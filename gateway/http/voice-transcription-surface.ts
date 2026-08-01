@@ -1,20 +1,40 @@
 /**
- * @neutronai/gateway/http — local voice-transcription install surface.
+ * @neutronai/gateway/http — the voice-transcription settings surface.
  *
- * Backs the Settings tab's "Local voice transcription" section: what backend is
- * transcribing voice notes right now, which models can be installed, how a
- * running download is progressing, and the button that starts or removes one.
+ * Backs the Settings "Voice transcription" section on BOTH clients: which
+ * backend is transcribing voice notes right now, WHICH ONE THE OWNER CHOSE,
+ * whether an OpenAI key is configured, which local models can be installed, how
+ * a running download is progressing, and the buttons that change any of it.
  *
- *   - `GET    /api/app/voice-transcription` → status + catalog + live progress
- *   - `POST   /api/app/voice-transcription` → start an install ({ model_id })
- *   - `DELETE /api/app/voice-transcription` → delete the installed assets
+ *   - `GET    /api/app/voice-transcription`            → the whole picture
+ *   - `POST   /api/app/voice-transcription`            → start an install ({ model_id })
+ *   - `DELETE /api/app/voice-transcription`            → delete the installed assets
+ *   - `PUT    /api/app/voice-transcription/backend`    → choose a backend ({ backend })
+ *   - `PUT    /api/app/voice-transcription/openai-key` → store a key ({ api_key })
+ *   - `DELETE /api/app/voice-transcription/openai-key` → forget the stored key
  *
- * MACHINE-SCOPED, not per-project — one whisper.cpp install serves every
- * project on the box — so the route carries no project segment, mirroring the
- * global Codex-connect route. Same bearer auth as its siblings
- * (`AppWsAuthResolver`); no owner-supplied path or URL is ever accepted, so
- * there is nothing here for a caller to point at an arbitrary file: the only
- * inputs are catalog ids, and every download URL + digest is compiled in.
+ * Every route answers with the SAME status object, so a client never has to
+ * guess what a mutation did — it re-renders from the reply.
+ *
+ * MACHINE-SCOPED, not per-project — one whisper.cpp install and one choice serve
+ * every project on the box — so the routes carry no project segment, mirroring
+ * the global Codex-connect route. Same bearer auth as its siblings
+ * (`AppWsAuthResolver`); `owner_slug` is ALWAYS the server-derived
+ * `resolved.project_slug`, never client-supplied. No owner-supplied path or URL
+ * is ever accepted, so there is nothing here for a caller to point at an
+ * arbitrary file: the only inputs are a catalog id, a backend name, and an API
+ * key, and every download URL + digest is compiled in.
+ *
+ * ── The API key is write-only ───────────────────────────────────────────────
+ * The status object reports that a key EXISTS, where it came from and when it
+ * was saved. It never carries the key, or any slice of it. Nothing here logs it.
+ *
+ * ── One decision, one place ─────────────────────────────────────────────────
+ * `backend` is computed by calling `resolveTranscriber` — the same function the
+ * upload path calls — rather than by re-deriving the rule here. This surface
+ * previously carried its own copy of the precedence (`installed ? 'local' :
+ * key ? 'openai' : 'none'`), which is how a status line drifts from what the box
+ * actually does. It now reports the real answer by asking the real resolver.
  *
  * The POST returns IMMEDIATELY with the job's initial progress. The download is
  * hundreds of megabytes; holding an HTTP request open for it would guarantee
@@ -30,6 +50,15 @@ import {
   modelAssetFor,
 } from '@neutronai/gateway/transcription/whisper-catalog.ts'
 import {
+  OpenAiKeyStore,
+  validateOpenAiKey,
+} from '@neutronai/gateway/transcription/openai-key-store.ts'
+import { resolveTranscriber } from '@neutronai/gateway/transcription/resolve-transcriber.ts'
+import {
+  isTranscriptionBackendChoice,
+  type TranscriptionBackendChoice,
+} from '@neutronai/gateway/transcription/types.ts'
+import {
   installedBytes,
   resolveWhisperInstall,
   whisperBinaryPresent,
@@ -37,14 +66,19 @@ import {
 } from '@neutronai/gateway/transcription/whisper-install.ts'
 import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts'
 
-const PATH = '/api/app/voice-transcription'
-
 export interface VoiceTranscriptionSurfaceOptions {
   auth: AppWsAuthResolver
   installer: WhisperInstaller
   /** Resolved `NEUTRON_HOME`. */
   neutron_home: string
   env: Record<string, string | undefined>
+  /** Reads/writes the owner's chosen backend (`instance_metadata`, migration
+   *  0111). Injected as functions rather than a DB handle so this surface stays
+   *  testable without a database, exactly as `installer` does for the download. */
+  readChoice: () => TranscriptionBackendChoice | null
+  writeChoice: (backend: TranscriptionBackendChoice) => Promise<void>
+  /** The OpenAI transcription key: presence, provenance, save, forget. */
+  keys: OpenAiKeyStore
   /** Injected in tests. Defaults to `process.platform` / `process.arch`. */
   platform?: string
   arch?: string
@@ -58,10 +92,14 @@ export interface VoiceTranscriptionSurface {
   handler: (req: Request) => Promise<Response | null>
 }
 
+const PATH = '/api/app/voice-transcription'
+const BACKEND_PATH = `${PATH}/backend`
+const OPENAI_KEY_PATH = `${PATH}/openai-key`
+
 export function createVoiceTranscriptionSurface(
   opts: VoiceTranscriptionSurfaceOptions,
 ): VoiceTranscriptionSurface {
-  const { auth, installer, neutron_home, env } = opts
+  const { auth, installer, neutron_home, env, keys } = opts
 
   const buildStatus = async (): Promise<object> => {
     const install = resolveWhisperInstall({ env, neutron_home })
@@ -85,9 +123,28 @@ export function createVoiceTranscriptionSurface(
       neutron_home,
       ...(opts.which !== undefined ? { which: opts.which } : {}),
     })
+    const choice = opts.readChoice()
+    const key_status = keys.status()
+    // ASK THE RESOLVER. Never re-derive the rule here.
+    const active = resolveTranscriber({
+      env,
+      neutron_home,
+      choice,
+      openai_api_key: keys.resolve(),
+      ...(opts.which !== undefined ? { which: opts.which } : {}),
+    })
     return {
       /** Which backend would transcribe a voice note right now. */
-      backend: install !== null ? 'local' : (env['OPENAI_API_KEY'] ?? '').trim().length > 0 ? 'openai' : 'none',
+      backend: active.kind,
+      /** When `backend === 'none'`, exactly why. */
+      backend_reason: active.reason ?? null,
+      /** What the owner CHOSE — `null` until they have chosen. Distinct from
+       *  `backend`: a chosen backend that cannot run reports here but not there. */
+      choice,
+      /** Whether local whisper.cpp could serve a note right now. */
+      local_available: install !== null,
+      /** Whether an OpenAI key is configured, and where it came from. Never the key. */
+      openai_key: key_status,
       installed: install !== null,
       model_id: install?.model_id ?? null,
       installed_bytes: install !== null ? await installedBytes(neutron_home) : 0,
@@ -110,10 +167,59 @@ export function createVoiceTranscriptionSurface(
   return {
     handler: async (req) => {
       const url = new URL(req.url)
-      if (url.pathname !== PATH) return null
+      const pathname = url.pathname
+      if (pathname !== PATH && pathname !== BACKEND_PATH && pathname !== OPENAI_KEY_PATH) {
+        return null
+      }
 
       const resolved = await resolveBearer(req, auth)
       if ('code' in resolved) return jsonError(401, resolved.code, resolved.message)
+
+      if (pathname === BACKEND_PATH) {
+        if (req.method !== 'PUT') {
+          return jsonError(405, 'method_not_allowed', `method '${req.method}' not allowed on ${BACKEND_PATH}`)
+        }
+        const body = (await readJsonBody(req)) as Record<string, unknown> | null
+        const backend = body?.['backend']
+        if (!isTranscriptionBackendChoice(backend)) {
+          return jsonError(400, 'unknown_backend', "backend must be 'local' or 'openai'")
+        }
+        // Deliberately NOT gated on the backend being usable right now. The
+        // owner is allowed to say what they want before it is ready (choose
+        // OpenAI, then paste the key; choose local, then install it) — the
+        // status object reports the gap, and the resolver refuses to substitute.
+        await opts.writeChoice(backend)
+        return jsonOk(await buildStatus())
+      }
+
+      if (pathname === OPENAI_KEY_PATH) {
+        switch (req.method) {
+          case 'PUT': {
+            const body = (await readJsonBody(req)) as Record<string, unknown> | null
+            const raw = body?.['api_key']
+            const invalid = validateOpenAiKey(raw)
+            // The message describes the SHAPE of the problem and never echoes
+            // the value — an error body is a log line waiting to happen.
+            if (invalid !== null) return jsonError(400, 'invalid_api_key', invalid)
+            await keys.save(raw as string)
+            return jsonOk(await buildStatus())
+          }
+          case 'DELETE': {
+            const removed = await keys.remove()
+            if (!removed && keys.status().source === 'environment') {
+              return jsonError(
+                409,
+                'key_from_environment',
+                'that key comes from OPENAI_API_KEY in the server environment, not from this app — ' +
+                  'remove it from the server\'s .env or unit file to unset it',
+              )
+            }
+            return jsonOk(await buildStatus())
+          }
+          default:
+            return jsonError(405, 'method_not_allowed', `method '${req.method}' not allowed on ${OPENAI_KEY_PATH}`)
+        }
+      }
 
       switch (req.method) {
         case 'GET':

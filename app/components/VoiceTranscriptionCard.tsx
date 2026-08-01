@@ -1,10 +1,21 @@
 /**
- * @neutronai/app — the Settings card that installs local voice transcription.
+ * @neutronai/app — the Settings card that chooses how voice notes are transcribed.
  *
  * The mobile half of a control that until now existed ONLY in the web Settings
  * tab (`landing/chat-react/SettingsTab.tsx`). Voice notes are a phone feature,
  * so the switch that decides how they are transcribed belonged on the phone;
  * shipping it web-only meant the capability was, for a mobile owner, unreachable.
+ *
+ * The card is ordered by what the owner is actually asking: what is running
+ * right now (one line, at the top), which one do I want (two rows), and then the
+ * setup each one needs. Neither option is presented as the default — the server
+ * has no precedence between them, and a UI that implied one would be lying about
+ * what the box does.
+ *
+ * The OpenAI key field is write-only. A saved key is reported as "saved on <date>"
+ * and never rendered back, not even partially: this repo's convention for stored
+ * secrets is to omit them from responses rather than to mask them, so there is
+ * nothing here to accidentally screenshot.
  *
  * Same server surface, same semantics, three differences the platform forces:
  *
@@ -22,16 +33,30 @@
  * can be tested without mounting anything; this file is layout.
  */
 
-import { Alert, Pressable, StyleSheet, Text, View, type DimensionValue } from 'react-native';
+import { useState } from 'react';
+import {
+  Alert,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  type DimensionValue,
+} from 'react-native';
 
 import { THEME } from '../lib/theme';
 import type {
+  TranscriptionBackendChoice,
   VoiceTranscriptionStatus,
   WhisperModelOption,
 } from '../lib/voice-transcription-client';
 import {
+  backendBlocker,
+  choiceIsStalled,
   describeBackend,
+  describeBackendOption,
   describeJob,
+  describeKeySource,
   describeModel,
   formatBytes,
   installBlocker,
@@ -47,7 +72,7 @@ export interface VoiceTranscriptionCardProps {
   /** Set when the status load failed — shown INSTEAD of any control. */
   failure: StatusFailure | null;
   loading: boolean;
-  /** A mutation (install/remove) is in flight. */
+  /** A mutation (install/remove/choose/key) is in flight. */
   busy: boolean;
   /** Error from the last mutation attempt. */
   actionError: string | null;
@@ -55,19 +80,22 @@ export interface VoiceTranscriptionCardProps {
   onSelectModel: (id: string) => void;
   onInstall: () => void;
   onRemove: () => void;
+  onChooseBackend: (backend: TranscriptionBackendChoice) => void;
+  onSaveOpenAiKey: (api_key: string) => void;
+  onRemoveOpenAiKey: () => void;
 }
 
 export function VoiceTranscriptionCard(props: VoiceTranscriptionCardProps): React.JSX.Element {
-  const { status, failure, loading, busy, actionError, selectedModelId } = props;
+  const { status, failure, loading, busy, selectedModelId } = props;
   const running = isJobRunning(status?.job?.phase ?? null);
 
   return (
     <View style={styles.card} testID="settings-voice-transcription-card">
-      <Text style={styles.title}>Local voice transcription</Text>
+      <Text style={styles.title}>Voice transcription</Text>
       <Text style={styles.subtitle}>
-        Transcribe voice notes on your own server with whisper.cpp — no API key, no
-        per-minute cost, and the audio never leaves the machine. Once installed it is
-        used instead of hosted OpenAI transcription, even if an OpenAI key is set.
+        How your voice notes are turned into text. Two options, and this setting is the
+        only thing that decides between them — installing one does not override the
+        other.
       </Text>
 
       {failure !== null ? (
@@ -94,12 +122,39 @@ function Body(
   const { status, running, busy, actionError, selectedModelId } = props;
   const blocker = installBlocker(status);
   const job = status.job;
+  const stalled = choiceIsStalled(status);
 
   return (
     <>
-      <Text style={styles.statusLine} testID="settings-voice-transcription-status">
+      {/* WHAT IS RUNNING, at the top and in one line. Rendered in the warning
+          colour whenever nothing is transcribing, because "no transcript" is
+          otherwise indistinguishable from "the model was slow". */}
+      <Text
+        style={[styles.statusLine, status.backend === 'none' && styles.statusLineWarning]}
+        testID="settings-voice-transcription-status"
+      >
         {describeBackend(status)}
       </Text>
+
+      <Text style={styles.fieldLabel}>Use</Text>
+      {(['local', 'openai'] as const).map((backend) => (
+        <BackendRow
+          key={backend}
+          backend={backend}
+          selected={status.choice === backend}
+          active={status.backend === backend}
+          blocker={backendBlocker(status, backend)}
+          disabled={busy}
+          onPress={() => props.onChooseBackend(backend)}
+        />
+      ))}
+
+      {stalled ? (
+        <Text style={styles.warning} testID="settings-voice-transcription-stalled">
+          Your choice is not running yet, and nothing has been substituted for it — set it
+          up below and it starts on the next voice note.
+        </Text>
+      ) : null}
 
       {/* Live progress off real server byte counts. The download runs on the
           server, so it survives this screen closing — the bar just stops being
@@ -139,6 +194,7 @@ function Body(
         </Text>
       ) : null}
 
+      <Text style={styles.sectionLabel}>On this server</Text>
       {status.installed ? (
         <Pressable
           accessibilityRole="button"
@@ -148,7 +204,10 @@ function Body(
           onPress={() => {
             Alert.alert(
               'Remove local Whisper',
-              `Delete the model and binary (${formatBytes(status.installed_bytes)})? Voice notes fall back to hosted transcription, or none.`,
+              `Delete the model and binary (${formatBytes(status.installed_bytes)})?` +
+                (status.choice === 'local'
+                  ? ' On-server transcription is what you chose, so voice notes stop being transcribed until you install it again or switch to OpenAI.'
+                  : ' Voice notes are unaffected — they are not using this.'),
               [
                 { text: 'Cancel', style: 'cancel' },
                 { text: 'Delete', style: 'destructive', onPress: props.onRemove },
@@ -198,6 +257,157 @@ function Body(
           </Pressable>
         </>
       )}
+
+      <Text style={styles.sectionLabel}>OpenAI</Text>
+      <OpenAiKeyField
+        status={status}
+        disabled={busy}
+        onSave={props.onSaveOpenAiKey}
+        onRemove={props.onRemoveOpenAiKey}
+      />
+    </>
+  );
+}
+
+/**
+ * One of the two backends, as a tappable row.
+ *
+ * Shows THREE separate facts that are easy to conflate: whether it is what the
+ * owner picked, whether it is what is actually running, and whether it could run
+ * at all. They come apart exactly when something is misconfigured, which is when
+ * the card has to be clearest.
+ */
+function BackendRow(props: {
+  backend: TranscriptionBackendChoice;
+  selected: boolean;
+  active: boolean;
+  blocker: string | null;
+  disabled: boolean;
+  onPress: () => void;
+}): React.JSX.Element {
+  const { backend, selected, active, blocker, disabled } = props;
+  const title = backend === 'local' ? 'This server' : 'OpenAI API';
+  return (
+    <Pressable
+      accessibilityRole="radio"
+      accessibilityState={{ selected, disabled }}
+      accessibilityLabel={title}
+      testID={`settings-voice-backend-${backend}`}
+      disabled={disabled}
+      onPress={props.onPress}
+      style={({ pressed }) => [
+        styles.modelRow,
+        selected && styles.modelRowSelected,
+        pressed && styles.pressed,
+      ]}
+    >
+      <Text style={styles.modelRadio}>{selected ? '●' : '○'}</Text>
+      <View style={styles.modelText}>
+        <View style={styles.rowHeader}>
+          <Text style={styles.modelLabel}>{title}</Text>
+          {active ? (
+            <Text style={styles.activeBadge} testID={`settings-voice-backend-${backend}-active`}>
+              IN USE
+            </Text>
+          ) : null}
+        </View>
+        <Text style={styles.modelNote}>{describeBackendOption(backend)}</Text>
+        {blocker !== null ? (
+          <Text style={styles.modelWarning} testID={`settings-voice-backend-${backend}-blocked`}>
+            {blocker}
+          </Text>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+}
+
+/**
+ * The API key field.
+ *
+ * Write-only by construction: there is no state here that could ever hold a
+ * stored key, because the server never sends one. The draft is cleared the
+ * instant a save is fired so the pasted value does not linger in a component
+ * that survives a screen re-render.
+ */
+function OpenAiKeyField(props: {
+  status: VoiceTranscriptionStatus;
+  disabled: boolean;
+  onSave: (api_key: string) => void;
+  onRemove: () => void;
+}): React.JSX.Element {
+  const { status, disabled } = props;
+  const [draft, setDraft] = useState('');
+  const source = describeKeySource(status);
+
+  return (
+    <>
+      {source !== null ? (
+        <Text style={styles.note} testID="settings-voice-openai-key-status">
+          {source}
+        </Text>
+      ) : (
+        <Text style={styles.note}>
+          Add a key from platform.openai.com to use OpenAI transcription. It is stored
+          encrypted on your own server and is never shown again.
+        </Text>
+      )}
+      <TextInput
+        testID="settings-voice-openai-key-input"
+        accessibilityLabel="OpenAI API key"
+        style={styles.input}
+        value={draft}
+        onChangeText={setDraft}
+        placeholder={status.openai_key.present ? 'Replace the saved key' : 'Paste your OpenAI API key'}
+        placeholderTextColor={THEME.text_muted}
+        // A key is not a word: no autocorrect, no capitalisation, no dictionary,
+        // and masked so it is not left legible on a screen someone else can see.
+        secureTextEntry
+        autoCapitalize="none"
+        autoCorrect={false}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Save OpenAI key"
+        testID="settings-voice-openai-key-save"
+        disabled={disabled || draft.trim().length === 0}
+        onPress={() => {
+          const value = draft.trim();
+          setDraft('');
+          props.onSave(value);
+        }}
+        style={({ pressed }) => [
+          styles.primaryBtn,
+          (pressed || disabled || draft.trim().length === 0) && styles.pressed,
+        ]}
+      >
+        <Text style={styles.primaryBtnText}>{status.openai_key.present ? 'Replace key' : 'Save key'}</Text>
+      </Pressable>
+      {status.openai_key.source === 'stored' ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Remove OpenAI key"
+          testID="settings-voice-openai-key-remove"
+          disabled={disabled}
+          onPress={() => {
+            Alert.alert(
+              'Remove OpenAI key',
+              status.choice === 'openai'
+                ? 'OpenAI is what you chose, so voice notes stop being transcribed until you add a key again or switch to this server.'
+                : 'The key is deleted from your server. Voice notes are unaffected — they are not using it.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Delete', style: 'destructive', onPress: props.onRemove },
+              ],
+            );
+          }}
+          style={({ pressed }) => [styles.dangerBtn, (pressed || disabled) && styles.pressed]}
+        >
+          <Text style={styles.dangerBtnText}>Remove key</Text>
+        </Pressable>
+      ) : null}
     </>
   );
 }
@@ -247,9 +457,45 @@ const styles = StyleSheet.create({
   },
   title: { color: THEME.text_primary, fontSize: 15, fontWeight: '600' },
   subtitle: { color: THEME.text_secondary, fontSize: 12, lineHeight: 16 },
-  statusLine: { color: THEME.text_primary, fontSize: 13, lineHeight: 18 },
+  statusLine: { color: THEME.text_primary, fontSize: 13, lineHeight: 18, fontWeight: '600' },
+  statusLineWarning: { color: THEME.warning },
   note: { color: THEME.text_secondary, fontSize: 12, lineHeight: 16 },
+  warning: { color: THEME.warning, fontSize: 12, lineHeight: 16 },
   error: { color: THEME.danger, fontSize: 12, lineHeight: 16 },
+  rowHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  activeBadge: {
+    color: THEME.accent,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    borderWidth: 1,
+    borderColor: THEME.accent,
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    overflow: 'hidden',
+  },
+  sectionLabel: {
+    color: THEME.text_muted,
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: THEME.hairline,
+  },
+  input: {
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: THEME.hairline,
+    backgroundColor: THEME.background,
+    color: THEME.text_primary,
+    paddingHorizontal: 12,
+    fontSize: 14,
+  },
   progressBlock: { gap: 6 },
   progressTrack: {
     height: 6,

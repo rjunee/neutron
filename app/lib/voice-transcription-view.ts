@@ -1,5 +1,5 @@
 /**
- * @neutronai/app — presentation logic for the Settings screen's "Local voice
+ * @neutronai/app — presentation logic for the Settings screen's "Voice
  * transcription" card.
  *
  * The app suite mounts no React Native components, so every decision the card
@@ -19,6 +19,7 @@
  */
 
 import type {
+  TranscriptionBackendChoice,
   VoiceTranscriptionStatus,
   WhisperInstallPhase,
   WhisperJob,
@@ -68,15 +69,107 @@ export function jobFraction(job: WhisperJob): number | null {
   return Math.min(1, job.received_bytes / job.total_bytes);
 }
 
-/** What is transcribing voice notes on this server right now. */
+/**
+ * What is transcribing voice notes on this server RIGHT NOW.
+ *
+ * The single most important line on the card. The complaint that started this
+ * work was not knowing which backend was in use, so this states the live answer
+ * — and when nothing is running, says exactly which of the four situations it
+ * is rather than one generic "not transcribing".
+ */
 export function describeBackend(status: VoiceTranscriptionStatus): string {
   if (status.backend === 'local') {
     const model = status.model_id ?? 'installed';
     const size = status.installed_bytes > 0 ? ` (${formatBytes(status.installed_bytes)} on disk)` : '';
-    return `Running on your server — ${model} model${size}`;
+    return `Transcribing on this server — ${model} model${size}`;
   }
-  if (status.backend === 'openai') return 'Using hosted OpenAI transcription (an API key is set)';
-  return 'Voice notes are not transcribed on this server';
+  if (status.backend === 'openai') return 'Transcribing with the OpenAI API';
+  switch (status.backend_reason) {
+    case 'unchosen':
+      return 'Nothing is transcribing — both options are set up, so pick the one you want';
+    case 'local_not_installed':
+      return 'Nothing is transcribing — you chose this server, but whisper.cpp is not installed yet';
+    case 'openai_key_missing':
+      return 'Nothing is transcribing — you chose OpenAI, but no API key is saved';
+    default:
+      return 'Nothing is transcribing — set up one of the options below';
+  }
+}
+
+/**
+ * True when the owner's choice is not what is actually running.
+ *
+ * The server NEVER substitutes the other backend, so this is always a "your
+ * choice cannot run yet" state, never a silent swap. Surfaced as a warning next
+ * to the selected option, which is the place someone would look.
+ */
+export function choiceIsStalled(status: VoiceTranscriptionStatus): boolean {
+  return status.choice !== null && status.backend !== status.choice;
+}
+
+/**
+ * Why an option cannot serve a voice note yet, or null when it can.
+ *
+ * Answers it for EITHER option, whether or not it is the selected one, so the
+ * cost of switching is visible before the tap rather than after it.
+ */
+export function backendBlocker(
+  status: VoiceTranscriptionStatus,
+  backend: TranscriptionBackendChoice,
+): string | null {
+  if (backend === 'local') {
+    return status.local_available ? null : 'Not installed yet — install a model below.';
+  }
+  return status.openai_key.present ? null : 'No API key saved yet — add one below.';
+}
+
+/** Where the active OpenAI key came from, or null when there is none. */
+export function describeKeySource(status: VoiceTranscriptionStatus): string | null {
+  const key = status.openai_key;
+  if (!key.present) return null;
+  if (key.source === 'environment') {
+    // Worth spelling out: someone who never typed a key here, and cannot delete
+    // it from here either, otherwise has no way to understand where it is from.
+    return 'Using OPENAI_API_KEY from the server environment. To change it here, save a key below; to remove it, edit the server.';
+  }
+  return key.saved_at !== null ? `Key saved ${formatSavedAt(key.saved_at)}.` : 'Key saved.';
+}
+
+/**
+ * The honest one-line case for each option.
+ *
+ * Neither is "the good one". The measured per-model timings in the catalog were
+ * taken on a CPU-only server (`gateway/transcription/whisper-catalog.ts` — 8-core
+ * EPYC, AVX2, explicitly "no GPU"), which is what makes the large models slow
+ * THERE; the same models on GPU-accelerated hardware are far quicker. So the
+ * copy attributes the slowness to the hardware, which is where it belongs,
+ * rather than to local transcription as such.
+ */
+export function describeBackendOption(backend: TranscriptionBackendChoice): string {
+  if (backend === 'local') {
+    return (
+      'Runs on your own server with whisper.cpp. No API key, nothing billed per minute, and the ' +
+      'audio never leaves the machine. Speed is down to the hardware: the timings below were ' +
+      'measured on a server with no GPU, where the large models take longer than the recording ' +
+      'itself. On a GPU-accelerated machine they are much faster.'
+    );
+  }
+  return (
+    'Sends the audio to OpenAI. Large-model accuracy in a few seconds whatever your server is, ' +
+    'so it does not slow down on a CPU-only box. Needs an API key, is billed per minute of ' +
+    'audio, and the recording leaves your machine.'
+  );
+}
+
+/** `2026-08-01T04:12:09.000Z` → `1 Aug 2026`. Date only — the exact second is noise. */
+function formatSavedAt(iso: string): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return 'previously';
+  return new Date(ms).toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
 }
 
 export type StatusFailure =

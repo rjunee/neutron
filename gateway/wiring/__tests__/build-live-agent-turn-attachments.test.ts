@@ -279,7 +279,7 @@ describe('build-live-agent-turn — attachment threading', () => {
     expect(prompt).toContain('buy milk tomorrow')
   })
 
-  test('(i) a keyless audio attachment (transcript null) emits the set-OPENAI_API_KEY note', async () => {
+  test('(i) an un-transcribed audio attachment points at the ONE setting that fixes it', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
     const run = buildLiveAgentTurn({
@@ -296,13 +296,16 @@ describe('build-live-agent-turn — attachment threading', () => {
     await run(makeTurn(sent, 'listen to this', [AUDIO_URL]))
     const prompt = specs[0]!.prompt
     expect(prompt).toContain(AUDIO_PATH)
-    // The graceful note must point at BOTH ways to enable transcription. Naming
-    // only OPENAI_API_KEY was true until local whisper.cpp shipped, and would now
-    // tell a self-hoster to go get a third-party account they do not need.
+    // The graceful note must name BOTH options AND the setting that chooses
+    // between them. "Set OPENAI_API_KEY" was the whole answer once, then half of
+    // it when local whisper.cpp shipped, and since migration 0111 it is the
+    // WRONG half — a key alone no longer selects the hosted backend, so an agent
+    // parroting it would send the owner to a step that changes nothing.
     expect(prompt).toContain('transcription unavailable')
-    expect(prompt).toContain('Settings → Local voice transcription')
+    expect(prompt).toContain('Settings → Voice transcription')
     expect(prompt).toContain('no API key')
-    expect(prompt).toContain('OPENAI_API_KEY')
+    expect(prompt).toContain('OpenAI (needs a key)')
+    expect(prompt).not.toContain('OPENAI_API_KEY')
   })
 
   test('(j) a very long transcript is truncated with a marker', async () => {
