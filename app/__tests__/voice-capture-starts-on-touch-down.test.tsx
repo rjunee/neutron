@@ -11,23 +11,43 @@
  * THE FIX these cases pin: capture starts on TOUCH-DOWN and the recogniser's
  * verdict decides what happens TO the recording, not whether it exists.
  *
- * MEASURED, NOT ASSERTED. Every case below reports real milliseconds — the gap
+ * MEASURED, NOT ASSERTED. Every case below reports milliseconds — the gap
  * between the finger landing and the microphone opening, and the gap between how
  * long the control was held and how much audio came back. Both are printed, so a
  * regression shows up as a number rather than as a red assertion with no scale.
- * The clock is real (`Date.now()`), the gesture is the real react-native-web
- * `Pressable` with the real 250 ms classification delay — the harness reproduces
- * `in@54 / long@305 / out@906` for a held press — and the recorder, composer and
- * chat surface are all the real ones. Only the microphone itself is a stub, and
- * it timestamps `record()` / `stop()` precisely so this file can do arithmetic.
+ * The gesture is the real react-native-web `Pressable` with the real 250 ms
+ * classification delay, and the recorder, composer and chat surface are all the
+ * real ones. Only the microphone itself is a stub, and it timestamps `record()`
+ * / `stop()` precisely so this file can do arithmetic.
+ *
+ * THE CLOCK IS LOGICAL, NOT WALL. It used to be `Date.now()`, and that made
+ * every number here a statement about the machine: the same correct code
+ * measured a 54 ms lead-in on a quiet box and 326 ms on a loaded one, so the
+ * budget below held or missed depending on what else was running (ISSUES #436).
+ * `support/harness-clock.ts` replaces that with one timeline the test moves by
+ * hand — the recogniser's 250 ms deadline is queued on it rather than scheduled
+ * on the OS, so "the finger has been down 250 ms" is now something this file
+ * asserts rather than something it hopes the scheduler delivers. The interval
+ * being measured is exactly as real as it was; the machine's speed is no longer
+ * part of the reading. The wall clock is gone from this file entirely.
  *
  * WHAT IT STILL CANNOT SEE: real audio. A stub cannot prove the first syllable
- * is audible, only that the recorder was running when it was spoken.
+ * is audible, only that the recorder was running when it was spoken. It also
+ * does not model how long a real permission check or native prepare takes —
+ * those are stubs that return instantly, so the wall-clock figure this replaced
+ * was never device latency, only harness overhead.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { createElement } from 'react';
 
+import {
+  advanceHarnessClock,
+  harnessClockNow,
+  installHarnessClock,
+  resetHarnessClock,
+  uninstallHarnessClock,
+} from './support/harness-clock';
 import { installNativeHarness, resetHarnessGlobals, setHarnessPlatform } from './support/native-harness';
 
 installNativeHarness();
@@ -63,19 +83,31 @@ const LONG_PRESS_MS = 250;
 /**
  * The most audio a touch-down is allowed to lose before capture opens.
  *
- * Generous on purpose: it covers the permission check, the audio-session switch
- * and the native prepare, all of which are awaited between the finger landing
- * and `record()`. What it does NOT cover is waiting for the tap-versus-hold
- * verdict, which is the regression it is sized to catch — anything at or above
- * `LONG_PRESS_MS` means capture went back to starting on the long-press edge.
+ * Sized against the verdict, not against the machine: anything at or above
+ * `LONG_PRESS_MS` means capture went back to starting on the long-press edge,
+ * which is the regression this file exists to catch, and the headroom below it
+ * covers any delay a future change might legitimately put in front of `record()`
+ * without giving the recogniser time to rule first.
+ *
+ * What actually sits under it today is 50 ms, and it is not harness overhead —
+ * react-native-web's press responder defers `onPressIn` by its own
+ * `DEFAULT_PRESS_DELAY_MS` of 50, then schedules the long-press verdict 250 ms
+ * after THAT. So the interaction really runs press-in@50 / verdict@300, and the
+ * old wall-clock reading of ~54 ms was that fixed delay plus a few milliseconds
+ * of work, not the permission check it was assumed to be. The logical clock is
+ * what made the two separable.
  */
 const LEAD_IN_BUDGET_MS = 120;
 
 beforeAll(() => {
   installNativeHarness();
+  installHarnessClock();
 });
 
 afterAll(() => {
+  // Process-global, both of them: Bun runs ~100 test FILES per process, and a
+  // frozen `Date.now()` left installed here lands in whatever runs next.
+  uninstallHarnessClock();
   resetHarnessGlobals();
 });
 
@@ -86,6 +118,7 @@ beforeEach(() => {
   __resetServerConfigForTests();
   setRuntimeServerConfig({ gateway_base_url: BASE_URL, auth_base_url: null });
   resetHarnessAudio();
+  resetHarnessClock();
 });
 
 async function mountChat() {
@@ -112,26 +145,58 @@ function control(host: HTMLElement, label: string): HTMLElement {
 }
 
 /**
- * Hold the mic for `hold_ms` of REAL time and report what the microphone did.
+ * Hold the mic for `hold_ms` of LOGICAL time and report what the microphone did.
  *
  * `mountScreen.press()` cannot express this: it fires down, up and click in one
  * act(), so the press is over before the recogniser has classified it and
- * `onLongPress` never runs. A hold has to be three separate events with real
- * wall-clock between them, which is also the only way the numbers mean anything.
+ * `onLongPress` never runs. A hold has to be three separate events with time
+ * between them — and that time is the harness clock's, so the recogniser's
+ * 250 ms deadline lands where this function puts it rather than where the OS
+ * scheduler happened to get to it.
+ *
+ * It also watches the two instants the file compares, on the SAME timeline: when
+ * the microphone opened, and when the recogniser delivered its hold verdict. The
+ * verdict announces itself through the control's own accessibility label — the
+ * composer relabels the mic the moment `onLongPress` puts it in holding state —
+ * so it is observed the way a thumb would notice it, not inferred from a
+ * constant.
  */
 async function holdMic(
   screen: { host: HTMLElement; settle: () => Promise<void> },
   hold_ms: number,
   options: { drift_px?: number } = {},
-): Promise<{ down_at: number; up_at: number; held_ms: number }> {
+): Promise<{
+  down_at: number;
+  up_at: number;
+  held_ms: number;
+  /** Logical ms from touch-down to the recogniser calling this a hold; null if it never did. */
+  verdict_at_ms: number | null;
+}> {
   const mic = control(screen.host, 'Record voice message');
+  let verdict_at_ms: number | null = null;
+
+  /**
+   * Run something React must see, let its consequences settle, then note the
+   * verdict if it just landed. Edge-triggered, so it records the FIRST instant
+   * the label changed rather than the last.
+   */
+  const step = async (run: () => void): Promise<void> => {
+    await act(async () => {
+      run();
+    });
+    await screen.settle();
+    if (verdict_at_ms === null && mic.getAttribute('aria-label') !== 'Record voice message') {
+      verdict_at_ms = harnessClockNow();
+    }
+  };
+
   const down_at = Date.now();
-  await act(async () => {
+  await step(() => {
     mic.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 0, clientY: 0 }));
   });
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, hold_ms));
-  });
+
+  await advanceHarnessClock(hold_ms, step);
+
   const drift = options.drift_px ?? 0;
   if (drift !== 0) {
     // Two moves, because the composer takes the FIRST one as the origin the
@@ -139,7 +204,7 @@ async function holdMic(
     // set on the DOM event itself: React hands that object through as
     // `nativeEvent`, which is where the composer reads the coordinate.
     for (const x of [0, drift]) {
-      await act(async () => {
+      await step(() => {
         const ev = new Event('touchmove', { bubbles: true });
         Object.defineProperty(ev, 'pageX', { value: x });
         mic.dispatchEvent(ev);
@@ -147,19 +212,18 @@ async function holdMic(
     }
   }
   const up_at = Date.now();
-  await act(async () => {
+  await step(() => {
     mic.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     mic.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
-  await screen.settle();
-  return { down_at, up_at, held_ms: up_at - down_at };
+  return { down_at, up_at, held_ms: up_at - down_at, verdict_at_ms };
 }
 
 describe('a held voice message keeps its opening', () => {
   it('opens the microphone on touch-down, not on the long-press verdict', async () => {
     const { screen } = await mountChat();
     try {
-      const { down_at } = await holdMic(screen, 900);
+      const { down_at, verdict_at_ms } = await holdMic(screen, 900);
 
       const audio = harnessAudioState();
       expect(audio.record_calls).toBe(1);
@@ -168,11 +232,18 @@ describe('a held voice message keeps its opening', () => {
       // The measurement, printed so a regression reads as a number.
       console.log(
         `[voice] lead-in from touch-down to microphone open: ${lead_in_ms}ms ` +
-          `(budget ${LEAD_IN_BUDGET_MS}ms, long-press verdict at ${LONG_PRESS_MS}ms)`,
+          `(budget ${LEAD_IN_BUDGET_MS}ms, hold verdict at ${verdict_at_ms ?? '—'}ms)`,
       );
 
+      // THE ORDERING GUARD, stated without reference to any constant: the
+      // recogniser really did rule during this hold, and the microphone was
+      // already open when it did. Both instants are read off the same logical
+      // timeline, so no amount of machine load can reorder them.
+      expect(verdict_at_ms).not.toBeNull();
+      expect(lead_in_ms).toBeLessThan(verdict_at_ms ?? 0);
+
       // THE MUTATION GUARD. Move `start()` back onto the long-press edge and
-      // this lands at ~250ms, above the budget, and fails.
+      // this lands on the verdict, above the budget, and fails.
       expect(lead_in_ms).toBeLessThan(LEAD_IN_BUDGET_MS);
       expect(lead_in_ms).toBeLessThan(LONG_PRESS_MS);
     } finally {
