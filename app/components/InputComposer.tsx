@@ -127,7 +127,22 @@ export interface InputComposerProps {
    * rather than pretending to record — see {@link VOICE_UNAVAILABLE_NOTICE}.
    */
   onVoiceTap?: () => void;
-  /** Long-press began. The recorder starts capturing. */
+  /**
+   * THE FINGER WENT DOWN — before anything knows whether this is a tap or a
+   * hold. Capture starts HERE, not at {@link onVoiceHoldStart}.
+   *
+   * The gesture recogniser needs {@link VOICE_LONG_PRESS_MS} to tell a tap from
+   * a hold, and people begin talking as they press rather than after. Starting
+   * capture on the long-press edge therefore threw away every syllable spoken
+   * during that window. The microphone does not depend on the verdict, so it no
+   * longer waits for it: recording begins on touch-down and the verdict decides
+   * what happens TO the recording, not whether it exists.
+   */
+  onVoicePressIn?: () => void;
+  /**
+   * The press has been classified as a hold. Capture is ALREADY running (see
+   * {@link onVoicePressIn}); this only says the release will be the stop.
+   */
   onVoiceHoldStart?: () => void;
   /**
    * The finger moved during a hold. `cancelling` is true once it has slid far
@@ -347,6 +362,17 @@ function MicGlyph({ color }: { color: string }): React.ReactElement {
 const VOICE_CANCEL_SLIDE_PT = 64;
 
 /**
+ * How long the finger must stay down before the press counts as a HOLD.
+ *
+ * This is a classification delay and nothing else. It used to be the delay
+ * before the microphone opened, which cost the opening of every held message;
+ * capture now starts on touch-down (`onVoicePressIn`) and this only decides
+ * which release semantics apply. Lowering it would make deliberate taps read as
+ * holds — the value is a gesture-feel constant, not a latency budget.
+ */
+const VOICE_LONG_PRESS_MS = 250;
+
+/**
  * What the button says when it is pressed and no recorder is wired behind it.
  * The alternative — a control that looks live and does nothing — is the failure
  * this is here to avoid.
@@ -365,6 +391,7 @@ export function InputComposer({
   initial_draft,
   bottom_inset,
   onVoiceTap,
+  onVoicePressIn,
   onVoiceHoldStart,
   onVoiceHoldMove,
   onVoiceHoldEnd,
@@ -413,13 +440,46 @@ export function InputComposer({
   // second capture. The ref survives the state reset in `handleVoiceRelease`,
   // which reading `holding` would not.
   const justHeld = useRef(false);
+  // A press whose touch-down opened a recording. Every one of these MUST reach a
+  // terminal edge in `handleVoiceRelease`, because `onPress` does not fire when
+  // the finger leaves the button — and a recording nothing resolves is a hot
+  // microphone.
+  const pressOpenedCapture = useRef(false);
+  // `handleVoiceRelease` already decided what this press meant. The `onPress`
+  // that follows it (RN fires press-out, then press) must not decide again.
+  const pressResolved = useRef(false);
+  // Whether the finger has EVER travelled past the cancel threshold since
+  // touch-down. Tracked for every press rather than only holds: a short press
+  // that wandered off the button is an abandoned gesture, and since touch-down
+  // it has a live recording to dispose of. Sticky on purpose — wandering away
+  // and drifting back is still an abandoned press.
+  const pressDrifted = useRef(false);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+
+  const handleVoicePressIn = useCallback(() => {
+    // Clearing here — at the START of a press — is what keeps a flag set by an
+    // edge that never arrived from leaking into the next gesture.
+    justHeld.current = false;
+    pressResolved.current = false;
+    pressDrifted.current = false;
+    holdOriginX.current = null;
+    if (onVoicePressIn === undefined) {
+      // Unwired: the notice is still the tap's job, so this press stays silent.
+      pressOpenedCapture.current = false;
+      return;
+    }
+    pressOpenedCapture.current = true;
+    onVoicePressIn();
+  }, [onVoicePressIn]);
 
   const handleVoiceHoldStart = useCallback(() => {
     if (onVoiceHoldStart === undefined) {
       setVoiceNotice(VOICE_UNAVAILABLE_NOTICE);
       return;
     }
+    // The recording is already running — touch-down opened it. All this edge
+    // does is claim the press for hold semantics, so the release sends or
+    // discards instead of latching.
     justHeld.current = true;
     setHolding({ cancelling: false });
     onVoiceHoldStart();
@@ -427,7 +487,6 @@ export function InputComposer({
 
   const handleVoiceTouchMove = useCallback(
     (e: { nativeEvent: { pageX: number } }) => {
-      if (holding === null) return;
       const x = e.nativeEvent.pageX;
       if (holdOriginX.current === null) {
         holdOriginX.current = x;
@@ -437,7 +496,8 @@ export function InputComposer({
       // one-handed thumb arcs, and a gesture that only cancels one way strands
       // whoever arcs the other.
       const cancelling = Math.abs(holdOriginX.current - x) > VOICE_CANCEL_SLIDE_PT;
-      if (cancelling === holding.cancelling) return;
+      if (cancelling) pressDrifted.current = true;
+      if (holding === null || cancelling === holding.cancelling) return;
       setHolding({ cancelling });
       onVoiceHoldMove?.({ cancelling });
     },
@@ -446,11 +506,27 @@ export function InputComposer({
 
   const handleVoiceRelease = useCallback(() => {
     holdOriginX.current = null;
-    if (holding === null) return;
-    const intent = holding.cancelling ? 'cancel' : 'send';
-    setHolding(null);
-    onVoiceHoldEnd?.(intent);
-  }, [holding, onVoiceHoldEnd]);
+    const opened = pressOpenedCapture.current;
+    pressOpenedCapture.current = false;
+    if (holding !== null) {
+      const intent = holding.cancelling ? 'cancel' : 'send';
+      setHolding(null);
+      onVoiceHoldEnd?.(intent);
+      return;
+    }
+    // Not a hold, so this release is the whole of a SHORT press — and it has to
+    // resolve here rather than waiting for `onPress`, which never comes when the
+    // finger drifted off the control.
+    if (!opened) return;
+    pressResolved.current = true;
+    if (pressDrifted.current) {
+      // Wandered away and let go: the same verdict a hold's slide reaches, and
+      // the recording touch-down opened is discarded with the microphone.
+      onVoiceHoldEnd?.('cancel');
+      return;
+    }
+    onVoiceTap?.();
+  }, [holding, onVoiceHoldEnd, onVoiceTap]);
 
   const handleVoiceTap = useCallback(() => {
     // A hold that just ended has already been reported through
@@ -459,6 +535,14 @@ export function InputComposer({
       justHeld.current = false;
       return;
     }
+    // Likewise a short press `handleVoiceRelease` already resolved.
+    if (pressResolved.current) {
+      pressResolved.current = false;
+      return;
+    }
+    // What is left is an activation with no touch behind it — a screen reader
+    // firing the button directly. Nothing started on touch-down, so the tap
+    // opens the recording itself.
     if (onVoiceTap === undefined) {
       setVoiceNotice(VOICE_UNAVAILABLE_NOTICE);
       return;
@@ -717,11 +801,12 @@ export function InputComposer({
                       : 'Release to send voice message'
                 }
                 testID="composer-voice"
+                onPressIn={handleVoicePressIn}
                 onPress={handleVoiceTap}
                 onLongPress={handleVoiceHoldStart}
                 onPressOut={handleVoiceRelease}
                 onTouchMove={handleVoiceTouchMove}
-                delayLongPress={250}
+                delayLongPress={VOICE_LONG_PRESS_MS}
                 disabled={disabled || sending}
                 hitSlop={ACTION_HIT_SLOP_PT}
                 style={({ pressed }) => [

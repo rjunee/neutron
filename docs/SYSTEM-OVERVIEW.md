@@ -5909,6 +5909,33 @@ now-nonexistent vanilla client.
   second, never-rendered mic control whose emoji glyph and filled resting circle
   contradicted the iMessage composer's drawn `MicGlyph`, and two mic buttons is
   exactly the dual code path this repo forbids. One button, one recorder.
+- **…and capture now opens on TOUCH-DOWN, not on the long-press verdict
+  (2026-07-31):** the wiring above started the recorder from `onLongPress`, and
+  the mic carries `delayLongPress={250}`, so for the first quarter-second of
+  every hold the gesture recogniser was deciding "tap or hold?" with the
+  microphone still shut. People begin talking as they press, so a held message
+  opened mid-syllable. Measured on the device harness — real `Pressable`, real
+  250 ms classification delay, real clock — a 904 ms hold returned **599 ms of
+  audio: 305 ms lost**. Nothing about opening the microphone depends on the
+  verdict, so it no longer waits for it. `InputComposer` gained a FIFTH voice
+  callback, **`onVoicePressIn`**, fired from the button's `onPressIn`; the same
+  900 ms hold now returns 853 ms, a 52 ms lead-in that is permission +
+  audio-session + native prepare rather than a gesture delay. Lowering
+  `delayLongPress` was rejected as the fix: it makes deliberate taps read as
+  holds and still never reaches zero. **The verdict now decides what happens TO
+  the recording rather than whether it exists** — a hold keeps what touch-down
+  captured, a tap `latch()`es it (the early audio is a head start, and the
+  overlay's ■ appears because the finger is gone), and a press that wandered off
+  the control routes to `cancel()`. That last edge is the new hot-mic obligation
+  and it is why the release edge, not `onPress`, resolves a short press: `onPress`
+  does not fire for a press that left the button, so a recording waiting on it
+  would run on unstoppably. The invariant is now structural — **every touch-down
+  that opened a capture reaches a terminal edge at `onPressOut`**: hold-end,
+  cancel, or latch-with-a-stop-control. None of the three is a hot mic. Pinned by
+  `app/__tests__/voice-capture-starts-on-touch-down.test.tsx`, which reports the
+  lead-in and the lost-audio figures as real milliseconds so a regression reads
+  as a number, and by the `record()`/`stop()` timestamps the `expo-audio` harness
+  stub now records.
 - **ISO-BMFF audio is no longer mistaken for video (2026-07-31):** `magicByteSniff`
   classified `ftyp` files on the major brand alone, so a GENERIC brand meant
   `video/mp4` — a type absent from `CHAT_UPLOAD_MIME_WHITELIST`. Android's
