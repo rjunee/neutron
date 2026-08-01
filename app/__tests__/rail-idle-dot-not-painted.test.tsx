@@ -6,7 +6,7 @@
  * it reachable it gave `idle` a visible resting state: a hollow muted ring. On a
  * 72px rail with every project stacked in a column, that is a grey circle on
  * every single row, permanently — the rail read as a wall of state at exactly the
- * moment nothing was happening. Ryan on device: "remove that ugly grey hollow
+ * moment nothing was happening. The owner, on device: "remove that ugly grey hollow
  * circle on every project in the rail. the pulsing dot should only show up if
  * there's activity, otherwise nothing shows. that area can still be tappable for
  * the inspector even if nothing visible. its an 'advanced' feature."

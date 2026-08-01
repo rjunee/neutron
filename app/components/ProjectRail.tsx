@@ -98,9 +98,9 @@ function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: 
   // IDLE PAINTS NOTHING. WAVE 3.5 drew a quiet hollow ring at rest so the dot
   // would always be there to tap; on a 72px rail that meant a grey circle on
   // EVERY row, which read as eight pieces of state at a moment when nothing was
-  // happening anywhere. Ryan on device: "remove that ugly grey hollow circle on
-  // every project in the rail. the pulsing dot should only show up if there's
-  // activity, otherwise nothing shows."
+  // happening anywhere. The owner, on device: "remove that ugly grey hollow
+  // circle on every project in the rail. the pulsing dot should only show up if
+  // there's activity, otherwise nothing shows."
   //
   // What is superseded is only the PAINT. The affordance is untouched, which is
   // the whole subtlety of this change: `railDotKind` still returns `idle`, the

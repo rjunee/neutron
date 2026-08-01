@@ -2726,7 +2726,7 @@ instead).
 **Web and mobile deliberately differ at REST.** Web still draws the quiet hollow ring
 (`.car-rail-dot-idle`). Mobile draws NOTHING: `ActivityDot` renders a transparent
 DOT-sized `dotSlot` for `idle`, so the pulsing dot appears only when there is
-activity (Ryan on device, 2026-07-31 — a grey ring on every row of a 72px rail read as
+activity (the owner, on device, 2026-07-31 — a grey ring on every row of a 72px rail read as
 a wall of state at a moment when nothing was happening). The affordance is unchanged
 by that: `railDotKind` still returns `idle`, the slot holds the corner box open, and
 the active row's Pressable keeps its full touch target — so on mobile the inspector is

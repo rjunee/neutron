@@ -139,7 +139,7 @@ export type RailDotKind = 'work' | 'attention' | 'idle';
  *
  * Note the split this function is careful NOT to make: `idle` is a real kind that
  * keeps its touch target, but the mobile rail RENDERS it as nothing at all (see
- * `ActivityDot` in `components/ProjectRail.tsx` — Ryan: "the pulsing dot should
+ * `ActivityDot` in `components/ProjectRail.tsx` — the owner: "the pulsing dot should
  * only show up if there's activity, otherwise nothing shows"). Tappability lives
  * here; visibility lives in the component. Do not "simplify" this to return null
  * for idle — that would delete the inspector's entry point along with the paint.
@@ -149,7 +149,10 @@ export type RailDotKind = 'work' | 'attention' | 'idle';
  * never shows ATTENTION (it has no bound runs).
  *
  * Exact mirror of the web `railDotClass` (`landing/chat-react/ChatApp.tsx`) — the
- * two must stay in lockstep.
+ * two must stay in lockstep. That is a claim about the DERIVATION only: which
+ * kind an activity maps to. How each client paints a kind is the client's own
+ * business, and as of 2026-07-31 the two deliberately differ at rest (web draws
+ * a hollow ring, mobile draws nothing).
  */
 export function railDotKind(
   activity: ProjectActivity | undefined,
