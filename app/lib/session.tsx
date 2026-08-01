@@ -27,6 +27,7 @@ import {
 import type { AuthUser } from './auth';
 import { tokenStorage, type TokenStorage } from './token-storage';
 import { clearSessionCache } from './chat-core/session-cache';
+import { forgetWarmedScopes } from './chat-core/transcript-warmer';
 
 export type AuthSessionStatus = 'hydrating' | 'ready';
 
@@ -132,6 +133,11 @@ export function AuthSessionProvider({
     // must die with it. Leaving a cached session running past sign-out is the
     // same shape as ISSUES #398 — state outliving the credential that scoped it.
     clearSessionCache();
+    // The background warmer's "already done this scope" ledger dies with it, for
+    // the same reason: it is scoped to an identity that no longer holds the
+    // device, and a project id that survives a sign-in as someone else must be
+    // pulled fresh rather than assumed present.
+    forgetWarmedScopes();
     setUser(null);
   }, [setUser]);
 

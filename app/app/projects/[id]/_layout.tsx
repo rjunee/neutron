@@ -97,6 +97,7 @@ import { ProjectStateProvider, useProjectState } from '../../../lib/project-stat
 import type { ProjectSettings } from '../../../lib/projects-client';
 import { useAuthSession } from '../../../lib/session';
 import { TabsClient, type TabDescriptor } from '../../../lib/tabs-client';
+import { useTranscriptWarming } from '../../../lib/chat-core/use-transcript-warming';
 
 /**
  * How many rail projects get their tab set fetched ahead of the tap.
@@ -335,6 +336,23 @@ function ProjectShell({ project_id }: { project_id: string }) {
     // waste, so it is deliberately not a dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, config.base_url, railIdsKey, mergeTabs]);
+
+  // ── PRE-CACHE THE REST (background warming, 2026-07-31) ───────────────────
+  // The tap's other two inputs are already warm before it happens — the settings
+  // doc (filed from the rail's own list, `projects.ts:185`) and the tab set (the
+  // effect above). The TRANSCRIPT was the one still fetched on arrival, which is
+  // why a scope this device has never visited still flashed an empty state
+  // before its history landed (#20, reported and left open). This pulls it
+  // ahead of the tap, active scope excluded, bounded and yielding — everything
+  // about WHEN lives in `transcript-warmer.ts`, not here.
+  // General leads: it is the default scope, the one the rail always offers, and
+  // the largest transcript on a typical install.
+  useTranscriptWarming({
+    base_url: config.base_url,
+    user: user === null ? null : { id: user.id, token: user.token },
+    scopes: [GENERAL_PROJECT_ID, ...railIds],
+    activeScope: project_id,
+  });
 
   useEffect(() => {
     if (user === null) return;

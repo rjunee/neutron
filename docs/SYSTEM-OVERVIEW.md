@@ -1188,6 +1188,74 @@ down.
 Pinned by `app/__tests__/project-switch-is-instant.test.tsx`, which forces each
 "already answered" case and then makes the corresponding request never come back.
 
+### Background transcript warmer (2026-07-31) — `app/lib/chat-core/transcript-warmer.ts`, `use-transcript-warming.ts`
+
+The work above left one residual, reported rather than hidden: on a scope this
+device has **never visited** there are no rows in the on-device store, so
+`hydrationSettled` takes its `status === 'open'` branch the moment the socket
+comes up (`chat-render-model.ts`), the surface renders "No messages yet. Say
+hello 👋", and the resume replay lands a beat later and replaces it. The empty
+state is not wrong, only premature — and the protocol has no resume-complete
+frame to gate it on. Ryan: *"pre-cache everything in the background. First
+download the active project, but as you have time in the background just download
+all the other tabs etc so switching is instant."*
+
+So the transcript is pulled **ahead of the tap**. Of the three things a switch
+needs, the other two were already warm before it happened — the settings doc
+(filed from the rail's own list) and the tab set (`TAB_PREFETCH_LIMIT`) — and the
+transcript was the last one still fetched on arrival.
+
+**The seam is the existing session, not a new cache.** A warm is
+`acquireSession(topic)` → `start()` → `session_ready` → `resume(after_seq)` →
+`applyInbound` → the ONE device-wide op-sqlite store — the exact path a real
+visit uses, so no sync logic is duplicated and no second copy of anything exists.
+The reference is released immediately afterwards; `releaseSession` does not
+disconnect, and the LRU keeps at most `MAX_WARM_SESSIONS = 3` sockets, so warming
+eight scopes does **not** leave eight sockets open. The socket was never the
+point — the rows it pulled stay on disk after its eviction, which is what buys
+the next visit.
+
+**Bounds, and why.** `WARM_SCOPE_LIMIT = 8` scopes (the rail is activity-sorted;
+a ninth project opens exactly as it does today), the active scope excluded, one
+warm at a time, `WARM_FIRST_DELAY_MS = 2000` after the rail lands and
+`WARM_GAP_MS = 750` between scopes so eight never arrive as a burst at a gateway
+the owner is also talking to. Bytes per scope are bounded by the server, not the
+client: a cold resume replays at most `DEFAULT_REPLAY_LIMIT = 500` messages per
+topic (`persistence/app-chat-store.ts`). There is deliberately **no wifi-vs-
+cellular gate** — that needs a native network module, which would cost the
+OTA-shippability of everything in this section; the bound above is what makes
+cellular acceptable instead.
+
+**The yield is the load-bearing part.** A prefetch that delays the transcript the
+owner is waiting on has made the app slower at the one interaction it was built
+to speed up, and it would do so with no symptom at all. So: nothing is dequeued
+while the visible chat is hydrating (`useMobileChat` raises the claim on attach
+and lowers it when that scope settles — every settle path, including the floor
+timer and the failed-attach path), and a warm already in flight **abandons
+itself** on the gate transition rather than at its next budget boundary.
+`AppState` backgrounding suspends the schedule outright.
+
+**Staleness.** Nothing marks a scope "done". A visit to a warmed scope still
+drives `start()` unconditionally and still issues `resume` from the local cursor,
+so the warmed rows are a floor and everything appended since arrives on exactly
+today's schedule; `reconcileServerReset` still drops a transcript whose server
+has been wiped. The warm can be stale by minutes without ever being wrong —
+the owner sees real messages instantly and the tail fills in behind them, instead
+of seeing an empty state and then real messages.
+
+**Not warmed, stated rather than implied:** Docs and Tasks tab BODIES. Each is a
+per-mount hook chain (`app/features/docs/`) with no shared cache to fill, so
+warming them would mean inventing a second cache per surface for a flash nobody
+has measured.
+
+Measured in the mobile harness (`app/__tests__/transcript-warmer.test.ts`),
+filming the real surface at 30 fps over an 800 ms replay delay: the cold scope
+shows the empty state for **22 of 36 frames (~726 ms)**; the same scope warmed
+first — with its warm session then cleared, so the win comes from disk and not
+from a live socket — shows it for **0 of 36**. Harness, not glass: the frame
+counts are real commits, the device-side number is unverified. The three
+yield guarantees are mutation-tested in the same file.
+
 ### Web client consumption (WAVE 3 PR-4)
 
 > **P0b (2026-06-26) — React is the ONLY web chat client.** The vanilla
