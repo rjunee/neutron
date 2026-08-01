@@ -252,4 +252,157 @@ describe('attachment compose + authed render (happy-dom)', () => {
       root.unmount()
     })
   })
+
+  /**
+   * A voice note used to render as `🎵 <storage hash>` — a download link, not a
+   * player. The clip was unlistenable in the client that received it. The web
+   * fix is the browser's own `<audio controls>` (play/pause, duration and a
+   * scrubber, keyboard-accessible, for free), fed from the SAME bearer-authed
+   * object URL an image gets, plus the one-clip-at-a-time rule the mobile client
+   * enforces too.
+   */
+  it('renders a sent voice note as an audio PLAYER, authed, one clip at a time', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ChatApp } = await import('../ChatApp.tsx')
+    const { __resetExclusiveAudioForTests } = await import('../audio-exclusivity.ts')
+    const React = await import('react')
+
+    __resetExclusiveAudioForTests()
+
+    const CLIP_A = '/api/app/upload/sam/aaaa.m4a'
+    const CLIP_B = '/api/app/upload/sam/bbbb.m4a'
+    let authedGets: string[] = []
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.includes('/api/app/upload/') && (init?.method ?? 'GET') === 'GET') {
+        authedGets.push(String((init?.headers as Record<string, string>)['authorization']))
+        return new Response(new Blob([new Uint8Array([1, 2, 3, 4])]), { status: 200 })
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const sockets: Array<{
+      open: () => void
+      deliver: (o: unknown) => void
+      onopen: (() => void) | null
+      onmessage: ((ev: { data: unknown }) => void) | null
+      onclose: (() => void) | null
+      onerror: (() => void) | null
+      send: (d: string) => void
+      close: () => void
+    }> = []
+    const makeSocket = () => {
+      const s = {
+        onopen: null as null | (() => void),
+        onmessage: null as null | ((ev: { data: unknown }) => void),
+        onclose: null as null | (() => void),
+        onerror: null as null | (() => void),
+        send: () => {},
+        close: () => {},
+        open() {
+          this.onopen?.()
+        },
+        deliver(o: unknown) {
+          this.onmessage?.({ data: JSON.stringify(o) })
+        },
+      }
+      sockets.push(s)
+      return s as never
+    }
+
+    const controller = new NeutronChatController({
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: null,
+      projects: [],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token, fetchImpl: fakeFetch })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ChatApp vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fakeFetch} />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      sockets[0]!.open()
+      sockets[0]!.deliver(ready())
+      await tick()
+    })
+
+    // Two voice notes land in the transcript.
+    await act(async () => {
+      sockets[0]!.deliver({
+        v: 1, type: 'user_message', user_id: 'sam', message_id: 'v1', seq: 1, ts: 1,
+        body: '', attachments: [CLIP_A],
+      })
+      sockets[0]!.deliver({
+        v: 1, type: 'user_message', user_id: 'sam', message_id: 'v2', seq: 2, ts: 2,
+        body: '', attachments: [CLIP_B],
+      })
+      await tick()
+      await tick()
+    })
+
+    const players = [...container.querySelectorAll('audio')]
+    expect(players.length).toBe(2)
+    // A real control, not a link that downloads the clip.
+    expect(players[0]!.hasAttribute('controls')).toBe(true)
+    expect(container.querySelector('a.car-attach-file')).toBeNull()
+    // Duration is known before the first play, so the control never shows a
+    // fabricated 0:00.
+    expect(players[0]!.getAttribute('preload')).toBe('metadata')
+    // Fed through the bearer-authed GET (object URL), never the raw authed path
+    // — a naked src would 401.
+    expect(authedGets).toEqual(['Bearer dev:sam', 'Bearer dev:sam'])
+    expect(players[0]!.getAttribute('src') ?? '').not.toContain('/api/app/upload/')
+
+    // One clip at a time: playing the second pauses the first. happy-dom has no
+    // media pipeline, so the `play` event is dispatched directly and `pause` is
+    // observed — which is exactly the seam the handler is bound to.
+    let pausedA = 0
+    players[0]!.pause = () => {
+      pausedA += 1
+    }
+    await act(async () => {
+      players[0]!.dispatchEvent(new Event('play', { bubbles: false }))
+      players[1]!.dispatchEvent(new Event('play', { bubbles: false }))
+    })
+    expect(pausedA).toBe(1)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
 })
