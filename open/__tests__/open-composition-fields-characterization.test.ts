@@ -58,6 +58,11 @@ const EXPECTED_COMPOSITION_KEYS = [
   'app_docs_surface',
   'app_project_credentials_surface',
   'app_projects_surface',
+  // The external system-notice route (`POST /api/app/system-notice`). Same
+  // done-means-served proof as the usage key below: it appears only if
+  // `composeOpen` really constructs the surface and hands it over, which is what
+  // makes the route reachable in a real install rather than merely written.
+  'app_system_notice_surface',
   'app_tabs_surface',
   'app_tasks_surface',
   'app_upload_surface',

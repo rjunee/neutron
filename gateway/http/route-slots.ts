@@ -527,6 +527,17 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_usage_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0h1b4. External system notice — `POST /api/app/system-notice`. The ONE way an
+  //        authenticated out-of-process caller puts a durable system message in
+  //        the owner's chat; it calls the `deliver` seam and nothing else.
+  slot({
+    key: 'appSystemNotice',
+    rung: 'app-system-notice',
+    composition: 'app_system_notice_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_system_notice_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0h1c. Per-project credential CRUD (Settings tab) —
   //       `/api/app/projects/<id>/credentials[/<service>]`.
   slot({

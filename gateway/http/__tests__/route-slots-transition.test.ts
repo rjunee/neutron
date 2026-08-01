@@ -85,6 +85,10 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   // shape as the activity row above: it sits between activity and credentials in
   // the ladder, mirroring its slot order.
   ['app-usage', 'appUsage', 'app_usage_surface', true],
+  // External system notice (`POST /api/app/system-notice`). RATCHET EXTENSION,
+  // same shape as the two rows above: it sits between usage and credentials in
+  // the ladder, mirroring its slot order.
+  ['app-system-notice', 'appSystemNotice', 'app_system_notice_surface', true],
   ['app-project-credentials', 'appProjectCredentials', 'app_project_credentials_surface', true],
   ['app-codex-credential', 'appCodexCredential', 'app_codex_credential_surface', true],
   ['app-projects', 'appProjects', 'app_projects_surface', true],
@@ -467,6 +471,7 @@ function fullComposition(): RouteSlotComposition {
     app_work_board_surface: { handler: h() },
     app_activity_surface: { handler: h() },
     app_usage_surface: { handler: h() },
+    app_system_notice_surface: { handler: h() },
     app_project_credentials_surface: { handler: h() },
     app_codex_credential_surface: { handler: h() },
     app_backups_surface: { handler: h() },
@@ -517,6 +522,8 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_activity_surface',
   // Active-credential usage meter (ratchet extension).
   'app_usage_surface',
+  // External system notice — `POST /api/app/system-notice` (ratchet extension).
+  'app_system_notice_surface',
   'app_project_credentials_surface',
   'app_codex_credential_surface',
   'app_backups_surface',
