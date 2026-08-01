@@ -110,6 +110,21 @@ export {
   type ReflectPassDeps,
   type ReflectReport,
 } from './reflect/reflect-pass.ts'
+// The merge ARCHIVE — a dedup loser is copied byte-exact to
+// `<ownerDataDir>/memory-archive/` before it is deleted, so a wrong auto-merge
+// can be undone (`neutron memory-restore`). A failed archive blocks the delete.
+export {
+  archiveMergedPage,
+  readMergeLedger,
+  restoreArchivedPage,
+  pruneMergeArchive,
+  mergeArchiveRoot,
+  MERGE_ARCHIVE_DIRNAME,
+  MERGE_LEDGER_FILENAME,
+  MERGE_ARCHIVE_RETENTION_MS,
+  type ArchivedMerge,
+  type ReflectArchivePage,
+} from './reflect/merge-archive.ts'
 export {
   clusterNearDuplicates,
   jaccard,

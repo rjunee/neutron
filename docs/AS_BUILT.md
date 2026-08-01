@@ -6285,3 +6285,39 @@ default so no existing harness file changes behaviour.
 `app/__tests__/project-switch-reaches-the-wire.test.tsx` (7/0) asserts a SOCKET per
 tapped project, not that a spinner stopped. Six mutations, each proven applied by
 file hash, each failing its paired test.
+
+## 2026-08-01 — memory: an auto-merged page can be un-merged
+
+The 6h reflect pass clusters near-duplicate entity pages, folds the losers into a
+survivor, and **hard-unlinked** each loser (`runtime/entity-writer.ts:deleteEntity`
+→ `fs.unlink`). Jaccard similarity is a heuristic, so that removal could be wrong
+and there was no way back: no copy, no record, and — because the pass's report is
+a return value nobody reads (`open/wiring/memory.ts` discards it) — not even a log
+line saying a page had gone. `entities/.quarantine/` had been designed and dropped.
+
+**`scribe/reflect/merge-archive.ts` (new).** A merged-away loser is copied
+BYTE-EXACT to `<ownerDataDir>/memory-archive/<kind-dir>/<slug>.<stamp>.md` and the
+merge recorded in `memory-archive/merges.jsonl` (when, which page, which survivor
+absorbed it) **before** the unlink. `memory-archive/` is a sibling of `entities/`,
+outside every enumeration path, so an archived copy is inert until restored.
+Content-idempotent (a re-archived loser reuses its existing copy), and
+`pruneMergeArchive` enforces a **90-day** horizon each pass so the safety net stays
+bounded. A `README.md` with plain-English restore instructions is dropped into the
+folder on first use.
+
+**`scribe/reflect/reflect-pass.ts`.** `mergeCluster` archives before deleting, and
+**a failed archive BLOCKS the delete** — the loser is retained, not counted as
+merged, and a later pass retries. New `report.archived`; a successful merge now
+logs the removed page, the survivor, the archive path and the restore command.
+
+**`neutron memory-restore`** (`scribe/reflect/memory-restore-cli.ts`, dispatched
+from `bin/neutron`) lists what was merged away and puts a page back byte-for-byte.
+It refuses to overwrite a live page without `--force`.
+
+**Test surface.** `scribe/__tests__/reflect-merge-archive.test.ts` (12/0) drives
+REAL merges over real on-disk pages and then **recovers the loser, asserting the
+restored bytes equal the pre-merge bytes** — including the case where the loser was
+the better page. Mutation: reverting `mergeCluster` to a hard delete turns 10 of
+the 12 red.
+
+No schema change, no feature flag. Gateway/scribe code — reaches a box on deploy.
