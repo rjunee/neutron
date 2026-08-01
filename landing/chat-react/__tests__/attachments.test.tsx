@@ -256,10 +256,15 @@ describe('attachment compose + authed render (happy-dom)', () => {
   /**
    * A voice note used to render as `🎵 <storage hash>` — a download link, not a
    * player. The clip was unlistenable in the client that received it. The web
-   * fix is the browser's own `<audio controls>` (play/pause, duration and a
-   * scrubber, keyboard-accessible, for free), fed from the SAME bearer-authed
-   * object URL an image gets, plus the one-clip-at-a-time rule the mobile client
-   * enforces too.
+   * fix is a real player fed from the SAME bearer-authed object URL an image
+   * gets, plus the one-clip-at-a-time rule the mobile client enforces too.
+   *
+   * It began as the browser's `<audio controls>`, which was free but drew its
+   * own filled panel inside the bubble. `VoiceNotePlayer` keeps the `<audio>`
+   * element as the transport and replaces only that chrome, so what this case
+   * has to hold is BOTH halves: the browser's control is gone, AND everything
+   * it used to provide for free — a keyboard-operable play button, a keyboard-
+   * operable scrubber, an honest duration — is still there.
    */
   it('renders a sent voice note as an audio PLAYER, authed, one clip at a time', async () => {
     const { createRoot } = await import('react-dom/client')
@@ -377,11 +382,27 @@ describe('attachment compose + authed render (happy-dom)', () => {
 
     const players = [...container.querySelectorAll('audio')]
     expect(players.length).toBe(2)
-    // A real control, not a link that downloads the clip.
-    expect(players[0]!.hasAttribute('controls')).toBe(true)
     expect(container.querySelector('a.car-attach-file')).toBeNull()
-    // Duration is known before the first play, so the control never shows a
-    // fabricated 0:00.
+
+    // A real control, and OURS. The browser's own `controls` chrome draws a
+    // filled panel inside the bubble — a box in a box, and on the blue user
+    // bubble a light slab that owns the whole message. It is gone, and what
+    // replaced it is reachable the way a keyboard and a screen reader reach it.
+    expect(players[0]!.hasAttribute('controls')).toBe(false)
+    const toggles = [...container.querySelectorAll('button.car-vn-toggle')]
+    expect(toggles.length).toBe(2)
+    expect(toggles[0]!.getAttribute('aria-label')).toBe('Play voice message')
+    // Losing `controls` must not cost the scrubber its keyboard access.
+    expect(container.querySelectorAll('input[type="range"].car-vn-scrub').length).toBe(2)
+
+    // Nothing about the clip is known yet in happy-dom (no media pipeline), and
+    // the readout says so rather than printing a fabricated 0:00 — which reads
+    // as an empty recording.
+    const times = [...container.querySelectorAll('[data-testid="voice-note-time"]')]
+    expect(times[0]!.textContent).toBe('--:--')
+    expect(times[0]!.textContent).not.toBe('0:00')
+    // Duration is still fetched up front, so a real length appears before the
+    // first play on a browser that has one.
     expect(players[0]!.getAttribute('preload')).toBe('metadata')
     // Fed through the bearer-authed GET (object URL), never the raw authed path
     // — a naked src would 401.

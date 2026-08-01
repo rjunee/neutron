@@ -39,6 +39,8 @@
  * doubled cap produced.
  */
 
+import { THEME } from './theme';
+
 /**
  * The ONE cap, as a number, for arithmetic + assertions.
  *
@@ -163,3 +165,39 @@ export function bubbleGapPt(previous: BubbleSpeaker | null, current: BubbleSpeak
 export function bubbleHasTail(current: BubbleSpeaker, next: BubbleSpeaker | null): boolean {
   return next === null || next !== current;
 }
+
+/**
+ * A bubble's two colours: the fill it is painted with, and the colour its own
+ * content is drawn in.
+ *
+ * WHY THIS PAIR HAS TO BE NAMED. Most bubble content only needs the foreground —
+ * `userText` sets a colour and stops. A voice note needs BOTH, because iMessage
+ * draws its play control as the bubble's foreground colour with the triangle
+ * KNOCKED OUT of it in the bubble's own fill (measured off Apple's asset; see
+ * `components/VoiceNoteBubble.tsx`). A control that only knows the foreground
+ * has to invent the other half, and the way it used to invent it was by drawing
+ * its own opaque panel — the nested box the owner asked to be rid of.
+ *
+ * It lives here rather than in the component because this module is already the
+ * one place a bubble's facts are stated, and `ChatSyncSurface` paints its
+ * bubbles FROM these constants, so the player's idea of what it is sitting on
+ * cannot drift from what was actually drawn.
+ */
+export interface BubbleTone {
+  /** The bubble's fill. Content knocked out of the foreground reads in this. */
+  ground: string;
+  /** The colour the bubble's own content is drawn in. */
+  ink: string;
+}
+
+/** The owner's own bubble: a filled accent capsule with dark content. */
+export const USER_BUBBLE_TONE: BubbleTone = Object.freeze({
+  ground: THEME.accent,
+  ink: THEME.background,
+});
+
+/** The agent's bubble: a raised dark surface with light content. */
+export const AGENT_BUBBLE_TONE: BubbleTone = Object.freeze({
+  ground: THEME.surface_raised,
+  ink: THEME.text_primary,
+});

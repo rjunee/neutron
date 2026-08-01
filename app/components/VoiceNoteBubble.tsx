@@ -14,6 +14,46 @@
  * painted waveform that ignores playback position is the thing this component
  * exists NOT to be.
  *
+ * THE PLAYER IS THE BUBBLE'S CONTENT, NOT A PANEL INSIDE IT. The first version
+ * of this component drew its own filled, rounded container — so a voice note
+ * appeared as a box nested inside the message bubble, which already has an edge
+ * and a radius of its own. The owner: *"The voice note playback UX is kinda
+ * ugly. Its a box in a box, the play button is a really small tap target... can
+ * you make it look like imessage?"* iMessage draws no such frame: the audio
+ * message IS the bubble, and every mark in it is painted in the bubble's own
+ * foreground colour. That is why this component takes a `BubbleTone` rather than
+ * reaching for fixed palette entries — with no panel of its own it has no
+ * background it controls, so it has to be told what it is sitting on.
+ *
+ * THE REFERENCE, AND HOW IT WAS READ. Apple's own asset for "A Messages
+ * conversation with an audio message" from the iPhone User Guide
+ * (help.apple.com/assets/69F8EBBDF3B89A4F6E0C704C/69F8EBC43862495245036393/
+ * en_US/8d5297e97af5bc312625c6e5859061df.png, linked from
+ * support.apple.com/guide/iphone/send-and-receive-audio-messages-iph2e42d3117/ios),
+ * pixel-measured — the same method the composer rework used. Every ratio below
+ * is a measurement off that image, cross-checked against Apple's standalone
+ * play-button glyph asset and against an older (iOS 12-era) audio bubble. The
+ * arrangement all three agree on: disc at the LEADING edge, the waveform's slot
+ * spanning the middle, the length at the TRAILING edge, and no container of any
+ * kind between them and the bubble. Numbers in
+ * `docs/as-built/2026-08-01-voice-note-imessage-playback.md`.
+ *
+ * ONE DELIBERATE DEPARTURE: THE TRACK IS NOT A WAVEFORM. Apple draws a real
+ * amplitude envelope — you can see the silence at the head of the clip and the
+ * speech in the middle. We have no amplitude to draw. `expo-audio` reports
+ * `metering` on a RECORDING only; `AudioStatus`, the playback status this
+ * component reads, carries no level and no samples
+ * (`expo-audio/build/Audio.types.d.ts:137-169`, `:205`). The one PCM channel it
+ * does offer, `useAudioSampleListener`, is real-time-only (nothing exists before
+ * the first play), is documented as "not supported on all platforms", and
+ * "requires RECORD_AUDIO permission on Android" — asking for the microphone in
+ * order to draw a picture is not a trade this component will make. Bars whose
+ * heights came from anywhere else (a hash of the URL, a fixed pattern) would
+ * LOOK like an amplitude envelope while carrying nothing about the audio, which
+ * is a worse lie than an honest bar. So the waveform's SLOT, proportion and
+ * behaviour are Apple's; what fills it is a progress track that means exactly
+ * what it shows.
+ *
  * THREE THINGS THAT ARE EASY TO GET WRONG, AND ARE HANDLED HERE:
  *
  *   ONE CLIP AT A TIME. Each bubble owns its own player and cannot see its
@@ -42,6 +82,7 @@ import { Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent } f
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 
 import { resolveAttachmentSource, type AttachmentAuthCtx } from '../lib/attachment-url';
+import { AGENT_BUBBLE_TONE, type BubbleTone } from '../lib/chat-bubble-metrics';
 import {
   claimVoicePlayback,
   formatClipLength,
@@ -53,7 +94,7 @@ import {
   UNKNOWN_LENGTH_LABEL,
   type PausablePlayback,
 } from '../lib/voice-playback';
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { SPACING, TYPOGRAPHY } from '../lib/theme';
 
 /**
  * How often the native player reports position. `expo-audio` defaults to 500ms,
@@ -74,20 +115,127 @@ const PROGRESS_UPDATE_MS = 100;
  */
 const LOAD_DEADLINE_MS = 20_000;
 
-/** Track height. Thin enough to read as a scrubber, thick enough to hit. */
-const TRACK_HEIGHT = 4;
+/**
+ * THE PAINTED DIAMETER of the play/pause disc.
+ *
+ * Measured twice, independently: 33px in Apple's current in-thread asset at a
+ * 1.153 px/pt render scale = 28.7pt, and 87px in an iOS 12-era screenshot
+ * captured at a known 3x on a 375pt screen = 29.0pt. Implemented at 30 — within
+ * a point of both, and even, so the radius and the glyph ratios below resolve
+ * without a half-pixel.
+ *
+ * Note this is SMALLER than the 32pt disc the first version painted, which is
+ * the counter-intuitive half of the owner's "really small tap target". The disc
+ * was never the problem; its CONTRAST was. It was `surface_raised` (#1a1a1a) on
+ * `surface` (#121212) — invisible — so the only thing the eye could find was the
+ * 13pt `▶` text glyph inside it, and a 13pt mark is what "small" was measuring.
+ * Apple's disc is filled in the bubble's full foreground colour with the
+ * triangle knocked out of it, which is what makes it read as a big target at
+ * 29pt. The REACH is fixed separately and honestly, by {@link TAP_TARGET_PT}.
+ */
+export const CONTROL_DIAMETER_PT = 30;
+
+/**
+ * The control's TOUCHABLE size, which is deliberately not its painted size.
+ *
+ * 44pt is the platform's own minimum comfortable target, and `hitSlop` exists
+ * precisely so a control can be reached at 44 while being drawn at the size the
+ * design calls for. Delivered as slop rather than as padding on purpose: padding
+ * would grow the row and push the bubble taller than iMessage's, which is the
+ * proportion this change is trying to match.
+ */
+export const TAP_TARGET_PT = 44;
+
+/** Slop per side that takes the painted disc up to {@link TAP_TARGET_PT}. */
+export const CONTROL_HIT_SLOP_PT = (TAP_TARGET_PT - CONTROL_DIAMETER_PT) / 2;
+
+/**
+ * The play triangle, as ratios of the disc's diameter so they hold at any size.
+ *
+ * Measured off the triangle knocked out of Apple's in-thread disc (11 x 13px in
+ * a 33px disc = 0.333 x 0.394) and confirmed against Apple's standalone
+ * play-button asset (21 x 24px in a 60px box = 0.350 x 0.400).
+ *
+ * The nudge is real and it matters: a right-pointing triangle centred on its
+ * bounding box looks left-heavy, because its mass sits behind the apex. Apple
+ * offsets it — +1px of 33 in the bubble asset, +2.5px of 60 in the glyph asset,
+ * i.e. 0.030 and 0.042 of the diameter. 0.035 is the middle of the two.
+ */
+const GLYPH_WIDTH_RATIO = 0.333;
+const GLYPH_HEIGHT_RATIO = 0.394;
+const GLYPH_NUDGE_RATIO = 0.035;
+
+/**
+ * The pause mark: two bars as tall as the play triangle, so the control does not
+ * change visual weight when it flips. Not measured (Apple's downloadable pause
+ * asset is a filled disc, not a bare glyph) — derived to land on the triangle's
+ * total width, which is the property that keeps the swap from twitching.
+ */
+const PAUSE_BAR_WIDTH_RATIO = 0.105;
+const PAUSE_GAP_RATIO = 0.09;
+
+/**
+ * Track height. Apple's waveform envelope is ~26pt tall, but that height is
+ * AMPLITUDE — it is drawn by the audio, not chosen. A progress track claiming
+ * the same 26pt would just be a fat bar impersonating a waveform, so this is the
+ * height of an honest scrubber instead: thick enough to read as a control rather
+ * than a hairline, thin enough not to pretend.
+ */
+const TRACK_HEIGHT_PT = 6;
+
 /** Fully-rounded ends on the track and its fill. */
-const TRACK_RADIUS = 2;
-/** Diameter of the play/pause control. */
-const CONTROL_SIZE = 32;
-/** Reserved width for the time readout so the track does not resize per tick. */
-const TIME_WIDTH = 40;
+const TRACK_RADIUS_PT = TRACK_HEIGHT_PT / 2;
+
+/**
+ * The unplayed part of the track, as an opacity of the bubble's ink. No
+ * measurement exists to copy — Apple's track is an amplitude envelope drawn at
+ * full strength, so it has no "not yet reached" state to read a value from.
+ * Chosen to sit clearly behind the filled part on both bubble tones.
+ */
+const TRACK_REST_OPACITY = 0.3;
+
+/**
+ * The time readout's opacity against the bubble's ink. MEASURED: the `00:04` in
+ * Apple's asset resolves to 0.70 of the foreground, where the waveform beside it
+ * is a full-strength 1.0.
+ */
+const TIME_OPACITY = 0.7;
+
+/**
+ * Reserved width for the time readout so the track does not resize per tick.
+ * Sized for the widest thing that can appear, which is `--:--`, not `0:07`.
+ */
+const TIME_WIDTH_PT = 40;
+
 /** Padding around the track, enlarging its tap target without thickening it. */
-const TRACK_TOUCH_PAD = SPACING.sm;
+const TRACK_TOUCH_PAD_PT = SPACING.sm;
+
+/** Slop that takes the track's touch band to {@link TAP_TARGET_PT} tall. */
+const TRACK_HIT_SLOP_PT = (TAP_TARGET_PT - TRACK_HEIGHT_PT - 2 * TRACK_TOUCH_PAD_PT) / 2;
+
+/**
+ * The narrowest the whole row may be, so a two-second clip still gets a track
+ * worth aiming at rather than a stub between the disc and the readout.
+ *
+ * Held at 200 rather than raised to Apple's ~237pt of bubble content on purpose:
+ * the bubble is capped at 90% of a row the project rail has already taken 72pt
+ * out of, and on the smallest supported phone that leaves under 200pt. A minimum
+ * the container cannot honour does not make the track wider, it makes the bubble
+ * overflow. The track is `flex: 1`, so on every phone with room it grows past
+ * this on its own.
+ */
+const ROW_MIN_WIDTH_PT = 200;
 
 export interface VoiceNoteBubbleProps {
   url: string;
   auth: AttachmentAuthCtx | null;
+  /**
+   * The bubble this player is being painted INTO. Every mark the component draws
+   * comes from here — it owns no background of its own (see the file header).
+   * Defaults to the agent bubble, which is the correct reading for any dark
+   * surface that has not opted in.
+   */
+  tone?: BubbleTone;
 }
 
 /**
@@ -98,7 +246,11 @@ export interface VoiceNoteBubbleProps {
  * even when a recycled row's `url` flips between attachment kinds (the
  * rules-of-hooks structure documented on that dispatcher).
  */
-export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.ReactElement {
+export function VoiceNoteBubble({
+  url,
+  auth,
+  tone = AGENT_BUBBLE_TONE,
+}: VoiceNoteBubbleProps): React.ReactElement {
   const resolved = useMemo(() => resolveAttachmentSource(url, auth), [url, auth]);
   const bearer = resolved.headers?.Authorization;
   // RN-web plays through an <audio> element, which drops per-source headers —
@@ -189,12 +341,18 @@ export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.Reac
     return () => clearTimeout(timer);
   }, [failed, source, status.isLoaded, has_length, playing]);
 
-  // Finished: give the speaker back and rewind, so the next tap replays from
-  // the top rather than sitting dead at the end.
+  // Finished: stop, give the speaker back, and rewind, so the next tap replays
+  // from the top rather than sitting dead at the end.
+  //
+  // PAUSE BEFORE SEEKING. `didJustFinish` does not leave the player paused — it
+  // is still in a playing state, so seeking to 0 on its own hands it a fresh
+  // position to play FROM and the clip loops forever. That shipped, and the
+  // owner reported it within the hour.
   useEffect(() => {
     if (!status.didJustFinish) return;
     releaseVoicePlayback(handle);
     try {
+      player.pause();
       void player.seekTo(0)?.catch?.(() => undefined);
     } catch {
       // A player released between the status event and this effect.
@@ -288,12 +446,11 @@ export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.Reac
         onPress={toggle}
         accessibilityRole="button"
         accessibilityLabel="Voice message unavailable, tap to retry"
-        style={({ pressed }) => [styles.shell, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.row, pressed && styles.pressed]}
         testID="voice-note-player"
       >
-        <Text style={styles.glyph}>⟳</Text>
-        <Text style={styles.failure} numberOfLines={1}>
-          Voice message unavailable — tap to retry
+        <Text style={[styles.failure, { color: tone.ink }]} numberOfLines={1}>
+          ⟳ Voice message unavailable — tap to retry
         </Text>
       </Pressable>
     );
@@ -308,34 +465,40 @@ export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.Reac
       : length_label;
 
   return (
-    <View style={styles.shell} testID="voice-note-player">
+    <View style={styles.row} testID="voice-note-player">
       <Pressable
         onPress={toggle}
-        hitSlop={SPACING.sm}
+        hitSlop={CONTROL_HIT_SLOP_PT}
         accessibilityRole="button"
         accessibilityLabel={playbackControlLabel(playing, length_label)}
-        style={({ pressed }) => [styles.control, pressed && styles.pressed]}
+        style={({ pressed }) => [
+          styles.control,
+          { backgroundColor: tone.ink },
+          pressed && styles.pressed,
+        ]}
         testID="voice-note-toggle"
       >
-        <Text style={styles.glyph}>{playing ? '⏸' : '▶'}</Text>
+        {playing ? <PauseMark color={tone.ground} /> : <PlayMark color={tone.ground} />}
       </Pressable>
       <Pressable
         onPress={(e) => seek(e.nativeEvent.locationX)}
         onLayout={onTrackLayout}
+        hitSlop={{ top: TRACK_HIT_SLOP_PT, bottom: TRACK_HIT_SLOP_PT }}
         accessibilityRole="adjustable"
         accessibilityLabel="Seek within voice message"
         accessibilityValue={{ min: 0, max: 100, now: Math.round(fraction * 100) }}
         style={styles.track_touch}
       >
         <View style={styles.track}>
+          <View style={[styles.track_rest, { backgroundColor: tone.ink }]} />
           <View
-            style={[styles.track_fill, { width: `${fraction * 100}%` }]}
+            style={[styles.track_fill, { backgroundColor: tone.ink, width: `${fraction * 100}%` }]}
             testID="voice-note-progress"
           />
         </View>
       </Pressable>
       <Text
-        style={styles.time}
+        style={[styles.time, { color: tone.ink }]}
         numberOfLines={1}
         accessibilityLabel={
           length_label === UNKNOWN_LENGTH_LABEL ? 'Voice message length loading' : undefined
@@ -348,58 +511,118 @@ export function VoiceNoteBubble({ url, auth }: VoiceNoteBubbleProps): React.Reac
   );
 }
 
+/**
+ * The play triangle, drawn from a view rather than typed as a character.
+ *
+ * `▶` in a `<Text>` takes its size, weight and vertical position from whatever
+ * the system font decides, which is how the previous version ended up with a
+ * ~13pt mark adrift in a 32pt circle — the same mistake the composer's send
+ * arrow was rebuilt to fix. Built from the collapsed-box border technique (a
+ * zero-size view whose left border is the only one carrying a colour), the
+ * geometry is ours and holds Apple's measured ratios at any diameter.
+ */
+function PlayMark({ color }: { color: string }): React.ReactElement {
+  const width = CONTROL_DIAMETER_PT * GLYPH_WIDTH_RATIO;
+  const half_height = (CONTROL_DIAMETER_PT * GLYPH_HEIGHT_RATIO) / 2;
+  return (
+    <View
+      testID="voice-note-play-mark"
+      style={{
+        width: 0,
+        height: 0,
+        backgroundColor: 'transparent',
+        borderTopWidth: half_height,
+        borderBottomWidth: half_height,
+        borderLeftWidth: width,
+        borderTopColor: 'transparent',
+        borderBottomColor: 'transparent',
+        borderLeftColor: color,
+        // Optical centring — see GLYPH_NUDGE_RATIO. Doubled because the mark's
+        // own box is the triangle's bounding box, so shifting the box by n moves
+        // its visual centre of mass by about n/2.
+        marginLeft: CONTROL_DIAMETER_PT * GLYPH_NUDGE_RATIO * 2,
+      }}
+    />
+  );
+}
+
+/** The pause mark: two capped bars the same height as the play triangle. */
+function PauseMark({ color }: { color: string }): React.ReactElement {
+  const bar_width = CONTROL_DIAMETER_PT * PAUSE_BAR_WIDTH_RATIO;
+  const bar = {
+    width: bar_width,
+    height: CONTROL_DIAMETER_PT * GLYPH_HEIGHT_RATIO,
+    borderRadius: bar_width / 2,
+    backgroundColor: color,
+  } as const;
+  return (
+    <View
+      testID="voice-note-pause-mark"
+      style={{ flexDirection: 'row', gap: CONTROL_DIAMETER_PT * PAUSE_GAP_RATIO }}
+    >
+      <View style={bar} />
+      <View style={bar} />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  shell: {
+  /**
+   * NO backgroundColor, NO borderRadius, NO border. That is the whole point of
+   * this arrangement: the row IS the bubble's content, and the bubble already
+   * drew the container. Anything filled here is the box-in-a-box coming back.
+   */
+  row: {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
-    gap: SPACING.sm,
-    minWidth: 200,
+    minWidth: ROW_MIN_WIDTH_PT,
     maxWidth: '100%',
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.sm + SPACING.xs,
-    borderRadius: 14,
-    backgroundColor: THEME.surface,
   },
   pressed: { opacity: 0.6 },
   control: {
-    width: CONTROL_SIZE,
-    height: CONTROL_SIZE,
-    borderRadius: CONTROL_SIZE / 2,
+    width: CONTROL_DIAMETER_PT,
+    height: CONTROL_DIAMETER_PT,
+    borderRadius: CONTROL_DIAMETER_PT / 2,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: THEME.surface_raised,
   },
-  glyph: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-  },
+  // MEASURED gaps: 12pt from the disc to the waveform, ~16pt from the waveform
+  // to the readout. Apple's spacing is not symmetric, and copying it symmetric
+  // is one of the things that makes a clone read as "close, but off".
   track_touch: {
     flex: 1,
     justifyContent: 'center',
-    paddingVertical: TRACK_TOUCH_PAD,
+    marginLeft: SPACING.md,
+    marginRight: SPACING.lg,
+    paddingVertical: TRACK_TOUCH_PAD_PT,
   },
   track: {
-    height: TRACK_HEIGHT,
-    borderRadius: TRACK_RADIUS,
-    backgroundColor: THEME.text_muted,
-    overflow: 'hidden',
+    height: TRACK_HEIGHT_PT,
+    borderRadius: TRACK_RADIUS_PT,
+    justifyContent: 'center',
+  },
+  /** The unplayed remainder, BEHIND the fill rather than around it — a parent
+   *  carrying the opacity would drag the fill down with it. */
+  track_rest: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: TRACK_RADIUS_PT,
+    opacity: TRACK_REST_OPACITY,
   },
   track_fill: {
-    height: TRACK_HEIGHT,
-    borderRadius: TRACK_RADIUS,
-    backgroundColor: THEME.accent,
+    height: TRACK_HEIGHT_PT,
+    borderRadius: TRACK_RADIUS_PT,
   },
   time: {
-    width: TIME_WIDTH,
+    width: TIME_WIDTH_PT,
     textAlign: 'right',
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.caption.fontSize,
+    fontSize: TYPOGRAPHY.body_small.fontSize,
+    opacity: TIME_OPACITY,
     fontVariant: ['tabular-nums'],
   },
   failure: {
     flex: 1,
-    color: THEME.text_secondary,
     fontSize: TYPOGRAPHY.body_small.fontSize,
+    opacity: TIME_OPACITY,
   },
 });

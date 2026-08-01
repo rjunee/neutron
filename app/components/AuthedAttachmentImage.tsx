@@ -53,6 +53,7 @@ import {
   resolveAttachmentSource,
   type AttachmentAuthCtx,
 } from '../lib/attachment-url';
+import { type BubbleTone } from '../lib/chat-bubble-metrics';
 import { THEME, TYPOGRAPHY } from '../lib/theme';
 import { VoiceNoteBubble } from './VoiceNoteBubble';
 
@@ -60,6 +61,13 @@ export interface AuthedAttachmentImageProps {
   url: string;
   auth: AttachmentAuthCtx | null;
   style?: StyleProp<ImageStyle>;
+  /**
+   * The bubble this attachment is being painted into. Only the VOICE NOTE branch
+   * reads it, and it has to: that control draws no container of its own, so
+   * every mark it makes is in the bubble's colours (see `VoiceNoteBubble`). An
+   * image or a file chip brings its own surface and does not care.
+   */
+  tone?: BubbleTone;
 }
 
 /**
@@ -75,13 +83,13 @@ export interface AuthedAttachmentImageProps {
  * unmounts the old leaf and mounts a fresh one instead of reusing an instance
  * whose hook count changed. (Argus r3 MAJOR.)
  */
-export function AuthedAttachmentImage({ url, auth, style }: AuthedAttachmentImageProps) {
+export function AuthedAttachmentImage({ url, auth, style, tone }: AuthedAttachmentImageProps) {
   // A voice note renders as a playback control — a play/pause button, the
   // clip's length, and a track that follows the position. It must be checked
   // BEFORE the file branch, which is where it used to land and paint as a
   // glyph plus a storage hash.
   if (isAudioAttachmentUrl(url)) {
-    return <VoiceNoteBubble url={url} auth={auth} />;
+    return <VoiceNoteBubble url={url} auth={auth} tone={tone} />;
   }
   // A non-image attachment (PDF, …) renders as a downloadable file chip, never
   // an <Image> — otherwise the document paints as a broken thumbnail.

@@ -256,3 +256,141 @@ function failingFetch(): { calls: number; undo: () => void } {
   }) as unknown as typeof globalThis.fetch;
   return record;
 }
+
+/**
+ * THE SECOND DEFECT, closed a day after the first. The player shipped drawing
+ * its own filled, rounded panel, so a voice note appeared as a box nested inside
+ * the message bubble — which already has an edge and a radius. The owner: *"The
+ * voice note playback UX is kinda ugly. Its a box in a box, the play button is a
+ * really small tap target... can you make it look like imessage?"*
+ *
+ * These cases pin the ARRANGEMENT that fixed it, which is the thing a future
+ * restyle breaks first. They are DOM and arithmetic facts under the
+ * react-native-web harness, not pixel facts, so they are honestly testable —
+ * whether it LOOKS like iMessage is a screenshot's job and a device's job, and
+ * the PR body says which of those actually happened.
+ */
+describe('the player is the bubble content, not a panel inside it', () => {
+  it('draws no container of its own — no fill, no radius, no border', async () => {
+    const screen = await mountScreen(bubble(CLIP_URL));
+    await reportStatus(0, { is_loaded: true, duration: 6 });
+    await screen.settle();
+
+    const root = screen.byTestId('voice-note-player');
+    expect(root).not.toBeNull();
+    // react-native-web compiles static styles to atomic classes named after the
+    // property, so "this node paints no surface" is directly observable. The
+    // BUBBLE around it in the real transcript carries exactly these — that is
+    // the point: one container, and it is not this one.
+    const painted = (root?.className ?? '')
+      .split(/\s+/)
+      .filter((c) => /^r-(backgroundColor|borderRadius|borderWidth)-/.test(c));
+    expect(painted).toEqual([]);
+    // Dynamic styles land inline, so a fill added that way has to be caught too.
+    expect(root?.style.backgroundColor ?? '').toBe('');
+    expect(root?.style.borderRadius ?? '').toBe('');
+
+    screen.unmount();
+  });
+
+  it('paints every mark in the colours of the bubble it was given', async () => {
+    const { USER_BUBBLE_TONE, AGENT_BUBBLE_TONE } = await import('../lib/chat-bubble-metrics');
+
+    // The owner's own bubble is a light accent capsule, so the disc is DARK with
+    // a light triangle knocked out of it. Getting this from a fixed palette
+    // entry instead is what forced the old version to draw its own panel.
+    const mine = await mountScreen(
+      createElement(AuthedAttachmentImage, { url: CLIP_URL, auth: AUTH, tone: USER_BUBBLE_TONE }),
+    );
+    await mine.settle();
+    expect(rgb(mine.byTestId('voice-note-toggle')?.style.backgroundColor)).toBe(
+      USER_BUBBLE_TONE.ink,
+    );
+    expect(rgb(mine.byTestId('voice-note-play-mark')?.style.borderLeftColor)).toBe(
+      USER_BUBBLE_TONE.ground,
+    );
+    mine.unmount();
+
+    // The agent's bubble is a dark surface, so the same two colours swap.
+    const theirs = await mountScreen(
+      createElement(AuthedAttachmentImage, { url: CLIP_URL, auth: AUTH, tone: AGENT_BUBBLE_TONE }),
+    );
+    await theirs.settle();
+    expect(rgb(theirs.byTestId('voice-note-toggle')?.style.backgroundColor)).toBe(
+      AGENT_BUBBLE_TONE.ink,
+    );
+    expect(rgb(theirs.byTestId('voice-note-play-mark')?.style.borderLeftColor)).toBe(
+      AGENT_BUBBLE_TONE.ground,
+    );
+    theirs.unmount();
+  });
+
+  it('draws the play mark instead of typing it, so its size is not a font decision', async () => {
+    const screen = await mountScreen(bubble(CLIP_URL));
+    await reportStatus(0, { is_loaded: true, duration: 6 });
+    await screen.settle();
+
+    // A `▶` in a <Text> takes its size, weight and vertical position from the
+    // system font — which is how a 13pt mark ended up adrift in a 32pt circle
+    // and got read as "a really small tap target".
+    expect(screen.byTestId('voice-note-play-mark')).not.toBeNull();
+    expect(screen.text()).not.toContain('▶');
+
+    await screen.press('Play 0:06 voice message');
+    await reportStatus(0, { playing: true, current_time: 1 });
+    await screen.settle();
+    expect(screen.byTestId('voice-note-pause-mark')).not.toBeNull();
+    expect(screen.text()).not.toContain('⏸');
+
+    screen.unmount();
+  });
+
+  it('plays ONCE — a finished clip is PAUSED, not merely rewound', async () => {
+    // THE REGRESSION THIS PINS. `didJustFinish` does not leave the player
+    // paused; it is still in a playing state. Rewinding to 0 without pausing
+    // therefore hands it a fresh position to play FROM, and the clip loops
+    // forever. That shipped, and the owner reported it within the hour: "the
+    // playback of the voice note loops. can you have it just play once".
+    //
+    // Asserting the seek alone would NOT catch it — the buggy build seeks too.
+    // The pause is the whole fix, so the pause is what is asserted.
+    const screen = await mountScreen(bubble(CLIP_URL));
+    await reportStatus(0, { is_loaded: true, duration: 7.4 });
+    await screen.settle();
+    await screen.press('Play 0:07 voice message');
+    expect(harnessPlayers()[0]?.play_calls).toBe(1);
+
+    const pauses_before = harnessPlayers()[0]?.pause_calls ?? 0;
+    await reportStatus(0, { did_just_finish: true, playing: false, current_time: 7.4 });
+    await screen.settle();
+
+    const player = harnessPlayers()[0];
+    expect(player?.pause_calls ?? 0).toBeGreaterThan(pauses_before);
+    // Still rewound, so the next tap replays from the top rather than sitting
+    // dead at the end — the behaviour the original handler was reaching for.
+    expect(player?.seeks).toContain(0);
+
+    screen.unmount();
+  });
+
+  it('reaches 44pt even though it paints the reference 30', async () => {
+    const { CONTROL_DIAMETER_PT, CONTROL_HIT_SLOP_PT, TAP_TARGET_PT } = await import(
+      '../components/VoiceNoteBubble'
+    );
+    // Apple's disc measures ~29pt; the platform's comfortable target is 44. The
+    // two are reconciled with slop rather than by inflating the paint, which
+    // would push the bubble taller than the reference.
+    expect(CONTROL_DIAMETER_PT).toBe(30);
+    expect(TAP_TARGET_PT).toBe(44);
+    expect(CONTROL_DIAMETER_PT + 2 * CONTROL_HIT_SLOP_PT).toBe(TAP_TARGET_PT);
+    // NOT verified here: that React Native honours the slop. `hitSlop` leaves no
+    // trace in the DOM, so it is a device fact. This pins the arithmetic only.
+  });
+});
+
+/** `rgba(10, 10, 10, 1.00)` as react-native-web writes it → `#0a0a0a`. */
+function rgb(value: string | undefined): string | undefined {
+  const m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(value ?? '');
+  if (m === null) return value;
+  return `#${[1, 2, 3].map((i) => Number(m[i]).toString(16).padStart(2, '0')).join('')}`;
+}
