@@ -3394,8 +3394,37 @@ per-project `reminders` table. Three parts:
   strictly after now (via `@neutronai/cron`'s `cron-standard.ts` evaluator — the
   classic-crontab sibling of the systemd-`OnCalendar` parser in `calendar.ts`,
   with Vixie dom/dow OR semantics and spring-forward gap-skip); a coarse label
-  uses the fixed delta. `time_zone` defaults to the host zone ("9am" = 9am
-  local). A corrupt cron fires once then retires so it can't wedge the loop.
+  uses the fixed delta. A corrupt cron fires once then retires so it can't wedge
+  the loop.
+  - **Which clock "9pm" means (ISSUES #40).** A cron cadence is resolved in the
+    OWNER's zone, read per fire from `instance_metadata.timezone` via
+    `readOwnerTimezone` — the same source and the same resolve-at-invocation
+    contract the nudge engine uses, so a zone reported after boot applies on the
+    next tick without a restart. The composition passes `resolve_time_zone` and
+    validates the stored value with `isValidIanaTimezone`, because an
+    unconstructable zone would make `nextCronFire` throw and the tick would
+    retire the row as an uncomputable cadence — a bad zone must cost an hour,
+    never the reminder. There is deliberately **no host-zone fallback**: the loop
+    previously defaulted to `hostTimeZone()`, so on a UTC server every recurring
+    reminder fired at its stored hour in UTC (a `0 21 * * *` evening cadence
+    arriving mid-afternoon for an owner in the Americas) while raising no error.
+    When the owner's zone is not known yet the loop uses the explicit
+    `REMINDER_FALLBACK_TIME_ZONE` (`UTC`) and logs it — a stable, machine-
+    independent default beats one that changes if the instance moves boxes.
+    Every client reports its IANA zone on connect, so a live instance leaves the
+    unknown state on first connect.
+  - **Existing rows need no migration.** A `recurrence_spec` stores a bare
+    wall-clock expression with no zone, and it always MEANT the owner's clock —
+    only the reading was wrong, so the stored specs are already correct. The
+    derived `fire_at` column, however, still holds the next instant computed
+    under the old host-zone reading, so each already-pending recurring row fires
+    ONE more time at the old (wrong) hour; `advanceRecurrence` then recomputes in
+    the owner's zone and every later occurrence is correct. Nothing is dropped or
+    rewritten. `fire_at` is deliberately NOT backfilled at boot: it doubles as
+    the owner's manual reschedule/snooze slot (see `revertRecurrenceAdvance`), so
+    a boot-time recompute would clobber a deliberate one-off move. An owner who
+    doesn't want to wait out a long cadence can reschedule or recreate that
+    reminder to correct it immediately.
 - **Dispatcher** (`reminders/dispatcher.ts` + `message-shape.ts`) — the
   fire-time composer. The stored `message` is classified into one of three
   shapes (**literal / smart-wrap `[smart]` / pattern-template `PATTERN:`**);

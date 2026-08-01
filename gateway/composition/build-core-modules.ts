@@ -82,7 +82,7 @@ import {
   buildNudgeEngineHandler,
   registerNudgeEngineCron,
 } from '../tasks/p6/nudge-engine.ts'
-import { readOwnerTimezone } from '../storage/owner-metadata.ts'
+import { isValidIanaTimezone, readOwnerTimezone } from '../storage/owner-metadata.ts'
 import { ProactiveStateStore } from '../proactive/state-store.ts'
 import {
   buildIdleNudgeSweepHandler,
@@ -374,6 +374,24 @@ export function buildCoreModules(
       const loopOpts: ConstructorParameters<typeof ReminderTickLoop>[0] = {
         store,
         dispatcher: input.reminder_dispatcher,
+        // ISSUES #40 — resolve a cron reminder's wall clock in the OWNER's zone.
+        // Before this, the tick loop had no zone wired and defaulted to the HOST
+        // zone, so on a UTC server every recurring reminder fired at its stored
+        // hour in UTC: a `0 21 * * *` evening ritual arrived mid-afternoon for an
+        // owner in the Americas, and nothing errored — the reminder shows up, at
+        // the wrong hour, which reads as the owner's own mistake.
+        //
+        // Same source + same resolve-per-invocation contract as the nudge engine
+        // above: the stored per-instance zone, read at each fire (keyed on the
+        // ROW's owner_slug, not a composition-time slug) so a zone reported after
+        // boot applies on the next tick without a restart. `isValidIanaTimezone`
+        // guards the read because a zone that does not construct would make
+        // `nextCronFire` throw, which the tick treats as an uncomputable cadence
+        // and RETIRES the row — a bad zone must cost an hour, never the reminder.
+        resolve_time_zone: (owner_slug: string): string | null => {
+          const tz = readOwnerTimezone(input.db, owner_slug)
+          return tz !== null && isValidIanaTimezone(tz) ? tz : null
+        },
       }
       if (input.push_dispatcher !== undefined) {
         loopOpts.on_fired = input.push_dispatcher

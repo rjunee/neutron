@@ -290,7 +290,7 @@ describe('ReminderTickLoop.runOnce', () => {
       store,
       dispatcher,
       now: () => now_ms,
-      time_zone: 'UTC',
+      resolve_time_zone: () => 'UTC',
     })
     const result = await loop.runOnce()
     expect(result.fired).toBe(1)
@@ -315,7 +315,7 @@ describe('ReminderTickLoop.runOnce', () => {
       recurrence_spec: '0 9 * * *',
     })
     const dispatcher = recordingDispatcher()
-    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_ms, time_zone: 'UTC' })
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_ms, resolve_time_zone: () => 'UTC' })
     await loop.runOnce()
     expect(store.get(cron.id)?.fire_at).toBe(Date.UTC(2026, 0, 16, 9, 0, 0) / 1000)
   })
@@ -333,7 +333,7 @@ describe('ReminderTickLoop.runOnce', () => {
       recurrence_spec: 'not a cron',
     })
     const dispatcher = recordingDispatcher()
-    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_ms, time_zone: 'UTC' })
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now_ms, resolve_time_zone: () => 'UTC' })
     const result = await loop.runOnce()
     // It dispatched once…
     expect(result.fired).toBe(1)
