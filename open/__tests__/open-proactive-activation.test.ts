@@ -6,9 +6,10 @@
  * Open composer never set it. These tests pin that the composer now wires
  * `tasks.proactive` so the daily brief registers + posts through the durable
  * web sink, with the LLM seams present on a credentialed boot and absent
- * (graceful) on an LLM-less one — never behind a feature flag. The idle-nudge
- * SWEEP is deliberately not auto-enabled (no `listIdleTopics`); its gate is
- * ready but a correct production enumeration is a documented follow-up.
+ * (graceful) on an LLM-less one — never behind a feature flag. As of 2026-07-30
+ * the idle-nudge SWEEP is wired too: the composer supplies `listIdleTopics`
+ * (`buildOwnerIdleTopicEnumerator` over both of the owner's topic roots), so
+ * the sweep cron registers.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -93,12 +94,20 @@ describe('Open proactive activation wiring', () => {
     expect(typeof proactive!.composeBrief).toBe('function')
     expect(typeof proactive!.rateNudge).toBe('function')
 
-    // The idle-nudge SWEEP is deliberately NOT auto-enabled (no listIdleTopics):
-    // a correct production enumeration needs a user-turn-only activity watermark
-    // + dual web:/app: namespace (see composer comment +
-    // docs/research/AS-BUILT-archive-2026-07.md). The gate is
-    // wired and ready; the sweep cron only registers once listIdleTopics lands.
-    expect(proactive!.listIdleTopics).toBeUndefined()
+    // The idle-nudge SWEEP is ON (2026-07-30). It was withheld while its
+    // production enumeration was wrong in two ways — an agent-polluted activity
+    // watermark that let the nudge re-arm on its own post, and a single-root
+    // scan blind to whichever client the owner wasn't using. Both are fixed
+    // (`last_user_activity_at` + dual `web:`/`app:` roots, proved by
+    // gateway/proactive/__tests__/idle-nudge-no-repeat.test.ts), so the
+    // composer now supplies `listIdleTopics` and the sweep cron registers.
+    expect(typeof proactive!.listIdleTopics).toBe('function')
+    const candidates = await proactive!.listIdleTopics!()
+    // One candidate, not a fan-out: Open has ONE ranker pick per day, delivered
+    // to the same General app-ws topic as the brief.
+    expect(candidates).toEqual([
+      { topic_id: appWsTopicId(OWNER_USER_ID), project_slug: 'owner', last_activity_ms: null },
+    ])
 
     for (const cleanup of composition.realmode_cleanups ?? []) {
       try {

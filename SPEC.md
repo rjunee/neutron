@@ -341,6 +341,31 @@ decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
 
+### 2026-07-30
+
+- **The idle-nudge sweep ships ON, and "does not repeat" is the acceptance test — not a review opinion.**
+  The re-engagement nudge (the "one thing at a time" ping when a topic goes quiet) was built, unit-tested,
+  and then deliberately WITHHELD: the composer withheld `listIdleTopics`, so the cron never registered, and a
+  test asserted the absence to pin the withholding. That was the right call at the time, because switching it
+  on would have spammed the owner daily. Two defects made it unsafe, and both are now fixed. (1) **The
+  activity watermark polluted itself.** The nudge posts through a sink that persists a durable row into
+  `button_prompts` — the same table the watermark was read from as an unfiltered `MAX(created_at)` — so the
+  sweep's own bubble advanced the watermark it had stored at the last nudge, the dedupe branch read that as
+  "the user came back", and it re-armed on itself every idle cycle, forever. The watermark that gates a
+  re-engagement decision must be movable ONLY by a human: `listTopicsByUser` now exposes
+  `last_user_activity_at` (the `resolved_at` of turns a real person took, excluding the `__system__` speaker
+  sentinel) ALONGSIDE the unchanged `last_created_at` that the sidebar orders by — two questions, two columns,
+  because "most recent message" and "when did the owner last show up" are genuinely different questions.
+  (2) **Enumeration saw one namespace.** The owner speaks under both `web:<owner>` and `app:<owner>`, so a
+  single-root scan would nudge about work just handled on the other client; the store now unions N roots in
+  one query. Open emits exactly ONE candidate, never a per-topic fan-out, because the ranker writes one
+  `current_focus_pick` per instance per day.
+  **The standard this sets:** a feature withheld for a spam risk is switched on only against a test that
+  proves the risk is gone — here, several idle cycles after a nudge with no intervening USER activity
+  producing exactly one nudge, mutation-tested in both directions (it fails if the watermark fix is reverted,
+  AND real user activity still re-arms the nudge, so silence is not traded for spam). — [detail:
+  `docs/SYSTEM-OVERVIEW.md` § Proactive messaging; `gateway/proactive/__tests__/idle-nudge-no-repeat.test.ts`]
+
 ### 2026-07-27
 
 - **App diagnostics report to the OWNER'S OWN gateway, never a third party, and never carry a credential.**

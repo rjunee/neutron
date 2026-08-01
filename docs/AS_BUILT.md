@@ -2,6 +2,71 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-30 — the idle nudge is switched ON, against a test that proves it does not repeat
+
+Branch `fix/idle-nudge-user-activity-watermark`. `channels/button-store.ts`,
+`gateway/proactive/idle-topic-enumeration.ts` (new), `open/composer.ts`,
+`gateway/proactive/__tests__/idle-nudge-no-repeat.test.ts` (new).
+
+**The feature was finished and deliberately withheld.** `open/composer.ts` did not
+supply `listIdleTopics`, so `build-core-modules.ts:1086` never registered the sweep
+cron, and `open/__tests__/open-proactive-activation.test.ts` asserted that absence
+to pin the withholding on purpose. The reason was sound: switching it on would have
+nudged the owner about the same thing every hour, indefinitely. So this change is
+not "wire up a feature" — it is removing the two reasons it had to stay off.
+
+**Defect 1 — the watermark polluted itself.** The nudge posts through
+`buildButtonStoreProactiveSink`, which persists a durable row into `button_prompts`
+via `persistInertAgentTurn`. The activity watermark was `MAX(created_at)` over that
+same table with no speaker filter. `evaluateNudgeGate` only skips while activity has
+NOT advanced past the watermark stored at the last nudge — so the nudge's own row
+advanced it, the sweep read its own bubble as "the user came back", and dedupe was
+defeated on the first cycle after every post.
+
+The table records the speaker (`resolution_speaker_user_id`), and everything the
+system authors stamps a `__system__` sentinel — `persistInertAgentTurn` and
+`sweepExpired`'s synthesized `__timeout__`. So `listTopicsByUser` now returns TWO
+watermarks rather than redefining the one it had:
+
+- `last_created_at` — unchanged, every row, agent posts included. This is the
+  SIDEBAR's ordering key, and an agent bubble is a message; narrowing it would have
+  traded a nudge bug for a rail-ordering bug.
+- `last_user_activity_at` — the `resolved_at` of turns a real person took. System
+  rows contribute nothing, and neither do unresolved agent prompts (an unanswered
+  question is not the owner showing up).
+
+**Defect 2 — enumeration saw one namespace.** The owner speaks under both
+`web:<owner>` (React web) and `app:<owner>` (Expo app-ws), and they are independent:
+a conversation handled on the phone leaves no trace under `web:`. `listTopicsByUser`
+took exactly one root, so the sweep would have nudged about work just dealt with on
+the other device. It now accepts a string OR an array of roots, unioned in one
+grouped scan, with `project_id` attributed by longest-matching root.
+
+**The enumerator emits ONE candidate, not a fan-out.** `buildOwnerIdleTopicEnumerator`
+returns a single candidate — the owner's General app-ws topic, the same target as the
+morning brief — because the P6 ranker writes one `current_focus_pick` per instance per
+day. A candidate per project topic would post the identical pick into every topic. Its
+`last_activity_ms` is the max `last_user_activity_at` across both roots and all their
+project descendants. Enumeration failure yields zero candidates, never a dead cron.
+
+**The bar, and how it was met.** `idle-nudge-no-repeat.test.ts` (10/0) runs the REAL
+sweep against a real database with the real sink shape — the nudge's post genuinely
+lands in `button_prompts`, because a stub sink would hide the exact bug this file
+exists to disprove. Four idle cycles after a nudge with no intervening user activity
+produce exactly ONE post. Both mutations were applied and confirmed to fail it:
+reverting `last_user_activity_at` to an unfiltered `MAX(created_at)` breaks 3 tests
+including the headline one; collapsing enumeration to a single root breaks 4. The
+inverse direction is pinned too — a real user turn re-arms the nudge and a second one
+fires — so the fix cannot be a silence bug wearing a spam bug's clothes. The ≥7
+`rateNudge` floor was already supplied by the composer and is confirmed to take effect
+now that enumeration reaches it (6/10 stays silent, 7/7 posts, an abstain skips).
+
+`open-proactive-activation.test.ts` no longer asserts the feature is off; it asserts
+the wiring, and that the enumerator yields the single expected candidate.
+
+**Deploy note:** this is gateway/composer code. It needs a SERVER-SIDE deploy to take
+effect — there is no over-the-air path for it.
+
 ## 2026-07-31 — an authenticated caller outside the process can put a message in the owner's chat
 
 Branch `feat/system-notice-route`. `POST /api/app/system-notice`
