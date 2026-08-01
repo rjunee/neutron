@@ -57,6 +57,10 @@ import {
 import { sharedMobileStore } from './op-sqlite-store';
 import { MobileChatSession } from './mobile-session';
 import { acquireSession, releaseSession, setCacheActive } from './session-cache';
+// The AppState→warming bridge lives with the warmer (`use-transcript-warming`),
+// which the project shell mounts for every tab; this hook only owns the
+// foreground CLAIM, because the transcript is the work the claim is about.
+import { setForegroundBusy } from './transcript-warmer';
 
 export interface UseMobileChatResult {
   /** The merged render list (durable transcript + live streaming bubbles). */
@@ -211,6 +215,13 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     let disposed = false;
     let session: MobileChatSession | null = null;
 
+    // THE FOREGROUND CLAIM (background warming, 2026-07-31). From here until
+    // this scope's history settles, the visible chat owns the runway: the
+    // background warmer dequeues nothing and abandons anything already in
+    // flight. Raised here rather than in the shell because THIS is the work the
+    // owner is waiting on — the transcript — and the flag has to mean exactly
+    // that or the gate protects the wrong thing.
+    setForegroundBusy(true);
     const attachScope = `${user.id}|${projectId}`;
     if (attachScopeRef.current !== attachScope) {
       attachScopeRef.current = attachScope;
@@ -231,7 +242,15 @@ export function useMobileChat(railId: string): UseMobileChatResult {
         status: liveStatus,
         elapsed_ms,
       });
-      if (settled) setHydrated(true);
+      if (settled) {
+        setHydrated(true);
+        // …and the runway is released. Settled means the owner is looking at
+        // this scope's real content (or its honest empty state), so background
+        // work may resume. Every settle path goes through here, including the
+        // floor timer and the failed-attach path, so there is no way to reach a
+        // rendered surface with the warmer still held off.
+        setForegroundBusy(false);
+      }
     };
     // THE FLOOR. Armed on attach, cleared on detach: whatever else happens —
     // a socket that never opens, a store that stays empty, a session that was
@@ -403,6 +422,12 @@ export function useMobileChat(railId: string): UseMobileChatResult {
 
     return (): void => {
       disposed = true;
+      // A view that is gone is not waiting on anything. Without this, navigating
+      // off chat mid-hydration would leave the claim raised with nothing to
+      // lower it, and the warmer would stay parked for the life of the process.
+      // (A project switch re-raises it in the very next effect, in the same
+      // commit, so there is no window.)
+      setForegroundBusy(false);
       clearTimeout(settleDeadline);
       if (retryHandle !== null) clearTimeout(retryHandle);
       streamRef.current = emptyStreamState();
