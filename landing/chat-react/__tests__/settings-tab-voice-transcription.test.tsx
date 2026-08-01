@@ -77,6 +77,7 @@ function status(over: Record<string, unknown> = {}): Response {
     model_id: null,
     installed_bytes: 0,
     binary_downloadable: true,
+    binary_present: false,
     whisper_version: 'v1.9.1',
     default_model_id: 'base',
     models: MODELS,
@@ -240,6 +241,18 @@ describe('SettingsTab — local voice transcription (happy-dom)', () => {
       url.endsWith(ASR) ? status({ binary_downloadable: false }) : null,
     )
     expect(container.textContent).toContain('brew install whisper-cpp')
+    root.unmount()
+  })
+
+  it('...but NOT once that binary is already there — the step is done', async () => {
+    // `binary_present` (added for the mobile card, which has to disable its
+    // control when neither flag holds) also fixes a small web lie: a macOS box
+    // that already has Homebrew's whisper-cli was still being told to go and
+    // install it.
+    const { container, root } = await mount((url) =>
+      url.endsWith(ASR) ? status({ binary_downloadable: false, binary_present: true }) : null,
+    )
+    expect(container.textContent).not.toContain('brew install whisper-cpp')
     root.unmount()
   })
 })

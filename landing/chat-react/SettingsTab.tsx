@@ -762,7 +762,7 @@ export function SettingsTab({
 
             {/* macOS ships no upstream whisper-cli build; point at Homebrew
                 rather than downloading weights that cannot be run. */}
-            {!asr.binary_downloadable && !asr.installed ? (
+            {!asr.binary_downloadable && !asr.binary_present && !asr.installed ? (
               <div className="cset-note">
                 No prebuilt whisper.cpp binary is published for this platform. Install it first with
                 your package manager (on macOS: <code>brew install whisper-cpp</code>), then reload

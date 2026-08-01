@@ -2380,9 +2380,29 @@ running several instances can share ONE copy of the weights.
 **Surfaces.** HTTP `gateway/http/voice-transcription-surface.ts` —
 machine-scoped `/api/app/voice-transcription` (GET status + catalog + live job
 progress, POST install, DELETE remove). POST returns 202 immediately; the client
-(`landing/chat-react/voice-transcription-client.ts`) polls the GET for real
-byte counts, rendered as a progress bar in the Settings tab's "Local voice
-transcription" section.
+polls the GET for real byte counts, rendered as a progress bar.
+
+TWO clients drive it, because voice notes are mostly recorded on a phone and a
+switch that only exists on the desktop is, for a mobile owner, unshipped:
+
+- **web** — `landing/chat-react/voice-transcription-client.ts` →
+  `SettingsTab.tsx` § "Local voice transcription".
+- **mobile** — `app/lib/voice-transcription-client.ts` +
+  `app/lib/voice-transcription-view.ts` → `app/components/VoiceTranscriptionCard.tsx`,
+  mounted on `app/app/settings.tsx`. The wire types are re-declared rather than
+  imported (no browser package in the Metro bundle) and held in sync by
+  `app/__tests__/voice-transcription-settings.test.ts`'s mirror-parity block.
+  Mobile-only behaviour: model options are tappable rows carrying each model's
+  measured cost instead of a `<select>`; a foreground `AppState` refetch resumes
+  polling after a backgrounded phone (the job is unaffected — it lives in the
+  gateway process, so only the WATCHING pauses); a 404 is reported as "this
+  server is older than the API" rather than a generic failure.
+
+`binary_present` (alongside `binary_downloadable`) reports whether a runnable
+`whisper-cli` is already on the box. The pair is the whole truth about whether
+Install can succeed: on `false`/`false` the owner must run a package manager ON
+THE SERVER, which no client can do for them, so the mobile card replaces the
+button with that explanation rather than offering a control that would fail.
 
 **Measured cost** (8-core AMD EPYC-Milan @2.4 GHz, AVX2, no GPU, `-t 4`,
 whisper.cpp v1.9.1, 30-second note): `base` 3.8 s / 343 MB RSS; `small` 12.4 s /

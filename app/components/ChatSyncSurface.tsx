@@ -77,6 +77,7 @@ import {
   bubbleHasTail,
   type BubbleSpeaker,
 } from '../lib/chat-bubble-metrics';
+import { useComposerDock } from '../lib/composer-dock';
 import { composerBottomInset } from '../lib/keyboard-inset';
 import { useKeyboardInset } from '../lib/use-keyboard-inset';
 
@@ -515,14 +516,56 @@ export function ChatSyncSurface({
     if (grew) listRef.current?.scrollToEnd?.({ animated: true });
   }, [keyboardInset]);
 
-  return (
-    // OUTER view: measured, and deliberately NEVER padded — padding it would move
-    // the very edge whose position produced the padding.
-    <View style={styles.fill} ref={containerRef} collapsable={false}>
+  // THE COMPOSER IS DOCKED, NOT NESTED (2026-07-31). It used to be the last child
+  // of this surface, which the project shell renders inside the column to the
+  // RIGHT of the project rail — so the rail cut 72pt off the input's leading edge
+  // and it read as narrower than the transcript above it. It is published into
+  // the shell's full-width bottom band instead; `lib/composer-dock.tsx` explains
+  // why the fix is a move in the TREE rather than a negative margin.
+  //
+  // THE KEYBOARD LIFT MOVES WITH IT, and it has to. The measured container must
+  // be the one whose bottom edge IS the window's bottom edge (iOS reads
+  // `measureInWindow` against the keyboard's `screenY`; Android's
+  // `androidKeyboardInset` assumes the same thing) — and after this change that
+  // is the BAND, not this surface, which now stops at the band's top edge. So the
+  // ref rides along INTO the dock:
+  //
+  //   outer  measured, never padded — its bottom stays pinned to the window's
+  //   inner  carries `paddingBottom`, which lifts the composer clear of the IME
+  //
+  // The band grows by that padding, the `flex: 1` rail row above gives up the
+  // space, and the transcript shrinks exactly as it did when the padding was
+  // applied here. The voice recorder rides along too: it renders directly above
+  // the composer bar and must span the same width.
+  useComposerDock(
+    <View ref={containerRef} collapsable={false}>
       <View
-        style={[styles.fill, keyboardInset > 0 ? { paddingBottom: keyboardInset } : null]}
+        style={keyboardInset > 0 ? { paddingBottom: keyboardInset } : null}
         testID="chat-keyboard-inset"
       >
+        {/* Sits directly above the composer bar and only while a note is live —
+            it renders null at rest. The mic button stays mounted underneath on
+            purpose: in long-press mode the finger is still ON it, and the release
+            is what sends. */}
+        <VoiceRecorderOverlay voice={voice} />
+        <InputComposer
+          onSend={handleSend}
+          {...voiceHandlers}
+          bottom_inset={composerBottom}
+          placeholder={hasPromptWithFreeform ? 'Or type a response…' : 'Message'}
+          {...(composerHint !== undefined ? { hint: composerHint } : {})}
+          {...(initialPrefill !== undefined && initialPrefill.length > 0
+            ? { initial_draft: initialPrefill }
+            : {})}
+          onFilesPicked={handleFilesPicked}
+          pickAttachments={handleNativePickAttachments}
+        />
+      </View>
+    </View>,
+  );
+
+  return (
+    <View style={styles.fill}>
       <StatusStrip status={status} pendingCount={pendingCount} sendError={sendError} />
       {dropMultiFileHint !== null ? (
         <View style={styles.dropMultiFileHint} testID="chat-drop-multi-file-hint">
@@ -553,23 +596,6 @@ export function ChatSyncSurface({
           ListEmptyComponent={hydrated ? <EmptyState /> : <HydratingState />}
         />
       )}
-      {/* Sits directly above the composer bar and only while a note is live —
-          it renders null at rest. The mic button stays mounted underneath on
-          purpose: in long-press mode the finger is still ON it, and the release
-          is what sends. */}
-      <VoiceRecorderOverlay voice={voice} />
-      <InputComposer
-        onSend={handleSend}
-        {...voiceHandlers}
-        bottom_inset={composerBottom}
-        placeholder={hasPromptWithFreeform ? 'Or type a response…' : 'Message'}
-        {...(composerHint !== undefined ? { hint: composerHint } : {})}
-        {...(initialPrefill !== undefined && initialPrefill.length > 0
-          ? { initial_draft: initialPrefill }
-          : {})}
-        onFilesPicked={handleFilesPicked}
-        pickAttachments={handleNativePickAttachments}
-      />
       <DropZoneOverlay
         visible={dragging && uploadAffordance !== null}
         {...(uploadAffordance !== null ? { source_label: sourceLabel(uploadAffordance.source) } : {})}
@@ -587,7 +613,6 @@ export function ChatSyncSurface({
         onRetry={upload.retry}
         onDismiss={upload.dismiss}
       />
-      </View>
     </View>
   );
 }

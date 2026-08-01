@@ -50,6 +50,7 @@ function make(opts: { env?: Record<string, string | undefined>; installed?: bool
     env: opts.env ?? {},
     platform: 'linux',
     arch: 'x64',
+    which: () => null,
   })
   return { surface, installer, home }
 }
@@ -89,6 +90,48 @@ describe('voice-transcription surface', () => {
     expect(Array.isArray(body['models'])).toBe(true)
     expect((body['models'] as unknown[]).length).toBeGreaterThan(0)
     expect(body['binary_downloadable']).toBe(true)
+    // Nothing unpacked and nothing on PATH (`which: () => null` in `make`).
+    expect(body['binary_present']).toBe(false)
+  })
+
+  test('binary_present is TRUE when whisper-cli is already on PATH (Homebrew)', async () => {
+    // The pair (`binary_downloadable`, `binary_present`) is the whole truth about
+    // whether pressing Install can work. A mobile client cannot run `brew` for
+    // the owner, so it disables the control on false/false — which is only
+    // correct if this field reports a Homebrew install honestly.
+    const home = mkdtempSync(join(tmpdir(), 'neutron-asr-brew-'))
+    const installer = new WhisperInstaller({ neutron_home: home, which: () => null })
+    const surface = createVoiceTranscriptionSurface({
+      auth,
+      installer,
+      neutron_home: home,
+      env: {},
+      platform: 'darwin',
+      arch: 'arm64',
+      which: (cmd) => (cmd === 'whisper-cli' ? '/opt/homebrew/bin/whisper-cli' : null),
+    })
+    const body = (await (await surface.handler(req('GET')))!.json()) as Record<string, unknown>
+    expect(body['binary_present']).toBe(true)
+    // macOS publishes no CLI tarball — the flag pair's blocking case.
+    expect(body['binary_downloadable']).toBe(false)
+  })
+
+  test('binary_present honours the NEUTRON_WHISPER_BIN operator pin', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'neutron-asr-pin-'))
+    const pinned = join(home, 'whisper-cli')
+    writeFileSync(pinned, 'x')
+    const installer = new WhisperInstaller({ neutron_home: home, which: () => null })
+    const surface = createVoiceTranscriptionSurface({
+      auth,
+      installer,
+      neutron_home: home,
+      env: { NEUTRON_WHISPER_BIN: pinned },
+      platform: 'darwin',
+      arch: 'arm64',
+      which: () => null,
+    })
+    const body = (await (await surface.handler(req('GET')))!.json()) as Record<string, unknown>
+    expect(body['binary_present']).toBe(true)
   })
 
   test('GET with only a key set reports backend=openai', async () => {
