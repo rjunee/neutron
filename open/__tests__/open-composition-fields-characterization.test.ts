@@ -118,6 +118,11 @@ const EXPECTED_COMPOSITION_KEYS = [
   // `memory_search` (renamed from `gbrain_search`; same MemoryStore wiring).
   'memory_search',
   'message_search',
+  // The post-compose hook that hands the composed Cores registry back to the
+  // tab resolver. The resolver is built BEFORE `graph.compose()`, so this is
+  // the only moment the registry exists while the surface is still upstream of
+  // any request — without it, Core-contributed tabs (Tasks) resolve to `[]`.
+  'on_cores_ready',
   // F4 — the gateway-tick hook that pulses the supervision-watchdog heartbeat.
   'on_gateway_tick',
   'onboarding_import_running_cron',
