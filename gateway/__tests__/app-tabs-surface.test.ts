@@ -57,7 +57,13 @@ interface StartOptions {
 
 function startGateway(opts: StartOptions = {}): Harness {
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
-  const surface = createAppTabsSurface({ auth, ...opts })
+  // `cores` is a GETTER on the surface (the composition root has no registry
+  // until after `graph.compose()`), so the harness wraps the fixture state.
+  const surface = createAppTabsSurface({
+    auth,
+    cores: () => opts.cores ?? null,
+    ...(opts.installations !== undefined ? { installations: opts.installations } : {}),
+  })
   const composed = composeHttpHandler({
     appTabs: { handler: surface.handler },
     defaultHandler: () => new Response('not found', { status: 404 }),
@@ -104,7 +110,36 @@ function fakeCoresState(core: {
   slug: string
   entry_point: string
   label?: string
+  /** When set, the Core declares an `app_tab` surface (the shape EVERY bundled
+   *  UI Core actually uses) instead of a `project_tab` webview surface. */
+  app_tab?: { path?: string; label?: string; order?: number }
 }): CoresModuleState {
+  const uiComponents =
+    core.app_tab !== undefined
+      ? [
+          {
+            name: `${core.slug}-app-tab`,
+            // Deliberately a SOURCE FILE, exactly as the real manifests declare
+            // it — the resolver must read `props_schema.path`, never this.
+            entry_point: core.entry_point,
+            surface: 'app_tab',
+            props_schema: {
+              type: 'object',
+              properties: {
+                ...(core.app_tab.path !== undefined
+                  ? { path: { type: 'string', const: core.app_tab.path } }
+                  : {}),
+                ...(core.app_tab.label !== undefined
+                  ? { label: { type: 'string', const: core.app_tab.label } }
+                  : {}),
+                ...(core.app_tab.order !== undefined
+                  ? { order: { type: 'integer', const: core.app_tab.order } }
+                  : {}),
+              },
+            },
+          },
+        ]
+      : [{ name: `${core.slug}-tab`, entry_point: core.entry_point, surface: 'project_tab' }]
   const bundled = {
     slug: core.slug,
     package_name: `@neutronai/${core.slug}`,
@@ -116,9 +151,7 @@ function fakeCoresState(core: {
       capabilities: [],
       tier_support: ['regular'],
       tools: [],
-      ui_components: [
-        { name: `${core.slug}-tab`, entry_point: core.entry_point, surface: 'project_tab' },
-      ],
+      ui_components: uiComponents,
       billing_hooks: [],
       linked_sources: [],
       secrets: [],
@@ -162,7 +195,13 @@ describe('app-tabs surface — builtin-only (no Cores wired)', () => {
     expect(json.ok).toBe(true)
     expect(json.scope).toBe('project')
     expect(json.project_id).toBe(PROJECT_ID)
-    expect(json.tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'settings'])
+    expect(json.tabs.map((t) => t.key)).toEqual([
+      'chat',
+      'work_board',
+      'documents',
+      'launcher',
+      'settings',
+    ])
     expect(json.tabs.every((t) => t.source === 'builtin' && t.scope === 'project')).toBe(true)
   })
 
@@ -222,6 +261,7 @@ describe('app-tabs surface — Core union (PR-2)', () => {
         'chat',
         'work_board',
         'documents',
+        'launcher',
         'settings',
         'core:calendar_core',
       ])
@@ -312,6 +352,160 @@ describe('app-tabs surface — non-owned paths', () => {
       expect(await res.text()).toBe('not found')
     } finally {
       await harness.close()
+    }
+  })
+})
+
+/**
+ * The `app_tab` contribution path — the route the bundled UI Cores (Tasks
+ * among them) ACTUALLY declare.
+ *
+ * Before this landed, `coreTabsFromSlugs` matched only `surface ===
+ * 'project_tab'`, and every bundled UI Core declares `app_tab`. The Core tab
+ * list was therefore permanently empty and Tasks was unreachable from either
+ * client — while a test that merely asserted "cores were passed in" would have
+ * passed. These assert the payload the clients consume, so removing the wiring
+ * fails them.
+ */
+describe('app-tabs surface — app_tab Cores contribute a client-native route', () => {
+  /** Install a Core per-project and resolve the project tab set. */
+  async function tabsWithInstalledCore(
+    coreOpts: Parameters<typeof fakeCoresState>[0],
+    opts: { install?: boolean } = {},
+  ): Promise<TabDescriptor[]> {
+    const { store } = openStore()
+    if (opts.install !== false) {
+      await store.record({
+        owner_slug: PROJECT_SLUG,
+        core_slug: coreOpts.slug,
+        package_name: `@neutronai/${coreOpts.slug}`,
+        package_version: '1.0.0',
+        capabilities: [],
+        data_layout: 'tables',
+      })
+    }
+    const harness = startGateway({ cores: fakeCoresState(coreOpts), installations: store })
+    try {
+      const res = await authedFetch(harness.base, `/api/app/projects/${PROJECT_ID}/tabs`)
+      expect(res.status).toBe(200)
+      return ((await res.json()) as TabsPayload).tabs
+    } finally {
+      await harness.close()
+    }
+  }
+
+  /** The real Tasks Core manifest shape (cores/free/tasks/package.json). */
+  const TASKS_CORE = {
+    slug: 'tasks_core',
+    entry_point: './src/ui/app-tab-surface.ts',
+    app_tab: { path: '/projects/<project_id>/tasks', label: 'Tasks', order: 30 },
+  } as const
+
+  it('contributes an app_route tab from the manifest path, NOT the entry_point', async () => {
+    const tabs = await tabsWithInstalledCore({ ...TASKS_CORE })
+    const tasks = tabs.find((t) => t.key === 'core:tasks_core')
+    expect(tasks).toBeDefined()
+    expect(tasks!.source).toBe('core')
+    expect(tasks!.core_slug).toBe('tasks_core')
+    expect(tasks!.label).toBe('Tasks')
+    // The path is `<project_id>`-substituted; the source file never appears.
+    expect(tasks!.mount).toEqual({
+      kind: 'app_route',
+      target: `/projects/${PROJECT_ID}/tasks`,
+    })
+    expect(JSON.stringify(tasks)).not.toContain('app-tab-surface.ts')
+  })
+
+  it('honours the manifest order const (Tasks sorts after the builtins)', async () => {
+    const tabs = await tabsWithInstalledCore({ ...TASKS_CORE })
+    expect(tabs.map((t) => t.key)).toEqual([
+      'chat',
+      'work_board',
+      'documents',
+      'launcher',
+      'settings',
+      'core:tasks_core',
+    ])
+  })
+
+  it('does NOT contribute a tab when the Core is not installed', async () => {
+    const tabs = await tabsWithInstalledCore({ ...TASKS_CORE }, { install: false })
+    expect(tabs.some((t) => t.key === 'core:tasks_core')).toBe(false)
+    expect(tabs.every((t) => t.source === 'builtin')).toBe(true)
+  })
+
+  it('falls back to the launcher-icon label when the manifest declares no label', async () => {
+    const tabs = await tabsWithInstalledCore({
+      slug: 'tasks_core',
+      entry_point: './src/ui/app-tab-surface.ts',
+      label: 'Launcher Label',
+      app_tab: { path: '/projects/<project_id>/tasks' },
+    })
+    expect(tabs.find((t) => t.key === 'core:tasks_core')!.label).toBe('Launcher Label')
+  })
+
+  it('SKIPS an app_tab Core that declares no path (nothing a client could open)', async () => {
+    const tabs = await tabsWithInstalledCore({
+      slug: 'tasks_core',
+      entry_point: './src/ui/app-tab-surface.ts',
+      app_tab: { label: 'Tasks' },
+    })
+    expect(tabs.some((t) => t.key === 'core:tasks_core')).toBe(false)
+  })
+})
+
+describe('app-tabs surface — late-bound Cores registry', () => {
+  /**
+   * The composition root builds this surface BEFORE `graph.compose()`, so the
+   * registry is null at construction and arrives later via `on_cores_ready`.
+   * The surface must therefore read the getter PER REQUEST. A boot-time read
+   * would latch null and serve builtins forever — the original defect.
+   */
+  it('serves builtins while cores is null, then Core tabs once it resolves', async () => {
+    const { store } = openStore()
+    await store.record({
+      owner_slug: PROJECT_SLUG,
+      core_slug: 'tasks_core',
+      package_name: '@neutronai/tasks-core',
+      package_version: '1.0.0',
+      capabilities: [],
+      data_layout: 'tables',
+    })
+
+    let live: CoresModuleState | null = null
+    const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
+    const surface = createAppTabsSurface({
+      auth,
+      cores: () => live,
+      installations: store,
+    })
+    const composed = composeHttpHandler({
+      appTabs: { handler: surface.handler },
+      defaultHandler: () => new Response('not found', { status: 404 }),
+    })
+    const host = `gw-${++__gatewaySeq}.test`
+    __composedHandlers.set(host, composed)
+    const base = `http://${host}`
+    try {
+      const before = await authedFetch(base, `/api/app/projects/${PROJECT_ID}/tabs`)
+      const beforeTabs = ((await before.json()) as TabsPayload).tabs
+      expect(beforeTabs.some((t) => t.source === 'core')).toBe(false)
+
+      // `on_cores_ready` fires post-compose.
+      live = fakeCoresState({
+        slug: 'tasks_core',
+        entry_point: './src/ui/app-tab-surface.ts',
+        app_tab: { path: '/projects/<project_id>/tasks', label: 'Tasks', order: 30 },
+      })
+
+      const after = await authedFetch(base, `/api/app/projects/${PROJECT_ID}/tabs`)
+      const afterTabs = ((await after.json()) as TabsPayload).tabs
+      expect(afterTabs.find((t) => t.key === 'core:tasks_core')!.mount).toEqual({
+        kind: 'app_route',
+        target: `/projects/${PROJECT_ID}/tasks`,
+      })
+    } finally {
+      __composedHandlers.delete(host)
     }
   })
 })

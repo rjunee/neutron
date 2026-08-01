@@ -29,12 +29,31 @@ export type TabSource = 'builtin' | 'core' | 'custom'
  *     component on web).
  *   - `'webview'`: render the contributing Core's `project_tab` entry in a
  *     sandboxed webview/iframe at `mount.target`.
+ *   - `'app_route'`: the client renders its OWN native view for the client
+ *     ROUTE PATH in `mount.target` (e.g. `/projects/p1/tasks`). Contributed by
+ *     a Core's `app_tab` surface, whose manifest `props_schema` declares the
+ *     path. Unlike `'builtin'` the target is a full path rather than a bare
+ *     view key, and unlike `'webview'` there is no URL to frame — the screen
+ *     is part of the client. Mobile navigates the path with `expo-router`;
+ *     web maps the terminal path segment to a registered React view.
+ *
+ * ── The renderability rule (cross-client contract) ──────────────────────
+ * A client MUST DROP any descriptor it cannot actually render — an unknown
+ * `'builtin'` target or an `'app_route'` path it has no screen for. The
+ * engine resolves ONE tab set for every client, but the clients do not
+ * implement the same screens (web has no Apps launcher; a Core may ship a
+ * screen only one client has). Rendering a tab that resolves to an empty pane
+ * is worse than omitting it, so "can I render this?" is the client's call and
+ * the engine does not try to guess per-client capability.
  */
-export type TabMountKind = 'builtin' | 'webview'
+export type TabMountKind = 'builtin' | 'webview' | 'app_route'
 
 export interface TabMount {
   kind: TabMountKind
-  /** builtin → route/view key; webview → resolved URL. */
+  /**
+   * builtin → route/view key; webview → resolved URL; app_route → client route
+   * path (`<project_id>` already substituted on the project-scope endpoint).
+   */
   target: string
 }
 

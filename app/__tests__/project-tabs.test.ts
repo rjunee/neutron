@@ -204,3 +204,74 @@ describe('lastTabValueForLeaf', () => {
     expect(lastTabValueForLeaf('proj_1')).toBeNull();
   });
 });
+
+/**
+ * `app_route` — a Core-contributed screen that lives IN this client (Tasks).
+ * The descriptor carries a client ROUTE PATH, not a URL and not a bare view
+ * key, so it must be navigated verbatim rather than re-prefixed.
+ */
+describe('project-tabs — app_route (Core-contributed native screen)', () => {
+  const tasksTab: TabDescriptor = {
+    key: 'core:tasks_core',
+    label: 'Tasks',
+    scope: 'project',
+    source: 'core',
+    core_slug: 'tasks_core',
+    order: 30,
+    mount: { kind: 'app_route', target: '/projects/acme/tasks' },
+  };
+
+  it('navigates the engine-substituted path verbatim (no double prefix)', () => {
+    expect(resolveTabRoute(tasksTab, 'acme')).toBe('/projects/acme/tasks');
+  });
+
+  it('keeps the tab — this client ships the tasks screen', () => {
+    const resolved = descriptorsToResolvedTabs([tasksTab], 'acme');
+    expect(resolved).toEqual([
+      { key: 'core:tasks_core', label: 'Tasks', route: '/projects/acme/tasks' },
+    ]);
+  });
+
+  it('highlights the Tasks tab when the route is active', () => {
+    const resolved = descriptorsToResolvedTabs([tasksTab], 'acme');
+    expect(activeTabKeyFromSegments(['projects', 'acme', 'tasks'], resolved)).toBe(
+      'core:tasks_core',
+    );
+  });
+
+  it('DROPS an app_route naming a screen this client does not ship', () => {
+    const alien: TabDescriptor = {
+      ...tasksTab,
+      key: 'core:ledger_core',
+      core_slug: 'ledger_core',
+      mount: { kind: 'app_route', target: '/projects/acme/ledger' },
+    };
+    expect(descriptorsToResolvedTabs([alien], 'acme')).toEqual([]);
+  });
+
+  it('DROPS an unknown builtin target rather than routing to a dead screen', () => {
+    const alien: TabDescriptor = {
+      key: 'ledger',
+      label: 'Ledger',
+      scope: 'project',
+      source: 'builtin',
+      order: 20,
+      mount: { kind: 'builtin', target: 'ledger' },
+    };
+    expect(descriptorsToResolvedTabs([alien], 'acme')).toEqual([]);
+  });
+
+  it('KEEPS the Apps launcher — the engine-resolved set no longer drops it', () => {
+    const launcher: TabDescriptor = {
+      key: 'launcher',
+      label: 'Apps',
+      scope: 'project',
+      source: 'builtin',
+      order: 12,
+      mount: { kind: 'builtin', target: 'launcher' },
+    };
+    expect(descriptorsToResolvedTabs([launcher], 'acme')).toEqual([
+      { key: 'launcher', label: 'Apps', route: '/projects/acme/launcher' },
+    ]);
+  });
+})

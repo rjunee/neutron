@@ -44,12 +44,20 @@ import { jsonResponse, resolveBearer } from './surface-kit.ts'
 export interface AppTabsSurfaceOptions {
   auth: AppWsAuthResolver
   /**
-   * Composed Cores state (bundled registry + resolved launcher labels). When
-   * supplied alongside `installations`, the surface folds installed Cores'
-   * `project_tab` surfaces into the resolved tab set. Omit for a builtin-only
-   * surface.
+   * LATE-BOUND composed Cores state (bundled registry + resolved launcher
+   * labels). When it resolves non-null alongside `installations`, the surface
+   * folds installed Cores' tab surfaces into the resolved set. Omit (or
+   * resolve null) for a builtin-only surface.
+   *
+   * A GETTER, not the state itself, and that is load-bearing: the composition
+   * root builds this surface long BEFORE `graph.compose()` runs, so the Cores
+   * state does not exist yet at construction time. Passing the value directly
+   * is what stranded Core tabs at `[]` forever — the composer had nothing to
+   * pass, so it passed nothing. The composer now seeds a ref from the
+   * `on_cores_ready` post-compose hook and hands the reader in here; the first
+   * `/tabs` request after boot sees the live registry.
    */
-  cores?: CoresModuleState
+  cores?: () => CoresModuleState | null
   /**
    * Core installations store — the source of which Cores are installed
    * per-project (`core_installations`) and globally
@@ -74,7 +82,7 @@ const GLOBAL_TABS_PATH = '/api/app/tabs'
 const PROJECT_TABS_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/tabs$/
 
 export function createAppTabsSurface(opts: AppTabsSurfaceOptions): AppTabsSurface {
-  const { auth, cores, installations } = opts
+  const { auth, cores: readCores, installations } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
@@ -100,9 +108,14 @@ export function createAppTabsSurface(opts: AppTabsSurfaceOptions): AppTabsSurfac
         return jsonResponse(401, { ok: false, code: resolved.code, message: resolved.message })
       }
 
+      // Resolved PER REQUEST, not once at construction: the Cores state lands
+      // asynchronously after `graph.compose()`, so a boot-time read would
+      // permanently latch the pre-compose `null`.
+      const cores = readCores?.() ?? null
+
       if (isGlobal) {
         const coreTabs =
-          cores !== undefined && installations !== undefined
+          cores !== null && installations !== undefined
             ? await gatherGlobalCoreTabs(cores, installations)
             : []
         const tabs = resolveGlobalTabs(coreTabs)
@@ -120,7 +133,7 @@ export function createAppTabsSurface(opts: AppTabsSurfaceOptions): AppTabsSurfac
         })
       }
       const coreTabs =
-        cores !== undefined && installations !== undefined
+        cores !== null && installations !== undefined
           ? await gatherProjectCoreTabs(cores, installations, resolved.project_slug, project_id)
           : []
       const tabs = resolveProjectTabs(coreTabs)
@@ -158,7 +171,50 @@ async function gatherGlobalCoreTabs(
   return coreTabsFromSlugs(cores, installs.map((r) => r.core_slug), null)
 }
 
-/** Map installed Core slugs → tab contributions via the registry's manifests. */
+/**
+ * Read a `const` string out of a ui_component's `props_schema`. The manifest
+ * schema types `props_schema` as a free-form JSON-Schema document, so the walk
+ * is defensive at every hop — a Core with a malformed or absent schema yields
+ * `null` and simply contributes no tab rather than crashing the resolver for
+ * every OTHER Core in the list.
+ */
+function propConst(schema: unknown, prop: string): string | null {
+  if (typeof schema !== 'object' || schema === null) return null
+  const props = (schema as { properties?: unknown }).properties
+  if (typeof props !== 'object' || props === null) return null
+  const entry = (props as Record<string, unknown>)[prop]
+  if (typeof entry !== 'object' || entry === null) return null
+  const value = (entry as { const?: unknown }).const
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** Same walk, for the numeric `order` const. */
+function propConstNumber(schema: unknown, prop: string): number | null {
+  if (typeof schema !== 'object' || schema === null) return null
+  const props = (schema as { properties?: unknown }).properties
+  if (typeof props !== 'object' || props === null) return null
+  const entry = (props as Record<string, unknown>)[prop]
+  if (typeof entry !== 'object' || entry === null) return null
+  const value = (entry as { const?: unknown }).const
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * Map installed Core slugs → tab contributions via the registry's manifests.
+ *
+ * TWO surfaces contribute, and they differ in what `target` means:
+ *
+ *   - `project_tab` → a webview. `entry_point` is the URL to frame.
+ *   - `app_tab`     → a client-native screen. The route path comes from
+ *     `props_schema.properties.path.const`, NOT from `entry_point` — the
+ *     entry_point of an `app_tab` is a SOURCE FILE inside the Core package
+ *     (`./src/ui/app-tab-surface.ts`), which is meaningless to a client. Every
+ *     bundled UI Core declares `app_tab`, so reading `entry_point` here is
+ *     what would have shipped a tab pointing at a TypeScript path.
+ *
+ * `label`/`order` prefer the manifest's own consts (the Core's authoring
+ * intent) and fall back to the launcher-icon label, then the slug.
+ */
 function coreTabsFromSlugs(
   cores: CoresModuleState,
   slugs: readonly string[],
@@ -168,14 +224,35 @@ function coreTabsFromSlugs(
   for (const slug of slugs) {
     const core = cores.registry.get(slug)
     if (core === null) continue
-    const tabSurface = core.manifest.ui_components.find((c) => c.surface === 'project_tab')
-    if (tabSurface === undefined) continue
-    const label = cores.launcherIcons.get(slug)?.label ?? slug
-    const target =
-      project_id === null
-        ? tabSurface.entry_point
-        : tabSurface.entry_point.replaceAll('<project_id>', project_id)
-    out.push({ core_slug: slug, label, target })
+    const iconLabel = cores.launcherIcons.get(slug)?.label
+    const substitute = (raw: string): string =>
+      project_id === null ? raw : raw.replaceAll('<project_id>', project_id)
+
+    const webviewSurface = core.manifest.ui_components.find((c) => c.surface === 'project_tab')
+    if (webviewSurface !== undefined) {
+      out.push({
+        core_slug: slug,
+        label: iconLabel ?? slug,
+        target: substitute(webviewSurface.entry_point),
+      })
+      continue
+    }
+
+    const appTabSurface = core.manifest.ui_components.find((c) => c.surface === 'app_tab')
+    if (appTabSurface === undefined) continue
+    const path = propConst(appTabSurface.props_schema, 'path')
+    // No declared path ⇒ nothing a client could navigate to. Skip rather than
+    // guessing a route: a fabricated path renders an error screen, and the
+    // Core's launcher tile remains a working way in.
+    if (path === null) continue
+    const order = propConstNumber(appTabSurface.props_schema, 'order')
+    out.push({
+      core_slug: slug,
+      label: propConst(appTabSurface.props_schema, 'label') ?? iconLabel ?? slug,
+      target: substitute(path),
+      mount_kind: 'app_route',
+      ...(order !== null ? { order } : {}),
+    })
   }
   return out
 }

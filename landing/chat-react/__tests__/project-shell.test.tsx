@@ -1180,3 +1180,174 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     container.remove()
   })
 })
+
+/**
+ * The end of the chain: an `app_route` Tasks descriptor from the engine must
+ * become a REAL, TAPPABLE tab that renders task data — and the Apps launcher,
+ * which has no web screen, must be dropped rather than seated as an empty pane.
+ *
+ * This is the leg a "the prop is passed" test would miss: the surface can
+ * resolve Tasks correctly and the shell still fail to mount a view for it.
+ */
+describe('ProjectShell — Core-contributed app_route tabs', () => {
+  const TABS_WITH_TASKS = [
+    RESOLVED_TABS[0],
+    {
+      key: 'launcher',
+      label: 'Apps',
+      scope: 'project',
+      source: 'builtin',
+      order: 12,
+      mount: { kind: 'builtin', target: 'launcher' },
+    },
+    {
+      key: 'core:tasks_core',
+      label: 'Tasks',
+      scope: 'project',
+      source: 'core',
+      core_slug: 'tasks_core',
+      order: 30,
+      mount: { kind: 'app_route', target: `/projects/${PROJECT}/tasks` },
+    },
+  ]
+
+  async function mountShell() {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
+    const { InMemoryStore, WebChatSession } = await import('@neutronai/chat-core')
+    const { NeutronChatController } = await import('../controller.ts')
+    const { useNeutronChat } = await import('../useNeutronChat.ts')
+    const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const React = await import('react')
+
+    const makeSocket = () =>
+      ({
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send: () => {},
+        close: () => {},
+      }) as never
+
+    const fetchImpl = async (url: string): Promise<Response> => {
+      const j = (b: unknown): Response =>
+        new Response(JSON.stringify(b), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      if (url.endsWith(`/api/app/projects/${PROJECT}/tabs`)) {
+        return j({ ok: true, scope: 'project', project_id: PROJECT, tabs: TABS_WITH_TASKS })
+      }
+      if (url.includes(`/api/app/projects/${PROJECT}/tasks?`)) {
+        return j({
+          ok: true,
+          project_id: PROJECT,
+          status: 'open',
+          order: 'focus_score',
+          tasks: [
+            {
+              id: 't1',
+              project_id: PROJECT,
+              title: 'Reachable at last',
+              description: null,
+              status: 'open',
+              priority: null,
+              due_date: null,
+              owner_persona: null,
+              source: 'app',
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              completed_at: null,
+            },
+          ],
+        })
+      }
+      return new Response('not found', { status: 404 })
+    }
+
+    const controller = new NeutronChatController({
+      projectId: PROJECT,
+      createSession: (sinks) =>
+        new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: TOPIC,
+          store: new InMemoryStore(),
+          createSocket: makeSocket,
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        }),
+    })
+
+    const config = {
+      wsUrl: 'wss://t/ws/app/chat',
+      topicId: TOPIC,
+      userId: 'sam',
+      projectId: PROJECT,
+      projects: [{ id: PROJECT, label: 'Acme' }],
+      origin: 'https://sam.neutron.test',
+      deviceId: 'dev-test',
+      token: 'dev:sam',
+    }
+
+    function Harness(): React.JSX.Element {
+      const draft = useAttachmentDraft({ token: config.token })
+      const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
+      return (
+        <AssistantRuntimeProvider runtime={runtime}>
+          <ProjectShell
+            vm={vm}
+            controller={controller}
+            config={config}
+            draft={draft}
+            fetchImpl={fetchImpl}
+          />
+        </AssistantRuntimeProvider>
+      )
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(<Harness />)
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+    return { container, root: root as unknown as { unmount: () => void }, act }
+  }
+
+  it('seats a Tasks tab and DROPS the web-less Apps launcher', async () => {
+    const { container, root } = await mountShell()
+    try {
+      const labels = Array.from(container.querySelectorAll('button')).map((b) => b.textContent)
+      expect(labels).toContain('Tasks')
+      expect(labels).not.toContain('Apps')
+    } finally {
+      root.unmount()
+    }
+  })
+
+  it('renders real task data when the Tasks tab is opened', async () => {
+    const { container, root, act } = await mountShell()
+    try {
+      const tasksBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent === 'Tasks',
+      ) as HTMLButtonElement
+      expect(tasksBtn).toBeDefined()
+      await act(async () => {
+        tasksBtn.click()
+        await tick()
+        await tick()
+      })
+      expect(container.textContent ?? '').toContain('Reachable at last')
+    } finally {
+      root.unmount()
+    }
+  })
+})
