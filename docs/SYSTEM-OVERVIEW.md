@@ -1009,20 +1009,64 @@ The project (and global) tab set is resolved **engine-side** so both clients
 (mobile RN + web React) consume one source of truth instead of hardcoding
 their tabs. `tabs/registry.ts` exposes a `TabDescriptor` (`key`, `label`,
 `scope: 'project'|'global'`, `source: 'builtin'|'core'`, `order`,
-`mount: { kind: 'builtin'|'webview', target }`) and a
+`mount: { kind: 'builtin'|'webview'|'app_route', target }`) and a
 `resolveTabs(scope, cores)` resolver. **BUILTIN descriptors** — Chat /
-**Work** (`work_board`, label "Work") / Documents per-project, Admin global — are
-unioned with **CORE-contributed tabs** (PR-2): the `project_tab` surfaces of installed
-Cores, shaped as `source:'core'`, `key:'core:<slug>'`,
-`mount:{kind:'webview', target}` and sorted AFTER the builtins. The registry
+**Work** (`work_board`, label "Work") / Documents / **Apps** (`launcher`) /
+Settings per-project (orders 0/5/10/12/15), Admin global — are
+unioned with **CORE-contributed tabs** (PR-2), shaped as `source:'core'`,
+`key:'core:<slug>'`. The registry
 stays **pure** (no DB / no package loading) — the HTTP layer resolves which
 Cores are installed and passes a `CoreTabContribution[]` in.
 
 > **Tasks is NOT a builtin tab** (Ryan directive, 2026-06-30). The `tasks`
-> `BUILTIN_TABS` entry + the engine web tasks-tab UI (`TasksTab.tsx`,
-> `tasks-client.ts`) were removed; Tasks returns in WAVE 3 as a **Core-contributed
-> webview tab** through the same `CoreTabContribution` union. Per-project builtins
-> are now **Chat / Plan / Documents** (orders 0/5/10).
+> `BUILTIN_TABS` entry was removed; Tasks returns as a **Core-contributed
+> tab** through the `CoreTabContribution` union. Do not re-add a hardcoded
+> tasks builtin.
+
+### The two Core contribution surfaces — `project_tab` vs `app_tab`
+
+A Core's manifest `ui_components[]` can contribute a tab two ways, and they mean
+different things:
+
+| manifest `surface` | descriptor `mount.kind` | `target` is | rendered as |
+|---|---|---|---|
+| `project_tab` | `webview` | the `entry_point` URL | sandboxed iframe / system browser |
+| `app_tab` | `app_route` | `props_schema.properties.path.const` | the client's OWN native screen |
+
+**`app_tab` reads the manifest's `props_schema`, never `entry_point`** — an
+`app_tab`'s entry_point is a SOURCE FILE inside the Core package
+(`./src/ui/app-tab-surface.ts`), meaningless to a client. `label` and `order`
+come from the same `props_schema` consts (falling back to the launcher-icon
+label, then the slug). A declared `order` competes directly with the builtins,
+which is how Tasks (order 30) sorts after Settings (15) instead of landing in an
+arbitrary install slot; a Core with no `order` falls back to
+`CORE_TAB_ORDER_BASE + index`.
+
+This distinction is why "pass `cores` into the surface" was NOT the fix for
+Tasks being unreachable: **every bundled UI Core declares `app_tab`**, so a
+resolver matching only `project_tab` returned `[]` no matter what was passed in.
+
+### The renderability rule (cross-client contract)
+
+The engine resolves ONE tab set for every client, but the clients do not
+implement the same screens — web has no Apps launcher, and a Core may ship a
+screen only one client has. **Each client MUST DROP any descriptor it cannot
+render** (an unknown `builtin` target, or an `app_route` path it has no screen
+for) rather than seating a tab that opens onto an empty pane. Capability is the
+client's call; the engine does not guess.
+
+- Mobile: `canRenderTab` + `RENDERABLE_ROUTE_LEAVES` in `app/lib/project-tabs.ts`.
+- Web: `canRenderTab` + `APP_ROUTE_VIEWS`/`BUILTIN_VIEWS` in `landing/chat-react/tabs-client.ts`.
+
+### Late-bound Cores registry (the seam that makes Core tabs resolvable)
+
+`open/composer.ts` builds the tabs surface long BEFORE `graph.compose()` runs, so
+the Cores registry does not exist yet at construction time. The surface therefore
+takes `cores` as a **getter** (`() => CoresModuleState | null`) read PER REQUEST,
+and the composer seeds it from the post-compose `on_cores_ready` hook that
+`wireCoresSurfaces` fires. Reading the value at construction would latch the
+pre-compose `null` forever — which is precisely the defect that left Core tabs
+permanently empty in Open.
 
 Two read-only HTTP routes (Bearer-auth, shared `AppWsAuthResolver` contract):
 - `GET /api/app/projects/<project_id>/tabs` → builtins ∪ per-project Cores
@@ -1032,8 +1076,9 @@ Two read-only HTTP routes (Bearer-auth, shared `AppWsAuthResolver` contract):
 
 **Always on — no feature flag** (SPEC Decisions Log, 2026-06-23). The surface
 disclaims its routes (returns `null` → 404) only for non-owned paths. Surface
-factory: `createAppTabsSurface({ auth, cores?, installations? })` (Core union
-is opt-in — omit `cores`/`installations` for a builtin-only surface), plumbed
+factory: `createAppTabsSurface({ auth, cores?, installations? })` where `cores`
+is a `() => CoresModuleState | null` getter (Core union is opt-in — omit
+`cores`/`installations`, or resolve null, for a builtin-only surface), plumbed
 via `app_tabs_surface` in `AppSurfacesCompositionInput` → `composition.ts` →
 `compose.ts` (`appTabs`, mounted ahead of `appProjects`).
 
@@ -1044,17 +1089,22 @@ on mount it fetches `GET /api/app/projects/<id>/tabs` via `app/lib/tabs-client.t
 and feeds the resolved descriptors into `ProjectTabBar`'s `tabs` prop — no
 hardcoded set. `app/lib/project-tabs.ts` (RN-free, unit-tested) maps each
 descriptor to a route + active-highlight key: **builtin** descriptors render the
-native expo-router leaf (`mount.target` = `chat`/`workboard`/`docs`); **Core**
-(`mount.kind:'webview'`) descriptors route to the generic
-`app/app/projects/[id]/cores/[slug].tsx` webview (inline `<iframe>` on web,
-system browser via `expo-web-browser` on native — no `react-native-webview`
-dep). The legacy `PROJECT_TABS` const survives ONLY as the pre-fetch loading
-default (and the on-error fallback) — not a flag-gated path. Consequence: the
-registry's project builtins are Chat/Plan/Documents, so the old **Apps
-(launcher)** + **Reminders** + **Tasks** tabs are no longer top-level mobile tabs
-once the fetch resolves (their routes remain, reachable by deep-link); re-adding a
-builtin is a `BUILTIN_TABS` change in `tabs/registry.ts`. The web shell
-consumption is PR-4 (reworked 2026-06-30 — see below).
+native expo-router leaf (`mount.target` = `chat`/`workboard`/`docs`/`launcher`);
+**`app_route`** descriptors navigate `mount.target` VERBATIM (the engine already
+substituted `<project_id>`, so it is a complete expo-router path — no
+re-prefixing); **Core webview** (`mount.kind:'webview'`) descriptors route to the
+generic `app/app/projects/[id]/cores/[slug].tsx` webview (inline `<iframe>` on
+web, system browser via `expo-web-browser` on native — no `react-native-webview`
+dep). Descriptors this client cannot render are dropped (renderability rule
+above). The legacy `PROJECT_TABS` const survives ONLY as the pre-fetch loading
+default (and the on-error fallback) — not a flag-gated path.
+
+**Apps (launcher) is a builtin again (order 12).** It had been dropped from the
+registry while surviving in `PROJECT_TABS`, so the tab appeared for one frame and
+then VANISHED the moment `/tabs` resolved — taking with it the only live route to
+the Core screens it fronts. Reminders/Tasks routes remain reachable by deep-link
+and, for Tasks, as a Core-contributed `app_route` tab. The web shell consumption
+is PR-4 (reworked 2026-06-30 — see below).
 
 ### Mobile ENTRY: the app opens in chat, and the projects-list screen is deleted (2026-07-29)
 
@@ -1270,6 +1320,29 @@ counts are real commits, the device-side number is unverified. The three
 yield guarantees are mutation-tested in the same file.
 
 ### Web client consumption (WAVE 3 PR-4)
+
+**Tab body dispatch** (`landing/chat-react/ProjectShell.tsx` `TabContent`): a
+`webview` mount renders a scheme-validated sandboxed `<iframe>`; an `app_route`
+mount selects a React view by the TERMINAL SEGMENT of the path (`/projects/<id>/
+tasks` → `tasks` → `TasksTab`, wrapped in a `PaneErrorBoundary`); everything else
+dispatches on `mount.target` (`docs`/`workboard`/`admin`/`settings`). The fetched
+descriptor list is filtered through `canRenderTab` BEFORE it reaches the bar, so
+the web never seats the Apps launcher (no web screen) and never shows a
+placeholder for a Core screen it lacks.
+
+**`TasksTab.tsx` + `tasks-client.ts` (web Tasks).** The browser twin of the
+mobile `app/app/projects/[id]/tasks.tsx`, over the SAME
+`createAppTasksSurface` endpoints (`GET/POST /api/app/projects/<id>/tasks`,
+`PATCH|DELETE .../tasks/<task_id>`, `POST .../complete|/cancel`) and therefore
+the same canonical `TaskStore` rows the agent's `tasks_core` tools write — one
+data path, no web-only store. Filter chips (Open/Done/All), inline add,
+complete/reopen, delete. Server-authoritative like mobile: every mutation awaits
+its response then re-lists (`order=focus_score`), so both clients rank
+identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
+
+> These two files were deleted in the 2026-06-30 "Tasks is not a builtin" change
+> and are restored here as the CORE-CONTRIBUTED tab's web view — the tab is still
+> not a builtin; only the screen behind the Core's `app_route` is back.
 
 > **P0b (2026-06-26) — React is the ONLY web chat client.** The vanilla
 > `landing/chat.ts`/`chat.html` surface and the `NEUTRON_WEB_CHAT_CLIENT` /
@@ -2305,17 +2378,27 @@ platform's *separate* vault-deeplink convention (the `vault.example.test`
 redirector for the owner's own notes) — neither is part of a project's document
 flow.
 
-### Tasks — backend live, web builtin tab REMOVED
+### Tasks — a Core-contributed `app_route` tab on BOTH clients
 
 Tasks is **not** a builtin tab (Ryan directive, 2026-06-30 — see the tab-registry
-note above): the web builtin Tasks tab and its client (`TasksTab.tsx` +
-`chat-react/tasks-client.ts` + their tests) were removed, with no builtin
-replacement. The Tasks Core ships its OWN UI surfaces instead — a `launcher_icon`
-plus an `app_tab` at `/projects/<project_id>/tasks` (`cores/free/tasks/package.json`
-`ui_components`); a Core-contributed tab is the forward path, but note the
-`CoreTabContribution` union the registry gathers consumes a `project_tab`
-ui_component (`tabs/registry.ts`), which this Core does NOT yet declare — so no
-Core webview tab is wired to it today.
+note above) and must not be re-added as one. It reaches both clients as a
+**Core contribution**: the Tasks Core declares a `launcher_icon` plus an
+`app_tab` whose `props_schema` fixes `path: '/projects/<project_id>/tasks'`,
+`label: 'Tasks'`, `order: 30` (`cores/free/tasks/package.json` `ui_components`).
+The resolver reads those consts and emits
+`mount:{kind:'app_route', target:'/projects/<id>/tasks'}`, which mobile navigates
+via expo-router and web renders as `TasksTab`.
+
+The tab appears **only when the Tasks Core is installed** in the scope
+(`core_installations`), and disappears when it isn't — install state is the gate,
+not a hardcoded entry.
+
+> **History (closed 2026-08-01).** For a period this contributed nothing: the
+> resolver matched only `project_tab` surfaces while every bundled UI Core
+> declares `app_tab`, AND `open/composer.ts` passed the resolver no
+> `cores`/`installations` at all. Tasks was storable and agent-readable but
+> unreachable from any tab on either client; the launcher tile was the only way
+> in, and the engine-resolved tab set had dropped the launcher too.
 
 The tasks *backend* stays live and agent-writable. The prioritized ordering is
 LLM-primary (`tasks/prioritize-llm.ts`): ranked rows first by `llm_rank`, fresh
@@ -4115,7 +4198,8 @@ the existing per-platform durable store without forking the engine.
 
 `gateway/http/deliver.ts` is the ONE out-of-turn delivery seam: everything that
 posts to the owner OUTSIDE a request/response turn — fired reminders, the morning
-brief, idle nudges, ritual-approval prompts, the substrate notice bubbles — goes
+brief, idle nudges, ritual-approval prompts, the substrate notice bubbles, Skill
+Forge proposals — goes
 through `deliver(topic_id, envelope)`, which owns durable-row-first persistence
 and a best-effort live push routed by topic grammar. Every one of those producers
 is IN-PROCESS. Until this surface existed, **nothing could reach that seam from
@@ -6227,9 +6311,29 @@ flag; built unconditionally so the manage surface works even on an LLM-less box.
   (`skill-forge/command.ts`, a `ChatCommandFilter` chained into `buildLandingStack`
   alongside the Cores filters). Both call the SAME `SkillForgeBackend` — the agent can
   list / approve / decline exactly what the owner can.
-- **Notifier.** Open is WS-native + single-owner, so the proposal `ProposalNotifier`
-  logs (mirroring agent-dispatch's report sink); the persisted `skill_forge_proposals`
-  row is the source of truth, surfaced on demand via `/skills list`.
+- **Notifier — the proposal is DELIVERED into the owner's chat.** The composer's
+  `ProposalNotifier` posts the proposal message through `deliver(topic, envelope)`
+  (`gateway/http/deliver.ts`, the ONE out-of-turn delivery seam) on the owner's bare
+  `app:<owner>` topic, at **`durability: 'inert'`** — an already-resolved agent history
+  turn (speaker `__system__`), the same shape the `/api/app/system-notice` route and the
+  proactive brief use. `'inert'` and not the transient `'none'` pill because a proposal
+  is produced when a Trident run *finishes*, exactly when nobody is watching; a live-only
+  bubble would be gone by the time he opened the app. It is a **system notice, not the
+  owner speaking** — it does not route through chat/send and spends no model turn.
+  Delivery is **additive**: the row is persisted before notify and `forge.ts` swallows a
+  notify throw (`proposal_persisted_but_notify_failed`), so the `skill_forge_proposals`
+  row stays the source of truth and `/skills list` is unchanged. **One message per
+  proposal, and a run yields at most one** — `onWorkflowCompleted` creates a single
+  proposal and returns early on a duplicate `workflowSignature`, so a repeated workflow
+  re-notifies zero times. The message quotes the real decision surface
+  (`/skills approve|decline <id>`) with the proposal's own id.
+  - *Superseded:* this notifier was previously a `log.info`-only sink, justified by
+    "Open is WS-native + single-owner, no Telegram channel". That premise expired when
+    F5 landed `deliver` — Open **does** have an out-of-turn channel. The log-only sink
+    meant a proposal was drafted, persisted, and never announced: the owner could only
+    find one by typing `/skills`, i.e. by already suspecting it existed. Gate:
+    `open/__tests__/open-skill-forge-wiring.test.ts` asserts the durable turn lands in
+    the owner's topic (mutation-verified — deleting the `deliver` call fails it).
 
 ## Testing & CI — the bounded-memory partitioned runner (`scripts/run-tests.sh`)
 

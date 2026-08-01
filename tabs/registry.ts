@@ -91,11 +91,34 @@ const BUILTIN_TABS: readonly TabDescriptor[] = Object.freeze([
     mount: { kind: 'builtin', target: 'docs' },
   },
   {
+    // The Apps launcher — the grid of installed Cores' launcher tiles, backed by
+    // `GET /api/app/projects/<id>/launcher`. It is engine-native (it browses the
+    // Cores registry; it is NOT any one Core's tab), so it belongs in the
+    // builtin set rather than arriving as a contribution.
+    //
+    // It is here because the launcher was the ONLY live route to several Core
+    // screens (Tasks among them) and the engine-resolved set silently dropped
+    // it: `app/lib/project-tabs.ts` kept 'Apps' only in the PRE-FETCH loading
+    // default, so the tab vanished the moment `/tabs` resolved and the screen
+    // it fronted became unreachable. Restoring it as a real descriptor makes
+    // the launcher survive the fetch instead of depending on a race.
+    //
+    // Web has no launcher screen and DROPS this descriptor under the
+    // renderability rule (see `TabMountKind`) rather than rendering an empty
+    // pane. Order 12 slots it between Documents (10) and Settings (15).
+    key: 'launcher',
+    label: 'Apps',
+    scope: 'project',
+    source: 'builtin',
+    order: 12,
+    mount: { kind: 'builtin', target: 'launcher' },
+  },
+  {
     // Per-project Settings — hosts the credentials UI (per-project / global
     // service tokens), project rename + emoji, and the collaborators
     // (display-only, M2-gated) scaffold. Order 15 slots it after Documents (10)
     // and before any Core-contributed tab (base 100), so it's the last builtin
-    // in the per-project set: Chat / Work / Documents / Settings.
+    // in the per-project set: Chat / Work / Documents / Apps / Settings.
     key: 'settings',
     label: 'Settings',
     scope: 'project',
@@ -131,8 +154,26 @@ export interface CoreTabContribution {
   core_slug: string
   /** Tab label; the HTTP layer falls back to the slug when unnamed. */
   label: string
-  /** Webview URL/entry the client renders for this Core's tab. */
+  /** Webview URL/entry, or (for `app_route`) the client route path. */
   target: string
+  /**
+   * How the client mounts this contribution. Defaults to `'webview'` — the
+   * `project_tab` surface's original behaviour, so existing callers are
+   * unaffected.
+   *
+   * `'app_route'` comes from a Core's `app_tab` surface: the screen already
+   * lives IN the client, so there is nothing to frame and `target` is a route
+   * path instead of a URL.
+   */
+  mount_kind?: 'webview' | 'app_route'
+  /**
+   * Explicit sort key from the Core's manifest (`props_schema.order.const`).
+   * When absent the resolver falls back to `CORE_TAB_ORDER_BASE + index`, i.e.
+   * install order after every builtin. A Core that declares an order competes
+   * with the builtins directly, which is how Tasks (order 30) sorts itself
+   * after Settings (15) rather than landing in an arbitrary install slot.
+   */
+  order?: number
 }
 
 /**
@@ -154,8 +195,8 @@ function coreDescriptor(
     scope,
     source: 'core',
     core_slug: c.core_slug,
-    order: CORE_TAB_ORDER_BASE + index,
-    mount: { kind: 'webview', target: c.target },
+    order: c.order ?? CORE_TAB_ORDER_BASE + index,
+    mount: { kind: c.mount_kind ?? 'webview', target: c.target },
   }
 }
 

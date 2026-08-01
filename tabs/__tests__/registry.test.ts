@@ -22,8 +22,8 @@ describe('tab registry — project scope', () => {
     const tabs = resolveProjectTabs()
     // Tasks is NOT a builtin (Ryan directive — Core-contributed, WAVE 3); the
     // work_board tab's user-facing label reads "Work".
-    expect(tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'settings'])
-    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Work', 'Documents', 'Settings'])
+    expect(tabs.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'launcher', 'settings'])
+    expect(tabs.map((t) => t.label)).toEqual(['Chat', 'Work', 'Documents', 'Apps', 'Settings'])
   })
 
   it('marks every project tab scope=project, source=builtin, mount.kind=builtin', () => {
@@ -54,7 +54,7 @@ describe('tab registry — project scope', () => {
       expect(orders[i]!).toBeGreaterThan(orders[i - 1]!)
     }
     // gaps > 1 so a Core tab can slot BETWEEN builtins without renumbering
-    expect(orders).toEqual([0, 5, 10, 15])
+    expect(orders).toEqual([0, 5, 10, 12, 15])
   })
 })
 
@@ -97,7 +97,7 @@ describe('tab registry — resolveTabs(scope) parity + immutability', () => {
     })
 
     const second = resolveProjectTabs()
-    expect(second.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'settings'])
+    expect(second.map((t) => t.key)).toEqual(['chat', 'work_board', 'documents', 'launcher', 'settings'])
     expect(second[0]!.label).toBe('Chat')
     expect(second[0]!.mount.target).toBe('chat')
   })
@@ -126,6 +126,7 @@ describe('tab registry — Core union (PR-2)', () => {
       'chat',
       'work_board',
       'documents',
+      'launcher',
       'settings',
       'core:reminders_core',
       'core:calendar',
