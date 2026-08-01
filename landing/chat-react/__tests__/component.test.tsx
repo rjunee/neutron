@@ -864,6 +864,17 @@ describe('ChatApp render (happy-dom)', () => {
           }),
         )
       }
+      // The shell's tab-band divider polls the usage meter on mount — shell
+      // chrome, like the two above, and not what `calls` is counting. Serve the
+      // unavailable answer (the meter then draws a plain divider) and don't record it.
+      if (url.includes('/api/app/usage')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ available: false, reason: 'no_credential' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }
       calls.push({ url, ...(init !== undefined ? { init } : {}) })
       return Promise.resolve(
         new Response(JSON.stringify({ ok: true, project: { id: 'taxes', label: 'Taxes' }, created: true }), {
@@ -1002,6 +1013,17 @@ describe('ChatApp render (happy-dom)', () => {
       if (url.includes('/work-board')) {
         return Promise.resolve(
           new Response(JSON.stringify({ ok: true, items: [], project_id: 'general' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      }
+      // The shell's tab-band divider polls the usage meter on mount — shell
+      // chrome, like the two above, and not what `calls` is counting. Serve the
+      // unavailable answer (the meter then draws a plain divider) and don't record it.
+      if (url.includes('/api/app/usage')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ available: false, reason: 'no_credential' }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),

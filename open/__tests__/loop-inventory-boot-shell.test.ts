@@ -45,6 +45,10 @@ const LANDING_DIR = join(HERE, '..', '..', 'landing')
 /** COMPLETE set through the boot shell — 7 composer/graph loops + gateway-liveness. */
 const EXPECTED_RUNNING_LOOPS = [
   'chunked-upload-sweeper',
+  // The usage meter's 60 s credential probe. It arms UNCONDITIONALLY — an
+  // uncredentialed box does a cheap env/file check and no network call, so a
+  // credential added later starts reporting without a restart.
+  'credential-usage',
   'cron',
   'dispatch-lifecycle-watchdog',
   'gateway-liveness',
@@ -157,7 +161,7 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   const inventoryLines = lines.filter((l) => l.includes('[loop-registry]'))
   expect(inventoryLines).toHaveLength(1) // exactly one, emitted by the boot shell
   const line = inventoryLines[0]!
-  expect(line).toContain('8 loop(s) running')
+  expect(line).toContain('9 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
 }, 60_000)

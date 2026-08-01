@@ -2,6 +2,91 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-31 — the tab-bar divider is now the usage meter
+
+Branch `feat/usage-meter`. Ryan: *"two very thin lines … the line that separates the
+tab bar from the chat window … starting green until we hit 85%, then yellow until
+we hit 95%, then red until we max out. The whole line changes color, not just the
+piece at the end. Line for session usage above line for weekly usage."*
+
+**This was a surfacing job, not an instrumentation one.** Anthropic already reports
+both ceilings on the response headers of any authenticated call
+(`anthropic-ratelimit-unified-5h-utilization` / `…-7d-utilization`). What Open
+lacked was any way to ASK: every turn goes through the spawned `claude` binary,
+which surfaces no response headers, so the figures are unobservable from normal
+traffic. `auth/credential-usage-probe.ts` asks with a one-token
+`POST /v1/messages` whose body is never read — the same auth-tier probe class as
+`auth/max-oauth.ts`'s token check, carrying no owner content, no `system` field
+and no signature.
+
+**One credential, and the right one.** `open/active-credential.ts` walks the same
+precedence `resolveOpenLlmPool` uses but resolves one tier further than dispatch
+needs: the ambient tier carries an empty secret by contract, which is correct for
+spawning `claude` and useless for measuring, so the token is read from
+`<CLAUDE_CONFIG_DIR|~>/.claude/.credentials.json`. That is the file the `claude`
+CLI re-reads per turn, so reading it is the literal definition of "the credential
+we are actively using" — and it is why the meter is correct on a hosted instance
+that swaps that file underneath, with no hosting-side code and no multi-account
+concept anywhere in this repo. `ANTHROPIC_API_KEY` is billed per token and has no
+window, so it reports unsupported rather than an empty bar.
+
+**Unknown is a first-class state, and it looks like nothing.**
+`open/credential-usage-monitor.ts` measures every 60 s on a `SupervisedLoop` and
+caches; `GET /api/app/usage` answers from memory and always 200s, with
+`{available:false, reason}` when there is nothing to report. A reading older than
+five minutes stops being quoted — a utilization figure describes a rolling window,
+so a stale one is wrong rather than merely old — while a single failed probe keeps
+the last good one. Both clients decode defensively and never coerce a missing
+number to zero: an empty coloured track would assert "0% used", which is a claim,
+and the point of the unavailable state is that there is none to make.
+
+**Both surfaces, and it IS the divider.** Web: `landing/chat-react/UsageMeter.tsx`
+sits between `.car-topbar` and `.car-stage`; the topbar dropped its own
+`border-bottom` and the active tab dropped its -1px overhang, because a notch in a
+fill bar reads as a wrong number rather than as a fused tab. Mobile:
+`app/components/UsageMeter.tsx` is the last child of `ProjectTabBar`'s
+`narrowBand`, which likewise dropped its `borderBottomWidth`. Thresholds and the
+band function live in `contracts/credential-usage.ts` and are imported by the
+gateway, the browser bundle and the app, so the three cannot disagree about where
+amber starts. No feature flag; the meter is the default and only path.
+
+**Tests.** `auth/__tests__/credential-usage-probe.test.ts` (11/0) pins the header
+read and the classifications that would otherwise be invisible: a 200 without
+windows is `no-windows`, never a zero, and a 429 without windows is FULL rather
+than empty — the moment the bar is supposed to be red.
+`open/__tests__/credential-usage-monitor.test.ts` (14/0) covers every way the meter
+could lie: no network call without a credential, a reading kept through a blip,
+dropped once stale, dropped outright on a dead credential, and the token
+re-resolved each tick. `gateway/__tests__/app-usage-surface.test.ts` (5/0) pins
+"nothing to report" as a 200. `landing/chat-react/__tests__/usage-meter.test.tsx`
+(6/0) and `app/__tests__/usage-meter.test.tsx` (10/0) assert on both trees that an
+unavailable reading renders NO fill node and no `progressbar` role, and that the
+whole fill recolours as one unit at each threshold.
+`open/__tests__/open-composition-fields-characterization.test.ts` boots the real
+Open composer and now requires `app_usage_surface` in its output — the
+done-means-served proof that the route is actually mounted.
+
+Two existing guards were extended deliberately rather than relaxed: the loop
+inventories (`open/__tests__/loop-inventory-{open-composer,boot-shell}.test.ts`)
+now name `credential-usage` in the complete running set — the loop arms
+UNCONDITIONALLY, because an uncredentialed box does a cheap env/file check and no
+network call, so a credential added later starts reporting without a restart —
+and the create-project fetch shim in `landing/chat-react/__tests__/component.test.tsx`
+exempts the shell's usage poll the same way it already exempts `/tabs` and
+`/work-board`, since that assertion counts the create POST, not shell chrome.
+
+**What was checked on a real screen, and what was not.** The one thing source
+review cannot answer is whether two 1px rules are legible at phone density, so the
+SHIPPED CSS (extracted from `chat-react.html`, not retyped) was rendered on a cloud
+Android 14 device at 422 dpi across seven states. It reads correctly: each line is
+wholly ONE colour along its filled length, session sits above weekly, the fill
+grows from the left, the amber and red bands are unmistakable against the dark
+stage, the `min-width` floor keeps a 0.2% reading visible as a sliver, and the
+unavailable state is indistinguishable from ordinary window chrome — which is the
+whole point of it. NOT verified on device: the React Native component itself
+(reaching it needs a native build, which is a local Gradle run and is off-limits),
+and the live probe against a real subscription. Those rest on the harness tests.
+
 ## 2026-07-31 — the mobile rail shows nothing when nothing is happening
 
 Branch `fix/rail-idle-dot-invisible`. WAVE 3.5 made the rail's corner dot the Activity Inspector's entry point, and to guarantee it stayed reachable it gave the idle state a visible resting form: a quiet hollow ring. That reasoning was sound and its rendering was not. On a 72px rail with every project stacked in a column it put a grey circle on every single row, permanently. The owner, on device: *"remove that ugly grey hollow circle on every project in the rail. the pulsing dot should only show up if there's activity, otherwise nothing shows. that area can still be tappable for the inspector even if nothing visible. its an 'advanced' feature."*
