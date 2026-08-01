@@ -230,12 +230,40 @@ describe('#385 — eas.json build profiles', () => {
     // "configured" host. `environment` is the field that loads server-side
     // variables. UNVERIFIED against a live EAS schema — `eas-cli` is not a
     // repo dependency; this only guards the values we chose.
-    expect(Object.keys(eas.build).sort()).toEqual(['development', 'preview', 'production']);
-    for (const [name, profile] of Object.entries(eas.build)) {
-      expect(['development', 'preview', 'production']).toContain(
-        profile['environment'] as string,
-      );
+    // `base` is a SHARED, NON-BUILDABLE profile: it exists only to be
+    // `extends`-ed, so that the bun version pin lives in one place instead of
+    // three drifting copies (that pin is what keeps the local and builder
+    // fingerprints in agreement — see app/AGENTS.md). It is excluded from the
+    // buildable set below and separately constrained to stay non-buildable, so
+    // it cannot quietly become a build target that ships without an
+    // environment.
+    const BUILDABLE = ['development', 'preview', 'production'];
+    const buildable = Object.keys(eas.build).filter((k) => k !== 'base');
+    expect(buildable.sort()).toEqual(BUILDABLE);
+
+    for (const name of buildable) {
+      const profile = eas.build[name] as Record<string, unknown>;
+      expect(BUILDABLE).toContain(profile['environment'] as string);
       expect(profile['environment']).toBe(name);
+    }
+
+    // The shared profile must carry NOTHING that selects an environment or
+    // makes it usable as a build target. Without this, `base` would be a hole
+    // in the invariant above rather than an exception to it.
+    const base = eas.build['base'] as Record<string, unknown> | undefined;
+    if (base) {
+      expect(base['environment']).toBeUndefined();
+      expect(base['channel']).toBeUndefined();
+      expect(base['distribution']).toBeUndefined();
+    }
+
+    // Every buildable profile must actually inherit the shared pin — a profile
+    // that forgets `extends` silently builds on the builder's default bun and
+    // reintroduces the fingerprint mismatch this pin exists to prevent.
+    if (base) {
+      for (const name of buildable) {
+        expect((eas.build[name] as Record<string, unknown>)['extends']).toBe('base');
+      }
     }
   });
 
