@@ -133,6 +133,7 @@ import {
   buildChainedChatCommandFilter,
   buildStatusChatCommandFilter,
   buildResetChatCommandFilter,
+  buildTridentCodeChatCommandFilter,
   type StatusSnapshot,
 } from '@neutronai/gateway/boot-helpers.ts'
 import {
@@ -352,7 +353,10 @@ import {
   type PreviewFrom,
 } from './project-rail.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
-import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
+import {
+  dispatchBoardBoundBuild,
+  type TridentBoardBinder,
+} from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { buildTridentTerminalObserver } from './wiring/trident-nexus-observer.ts'
@@ -1538,16 +1542,70 @@ export function buildOpenGraphComposer(
       },
     })
 
+    // `/code` — the Trident build entry. BUILT-BUT-NOT-WIRED FIX: the filter
+    // (`buildTridentCodeChatCommandFilter`) and the whole durable Trident stack
+    // behind it — run store, tick loop, delivery, terminal observers — were all
+    // composed here, but the filter itself was never added to the chain below, so
+    // every `/code …` the owner typed fell through to the LLM and got a chat
+    // reply instead of starting a build. Same defect class as the proactive
+    // modules above: a module that exists but is never composed is a gap, not a
+    // feature.
+    //
+    // The context is resolved PER MESSAGE (the filter calls this at command time,
+    // long after composition), which is what lets it reach the canonical
+    // `workBoardStore` through the SAME late-bound holder the agent-dispatch
+    // binder uses — the store is constructed later (it needs `appWsRegistry`).
+    const tridentCodeBoardBinder: TridentBoardBinder = {
+      get: (slug, id) => dispatchBoardHolder.deref((s) => s.get(slug, id)) ?? null,
+      attachRun: async (slug, id, run_id) => {
+        await dispatchBoardHolder.deref((s) => s.attachRun(slug, id, run_id))
+      },
+      detachRun: async (slug, run_id, outcome) => {
+        await dispatchBoardHolder.deref((s) => s.detachRun(slug, run_id, outcome))
+      },
+    }
+    // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
+    // below — "a second instance elsewhere is harmless").
+    const tridentCodeRunStore = new TridentRunStore(db)
+    const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
+      resolve_context: (input) => {
+        // No credential → no substrate → the tick loop can never advance a run
+        // (`tridentFireInnerWorkflow` is null on an LLM-less boot). Returning null
+        // makes the filter STILL claim `/code` and answer honestly "unavailable"
+        // rather than writing a row that would sit un-driven forever. `/code` is
+        // never silently handed to the model.
+        if (llmPool === null) return null
+        return {
+          store: tridentCodeRunStore,
+          work_board: tridentCodeBoardBinder,
+          // Board scope for the project this message came from — the SAME
+          // `workBoardScopeKey(owner_slug, project_id)` mapping the board surface
+          // and the project rail use, so `/code` binds to the Plan item the owner
+          // is actually looking at (General → the owner slug).
+          project_slug: workBoardScopeKey(project_slug, input.project_id),
+          // The owner HOME BASE, not a git repo: the dispatch chokepoint resolves
+          // `<home>/Projects/<project_slug>/code` under it (git-init-ing on first
+          // use), so a project with no repo yet still builds.
+          repo_path: owner_home,
+        }
+      },
+      // Runs started here originate on the app socket, so the terminal result is
+      // delivered back to THIS surface rather than defaulting to Telegram (#317).
+      channel_kind: 'app_socket',
+    })
+
     // Chat-command filter (Free Cores `/cal`/`/email`/`/note`/`/remind`/
-    // `/research` + skill-forge `/skills` + `/status`), chained. Defined ONCE here
-    // so BOTH the web onboarding chat AND the app-ws chat (`/ws/app/chat`) route
-    // slash commands through the IDENTICAL handlers (Codex r1 [P2] — without this
-    // the React app-ws path lost slash commands, sending `/note` etc. to the LLM).
+    // `/research` + skill-forge `/skills` + `/status` + `/code`), chained. Defined
+    // ONCE here so BOTH the web onboarding chat AND the app-ws chat
+    // (`/ws/app/chat`) route slash commands through the IDENTICAL handlers (Codex
+    // r1 [P2] — without this the React app-ws path lost slash commands, sending
+    // `/note` etc. to the LLM).
     const chatCommandFilter = buildChainedChatCommandFilter([
       coresWiring.chatCommandFilter,
       buildSkillForgeChatCommandFilter(skillForgeBackend),
       statusChatCommandFilter,
       resetChatCommandFilter,
+      tridentCodeChatCommandFilter,
     ])
 
     // ── The landing stack (onboarding engine + chat UI + WS) ───────────────

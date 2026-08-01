@@ -503,6 +503,19 @@ deletes a forged pack.
   registry tool backend. It is NOT an agent-invocation path — the bridge is the
   agent's single native path. One underlying tool implementation, two entry
   surfaces (user-typed slash vs. agent-native MCP).
+- **The chain's members** (`open/composer.ts`, in order): the Free-Cores filter,
+  skill-forge (`/skills`), `/status`, `/reset`, and the Trident `/code` entry
+  (`buildTridentCodeChatCommandFilter`). `/code` was BUILT-BUT-NOT-WIRED until
+  2026-08-01 — the filter and the whole durable Trident stack behind it (run
+  store, tick loop, delivery, terminal observers) were composed, but the filter
+  was never added to this chain, so its only non-test references were barrel
+  re-exports and every `/code …` fell through to the LLM as ordinary chat. Its
+  context resolves PER MESSAGE, reaching the canonical `workBoardStore` through
+  the same late-bound holder agent-dispatch uses, and scoping the build to the
+  message's board (`workBoardScopeKey`). On an LLM-less boot it resolves `null`,
+  so `/code` is still CLAIMED and answered "unavailable" rather than writing a
+  run no tick loop could ever advance. Wiring is pinned end-to-end over a live
+  socket by `open/__tests__/open-code-command-wiring.test.ts`.
 
 ## Mobile app boot + server URL (ISSUES #385) — `app/lib/server-url.ts`, `app/lib/config.ts`
 
