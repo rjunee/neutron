@@ -1,22 +1,29 @@
 /**
- * bundled-rituals.e2e.test.ts — the T7 LLM-behaviour acceptance for the two
- * ENGINE-shipped read-only rituals (plan task 7 / design §6 T7).
+ * bundled-rituals.e2e.test.ts — the T7 LLM-behaviour acceptance for the
+ * ENGINE-shipped bundled rituals (plan task 7 / design §6 T7).
  *
  * The static half of the ported-prompt silent-no-op guard lives in
  * `bundled-rituals.test.ts` (template grounds on the Neutron layout, carries no
  * the legacy harness-isms). THIS test proves the BEHAVIOURAL half: each SHIPPED template, run
- * with the real ritual base prompt + the read-only ['Read','Glob','Grep'] surface
- * against a fixture instance, produces output that cites PLANTED fixture state —
+ * with the real ritual base prompt + THAT DEF'S OWN tool surface against a
+ * fixture instance, produces output that cites PLANTED fixture state —
  * something impossible to compose without actually reading the files. That is the
  * proof a ported prompt does not silently no-op (cost tokens, exit 0, do nothing).
+ *
+ * For `kaizen` the bar is higher, because a weekly report is the easiest thing in
+ * this repo to fake: reading the files is necessary but NOT sufficient. Its
+ * fixture plants ONE lesson corrected four times under four wordings, so the
+ * assertion is that the ritual recognised the REPEAT and proposed a rule change —
+ * a run that faithfully lists four corrections and proposes nothing has failed at
+ * the only job kaizen has.
  *
  * MIRRORS `runtime/adapters/claude-code/persistent/__tests__/dev-channel-pty-bind.e2e.test.ts`
  * mechanics EXACTLY (real Bun PTY spawn, dev-channel MCP sink for
  * /channel-ready //channel-bound //reply, disclaimer dismiss in onData,
  * MCP_CONNECTION_NONBLOCKING:'false'). Deltas from the sibling: cwd + addDir = a
  * mkdtemp FIXTURE owner_home; appendSystemPromptFile = RITUAL_AGENT_BASE_PROMPT;
- * tools = ['Read','Glob','Grep']; skipPermissions:true; the injected message is the
- * LIVE shipped template bytes (that is what T7 certifies).
+ * tools = the def's `tool_surface`; skipPermissions:true; the injected message is
+ * the LIVE shipped template bytes (that is what T7 certifies).
  *
  * OPT-IN: needs a real `claude` binary + working credentials, so it is skipped
  * unless `NEUTRON_PTY_E2E=1`. CI (no creds) skips.
@@ -35,7 +42,7 @@ import { BunTerminalHost } from '@neutronai/runtime/adapters/claude-code/persist
 import { ensureClaudeTrust } from '@neutronai/runtime/adapters/claude-code/persistent/ensure-claude-trust.ts'
 
 import { RITUAL_AGENT_BASE_PROMPT } from './prompt-path.ts'
-import { bundledTemplatePathFor } from './bundled-rituals.ts'
+import { BUNDLED_RITUAL_DEFS, bundledTemplatePathFor } from './bundled-rituals.ts'
 
 const OPT_IN = process.env['NEUTRON_PTY_E2E'] === '1'
 const CLAUDE_BIN =
@@ -77,28 +84,45 @@ function writeFixtureHome(): string {
   return home
 }
 
-/** Write a planted-fixture memory layer (entities index + corrections + diary)
- *  that the daily-delta ritual reads. Markers `LEDGER-7431` / `PRISM-88` are not
- *  composable without actually reading the files. */
-function writeMemoryFixtureHome(): string {
-  const home = mkdtempSync(join(tmpdir(), 'neutron-ritual-mem-fixture-'))
-  mkdirSync(join(home, 'entities'), { recursive: true })
+/** Write a planted-fixture self-improvement layer (corrections + persona rules +
+ *  diary) that the kaizen ritual reads.
+ *
+ *  The plant is the RITUAL'S JOB, not just a marker: the SAME lesson
+ *  (`LEDGER-7431`) is corrected FOUR times across the week under four different
+ *  wordings, and `persona/SOUL.md` contains no rule about it. A kaizen that
+ *  merely summarises reports four corrections; the kaizen we want notices they
+ *  are ONE missing rule and says so. `PRISM-88` is a single-occurrence
+ *  distractor — it must not be promoted to systemic. */
+function writeKaizenFixtureHome(): string {
+  const home = mkdtempSync(join(tmpdir(), 'neutron-ritual-kaizen-fixture-'))
   mkdirSync(join(home, 'corrections'), { recursive: true })
   mkdirSync(join(home, 'diary'), { recursive: true })
-  const today = new Date().toISOString()
-  writeFileSync(
-    join(home, 'entities', 'INDEX.md'),
-    '# Memory Index\n\n- [[ledger-migration]] — the LEDGER-7431 billing migration\n',
-    'utf8',
-  )
+  mkdirSync(join(home, 'persona'), { recursive: true })
+  const now = Date.now()
+  const at = (daysAgo: number): string => new Date(now - daysAgo * 86_400_000).toISOString()
+  const block = (ts: string, id: string, wrong: string, right: string, why: string): string =>
+    `## ${ts} · ${id}\n\n- **wrong:** ${wrong}\n- **right:** ${right}\n- **why:** ${why}\n- **scope:** general\n- **source:** owner\n\n`
+
   writeFileSync(
     join(home, 'corrections', 'corrections-log.md'),
-    `---\nkind: corrections-log\n---\n\n# Corrections Log\n\n## ${today} · c-e2e1\n\n- **wrong:** used the old ledger flow\n- **right:** route billing through LEDGER-7431\n- **why:** the migration is live\n- **scope:** general\n- **source:** owner\n`,
+    '---\nkind: corrections-log\n---\n\n# Corrections Log\n\n' +
+      // One lesson, four times, four wordings.
+      block(at(6), 'c-e2e1', 'used the old ledger flow', 'route billing through LEDGER-7431', 'the migration is live') +
+      block(at(4), 'c-e2e2', 'posted an invoice against the legacy ledger', 'every billing write goes through LEDGER-7431', 'the old path is frozen') +
+      block(at(2), 'c-e2e3', 'reconciled against the pre-migration ledger', 'reconcile through LEDGER-7431 only', 'twice now') +
+      block(at(1), 'c-e2e4', 'quoted a balance from the legacy ledger again', 'read balances from LEDGER-7431', 'this keeps happening') +
+      // A one-off that must NOT be called systemic.
+      block(at(3), 'c-e2e5', 'left the PRISM-88 flag on after the refactor', 'clear the PRISM-88 flag when the refactor lands', 'one-off'),
     'utf8',
   )
   writeFileSync(
-    join(home, 'diary', `${today.slice(0, 10)}.md`),
-    `# Diary ${today.slice(0, 10)}\n\n- Shipped the PRISM-88 refactor and noted the follow-ups.\n`,
+    join(home, 'persona', 'SOUL.md'),
+    '# Standing rules\n\n- Be concise.\n- Never send external communications without approval.\n',
+    'utf8',
+  )
+  writeFileSync(
+    join(home, 'diary', `${at(1).slice(0, 10)}.md`),
+    `# Diary\n\n- ${at(1)} | reflection | - | Shipped the PRISM-88 refactor and noted the follow-ups.\n`,
     'utf8',
   )
   return home
@@ -110,6 +134,12 @@ function writeMemoryFixtureHome(): string {
  */
 async function runRitual(id: string, fixture: () => string = writeFixtureHome): Promise<string | undefined> {
   const fixtureHome = fixture()
+  // The surface comes from the DEF, not a hardcoded triple: kaizen is granted
+  // WebSearch on top of the read-only three, and an e2e that silently ran it
+  // with the wrong tools would certify a ritual nobody ships.
+  const def = BUNDLED_RITUAL_DEFS.find((d) => d.id === id)
+  if (def === undefined) throw new Error(`runRitual: no bundled def '${id}'`)
+  const tools = [...def.tool_surface]
   const channelName = `neutron-${randomBytes(4).toString('hex')}`
   const sessionId = crypto.randomUUID()
   const cfgDir = mkdtempSync(join(tmpdir(), 'neutron-ritual-e2e-'))
@@ -167,7 +197,7 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
     appendSystemPromptFile: RITUAL_AGENT_BASE_PROMPT,
     model: 'claude-opus-4-8',
     addDir: fixtureHome,
-    tools: ['Read', 'Glob', 'Grep'],
+    tools,
     skipPermissions: true,
   })
 
@@ -242,12 +272,18 @@ describe.skipIf(!OPT_IN)('bundled rituals cite planted fixture state (T7 accepta
   )
 
   it(
-    'daily-delta output references a planted memory-layer marker',
+    'kaizen names the REPEATED correction as systemic, not just the week',
     async () => {
-      const reply = await runRitual('daily-delta', writeMemoryFixtureHome)
+      const reply = await runRitual('kaizen', writeKaizenFixtureHome)
       expect(reply).toBeDefined()
-      // A marker impossible to compose without reading the corrections log / diary.
-      expect(reply).toMatch(/LEDGER-7431|PRISM-88/)
+      // Read the files at all: not composable without the corrections log.
+      expect(reply).toMatch(/LEDGER-7431/)
+      // Did its JOB: recognised four wordings as ONE recurring lesson. Either the
+      // explicit label or the count is acceptable evidence; a bare summary of the
+      // week's corrections satisfies neither.
+      expect(reply).toMatch(/SYSTEMIC|systemic|4 times|four times|repeat/i)
+      // Proposed a change to the rules file, which is where a missing rule lives.
+      expect(reply).toMatch(/SOUL\.md/)
     },
     180_000,
   )

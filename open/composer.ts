@@ -2168,10 +2168,12 @@ export function buildOpenGraphComposer(
     // spawns each ritual turn on the `cc-ritual-*` ephemeral substrate, and
     // writes durable history to `code_ritual_runs`.
     //
-    // Task 7 — the registry is rooted at `<owner_home>/rituals` and the two
-    // bundled GENERIC read-only defs (morning-brief, evening-wrap) are seeded
-    // COPY-IF-ABSENT into that dir + registered here at boot. They surface only
-    // ['Read','Glob','Grep'] (Layer 1 `--tools` default-deny contains them). They
+    // Task 7 — the registry is rooted at `<owner_home>/rituals` and the three
+    // bundled GENERIC defs (morning-brief, evening-wrap, kaizen) are seeded
+    // COPY-IF-ABSENT into that dir + registered here at boot. All three are
+    // WRITE-FREE; morning-brief and evening-wrap surface only ['Read','Glob','Grep']
+    // and `kaizen` adds WebSearch under a SEPARATELY-approved egress grant (Layer 1
+    // `--tools` default-deny contains them all). They
     // register but stay UNAPPROVED until the owner's task-8 approval act, so no
     // ritual can FIRE yet — an unapproved fire lands a durable 'skipped'/'unapproved'
     // row (the plumbing is live; approval is the gate). Seeding is copy-if-absent:

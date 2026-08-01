@@ -558,7 +558,7 @@ export function createRitualRegistrationService(
   /**
    * ENABLE an already-registered ritual (bundled example or persisted def). The
    * BLOCKER this closes (Argus r2): the three bundled rituals (morning-brief /
-   * evening-wrap / daily-delta) are seeded + registered at boot but have NO
+   * evening-wrap / kaizen) are seeded + registered at boot but have NO
    * approval or scheduling path — `propose` refuses their id as
    * `duplicate_id`/`exists_on_disk`, and they carry no `<id>.def.json` so
    * `readSchedule` dead-ends. `enable` is that missing path: it takes ONLY a
