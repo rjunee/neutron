@@ -18,6 +18,11 @@
  *
  * It is NOT a simulation. No audio, no timers, no real elapsed clock — the
  * duration a test wants is the duration it sets.
+ *
+ * The PLAYBACK half (further down) is observable for the same reason: a voice
+ * note that renders a play button but never reaches a player, or whose progress
+ * track ignores the position the player reports, looks identical to a working
+ * one in any test that only queries the view hierarchy.
  */
 
 /** Everything the harness saw, for assertions. Reset per test. */
@@ -84,10 +89,12 @@ export function setHarnessAudio(next: Partial<VoiceHarnessConfig>): void {
   config = { ...config, ...next };
 }
 
-/** Back to "permission granted, a clip records fine". Call in `beforeEach`. */
+/** Back to "permission granted, a clip records fine", with no players handed
+ *  out. Call in `beforeEach`. */
 export function resetHarnessAudio(): void {
   config = { ...DEFAULT_CONFIG };
   state = freshState();
+  resetHarnessPlayback();
 }
 
 interface HarnessRecorder {
@@ -140,26 +147,183 @@ export async function setAudioModeAsync(): Promise<void> {
   state.audio_mode_calls += 1;
 }
 
-/** Preview playback — inert. Nothing in the harness can hear anything. */
-export function useAudioPlayer(): {
-  play: () => void;
-  pause: () => void;
-  seekTo: (seconds: number) => Promise<void>;
-} {
-  return {
-    play: () => undefined,
-    pause: () => undefined,
-    seekTo: async () => undefined,
-  };
+/* ── Playback ──────────────────────────────────────────────────────────────
+ * ALSO deliberately observable, and for the same reason the recorder is: the
+ * claim a voice-note bubble has to keep proving is "tapping play reaches a
+ * player, and the position it reports moves the pixels". An inert player answers
+ * neither. So each `useAudioPlayer` call gets its OWN stub player with its own
+ * counters and its own status, and a test drives that status directly — there is
+ * no audio, no clock and no decoding anywhere in here.
+ *
+ * It is NOT a simulation. `play()` does not make time pass; a test that wants
+ * the clip to be three seconds in says so with `setHarnessPlayback`.
+ */
+
+export interface HarnessPlaybackState {
+  /** The source the component handed the player (its `uri`, or null). */
+  source_uri: string | null;
+  /**
+   * The headers that rode along with the source. A bearer-authed clip that
+   * arrives here WITHOUT one is a clip the device will 401 on, and the bubble
+   * would show an eternal spinner with no way to tell why — so it is observable.
+   */
+  source_headers: Record<string, string> | null;
+  play_calls: number;
+  pause_calls: number;
+  /** Every position seeked to, in seconds, in order. */
+  seeks: number[];
+  /** True once the component's unmount released this player. */
+  released: boolean;
+  playing: boolean;
+  current_time: number;
+  duration: number;
+  did_just_finish: boolean;
+  is_loaded: boolean;
 }
 
-export function useAudioPlayerStatus(): {
+type Listener = () => void;
+
+class HarnessPlayer {
+  readonly state: HarnessPlaybackState;
+  private readonly listeners = new Set<Listener>();
+
+  constructor(source_uri: string | null, source_headers: Record<string, string> | null) {
+    this.state = {
+      source_uri,
+      source_headers,
+      play_calls: 0,
+      pause_calls: 0,
+      seeks: [],
+      released: false,
+      playing: false,
+      current_time: 0,
+      duration: 0,
+      did_just_finish: false,
+      is_loaded: false,
+    };
+  }
+
+  subscribe(fn: Listener): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  emit(): void {
+    for (const fn of [...this.listeners]) fn();
+  }
+
+  play(): void {
+    this.state.play_calls += 1;
+  }
+
+  pause(): void {
+    this.state.pause_calls += 1;
+  }
+
+  async seekTo(seconds: number): Promise<void> {
+    this.state.seeks.push(seconds);
+  }
+
+  replace(source: unknown): void {
+    this.state.source_uri = readSourceUri(source);
+    this.state.source_headers = readSourceHeaders(source);
+  }
+}
+
+let players: HarnessPlayer[] = [];
+
+function readSourceUri(source: unknown): string | null {
+  if (typeof source === 'string') return source;
+  if (source !== null && typeof source === 'object' && 'uri' in source) {
+    const uri = (source as { uri?: unknown }).uri;
+    return typeof uri === 'string' ? uri : null;
+  }
+  return null;
+}
+
+function readSourceHeaders(source: unknown): Record<string, string> | null {
+  if (source === null || typeof source !== 'object') return null;
+  const headers = (source as { headers?: unknown }).headers;
+  return headers !== null && typeof headers === 'object'
+    ? (headers as Record<string, string>)
+    : null;
+}
+
+/** Every player the harness handed out this test, in mount order. */
+export function harnessPlayers(): HarnessPlaybackState[] {
+  return players.map((p) => p.state);
+}
+
+/** Back to zero players. Call in `beforeEach` alongside `resetHarnessAudio`. */
+export function resetHarnessPlayback(): void {
+  players = [];
+}
+
+/**
+ * Drive what the Nth player reports, then re-render every subscriber — the
+ * harness's stand-in for "three seconds of audio just came out of the speaker".
+ */
+export function setHarnessPlayback(index: number, next: Partial<HarnessPlaybackState>): void {
+  const player = players[index];
+  if (player === undefined) throw new Error(`no harness player at index ${index}`);
+  Object.assign(player.state, next);
+  player.emit();
+}
+
+interface HookRuntime {
+  useState: <T>(initial: T | (() => T)) => [T, (v: T | ((prev: T) => T)) => void];
+  useEffect: (fn: () => void | (() => void), deps?: unknown[]) => void;
+  useMemo: <T>(fn: () => T, deps?: unknown[]) => T;
+}
+
+/**
+ * React is imported lazily so this stub stays loadable in the non-harness unit
+ * tests that only want the recorder half (they never render anything).
+ */
+function react(): HookRuntime {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('react') as HookRuntime;
+}
+
+export function useAudioPlayer(source?: unknown): HarnessPlayer {
+  const { useMemo, useEffect } = react();
+  const uri = readSourceUri(source ?? null);
+  const headers = readSourceHeaders(source ?? null);
+  // Keyed on the uri exactly like the real hook (which keys a releasing shared
+  // object on `JSON.stringify(source)`), so a source swap really does hand the
+  // component a NEW player rather than mutating the old one.
+  const player = useMemo(() => {
+    const created = new HarnessPlayer(uri, headers);
+    players.push(created);
+    return created;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uri]);
+  useEffect(
+    () => () => {
+      player.state.released = true;
+    },
+    [player],
+  );
+  return player;
+}
+
+export function useAudioPlayerStatus(player: HarnessPlayer): {
   playing: boolean;
   currentTime: number;
   duration: number;
   didJustFinish: boolean;
+  isLoaded: boolean;
 } {
-  return { playing: false, currentTime: 0, duration: 0, didJustFinish: false };
+  const { useState, useEffect } = react();
+  const [, bump] = useState(0);
+  useEffect(() => player.subscribe(() => bump((n) => n + 1)), [player]);
+  return {
+    playing: player.state.playing,
+    currentTime: player.state.current_time,
+    duration: player.state.duration,
+    didJustFinish: player.state.did_just_finish,
+    isLoaded: player.state.is_loaded,
+  };
 }
 
 /** Present so the real module's shape is matched; the recorder ignores it. */

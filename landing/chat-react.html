@@ -1326,6 +1326,10 @@
   /* Phase 3 — attachment compose affordance + render. */
   .car-attach-img { max-width: 100%; border-radius: 12px; display: block; margin-top: 6px; }
   .car-attach-loading, .car-attach-error { display: inline-block; margin-top: 6px; font-size: 12px; color: var(--muted); }
+  /* A sent voice note is a player, not a filename. The browser's own control
+     already knows about play/pause, duration and scrubbing; this only sizes it
+     to the bubble and matches the surrounding chrome. */
+  .car-attach-audio { display: block; margin-top: 6px; width: 100%; max-width: 320px; height: 40px; }
   .car-composer-wrap { border-top: 1px solid var(--border); background: var(--surface); }
   .car-composer-wrap .car-composer { border-top: 0; }
   /* BUG 1 — staged-attachment chips align to the centered composer column. */
