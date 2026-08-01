@@ -13,33 +13,60 @@ So this converts `333ca1d7` to iMessage rather than layering a third style on to
 not reproducible are Apple's proprietary assets — SF Pro and the exact `arrow.up` outline —
 which are approximated, as expected, and are not a capability blocker.
 
-### The reference
+### The reference, and which iMessage
 
-No pixel reference was available. Working from:
+**Target: the iOS 17/18 composer, deliberately — NOT iOS 26's Liquid Glass treatment.**
+The reasoning matters, because picking the newer one would have repeated the mistake this
+change exists to correct:
 
-- the owner's own description of the target (the four elements named in the brief);
-- Stream's iOS Chat SDK guide to restyling its composer as iMessage
-  (<https://getstream.io/chat/docs/sdk/ios/uikit/components/message-composer/>), which is a
-  third party independently describing the same arrangement: *move the send button from the
-  trailing container to the input container*, make it *aligned to bottom* inside that
-  container, set the input's *corner radius to 18*, and keep the attachment button in the
-  **leading** container. Its `cornerRadius = 18` against a ~36pt field is the same "radius =
-  half the resting height" pill this implements, arrived at independently.
+1. Liquid Glass depends on real-time backdrop blur sampling the content behind it. Android
+   cannot reproduce that faithfully, so targeting it would mean approximating the *defining
+   characteristic* of the look — i.e. substituting a design on a real blocker, at the one
+   place where a blocker actually exists.
+2. The outlined pill with the circular send button is the iMessage composer people picture.
+   It is the recognisable one.
+3. It replicates cleanly with no approximation, so "copy it exactly" can be met rather than
+   gestured at.
 
-**This was NOT verified against a running iMessage instance or a screenshot**, and it was
-not verified on a device — see "What is not verified" below. Anywhere the two sources above
-were silent, the brief's wording was followed literally rather than filled in from memory.
+Sources: a pixel measurement of primary iOS 17/18 assets (row-scanning the send glyph, which
+is what settled the arrowhead question below), plus Stream's iOS Chat SDK guide to restyling
+its own composer as iMessage
+(<https://getstream.io/chat/docs/sdk/ios/uikit/components/message-composer/>) — a third party
+independently describing the same arrangement: *move the send button from the trailing
+container to the input container*, make it *aligned to bottom* inside that container, set the
+input's *corner radius to 18*, and keep the attachment button in the **leading** container.
+Its `cornerRadius = 18` against a ~36pt field is the same "radius = half the resting height"
+pill implemented here, arrived at independently.
+
+**Not verified on a device** — see "What is not verified" below.
 
 ### What changed, element by element
 
 | Element | Was (WhatsApp pass) | Now (iMessage) |
 |---|---|---|
 | Text field | Filled `surface_raised` capsule, no stroke | **Outlined** pill — transparent fill, `StyleSheet.hairlineWidth` stroke in `THEME.hairline` |
-| Send control | 40pt circle **outside** the field, to its right | 28pt filled circle **inside** the field at the trailing edge |
-| Send glyph | Paper plane (filled triangle + notch) | **Upward arrow** — shaft + two-armed chevron |
+| Send control | 40pt circle **outside** the field, to its right | Filled circle **inside** the field at the trailing edge, diameter = the field's inner height |
+| Send glyph | Paper plane (filled triangle + notch) | **Upward arrow** — open chevron + equal-width shaft, round caps |
 | Leading side | Nothing | A single **`+`** in a filled circle, outside the field |
 | Attachment | 📎 emoji inside the field's trailing edge | Folded into the leading `+` (same handler) |
-| Mic (empty state) | 40pt circle outside the field | 28pt, in the same in-field slot the send arrow uses |
+| Mic (empty state) | 40pt filled circle outside the field | A **bare glyph** in the same in-field slot the send arrow uses |
+
+**The send circle's diameter is derived, not chosen** — it is the field's inner height, so
+the circle is concentric with the pill's own rounded cap at rest. That is what iMessage's
+send button looks like tucked into the trailing end, and it means the proportion cannot drift
+if the field's height or padding is ever retuned. There is no arbitrary constant to rot.
+
+**The resting mic is a bare glyph, no circle behind it** — which is how iOS 17/18 renders the
+control in this slot, and it is what makes the swap *read*: a quiet mark while the field is
+empty, a filled accent circle the moment there is something to send. A filled circle in both
+states would say nothing by changing. It still fills while a hold is in progress, so the
+recording state stays unmistakable.
+
+**The arrowhead is an OPEN CHEVRON, not a solid triangle.** Row-scanning the primary asset
+shows three separate ink runs across the head — left arm, shaft, right arm — which is only
+possible if the head is two strokes rather than a filled wedge, and the shaft is the same
+width as the arms. The solid-triangle version is the common wrong one and is exactly what
+makes iMessage clones look cheap.
 
 **The up-arrow stays.** The owner asked *"Is this up arrow for send how imessage does it? It
 looks kinda ugly."* The honest answer is yes — that is the mark iMessage uses — and "copy it
@@ -64,6 +91,16 @@ composer refuses to ship elsewhere.
 
 **The tint is the app's own accent** (`THEME.accent`), not Apple's blue — for the send
 circle's fill and for the caret, as before.
+
+### The one deliberate deviation from Apple
+
+iOS 17/18 puts a **dictation** mic in the field's trailing slot — speech-to-text into the
+field. Ours puts the **voice-message recorder** there instead. Recording and sending audio is
+a hard requirement here, and this is the slot that gesture belongs in. The position, the
+swap and the mark are iMessage's; only what the control *does* differs.
+
+Worth one line of justification: iOS 26 later replaced the dictation mic in this same slot
+with a waveform Record-Audio control. Apple converged on this usage.
 
 ### What was preserved
 
@@ -114,7 +151,10 @@ are not false positives.
 
 ### Adjacent gap found, NOT fixed here
 
-**The voice recorder from PR #24 (`1bddf3df`) is built but not wired.** `ChatSyncSurface`
+**The voice recorder from PR #24 (`1bddf3df`) is built but not wired.** This contradicts a
+belief in circulation that the mic is "already wired via `expo-audio`" — it is not, and the
+citations below are from the code as it stands on `main` today, not from memory.
+`ChatSyncSurface`
 renders `<InputComposer>` with no `onVoiceTap` / `onVoiceHoldStart` / `onVoiceHoldMove` /
 `onVoiceHoldEnd` props (`app/components/ChatSyncSurface.tsx:527-537`), and
 `app/components/VoiceMicButton.tsx` — the component PR #24 added to carry those gestures —

@@ -204,13 +204,13 @@ const FIELD_BORDER_PT = StyleSheet.hairlineWidth;
 const LEADING_BUTTON_SIZE_PT = 32;
 
 /**
- * THE IN-FIELD ACTION BUTTON — small, filled, circular, and inset from the
- * pill's trailing edge. Sized so the pill's own padding frames it: at rest it
- * clears the stroke by {@link ACTION_INSET_PT} top and bottom.
+ * THE IN-FIELD ACTION BUTTON. Its diameter is the field's INNER height — not an
+ * arbitrary constant — so the filled circle is concentric with the pill's own
+ * rounded cap at rest, which is what iMessage's send button looks like tucked
+ * into the trailing end. Deriving it also means it cannot drift out of
+ * proportion if the field's height or padding is ever retuned.
  */
-const ACTION_BUTTON_SIZE_PT = 28;
-/** The gap between the button and the pill's inner edge, on every side at rest. */
-const ACTION_INSET_PT = (FIELD_MIN_HEIGHT_PT - FIELD_BORDER_PT * 2 - ACTION_BUTTON_SIZE_PT) / 2;
+const ACTION_BUTTON_SIZE_PT = FIELD_MIN_HEIGHT_PT - FIELD_BORDER_PT * 2;
 
 /**
  * Android's Material minimum touch target. The visuals are smaller than this on
@@ -291,8 +291,14 @@ function PlusGlyph({ color }: { color: string }): React.ReactElement {
  * dependency tree, and this has to ship over-the-air). Three parts in a 16×16
  * box: a capsule head, a U-shaped cradle made from a box with a transparent top
  * border and rounded bottom corners, and a short stem joining them to the chin.
- * It shares the in-field trailing slot with the send arrow — the same slot
- * iMessage puts its audio control in while the field is empty.
+ *
+ * THE ONE DELIBERATE DEVIATION FROM iOS 17/18. Apple puts a DICTATION mic in
+ * this slot — speech-to-text into the field. Ours is the VOICE-MESSAGE recorder
+ * instead: recording and sending audio is a hard requirement here, and this is
+ * the slot the gesture belongs in. The position, the swap and the mark are
+ * iMessage's; only what the control does differs. Worth noting that iOS 26 later
+ * replaced the dictation mic in this same slot with a waveform Record-Audio
+ * control, so Apple converged on this usage.
  */
 const MIC_BOX_PT = 16;
 
@@ -871,29 +877,30 @@ const styles = StyleSheet.create({
     // and the one most often skipped.
     maxHeight: FIELD_MAX_HEIGHT_PT,
   },
-  /** The in-field trailing slot: inset from the pill's stroke on every side at
-   *  rest, and bottom-aligned so it stays on the LAST line as the field grows. */
+  /** The in-field trailing slot: it fills the pill's inner height, sits just
+   *  inside the stroke at the trailing end, and is bottom-aligned so it stays
+   *  pinned to the LAST line as the field grows upward. */
   actionSlot: {
     height: ACTION_BUTTON_SIZE_PT,
     width: ACTION_BUTTON_SIZE_PT,
-    marginRight: ACTION_INSET_PT,
-    marginBottom: ACTION_INSET_PT,
   },
   actionFill: {
     height: '100%',
     width: '100%',
   },
-  // The resting mic is quiet — an outlined circle, not a filled one, so the
-  // filled accent circle means "send" and nothing else.
+  // The resting mic is a BARE GLYPH — no circle behind it — which is how
+  // iOS 17/18 renders the control in this slot, and what makes the swap read: a
+  // quiet mark while empty, a filled accent circle the moment there is something
+  // to send. A filled circle in both states would say nothing by changing.
   voiceBtn: {
     height: ACTION_BUTTON_SIZE_PT,
     width: ACTION_BUTTON_SIZE_PT,
     borderRadius: ACTION_BUTTON_SIZE_PT / 2,
-    backgroundColor: THEME.surface_raised,
+    backgroundColor: 'transparent',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  /** Holding: the control fills, the way the reference's does while recording. */
+  /** Holding: the control fills, so the recording state is unmistakable. */
   voiceBtnHolding: { backgroundColor: THEME.accent },
   /** Slid far enough that releasing discards. */
   voiceBtnCancelling: { backgroundColor: THEME.danger },
