@@ -94,11 +94,28 @@ function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: 
 
   // FIX #335 — the pulsing `work` dot uses the building blue (`PHASE.build.fg`),
   // matching the Work-list building dot exactly; `attention` stays a static amber.
-  // SPEC § WAVE 3.5 — `idle` is a quiet hollow ring: present and tappable (it is
-  // the Activity Inspector's entry point) but it must read as "nothing happening",
-  // never as state.
+  //
+  // IDLE PAINTS NOTHING. WAVE 3.5 drew a quiet hollow ring at rest so the dot
+  // would always be there to tap; on a 72px rail that meant a grey circle on
+  // EVERY row, which read as eight pieces of state at a moment when nothing was
+  // happening anywhere. The owner, on device: "remove that ugly grey hollow
+  // circle on every project in the rail. the pulsing dot should only show up if
+  // there's activity, otherwise nothing shows."
+  //
+  // What is superseded is only the PAINT. The affordance is untouched, which is
+  // the whole subtlety of this change: `railDotKind` still returns `idle`, the
+  // active row still wraps this in the `dotPress` Pressable, and the corner still
+  // occupies a DOT-sized (transparent) box. So the Activity Inspector's touch
+  // target keeps exactly the geometry it had — invisible but tappable, which is
+  // what an advanced affordance is supposed to feel like — and a row's layout
+  // does not shift the moment activity starts or stops, because only the colour
+  // ever appears and disappears.
+  //
+  // Deliberate divergence from the web rail's `.car-rail-dot-idle`, which still
+  // draws its resting ring: the complaint is specific to the narrow phone rail.
+  // Treat a future web change as its own decision, not as drift to "fix".
   if (kind === 'idle') {
-    return <Animated.View testID="rail-dot-idle" style={[styles.dot, styles.dotIdle]} />;
+    return <Animated.View testID="rail-dot-none" style={styles.dotSlot} />;
   }
   const color = kind === 'attention' ? THEME.attention : PHASE.build.fg;
   return (
@@ -306,11 +323,16 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: THEME.surface,
   },
-  /** The idle dot: hollow muted ring, no fill (mirrors web `.car-rail-dot-idle`). */
-  dotIdle: {
-    backgroundColor: 'transparent',
-    borderColor: THEME.text_muted,
-    opacity: 0.5,
+  /**
+   * The idle corner: a DOT-sized hole in the paint. No fill, no border, no
+   * opacity trick — nothing renders. It exists ONLY to hold the box open, so
+   * `dotPress` keeps its 10px target (plus `hitSlop`) while nothing is drawn and
+   * the row does not twitch when a dot lights up. Anything visible here — a
+   * dimmed ring, a low-opacity dot — is the exact thing that was removed.
+   */
+  dotSlot: {
+    width: DOT,
+    height: DOT,
   },
   dotPress: {
     position: 'absolute',

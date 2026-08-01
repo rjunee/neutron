@@ -2,6 +2,20 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-07-31 — the mobile rail shows nothing when nothing is happening
+
+Branch `fix/rail-idle-dot-invisible`. WAVE 3.5 made the rail's corner dot the Activity Inspector's entry point, and to guarantee it stayed reachable it gave the idle state a visible resting form: a quiet hollow ring. That reasoning was sound and its rendering was not. On a 72px rail with every project stacked in a column it put a grey circle on every single row, permanently. The owner, on device: *"remove that ugly grey hollow circle on every project in the rail. the pulsing dot should only show up if there's activity, otherwise nothing shows. that area can still be tappable for the inspector even if nothing visible. its an 'advanced' feature."*
+
+**Only the paint was removed.** `ActivityDot` (`app/components/ProjectRail.tsx:117`) renders a transparent, DOT-sized `dotSlot` for `idle` instead of the ring. `railDotKind` is untouched and still returns `idle`, the active row still wraps the corner in its `dotPress` Pressable with the same `hitSlop`, and the slot holds the box open — so the inspector's touch target has exactly the geometry it had, and a row does not shift the moment a dot lights up. Invisible but tappable is the intent, not an oversight: an advanced affordance the owner asked to be undiscoverable.
+
+The obvious implementation — return `null` for idle — would have done the visible half correctly and silently unshipped the feature, because the target is sized from the box the dot occupies and nobody would notice an invisible control had stopped working. That is what the new tests are for.
+
+**Deliberate web/mobile divergence.** The web rail keeps `.car-rail-dot-idle`; the complaint is specific to the narrow phone rail, where eight resting rings read as a wall of state. Both `ProjectRail.tsx` and `docs/SYSTEM-OVERVIEW.md` § "The dot is the entry point" say so, so the next reader does not file it as drift and reconcile it back.
+
+**Tests.** `app/__tests__/rail-idle-dot-not-painted.test.tsx` (new, 6 tests) pins all three halves: nothing is painted (asserted on computed fill and border width, not just on the absence of a testID, so "make it very subtle instead" fails too); the corner box matches a painted dot's geometry exactly; and pressing the active row's invisible corner still opens the inspector without also switching project. The geometry assertion was mutation-tested — collapsing `dotSlot` to 0×0 reds it. `rail-dot-misclick.test.tsx` is unchanged in behaviour; its "inert, not removed" case is annotated to say it is about a dot that has something to report.
+
+**Verified, and not.** Typecheck and ESLint clean on the app package; the three rail test files green (22 tests). The PRE-change rail was reproduced on an emulator — a ring in the corner of every row. The AFTER state was **not** confirmed visually: the emulator was stopped part-way through (it was bogging down the owner's laptop), so what backs this is the harness and the component, not a screenshot of the result. Worth a glance on device. JS-only — no native module, no manifest change, so it ships over-the-air ahead of the next binary. No feature flags.
+
 ## 2026-07-31 — a rail tap is a tap, not a load
 
 Branch `perf/instant-project-switch`. Switching projects had been CORRECT since the previous entry; it had not been instant. Ryan: *"I don't want to see like three screen repaints and a loading indicator appearing for a second and disappearing. I just want tap and instant switch."*

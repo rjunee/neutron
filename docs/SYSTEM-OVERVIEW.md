@@ -2792,16 +2792,28 @@ which is also what bounds the ring at ~400 KB/scope and the fanned WS frame) +
 
 ### The dot is the entry point — and it is now always present
 
-Ryan-locked: **no new icon**. `railDotClass` (web) / `railDotKind` (mobile) are now
+Ryan-locked: **no new icon**. `railDotClass` (web) / `railDotKind` (mobile) are
 TOTAL — they previously returned `null` for an idle scope and for General, which would
-have made the affordance disappear exactly when the owner wants it. An idle scope gets
-a quiet hollow ring (`.car-rail-dot-idle` / `dotIdle`), so an idle session is visually
-distinct from a wedged one and remains clickable. General gets a dot too: it is a real
-chat scope with its own warm session. General still never shows ATTENTION (no bound
-runs) — it degrades to idle. On web the dot is a `role="button"` span inside the row's
-existing `<button>` (a nested `<button>` would be invalid HTML) with
-`stopPropagation`, so a dot tap inspects and does not also navigate; on mobile it is a
-nested `Pressable` with `hitSlop`.
+have made the affordance disappear exactly when the owner wants it. General gets a dot
+too: it is a real chat scope with its own warm session. General still never shows
+ATTENTION (no bound runs) — it degrades to idle. On web the dot is a `role="button"`
+span inside the row's existing `<button>` (a nested `<button>` would be invalid HTML)
+with `stopPropagation`, so a dot tap inspects and does not also navigate; on mobile it
+is a nested `Pressable` with `hitSlop`, present only on the ACTIVE row (an inactive
+row's corner is inert, so a thumb aimed at a project cannot open the inspector for it
+instead).
+
+**Web and mobile deliberately differ at REST.** Web still draws the quiet hollow ring
+(`.car-rail-dot-idle`). Mobile draws NOTHING: `ActivityDot` renders a transparent
+DOT-sized `dotSlot` for `idle`, so the pulsing dot appears only when there is
+activity (the owner, on device, 2026-07-31 — a grey ring on every row of a 72px rail read as
+a wall of state at a moment when nothing was happening). The affordance is unchanged
+by that: `railDotKind` still returns `idle`, the slot holds the corner box open, and
+the active row's Pressable keeps its full touch target — so on mobile the inspector is
+an invisible-but-tappable advanced affordance, and rows do not shift when a dot lights
+up. `app/__tests__/rail-idle-dot-not-painted.test.tsx` pins all three halves (nothing
+painted / box preserved / tap still opens). Treat a future web change here as its own
+decision rather than drift to reconcile.
 
 The chat surface keeps showing only its minimal curated messages — that terseness is
 correct and stays. This is a separate surface.
