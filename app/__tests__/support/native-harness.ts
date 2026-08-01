@@ -74,6 +74,11 @@ const ALIASES: ReadonlyArray<readonly [RegExp, string, 'named' | 'both']> = [
   [pkg('expo-file-system'), `${STUBS}/expo-file-system.ts`, 'named'],
   [pkg('expo-web-browser'), `${STUBS}/expo-web-browser.ts`, 'named'],
   [pkg('expo-sharing'), `${STUBS}/expo-sharing.ts`, 'named'],
+  // The recorder behind the composer's mic. This one is NOT inert — see the
+  // stub's header: whether a press reaches a recorder at all is the exact claim
+  // the voice wiring has to keep proving, so the stub counts its calls and can
+  // be driven into a permission refusal.
+  [pkg('expo-audio'), `${STUBS}/expo-audio.ts`, 'named'],
   // FlashList v2 is native-only; the stub renders every row so assertions can
   // see the transcript. It deliberately does NOT virtualise.
   [pkg('@shopify/flash-list'), `${STUBS}/flash-list.tsx`, 'named'],
