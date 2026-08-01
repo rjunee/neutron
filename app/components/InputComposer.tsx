@@ -9,8 +9,8 @@
  * Char counter appears at 90% of MAX_USER_MESSAGE_LEN; at 100% the
  * send button disables + the counter turns danger-colored.
  *
- * Attach button: paperclip → image picker (web file input or native
- * pickAttachments hook).
+ * Attach control: the leading `+` → image picker (web file input or native
+ * pickAttachments hook), which is the job iMessage's leading `+` does.
  *
  * M2 chat-upload UX extensions:
  *   - `onFilesPicked` hook fires when the user drops a file, pastes a
@@ -117,8 +117,7 @@ export interface InputComposerProps {
    * the RECORDER (capture, permissions, upload). Everything here is the button
    * telling that module what the finger did — the composer never records.
    *
-   * The reference (WhatsApp on Android) supports two interactions, and both are
-   * wired through:
+   * iMessage supports two interactions, and both are wired through:
    *   - HOLD: long-press to start, release to send, or slide away past
    *     {@link VOICE_CANCEL_SLIDE_PT} and release to discard. `onVoiceHoldEnd`
    *     receives which of the two happened.
@@ -151,39 +150,67 @@ const COUNTER_WARN_THRESHOLD = Math.floor(MAX_USER_MESSAGE_LEN_CLIENT * 0.9);
 const COMPOSER_RESTING_BOTTOM_PT = 8;
 
 /**
- * THE COMPOSER'S GEOMETRY — WhatsApp on Android (owner, 2026-07-30: *"In that
- * case we copy Whatsapp on Android"*, choosing the platform-native pattern over
- * iMessage's because he is on Android).
+ * THE COMPOSER'S GEOMETRY — iMessage (owner, 2026-07-31: *"the design is
+ * supposed to be imessage. Whatsapp was ONLY suggested if there's something in
+ * the imessage UX that just CANNOT be done on android."*). The WhatsApp pass
+ * this replaces was built on a fallback that was never actually needed; nothing
+ * below turned out to be blocked on Android.
  *
- * THE STRUCTURE, and it is the part that distinguishes WhatsApp from iMessage:
- * the bar is TWO elements side by side — a filled capsule field, and a circular
- * action button OUTSIDE it to the right. iMessage puts its send button inside
- * the field; WhatsApp does not.
+ * THE STRUCTURE, and it is the whole difference from the WhatsApp arrangement:
  *
- * The capsule's radius is always half its resting height, so one line is a true
- * pill and extra lines grow it into a rounded box. It grows with the text and
- * stops at {@link FIELD_MAX_LINES}, after which `maxHeight` makes the
- * `TextInput` scroll INTERNALLY and the bar stops moving.
+ *   [ + ]  ( ──── outlined pill ────────────────  (↑) )
+ *    ^                                             ^
+ *    one control, LEADING, OUTSIDE the field        the send control lives
+ *                                                   INSIDE the field's
+ *                                                   trailing edge
+ *
+ * WhatsApp puts a large circular action button OUTSIDE the capsule to the right
+ * and fills the capsule; iMessage does neither. The field is an OUTLINED pill —
+ * a hairline stroke over the bar's own background, not a filled grey capsule —
+ * and the send control is a small filled circle tucked inside it.
+ *
+ * The pill's radius is half its RESTING height, so one line is a true pill and
+ * extra lines grow it into a rounded box. It grows upward and stops at
+ * {@link FIELD_MAX_LINES}, after which `maxHeight` makes the `TextInput` scroll
+ * INTERNALLY and the bar stops moving. Both the leading control and the in-field
+ * action button are bottom-aligned, so they track the LAST line as it grows.
  */
 const FIELD_LINE_HEIGHT_PT = TYPOGRAPHY.body.lineHeight ?? 22;
 const FIELD_PADDING_V_PT = 7;
-/** One line of text plus its padding — the resting capsule height. */
+/** One line of text plus its padding — the resting pill height. */
 const FIELD_MIN_HEIGHT_PT = FIELD_LINE_HEIGHT_PT + FIELD_PADDING_V_PT * 2;
-/** WhatsApp grows to roughly six lines, then scrolls the field, not the bar. */
+/** iMessage grows to roughly six lines, then scrolls the field, not the bar. */
 const FIELD_MAX_LINES = 6;
 const FIELD_MAX_HEIGHT_PT = FIELD_LINE_HEIGHT_PT * FIELD_MAX_LINES + FIELD_PADDING_V_PT * 2;
 
-/** The paperclip lives INSIDE the capsule at its trailing edge, as WhatsApp's does. */
-const FIELD_ICON_SIZE_PT = 30;
+/**
+ * THE OUTLINE. `StyleSheet.hairlineWidth` is react-native's thinnest drawable
+ * line — one physical pixel — which is the weight iMessage's stroke actually is.
+ * A flat `1` would render three device pixels at 3x and read as a heavy box.
+ */
+const FIELD_BORDER_PT = StyleSheet.hairlineWidth;
 
 /**
- * THE ACTION BUTTON. Deliberately LARGER than the resting capsule so it reads as
- * a separate control rather than part of the field, and bottom-aligned with it
- * so that it tracks the LAST line once the field grows. At this size,
- * bottom-aligned against a one-line field is also within 2pt of vertically
- * centred, which is the other half of how WhatsApp's looks at rest.
+ * THE LEADING CONTROL — iMessage's single app/plus button, outside the field on
+ * the leading side. It is the ONE control there: iMessage does not stack an
+ * emoji button and a paperclip into the field the way the WhatsApp pass put a
+ * paperclip at the field's trailing edge.
+ *
+ * It is wired to the REAL attachment picker (`handleAttachPress`), which is the
+ * same job iMessage's + does — it opens the photo/file drawer. A + that opened
+ * nothing would be the no-op-control defect this composer already refuses to
+ * ship elsewhere.
  */
-const ACTION_BUTTON_SIZE_PT = 40;
+const LEADING_BUTTON_SIZE_PT = FIELD_MIN_HEIGHT_PT * 0.95;
+
+/**
+ * THE IN-FIELD ACTION BUTTON. Its diameter is the field's INNER height — not an
+ * arbitrary constant — so the filled circle is concentric with the pill's own
+ * rounded cap at rest, which is what iMessage's send button looks like tucked
+ * into the trailing end. Deriving it also means it cannot drift out of
+ * proportion if the field's height or padding is ever retuned.
+ */
+const ACTION_BUTTON_SIZE_PT = FIELD_MIN_HEIGHT_PT - FIELD_BORDER_PT * 2;
 
 /**
  * Android's Material minimum touch target. The visuals are smaller than this on
@@ -192,54 +219,115 @@ const ACTION_BUTTON_SIZE_PT = 40;
  */
 const MIN_TOUCH_TARGET_PT = 44;
 const ACTION_HIT_SLOP_PT = (MIN_TOUCH_TARGET_PT - ACTION_BUTTON_SIZE_PT) / 2;
-const ICON_HIT_SLOP_PT = (MIN_TOUCH_TARGET_PT - FIELD_ICON_SIZE_PT) / 2;
+const LEADING_HIT_SLOP_PT = (MIN_TOUCH_TARGET_PT - LEADING_BUTTON_SIZE_PT) / 2;
 
 /**
- * THE SEND MARK — a paper plane, which is what the reference frame shows inside
- * the circle (not the up-arrow this used to render as a `Text` glyph).
+ * THE SEND MARK — iMessage's UPWARD ARROW.
  *
- * There is no icon set in this app's dependency tree — no `@expo/vector-icons`,
- * no `react-native-svg` (checked `app/package.json`) — and this has to ship
- * over-the-air, so adding a native font or SVG package was not an option. The
- * plane is therefore drawn with the zero-size-view border trick, which is the
- * one way to get a filled triangle out of react-native's box model: a view with
- * no width or height, a coloured left border and transparent top/bottom borders,
- * renders as a right-pointing triangle {@link PLANE_W_PT} wide and
- * {@link GLYPH_BOX_PT} tall. A second triangle in the BUTTON's fill colour is
- * painted over the left edge to cut the notch that makes it read as a plane
- * rather than a "play" arrow.
+ * The owner asked *"Is this up arrow for send how imessage does it? It looks
+ * kinda ugly."* The honest answer is yes, that is the mark iMessage uses
+ * (`arrow.up` in a filled circle), and "copy it exactly" means keeping it. What
+ * was actually ugly was the RENDERING: the pre-#29 code drew a literal `↑` in a
+ * `<Text>`, so its size, weight and vertical position all came from whatever the
+ * system font's metrics happened to be — which is why it sat low in its circle
+ * and looked cheap. It is drawn from views here so its geometry is ours.
  *
- * OPTICAL CENTRING. A right-pointing triangle carries its ink centroid one
- * third of the way from base to apex — x ≈ 5.3 in a 16-wide box whose geometric
- * centre is 8 — so a naive centre parks it visibly left. {@link PLANE_NUDGE_PT}
- * shifts it back by the difference. Vertically it is symmetric and needs
- * nothing. This control is exactly why the glyph is drawn rather than typed: a
- * font glyph's position comes from the font's own metrics, which is what left
- * the old `↑` sitting low in its circle.
+ * There is still no icon set in this app's dependency tree — no
+ * `@expo/vector-icons`, no `react-native-svg` (re-checked `app/package.json`
+ * this change; `expo-audio` was the only dependency PR #24 added) — and this
+ * ships over the air, so a native font or SVG package remains unavailable.
+ *
+ * THE CONSTRUCTION. A vertical shaft plus a two-armed chevron head — an OPEN V,
+ * not a solid triangle. That is settled evidence, not a guess: row-scanning
+ * Apple's own Send-button asset returns THREE separate ink runs across the head
+ * (left arm, background, shaft, background, right arm), which is only possible
+ * if the head is two strokes of the same width as the shaft. The solid-wedge
+ * version is the common wrong one and is what makes clones look cheap.
+ *
+ * THE PROPORTIONS BELOW ARE MEASURED off that asset and expressed as ratios of
+ * the BUTTON'S DIAMETER, so they hold at any size:
+ *
+ *   shaft width      0.069 × D
+ *   glyph height     0.52  × D   (vertically centred in the circle)
+ *   arrowhead width  0.41  × D   (≈ 6 × the shaft width)
+ *   included angle   ≈ 80°       — a WIDE head, ≈40° off vertical per side,
+ *                                  not the 45° a naive diagonal would give
+ *
+ * All three bars carry `borderRadius` half their width, which gives the round
+ * caps and the round apex join the asset shows (its tip and its shaft's foot
+ * each taper to a single pixel).
+ *
+ * The arms are the shaft's bar rotated ±{@link ARROW_ANGLE_DEG}, positioned by
+ * their CENTRES — an arm running from the apex at that angle has its centre half
+ * its length along that diagonal, hence the trig below. Deriving every offset
+ * rather than hardcoding it is what keeps the head attached to the shaft if the
+ * button is ever resized. A rotated bar's layout box legitimately extends past
+ * its parent, so the glyph is explicitly `overflow: visible`.
+ *
+ * Apple's SF Pro and the exact `arrow.up` outline are proprietary, so this is a
+ * reconstruction from measured proportions, not a copy of the asset.
  */
-const GLYPH_BOX_PT = 16;
-const PLANE_W_PT = 16;
-const PLANE_NUDGE_PT = 2;
-/** The notch cut into the plane's trailing edge. */
-const PLANE_NOTCH_W_PT = 6;
-const PLANE_NOTCH_H_PT = 8;
+const ARROW_SHAFT_RATIO = 0.069;
+const ARROW_HEIGHT_RATIO = 0.52;
+const ARROW_HEAD_RATIO = 0.41;
+const ARROW_ANGLE_DEG = 40;
 
-function SendPlane({ color, fill }: { color: string; fill: string }): React.ReactElement {
+const ARROW_STROKE_PT = ACTION_BUTTON_SIZE_PT * ARROW_SHAFT_RATIO;
+/** The glyph's box is square at its measured height; the head is narrower, so it fits. */
+const ARROW_BOX_PT = ACTION_BUTTON_SIZE_PT * ARROW_HEIGHT_RATIO;
+const ARROW_APEX_X_PT = ARROW_BOX_PT / 2;
+/** Half the head's width — how far each arm's tip reaches from the shaft. */
+const ARROW_HEAD_HALF_PT = (ACTION_BUTTON_SIZE_PT * ARROW_HEAD_RATIO) / 2;
+const ARROW_ANGLE_RAD = (ARROW_ANGLE_DEG * Math.PI) / 180;
+/** Arm length that puts its tip exactly at the head's half-width, at that angle. */
+const ARROW_ARM_PT = ARROW_HEAD_HALF_PT / Math.sin(ARROW_ANGLE_RAD);
+/** Where an arm's CENTRE lands from the apex, per axis. */
+const ARROW_ARM_DX_PT = (ARROW_ARM_PT / 2) * Math.sin(ARROW_ANGLE_RAD);
+const ARROW_ARM_DY_PT = (ARROW_ARM_PT / 2) * Math.cos(ARROW_ANGLE_RAD);
+
+function SendArrow({ color }: { color: string }): React.ReactElement {
   return (
-    <View style={styles.sendGlyph} testID="composer-send-plane">
-      <View style={[styles.sendPlaneBody, { borderLeftColor: color }]} />
-      <View style={[styles.sendPlaneNotch, { borderLeftColor: fill }]} />
+    <View style={styles.arrowGlyph} testID="composer-send-arrow">
+      <View style={[styles.arrowShaft, { backgroundColor: color }]} />
+      <View style={[styles.arrowArm, styles.arrowArmLeft, { backgroundColor: color }]} />
+      <View style={[styles.arrowArm, styles.arrowArmRight, { backgroundColor: color }]} />
+    </View>
+  );
+}
+
+/**
+ * THE PLUS, drawn the same way: two bars crossing at the centre with rounded
+ * caps. iMessage's leading control is a plus in a filled grey circle.
+ */
+const PLUS_BOX_PT = 16;
+const PLUS_STROKE_PT = 2;
+/** Measured at 13–14pt against a ~35pt circle. */
+const PLUS_ARM_PT = 13.5;
+
+function PlusGlyph({ color }: { color: string }): React.ReactElement {
+  return (
+    <View style={styles.plusGlyph} testID="composer-plus-glyph">
+      <View style={[styles.plusBarH, { backgroundColor: color }]} />
+      <View style={[styles.plusBarV, { backgroundColor: color }]} />
     </View>
   );
 }
 
 /**
  * THE MICROPHONE, drawn the same way and for the same reason (no icon set in the
- * dependency tree, and this has to ship over-the-air). Three parts in an 18×18
+ * dependency tree, and this has to ship over-the-air). Three parts in a 16×16
  * box: a capsule head, a U-shaped cradle made from a box with a transparent top
  * border and rounded bottom corners, and a short stem joining them to the chin.
+ *
+ * THE ONE DELIBERATE DEVIATION FROM iOS 17/18. Apple puts a DICTATION mic in
+ * this slot — speech-to-text into the field. Ours is the VOICE-MESSAGE recorder
+ * instead: recording and sending audio is a hard requirement here, and this is
+ * the slot the gesture belongs in. The position, the swap and the mark are
+ * iMessage's; only what the control does differs. Worth noting that iOS 26 later
+ * replaced the dictation mic in this same slot with a waveform Record-Audio
+ * control, so Apple converged on this usage.
  */
-const MIC_BOX_PT = 18;
+const MIC_BOX_PT = 16;
 
 function MicGlyph({ color }: { color: string }): React.ReactElement {
   return (
@@ -253,7 +341,7 @@ function MicGlyph({ color }: { color: string }): React.ReactElement {
 
 /**
  * How far the finger has to travel from where the hold started before releasing
- * DISCARDS instead of sends. The reference slides left toward a "cancel" label;
+ * DISCARDS instead of sends. iMessage slides left toward a "cancel" affordance;
  * the distance is what makes the gesture forgiving enough to use one-handed.
  */
 const VOICE_CANCEL_SLIDE_PT = 64;
@@ -548,25 +636,37 @@ export function InputComposer({
         </View>
       ) : null}
       <View style={styles.row}>
-        {/* THE CAPSULE. Filled a shade lighter than the bar, radius = half its
-            resting height, and the attachment control lives INSIDE it at the
-            trailing edge — the arrangement the reference frame shows.
+        {/* THE LEADING CONTROL — iMessage's single app/plus button, OUTSIDE the
+            field on the leading side. One control, not a stack: iMessage has no
+            emoji button and no separate paperclip here.
 
-            NOT PORTED: the emoji/sticker button the reference carries at the
-            capsule's LEADING edge. This app has no emoji picker to open
-            (searched: no picker component, no such dependency), and a button
-            that opens nothing is the same defect as a microphone that records
-            nothing. The leading edge is plain padding until there is a picker
-            behind it. */}
-        <View style={styles.field}>
+            It opens the real attachment picker, which is the job iMessage's +
+            does. Bottom-aligned with the row so it tracks the last line. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Add attachment"
+          onPress={handleAttachPress}
+          disabled={disabled || sending}
+          hitSlop={LEADING_HIT_SLOP_PT}
+          style={({ pressed }) => [styles.leadingBtn, pressed && styles.pressed]}
+          testID="composer-attach"
+        >
+          <PlusGlyph color={THEME.text_secondary} />
+        </Pressable>
+        {/* THE FIELD — an OUTLINED pill: a hairline stroke over the bar's own
+            background, not a filled grey capsule. The action control sits INSIDE
+            it at the trailing edge, which is the arrangement that most separates
+            iMessage from the WhatsApp pass this replaces. */}
+        <View style={styles.field} testID="composer-field">
           <TextInput
             ref={inputRef}
             accessibilityLabel="Compose message"
             style={styles.input}
             placeholder={placeholder}
             placeholderTextColor={THEME.text_muted}
-            // The reference tints the caret with the app accent. `cursorColor`
-            // is the Android property; `selectionColor` covers both platforms.
+            // The caret takes the app's own accent. `cursorColor` is the Android
+            // property; `selectionColor` covers both platforms. NOT iMessage
+            // blue — this app's accent is the tint everywhere else in it.
             selectionColor={THEME.accent}
             cursorColor={THEME.accent}
             value={draft}
@@ -575,75 +675,66 @@ export function InputComposer({
             multiline
             blurOnSubmit={false}
           />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Attach image"
-            onPress={handleAttachPress}
-            disabled={disabled || sending}
-            hitSlop={ICON_HIT_SLOP_PT}
-            style={({ pressed }) => [styles.fieldIcon, pressed && styles.pressed]}
-            testID="composer-attach"
-          >
-            <Text style={styles.attachIcon}>📎</Text>
-          </Pressable>
-        </View>
-        {/* THE ACTION BUTTON — outside the capsule, to its right, and it SWAPS
-            BY CONTENT: microphone while the field is empty, send once there is
-            something to send. That swap is the affordance; the slot itself is
-            always occupied, so the capsule never reflows mid-typing. */}
-        <View style={styles.actionSlot}>
-          {showSend ? (
-            <Animated.View
-              style={[
-                styles.actionFill,
-                { opacity: sendReveal, transform: [{ scale: sendReveal }] },
-              ]}
-            >
+          {/* THE IN-FIELD ACTION BUTTON. It SWAPS BY CONTENT — microphone while
+              the field is empty, send arrow once there is something to send —
+              which is the same slot iMessage swaps its own audio control and
+              send button through. The slot is always occupied, so the pill never
+              reflows mid-typing, and it is bottom-aligned so it stays pinned to
+              the LAST line as the field grows upward. */}
+          <View style={styles.actionSlot}>
+            {showSend ? (
+              <Animated.View
+                style={[
+                  styles.actionFill,
+                  { opacity: sendReveal, transform: [{ scale: sendReveal }] },
+                ]}
+              >
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Send"
+                  onPress={handleSend}
+                  disabled={!canSend}
+                  hitSlop={ACTION_HIT_SLOP_PT}
+                  style={({ pressed }) => [styles.sendBtn, pressed && styles.pressed]}
+                >
+                  {sending ? (
+                    <ActivityIndicator size="small" color={THEME.background} />
+                  ) : (
+                    // The accessibility label stays "Send" — that is what a screen
+                    // reader announces and what the device harness presses.
+                    <SendArrow color={THEME.background} />
+                  )}
+                </Pressable>
+              </Animated.View>
+            ) : (
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Send"
-                onPress={handleSend}
-                disabled={!canSend}
+                accessibilityLabel={
+                  holding === null
+                    ? 'Record voice message'
+                    : holding.cancelling
+                      ? 'Release to discard voice message'
+                      : 'Release to send voice message'
+                }
+                testID="composer-voice"
+                onPress={handleVoiceTap}
+                onLongPress={handleVoiceHoldStart}
+                onPressOut={handleVoiceRelease}
+                onTouchMove={handleVoiceTouchMove}
+                delayLongPress={250}
+                disabled={disabled || sending}
                 hitSlop={ACTION_HIT_SLOP_PT}
-                style={({ pressed }) => [styles.sendBtn, pressed && styles.pressed]}
+                style={({ pressed }) => [
+                  styles.voiceBtn,
+                  holding !== null && styles.voiceBtnHolding,
+                  holding?.cancelling === true && styles.voiceBtnCancelling,
+                  pressed && styles.pressed,
+                ]}
               >
-                {sending ? (
-                  <ActivityIndicator size="small" color={THEME.background} />
-                ) : (
-                  // The accessibility label stays "Send" — that is what a screen
-                  // reader announces and what the device harness presses.
-                  <SendPlane color={THEME.background} fill={THEME.accent} />
-                )}
+                <MicGlyph color={holding === null ? THEME.text_muted : THEME.background} />
               </Pressable>
-            </Animated.View>
-          ) : (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={
-                holding === null
-                  ? 'Record voice message'
-                  : holding.cancelling
-                    ? 'Release to discard voice message'
-                    : 'Release to send voice message'
-              }
-              testID="composer-voice"
-              onPress={handleVoiceTap}
-              onLongPress={handleVoiceHoldStart}
-              onPressOut={handleVoiceRelease}
-              onTouchMove={handleVoiceTouchMove}
-              delayLongPress={250}
-              disabled={disabled || sending}
-              hitSlop={ACTION_HIT_SLOP_PT}
-              style={({ pressed }) => [
-                styles.voiceBtn,
-                holding !== null && styles.voiceBtnHolding,
-                holding?.cancelling === true && styles.voiceBtnCancelling,
-                pressed && styles.pressed,
-              ]}
-            >
-              <MicGlyph color={holding === null ? THEME.text_muted : THEME.background} />
-            </Pressable>
-          )}
+            )}
+          </View>
         </View>
       </View>
       {voiceNotice !== null ? (
@@ -746,46 +837,78 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     // BOTTOM-aligned, not centred. Once the field grows past one line the
-    // action button must track the LAST line; centring it against a grown field
-    // is the tell that the pattern was copied from a single-line screenshot.
+    // leading control must track the LAST line; centring it against a grown
+    // field is the tell that the pattern was copied from a single-line
+    // screenshot.
     alignItems: 'flex-end',
-    gap: SPACING.sm,
+    // Measured at ~12pt between the `+` circle and the field's leading edge.
+    gap: SPACING.md,
+  },
+  /** iMessage's + — a filled grey circle OUTSIDE the field, on the leading side. */
+  leadingBtn: {
+    height: LEADING_BUTTON_SIZE_PT,
+    width: LEADING_BUTTON_SIZE_PT,
+    borderRadius: LEADING_BUTTON_SIZE_PT / 2,
+    backgroundColor: THEME.surface_raised,
+    justifyContent: 'center',
+    alignItems: 'center',
+    // Centres it against a one-line field, and holds that offset from the last
+    // line once the field grows.
+    marginBottom: (FIELD_MIN_HEIGHT_PT - LEADING_BUTTON_SIZE_PT) / 2,
+  },
+  plusGlyph: {
+    height: PLUS_BOX_PT,
+    width: PLUS_BOX_PT,
+  },
+  plusBarH: {
+    position: 'absolute',
+    left: (PLUS_BOX_PT - PLUS_ARM_PT) / 2,
+    top: (PLUS_BOX_PT - PLUS_STROKE_PT) / 2,
+    width: PLUS_ARM_PT,
+    height: PLUS_STROKE_PT,
+    borderRadius: PLUS_STROKE_PT / 2,
+  },
+  plusBarV: {
+    position: 'absolute',
+    left: (PLUS_BOX_PT - PLUS_STROKE_PT) / 2,
+    top: (PLUS_BOX_PT - PLUS_ARM_PT) / 2,
+    width: PLUS_STROKE_PT,
+    height: PLUS_ARM_PT,
+    borderRadius: PLUS_STROKE_PT / 2,
   },
   field: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'flex-end',
-    // Filled, not outlined: a shade lighter than the bar behind it.
-    backgroundColor: THEME.surface_raised,
+    // OUTLINED, not filled. The pill is the bar's own background with a hairline
+    // stroke around it — the single most visible difference from the filled grey
+    // capsule this replaces.
+    backgroundColor: 'transparent',
+    borderWidth: FIELD_BORDER_PT,
+    borderColor: THEME.hairline,
     // A PILL, not a rounded rectangle: half the RESTING height, so one line is
     // fully round and extra lines grow it into a rounded box.
     borderRadius: FIELD_MIN_HEIGHT_PT / 2,
     minHeight: FIELD_MIN_HEIGHT_PT,
-    paddingRight: SPACING.xs,
   },
-  fieldIcon: {
-    height: FIELD_ICON_SIZE_PT,
-    width: FIELD_ICON_SIZE_PT,
-    borderRadius: FIELD_ICON_SIZE_PT / 2,
-    justifyContent: 'center',
-    alignItems: 'center',
-    // Keeps the icon level with the last line as the capsule grows.
-    marginBottom: (FIELD_MIN_HEIGHT_PT - FIELD_ICON_SIZE_PT) / 2,
-  },
-  attachIcon: { fontSize: 17 },
   input: {
     flex: 1,
     color: THEME.text_primary,
-    paddingLeft: SPACING.md,
+    // Measured at ~15pt from the field's leading edge to the first glyph.
+    paddingLeft: SPACING.lg,
+    // Clears the in-field action button, which occupies the trailing end.
     paddingRight: SPACING.xs,
     paddingVertical: FIELD_PADDING_V_PT,
     ...TYPOGRAPHY.body,
-    minHeight: FIELD_MIN_HEIGHT_PT,
+    minHeight: FIELD_MIN_HEIGHT_PT - FIELD_BORDER_PT * 2,
     // THE GROWTH CAP. Past this the TextInput scrolls its own content and the
     // bar stops rising, which is the behaviour the field is supposed to have
     // and the one most often skipped.
     maxHeight: FIELD_MAX_HEIGHT_PT,
   },
+  /** The in-field trailing slot: it fills the pill's inner height, sits just
+   *  inside the stroke at the trailing end, and is bottom-aligned so it stays
+   *  pinned to the LAST line as the field grows upward. */
   actionSlot: {
     height: ACTION_BUTTON_SIZE_PT,
     width: ACTION_BUTTON_SIZE_PT,
@@ -794,17 +917,19 @@ const styles = StyleSheet.create({
     height: '100%',
     width: '100%',
   },
-  // The resting mic is quiet — an outlined circle, not a filled one, so the
-  // filled accent circle means "send" and nothing else.
+  // The resting mic is a BARE GLYPH — no circle behind it — which is how
+  // iOS 17/18 renders the control in this slot, and what makes the swap read: a
+  // quiet mark while empty, a filled accent circle the moment there is something
+  // to send. A filled circle in both states would say nothing by changing.
   voiceBtn: {
     height: ACTION_BUTTON_SIZE_PT,
     width: ACTION_BUTTON_SIZE_PT,
     borderRadius: ACTION_BUTTON_SIZE_PT / 2,
-    backgroundColor: THEME.surface_raised,
+    backgroundColor: 'transparent',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  /** Holding: the control fills, the way the reference's does while recording. */
+  /** Holding: the control fills, so the recording state is unmistakable. */
   voiceBtnHolding: { backgroundColor: THEME.accent },
   /** Slid far enough that releasing discards. */
   voiceBtnCancelling: { backgroundColor: THEME.danger },
@@ -814,27 +939,27 @@ const styles = StyleSheet.create({
   },
   micHead: {
     position: 'absolute',
-    left: 5,
+    left: 4.5,
     top: 0,
-    width: 8,
-    height: 11,
-    borderRadius: 4,
+    width: 7,
+    height: 10,
+    borderRadius: 3.5,
   },
   // A U: a box with its top border removed and its bottom corners rounded.
   micCradle: {
     position: 'absolute',
-    left: 2,
-    top: 7,
-    width: 14,
-    height: 8,
+    left: 1.5,
+    top: 6,
+    width: 13,
+    height: 7,
     borderWidth: 2,
-    borderBottomLeftRadius: 7,
-    borderBottomRightRadius: 7,
+    borderBottomLeftRadius: 6.5,
+    borderBottomRightRadius: 6.5,
   },
   micStem: {
     position: 'absolute',
-    left: 8,
-    top: 15,
+    left: 7,
+    top: 13,
     width: 2,
     height: 3,
   },
@@ -845,44 +970,46 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.accent,
     justifyContent: 'center',
     alignItems: 'center',
+    // The arrow's rotated arms extend past the glyph's layout box; this is the
+    // ancestor that would otherwise clip them.
+    overflow: 'visible',
   },
-  sendGlyph: {
-    height: GLYPH_BOX_PT,
-    width: PLANE_W_PT,
-    // The optical-centring shift; see the SendPlane doc comment.
-    marginLeft: PLANE_NUDGE_PT,
-    justifyContent: 'center',
+  arrowGlyph: {
+    height: ARROW_BOX_PT,
+    width: ARROW_BOX_PT,
+    // A rotated bar's layout box legitimately extends past this one; nothing
+    // here may clip it.
+    overflow: 'visible',
   },
-  // A right-pointing filled triangle: zero-size box, coloured left border,
-  // transparent top/bottom borders.
-  sendPlaneBody: {
-    width: 0,
-    height: 0,
-    borderStyle: 'solid',
-    borderTopWidth: GLYPH_BOX_PT / 2,
-    borderBottomWidth: GLYPH_BOX_PT / 2,
-    borderLeftWidth: PLANE_W_PT,
-    borderRightWidth: 0,
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    borderRightColor: 'transparent',
-  },
-  // The same triangle in the BUTTON's fill colour, painted over the trailing
-  // edge — that notch is the difference between a paper plane and a play arrow.
-  sendPlaneNotch: {
+  // The shaft spans the glyph's full measured height, apex to tail.
+  arrowShaft: {
     position: 'absolute',
-    left: 0,
-    top: (GLYPH_BOX_PT - PLANE_NOTCH_H_PT) / 2,
-    width: 0,
-    height: 0,
-    borderStyle: 'solid',
-    borderTopWidth: PLANE_NOTCH_H_PT / 2,
-    borderBottomWidth: PLANE_NOTCH_H_PT / 2,
-    borderLeftWidth: PLANE_NOTCH_W_PT,
-    borderRightWidth: 0,
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    borderRightColor: 'transparent',
+    left: ARROW_APEX_X_PT - ARROW_STROKE_PT / 2,
+    top: 0,
+    width: ARROW_STROKE_PT,
+    height: ARROW_BOX_PT,
+    // Round caps, as the asset has — and what makes the apex join read as one
+    // continuous mark rather than three sticks.
+    borderRadius: ARROW_STROKE_PT / 2,
+  },
+  arrowArm: {
+    position: 'absolute',
+    width: ARROW_STROKE_PT,
+    height: ARROW_ARM_PT,
+    borderRadius: ARROW_STROKE_PT / 2,
+  },
+  // Each arm is the shaft's bar rotated ±ARROW_ANGLE_DEG about its own centre,
+  // so it is POSITIONED by that centre: half its length down the diagonal from
+  // the apex, which sits at the top of the shaft.
+  arrowArmLeft: {
+    left: ARROW_APEX_X_PT - ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
+    top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
+    transform: [{ rotate: `${ARROW_ANGLE_DEG}deg` }],
+  },
+  arrowArmRight: {
+    left: ARROW_APEX_X_PT + ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
+    top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
+    transform: [{ rotate: `-${ARROW_ANGLE_DEG}deg` }],
   },
   pressed: { opacity: 0.7 },
   counter: {
