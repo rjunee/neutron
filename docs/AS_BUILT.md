@@ -2,6 +2,73 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-01 — the reachability gate: coverage that asks whether the owner can still DO it
+
+Branch `feat/reachability-gate`. New:
+`landing/chat-react/__tests__/reachability-inventory.ts` + `reachability.test.tsx`,
+`open/__tests__/reachability-inventory.ts` + `reachability.test.ts` +
+`reachability-inventory-complete.test.ts`. Doc:
+`docs/SYSTEM-OVERVIEW.md` § Reachability gate. No production code changed.
+
+**Why.** Four regressions reached the owner through green CI in a day, and they
+were one bug wearing four hats: **a part worked and the product could not reach
+it.** Voice recording, mounted by a host screen that never passed its props. A
+usage meter absent from the wide layout, in an app where no test had ever rendered
+a wide layout. `/code`, written and unit-tested and never added to the composer's
+filter chain, so every `/code` went to the model. Unit tests assert that a part
+works; nothing asserted that the product still reaches it, and no amount of the
+former produces the latter.
+
+**What landed.** An inventory of what the owner must be able to do, as data, with
+the owner-facing sentence to print when each stops being true — and three gates
+that prove it against the real thing rather than against a mounted part:
+
+- the REAL app shell (`ProjectShell` with the real controller, session, tab
+  resolver, usage client; fake socket, injected fetch, no model) mounted at BOTH
+  shipped layouts, probing eight affordances;
+- the REAL Open composition over a live `Bun.serve` and the unified
+  `/ws/app/chat` socket, TYPING `/status`, `/reset` and `/code` and requiring the
+  composed chain to claim each one without the model seeing it;
+- a completeness gate that reads the product's real command factories out of
+  `gateway/boot-chat-command-filters.ts` and fails when one is neither probed nor
+  excluded in writing, with a reason.
+
+**The two ideas doing the work.** *Layout parity*: an affordance reachable at one
+width and missing at another fails unless the inventory records why — which is the
+general form of the usage-meter bug rather than a test for that one instance.
+*Self-extension*: a new `/`-command reds the gate on the PR that adds it, so the
+inventory cannot quietly stop describing the product. Failure text is the owner's
+sentence ("You cannot attach a file — the attach control is missing from the
+composer"), asserted as the value so it lands in any runner's diff, and a healthy
+run prints nothing.
+
+**Where it runs.** The ordinary CI shards — no workflow change, no schedule, no
+notifier. All four incidents were introduced by a merge, so the moment that
+matters is before the merge. Nothing in it touches the network, a model or a
+clock, which is the property that lets a red be believed.
+
+**Mutation-tested, all four:** reintroducing the wide-branch `usage` omission reds
+the wide layout and the parity check; renaming the attach control reds both
+layouts; dropping `statusChatCommandFilter` / `tridentCodeChatCommandFilter` from
+the chain names `/status` and `/code` as lost; an unaccounted-for filter factory
+reds the completeness gate.
+
+**Not covered, stated plainly** (full list in SYSTEM-OVERVIEW): the mobile app —
+so the voice-props incident would still have got through, and the device harness
+that could catch it is pinned to one screen width (`HARNESS_SCREEN_WIDTH` 393), so
+the mobile wide branch stays untestable; playback behaviour, so the looping voice
+note is out of reach; CSS, since happy-dom renders a tree and not a layout;
+`/remind` and `/cal`, excluded with written reasons because they claim
+conditionally and a red would be ambiguous; and anything post-deploy, since this
+is a pre-merge gate and not a monitor.
+
+**Found while building it.** `tests/e2e-browser/onboarding_walkthrough.py`, the
+only real-browser check in the repo, is orphaned in two independent ways: it is a
+`.py` file and `scripts/lib/discover-test-files.sh` globs `.test.*`/`.spec.*`
+only, and nothing in `.github/workflows/` references it. It also prints `E2E SKIP`
+and exits 0 whenever no server answers, so it can prove nothing indefinitely and
+look fine doing it.
+
 ## 2026-07-30 — the idle nudge is switched ON, against a test that proves it does not repeat
 
 Branch `fix/idle-nudge-user-activity-watermark`. `channels/button-store.ts`,
