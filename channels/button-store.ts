@@ -122,6 +122,62 @@ const RESERVED_RESOLUTION_VALUES: ReadonlySet<string> = new Set([
   '__cancel__',
 ])
 
+/**
+ * The `resolution_speaker_user_id` sentinel stamped on rows NO PERSON authored:
+ * `persistInertAgentTurn` (proactive brief, idle nudge, system notices, wow
+ * statements) and `sweepExpired`'s synthesized `__timeout__` resolution.
+ *
+ * Anything that answers "when did the owner last actually show up?" MUST
+ * exclude it — see `listTopicsByUser`'s `last_user_activity_at`.
+ */
+export const SYSTEM_SPEAKER_USER_ID = '__system__'
+
+/**
+ * Normalize `listTopicsByUser`'s root argument to a non-empty, de-duplicated
+ * array of topic roots. A bare string is the single-namespace sidebar call; an
+ * array unions namespaces (`web:<u>` + `app:<u>`) in one query.
+ */
+function normalizeTopicRoots(input: string | readonly string[]): string[] {
+  const raw = typeof input === 'string' ? [input] : input
+  if (!Array.isArray(raw)) {
+    throw new ButtonStoreError(
+      'invalid_prompt',
+      `listTopicsByUser requires a non-empty user_id_prefix`,
+    )
+  }
+  const roots: string[] = []
+  for (const candidate of raw) {
+    if (typeof candidate !== 'string' || candidate.length === 0) {
+      throw new ButtonStoreError(
+        'invalid_prompt',
+        `listTopicsByUser requires a non-empty user_id_prefix`,
+      )
+    }
+    if (!roots.includes(candidate)) roots.push(candidate)
+  }
+  if (roots.length === 0) {
+    throw new ButtonStoreError(
+      'invalid_prompt',
+      `listTopicsByUser requires a non-empty user_id_prefix`,
+    )
+  }
+  return roots
+}
+
+/**
+ * The LONGEST root that `topic_id` is a `<root>:` descendant of, or null when
+ * none matches. Longest-first so an overlapping pair of roots can never
+ * attribute a topic to the shorter one.
+ */
+function longestMatchingRoot(roots: readonly string[], topic_id: string): string | null {
+  let best: string | null = null
+  for (const root of roots) {
+    if (!topic_id.startsWith(`${root}:`)) continue
+    if (best === null || root.length > best.length) best = root
+  }
+  return best
+}
+
 export class ButtonStore {
   private readonly db: ProjectDb
   private readonly now: () => number
@@ -310,8 +366,17 @@ export class ButtonStore {
           expires_at, idempotency_key, created_at, delivered_at,
           resolved_at, resolution_value, resolution_speaker_user_id,
           resolution_channel_kind, kind)
-       VALUES (?, ?, ?, '[]', 1, ?, NULL, ?, ?, ?, '', '__system__', 'webhook', NULL)`,
-      [prompt_id, input.topic_id, input.body, now + DEFAULT_EXPIRES_IN_MS, now, now, now],
+       VALUES (?, ?, ?, '[]', 1, ?, NULL, ?, ?, ?, '', ?, 'webhook', NULL)`,
+      [
+        prompt_id,
+        input.topic_id,
+        input.body,
+        now + DEFAULT_EXPIRES_IN_MS,
+        now,
+        now,
+        now,
+        SYSTEM_SPEAKER_USER_ID,
+      ],
     )
     return { prompt_id }
   }
@@ -919,25 +984,60 @@ export class ButtonStore {
    * `/api/v1/chat/topics` surface; one row per topic the user has at
    * least one button_prompts row in.
    *
-   * Scope: rows whose `topic_id` is exactly the user's General topic
-   * (`web:<user_id>`) OR a per-project descendant
-   * (`web:<user_id>:<project_id>`). The prefix match is deliberately
-   * strict — `web:<user_id>` followed by either end-of-string OR a
-   * literal `:` — so an instance with two users `u-1` and `u-10` does
-   * NOT see `u-10`'s topics leaked into `u-1`'s sidebar.
+   * Scope: rows whose `topic_id` is exactly one of the supplied topic
+   * ROOTS (the user's General topic, e.g. `web:<user_id>`) OR a
+   * per-project descendant of one (`web:<user_id>:<project_id>`). The
+   * prefix match is deliberately strict — a root followed by either
+   * end-of-string OR a literal `:` — so an instance with two users
+   * `u-1` and `u-10` does NOT see `u-10`'s topics leaked into `u-1`'s
+   * sidebar.
    *
-   * The `project_id` for each row is derived from the topic_id:
-   *   - exactly `web:<user_id>` → project_id = null (General)
-   *   - `web:<user_id>:<rest>` → project_id = rest
+   * MULTIPLE ROOTS: the owner exists under more than one topic namespace
+   * — `web:<user>` (React web client) and `app:<user>` (Expo app-ws
+   * client) — and a caller that needs the owner's WHOLE footprint (the
+   * idle-nudge sweep's activity watermark) must see both. Pass an array
+   * to union them in ONE query; a bare string stays the single-root
+   * sidebar call. Roots are matched longest-first when deriving
+   * `project_id`, so overlapping roots cannot mis-attribute a topic.
+   *
+   * The `project_id` for each row is derived from its matching root:
+   *   - exactly `<root>` → project_id = null (General)
+   *   - `<root>:<rest>` → project_id = rest
    *
    * `last_body` precomputes the 50-char preview the sidebar renders.
    * Unresolved-and-unexpired rows count toward `unread_count` — the same
    * filter the chat-history surface uses for "active" prompts. Resolved
    * prompts never carry unread weight.
+   *
+   * TWO WATERMARKS, deliberately (2026-07-30):
+   *   • `last_created_at` — `MAX(created_at)` over EVERY row, agent posts
+   *     included. This is the SIDEBAR's ordering key ("most recent
+   *     message in this thread"), and an agent-authored bubble is a
+   *     message, so it must keep counting here.
+   *   • `last_user_activity_at` — the timestamp of the most recent turn a
+   *     REAL PERSON took: `resolved_at` on rows whose
+   *     `resolution_speaker_user_id` is a genuine user id. Rows the
+   *     system authored (`persistInertAgentTurn` and the `sweepExpired`
+   *     `__timeout__` synthesis both stamp `{@link SYSTEM_SPEAKER_USER_ID}`)
+   *     contribute NOTHING. Unresolved agent prompts contribute nothing
+   *     either — an unanswered question is not the user showing up.
+   *
+   * Why the second one exists: the idle-nudge sweep dedupes by comparing
+   * current activity against the watermark it stored at the last nudge,
+   * and the nudge's own post is persisted into THIS table via
+   * `persistInertAgentTurn`. Read against `last_created_at` the sweep sees
+   * its own bubble as "the user came back", re-arms itself, and re-nudges
+   * every idle cycle forever. `last_user_activity_at` is the watermark
+   * that only a person can move.
    */
   async listTopicsByUser(input: {
-    /** Exact `webTopicId(user_id)` — matched via `topic_id = ?` for General, and a wildcard-free range `[<prefix>:, <prefix>;)` for project descendants. */
-    user_id_prefix: string
+    /**
+     * One or more exact topic ROOTS (`webTopicId(user_id)`,
+     * `appWsTopicId(user_id)`) — each matched via `topic_id = ?` for the
+     * General row, plus a wildcard-free range `[<root>:, <root>;)` for its
+     * project descendants.
+     */
+    user_id_prefix: string | readonly string[]
     /** Wall clock used to gate unresolved rows by `expires_at > now`. */
     now: number
   }): Promise<
@@ -946,16 +1046,12 @@ export class ButtonStore {
       project_id: string | null
       last_body: string | null
       last_created_at: number | null
+      /** Most recent GENUINE user turn in this topic; null when a person has never spoken. */
+      last_user_activity_at: number | null
       unread_count: number
     }>
   > {
-    if (typeof input.user_id_prefix !== 'string' || input.user_id_prefix.length === 0) {
-      throw new ButtonStoreError(
-        'invalid_prompt',
-        `listTopicsByUser requires a non-empty user_id_prefix`,
-      )
-    }
-    const general = input.user_id_prefix
+    const roots = normalizeTopicRoots(input.user_id_prefix)
     // Argus r1 BLOCKER 2 (2026-05-28) — switched from `topic_id LIKE
     // 'web:<u>:%'` to a range-bound comparison so a user_id that
     // happens to contain SQL LIKE wildcards (`%` or `_`) cannot leak
@@ -974,17 +1070,21 @@ export class ButtonStore {
     // The general row is matched with an explicit `topic_id = ?`.
     // The bounds are pure equality on the topic_id index — no LIKE
     // optimizer pessimization, no wildcard-escape complexity.
-    const projectLowerBound = `${input.user_id_prefix}:`
-    const projectUpperBound = `${input.user_id_prefix};`
+    // One `(exact-root OR descendant-range)` clause per root, OR-joined, so N
+    // namespaces resolve in ONE grouped scan rather than N round trips.
+    const scopeClause = roots.map(() => `(topic_id = ? OR (topic_id >= ? AND topic_id < ?))`).join(' OR ')
+    const scopeParams: string[] = []
+    for (const root of roots) scopeParams.push(root, `${root}:`, `${root};`)
     const rows = this.db
       .prepare<
         {
           topic_id: string
           last_body: string | null
           last_created_at: number | null
+          last_user_activity_at: number | null
           unread_count: number
         },
-        [number, string, string, string]
+        [string, number, ...string[]]
       >(
         `SELECT topic_id,
                 -- Prefer the agent body, but fall back to the user's freeform
@@ -998,19 +1098,33 @@ export class ButtonStore {
                   WHERE b2.topic_id = bp.topic_id
                   ORDER BY b2.created_at DESC, b2.prompt_id DESC LIMIT 1) AS last_body,
                 MAX(created_at) AS last_created_at,
+                -- GENUINE user activity only. A turn counts iff a real person
+                -- resolved it: the agent's own posts (persistInertAgentTurn) and
+                -- the expiry sweep's synthesized timeout both stamp the
+                -- '__system__' sentinel and are excluded, so the idle-nudge
+                -- sweep can never read its own bubble as "the user returned".
+                MAX(CASE WHEN resolved_at IS NOT NULL
+                          AND resolution_speaker_user_id IS NOT NULL
+                          AND resolution_speaker_user_id <> ?
+                         THEN resolved_at END) AS last_user_activity_at,
                 SUM(CASE WHEN resolved_at IS NULL AND expires_at > ? THEN 1 ELSE 0 END) AS unread_count
            FROM button_prompts bp
-          WHERE topic_id = ? OR (topic_id >= ? AND topic_id < ?)
+          WHERE ${scopeClause}
           GROUP BY topic_id`,
       )
-      .all(input.now, general, projectLowerBound, projectUpperBound)
+      .all(SYSTEM_SPEAKER_USER_ID, input.now, ...scopeParams)
     return rows.map((row) => {
-      const project_id = row.topic_id === general ? null : row.topic_id.slice(general.length + 1)
+      // Longest matching root wins, so overlapping roots can never attribute a
+      // descendant to the shorter one.
+      const root = roots.find((r) => row.topic_id === r) ?? longestMatchingRoot(roots, row.topic_id)
+      const project_id =
+        root === null || row.topic_id === root ? null : row.topic_id.slice(root.length + 1)
       return {
         topic_id: row.topic_id,
         project_id,
         last_body: row.last_body !== null ? truncatePreview(row.last_body) : null,
         last_created_at: row.last_created_at,
+        last_user_activity_at: row.last_user_activity_at,
         unread_count: Number(row.unread_count ?? 0),
       }
     })
@@ -1044,7 +1158,7 @@ export class ButtonStore {
         prompt_id: row.prompt_id,
         choice_value: '__timeout__',
         chosen_at: now,
-        speaker_user_id: '__system__',
+        speaker_user_id: SYSTEM_SPEAKER_USER_ID,
         channel_kind: 'webhook',
       }
       try {

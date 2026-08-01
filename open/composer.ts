@@ -221,6 +221,8 @@ export type OpenComposition = CompositionInput &
   >
 import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-sweep.ts'
 import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
+import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
+import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
 import { resolveLocalTimezone } from '@neutronai/gateway/proactive/local-timezone.ts'
 import { readSessionCookie } from '@neutronai/landing/session-cookie.ts'
 
@@ -2252,21 +2254,24 @@ export function buildOpenGraphComposer(
         sink: proactiveSink,
         resolveGeneralTopic: (): string => proactiveGeneralTopic,
         timezone: localTimezone,
-        // Idle-nudge SWEEP — DELIBERATELY NOT auto-enabled here (no
-        // `listIdleTopics`), so the sweep cron does not register. The sweep
-        // CODE + the ≥7 dual-rating quality gate (`rateNudge`) are complete and
-        // unit-tested; what is NOT yet a clean seam is a CORRECT production
-        // enumeration, which needs (1) BOTH the `web:<owner>` (React web) AND
-        // `app:<owner>` (Expo app-ws) topic namespaces — `ButtonStore.list-
-        // TopicsByUser` is single-prefix — and (2) a USER-TURN-ONLY activity
-        // watermark for dedupe: `last_created_at` counts agent rows (incl. the
-        // nudge's own durable row), so the sweep would see its own post as
-        // "the user returned" and re-nudge every idle cycle (Codex P1/P2,
-        // 2026-06-27). Enabling it on the agent-polluted, web-only watermark
-        // would mis-target + spam — worse than deferring. The `rateNudge` gate
-        // is still supplied so the sweep enforces ≥7 the moment a correct
-        // `listIdleTopics` lands. See docs/research/AS-BUILT-archive-2026-07.md
-        // for the follow-up.
+        // Idle-nudge SWEEP — ON (2026-07-30). It was withheld because the two
+        // things a correct enumeration needs were both broken: the activity
+        // watermark counted agent rows (so the nudge's own durable post read as
+        // "the user returned" and it re-nudged every idle cycle forever), and
+        // `ButtonStore.listTopicsByUser` could only see ONE topic root (so it
+        // was blind to whichever client the owner wasn't using). Both are fixed
+        // — `last_user_activity_at` moves only when a real person speaks, and
+        // the enumeration unions `web:<owner>` + `app:<owner>`. The nudge is
+        // delivered to the SAME General app-ws topic as the brief, and the ≥7
+        // dual-rating `rateNudge` floor below now actually applies.
+        listIdleTopics: buildOwnerIdleTopicEnumerator({
+          store: landing.buttonStore,
+          project_slug,
+          topic_id: proactiveGeneralTopic,
+          topic_roots: [webTopicId(OWNER_USER_ID), appWsTopicId(OWNER_USER_ID)],
+          now: () => Date.now(),
+          log: (msg: string): void => log.warn('idle_topic_enumeration', { note: msg }),
+        }),
         ...(proactiveLlm !== null
           ? {
               // LLM brief over real sources (the legacy harness parity) + the dual-rating

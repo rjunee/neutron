@@ -3391,8 +3391,9 @@ ritual content in chat.
 
 The owner-facing proactive layer (the legacy harness parity). Both halves were built + tested
 early but stayed DEAD until P1-4 because they register only when
-`tasks.proactive` is set — and the Open composer never set it. The daily brief
-now ships ON (no feature flag); `open/composer.ts` wires `tasks.proactive`.
+`tasks.proactive` is set — and the Open composer never set it. Both halves now
+ship ON (no feature flag); `open/composer.ts` wires `tasks.proactive`, including
+`listIdleTopics` since 2026-07-30.
 
 - **Daily morning brief** (`morning-brief.ts`) — **ACTIVE.** Once per owner-local
   day at/after `brief_hour`, composes from live context (focus/task queue,
@@ -3418,20 +3419,38 @@ now ships ON (no feature flag); `open/composer.ts` wires `tasks.proactive`.
   `ChannelRouter`'s live-only `AppWsAdapter` (which would drop a post with no
   open socket). `tasks.proactive.sink` overrides the router; absent → router
   (Telegram instances).
-- **Idle-nudge sweep** (`idle-nudge-sweep.ts`) — code + gate complete; sweep cron
-  **not yet auto-enabled** in Open. Per tick it would consider each idle
-  project-bound topic with a fresh ranker pick (`current_focus_pick`) and post
-  ONE highest-leverage next action through three gates: idle threshold (default
-  4h) → dedupe (never re-nudge the same task until the owner returns) → the
-  **dual-rating ≥7 quality gate** (`evaluateQualityGate` + the `rateNudge` LLM
-  seam, `buildLlmNudgeRater`): a candidate is rated 1–10 on leverage + gratitude
-  and only posts when BOTH ≥7; a null/abstain rating skips (`low_quality`).
-  Without the gate the sweep would nudge every idle topic. The composer does NOT
-  yet set `listIdleTopics` (so the sweep cron does not register): a correct
-  enumeration needs a user-turn-only activity watermark (`last_created_at` counts
-  agent rows, incl. the nudge's own, which would defeat dedupe) + both the
-  `web:` and `app:` topic namespaces. The `rateNudge` gate is wired and ready for
-  when that enumeration lands.
+- **Idle-nudge sweep** (`idle-nudge-sweep.ts`) — **ACTIVE since 2026-07-30.** Per
+  tick it takes the idle candidate(s) supplied by `listIdleTopics`, reads the
+  day's ranker pick (`current_focus_pick`) and posts ONE highest-leverage next
+  action through three gates: idle threshold (default 4h) → dedupe (never
+  re-nudge the same task until the owner returns) → the **dual-rating ≥7 quality
+  gate** (`evaluateQualityGate` + the `rateNudge` LLM seam,
+  `buildLlmNudgeRater`): a candidate is rated 1–10 on leverage + gratitude and
+  only posts when BOTH ≥7; a null/abstain rating skips (`low_quality`).
+- **Idle-topic enumeration** (`idle-topic-enumeration.ts`) — the seam that kept
+  the sweep switched off, now correct. `buildOwnerIdleTopicEnumerator` returns
+  **exactly ONE** candidate (the owner's General app-ws topic, the same target as
+  the brief) — not a fan-out, because the P6 ranker writes one
+  `current_focus_pick` per instance per day, so per-topic candidates would post
+  the same thought into every topic. Its `last_activity_ms` is the **maximum
+  genuine user activity across BOTH topic roots**, `web:<owner>` and
+  `app:<owner>`. Two defects had to be fixed for that to be expressible:
+  - `ButtonStore.listTopicsByUser` was single-root, so the sweep was blind to
+    whichever client the owner was not using. It now takes `user_id_prefix` as a
+    string **or an array of roots**, unioned in one grouped scan (`project_id` is
+    attributed by longest-matching root).
+  - The activity watermark polluted itself. The nudge posts via
+    `persistInertAgentTurn` into `button_prompts` — the table the watermark reads
+    — so against `MAX(created_at)` the sweep saw its own bubble as "the user came
+    back" and re-nudged every idle cycle forever. `listTopicsByUser` now returns
+    **two** watermarks: `last_created_at` (every row; the SIDEBAR's ordering key,
+    unchanged) and **`last_user_activity_at`** — `resolved_at` on rows whose
+    `resolution_speaker_user_id` is a real person, excluding the
+    `SYSTEM_SPEAKER_USER_ID` (`__system__`) sentinel that `persistInertAgentTurn`
+    and `sweepExpired`'s `__timeout__` both stamp. Only a human can move it.
+  Non-repetition is pinned by `gateway/proactive/__tests__/idle-nudge-no-repeat.test.ts`
+  (four idle cycles → exactly one nudge; real user activity re-arms it; both
+  namespaces observed), mutation-tested in both directions.
 
 ## Doc search (QMD-equivalent) — `@neutronai/doc-search`
 
