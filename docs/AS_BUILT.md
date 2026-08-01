@@ -75,10 +75,17 @@ and the create-project fetch shim in `landing/chat-react/__tests__/component.tes
 exempts the shell's usage poll the same way it already exempts `/tabs` and
 `/work-board`, since that assertion counts the create POST, not shell chrome.
 
-**Not verified on device.** The rendering is asserted against the real component
-trees in the Bun/happy-dom and RN harnesses; it has not been looked at on an
-Android or iOS device, and the live probe has not been run against a real
-subscription from this branch.
+**What was checked on a real screen, and what was not.** The one thing source
+review cannot answer is whether two 1px rules are legible at phone density, so the
+SHIPPED CSS (extracted from `chat-react.html`, not retyped) was rendered on a cloud
+Android 14 device at 422 dpi across seven states. It reads correctly: each line is
+wholly ONE colour along its filled length, session sits above weekly, the fill
+grows from the left, the amber and red bands are unmistakable against the dark
+stage, the `min-width` floor keeps a 0.2% reading visible as a sliver, and the
+unavailable state is indistinguishable from ordinary window chrome — which is the
+whole point of it. NOT verified on device: the React Native component itself
+(reaching it needs a native build, which is a local Gradle run and is off-limits),
+and the live probe against a real subscription. Those rest on the harness tests.
 
 ## 2026-07-31 — the mobile rail shows nothing when nothing is happening
 
