@@ -208,6 +208,7 @@ export type OpenComposition = CompositionInput &
       | 'app_projects_surface'
       | 'app_work_board_surface'
       | 'app_activity_surface'
+      | 'app_usage_surface'
       | 'app_project_credentials_surface'
       | 'app_codex_credential_surface'
       | 'codex_credential'
@@ -313,6 +314,8 @@ import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surfa
 // ACTIVITY INSPECTOR (SPEC § WAVE 3.5) — the live-only per-scope event ring, its
 // read surface, and the late-bound runtime tap the Pre/PostToolUse hook reaches.
 import { createActivitySurface } from '@neutronai/gateway/http/activity-surface.ts'
+import { createAppUsageSurface } from '@neutronai/gateway/http/app-usage-surface.ts'
+import { CredentialUsageMonitor } from './credential-usage-monitor.ts'
 import {
   ActivityInspector,
   activityRowFromSubstrateEvent,
@@ -2906,6 +2909,24 @@ export function buildOpenGraphComposer(
       auth: appOwnerAuth,
     })
 
+    // The usage meter's ONE source of truth: a 60 s probe of whichever credential
+    // this box is currently dispatching with, cached in memory. Constructed here
+    // and ARMED at the very end of composition alongside `reflectLoop`, so a
+    // later composition throw can never leak a live interval; the quiescing
+    // cleanup is registered immediately below for shutdown ordering.
+    const credentialUsageMonitor = new CredentialUsageMonitor({ env })
+    realmodeCleanups.push(async () => {
+      try {
+        await credentialUsageMonitor.loop.stop()
+      } catch {
+        // best-effort shutdown cleanup — stop() never rejects
+      }
+    })
+    const appUsageSurface = createAppUsageSurface({
+      auth: appOwnerAuth,
+      snapshot: () => credentialUsageMonitor.snapshot(),
+    })
+
     // Per-project credential store: the ONE canonical instance is constructed
     // above (before mountOpenCores) so the Cores' credential resolver + this
     // CRUD surface + the awareness injection all share it. Mount the CRUD surface.
@@ -4173,6 +4194,16 @@ export function buildOpenGraphComposer(
       throw err
     }
 
+    // Same discipline for the credential-usage probe: register, then arm last,
+    // and stop a partially-started loop before re-throwing.
+    loopRegistry.register(credentialUsageMonitor.loop.describe())
+    try {
+      credentialUsageMonitor.loop.start()
+    } catch (err) {
+      await credentialUsageMonitor.loop.stop()
+      throw err
+    }
+
     return {
       db,
       project_slug,
@@ -4479,6 +4510,7 @@ export function buildOpenGraphComposer(
       // what makes the panel reachable in a real install rather than merely built:
       // the route reaches the ladder via `route-slots.ts`'s `appActivity` slot.
       app_activity_surface: { handler: activitySurface.handler },
+      app_usage_surface: { handler: appUsageSurface.handler },
       // Per-project credential CRUD (`/api/app/projects/<id>/credentials`),
       // bearer-gated, dispatching the canonical ProjectCredentialStore.
       app_project_credentials_surface: { handler: projectCredentialsSurface.handler },

@@ -81,6 +81,10 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   // (the documented "adding a surface" step), NOT a relaxed assertion: it sits
   // between work-board and credentials in the ladder, mirroring its slot order.
   ['app-activity', 'appActivity', 'app_activity_surface', true],
+  // Active-credential usage meter (`GET /api/app/usage`). RATCHET EXTENSION, same
+  // shape as the activity row above: it sits between activity and credentials in
+  // the ladder, mirroring its slot order.
+  ['app-usage', 'appUsage', 'app_usage_surface', true],
   ['app-project-credentials', 'appProjectCredentials', 'app_project_credentials_surface', true],
   ['app-codex-credential', 'appCodexCredential', 'app_codex_credential_surface', true],
   ['app-projects', 'appProjects', 'app_projects_surface', true],
@@ -462,6 +466,7 @@ function fullComposition(): RouteSlotComposition {
     app_tabs_surface: { handler: h() },
     app_work_board_surface: { handler: h() },
     app_activity_surface: { handler: h() },
+    app_usage_surface: { handler: h() },
     app_project_credentials_surface: { handler: h() },
     app_codex_credential_surface: { handler: h() },
     app_backups_surface: { handler: h() },
@@ -510,6 +515,8 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_work_board_surface',
   // SPEC § WAVE 3.5 — Activity Inspector snapshot surface (ratchet extension).
   'app_activity_surface',
+  // Active-credential usage meter (ratchet extension).
+  'app_usage_surface',
   'app_project_credentials_surface',
   'app_codex_credential_surface',
   'app_backups_surface',

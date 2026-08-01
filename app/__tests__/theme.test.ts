@@ -28,6 +28,10 @@ describe('THEME', () => {
       // M1 UX REDESIGN PR-6 — rail work-activity dot tokens (mirror web).
       work: '#66ccff',
       attention: '#ffd27d',
+      // Usage-meter bands (mirror the web `--usage-*` tokens).
+      usage_nominal: '#4bbf73',
+      usage_warning: '#e0a832',
+      usage_critical: '#e0553f',
     });
   });
 

@@ -108,6 +108,12 @@
     --phase-fix-fg: #ffd27d;     --phase-fix-bg: rgba(255,210,125,.14);
     --phase-merged-fg: #7ddf9b;  --phase-merged-bg: rgba(125,223,155,.14);
     --phase-failed-fg: #ff8a8a;  --phase-failed-bg: rgba(255,138,138,.14);
+    /* Usage-meter bands (see `.car-usage`). Own tokens rather than borrowed
+       phase colours: what the meter means has nothing to do with a job's phase,
+       and the two must be free to diverge. */
+    --usage-nominal: #4bbf73;
+    --usage-warning: #e0a832;
+    --usage-critical: #e0553f;
     /* Connection banners */
     --banner-warn-bg: #2a2410;   --banner-warn-fg: #ffd479;
     --banner-info-bg: #18222e;   --banner-info-fg: #8cc6ff;
@@ -181,6 +187,11 @@
     --phase-fix-fg: #9a6a00;     --phase-fix-bg: rgba(154,106,0,.12);
     --phase-merged-fg: #1a7f37;  --phase-merged-bg: rgba(26,127,55,.12);
     --phase-failed-fg: #c9252d;  --phase-failed-bg: rgba(201,37,45,.10);
+    /* Darkened for contrast against the white stage — the dark-theme greens and
+       ambers wash out on a light background at one pixel tall. */
+    --usage-nominal: #1a7f37;
+    --usage-warning: #b07407;
+    --usage-critical: #c9252d;
     --banner-warn-bg: #fff4d6;   --banner-warn-fg: #7a5b00;
     --banner-info-bg: #e6f0ff;   --banner-info-fg: #0b57d0;
     --banner-error-bg: #ffe5e5;  --banner-error-fg: #c9252d;
@@ -217,10 +228,36 @@
   /* Seated tabs (M1 UX redesign) — the tab band reads as the page's top edge: a
      surface strip whose ACTIVE tab lifts onto the content sheet (fused via a
      -1px bottom margin over the band's own bottom border). No sliding underline. */
+  /* The band's bottom edge is NOT drawn here — `.car-usage` below is the seam
+     between the band and the stage, and it owns that line whether or not there
+     is anything to report. */
   .car-topbar {
     display: flex; align-items: flex-end; flex: 0 0 auto; gap: 2px;
-    padding: 8px 10px 0; background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 8px 10px 0; background: var(--surface);
   }
+  /* ── USAGE METER — the line between the tab band and the chat stage ─────────
+     This IS the divider, not a widget near it. Two 1px rules stacked: the
+     5-hour SESSION window on top, the 7-day WEEKLY window below. Each fills from
+     the left edge, and the ENTIRE fill is one colour that changes as a unit when
+     it crosses a threshold (green → amber at 85%, amber → red at 95%). No
+     gradient: at one pixel tall a gradient is just a smudge.
+
+     Unfilled track is `--border`, so a box with nothing to report renders as the
+     plain divider it always was — and the seated tabs' old "fused" trick (the
+     active tab pulled -1px over the band's border to erase that segment) is gone
+     on purpose. A line that reads as a fill level must not have a hole in it. */
+  .car-usage { flex: 0 0 auto; display: flex; flex-direction: column; }
+  .car-usage-line { height: 1px; background: var(--border); overflow: hidden; }
+  /* `min-width` is the "measured but barely used" floor: a sub-pixel fill would
+     render as nothing, and "0.1% used" must not look like "unknown". */
+  .car-usage-fill {
+    height: 100%; min-width: 2px;
+    transition: width .4s linear, background-color .25s linear;
+  }
+  .car-usage-nominal { background: var(--usage-nominal); }
+  .car-usage-warning { background: var(--usage-warning); }
+  .car-usage-critical { background: var(--usage-critical); }
+  @media (prefers-reduced-motion: reduce) { .car-usage-fill { transition: none; } }
   /* Workspace-identity seat — the "you're inside a workspace" anchor, left of the
      tabs. Emoji + name; General shows 💬 General. NO activity dot (that lives on
      the rail — Ryan's de-dup keeps the seat clean). */
@@ -254,11 +291,13 @@
   .car-tab:hover:not(:disabled) { background: var(--hover-bg); color: var(--fg-2); }
   .car-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .car-tab:disabled { opacity: .5; cursor: default; }
-  /* Active tab fuses to the content sheet below: bg matches the page, a border
-     minus its bottom edge, pulled 1px down over the band's bottom border. */
+  /* Active tab seats onto the content sheet below: bg matches the page, a border
+     minus its bottom edge. It no longer overhangs the seam by -1px — the seam is
+     now the usage meter, and a tab notched out of it would read as a gap in the
+     fill rather than as a fused tab. */
   .car-tab-active {
     color: var(--fg); font-weight: 590; background: var(--bg);
-    border-color: var(--border); margin-bottom: -1px;
+    border-color: var(--border);
   }
   /* Light/dark theme toggle — pinned top-right of the content pane. A single
      pill button that cycles system → light → dark; the glyph shows the resolved

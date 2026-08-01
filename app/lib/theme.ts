@@ -46,6 +46,12 @@ export interface NeutronTheme {
   /** M1 UX REDESIGN — rail attention dot: a failed-not-done item or a stalled
    *  live run. Mirror of the web `--attention` token. */
   attention: string;
+  /** Usage meter, below 85% of a window. Mirror of the web `--usage-nominal`. */
+  usage_nominal: string;
+  /** Usage meter, 85–95%. Mirror of the web `--usage-warning`. */
+  usage_warning: string;
+  /** Usage meter, 95% and up. Mirror of the web `--usage-critical`. */
+  usage_critical: string;
 }
 
 export const THEME: NeutronTheme = Object.freeze({
@@ -62,6 +68,9 @@ export const THEME: NeutronTheme = Object.freeze({
   link: '#5fb6ff',
   work: '#66ccff',
   attention: '#ffd27d',
+  usage_nominal: '#4bbf73',
+  usage_warning: '#e0a832',
+  usage_critical: '#e0553f',
 });
 
 /** One phase's tinted-capsule colors: solid foreground + a low-alpha background wash. */

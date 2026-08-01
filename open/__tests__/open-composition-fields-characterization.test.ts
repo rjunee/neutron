@@ -61,6 +61,10 @@ const EXPECTED_COMPOSITION_KEYS = [
   'app_tabs_surface',
   'app_tasks_surface',
   'app_upload_surface',
+  // The active-credential usage meter (`GET /api/app/usage`) that both clients
+  // draw the tab-bar divider from. Same done-means-served proof as the activity
+  // key above: it appears only if `composeOpen` really constructs the surface.
+  'app_usage_surface',
   // Local voice transcription (`/api/app/voice-transcription`) — the Settings
   // control that installs whisper.cpp so voice notes transcribe with no API key.
   // Its presence HERE is the done-means-served proof: the REAL Open composer

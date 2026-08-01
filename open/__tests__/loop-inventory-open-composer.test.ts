@@ -10,8 +10,8 @@
  * running set. This test drives that exact sequence — the real composer, not a
  * stub — and pins the complete set:
  *
- *   chunked-upload-sweeper, cron, dispatch-lifecycle-watchdog,
- *   reminders, trident, watchdog
+ *   chunked-upload-sweeper, cron, credential-usage,
+ *   dispatch-lifecycle-watchdog, reminders, trident, watchdog
  *
  * A loop that silently stops starting (a wiring regression) OR a silently-added
  * new loop breaks this. MUTATION-VERIFIED: deleting any `loopRegistry.register`
@@ -40,6 +40,10 @@ const LANDING_DIR = join(HERE, '..', '..', 'landing')
 /** The COMPLETE set of loops a credentialed single-owner Open boot starts. */
 const EXPECTED_RUNNING_LOOPS = [
   'chunked-upload-sweeper',
+  // The usage meter's 60 s credential probe. It arms UNCONDITIONALLY — an
+  // uncredentialed box does a cheap env/file check and no network call, so a
+  // credential added later starts reporting without a restart.
+  'credential-usage',
   'cron',
   'dispatch-lifecycle-watchdog',
   // Memory consolidation is ON by default (managed SPEC Decisions Log 2026-07-20,
@@ -185,9 +189,9 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all seven running loops + the dormant set', () => {
+test('the ONE boot line names all eight running loops + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('7 loop(s) running')
+  expect(line).toContain('8 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
