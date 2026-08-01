@@ -2448,9 +2448,29 @@ running several instances can share ONE copy of the weights.
 **Surfaces.** HTTP `gateway/http/voice-transcription-surface.ts` —
 machine-scoped `/api/app/voice-transcription` (GET status + catalog + live job
 progress, POST install, DELETE remove). POST returns 202 immediately; the client
-(`landing/chat-react/voice-transcription-client.ts`) polls the GET for real
-byte counts, rendered as a progress bar in the Settings tab's "Local voice
-transcription" section.
+polls the GET for real byte counts, rendered as a progress bar.
+
+TWO clients drive it, because voice notes are mostly recorded on a phone and a
+switch that only exists on the desktop is, for a mobile owner, unshipped:
+
+- **web** — `landing/chat-react/voice-transcription-client.ts` →
+  `SettingsTab.tsx` § "Local voice transcription".
+- **mobile** — `app/lib/voice-transcription-client.ts` +
+  `app/lib/voice-transcription-view.ts` → `app/components/VoiceTranscriptionCard.tsx`,
+  mounted on `app/app/settings.tsx`. The wire types are re-declared rather than
+  imported (no browser package in the Metro bundle) and held in sync by
+  `app/__tests__/voice-transcription-settings.test.ts`'s mirror-parity block.
+  Mobile-only behaviour: model options are tappable rows carrying each model's
+  measured cost instead of a `<select>`; a foreground `AppState` refetch resumes
+  polling after a backgrounded phone (the job is unaffected — it lives in the
+  gateway process, so only the WATCHING pauses); a 404 is reported as "this
+  server is older than the API" rather than a generic failure.
+
+`binary_present` (alongside `binary_downloadable`) reports whether a runnable
+`whisper-cli` is already on the box. The pair is the whole truth about whether
+Install can succeed: on `false`/`false` the owner must run a package manager ON
+THE SERVER, which no client can do for them, so the mobile card replaces the
+button with that explanation rather than offering a control that would fail.
 
 **Measured cost** (8-core AMD EPYC-Milan @2.4 GHz, AVX2, no GPU, `-t 4`,
 whisper.cpp v1.9.1, 30-second note): `base` 3.8 s / 343 MB RSS; `small` 12.4 s /
@@ -4267,9 +4287,20 @@ indicator. No feature flags — one live path.
   `chat-core/__tests__/no-direct-webcrypto.test.ts` fails the build on any direct
   WebCrypto call in `chat-core/`, `app/lib`, `app/app`, `app/components` or
   `landing/chat-react`.
+- **The connection is ASSUMED GOOD until it has been bad for a while (2026-07-31).**
+  `app/components/ConnectionNotice.tsx` replaced the strip that transcribed the
+  `ConnStatus` machine ("Connecting…" on every mount, i.e. on every project switch).
+  It now renders nothing for a connect or a reconnect, and shows a single quiet
+  `Offline` line (with the queue depth, when sends are stacked up) only after
+  `OFFLINE_NOTICE_AFTER_MS` — 15 s, matching `ChatWsClient`'s `maxBackoffMs`, so five
+  backoff rounds have failed before the owner is told anything. The deadline keys on
+  boolean health, never the status string, so a flapping outage still surfaces and a
+  recovered socket clears the notice on the same render. Per-message truth stays on
+  the bubble's 🕓/✓/⚠️ delivery glyph.
 - **A send that cannot be queued is VISIBLE (2026-07-29).** `useMobileChat.send`
-  returns `Promise<boolean>` and sets `sendError`, which `StatusStrip` renders above
-  the connection label; `InputComposer` keeps the owner's draft when it is false. A
+  returns `Promise<boolean>` and sets `sendError`, which `ConnectionNotice` renders
+  above the transcript, instantly and undelayed; `InputComposer` keeps the owner's
+  draft when it is false. A
   null session reports "Still connecting" instead of silently no-oping. The old
   `void session?.send(...)` made every send failure indistinguishable from success,
   which is what made the WebCrypto bug undiagnosable rather than merely present.

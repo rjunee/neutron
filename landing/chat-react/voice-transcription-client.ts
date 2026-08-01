@@ -51,6 +51,10 @@ export interface VoiceTranscriptionStatus {
   installed_bytes: number
   /** False on platforms with no upstream CLI build (macOS → use Homebrew). */
   binary_downloadable: boolean
+  /** True when a runnable `whisper-cli` is already on the server (unpacked,
+   *  Homebrew, or `NEUTRON_WHISPER_BIN`). With the flag above it decides
+   *  whether pressing Install can succeed at all. */
+  binary_present: boolean
   whisper_version: string
   default_model_id: string
   models: WhisperModelOption[]

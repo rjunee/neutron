@@ -23,6 +23,12 @@
  * ({@link AuthedAttachmentFile}), mirroring the web client's `AttachmentImage`
  * file-chip branch (`landing/chat-react/ChatApp.tsx`). Without this a document
  * painted as a broken image with no openable affordance (Argus r2 BLOCKER #1).
+ *
+ * An AUDIO attachment is narrower still: a voice note renders as a PLAYBACK
+ * CONTROL ({@link VoiceNoteBubble}), not a chip. It used to fall into the file
+ * branch and paint as a 🎵 glyph plus the clip's storage hash — the audio was
+ * unlistenable from the app that recorded it, because the file chip's only
+ * affordance is "hand the bytes to the OS share sheet".
  */
 
 import { useEffect, useState } from 'react';
@@ -48,6 +54,7 @@ import {
   type AttachmentAuthCtx,
 } from '../lib/attachment-url';
 import { THEME, TYPOGRAPHY } from '../lib/theme';
+import { VoiceNoteBubble } from './VoiceNoteBubble';
 
 export interface AuthedAttachmentImageProps {
   url: string;
@@ -69,6 +76,13 @@ export interface AuthedAttachmentImageProps {
  * whose hook count changed. (Argus r3 MAJOR.)
  */
 export function AuthedAttachmentImage({ url, auth, style }: AuthedAttachmentImageProps) {
+  // A voice note renders as a playback control — a play/pause button, the
+  // clip's length, and a track that follows the position. It must be checked
+  // BEFORE the file branch, which is where it used to land and paint as a
+  // glyph plus a storage hash.
+  if (isAudioAttachmentUrl(url)) {
+    return <VoiceNoteBubble url={url} auth={auth} />;
+  }
   // A non-image attachment (PDF, …) renders as a downloadable file chip, never
   // an <Image> — otherwise the document paints as a broken thumbnail.
   if (!isImageAttachmentUrl(url)) {
@@ -167,6 +181,10 @@ export function AuthedAttachmentImageView({ url, auth, style }: AuthedAttachment
  *     on the OS viewer, but the filename affordance + open attempt always
  *     render — a document never paints as a broken image.
  *
+ * DOCUMENTS ONLY. A voice note never reaches here — the dispatcher routes audio
+ * to {@link VoiceNoteBubble}, because "hand the bytes to the OS share sheet" is
+ * not a way to listen to a message someone sent you.
+ *
  * NOTE — native must NOT hand a `data:`/`file:` URL to `WebBrowser`: iOS
  * SFSafariViewController and Android Chrome Custom Tabs reject non-http(s)
  * INITIAL urls, so the open fails silently (Argus r2 BLOCKER). The write-to-
@@ -180,9 +198,6 @@ export function AuthedAttachmentFile({
   auth: AttachmentAuthCtx | null;
 }) {
   const name = attachmentBasename(url);
-  // M2 task 5 — a voice note gets a 🎵 icon; every other non-image stays 📎
-  // (matches `docs-shared.ts` treeIconFor precedent).
-  const icon = isAudioAttachmentUrl(url) ? '🎵' : '📎';
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -268,7 +283,7 @@ export function AuthedAttachmentFile({
       style={({ pressed }) => [styles.fileChip, pressed && styles.fileChipPressed]}
     >
       <Text style={styles.fileChipText} numberOfLines={1}>
-        {icon} {failed ? `${name} — couldn't open` : busy ? `${name}…` : name}
+        📎 {failed ? `${name} — couldn't open` : busy ? `${name}…` : name}
       </Text>
     </Pressable>
   );
