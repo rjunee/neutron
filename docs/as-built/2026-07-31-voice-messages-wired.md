@@ -58,8 +58,23 @@ sitting there looking available.
 
 ### Verification
 
-**On a device.** See the device section below — a cloud Genymotion Pixel 9 (Android 14), not
-the owner's phone and not the local emulator.
+**On a device.** A cloud Genymotion Pixel 9 (Android 14) — a clean instance, not the owner's
+phone and not the local emulator, never pointed at a production tenant. An EAS development
+client running THIS branch's JS from Metro, writing to a throwaway local Open instance over
+`adb reverse`. Tapping the real controls, in order: the mic prompted for microphone access
+(`RECORD_AUDIO` went `granted=false` → `granted=true`); the recording row appeared with a live
+clock; ■ stop produced the review row (▶ / `1:25` / ✕ / ➤); ➤ uploaded a **354 KB `.m4a`
+recorded on the device** into `chat-attachments/owner/<hash>.m4a`; the transcript showed a user
+bubble with the 🎵 chip marked delivered; and the agent REPLIED to it — "Got the voice note,
+but I can't hear it. Transcription isn't switched on for this machine yet" — which is the
+documented keyless-ASR path and the proof the clip reached the agent's turn rather than just
+reaching disk.
+
+Two incidental findings from that run, neither a defect in this change. A worktree is missing
+`app/google-services.json` (gitignored), and without it Metro cannot parse the Expo config, so
+it serves no manifest and the dev client dies with "Unable to load script" — copy it in.
+And `uiautomator dump` returns "could not get idle state" while recording, because the record
+dot's `Animated.loop` never idles; drive by screenshot coordinates instead.
 
 **In the harness.** `app/__tests__/voice-message-end-to-end.test.tsx` (new) drives the real
 mounted `ChatSyncSurface`, the real composer, the real recorder hook, the real upload client
