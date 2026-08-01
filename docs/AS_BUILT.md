@@ -66,6 +66,15 @@ whole fill recolours as one unit at each threshold.
 Open composer and now requires `app_usage_surface` in its output — the
 done-means-served proof that the route is actually mounted.
 
+Two existing guards were extended deliberately rather than relaxed: the loop
+inventories (`open/__tests__/loop-inventory-{open-composer,boot-shell}.test.ts`)
+now name `credential-usage` in the complete running set — the loop arms
+UNCONDITIONALLY, because an uncredentialed box does a cheap env/file check and no
+network call, so a credential added later starts reporting without a restart —
+and the create-project fetch shim in `landing/chat-react/__tests__/component.test.tsx`
+exempts the shell's usage poll the same way it already exempts `/tabs` and
+`/work-board`, since that assertion counts the create POST, not shell chrome.
+
 **Not verified on device.** The rendering is asserted against the real component
 trees in the Bun/happy-dom and RN harnesses; it has not been looked at on an
 Android or iOS device, and the live probe has not been run against a real
