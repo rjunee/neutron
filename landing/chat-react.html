@@ -1331,7 +1331,67 @@
      A DEFINITE width, not `width:100%`: the bubble is a shrink-to-fit box, so a
      percentage width resolves against a parent that is itself sizing to its
      content and the player collapses to a sliver. */
-  .car-attach-audio { display: block; margin-top: 6px; width: 300px; max-width: 100%; height: 40px; }
+  /* VOICE NOTE — the same measured iMessage geometry the mobile player uses
+     (see app/components/VoiceNoteBubble.tsx for where every number comes from):
+     a 30px disc at the leading edge painted in the bubble's FOREGROUND with the
+     triangle knocked out of it in the bubble's own fill, a 6px track spanning
+     the middle at 12px / 16px gaps, and the length at the trailing edge. There
+     is deliberately no background, border or radius on `.car-vn` — the bubble
+     already drew the container, and Chrome's `<audio controls>` panel drawing a
+     second one inside it is the defect this replaced. Every colour is
+     `currentColor` or `--bubble-ground`, both inherited from the bubble, so this
+     block names no palette entry and cannot drift from what the bubble painted. */
+  .car-bubble-user { --bubble-ground: var(--user-bubble); }
+  .car-bubble-agent { --bubble-ground: var(--agent-bubble); }
+  .car-vn { display: flex; align-items: center; min-width: 200px; max-width: 100%; }
+  .car-vn-audio { display: none; }
+  .car-vn-toggle {
+    flex: none; width: 30px; height: 30px; border-radius: 15px;
+    border: 0; padding: 0; margin: 0; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    background: currentColor; color: inherit;
+  }
+  .car-vn-toggle:active { opacity: 0.6; }
+  /* The play triangle as a collapsed box, so its size and position are ours
+     rather than a font's. Ratios: 0.333 x 0.394 of the disc, nudged right —
+     a right-pointing triangle centred on its bounding box reads left-heavy. */
+  .car-vn-play-mark {
+    width: 0; height: 0; margin-left: 2.1px;
+    border-top: 5.9px solid transparent;
+    border-bottom: 5.9px solid transparent;
+    border-left: 10px solid var(--bubble-ground, #000);
+  }
+  /* Two capped bars the same height as the triangle, so the control does not
+     change weight when it flips. */
+  .car-vn-pause-mark {
+    width: 11px; height: 11.8px;
+    border-left: 3.2px solid var(--bubble-ground, #000);
+    border-right: 3.2px solid var(--bubble-ground, #000);
+    border-radius: 1.6px;
+    box-sizing: border-box;
+  }
+  .car-vn-track { position: relative; flex: 1 1 auto; height: 6px; margin: 0 16px 0 12px; }
+  .car-vn-track-rest {
+    position: absolute; inset: 0; border-radius: 3px;
+    background: currentColor; opacity: 0.3;
+  }
+  .car-vn-track-fill {
+    position: absolute; top: 0; left: 0; height: 6px; border-radius: 3px;
+    background: currentColor;
+  }
+  /* Invisible, fully operable: this is what keeps the scrubber keyboard- and
+     pointer-reachable now that the browser's own control is gone. Its box is
+     taller than the painted track so the target is comfortable (44px). */
+  .car-vn-scrub {
+    position: absolute; left: 0; top: -19px; width: 100%; height: 44px;
+    margin: 0; padding: 0; opacity: 0; cursor: pointer;
+  }
+  .car-vn-scrub:disabled { cursor: default; }
+  .car-vn-track:focus-within { outline: 2px solid currentColor; outline-offset: 6px; border-radius: 3px; }
+  .car-vn-time {
+    flex: none; width: 40px; text-align: right;
+    font-size: 13px; opacity: 0.7; font-variant-numeric: tabular-nums;
+  }
   .car-composer-wrap { border-top: 1px solid var(--border); background: var(--surface); }
   .car-composer-wrap .car-composer { border-top: 0; }
   /* BUG 1 — staged-attachment chips align to the centered composer column. */

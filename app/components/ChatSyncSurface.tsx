@@ -69,11 +69,13 @@ import { selectDropFiles, shouldGateUpload } from '../lib/upload-gate';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
+  AGENT_BUBBLE_TONE,
   BUBBLE_MAX_WIDTH,
   BUBBLE_PADDING_H_PT,
   BUBBLE_PADDING_V_PT,
   BUBBLE_RADIUS_PT,
   BUBBLE_TAIL_RADIUS_PT,
+  USER_BUBBLE_TONE,
   bubbleGapPt,
   bubbleHasTail,
   type BubbleSpeaker,
@@ -813,9 +815,22 @@ function ChatRow({
               <RenderMarkdown source={message.body} textColor={THEME.text_primary} />
             )}
             {attachmentUrls.length > 0 ? (
-              <View style={styles.attachments}>
+              // The top margin separates attachments from the words above them.
+              // A voice note has no words — `sendVoiceNote`'s caller posts
+              // `send('', [url])` — so on that message the margin is just dead
+              // space at the top of the bubble, which is half of why the player
+              // read as a panel floating inside a box.
+              <View style={message.body.length > 0 ? styles.attachments : styles.attachmentsOnly}>
                 {attachmentUrls.map((url) => (
-                  <AuthedAttachmentImage key={url} url={url} auth={auth} style={styles.attachment} />
+                  <AuthedAttachmentImage
+                    key={url}
+                    url={url}
+                    auth={auth}
+                    style={styles.attachment}
+                    // The voice-note player draws no surface of its own, so it
+                    // has to be told the colours of the bubble it is inside.
+                    tone={isUser ? USER_BUBBLE_TONE : AGENT_BUBBLE_TONE}
+                  />
                 ))}
               </View>
             ) : null}
@@ -1054,9 +1069,12 @@ const styles = StyleSheet.create({
     paddingVertical: BUBBLE_PADDING_V_PT,
     borderRadius: BUBBLE_RADIUS_PT,
   },
-  userBubble: { backgroundColor: THEME.accent },
+  // Painted FROM the tone constants, not from the palette directly, so a control
+  // that has to know what it is sitting on (the voice-note player) cannot end up
+  // drawing against a colour the bubble no longer uses.
+  userBubble: { backgroundColor: USER_BUBBLE_TONE.ground },
   agentBubble: {
-    backgroundColor: THEME.surface_raised,
+    backgroundColor: AGENT_BUBBLE_TONE.ground,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: THEME.hairline,
   },
@@ -1064,10 +1082,17 @@ const styles = StyleSheet.create({
   // iMessage draws one tail per run, not one per bubble.
   userTail: { borderBottomRightRadius: BUBBLE_TAIL_RADIUS_PT },
   agentTail: { borderBottomLeftRadius: BUBBLE_TAIL_RADIUS_PT },
-  userText: { ...TYPOGRAPHY.body, color: THEME.background },
+  userText: { ...TYPOGRAPHY.body, color: USER_BUBBLE_TONE.ink },
   agentText: { ...TYPOGRAPHY.body, color: THEME.text_primary },
   attachments: {
     marginTop: SPACING.sm,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.xs + 2,
+  },
+  /** The same row with no leading gap — for a message that is ONLY attachments,
+   *  where the bubble's own padding is already the whole inset. */
+  attachmentsOnly: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: SPACING.xs + 2,
