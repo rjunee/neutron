@@ -103,6 +103,26 @@ mock.module('expo-file-system/legacy', () => ({
   },
 }));
 
+/* ── expo-audio ────────────────────────────────────────────────────────────
+ * The audio leaf (`VoiceNoteBubble`) statically imports `expo-audio`, a native
+ * module bun cannot load — so importing the component module drags it in even
+ * though nothing here renders a player. Inert stub.
+ *
+ * Process-global, and deliberately safe: the DEVICE-HARNESS files that need the
+ * real observable stub run in their OWN process (`scripts/run-tests.sh`
+ * device-harness isolation lane), so this registration cannot reach them. */
+mock.module('expo-audio', () => ({
+  useAudioPlayer: () => ({ play: () => {}, pause: () => {}, seekTo: async () => {} }),
+  useAudioPlayerStatus: () => ({
+    playing: false,
+    currentTime: 0,
+    duration: 0,
+    didJustFinish: false,
+    isLoaded: false,
+  }),
+  setAudioModeAsync: async () => {},
+}));
+
 let sharingAvailable = true;
 let shareCalls: Array<{ url: string; options: unknown }> = [];
 mock.module('expo-sharing', () => ({
