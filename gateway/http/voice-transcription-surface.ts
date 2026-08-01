@@ -126,6 +126,14 @@ export function createVoiceTranscriptionSurface(
     const choice = opts.readChoice()
     const key_status = keys.status()
     // ASK THE RESOLVER. Never re-derive the rule here.
+    //
+    // `keys.resolve()` decrypts, so a status poll (1/sec while a model is
+    // downloading) briefly holds the plaintext. That is accepted rather than
+    // worked around with a presence-only variant: this process owns the AES
+    // keyfile and already decrypts the same value on every voice-note upload,
+    // so no boundary is crossed — and threading a second "is there a key"
+    // parameter purely to avoid it would put a copy of the availability rule
+    // back in this file, which is the actual thing that goes wrong here.
     const active = resolveTranscriber({
       env,
       neutron_home,
