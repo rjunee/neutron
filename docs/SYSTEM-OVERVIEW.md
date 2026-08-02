@@ -6715,6 +6715,56 @@ vacuously.
   liveness, none exercises product functionality — reusing the notifier that
   already broadcasts supervisor alerts to the chat surface. Not built.
 
+## Route-slot coverage gate — is the declared HTTP surface actually served? (`open/__tests__/route-slot-coverage*`)
+
+**The same class of bug, one layer down.** The reachability gate above proves the
+owner can still reach a working part. This one proves the part is SERVED at all.
+`gateway/http/route-slots.ts` declares the whole HTTP surface, but a `RouteSlot`
+is live only when a real composer sets its `CompositionInput` field; when none
+does, the ladder falls through and the caller gets the default 404 —
+indistinguishable from a typo'd path. That is how a complete mobile reminders UI
+(`app/lib/reminders-client.ts`, `app/app/projects/[id]/reminders.tsx`) came to
+ship against endpoints that 404, and it is the same "built at both ends, never
+connected" shape as the persona-gen and `/code` incidents.
+
+**Why it is a runtime check and not a grep.** The obvious gate is a lexical scan
+of the composers for `<key>:`. It was tried first and produced false positives two
+ways: `open/composer.ts:4565-4566` assigns two surfaces by object SHORTHAND (no
+colon), and `cores_surface` is never written in a composer at all — it is filled
+in after the graph composes, by `gateway/composition/wire-cores-surfaces.ts:49`.
+Three served surfaces reported dead. A gate with false positives is worse than no
+gate here specifically: #384/#388 already showed a tolerated red training everyone
+to merge past it and hiding a second, completely dead check for days. So
+`open/__tests__/route-slot-coverage.test.ts` boots the REAL Open composition, runs
+the real `composeProductionGraph`, and reads which slots the resulting composition
+carries. Shorthand and post-compose mutation are both seen for free. ~10s, one
+boot, no network and no model.
+
+**It is a ratchet with written reasons.** 16 of the 39 declared slots are unserved
+today, so a blanket assert would be permanently red. `route-slot-coverage-inventory.ts`
+carries the served baseline (which may only grow) and every absence WITH its
+reason and what the owner is missing — `why` plus `costs`, because a bare list of
+names rots into permission. The test fails on a new absence, on an unclassified
+slot, and on an allowlist line that has stopped being true.
+`scripts/ci/route-slot-ratchet-guard.sh` (layering job, needs full history) is the
+half the test cannot be: the test reads its own baseline, so it cannot see a rung
+being MOVED into the allowlist, which deletes the assertion rather than failing
+it. Deleting a slot outright stays legal — the comparator is handed the live
+declared set so a real deletion is not a false alarm.
+
+**Mutation-tested** in both directions: removing `app_tasks_surface` (plain
+assignment), `chat_history_surface` (shorthand), or the `cores_surface`
+post-compose assignment each turns the gate red naming the lost surface; the 16
+legitimate absences keep it green; demoting a rung into the allowlist fails the
+ratchet guard, promoting one passes it.
+
+**What it does NOT cover.** It answers "is the slot populated", not "does the
+handler behave". It reads the composition rather than issuing requests, so a
+surface that is mounted but disclaims every path still reads as served. And it
+says nothing about which of the 16 absences should be fixed — each needs a
+wire-or-delete decision (Focus, for one, is dead at both ends: nothing navigates
+to `app/app/focus.tsx`, so mounting its backend would serve an unreachable page).
+
 ## Mobile device-shaped test harness — `app/__tests__/support/native-harness.ts`
 
 **What it is for.** Until 2026-07-29 the app suite could not mount a single React
