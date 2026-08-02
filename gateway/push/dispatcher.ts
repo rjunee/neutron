@@ -18,10 +18,13 @@
  *
  * Failure semantics per the brief: "Hook is additive — gracefully
  * no-ops if no tokens registered or Expo API unreachable." We:
- *   * return early when there are zero tokens
+ *   * return early when there are zero tokens — no HTTP call at all, which
+ *     is what makes the hook safe to leave ON from the first boot of a
+ *     fresh install (nobody has registered a device yet)
  *   * catch ExpoPushError / network failures and log a warning
- *   * log a warning per error-status ticket so a future cleanup pass
- *     can prune DeviceNotRegistered tokens
+ *   * log a warning per error-status ticket, and DELETE the tokens Expo
+ *     reported as `DeviceNotRegistered` so a dead device is retried at most
+ *     once instead of on every reminder forever
  *
  * The reminder dispatcher (Telegram-side) runs FIRST in
  * `ReminderTickLoop`; this hook runs AFTER markFired via the new
@@ -35,6 +38,7 @@ import {
   ExpoPushError,
   type ExpoPushClient,
   type ExpoPushMessage,
+  type ExpoPushTicket,
 } from './expo-push-client.ts'
 import { createLogger } from '@neutronai/logger'
 
@@ -155,6 +159,24 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
             error: ticket.details?.error ?? ticket.message ?? 'unknown',
           })
         }
+        // PRUNE the tokens Expo says are dead. Tickets come back in submission
+        // order (`expo-push-client.ts:173` appends per chunk in order, and the
+        // chunks are POSTed sequentially), so index i identifies message i's
+        // recipient.
+        //
+        // Without this the table only ever grows: every app reinstall or OS
+        // token rotation leaves a `DeviceNotRegistered` row behind, and each one
+        // is re-sent on EVERY subsequent reminder, forever, burning Expo quota
+        // and emitting a warning line per fire. Expo's contract is to stop
+        // sending to these tokens; the client re-registers on every sign-in
+        // (`app/lib/push.ts:143`), so a wrongly-pruned live device heals itself
+        // at the next launch — which makes deleting strictly safer than keeping.
+        //
+        // Only `DeviceNotRegistered` prunes. `MessageRateExceeded`,
+        // `MessageTooBig`, `InvalidCredentials` and friends are transient or
+        // sender-side; deleting a live owner's device over a rate limit would
+        // silently end push for that device until the next sign-in.
+        await pruneUnregistered(project_slug, messages, result.tickets)
       }
       return {
         attempted: messages.length,
@@ -182,6 +204,36 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
         errored: messages.length,
         ok: false,
         error: { name, message },
+      }
+    }
+  }
+
+  /**
+   * Delete every token Expo reported as `DeviceNotRegistered` in this batch.
+   * Fail-soft per token: a store error is logged and the remaining tokens are
+   * still attempted, because a pruning failure must never turn into a thrown
+   * push (the reminder tick's `on_fired` catch would swallow it, but the
+   * dispatch result would wrongly read as a network failure).
+   */
+  async function pruneUnregistered(
+    project_slug: string,
+    messages: readonly ExpoPushMessage[],
+    tickets: readonly ExpoPushTicket[],
+  ): Promise<void> {
+    for (let i = 0; i < tickets.length; i += 1) {
+      const ticket = tickets[i]
+      if (ticket === undefined || ticket.status !== 'error') continue
+      if (ticket.details?.error !== 'DeviceNotRegistered') continue
+      const token = messages[i]?.to
+      if (token === undefined || token.length === 0) continue
+      try {
+        const removed = await opts.store.unregister(project_slug, token)
+        if (removed) logger.warn('expo push token pruned', { project_slug })
+      } catch (err) {
+        logger.warn('expo push token prune failed', {
+          project_slug,
+          message: err instanceof Error ? err.message : String(err),
+        })
       }
     }
   }

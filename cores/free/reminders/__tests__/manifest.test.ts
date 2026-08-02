@@ -13,6 +13,7 @@ import {
   WRITE_CAPABILITY,
   loadManifest,
 } from '../src/manifest.ts'
+import { APP_TAB_SURFACE } from '../src/ui/app-tab-surface.ts'
 
 describe('manifest — package.json round-trip', () => {
   test('the bundled package.json parses through @neutronai/cores-sdk parseManifest', () => {
@@ -69,6 +70,29 @@ describe('manifest — package.json round-trip', () => {
     const tab = m.ui_components.find((u) => u.surface === 'app_tab')
     expect(tab).toBeDefined()
     expect(tab?.name).toBe('RemindersAppTab')
+  })
+
+  test('the app_tab carries the props_schema consts the tab resolver reads', () => {
+    // `gateway/http/app-tabs-surface.ts:243-247` takes the route from
+    // `props_schema.properties.path.const` and SKIPS the contribution when it is
+    // absent — the `entry_point` is a TypeScript file, meaningless to a client.
+    // This manifest declared the surface with NO props_schema at all, so the
+    // Reminders tab was dropped by the resolver on every request and survived
+    // only in the mobile pre-fetch placeholder (`app/lib/project-tabs.ts:44-51`),
+    // vanishing the moment `/tabs` answered.
+    //
+    // The values are not invented here: `src/ui/app-tab-surface.ts` has declared
+    // exactly this path/label/emoji/order since S1. The manifest is what never
+    // carried them.
+    const m = loadManifest()
+    const tab = m.ui_components.find((u) => u.surface === 'app_tab')
+    const props = (tab?.props_schema ?? {}) as {
+      properties?: Record<string, { const?: unknown } | undefined>
+    }
+    expect(props.properties?.['path']?.const).toBe(APP_TAB_SURFACE.path)
+    expect(props.properties?.['label']?.const).toBe(APP_TAB_SURFACE.label)
+    expect(props.properties?.['emoji']?.const).toBe(APP_TAB_SURFACE.emoji)
+    expect(props.properties?.['order']?.const).toBe(APP_TAB_SURFACE.order)
   })
 
   test('CORE_SLUG and CORE_PACKAGE_NAME constants match the locked values', () => {

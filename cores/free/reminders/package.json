@@ -503,7 +503,34 @@
       {
         "name": "RemindersAppTab",
         "entry_point": "./src/ui/app-tab-surface.ts",
-        "surface": "app_tab"
+        "surface": "app_tab",
+        "props_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "/projects/<project_id>/reminders"
+            },
+            "label": {
+              "type": "string",
+              "const": "Reminders"
+            },
+            "emoji": {
+              "type": "string",
+              "const": "⏰"
+            },
+            "order": {
+              "type": "integer",
+              "const": 40
+            }
+          },
+          "required": [
+            "path",
+            "label",
+            "emoji",
+            "order"
+          ]
+        }
       }
     ],
     "billing_hooks": [],

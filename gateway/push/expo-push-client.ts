@@ -56,8 +56,9 @@ export interface ExpoPushMessage {
  * One ticket entry returned by the Expo Push API per submitted message.
  * Tickets with `status: 'error'` carry a `details.error` reason — most
  * commonly `'DeviceNotRegistered'` (the device uninstalled the app).
- * Our dispatcher logs these so a future cleanup pass can prune dead
- * tokens; v1 does not auto-prune.
+ * Our dispatcher logs these AND deletes the offending token row
+ * (`dispatcher.ts:pruneUnregistered`) — tickets are returned in submission
+ * order, which is what lets index i identify message i's recipient.
  */
 export interface ExpoPushTicket {
   status: 'ok' | 'error'
