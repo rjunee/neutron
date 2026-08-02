@@ -153,6 +153,16 @@ jobs:
       # the route 404 with CI green. This is that half. Lives here because the
       # layering job is the one checked out with full history.
       - run: bash scripts/ci/route-slot-ratchet-guard.sh
+      # Composition-field coverage ratchet — the same shape of guard for the
+      # fields that are neither an `enable_*` boolean nor an HTTP route slot, and
+      # which consequently NEITHER gate above can see. `push_dispatcher` was one:
+      # declared, consumed, set by no composer, so push registered devices and
+      # delivered to none of them.
+      # `open/__tests__/composition-field-coverage.test.ts` boots the real
+      # composition and asserts every wired field is still set; this half stops a
+      # field being MOVED into the unwired allowlist, which deletes the assertion
+      # and takes the capability dark with CI green.
+      - run: bash scripts/ci/composition-field-ratchet-guard.sh
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:
