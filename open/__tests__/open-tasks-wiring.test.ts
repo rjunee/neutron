@@ -222,11 +222,18 @@ describe('Open tasks composition wiring (ISSUES #440)', () => {
     // The agent-facing path: `tasks_create` runs through this backend. Without
     // `canonicalTaskStore` threaded into `mountOpenCores`, the adapter builds
     // its own substrate store and an agent-created task fires nothing.
-    const factory = composition.cores?.backends?.['tasks_core']
+    // `CoreBackendFactoryContext` also carries `core` / `projectDb` /
+    // `installation` — install-time plumbing the `tasks_core` branch does not
+    // read (`gateway/boot-cores-factories.ts` destructures `{ project_slug }`
+    // alone). Narrowed rather than fabricated so the call stays honest about
+    // what it exercises.
+    const factory = composition.cores?.backends?.['tasks_core'] as
+      | ((ctx: { project_slug: string }) => Promise<{
+          store: { create: (i: { title: string }) => Promise<unknown> }
+        }>)
+      | undefined
     expect(factory).toBeDefined()
-    const backend = (await factory!({ project_slug: 'owner' })) as {
-      store: { create: (i: { title: string }) => Promise<unknown> }
-    }
+    const backend = await factory!({ project_slug: 'owner' })
     await backend.store.create({ title: 'created by the agent' })
 
     expect(seen.map((e) => e.kind)).toEqual(['create'])
