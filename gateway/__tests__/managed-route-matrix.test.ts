@@ -134,8 +134,11 @@ async function bootManagedGraph(): Promise<GraphHarness> {
     app_admin_surface: surface('app-admin', (u) => u.pathname.startsWith('/api/app/admin/')),
     app_persona_surface: surface('app-persona', (u) => u.pathname.startsWith('/api/app/persona/')),
     app_devices_surface: surface('app-devices', (u) => u.pathname.startsWith('/api/app/devices/')),
+    // Every backups route — INCLUDING the restore — is under `/backups`. The
+    // bare `/restore` beside it is `app_projects_surface`'s un-archive and never
+    // belonged to this surface.
     app_backups_surface: surface('app-backups', (u) =>
-      /^\/api\/app\/projects\/[^/]+\/(backups|restore)(\/|$)?/.test(u.pathname),
+      /^\/api\/app\/projects\/[^/]+\/backups(\/|$)/.test(u.pathname),
     ),
   })
 

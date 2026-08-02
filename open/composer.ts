@@ -293,6 +293,8 @@ import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders
 import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
 import { createAppAdminSurface } from '@neutronai/gateway/http/app-admin-surface.ts'
 import { createAdminPersonalitySurface } from '@neutronai/gateway/http/admin-personality-surface.ts'
+import { createAppBackupsSurface } from '@neutronai/gateway/http/app-backups-surface.ts'
+import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
@@ -2845,8 +2847,13 @@ export function buildOpenGraphComposer(
     // DEFINED answer rather than a 404 (`app-admin-surface.ts:101-148`):
     //   - `projectBackupStore` / `platform` → the `/project-backup/*` family
     //     answers `{ configured: false }` so the Admin UI hides its Backup tab.
-    //     Wiring a backup store belongs with the separate `app_backups_surface`
-    //     work, which also has a route-precedence problem to settle first.
+    //     A store now EXISTS in this closure (`projectBackupStore` below, built
+    //     for `app_backups_surface`), so this is a deliberate hold rather than a
+    //     missing dependency: that family is backup CONFIGURATION — remote
+    //     setup, schedule, backup-now — a separate feature from the restore UI
+    //     this change wires, with its own client and its own acceptance. Wiring
+    //     it here would flip those routes live untested. It stays listed as
+    //     unwired until it gets its own change.
     //   - `mintReauthStartToken` → `max-oauth/mint-reauth-token` answers 503
     //     `reauth_not_configured`. That flow is the hosted overlay's, minted in
     //     its own boot shell; a single-owner install has no identity host to
@@ -2878,6 +2885,40 @@ export function buildOpenGraphComposer(
       auth: appOwnerAuth,
       owner_home,
       project_slug,
+    })
+    // P7.4 project backups + snapshot restore
+    // (`/api/app/projects/<id>/backups[…]`, `POST .../backups/restore`) — the
+    // screen the project settings drawer routes to
+    // (`app/app/projects/[id]/backups.tsx` via `app/lib/backups-client.ts`).
+    // Every one of those calls 404'd, with ONE exception that was worse than a
+    // 404: restore. It used to POST the bare `/api/app/projects/<id>/restore`,
+    // which the SERVED `appProjects` rung claims for UN-ARCHIVING a project and
+    // wins (it is earlier in the ladder) — so tapping "restore this snapshot"
+    // un-archived the project and reported success. The route is now nested at
+    // `.../backups/restore`, disjoint by shape from anything `appProjects`
+    // claims; `open/__tests__/app-surfaces-served.test.ts` drives both paths
+    // through the real router and pins which handler each one reaches.
+    //
+    // `ProjectBackupStore` is a stateless wrapper over the platform adapter plus
+    // the on-disk per-project git dirs (`gateway/git/project-backup-store.ts:397`
+    // — it holds no DB handle and no cross-request state beyond its own
+    // in-flight mutexes), so constructing one here is not a second source of
+    // truth. `resolveProjectRoot` is left at its default,
+    // `<owner_home>/Projects/<project_id>`, which is where the single-owner
+    // install actually keeps projects.
+    //
+    // Degraded hosts stay defined rather than broken: with no `git` binary the
+    // store's probe fails and the routes answer `RestoreUnavailableError` → 503
+    // (`app-backups-surface.ts` `jsonForError`), not a 404 and not a crash.
+    const projectBackupStore = new ProjectBackupStore({
+      platform,
+      owner_home,
+      project_slug,
+    })
+    const appBackupsSurface = createAppBackupsSurface({
+      auth: appOwnerAuth,
+      project_slug,
+      store: projectBackupStore,
     })
 
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
@@ -5012,6 +5053,11 @@ export function buildOpenGraphComposer(
       app_admin_surface: { handler: appAdminSurface.handler },
       // The Personality pane inside that screen (`/api/app/persona/*`).
       app_persona_surface: { handler: appPersonaSurface.handler },
+      // Project backups + snapshot restore. Its restore route is
+      // `POST .../backups/restore`; the bare `.../restore` beside it belongs to
+      // `app_projects_surface` (un-archive) and always did — which is why this
+      // surface had to move its path before it could be mounted at all.
+      app_backups_surface: { handler: appBackupsSurface.handler },
       app_upload_surface: { handler: appUploadSurface.handler },
       // Local voice transcription (`/api/app/voice-transcription`) — the
       // Settings-tab install/remove control for the keyless whisper.cpp backend.

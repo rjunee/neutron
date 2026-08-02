@@ -57,6 +57,13 @@ const EXPECTED_COMPOSITION_KEYS = [
   // 2026-08-01, so the screen Settings routes to answered 404 everywhere except
   // the diagnostics pane below, which an earlier rung claims.
   'app_admin_surface',
+  // Project backups + snapshot restore (`/api/app/projects/<id>/backups[…]`,
+  // `POST .../backups/restore`). Same done-means-served proof as the keys around
+  // it. Wiring it needed the route MOVE that landed with it: while the restore
+  // sat at the bare `.../restore`, the earlier `app_projects_surface` rung
+  // claimed that path for un-archive and won, so mounting alone would have
+  // served four routes and left the fifth answering the wrong operation.
+  'app_backups_surface',
   'app_codex_credential_surface',
   // Device push-token registration (`/api/app/devices/{register,unregister}`).
   // The client calls it on every sign-in and sign-out, so while it was unmounted

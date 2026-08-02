@@ -1,10 +1,16 @@
 /**
  * @neutronai/app — project-backups + restore API client (P7.4 restore UI).
  *
- * Thin fetch wrapper for the gateway's
- * `/api/app/projects/<id>/backups[...]` + `/api/app/projects/<id>/restore`
- * routes. Mirrors the P5.4 / P7.0 client shape: pass the bearer token
- * at construction time; each call returns the canonical server view.
+ * Thin fetch wrapper for the gateway's `/api/app/projects/<id>/backups[...]`
+ * routes — every one of them, INCLUDING the restore at
+ * `POST .../backups/restore`. Mirrors the P5.4 / P7.0 client shape: pass the
+ * bearer token at construction time; each call returns the canonical server
+ * view.
+ *
+ * Nothing here may target the bare `/api/app/projects/<id>/restore`. That path
+ * is a different operation on a different surface — un-archiving a project —
+ * and it wins the route, so a request sent there does not fail, it succeeds at
+ * the wrong thing. See `restore()` below.
  *
  * Backing surface: `gateway/http/app-backups-surface.ts`. Backing store:
  * `gateway/git/project-backup-store.ts` — same `.project-backup/` repo
@@ -138,6 +144,14 @@ export class BackupsClient extends GatewayHttpClient {
    * `.project-backup/` history; the response carries both the new
    * recovery sha AND the prior HEAD sha so the UI can stash the latter
    * to fuel a one-tap "undo this restore" follow-up.
+   *
+   * The path is `.../backups/restore`, NOT `.../restore`. The bare form is a
+   * different operation on a different surface — un-archiving a project
+   * (`gateway/http/app-projects-surface.ts:560`) — whose rung sits earlier in
+   * the route ladder, so every call this method made used to reach THAT handler
+   * instead: the project was un-archived, `200 {restored:true}` came back, and
+   * `res.restore` was `undefined`. Nesting under `backups/` is what makes the
+   * two disjoint by shape rather than by ladder order.
    */
   async restore(
     project_id: string,
@@ -151,7 +165,7 @@ export class BackupsClient extends GatewayHttpClient {
       body.file_path = file_path;
     }
     const res = await this.req<{ ok: boolean; restore: RestoreResult }>(
-      `/api/app/projects/${encodeURIComponent(project_id)}/restore`,
+      `/api/app/projects/${encodeURIComponent(project_id)}/backups/restore`,
       { method: 'POST', body },
     );
     return res.restore;

@@ -34,6 +34,14 @@
  * through the composed `graph.fetch`, because "the composition carries the
  * field" and "a request reaches the handler" are different claims and only this
  * file checks the first one.
+ *
+ * 2026-08-02 — `app-backups` joins them, and it needed a path change first, not
+ * just a composer line. Its restore route was the bare
+ * `POST /api/app/projects/<id>/restore`, which `app-projects` (an EARLIER rung)
+ * already owns for un-archiving a project; mounting the surface would not have
+ * fixed that, because the earlier rung wins regardless. The restore moved to
+ * `POST .../backups/restore` — disjoint by shape, so no reordering can bring the
+ * collision back — and only then was the surface wired.
  */
 
 /** A slot the product SERVES. Regressing one of these means the path starts 404ing. */
@@ -192,6 +200,12 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
     serves: 'the Docs tab — tree, read, write, move, folders',
   },
   {
+    rung: 'app-backups',
+    composition: 'app_backups_surface',
+    serves:
+      'the project Backups screen — snapshot list, preview, per-file body/diff, and the restore itself at POST .../backups/restore (it was .../restore, which the earlier appProjects rung claims for un-archive and won)',
+  },
+  {
     rung: 'cores-integrations',
     composition: 'cores_integrations_surface',
     serves: 'the Integrations list and API-key management',
@@ -234,13 +248,6 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
     why: 'createAppLauncherSurface (gateway/http/app-launcher-surface.ts:49) has no non-test call site.',
     costs:
       'The Apps tab is a shipped builtin (tabs/registry.ts:109-114) and app_tabs_surface IS served, so the tab renders and taps through to a screen whose every call 404s (app/lib/launcher-client.ts:79,89,97,109).',
-  },
-  {
-    rung: 'app-backups',
-    composition: 'app_backups_surface',
-    why: 'createAppBackupsSurface (gateway/http/app-backups-surface.ts:61) has no non-test call site.',
-    costs:
-      'The project settings drawer routes to a backups screen whose list/create/download calls 404 (app/lib/backups-client.ts:96,105,117,129). Worse than a 404 on ONE of them: POST /api/app/projects/<id>/restore is also claimed by the SERVED appProjects rung (gateway/http/app-projects-surface.ts:560), which sits earlier in the ladder — so the restore-from-backup button silently UN-ARCHIVES the project and reports success instead of failing.',
   },
   {
     rung: 'cores-oauth',

@@ -2,17 +2,30 @@
  * @neutronai/gateway/http — Expo-app project-scoped backups / restore surface (P7.4 restore UI).
  *
  * Per SPEC.md Phases→Steps (was SPEC.md § Phases→Steps P7 + this sprint's brief
- * (`docs/plans/P7.4-restore-ui-sprint-brief.md`). Mounts four routes
- * under `/api/app/projects/<project_id>/`:
+ * (`docs/plans/P7.4-restore-ui-sprint-brief.md`). EVERY route this surface owns
+ * lives under the ONE `/api/app/projects/<project_id>/backups` prefix:
  *
  *   - GET  .../backups                    list snapshots, newest first
  *   - GET  .../backups/<sha>              snapshot preview (files + diff stat)
  *   - GET  .../backups/<sha>/file?path=X  read one file's body at <sha>
  *   - GET  .../backups/<sha>/diff?path=X  unified diff for one file vs HEAD
- *   - POST .../restore                    perform a restore op
+ *   - POST .../backups/restore            perform a restore op
+ *
+ * THE RESTORE ROUTE USED TO BE `POST .../restore`, AND THAT WAS A COLLISION,
+ * not a naming preference. `app-projects-surface.ts:560` claims the very same
+ * `POST /api/app/projects/<id>/restore` for a completely different operation —
+ * un-archiving a project back onto the rail — and its rung sits EARLIER in the
+ * ladder (`route-slots.ts`: `app-projects` before `app-backups`), so it won
+ * every time. A snapshot restore therefore un-archived the project and answered
+ * `200 {restored:true}`: a silent wrong answer, which is worse than the 404 the
+ * caller would have got had this surface simply been absent. Nesting under
+ * `backups/` makes the two disjoint by SHAPE rather than by ladder order, so no
+ * future reordering can bring the collision back. `app-projects-surface.ts`
+ * claims only bare single-segment per-project actions (`/archive`, `/restore`,
+ * `/settings`, `/invite`, …) and nothing under `/backups`.
  *
  * The four read routes share the per-instance bearer + slug-mismatch
- * gate used elsewhere on the app surface. POST .../restore additionally
+ * gate used elsewhere on the app surface. POST .../backups/restore additionally
  * requires a JSON body `{ snapshot_sha: string, file_path?: string | null }`.
  *
  * Storage: every route is a thin wrapper over `ProjectBackupStore`.
@@ -35,16 +48,23 @@ import { jsonError, jsonOk, ownerSlugMismatch, readJsonBody, resolveBearer } fro
 const SNAPSHOT_SHA_RE = /^[0-9a-f]{40}$/
 
 /**
- * One regex that owns every shape the surface routes. Capture groups
- * are (project_id, action, optional-sha, optional-tail):
- *   action = 'backups' | 'restore'
- *   sha    = 40-hex (when action === 'backups')
- *   tail   = 'file' | 'diff' (when action === 'backups' and sha set)
+ * One regex that owns every shape the surface routes, and it is anchored on the
+ * `backups` segment so the surface can never claim a bare per-project action
+ * that `app-projects-surface.ts` owns. Capture groups are
+ * (project_id, segment, optional-tail):
+ *   segment = 'restore' | a 40-hex sha | absent (the list route)
+ *   tail    = 'file' | 'diff' (only meaningful when segment is a sha)
  *
- * `restore` is its own action — no sha, no tail.
+ * `restore` and a sha share the same slot because they are mutually exclusive:
+ * `restore` is not 40-hex, so the alternation is unambiguous. The one shape the
+ * regex admits but the surface does not serve is `/backups/restore/{file,diff}`,
+ * which the handler answers 404 `unknown_backups_route`.
  */
 const BACKUPS_PATH_RE =
-  /^\/api\/app\/projects\/([^/]+)\/(backups|restore)(?:\/([0-9a-f]{40}))?(?:\/(file|diff))?$/
+  /^\/api\/app\/projects\/([^/]+)\/backups(?:\/(restore|[0-9a-f]{40})(?:\/(file|diff))?)?$/
+
+/** The one non-sha `segment` value — a restore is a write on the backups resource. */
+const RESTORE_SEGMENT = 'restore'
 
 export interface AppBackupsSurfaceOptions {
   auth: AppWsAuthResolver
@@ -70,9 +90,10 @@ export function createAppBackupsSurface(
       const match = BACKUPS_PATH_RE.exec(pathname)
       if (match === null) return null
       const raw_project_id = match[1] ?? ''
-      const action = match[2] ?? ''
-      const sha = match[3] ?? null
-      const tail = match[4] ?? null
+      const segment = match[2] ?? null
+      const tail = match[3] ?? null
+      const is_restore = segment === RESTORE_SEGMENT
+      const sha = is_restore ? null : segment
       const project_id = sanitizeProjectId(raw_project_id)
       if (project_id === null) {
         return jsonError(
@@ -95,64 +116,74 @@ export function createAppBackupsSurface(
 
       const method = req.method
       try {
-        if (action === 'backups') {
-          if (sha === null) {
-            // GET /backups — list snapshots.
-            if (method !== 'GET') {
-              return jsonError(
-                405,
-                'method_not_allowed',
-                `method '${method}' not allowed on /backups`,
-              )
-            }
-            return await handleListSnapshots(req, store, project_id)
+        if (is_restore) {
+          // `/backups/restore/file` and `/backups/restore/diff` parse but mean
+          // nothing — those tails belong to a sha. Answer the surface's own 404
+          // rather than falling through to the ladder's, so the caller can tell
+          // "this surface is here and that path is wrong" from "not mounted".
+          if (tail !== null) {
+            return jsonError(
+              404,
+              'unknown_backups_route',
+              `no backup route at '${pathname}'`,
+            )
           }
-          if (tail === null) {
-            // GET /backups/<sha> — preview.
-            if (method !== 'GET') {
-              return jsonError(
-                405,
-                'method_not_allowed',
-                `method '${method}' not allowed on /backups/<sha>`,
-              )
-            }
-            return await handleSnapshotPreview(store, project_id, sha)
+          if (method !== 'POST') {
+            return jsonError(
+              405,
+              'method_not_allowed',
+              `method '${method}' not allowed on /backups/restore`,
+            )
           }
-          if (tail === 'file') {
-            if (method !== 'GET') {
-              return jsonError(
-                405,
-                'method_not_allowed',
-                `method '${method}' not allowed on /backups/<sha>/file`,
-              )
-            }
-            return await handleSnapshotFile(req, store, project_id, sha)
-          }
-          if (tail === 'diff') {
-            if (method !== 'GET') {
-              return jsonError(
-                405,
-                'method_not_allowed',
-                `method '${method}' not allowed on /backups/<sha>/diff`,
-              )
-            }
-            return await handleSnapshotDiff(req, store, project_id, sha)
-          }
-          return jsonError(
-            404,
-            'unknown_backups_route',
-            `no backup route at '${pathname}'`,
-          )
+          return await handleRestore(req, store, project_id)
         }
-        // action === 'restore'
-        if (method !== 'POST') {
-          return jsonError(
-            405,
-            'method_not_allowed',
-            `method '${method}' not allowed on /restore`,
-          )
+        if (sha === null) {
+          // GET /backups — list snapshots.
+          if (method !== 'GET') {
+            return jsonError(
+              405,
+              'method_not_allowed',
+              `method '${method}' not allowed on /backups`,
+            )
+          }
+          return await handleListSnapshots(req, store, project_id)
         }
-        return await handleRestore(req, store, project_id)
+        if (tail === null) {
+          // GET /backups/<sha> — preview.
+          if (method !== 'GET') {
+            return jsonError(
+              405,
+              'method_not_allowed',
+              `method '${method}' not allowed on /backups/<sha>`,
+            )
+          }
+          return await handleSnapshotPreview(store, project_id, sha)
+        }
+        if (tail === 'file') {
+          if (method !== 'GET') {
+            return jsonError(
+              405,
+              'method_not_allowed',
+              `method '${method}' not allowed on /backups/<sha>/file`,
+            )
+          }
+          return await handleSnapshotFile(req, store, project_id, sha)
+        }
+        if (tail === 'diff') {
+          if (method !== 'GET') {
+            return jsonError(
+              405,
+              'method_not_allowed',
+              `method '${method}' not allowed on /backups/<sha>/diff`,
+            )
+          }
+          return await handleSnapshotDiff(req, store, project_id, sha)
+        }
+        return jsonError(
+          404,
+          'unknown_backups_route',
+          `no backup route at '${pathname}'`,
+        )
       } catch (err) {
         return jsonForError(err)
       }
