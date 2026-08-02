@@ -506,6 +506,28 @@ export class ReminderStore {
     )
     return true
   }
+
+  /**
+   * Rewrite a PENDING reminder's message body in place.
+   *
+   * Exists for the task ↔ reminder link (`tasks/reminder-link.ts`): a
+   * task-derived reminder's message IS the task title, so renaming the task
+   * without this would leave the owner being reminded, by name, of a task that
+   * no longer goes by that name. Same pending-only contract as `reschedule` —
+   * a fired or cancelled row is history and is never rewritten.
+   *
+   * Returns `true` iff the row was pending and updated.
+   */
+  async retitle(id: string, message: string): Promise<boolean> {
+    const before = this.get(id)
+    if (before === null || before.status !== 'pending') return false
+    if (before.message === message) return false
+    await this.db.run(
+      `UPDATE reminders SET message = ? WHERE id = ? AND status = 'pending'`,
+      [message, id],
+    )
+    return true
+  }
 }
 
 function rowToReminder(row: ReminderDbRow): Reminder {

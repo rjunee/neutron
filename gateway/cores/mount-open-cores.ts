@@ -54,6 +54,7 @@ import type { ChatCommandFilter } from '../http/app-ws-surface.ts'
 import { OAuthTokenManager } from './oauth-token-manager.ts'
 import { CoreCredentialResolver } from './core-credential-resolver.ts'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import type { TaskStore as TaskStoreType } from '@neutronai/tasks/store.ts'
 import { buildCalendarCacheResolver } from './calendar-wiring.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
@@ -86,6 +87,16 @@ export const GOOGLE_CLIENT_SECRET_ENV = 'NEUTRON_CORES_GOOGLE_CLIENT_SECRET'
 export interface MountOpenCoresInput {
   /** Per-instance ProjectDb (the same handle boot opened). */
   projectDb: ProjectDb
+  /**
+   * The composer's ONE canonical `TaskStore`. Threaded straight through to
+   * `buildCoresBackendFactories({ canonicalTaskStore })` so the Tasks Core's
+   * `tasks_create` / `tasks_update` tools mutate the SAME object the app HTTP
+   * surface and `composition.tasks.store` use — which is what makes the
+   * subscribers `tasksModule.init` attaches (reminder link, projection) fire on
+   * an agent-driven write. Omitted ⇒ the adapter builds a private,
+   * subscriber-free store (`cores/free/tasks/src/backend.ts`).
+   */
+  canonicalTaskStore?: TaskStoreType
   /** Single-owner data dir (`<owner_home>`). Caches + sidecars live under it. */
   owner_home: string
   /** Instance slug — provenance, audit, OAuth-token keying. */
@@ -330,6 +341,10 @@ export async function mountOpenCores(
   // ── Backend-factory map (drives `installBundledCores` MCP-tool registration) ─
   const backends = await buildCoresBackendFactories({
     projectDb: input.projectDb,
+    // The one canonical store (see `MountOpenCoresInput.canonicalTaskStore`).
+    ...(input.canonicalTaskStore !== undefined
+      ? { canonicalTaskStore: input.canonicalTaskStore }
+      : {}),
     owner_home: input.owner_home,
     emailResolver,
     ...(emailOAuthTokens !== undefined ? { emailOAuthTokens } : {}),

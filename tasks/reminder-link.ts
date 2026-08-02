@@ -8,9 +8,13 @@
  * (non-null → different non-null), cancel + delete the link (non-null
  * → null), or create a new reminder (null → non-null).
  *
- * The link write happens in the same transaction as the task mutation
- * — the user-visible model is "this task has a reminder," so an async
- * read-after-write window without the reminder would be confusing.
+ * The link write is SYNCHRONOUS with respect to the task mutation, but not
+ * transactional with it: `TaskStore` commits the task row, then awaits its
+ * subscribers inline (`tasks/store.ts`), and the reminder + link INSERTs share
+ * a transaction of their own. So there is no async read-after-write window —
+ * by the time `create`/`update` resolves the reminder exists — but a reminder
+ * failure does NOT roll back the task. (This header used to claim one shared
+ * transaction; it never was one.)
  *
  * Mechanics surface as standalone functions (callable from the HTTP
  * surface, the Tasks-Core adapter, or a test) PLUS a single
@@ -36,6 +40,28 @@ import type {
  */
 export const TASK_REMINDER_SOURCE = '@neutronai/tasks' as const
 
+/**
+ * How far into the past a due date may sit and still earn a reminder.
+ *
+ * A reminder is a thing that fires LATER. Scheduling one for a moment that has
+ * already gone means it is due the instant it is written, and the tick loop
+ * posts it to the owner immediately — which is not "a reminder", it is a
+ * notification for a deadline they already missed.
+ *
+ * This matters because tasks arrive in BULK with historical dates: the
+ * onboarding history-import seeder (`tasks/history-import-seeder.ts`) creates
+ * tasks straight from LLM-proposed `due_at` values, and a batch of those with
+ * past dates would land as a wall of instant pings (the tick loop drains 50 due
+ * rows per pass). The overdue signal is already carried by `focus_score`'s
+ * overdue bucket (`tasks/focus-score.ts`) and the daily nudge pick — it does not
+ * need a second, louder channel.
+ *
+ * 60 s of tolerance, matching the same floor the app reminders HTTP surface
+ * enforces on hand-created reminders (`MAX_PAST_DRIFT_SECONDS`,
+ * `gateway/http/app-reminders-surface.ts`), so "due in a moment" still schedules.
+ */
+export const MAX_PAST_DUE_DRIFT_SECONDS = 60
+
 export interface TaskReminderLink {
   task_id: string
   reminder_id: string
@@ -46,6 +72,25 @@ export interface TaskReminderLink {
 export interface ReminderLinkContext {
   projectDb: ProjectDb
   remindersStore: ReminderStore
+  /** Override the wall clock (test seam). Defaults to `Date.now`. */
+  now?: () => number
+}
+
+/**
+ * Is this due date far enough in the future to be worth a reminder?
+ *
+ * Callers pre-check with this rather than `createLinkedReminder` returning
+ * null, keeping that function's "you asked for it, you get it" contract (same
+ * shape as its existing `due_date === null` throw).
+ */
+export function dueDateIsSchedulable(
+  due_date: string | null,
+  now_ms: number,
+): boolean {
+  if (due_date === null) return false
+  const fireAt = parseDueDateToFireAt(due_date)
+  if (fireAt === null) return false
+  return fireAt >= Math.floor(now_ms / 1000) - MAX_PAST_DUE_DRIFT_SECONDS
 }
 
 interface LinkDbRow {
@@ -167,6 +212,26 @@ export async function updateLinkedReminder(input: {
 }
 
 /**
+ * Rewrite the message body of every PENDING linked reminder to the task's
+ * current title. Used by the update path when the title changes; fired and
+ * cancelled reminders are history and are left alone.
+ */
+export async function retitleLinkedReminders(input: {
+  task_id: string
+  title: string
+  ctx: ReminderLinkContext
+}): Promise<{ retitled: number }> {
+  const { task_id, title, ctx } = input
+  const links = listLinkedRemindersForTask(task_id, ctx.projectDb)
+  let retitled = 0
+  for (const link of links) {
+    const ok = await ctx.remindersStore.retitle(link.reminder_id, title)
+    if (ok) retitled += 1
+  }
+  return { retitled }
+}
+
+/**
  * List every linked reminder for a task (regardless of reminder
  * status). The Focus aggregator and the Reminders Core convert-to-task
  * tool use this to round-trip a (task, reminder) pair.
@@ -187,9 +252,10 @@ export function listLinkedRemindersForTask(
 }
 
 /**
- * List links for a task whose linked reminder is still pending — the
- * shape `createLinkedReminder` uses to de-dup. Cheap because the
- * partial index on `(project_slug, task_id)` is dense.
+ * The candidate set `createLinkedReminder` de-dups against — every link for the
+ * task; the caller filters on reminder status. Cheap: `task_reminder_links` is
+ * indexed on `(project_slug, task_id)` (migration 0037) and a task has at most
+ * a handful of links over its life.
  */
 function listOpenLinksForTask(input: {
   task_id: string
@@ -232,9 +298,13 @@ async function handleEvent(
   event: TaskMutationEvent,
   ctx: ReminderLinkContext,
 ): Promise<void> {
+  const nowMs = (ctx.now ?? Date.now)()
   switch (event.kind) {
     case 'create': {
-      if (event.task.due_date !== null && event.task.status === 'open') {
+      if (
+        event.task.status === 'open' &&
+        dueDateIsSchedulable(event.task.due_date, nowMs)
+      ) {
         await createLinkedReminder({ task: event.task, ctx })
       }
       return
@@ -251,8 +321,28 @@ async function handleEvent(
         await cancelLinkedReminders({ task_id: after.id, ctx })
         return
       }
-      if (beforeDue === null && afterDue !== null) {
+      // A renamed task must not keep reminding the owner by its old name. Done
+      // first + unconditionally: the title can change in the same PATCH as the
+      // due date, and every branch below either keeps the reminder or replaces
+      // it, so retitling here is never wasted and never fights them.
+      if (before.title !== after.title) {
+        await retitleLinkedReminders({ task_id: after.id, title: after.title, ctx })
+      }
+      // RE-OPEN. Completing a task cancels its reminder; re-opening it must give
+      // the reminder back, or the task sits open with a live due date and
+      // nothing scheduled — permanently, because every branch below compares
+      // due dates and a pure re-open changes neither. This branch has to come
+      // before them for exactly that reason.
+      if (before.status !== 'open' && dueDateIsSchedulable(afterDue, nowMs)) {
+        // `createLinkedReminder` de-dupes against a still-pending link, so a
+        // re-open that never lost its reminder is a no-op here.
         await createLinkedReminder({ task: after, ctx })
+        return
+      }
+      if (beforeDue === null && afterDue !== null) {
+        if (dueDateIsSchedulable(afterDue, nowMs)) {
+          await createLinkedReminder({ task: after, ctx })
+        }
         return
       }
       if (beforeDue !== null && afterDue === null) {
@@ -260,6 +350,13 @@ async function handleEvent(
         return
       }
       if (beforeDue !== null && afterDue !== null && beforeDue !== afterDue) {
+        // Moving a due date INTO the past retires the reminder rather than
+        // rescheduling it to fire on the next tick — same reasoning as
+        // `MAX_PAST_DUE_DRIFT_SECONDS`.
+        if (!dueDateIsSchedulable(afterDue, nowMs)) {
+          await cancelLinkedReminders({ task_id: after.id, ctx })
+          return
+        }
         const links = listLinkedRemindersForTask(after.id, ctx.projectDb)
         const hasPending = links.some((l) => {
           const r = ctx.remindersStore.get(l.reminder_id)

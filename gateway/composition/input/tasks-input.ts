@@ -22,7 +22,20 @@ export interface TasksCompositionInput {
    * Optional — when omitted the canonical TaskStore is still
    * available via `graph.get('tasks').store` but no cron / projection
    * / reminder-link side effects fire. Tests + bespoke composers
-   * leave it unset; production wires all three.
+   * leave it unset.
+   *
+   * `open/composer.ts` — the ONLY production composer — sets `store` plus all
+   * FIVE side-effect fields (`enable_focus_score_cron`,
+   * `enable_task_prioritize_cron`, `enable_reminder_link`,
+   * `enable_nudge_engine_cron`, `projection`).
+   *
+   * That sentence used to read "production wires all three" and was false for
+   * every one of them: no composer set ANY of these fields, so a declared
+   * capability shipped as a guaranteed no-op and the comment is what stopped
+   * anyone noticing. If you add a field here, wire it in `open/composer.ts` in
+   * the SAME change and assert it against the composer's real output in
+   * `open/__tests__/` — a hand-built config literal in a test proves the gate
+   * works, never that anything reaches it. (ISSUES #439 / #440.)
    *
    * Per docs/plans/P6-task-system-overhaul-sprint-brief.md.
    */

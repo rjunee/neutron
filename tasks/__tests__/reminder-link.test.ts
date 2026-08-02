@@ -36,6 +36,21 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+/**
+ * Due dates are RELATIVE to now, never wall-clock literals.
+ *
+ * The link layer refuses to schedule a reminder for a moment that has already
+ * gone (`MAX_PAST_DUE_DRIFT_SECONDS`), so a hardcoded ISO date silently turns
+ * this whole file red the day the clock passes it — which is exactly what the
+ * original `2026-06-15` literals did.
+ */
+function inDays(days: number): string {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
+}
+
+const DUE_SOON = inDays(7)
+const DUE_LATER = inDays(21)
+
 async function waitForLink(taskId: string, timeoutMs = 1000): Promise<void> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
@@ -61,7 +76,7 @@ describe('task ↔ reminder auto-link — create path', () => {
       project_slug: 't1',
       project_id: 'proj-A',
       title: 'submit Q3 report',
-      due_date: '2026-06-15T09:00:00.000Z',
+      due_date: DUE_SOON,
       source: 'app',
     })
     await waitForLink(task.id)
@@ -89,7 +104,7 @@ describe('task ↔ reminder auto-link — create path', () => {
     const task = await taskStore.create({
       project_slug: 't1',
       title: 'one-off',
-      due_date: '2026-06-15T09:00:00.000Z',
+      due_date: DUE_SOON,
     })
     await waitForLink(task.id)
     const linksBefore = listLinkedRemindersForTask(task.id, db)
@@ -107,7 +122,7 @@ describe('task ↔ reminder auto-link — update / status / delete', () => {
     const task = await taskStore.create({
       project_slug: 't1',
       title: 'will be cleared',
-      due_date: '2026-06-15T09:00:00.000Z',
+      due_date: DUE_SOON,
     })
     await waitForLink(task.id)
     const links = listLinkedRemindersForTask(task.id, db)
@@ -125,12 +140,12 @@ describe('task ↔ reminder auto-link — update / status / delete', () => {
     const task = await taskStore.create({
       project_slug: 't1',
       title: 'move it',
-      due_date: '2026-06-15T09:00:00.000Z',
+      due_date: DUE_SOON,
     })
     await waitForLink(task.id)
     const linkBefore = listLinkedRemindersForTask(task.id, db)[0]!
     const fireBefore = remindersStore.get(linkBefore.reminder_id)?.fire_at
-    await taskStore.update(task.id, { due_date: '2026-07-01T09:00:00.000Z' })
+    await taskStore.update(task.id, { due_date: DUE_LATER })
     await waitFor(() => {
       const r = remindersStore.get(linkBefore.reminder_id)
       return r !== null && r.fire_at !== fireBefore
@@ -148,7 +163,7 @@ describe('task ↔ reminder auto-link — update / status / delete', () => {
     const task = await taskStore.create({
       project_slug: 't1',
       title: 'complete me',
-      due_date: '2026-06-15T09:00:00.000Z',
+      due_date: DUE_SOON,
     })
     await waitForLink(task.id)
     const reminderId = listLinkedRemindersForTask(task.id, db)[0]!.reminder_id
@@ -166,7 +181,7 @@ describe('task ↔ reminder auto-link — update / status / delete', () => {
     const task = await taskStore.create({
       project_slug: 't1',
       title: 'cancel me',
-      due_date: '2026-06-15T09:00:00.000Z',
+      due_date: DUE_SOON,
     })
     await waitForLink(task.id)
     const reminderId = listLinkedRemindersForTask(task.id, db)[0]!.reminder_id
@@ -182,7 +197,7 @@ describe('task ↔ reminder auto-link — update / status / delete', () => {
     const task = await taskStore.create({
       project_slug: 't1',
       title: 'delete me',
-      due_date: '2026-06-15T09:00:00.000Z',
+      due_date: DUE_SOON,
     })
     await waitForLink(task.id)
     const reminderId = listLinkedRemindersForTask(task.id, db)[0]!.reminder_id
@@ -196,5 +211,88 @@ describe('task ↔ reminder auto-link — update / status / delete', () => {
     const links = listLinkedRemindersForTask(task.id, db)
     expect(links).toHaveLength(0)
     expect(remindersStore.get(reminderId)?.status).toBe('cancelled')
+  })
+})
+
+/**
+ * ISSUES #440 — the three behaviours that had to be true before this layer
+ * could ship ON by default rather than being deleted as a permanently-unset
+ * switch. Each one is a way the link could have annoyed the owner or quietly
+ * dropped their reminder.
+ */
+describe('task ↔ reminder auto-link — safe-to-ship-on behaviours', () => {
+  test('a due date already in the past schedules NOTHING', async () => {
+    // The noise vector: the onboarding history-import seeder bulk-creates tasks
+    // from LLM-proposed `due_at` values, and past-dated ones would each be due
+    // the instant they were written — the tick loop drains 50 per pass, so an
+    // import lands as a wall of pings. Overdue-ness is the focus score's job.
+    const task = await taskStore.create({
+      project_slug: 't1',
+      title: 'imported from last quarter',
+      due_date: inDays(-30),
+    })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(listLinkedRemindersForTask(task.id, db)).toHaveLength(0)
+  })
+
+  test('moving a due date INTO the past retires the reminder instead of firing it', async () => {
+    const task = await taskStore.create({
+      project_slug: 't1',
+      title: 'slipped backwards',
+      due_date: DUE_SOON,
+    })
+    await waitForLink(task.id)
+    const reminderId = listLinkedRemindersForTask(task.id, db)[0]!.reminder_id
+    await taskStore.update(task.id, { due_date: inDays(-2) })
+    await waitFor(() => {
+      const r = remindersStore.get(reminderId)
+      return r !== null && r.status === 'cancelled'
+    })
+    expect(remindersStore.get(reminderId)?.status).toBe('cancelled')
+  })
+
+  test('re-opening a completed task gives its reminder back', async () => {
+    // Completing cancels the reminder. Before this branch existed, re-opening
+    // changed neither status-to-terminal nor the due date, so it fell through
+    // every branch and the task sat open with a live due date and nothing
+    // scheduled — permanently.
+    const task = await taskStore.create({
+      project_slug: 't1',
+      title: 'not done after all',
+      due_date: DUE_SOON,
+    })
+    await waitForLink(task.id)
+    const firstReminderId = listLinkedRemindersForTask(task.id, db)[0]!.reminder_id
+    await taskStore.complete(task.id)
+    await waitFor(() => remindersStore.get(firstReminderId)?.status === 'cancelled')
+
+    await taskStore.update(task.id, { status: 'open' })
+    await waitFor(() => {
+      const links = listLinkedRemindersForTask(task.id, db)
+      return links.some((l) => remindersStore.get(l.reminder_id)?.status === 'pending')
+    })
+    const pending = listLinkedRemindersForTask(task.id, db)
+      .map((l) => remindersStore.get(l.reminder_id))
+      .filter((r) => r !== null && r.status === 'pending')
+    expect(pending).toHaveLength(1)
+    expect(pending[0]?.message).toBe('not done after all')
+  })
+
+  test('renaming a task rewrites its pending reminder body', async () => {
+    // The reminder message IS the task title. Without this the owner gets
+    // reminded, by name, of a task that no longer goes by that name.
+    const task = await taskStore.create({
+      project_slug: 't1',
+      title: 'call the plumber',
+      due_date: DUE_SOON,
+    })
+    await waitForLink(task.id)
+    const reminderId = listLinkedRemindersForTask(task.id, db)[0]!.reminder_id
+    await taskStore.update(task.id, { title: 'call the electrician' })
+    await waitFor(() => remindersStore.get(reminderId)?.message === 'call the electrician')
+    const after = remindersStore.get(reminderId)
+    expect(after?.message).toBe('call the electrician')
+    // Rescheduling did not happen and the row is still live.
+    expect(after?.status).toBe('pending')
   })
 })
