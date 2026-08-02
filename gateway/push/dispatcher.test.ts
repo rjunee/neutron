@@ -242,11 +242,17 @@ describe('PushDispatcher.pushReminder', () => {
     // NOT registration order. Both rows above are written in the same
     // millisecond, so that ORDER BY is a tie and SQLite may return them either
     // way round. A positional `[ok, error]` array therefore lands the error on
-    // whichever token sorted first — on CI and on a dev mac that was `tok-1`,
-    // so the wrong row was pruned and the `tok-2` assertion below failed every
-    // run. Whether some other host ties the other way is exactly the point: the
-    // assertion is about WHICH token gets pruned, so it must not rest on an
-    // order the query never promised. Address the tokens BY NAME instead.
+    // whichever token sorted first, so the wrong row gets pruned whenever the
+    // tie breaks that way and the `tok-2` assertion below fails.
+    //
+    // It is INTERMITTENT, and measurably so: it failed on CI run 30740607248
+    // (shard 4/4) and then passed on run 30741274758 with the same code, while
+    // failing on every local run on one dev mac. That spread is the signature of
+    // a tie-break, not of a broken assertion — which is exactly why the fix is
+    // to remove the ordering dependence rather than to pin an order.
+    //
+    // Address the tokens BY NAME: the assertion is about WHICH token gets
+    // pruned, so it must not rest on an order the query never promised.
     const client = fakeClient((messages) =>
       messages.map((m) =>
         m.to === 'tok-2'
