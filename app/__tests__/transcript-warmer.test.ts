@@ -36,6 +36,11 @@ import {
   resetHarnessGlobals,
   withoutWebCrypto,
 } from './support/native-harness';
+import {
+  advanceHarnessClock,
+  installHarnessClock,
+  uninstallHarnessClock,
+} from './support/harness-clock';
 
 installNativeHarness();
 setHarnessPlatform('ios');
@@ -428,12 +433,30 @@ async function filmTheSwitch(project: string): Promise<Film> {
   });
   await screen.settle();
 
+  // THE CLOCK GOES ON HERE, not at the top of the file. Everything above needs
+  // real timers (the mount, the socket handshake, and — between the two calls
+  // this helper gets — a real warm that waits on a real replay-quiet deadline).
+  // The only span that must be machine-independent is the one being measured, so
+  // that is the only span the logical clock owns.
+  //
+  // WHAT WAS WRONG WITH THE WALL CLOCK. A frame was a real 33 ms sleep and the
+  // hand-off was `Date.now() - started >= REPLAY_DELAY_MS`, so a busy machine
+  // crossed 800 ms in FEWER frames and the empty-state count fell toward the
+  // floor the assertion checks. Measured on this file: a nominal 25 empty frames
+  // became 20-22 under 4x CPU overload, against a floor of 16. Still green, but
+  // the margin was being spent by load rather than by the code under review, and
+  // that is a gate that eventually reddens for the wrong reason.
+  installHarnessClock();
+  try {
   const started = Date.now();
   let delivered = false;
   const film: Film = { empty: 0, hydrating: 0, content: 0 };
   for (let i = 0; i < FRAMES; i++) {
-    await act(async () => {
-      await new Promise<void>((resolve) => setTimeout(resolve, FRAME_MS));
+    // One frame is exactly one frame, whatever else the machine is doing.
+    await advanceHarnessClock(FRAME_MS, async (run) => {
+      await act(async () => {
+        run();
+      });
     });
     if (!delivered && Date.now() - started >= REPLAY_DELAY_MS) {
       delivered = true;
@@ -449,6 +472,11 @@ async function filmTheSwitch(project: string): Promise<Film> {
   }
   screen.unmount();
   return film;
+  } finally {
+    // PROCESS-GLOBAL: Bun runs ~100 test files per process. Leaving this
+    // installed would hand every later file a frozen `Date.now()`.
+    uninstallHarnessClock();
+  }
 }
 
 describe('the cold-scope empty-state flash', () => {
