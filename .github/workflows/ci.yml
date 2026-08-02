@@ -146,6 +146,13 @@ jobs:
       # literal the composer SHOULD have produced, so the gate was never the
       # failing step; this checks the step that was.
       - run: bash scripts/ci/composition-wiring-gate.sh .
+      # Route-slot coverage ratchet. `open/__tests__/route-slot-coverage.test.ts`
+      # boots the real composition and asserts every served surface is still
+      # served — but it reads its own baseline, so it cannot see a rung being
+      # MOVED into the unserved allowlist, which deletes the assertion and lets
+      # the route 404 with CI green. This is that half. Lives here because the
+      # layering job is the one checked out with full history.
+      - run: bash scripts/ci/route-slot-ratchet-guard.sh
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:

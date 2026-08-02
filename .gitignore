@@ -28,3 +28,8 @@ STATUS.md
 # copy ever lands in here anyway, it must not be committable: the list names the
 # exact strings it exists to keep out of a public repo.
 leak-gate-pii-denylist*
+
+# Scratch copy of main's route-slot inventory, written INSIDE the tree by
+# scripts/ci/route-slot-ratchet-guard.sh so bun can import it, and removed on
+# exit. Ignored so a killed run can never leave a committable stray.
+.route-slot-inventory-main.*.ts
