@@ -293,7 +293,30 @@ export interface MorningBriefDeps {
   general_topic_id: string
   channel_kind?: Topic['channel_kind']
   now(): number
+  /**
+   * Static fallback zone. On a self-hosted laptop install this is the HOST's
+   * zone (`resolveLocalTimezone`) — which is the right answer there, because
+   * the host IS the owner's machine. It is the WRONG answer on a hosted box
+   * (the server runs UTC while the owner lives in Pacific), so `resolveTimezone`
+   * below takes precedence when it resolves. "Local" is a property of the
+   * deployment, not of the code.
+   */
   tz?: string
+  /**
+   * Resolve the OWNER's IANA timezone at EACH tick, keyed on the DISPATCHED
+   * `owner_slug`. Mirrors the contract `NudgeEngineHandlerDeps.resolveTimezone`
+   * already documents: production wires this to read `instance_metadata.timezone`
+   * per-invocation, so (a) a fresh install that has no row yet at boot picks the
+   * zone up as soon as the first client reports it, and (b) a mid-run timezone
+   * change takes effect on the next tick without a gateway restart. Returning a
+   * value WINS over the static `tz`; returning `undefined` falls through to `tz`,
+   * then `DEFAULT_OWNER_TIMEZONE`.
+   *
+   * Consumed by `buildMorningBriefHandler` (the only layer that has an
+   * `owner_slug`), which resolves it and hands `runMorningBrief` an already-
+   * resolved `tz`. `runMorningBrief` itself never calls it.
+   */
+  resolveTimezone?: (owner_slug: string) => string | undefined
   /** Owner-local hour at/after which the brief may post. Default 7. */
   brief_hour?: number
   /**

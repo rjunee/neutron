@@ -167,4 +167,60 @@ describe('Open proactive activation wiring', () => {
       }
     }
   }, 20_000)
+
+  /**
+   * The sweep's PRODUCER. `gateway/tasks/p6/nudge-engine.ts:449` is the only
+   * non-test writer of `current_focus_pick`, and the idle-nudge sweep's
+   * `readTodayPick` returns `no_pick` (`gateway/proactive/idle-nudge-sweep.ts:187`)
+   * when that table is empty — so with the nudge cron off, the sweep this
+   * composer ships ON can never post. The flag shipped in 49f2bcd3, was removed
+   * alongside `listIdleTopics` in d4b669fc, and was NOT restored when
+   * `listIdleTopics` came back: consumer alive, producer dead.
+   *
+   * These assertions are deliberately made against what the PRODUCTION composer
+   * actually returns — not a hand-built config literal — so the exact regression
+   * that happened (an edit that drops the key from `open/composer.ts`) reds here.
+   */
+  test('a credentialed boot ENABLES the nudge engine cron with a real llm — the sweep has a producer', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-proactive-test'
+    const composer = buildOpenGraphComposer({ env: process.env })
+    const composition = await composer({ db, project_slug: 'owner' })
+
+    expect(composition.tasks?.enable_nudge_engine_cron).toBe(true)
+    // Enabling the cron WITHOUT an llm is strictly worse than leaving it off:
+    // `runNudgePass` runs the staleness pass (which decays focus scores) before
+    // it bails at the `llm === null` check, so an llm-less tick mutates task
+    // state daily and still never writes a pick. The llm is a dependency of the
+    // flag, not an optional extra.
+    expect(composition.tasks?.nudge_engine).toBeDefined()
+    expect(composition.tasks?.nudge_engine?.llm).not.toBeNull()
+    expect(typeof composition.tasks?.nudge_engine?.llm).toBe('function')
+
+    for (const cleanup of composition.realmode_cleanups ?? []) {
+      try {
+        cleanup()
+      } catch {
+        /* best-effort */
+      }
+    }
+  }, 20_000)
+
+  test('an LLM-less boot does NOT enable the nudge cron (a dependency, not a feature flag)', async () => {
+    delete process.env['ANTHROPIC_API_KEY']
+    const composer = buildOpenGraphComposer({ env: process.env })
+    const composition = await composer({ db, project_slug: 'owner' })
+
+    // Registering an llm-less nudge cron would decay focus scores every day
+    // while never producing a pick. Better to not register it at all.
+    expect(composition.tasks?.enable_nudge_engine_cron).toBeUndefined()
+    expect(composition.tasks?.nudge_engine).toBeUndefined()
+
+    for (const cleanup of composition.realmode_cleanups ?? []) {
+      try {
+        cleanup()
+      } catch {
+        /* best-effort */
+      }
+    }
+  }, 20_000)
 })

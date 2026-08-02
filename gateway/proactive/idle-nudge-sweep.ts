@@ -110,7 +110,27 @@ export interface IdleNudgeSweepDeps {
   /** Active project-bound topics to consider (production resolves; tests inject). */
   listTopics(): ProactiveTopicCandidate[] | Promise<ProactiveTopicCandidate[]>
   now(): number
+  /**
+   * Static fallback zone — the HOST's zone on a self-hosted laptop install
+   * (correct there: the host IS the owner's machine), the WRONG zone on a
+   * hosted box running UTC. `resolveTimezone` below wins when it resolves.
+   */
   tz?: string
+  /**
+   * Resolve the OWNER's IANA timezone at EACH tick, keyed on the DISPATCHED
+   * `owner_slug` — same contract as `MorningBriefDeps.resolveTimezone` and
+   * `NudgeEngineHandlerDeps.resolveTimezone`. Production reads
+   * `instance_metadata.timezone` per-invocation. A resolved value WINS over the
+   * static `tz`; `undefined` falls through to `tz`, then `DEFAULT_OWNER_TIMEZONE`.
+   *
+   * This zone keys the sweep's `day`, which is what `readTodayPick` looks the
+   * ranker's pick up by — so a wrong zone here does not merely mistime the
+   * nudge, it makes the lookup MISS for the hours the offset spans.
+   *
+   * Consumed by `buildIdleNudgeSweepHandler` (the only layer with an
+   * `owner_slug`); `runIdleNudgeSweep` receives an already-resolved `tz`.
+   */
+  resolveTimezone?: (owner_slug: string) => string | undefined
   idle_threshold_ms?: number
   channel_kind?: Topic['channel_kind']
   /**

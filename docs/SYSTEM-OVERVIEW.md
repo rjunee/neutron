@@ -3592,13 +3592,7 @@ ship ON (no feature flag); `open/composer.ts` wires `tasks.proactive`, including
 - **Daily morning brief** (`morning-brief.ts`) — **ACTIVE.** Once per owner-local
   day at/after `brief_hour`, composes from live context (focus/task queue,
   optional calendar / entity / project sources — each gathered behind its own
-  try/catch) and posts to the owner's General topic. **Owner-local day** is
-  computed from the host's actual timezone, not a hardcoded Pacific default:
-  `open/composer.ts` resolves it once via `resolveLocalTimezone` (`local-timezone.ts`
-  — `process.env.TZ` override → the runtime's `Intl` zone → a defensive floor) and
-  threads it through `tasks.proactive.timezone`. A non-Pacific host therefore gets
-  the brief at its real local hour (Ryan: "Detect local computer time not hardcode pt").
-  **LLM composition (the legacy harness
+  try/catch) and posts to the owner's General topic. **LLM composition (the legacy harness
   parity):** `buildLlmBriefComposer` routes the resolved `BriefContext` through
   the warm `cc-llm` substrate (grounded in exactly the resolved evidence, no
   fabrication); the pure `composeMorningBrief` template is the deterministic
@@ -3645,6 +3639,45 @@ ship ON (no feature flag); `open/composer.ts` wires `tasks.proactive`, including
   Non-repetition is pinned by `gateway/proactive/__tests__/idle-nudge-no-repeat.test.ts`
   (four idle cycles → exactly one nudge; real user activity re-arms it; both
   namespaces observed), mutation-tested in both directions.
+- **The daily nudge PRODUCER** (`gateway/tasks/p6/nudge-engine.ts`) — the sweep
+  above consumes `current_focus_pick`, and that table's only non-test writer is
+  the P6.1 nudge cron. `open/composer.ts` sets `tasks.enable_nudge_engine_cron`
+  + `tasks.nudge_engine.llm` (the same warm `cc-llm` `proactiveLlm` the brief
+  composer and nudge rater use), so the producer runs. The flag is set **only
+  when that llm resolves** — that is a dependency, not a feature flag: an
+  llm-less tick still runs the staleness pass (decaying focus scores) and then
+  bails without writing a pick, which is strictly worse than not registering.
+  Between 2026-06-27 and this fix the flag was unset while the sweep shipped ON,
+  so the sweep returned `no_pick` on every tick and could never post.
+
+### Which clock the daily rhythm runs on
+
+Every scheduled owner-facing surface resolves **the OWNER's** zone, not the
+host's — the brief's hour gate and day key, the sweep's day key (which is also
+the key `readTodayPick` looks the ranker's pick up by), the P6 nudge pick's day,
+and recurring reminders.
+
+The single source is `instance_metadata.timezone` (written by the app-ws client
+on connect — see § app-ws timezone reporting), read through `readOwnerTimezone`
+(`gateway/storage/owner-metadata.ts`). `build-core-modules.ts` wires it into
+`MorningBriefDeps.resolveTimezone` / `IdleNudgeSweepDeps.resolveTimezone` /
+`NudgeEngineHandlerDeps.resolveTimezone`, and the cron handlers call it **per
+fire**, keyed on the dispatched `ctx.owner_slug`. Per-fire is load-bearing twice:
+a fresh install has no `instance_metadata` row until the first client connects
+(a boot-time read would freeze the wrong zone forever), and a mid-run zone change
+takes effect on the next tick without a restart.
+
+Precedence: `resolveTimezone(owner_slug)` → the static `tz` → `DEFAULT_OWNER_TIMEZONE`.
+The static `tz` is the host's zone (`resolveLocalTimezone`, `local-timezone.ts`:
+`process.env.TZ` → the runtime's `Intl` zone → a defensive floor), threaded by
+`open/composer.ts` as `tasks.proactive.timezone`. It is kept deliberately: on a
+self-hosted laptop install the host IS the owner's machine, and there the host
+zone is the right answer. It became the WRONG answer only once the same code was
+hosted — a hosted box runs `Etc/UTC` while the owner lives in Pacific, so the 7am
+brief fired at midnight local and the sweep's pick lookup missed for the hours the
+offset spans. **"Local" is a property of the deployment, not of the code.** Pinned
+by `gateway/__tests__/proactive-owner-timezone-wiring.test.ts`, which drives the
+real composition with the stored zone and the host zone set to different values.
 
 ## Doc search (QMD-equivalent) — `@neutronai/doc-search`
 
@@ -5977,13 +6010,16 @@ client-visible error — since one instance `project_slug` binds many `user_id`s
 It then idempotently persists a valid, changed zone via
 `persistOwnerTimezoneIfChanged` → `writeOwnerTimezone`
 (`gateway/storage/owner-metadata.ts`), the row keyed on the auth-resolved instance
-`project_slug` (never a client-supplied identity). Its ONE consumer today is the
-idle-nudge engine (`gateway/composition/build-core-modules.ts` reads it per tick),
-which keys the daily nudge pick's day-boundary on the owner's real zone instead of
-the hardcoded `DEFAULT_OWNER_TIMEZONE`; the proactive morning brief and reminder
-schedulers still resolve their own host-local zone. A legacy client that reports no
-`tz` performs no write, leaving any previously stored zone unchanged; with no
-stored metadata the nudge engine falls back to `DEFAULT_OWNER_TIMEZONE`.
+`project_slug` (never a client-supplied identity). Its consumers are **every
+scheduled owner-facing surface** — the P6.1 nudge pick's day boundary, the
+proactive morning brief's hour gate + day key, the idle-nudge sweep's day key,
+and recurring reminders — each reading it per tick via `readOwnerTimezone` in
+`gateway/composition/build-core-modules.ts`. See § "Which clock the daily rhythm
+runs on" for the precedence and why the read must be per-fire. A legacy client
+that reports no `tz` performs no write, leaving any previously stored zone
+unchanged; with no stored metadata the proactive crons fall back to the host's
+zone (correct for a self-hosted install) and the nudge engine to
+`DEFAULT_OWNER_TIMEZONE`.
 
 > K11b0 (2026-07-06): the legacy `/ws/chat` `ChatBridge` this section once
 > described (`handleInbound` / `isLiveAgentEligible` / `handleProjectTopicInbound`,
