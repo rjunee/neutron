@@ -1324,8 +1324,24 @@ export function buildOpenGraphComposer(
     // (LLM-less box ⇒ never runs ⇒ tools throw unavailable / capture no-ops —
     // fail closed, no flags).
     let ritualRegistration: RitualRegistrationService | null = null
+    // ── THE canonical TaskStore — ONE instance for the whole box ────────────
+    // Every task surface must be the SAME object, not merely the same table.
+    // A `TaskStore` carries the mutation-subscriber list that `tasksModule.init`
+    // (`gateway/composition/build-core-modules.ts`) attaches the reminder-link /
+    // projection listeners to, so a write through a store that is not THIS one
+    // reaches the db and fires nothing.
+    //
+    // Open used to build THREE: the composition fallback
+    // (`build-core-modules.ts:916`, because `composition.tasks.store` was never
+    // set), one for the app HTTP surface (`createAppTasksSurface`, below), and a
+    // third inside the Tasks Core adapter (`buildSubstrateTaskStoreBackend`
+    // constructs its own when `canonicalTaskStore` is absent —
+    // `cores/free/tasks/src/backend.ts`). Constructed HERE, above
+    // `mountOpenCores`, so all three consumers can bind to it.
+    const canonicalTaskStore = new TaskStore(db)
     const coresWiring = await mountOpenCores({
       projectDb: db,
+      canonicalTaskStore,
       owner_home,
       project_slug,
       secretsStore,
@@ -2340,6 +2356,86 @@ export function buildOpenGraphComposer(
     // read wins whenever the owner's client has reported a zone.
     const localTimezone = resolveLocalTimezone({ env })
     const tasksConfig: NonNullable<CompositionInput['tasks']> = {
+      // THE canonical store. Without this, `build-core-modules.ts:916` builds a
+      // private fallback and every subscriber it attaches is attached to an
+      // object no other surface holds.
+      store: canonicalTaskStore,
+      // Focus-score convergence cron — ON, unconditionally.
+      //
+      // `TaskStore` stamps `focus_score` synchronously on write
+      // (`tasks/store.ts:274-283`), so scores are never null; what goes stale is
+      // the TIME-derived half of the score. `computeFocusScore` reads the clock
+      // for the overdue / due-soon / due-this-week buckets and the staleness
+      // bonus (`tasks/focus-score.ts:89-115`), and none of those move on their
+      // own — a task due tomorrow keeps yesterday's "due this week" urgency
+      // until something writes the row. This cron is the only thing that walks
+      // the open set and re-stamps against now (`tasks/focus-score-cron.ts:73`).
+      //
+      // No LLM, no network, no message to the owner: one indexed read + one
+      // transaction every 4h (`DEFAULT_FOCUS_SCORE_INTERVAL_MS`), and it
+      // early-returns on an empty backlog (`focus-score-cron.ts:94-96`).
+      enable_focus_score_cron: true,
+      // LLM backlog ranking — ON, unconditionally, LLM or not.
+      //
+      // Unlike the nudge engine (whose llm-less tick decays scores and produces
+      // nothing), this pass has a REAL null-llm path: it computes the
+      // deterministic focus-score order over the full open set and writes it
+      // with `prioritized_by: 'deterministic'` before any call is attempted
+      // (`tasks/prioritize-llm.ts:168-179`). So an uncredentialed box gets a
+      // correctly-ranked backlog, and the same cron starts producing LLM ranks
+      // the moment a credential exists — which is why the llm here is a plain
+      // value, not a gate.
+      enable_task_prioritize_cron: true,
+      // Same warm `cc-llm` substrate as the nudge engine / brief composer; null
+      // on an uncredentialed box → the deterministic branch above.
+      task_prioritizer: { llm: proactiveLlm },
+      // Task → reminder auto-link — ON.
+      //
+      // A due date that never reminds you of anything is a sort field, not a
+      // deadline. The layer creates one reminder per due-dated task, reschedules
+      // it in place when the date moves, retitles it when the task is renamed,
+      // and cancels it on complete / cancel / delete / due-date-cleared
+      // (`tasks/reminder-link.ts`). It writes ordinary `reminders` rows on the
+      // ordinary topic, so the existing tick loop delivers them and the
+      // Reminders tab lists them — no second delivery path.
+      //
+      // Two gaps were closed to make this safe to ship ON rather than deleting
+      // the switch: a re-opened task now gets its reminder back, and a due date
+      // already in the past no longer schedules at all (the history-import
+      // seeder bulk-creates tasks from LLM-proposed past dates — that was the
+      // noise storm). Overdue-ness stays the focus score's job.
+      enable_reminder_link: true,
+      // STATUS.md / ACTIONS.md projection — ON.
+      //
+      // This is not an export to nowhere. `reminders/rituals/kaizen.md:17,35`
+      // globs `Projects/*/ACTIONS.md` + `Projects/*/STATUS.md` for stalled work,
+      // and doc-search indexes both into the agent's `doc_read` / `doc_search`
+      // tools (`doc-search/walk.ts:6-7`, wired above). With the writer dark,
+      // ACTIONS.md does not exist on any install and kaizen's stalled-work pass
+      // reads nothing. STATUS.md is also the Documents tab's pinned root doc
+      // (`gateway/http/doc-store.ts:169`), so the block is owner-visible.
+      //
+      // The projection is marked-block-only on STATUS.md
+      // (`tasks/projection/parse.ts:70-82`) — frontmatter + narrative the
+      // onboarding materializer and the owner wrote are preserved; ACTIONS.md is
+      // generated end-to-end and says so in its own body
+      // (`tasks/projection/format.ts:190-193`).
+      projection: {
+        // `<owner_home>/Projects/<project_id>/` — the SAME convention the local
+        // platform adapter (`runtime/platform-adapter-local.ts:243-244`),
+        // doc-search (`doc-search/indexer.ts:73`) and the onboarding project
+        // materializer already use, so the block lands in the folder those
+        // readers already walk.
+        //
+        // `project_id === ''` is the NO_PROJECT sentinel: unfiled tasks have no
+        // folder to project into, and returning null skips the pair rather than
+        // inventing a `Projects//` path.
+        resolveProjectDir: (i: {
+          project_slug: string
+          project_id: string
+        }): { dir: string } | null =>
+          i.project_id === '' ? null : { dir: joinPath(owner_home, 'Projects', i.project_id) },
+      },
       // P6.1 daily nudge engine — ON whenever there is an LLM to run it with.
       //
       // This is the PRODUCER the idle-nudge sweep consumes:
@@ -2534,9 +2630,12 @@ export function buildOpenGraphComposer(
     // surface (`/api/app/upload`), the remaining app-API endpoints the React UI
     // calls. Codex r1 [P2]×2: the tabs resolver now SHOWS the Tasks tab and the
     // composer SHOWS the attachment button, so their backends must exist or those
-    // controls 404. `new TaskStore(db)` reads the SAME canonical project task
-    // data the agent's `cores/free/tasks` backend writes. Same owner auth.
-    const appTasksSurface = createAppTasksSurface({ store: new TaskStore(db), auth: appOwnerAuth })
+    // controls 404. Reads + writes THE `canonicalTaskStore` built above — the
+    // same object the agent's `cores/free/tasks` backend and
+    // `composition.tasks.store` hold, so a task created from the Tasks tab
+    // fires the subscribers `tasksModule.init` attached. It used to build its
+    // own `new TaskStore(db)`, which shared the table and nothing else.
+    const appTasksSurface = createAppTasksSurface({ store: canonicalTaskStore, auth: appOwnerAuth })
     // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
     // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
     // which one runs (`instance_metadata.transcription_backend`, migration

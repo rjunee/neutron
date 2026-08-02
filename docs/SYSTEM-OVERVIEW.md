@@ -3373,6 +3373,51 @@ true); `tasks.task_prioritizer.llm` is an OPTIONAL dependency, not a second gate
 registering with a null llm is safe, the handler runs the deterministic ranking
 until a credential exists.
 
+### What the composer actually turns on (ISSUES #439 / #440)
+
+Everything above is gated on a `composition.tasks.*` field, and until 2026-08 the
+only production composer set NONE of them — so five declared capabilities shipped
+as guaranteed no-ops while `tasks-input.ts` claimed "production wires all three."
+`open/composer.ts` now sets the whole block, and each entry is asserted against
+the composer's REAL output in `open/__tests__/open-tasks-wiring.test.ts` (a
+hand-built config literal in a test proves the gate, never the producer):
+
+| Field | State | Effect |
+|---|---|---|
+| `store` | always | THE canonical `TaskStore` — see below |
+| `enable_focus_score_cron` | always | `tasks.focus_score_recompute`, 4h |
+| `enable_task_prioritize_cron` + `task_prioritizer.llm` | always (llm may be null) | `tasks.prioritize_llm`, 6h; deterministic when llm-less |
+| `enable_reminder_link` | always | due-dated tasks get a reminder |
+| `enable_nudge_engine_cron` + `nudge_engine` | only with an LLM | daily `current_focus_pick` |
+| `projection` | always | STATUS.md / ACTIONS.md under `<owner_home>/Projects/<id>/` |
+
+**ONE `TaskStore` per box.** A `TaskStore` carries the mutation-subscriber list
+that `tasksModule.init` attaches the reminder-link and projection listeners to,
+so a surface holding a *different* instance over the same db writes the row and
+fires nothing. Open used to build three — the composition fallback, one for the
+app HTTP surface, one inside the Tasks Core adapter. `open/composer.ts` now
+builds exactly one and threads it into all three (`composition.tasks.store`,
+`createAppTasksSurface`, and `mountOpenCores({ canonicalTaskStore })` →
+`buildCoresBackendFactories`). The store-identity tests drive a write through the
+HTTP surface and through the Core adapter and assert the canonical store's
+subscriber fired — a "the row is in the table" assertion cannot tell the two
+apart.
+
+**The task → reminder link** (`tasks/reminder-link.ts`) creates one reminder per
+due-dated task on the ordinary `app-project:<id>` topic (so the existing tick
+loop delivers it and the Reminders tab lists it), reschedules it in place when
+the date moves, rewrites its body when the task is renamed
+(`ReminderStore.retitle`), restores it when a completed task is re-opened, and
+cancels it on complete / cancel / delete / due-date-cleared. It refuses to
+schedule anything already in the past (`MAX_PAST_DUE_DRIFT_SECONDS`, 60 s,
+matching the app reminders surface's floor) — the onboarding history-import
+seeder bulk-creates tasks from LLM-proposed dates, and past-dated ones would each
+be due on write. Overdue-ness stays the focus score's job.
+
+**The projection writer's failures are no longer silent.** Its default log sink
+is a no-op; `build-core-modules.ts` now supplies one that warns
+`tasks_projection_write_failed`, so an unwritable `Projects/` dir surfaces.
+
 ## Reminders — cadence + fire-time composition (`reminders/`)
 
 Instance-scoped reminder engine (`@neutronai/reminders`), backed by the

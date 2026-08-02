@@ -2,6 +2,62 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-01 — the rest of the tasks block was never switched on
+
+Branch `fix/wire-tasks-crons-shared-store`. Changed: `open/composer.ts`,
+`gateway/cores/mount-open-cores.ts`, `gateway/composition/build-core-modules.ts`,
+`gateway/composition/input/tasks-input.ts`, `tasks/reminder-link.ts`,
+`reminders/store.ts`, `docs/INVARIANTS.md`, `docs/SYSTEM-OVERVIEW.md`. New:
+`open/__tests__/open-tasks-wiring.test.ts`. Tests:
+`tasks/__tests__/reminder-link.test.ts`.
+
+**Why.** #439 fixed one instance of a shape; the same config block held five
+more. `composition.tasks` declares six capabilities and gates each on a `=== true`
+flag, and the only production composer set exactly one of them. So the
+focus-score convergence cron, the LLM backlog ranking cron, the task-to-reminder
+link, the STATUS.md / ACTIONS.md projection and the canonical-store seam were all
+declared, all tested, and all dead — while the input's own doc comment read
+"production wires all three." Nothing caught it because every wiring test
+hand-builds the config literal the composer should have produced and then asserts
+the gate works: that proves the consumer, never the producer.
+
+**What landed.** `open/composer.ts` now sets the whole block. Two of the five were
+unambiguous — refreshing time-derived focus scores and ranking a backlog both
+degrade safely with no credential and post nothing to the owner. Two were
+judgement calls and were investigated before being switched on rather than
+deleted: the projection turned out to have live readers (the bundled kaizen
+ritual globs `Projects/*/ACTIONS.md` for stalled work, and doc-search indexes both
+files into the agent's `doc_read`), and the reminder link turned out to be a
+coherent create/reschedule/cancel layer sitting on a store-identity fracture.
+
+The fracture is the fifth. Open built THREE `TaskStore`s over one db — the
+composition fallback, the app HTTP surface's, and the Tasks Core adapter's — and
+a `TaskStore` is where the mutation-subscriber list lives, so a write through any
+of them landed the row and fired nothing. One store now, threaded into all three.
+
+The reminder link needed two behaviour fixes before it was safe as a default:
+re-opening a completed task got its reminder back (it changed neither status-
+to-terminal nor the due date, so it fell through every branch and left the task
+open with a live due date and nothing scheduled), and a due date already in the
+past no longer schedules at all — the onboarding history-import seeder bulk-creates
+tasks from LLM-proposed dates and each past-dated one was due on write. Renaming a
+task now rewrites its pending reminder body too (`ReminderStore.retitle`), because
+the reminder message IS the task title.
+
+Two smaller truths corrected while in there: the projection writer's default log
+sink is a no-op, so a failed write was invisible — the composition now supplies
+one, and it immediately surfaced a real teardown-race write failure in an existing
+test. And invariant #23 claimed the link write shares the task mutation's
+transaction; it never did.
+
+**The test that would have caught it.** `open/__tests__/open-tasks-wiring.test.ts`
+runs the real composer and reads its real output. The two store-identity tests go
+further than reading a field: they subscribe to `composition.tasks.store`, then
+drive a write through the app HTTP handler and through the Tasks Core adapter and
+demand the subscriber fired — an assertion that the row reached the table cannot
+tell one store from three. Every assertion was mutation-verified by deleting the
+wiring it covers and watching it red.
+
 ## 2026-08-01 — the reachability gate reaches the phone
 
 Branch `test/reachability-mobile`. New: `app/__tests__/reachability-inventory.ts`,

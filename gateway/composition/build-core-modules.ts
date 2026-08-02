@@ -1160,6 +1160,19 @@ export function buildCoreModules(
         const projectionOpts: Parameters<typeof buildProjectionWriter>[0] = {
           store,
           resolveProjectDir: tasksCfg.projection.resolveProjectDir,
+          // The writer's DEFAULT log sink is a no-op (`tasks/projection/write.ts`),
+          // so an unwritable Projects dir or a full disk would have failed
+          // silently forever. Route it at the composition boundary instead — a
+          // write error is a warning, a skip/ok is debug-level noise.
+          log: (event): void => {
+            if (event.kind === 'write_error') {
+              tasksComposerLog.warn('tasks_projection_write_failed', {
+                project: input.project_slug,
+                project_id: event.project_id,
+                error: event.message,
+              })
+            }
+          },
         }
         if (tasksCfg.projection.debounce_ms !== undefined) {
           projectionOpts.debounce_ms = tasksCfg.projection.debounce_ms

@@ -121,7 +121,11 @@ with cross-references noted inline.
     persist-before-send outbound to the `app:` registry. `reminders/tick.ts:130-177`,
     `reminders/store.ts:234-293`, `reminders/outbound.ts:7-18`.
     Protects: **F1** (adopts `SupervisedLoop` in `reminders/tick.ts`).
-23. Task↔reminder link writes share the task mutation's transaction. `tasks/reminder-link.ts:97`.
+23. Task↔reminder link: the reminder INSERT + link INSERT share ONE transaction with each
+    other (not with the task mutation — the task row is already committed when the
+    subscriber runs), and a reminder is only ever scheduled for a future moment
+    (`MAX_PAST_DUE_DRIFT_SECONDS`), so a bulk import of past-dated tasks cannot fire a
+    wall of instant pings. `tasks/reminder-link.ts`.
     Protects: unprotected — covered by review only.
 24. App-chat: idempotency keyed on `(topic_id, client_msg_id)`; per-topic `MAX(seq)+1` computed
     inside the transaction; persist-first-then-fan-out in the adapter. `adapter.ts:174-199`.
