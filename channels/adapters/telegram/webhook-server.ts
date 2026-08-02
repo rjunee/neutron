@@ -259,6 +259,20 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     if (req.method !== 'POST') {
       return new Response('method not allowed', { status: 405 })
     }
+    // An EMPTY expected secret must never authenticate anyone. Without this
+    // line the compare below is `Buffer.from('')` vs `Buffer.from('')` on a
+    // request that sends NO header at all — equal lengths, timingSafeEqual
+    // returns true, and the endpoint becomes an unauthenticated command
+    // surface that accepts forged updates from the public internet. The
+    // builder already refuses to construct the surface without a non-empty
+    // secret (`gateway/wiring/build-telegram-webhook.ts`), so this is the
+    // second of two independent gates: any OTHER caller of this factory
+    // (tests, a future composer) gets the same refusal rather than inheriting
+    // the hole. Fail closed, and say nothing more to the caller than 403.
+    if (opts.secret_token.length === 0) {
+      log.error('empty_secret_token_rejecting_all')
+      return new Response('forbidden', { status: 403 })
+    }
     const provided = req.headers.get('x-telegram-bot-api-secret-token')
     // Constant-time compare. Length-check first because timingSafeEqual
     // throws on length mismatch (its same-length precondition); buffer
@@ -272,13 +286,25 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
       return new Response('forbidden', { status: 403 })
     }
 
-    let body: TelegramUpdate
+    let parsed: unknown
     try {
-      body = (await req.json()) as TelegramUpdate
+      parsed = await req.json()
     } catch (err) {
       log.warn('malformed_json', { error: err instanceof Error ? err.message : String(err) })
       return new Response('ok', { status: 200 })
     }
+    // `req.json()` only throws on UNPARSEABLE input. `null`, `[]`, `3` and
+    // `"x"` are all VALID JSON and all get past the catch above — and the very
+    // next line reads `body.callback_query`, which on `null` throws a
+    // TypeError, escapes as a 500, and lands us in precisely the retry storm
+    // the catch was written to prevent (Telegram re-sends non-2xx for hours).
+    // Caught by `open/__tests__/telegram-webhook-served.test.ts` on a literal
+    // `null` body. Same disposition as unparseable: log, absorb, 200.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      log.warn('non_object_update', { type: Array.isArray(parsed) ? 'array' : typeof parsed })
+      return new Response('ok', { status: 200 })
+    }
+    const body = parsed as TelegramUpdate
 
     // Inline-keyboard tap path (P2 S1 button primitive). Dispatch to the
     // gateway-supplied callback handler when wired; otherwise drop with a

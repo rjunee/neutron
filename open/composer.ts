@@ -294,6 +294,7 @@ import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-sur
 import { createAppAdminSurface } from '@neutronai/gateway/http/app-admin-surface.ts'
 import { createAdminPersonalitySurface } from '@neutronai/gateway/http/admin-personality-surface.ts'
 import { createAppBackupsSurface } from '@neutronai/gateway/http/app-backups-surface.ts'
+import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-telegram-webhook.ts'
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
@@ -4707,6 +4708,58 @@ export function buildOpenGraphComposer(
       throw err
     }
 
+    // ── Telegram inbound webhook (`POST /webhook/telegram`) ──────────────────
+    // The slot has been DECLARED since Sprint 18 (`gateway/http/route-slots.ts`)
+    // and served by nobody, because `buildTelegramWebhookSurface` carried a
+    // docblock claiming it was "called only by the Managed composer". There is
+    // no such composer — the hosting overlay spawns THIS file per instance — so
+    // the factory had no call site at all and the path answered the ladder's
+    // default 404, indistinguishable from a typo. Verified live 2026-08-02
+    // against a running instance: `POST /webhook/telegram` → 404, byte-identical
+    // to an invented control path, while `/healthz` on the same server → 200.
+    //
+    // STATE-DERIVED, NOT FLAG-GATED. There is no toggle. The surface exists iff
+    // this instance's SecretsStore holds all three Telegram values (bot token,
+    // webhook secret, bot user id); the factory returns null otherwise and the
+    // field stays unset, so the route is absent exactly as it is today. That
+    // distinction matters for safety rather than taste: this is an
+    // UNAUTHENTICATED endpoint whose only auth is the secret-token header, and
+    // an instance with no configured secret has nothing to compare against. A
+    // default Open install stores none of these — nothing in this repo writes
+    // `kind:'bot_token'` or `label:'telegram'` — so a self-hoster who has not
+    // deliberately provisioned a bot gets no new attack surface, not an open
+    // one. Empty-string secrets are refused by the factory AND by the handler,
+    // so "configured" cannot degenerate into "accepts everyone".
+    //
+    // `SecretsStoreError` is caught rather than propagated: corrupt Telegram
+    // secrets must not take down chat, memory, or the rest of the boot. Corrupt
+    // → logged → no Telegram route, same as unconfigured.
+    //
+    // SCOPE. Inbound only. `on_start_command` / `on_bind_command` are left
+    // unset because their production factories live in a `signup/` module that
+    // does not exist in this repo (the docblocks in
+    // `gateway/wiring/build-telegram-webhook.ts` name files that are not here);
+    // absent, `/start` deeplinks fall through to the normal message decoder
+    // rather than crashing. The adapter is likewise not registered on
+    // `channelRouter`, so OUTBOUND replies still travel the app-ws path — adding
+    // a second outbound adapter is a routing decision, not a wiring fix.
+    let telegramWebhookSurface: Awaited<
+      ReturnType<typeof buildTelegramWebhookSurface>
+    > = null
+    try {
+      telegramWebhookSurface = await buildTelegramWebhookSurface({
+        owner_handle,
+        url_slug: project_slug,
+        secrets: secretsStore,
+        receiver: channelRouter,
+      })
+    } catch (err) {
+      log.error('telegram_webhook_build_failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+      telegramWebhookSurface = null
+    }
+
     return {
       db,
       project_slug,
@@ -5065,6 +5118,15 @@ export function buildOpenGraphComposer(
       // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
       // owner-gated. Additive; mounts no write route.
       app_diagnostics_surface: { handler: appDiagnosticsSurface.handler },
+      // Telegram inbound (`POST /webhook/telegram`). Spread rather than set to
+      // `undefined`, because the route-slot ladder promotes on FIELD PRESENCE
+      // (`route-slots.ts` `promote: (c) => c.telegram_webhook?.handler`) and the
+      // coverage gate reads `fields[composition] !== undefined` — an explicitly-
+      // undefined field and an absent one must stay the same thing. Unset on an
+      // instance with no Telegram secrets, which is every default Open install.
+      ...(telegramWebhookSurface !== null
+        ? { telegram_webhook: { handler: telegramWebhookSurface.handler } }
+        : {}),
     }
   }
 }

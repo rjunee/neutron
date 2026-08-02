@@ -104,3 +104,79 @@ describe('buildWebhookHandler timing-safe secret_token compare', () => {
     expect(recv.events.length).toBe(0)
   })
 })
+
+/**
+ * The failure mode the timing-safe compare INTRODUCES if the expected secret is
+ * ever empty, and the guard that closes it (2026-08-02).
+ *
+ * `timingSafeEqual` is only reached when the two buffers have equal length. A
+ * request that sends NO header produces `Buffer.from('')`. If the configured
+ * secret is also `''`, the lengths match, the contents match, and the compare
+ * returns TRUE — the endpoint authenticates the entire public internet while
+ * every line of it still looks like careful constant-time security code. This
+ * is reachable state, not theory: `SecretsStore.put` places no constraint on
+ * plaintext, so an empty webhook secret is storable.
+ *
+ * `gateway/wiring/build-telegram-webhook.ts` refuses to build a surface around
+ * an empty secret, so in the composed product the route is simply absent. These
+ * tests pin the SECOND, independent gate — the handler fails closed on its own,
+ * so no other caller of this factory can inherit the hole.
+ *
+ * MUTATION TEST: remove the `opts.secret_token.length === 0` guard from
+ * `buildWebhookHandler` and both tests below red (403 → 200, and the receiver
+ * sees a forged event). Verified.
+ */
+describe('empty expected secret_token fails closed', () => {
+  test('an empty secret_token rejects a request sending NO header', async () => {
+    const recv = recordingReceiver()
+    const handler = buildWebhookHandler({ bot_user_id: 1, secret_token: '', receiver: recv })
+    const res = await handler(reqWith({}))
+    expect(res.status).toBe(403)
+    // The load-bearing half: nothing was dispatched. A 403 that still delivered
+    // the event would be theatre.
+    expect(recv.events.length).toBe(0)
+  })
+
+  test('an empty secret_token rejects a request sending an empty header', async () => {
+    const recv = recordingReceiver()
+    const handler = buildWebhookHandler({ bot_user_id: 1, secret_token: '', receiver: recv })
+    const res = await handler(reqWith({ 'x-telegram-bot-api-secret-token': '' }))
+    expect(res.status).toBe(403)
+    expect(recv.events.length).toBe(0)
+  })
+})
+
+/**
+ * Valid JSON that is not an object (2026-08-02). `req.json()` only throws on
+ * UNPARSEABLE input, so `null` sails past the try/catch and the next line
+ * dereferences it — a TypeError, a 500, and the hours-long Telegram retry storm
+ * the catch exists to prevent. Found by driving a literal `null` body through
+ * the composed router in `open/__tests__/telegram-webhook-served.test.ts`.
+ *
+ * MUTATION TEST: remove the non-object guard from `buildWebhookHandler` and the
+ * `null` case throws instead of answering 200. Verified.
+ */
+describe('non-object JSON bodies are absorbed, not crashed on', () => {
+  for (const raw of ['null', '[]', '3', '"a string"', 'true']) {
+    test(`body ${raw} → 200, no dispatch`, async () => {
+      const recv = recordingReceiver()
+      const handler = buildWebhookHandler({
+        bot_user_id: 1,
+        secret_token: 'super-secret-token-abc123',
+        receiver: recv,
+      })
+      const res = await handler(
+        new Request('http://x/webhook', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-telegram-bot-api-secret-token': 'super-secret-token-abc123',
+          },
+          body: raw,
+        }),
+      )
+      expect(res.status).toBe(200)
+      expect(recv.events.length).toBe(0)
+    })
+  }
+})

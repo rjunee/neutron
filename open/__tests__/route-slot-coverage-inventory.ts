@@ -42,6 +42,24 @@
  * fixed that, because the earlier rung wins regardless. The restore moved to
  * `POST .../backups/restore` — disjoint by shape, so no reordering can bring the
  * collision back — and only then was the surface wired.
+ *
+ * 2026-08-02 — `telegram-webhook` joins them, and it is the first entry here
+ * whose mounting is CONDITIONAL ON STORED STATE rather than unconditional. The
+ * surface exists iff the instance's SecretsStore holds the three Telegram
+ * values; a default Open install stores none of them, so the route stays absent
+ * there BY DESIGN — it is an unauthenticated endpoint and an instance with no
+ * configured secret has nothing to authenticate against.
+ *
+ * That is why the probe in `route-slot-coverage.test.ts` now SEEDS those
+ * secrets before composing. The file already fakes `ANTHROPIC_API_KEY` for the
+ * same reason and states the intent out loud — "the widest composition an Open
+ * instance produces, so a surface that is absent HERE is absent everywhere".
+ * Seeding widens the probe to match that claim instead of quietly narrowing the
+ * claim to match the probe. Without it this entry could only ever be recorded
+ * as unserved, and the ratchet would be measuring the fixture rather than the
+ * product. The reachability half — that a real request reaches the handler, and
+ * that a request with a missing or wrong secret is REJECTED BY IT rather than
+ * 404ing past it — is `open/__tests__/telegram-webhook-served.test.ts`.
  */
 
 /** A slot the product SERVES. Regressing one of these means the path starts 404ing. */
@@ -206,6 +224,12 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
       'the project Backups screen — snapshot list, preview, per-file body/diff, and the restore itself at POST .../backups/restore (it was .../restore, which the earlier appProjects rung claims for un-archive and won)',
   },
   {
+    rung: 'telegram-webhook',
+    composition: 'telegram_webhook',
+    serves:
+      'POST /webhook/telegram — the ONLY inbound path for a Telegram bot. Mounted iff this instance has Telegram secrets stored (unconfigured installs correctly serve nothing); when it regresses, a configured owner’s bot goes deaf and every message he sends is dropped with no error anywhere, because Telegram reads the 404 as delivery and stops retrying.',
+  },
+  {
     rung: 'cores-integrations',
     composition: 'cores_integrations_surface',
     serves: 'the Integrations list and API-key management',
@@ -255,13 +279,6 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
     why: 'gateway/composition/wire-cores-surfaces.ts:102 auto-builds it only when `cores.oauth` is supplied, and no composer supplies that field. Not env-conditional: the field has no setter at all.',
     costs:
       'Settings routes to Integrations (app/app/settings.tsx:378) and the Google connect/status/disconnect calls 404 (app/lib/cores-client.ts:161,168,175), so Google-backed Cores cannot be connected from the app.',
-  },
-  {
-    rung: 'telegram-webhook',
-    composition: 'telegram_webhook',
-    why: 'buildTelegramWebhookSurface (gateway/wiring/build-telegram-webhook.ts:109) documents itself as "called only by the Managed composer" — but the hosted overlay spawns this same open/server.ts per instance, so no such composer exists and nothing sets the field.',
-    costs:
-      "The hosting overlay forwards every inbound Telegram update to POST /webhook/telegram on the instance; that path 404s, so a hosted owner's Telegram bot is inert. Managed's own contract check greps `gateway/` for the literal path string, which route-slots.ts satisfies whether or not anything serves it — the check cannot see this.",
   },
 
   // ── Dead at both ends → mounting alone would serve nothing ────────────────

@@ -93,15 +93,18 @@ export interface TelegramWebhookSurface {
    * INBOUND path now (it was never instantiated before — `buildWebhookHandler`
    * was mounted directly). The adapter also carries the OUTBOUND `send`.
    *
-   * SCOPE NOTE: this Open repo never wires Telegram (no Telegram secrets /
-   * instance — `buildTelegramWebhookSurface` is called only by the Managed
-   * composer), so there is intentionally NO `registerAdapter(surface.adapter)`
-   * call here. Exposing the adapter is what MAKES the one-line outbound
-   * activation possible in the Telegram-instance (Managed) composer
-   * (`router.registerAdapter(surface.adapter)`) — the documented "add a channel
-   * = one registration" recipe. Kept ADDITIVE and unregistered here to avoid a
-   * double-registration conflict with any existing Managed outbound sender.
-   * Existing callers that read only `.handler` are unaffected.
+   * SCOPE NOTE (corrected 2026-08-02). This block used to say the factory was
+   * "called only by the Managed composer". That was false, and it is why
+   * `POST /webhook/telegram` 404'd on every hosted instance: the hosting
+   * overlay spawns this same `open/server.ts` per instance, so no second
+   * composer exists and NOTHING called this. `open/composer.ts` now calls it,
+   * which is the only call site there is.
+   *
+   * The adapter is still returned UNREGISTERED. Registering it is what would
+   * activate the OUTBOUND `send`, and that is a separate decision from serving
+   * the inbound route: the Open router already carries the durable app-ws
+   * adapter, and adding a second one changes where replies go. Inbound first,
+   * deliberately. Callers that read only `.handler` are unaffected.
    */
   adapter: TelegramAdapter
 }
@@ -139,6 +142,18 @@ export async function buildTelegramWebhookSurface(
   }
   if (webhookSecret === null) {
     moduleLog.info('skip_webhook_no_webhook_secret', { project: log_slug })
+    return null
+  }
+  // A PRESENT-BUT-EMPTY secret is more dangerous than a missing one, because
+  // the null check above already passed and the route would mount. The
+  // handler's constant-time compare would then match an empty stored secret
+  // against a request carrying no header at all, and `/webhook/telegram`
+  // would accept forged updates from anyone. `SecretsStore.put` does not
+  // constrain plaintext, so '' is a storable value and this is reachable
+  // state, not a hypothetical. Refuse to build: no surface, no route, 404 —
+  // the same shape as an instance that never configured a bot.
+  if (webhookSecret.trim().length === 0) {
+    moduleLog.error('skip_webhook_empty_webhook_secret', { project: log_slug })
     return null
   }
   if (botUserIdRaw === null) {
