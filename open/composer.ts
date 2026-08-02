@@ -162,6 +162,11 @@ import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 import { buildLlmBriefComposer } from '@neutronai/gateway/proactive/morning-brief.ts'
+// NAME COLLISION, on purpose flagged: the import ABOVE is the daily PROACTIVE
+// brief (`gateway/proactive/morning-brief.ts`); the type below belongs to the
+// OVERNIGHT-WORK report (`onboarding/overnight/morning-brief.ts`). Two different
+// subsystems that happen to share a filename.
+import type { MorningBriefDeliverInput } from '@neutronai/onboarding/overnight/morning-brief.ts'
 
 /**
  * C3d — the Open composition's return type. `CompositionInput` with the surfaces
@@ -200,6 +205,7 @@ export type OpenComposition = CompositionInput &
       | 'import_upload_handler'
       | 'chunked_upload_handler'
       | 'onboarding_import_running_cron'
+      | 'onboarding_overnight_cron'
       | 'skill_forge'
       | 'realmode_cleanups'
       | 'landing_server'
@@ -2349,6 +2355,13 @@ export function buildOpenGraphComposer(
     // on the next hydration); the live push reaches the owner's open socket.
     const proactiveGeneralTopic = appWsTopicId(OWNER_USER_ID)
     const proactiveSink = buildButtonStoreProactiveSink({ deliver })
+    // The OVERNIGHT-WORK report's topic (ISSUES #443) — a DIFFERENT subsystem
+    // from the daily proactive brief above that happens to share the filename
+    // `morning-brief.ts`. Same destination for the same reason: it is the one
+    // topic the owner's client binds and hydrates. Named once here because
+    // `onboarding_overnight_cron` needs it twice — as the reporter's gate and
+    // as the delivery target — and those must not be able to drift apart.
+    const overnightBriefTopic = appWsTopicId(OWNER_USER_ID)
     // Detect the host's LOCAL timezone (Ryan: "Detect local computer time not
     // hardcode pt"). Without this the morning brief fell back to the proactive
     // module's hardcoded `America/Los_Angeles`, so a non-Pacific owner got the
@@ -4920,6 +4933,70 @@ export function buildOpenGraphComposer(
       // `import_analysis_presented` without a user inbound. Mirrors the managed
       // wiring exactly (gateway/composition/build-core-modules.ts § S12).
       onboarding_import_running_cron: { engine: landing.engine },
+      // Overnight-work MORNING BRIEF delivery (ISSUES #443) — ON, no flag.
+      //
+      // THE GAP: the overnight ENGINE was never dark. Its handler registers
+      // UNCONDITIONALLY (`gateway/composition/build-core-modules.ts:783-794`),
+      // so autonomous overnight work scanned, dispatched and completed on every
+      // install. What was missing is the last inch: the reporter runs only when
+      // `input.deliver` exists (`onboarding/overnight/register.ts:254`), and no
+      // composer ever set this field. The owner's work ran overnight and the
+      // report went nowhere — the worst version of the failure, because
+      // everything upstream of the delivery looked healthy.
+      //
+      // It is the SAME problem the proactive brief already solved, so it takes
+      // the same answer: post through the ONE out-of-turn `deliver` seam built
+      // above (F5 — durable-row-first, then a best-effort live push).
+      //
+      // DURABILITY 'inert' — an already-resolved agent history TURN
+      // (`gateway/http/deliver.ts:57-70`), matching
+      // `buildButtonStoreProactiveSink`. An overnight brief fires at ~06:50 when
+      // the owner is asleep and no socket is open, so the durable row IS the
+      // delivery and the live push is the nicety. `'none'` would paint a
+      // transient pill into an empty socket and leave nothing to hydrate;
+      // `'reply'` would leave the topic's active prompt pointing at a report the
+      // owner's next message would then answer.
+      //
+      // TOPIC — the owner's bare `app:<owner>` topic, deliberately NOT the
+      // `topic_id` the reporter passes in. `resolveGeneralTopic`
+      // (`onboarding/overnight/register.ts:294-317`) reads the topic the owner
+      // ONBOARDED on out of `onboarding_state.phase_state`, which is whatever
+      // surface ran onboarding; the app-ws client binds and hydrates ONLY the
+      // bare `app:<user>` topic. Forwarding it verbatim is precisely the #105
+      // deliver-to-nobody shape that both the fired-reminder path
+      // (`resolveAppWsReminderTopic`) and the proactive brief
+      // (`proactiveGeneralTopic`) fixed by collapsing every out-of-turn post
+      // onto this one topic. The per-project detail posts route here too — the
+      // engine's `resolveProjectTopic` seam is unset, and an `app:owner:<id>`
+      // suffix has no bound sender either way.
+      //
+      // RETURN — `persisted`, the durable row, not `delivered_live`. Under
+      // durable-first the row is the guarantee; a true return would otherwise
+      // mean "a socket happened to be open", which at 06:50 is normally false
+      // for a brief that was in fact delivered. (`runMorningBrief` currently
+      // discards this boolean — see `safeDeliver` — but the contract should be
+      // honest regardless.)
+      onboarding_overnight_cron: {
+        // `general_topic_id` is not a nicety — it is the other half of the fix.
+        // The reporter's fallback reads the topic out of the onboarding row,
+        // and Open's production onboarding path NEVER writes that key (the
+        // live-agent turn + post-turn extractor persist the interview fields
+        // and nothing else; the sole writer is the narrow upload-before-row
+        // branch at `onboarding/interview/engine.ts:836`). So the read returns
+        // null and `register.ts` skips the brief with "no General topic
+        // resolved" EVEN WITH `deliver` wired — the report would still have
+        // gone nowhere. Naming the topic here is what opens that gate, and the
+        // composition root is the only layer that knows which topic the
+        // owner's client binds.
+        general_topic_id: overnightBriefTopic,
+        deliver: async (brief: MorningBriefDeliverInput): Promise<boolean> => {
+          const result = await deliver(overnightBriefTopic, {
+            body: brief.body,
+            durability: 'inert',
+          })
+          return result.persisted
+        },
+      },
       // Foundational Trident v2 (Work Board Phase 2a exec-model) — the
       // `/code <task>` autonomous Forge→Argus→merge loop, inner loop a native CC
       // Dynamic Workflow. Threading `fire_inner_workflow` here flips the trident

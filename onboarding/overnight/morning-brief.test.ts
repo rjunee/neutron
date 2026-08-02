@@ -158,3 +158,68 @@ describe('runMorningBrief routing', () => {
     expect(delivered[0]!.body).not.toMatch(/PR#/)
   })
 })
+
+/**
+ * A brief that was COMPOSED is not a brief that was DELIVERED. Both failure
+ * modes used to be invisible: a throw was swallowed into an optional log that
+ * no composer supplied, and a `false` return was discarded outright — so the
+ * cron recorded `report=reported` for a window the owner never saw. These pin
+ * that the failure is now COUNTED and NAMED, which is what makes it actionable
+ * rather than merely logged.
+ */
+describe('runMorningBrief delivery failures are counted, not swallowed', () => {
+  test('a THROWING surface still returns a result, but the tick says what was lost', async () => {
+    await seedTerminal('owk-20260619-001', 'acme', 'completed', 'PR#42')
+    const res = await runMorningBrief({
+      store: queue,
+      deliver: () => {
+        // Production `deliver` rethrows a failed durable persist on the inert
+        // path — the exact shape this must survive without lying.
+        throw new Error('durable persist failed')
+      },
+      general_topic_id: 'general',
+      now: () => REPORTER_TIME,
+    })
+    // Never throws: one bad surface must not turn the tick into a scheduler error.
+    expect(res.status).toBe('reported')
+    // Summary + one project detail = 2 messages, neither of which landed.
+    expect(res.delivery_failures).toBe(2)
+    expect(res.detail).toContain('2 message(s) NOT delivered')
+  })
+
+  test('a surface that ACCEPTS NOTHING (returns false) counts as undelivered', async () => {
+    await seedTerminal('owk-20260619-001', 'acme', 'completed', 'PR#42')
+    const res = await runMorningBrief({
+      store: queue,
+      deliver: () => false,
+      general_topic_id: 'general',
+      now: () => REPORTER_TIME,
+    })
+    expect(res.delivery_failures).toBe(2)
+    expect(res.detail).toContain('NOT delivered')
+  })
+
+  test('a quiet night that fails to post is not a quiet night that posted', async () => {
+    const res = await runMorningBrief({
+      store: queue,
+      deliver: () => false,
+      general_topic_id: 'general',
+      now: () => REPORTER_TIME,
+    })
+    expect(res.status).toBe('quiet')
+    expect(res.delivery_failures).toBe(1)
+    expect(res.detail).toContain('1 message(s) NOT delivered')
+  })
+
+  test('a healthy delivery reports ZERO failures and adds no noise to the detail', async () => {
+    await seedTerminal('owk-20260619-001', 'acme', 'completed', 'PR#42')
+    const res = await runMorningBrief({
+      store: queue,
+      deliver: () => true,
+      general_topic_id: 'general',
+      now: () => REPORTER_TIME,
+    })
+    expect(res.delivery_failures).toBe(0)
+    expect(res.detail).not.toContain('NOT delivered')
+  })
+})

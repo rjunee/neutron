@@ -87,10 +87,30 @@ export interface OnboardingCompositionInput {
    */
   onboarding_overnight_cron?: {
     /**
-     * Deliver the morning brief to the user's topic (production: the
-     * shared web sender registry). Returns true when an active surface
-     * accepted the message.
+     * Deliver one morning-brief message. Production wires this to the ONE
+     * out-of-turn delivery seam (`gateway/http/deliver.ts`), which persists a
+     * durable row FIRST and then best-effort live-pushes — so the return value
+     * means "the report is durably recorded and the owner will see it", NOT
+     * "a socket happened to be open". An overnight brief fires at ~06:50 with
+     * nobody connected; a liveness-only contract would report failure for
+     * every successful delivery.
      */
     deliver?: (input: MorningBriefDeliverInput) => boolean | Promise<boolean>
+    /**
+     * The topic the morning brief posts to, supplied by the COMPOSER.
+     *
+     * Without it the handler falls back to reading the topic the owner
+     * onboarded on out of `onboarding_state.phase_state`
+     * (`onboarding/overnight/register.ts`) — and on Neutron Open that key is
+     * never written on the production onboarding path (the live-agent turn +
+     * post-turn extractor persist no `topic_id`; only the narrow
+     * upload-before-row-exists branch at `onboarding/interview/engine.ts:836`
+     * does). The lookup therefore returns null, and the reporter skips the
+     * brief entirely with `report skipped: no General topic resolved` EVEN
+     * WHEN `deliver` is wired. Supplying the topic here is what actually makes
+     * the report fire; the composition root is also the only layer that knows
+     * which topic the owner's client binds.
+     */
+    general_topic_id?: string
   }
 }

@@ -149,6 +149,10 @@ const EXPECTED_COMPOSITION_KEYS = [
   // F4 — the gateway-tick hook that pulses the supervision-watchdog heartbeat.
   'on_gateway_tick',
   'onboarding_import_running_cron',
+  // ISSUES #443 — the overnight-work morning brief's delivery surface. The
+  // overnight ENGINE always registered, so the work ran; without this key the
+  // reporter had nowhere to post and the owner never saw the result.
+  'onboarding_overnight_cron',
   'platform',
   'project_slug',
   // The reminder-fired push hook (`ReminderTickLoop.on_fired`). Registering a
