@@ -237,14 +237,26 @@ describe('PushDispatcher.pushReminder', () => {
       device_token: 'tok-2',
       platform: 'android',
     })
-    const client = fakeClient([
-      { status: 'ok', id: 'a' },
-      {
-        status: 'error',
-        message: 'DeviceNotRegistered',
-        details: { error: 'DeviceNotRegistered' },
-      },
-    ])
+    // Ticket i belongs to message i, and the messages come out of
+    // `store.listByOwner`, which is `ORDER BY updated_at DESC` (store.ts:165) —
+    // NOT registration order. Both rows above are written in the same
+    // millisecond, so that ORDER BY is a tie and SQLite may return them either
+    // way round. A positional `[ok, error]` array therefore lands the error on
+    // whichever token sorted first, and this test pruned `tok-1` about as often
+    // as `tok-2`. Address the tokens BY NAME instead: the assertion below is
+    // about which token gets pruned, so it must not depend on an order the
+    // query never promised.
+    const client = fakeClient((messages) =>
+      messages.map((m) =>
+        m.to === 'tok-2'
+          ? {
+              status: 'error' as const,
+              message: 'DeviceNotRegistered',
+              details: { error: 'DeviceNotRegistered' },
+            }
+          : { status: 'ok' as const, id: 'a' },
+      ),
+    )
     const { logger, entries } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
     const result = await dispatcher.pushReminder(makeReminder())
