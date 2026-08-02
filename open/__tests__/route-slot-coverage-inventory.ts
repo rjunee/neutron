@@ -25,8 +25,8 @@
  * fixed.
  *
  * VERIFIED 2026-08-01 against the composed production graph, on a credentialed
- * boot. Managed does not change the answer: it spawns the same
- * `open/server.ts` per tenant, so there is no second composer that mounts more.
+ * boot. The hosted overlay does not change the answer: it spawns this same
+ * `open/server.ts` per instance, so there is no second composer that mounts more.
  */
 
 /** A slot the product SERVES. Regressing one of these means the path starts 404ing. */
@@ -251,9 +251,9 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
   {
     rung: 'telegram-webhook',
     composition: 'telegram_webhook',
-    why: 'buildTelegramWebhookSurface (gateway/wiring/build-telegram-webhook.ts:109) documents itself as "called only by the Managed composer" — but Managed spawns this same open/server.ts per tenant, so no such composer exists and nothing sets the field.',
+    why: 'buildTelegramWebhookSurface (gateway/wiring/build-telegram-webhook.ts:109) documents itself as "called only by the Managed composer" — but the hosted overlay spawns this same open/server.ts per instance, so no such composer exists and nothing sets the field.',
     costs:
-      "The Managed hosting overlay forwards every inbound Telegram update to POST /webhook/telegram on the tenant instance; that path 404s, so a tenant's Telegram bot is inert. Managed's own contract check greps `gateway/` for the literal path string, which route-slots.ts satisfies whether or not anything serves it — the check cannot see this.",
+      "The hosting overlay forwards every inbound Telegram update to POST /webhook/telegram on the instance; that path 404s, so a hosted owner's Telegram bot is inert. Managed's own contract check greps `gateway/` for the literal path string, which route-slots.ts satisfies whether or not anything serves it — the check cannot see this.",
   },
 
   // ── Dead at both ends → mounting alone would serve nothing ────────────────
