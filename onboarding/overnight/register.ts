@@ -200,6 +200,12 @@ export interface BuildOvernightEngineInput {
   owner_home?: string
   /** Deliver the morning brief + rejection notices. Absent → report-skipped. */
   deliver?: OvernightEngineDeliver
+  /**
+   * The General topic the brief posts to, supplied by the COMPOSITION ROOT.
+   * Takes precedence over {@link resolveGeneralTopic}'s read of the onboarding
+   * row — see that function for why the read returns null on Open.
+   */
+  general_topic_id?: string
   tz?: string
   /** Test seams. */
   now?: () => number
@@ -252,7 +258,12 @@ export function buildOvernightEngineHandler(input: BuildOvernightEngineInput): C
 
       let reportDetail = 'no report this tick'
       if (shouldReport(now(), tz) && input.deliver !== undefined) {
-        const generalTopic = resolveGeneralTopic(input.db)
+        // Composer-supplied topic WINS. The DB read below is a fallback for a
+        // deployment whose onboarding row does carry a topic; on Open it never
+        // does, so without the injected value the brief was skipped even with a
+        // delivery surface wired (ISSUES #443). Mirrors the `owner_home ??
+        // resolveOwnerHomeFromEnv()` precedence a few lines up.
+        const generalTopic = input.general_topic_id ?? resolveGeneralTopic(input.db)
         if (generalTopic !== null) {
           const briefDeps: Parameters<typeof runMorningBrief>[0] = {
             store: queueStore,
@@ -266,7 +277,14 @@ export function buildOvernightEngineHandler(input: BuildOvernightEngineInput): C
             ...(input.log !== undefined ? { log: input.log } : {}),
           }
           const brief = await runMorningBrief(briefDeps)
-          reportDetail = `report=${brief.status} (${brief.detail})`
+          // `brief.detail` already names any undelivered message; the explicit
+          // count is repeated here because THIS string is what lands on the
+          // cron tick record, and "the report ran" must never be mistakable for
+          // "the owner got it".
+          reportDetail =
+            brief.delivery_failures > 0
+              ? `report=${brief.status} UNDELIVERED=${brief.delivery_failures} (${brief.detail})`
+              : `report=${brief.status} (${brief.detail})`
         } else {
           reportDetail = 'report skipped: no General topic resolved'
         }
@@ -290,6 +308,17 @@ export function buildOvernightEngineHandler(input: BuildOvernightEngineInput): C
 /**
  * Resolve the General/main topic id from the most-recently-completed
  * onboarding row's phase_state (same source the old check-in handler used).
+ *
+ * FALLBACK ONLY — prefer `BuildOvernightEngineInput.general_topic_id`. On
+ * Neutron Open this returns null in the normal case: the production onboarding
+ * path is the live-agent turn plus the post-turn extractor, neither of which
+ * writes `topic_id` into `phase_state` (the extractor's patch keys are the
+ * extracted interview fields; `completeIfPhaseStateMatches` writes only
+ * phase/completed_at/wow_fired/persona_files_committed). The single production
+ * writer is the narrow "a ZIP upload landed before the row existed" branch at
+ * `onboarding/interview/engine.ts:836`. So this read is right for a deployment
+ * that stamps the key and useless for one that does not — which is exactly why
+ * the topic is now injected rather than discovered.
  */
 function resolveGeneralTopic(db: ProjectDb): string | null {
   const row = db

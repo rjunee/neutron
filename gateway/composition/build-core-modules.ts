@@ -790,6 +790,22 @@ export function buildCoreModules(
         const handler = buildOvernightEngineHandler({
           db: input.db,
           ...(overnightCfg?.deliver !== undefined ? { deliver: overnightCfg.deliver } : {}),
+          // The composer's topic beats the onboarding-row read (ISSUES #443 —
+          // on Open that row never carries one, so the brief was skipped).
+          ...(overnightCfg?.general_topic_id !== undefined
+            ? { general_topic_id: overnightCfg.general_topic_id }
+            : {}),
+          // The engine's log sink defaulted to ABSENT, so every dispatch,
+          // rejection and delivery failure it reported went to `undefined?.()`
+          // — a whole subsystem running overnight with no operational trace.
+          // Route it at the composition boundary, as the tasks-projection
+          // writer does. Volume is a handful of lines per ~30-min tick.
+          // (Delivery FAILURES are not left to this log alone: they are counted
+          // into `MorningBriefResult.delivery_failures` and surface in the
+          // cron tick's own `detail` — see `runMorningBrief`.)
+          log: (msg: string): void => {
+            moduleLog.info('overnight_engine', { project: input.project_slug, detail: msg })
+          },
         })
         registerOvernightHandler({ handlers: cron.handlers, handler })
       }

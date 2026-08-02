@@ -39,12 +39,14 @@
  * EVERY UNWIRED ENTRY CARRIES ITS REASON, and the reason is the point. A bare
  * list of names rots into permission: the next reader sees an established
  * allowlist and adds one more. A written reason is a claim someone can check,
- * and `costs` says out loud what the owner is currently missing — two of the
- * five below are live gaps, not decisions, and the list should read that way
- * until they are fixed.
+ * and `costs` says out loud what the owner is currently missing — one of the
+ * four below is a live gap, not a decision, and the list should read that way
+ * until it is fixed.
  *
  * VERIFIED 2026-08-02 against the composed production graph, on a credentialed
- * boot: 29 fields in scope, 24 set, 5 not.
+ * boot: 29 fields in scope, 25 set, 4 not. (`onboarding_overnight_cron` moved
+ * unwired → wired the same day — ISSUES #443, the overnight morning brief: the
+ * engine ran the work and the report reached nobody.)
  */
 
 /** A field the composed product sets today. This list may only grow. */
@@ -150,6 +152,11 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
       'the 15s sweep that advances a finished history import — unset, onboarding stalls at import_running until the owner sends another message',
   },
   {
+    field: 'onboarding_overnight_cron',
+    provides:
+      "the overnight-work morning brief's delivery surface — unset, the engine still runs the work and the reporter posts to nobody, so the owner's overnight results are silently discarded (ISSUES #443)",
+  },
+  {
     field: 'realmode_cleanups',
     provides: 'wiring teardown callbacks the boot shell runs on shutdown',
   },
@@ -212,13 +219,6 @@ export const UNWIRED_FIELDS: readonly CompositionFieldUnwiredEntry[] = [
     why:
       'DECISION — a test seam with a correct production default. `watchdog/detectors.ts:227` falls back to `DefaultPidLivenessProbe` when the field is absent, which is the real probe; only tests inject a fake. Consumed at `gateway/composition/build-core-modules.ts:635`.',
     costs: 'nothing. Setting it in production would replace a real liveness check with an injected one.',
-  },
-  {
-    field: 'onboarding_overnight_cron',
-    why:
-      'GAP. The overnight handler registers UNCONDITIONALLY, so overnight work runs; this field supplies only the `deliver` seam for the morning brief. No composer sets it — `gateway/composition/build-core-modules.ts:789-793` therefore builds the handler with no delivery surface.',
-    costs:
-      "the morning brief is never delivered. Overnight runs execute and the reporter records 'skipped' ticks instead of posting the result, so the owner does the work and never sees the report.",
   },
   {
     field: 'onboarding_telemetry',

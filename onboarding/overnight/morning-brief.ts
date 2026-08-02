@@ -45,6 +45,13 @@ export interface MorningBriefResult {
   window_date: string | null
   projects_reported: number
   items_reported: number
+  /**
+   * Messages that did NOT land — the surface threw, or returned false. Non-zero
+   * means the owner is missing some or all of this window's report, and the
+   * caller folds it into the cron tick's `detail` so it is on the record rather
+   * than only in a log line. A composed brief is not a delivered one.
+   */
+  delivery_failures: number
   detail: string
 }
 
@@ -137,8 +144,11 @@ export function composeProjectDetail(rollup: ProjectRollup, windowDate: string):
 
 /**
  * Compose + deliver the morning brief. Returns a structured result; never
- * throws (delivery failures land as `skipped`/logged so the cron records a
- * clean tick).
+ * throws, so one bad surface cannot turn the cron tick into a scheduler error.
+ *
+ * Not throwing is NOT the same as not caring: every message that fails to land
+ * is counted into `delivery_failures` and named in `detail`, so a brief that
+ * reached nobody can never again read as a clean `reported` tick.
  */
 export async function runMorningBrief(deps: MorningBriefDeps): Promise<MorningBriefResult> {
   const tz = deps.tz ?? DEFAULT_TZ
@@ -149,33 +159,44 @@ export async function runMorningBrief(deps: MorningBriefDeps): Promise<MorningBr
       window_date: null,
       projects_reported: 0,
       items_reported: 0,
+      delivery_failures: 0,
       detail: 'not in/after an overnight window; nothing to report',
     }
   }
 
+  /** Appended to `detail` so a partial delivery is visible on the tick record. */
+  const failureNote = (n: number): string => (n === 0 ? '' : `; ${n} message(s) NOT delivered`)
+
   const transitions = selectWindowTransitions(deps.store.list(), windowDate)
   if (transitions.length === 0) {
     // Quiet night — one honest line to General. Never invent results.
-    await safeDeliver(deps, {
+    const ok = await safeDeliver(deps, {
       topic_id: deps.general_topic_id,
       body: `Overnight work — ${windowDate}: a quiet night, nothing was queued to run.`,
     })
+    const failures = ok ? 0 : 1
     return {
       status: 'quiet',
       window_date: windowDate,
       projects_reported: 0,
       items_reported: 0,
-      detail: 'no items transitioned this window',
+      delivery_failures: failures,
+      detail: `no items transitioned this window${failureNote(failures)}`,
     }
   }
 
   const rollups = rollupByProject(transitions)
+  let failures = 0
 
   // 1) General high-level summary.
-  await safeDeliver(deps, {
-    topic_id: deps.general_topic_id,
-    body: composeGeneralSummary(rollups, windowDate),
-  })
+  if (
+    !(await safeDeliver(deps, {
+      topic_id: deps.general_topic_id,
+      body: composeGeneralSummary(rollups, windowDate),
+    }))
+  ) {
+    failures++
+  }
 
   // 2) Per-project detail, routed to each project's topic (General fallback).
   let projectsReported = 0
@@ -183,7 +204,7 @@ export async function runMorningBrief(deps: MorningBriefDeps): Promise<MorningBr
     const detail = composeProjectDetail(r, windowDate)
     if (detail === null) continue
     const topic = deps.resolveProjectTopic?.(r.slug) ?? deps.general_topic_id
-    await safeDeliver(deps, { topic_id: topic, body: detail })
+    if (!(await safeDeliver(deps, { topic_id: topic, body: detail }))) failures++
     projectsReported++
   }
 
@@ -192,14 +213,28 @@ export async function runMorningBrief(deps: MorningBriefDeps): Promise<MorningBr
     window_date: windowDate,
     projects_reported: projectsReported,
     items_reported: transitions.length,
-    detail: `reported ${transitions.length} item(s) across ${rollups.length} project(s)`,
+    delivery_failures: failures,
+    detail: `reported ${transitions.length} item(s) across ${rollups.length} project(s)${failureNote(failures)}`,
   }
 }
 
-async function safeDeliver(deps: MorningBriefDeps, input: MorningBriefDeliverInput): Promise<void> {
+/**
+ * Deliver one message and report whether it LANDED. Two ways it can fail, and
+ * both used to be invisible: the surface can THROW (production `deliver`
+ * rethrows a failed durable persist — `gateway/http/deliver.ts`), or it can
+ * return false (no surface accepted). Before, this swallowed the throw into an
+ * optional log that no composer supplied and discarded the boolean entirely, so
+ * `runMorningBrief` reported a clean `reported` tick for a brief that reached
+ * nobody. The caller now counts what this returns.
+ */
+async function safeDeliver(
+  deps: MorningBriefDeps,
+  input: MorningBriefDeliverInput,
+): Promise<boolean> {
   try {
-    await deps.deliver(input)
+    return (await deps.deliver(input)) !== false
   } catch (err) {
     deps.log?.(`[overnight] morning-brief deliver failed for topic ${input.topic_id}: ${err}`)
+    return false
   }
 }
