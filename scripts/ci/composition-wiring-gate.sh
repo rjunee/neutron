@@ -20,7 +20,7 @@ DECL_DIR="gateway/composition/input"
 tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
 fail=0
 
-grep -rn --include='*.ts' -oE '\benable_[a-z0-9_]+\?: *boolean' "$DECL_DIR" 2>/dev/null \
+{ grep -rn --include='*.ts' -oE '\benable_[a-z0-9_]+\?: *boolean' "$DECL_DIR" 2>/dev/null || true; } \
   | sed -E 's/\?: *boolean$//' | sort -u > "$tmp"
 
 if [ ! -s "$tmp" ]; then
@@ -35,11 +35,17 @@ while IFS= read -r d; do
   # A SETTER is `name:` in an object literal, in a non-test .ts file, and not the
   # declaration (`name?:`). A READ (`cfg.name === true`) is the GATE, not the
   # wiring, and must never count — that distinction is the entire mechanism.
-  setters=$(grep -rn --include='*.ts' -E "(^|[^.a-zA-Z0-9_])${name}: *(true|false|[a-zA-Z])" . 2>/dev/null \
-    | grep -v '/node_modules/' \
-    | grep -vE '(__tests__|\.test\.ts|/vendor/)' \
-    | grep -vE "${name}\?:" \
-    | grep -v "^\./${DECL_DIR}/" | wc -l | tr -d ' ')
+  # EVERY grep here is `|| true`. A grep that matches nothing exits 1, and with
+  # `pipefail` set that fails the whole pipeline — which under `set -e` aborts
+  # the script. CI invokes this as `bash -e script.sh`, so WITHOUT these the one
+  # case the gate exists for (a flag with NO setter) exited 1 having printed
+  # NOTHING: a red build with no diagnostic, which is how a check gets disabled.
+  # Verified under `bash -e` in both directions before this line was written.
+  setters=$({ grep -rn --include='*.ts' -E "(^|[^.a-zA-Z0-9_])${name}: *(true|false|[a-zA-Z])" . 2>/dev/null || true; } \
+    | { grep -v '/node_modules/' || true; } \
+    | { grep -vE '(__tests__|\.test\.ts|/vendor/)' || true; } \
+    | { grep -vE "${name}\?:" || true; } \
+    | { grep -v "^\./${DECL_DIR}/" || true; } | wc -l | tr -d ' ')
   if [ "$setters" = "0" ]; then
     echo "DEAD  $name   declared ${file}:${line} — no non-test caller sets it"
     fail=1
