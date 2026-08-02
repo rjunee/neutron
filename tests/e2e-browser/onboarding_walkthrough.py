@@ -5,8 +5,18 @@ Documents + web Admin panel, driven through the ACTUAL rendered React UI in a
 real headless Chromium (system Playwright, Python binding).
 
 This is a regression guard for the chat-surface consolidation. It runs against a
-LIVE Open install (default http://127.0.0.1:7800). It is CI-skippable: if the
-server is unreachable it prints `E2E SKIP` and exits 0 (no server in CI).
+LIVE Open install (default http://127.0.0.1:7800).
+
+EXIT CODES — 0 pass, 1 a real failure, **2 could-not-run**. The third one is the
+point. This used to print `E2E SKIP` and exit **0** when no server answered, which
+made "everything passed" and "nothing was checked" the same observable. That was
+a reasonable default for a script a human runs by hand against a local server; it
+became a lie once the file sat in a tree where its presence reads as coverage.
+
+The condition that made exit-0 correct is now written down instead of assumed: set
+`E2E_ALLOW_SKIP=1` to opt back into the soft skip for an ad-hoc local run. Absent
+that, an unreachable server is exit 2 — a caller can distinguish it from a
+genuine failure, and no caller can mistake it for a pass.
 
 What it proves, in a real browser:
   1. The React app loads at /chat (the server cold-start-redirects a fresh visit
@@ -234,8 +244,16 @@ def run() -> int:
     from playwright.sync_api import sync_playwright
 
     if not server_up():
-        print("E2E SKIP — no Open server reachable at", BASE_URL)
-        return 0
+        # Exit 2, not 0. A check that cannot check anything must not be
+        # indistinguishable from a check that passed. `E2E_ALLOW_SKIP=1` is the
+        # explicit opt-in for an ad-hoc local run with no server up.
+        if os.environ.get("E2E_ALLOW_SKIP") == "1":
+            print("E2E SKIP (E2E_ALLOW_SKIP=1) — no Open server reachable at", BASE_URL)
+            return 0
+        print("E2E COULD NOT RUN — no Open server reachable at", BASE_URL)
+        print("  This is exit 2, not a pass. Start an Open install, or set")
+        print("  E2E_ALLOW_SKIP=1 if you deliberately want a soft skip.")
+        return 2
 
     # Snapshot the server log size now so we can read ONLY the bytes appended
     # during this run when we later assert no router timeout fired (Step 1).
