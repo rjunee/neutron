@@ -140,6 +140,12 @@ jobs:
       # G8 — a PR could otherwise grandfather a new cross-band edge just by adding
       # it to the baseline and stay green.
       - run: bash scripts/ci/depcruise-ratchet-guard.sh
+      # G9 — composition wiring. A declared `enable_*` switch that no production
+      # composer sets is a feature that cannot run, and this repo has shipped six
+      # of those with green CI. Every existing wiring test hand-builds the config
+      # literal the composer SHOULD have produced, so the gate was never the
+      # failing step; this checks the step that was.
+      - run: bash scripts/ci/composition-wiring-gate.sh .
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:
