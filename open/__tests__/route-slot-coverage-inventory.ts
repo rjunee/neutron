@@ -27,6 +27,13 @@
  * VERIFIED 2026-08-01 against the composed production graph, on a credentialed
  * boot. The hosted overlay does not change the answer: it spawns this same
  * `open/server.ts` per instance, so there is no second composer that mounts more.
+ *
+ * 2026-08-01 — four rungs moved from unserved to served (`app-reminders`,
+ * `app-devices`, `app-admin`, `app-persona`), each of which had a shipped client
+ * calling it. `open/__tests__/app-surfaces-served.test.ts` drives all four
+ * through the composed `graph.fetch`, because "the composition carries the
+ * field" and "a request reaches the handler" are different claims and only this
+ * file checks the first one.
  */
 
 /** A slot the product SERVES. Regressing one of these means the path starts 404ing. */
@@ -111,6 +118,28 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
     rung: 'app-tasks',
     composition: 'app_tasks_surface',
     serves: 'the Tasks tab — list, create, complete, cancel',
+  },
+  {
+    rung: 'app-reminders',
+    composition: 'app_reminders_surface',
+    serves:
+      'the Reminders screen — list, create, snooze, cancel (convert-to-task answers 501 until the Core adapter is threaded in)',
+  },
+  {
+    rung: 'app-devices',
+    composition: 'app_devices_surface',
+    serves:
+      'device push-token register/unregister on sign-in and sign-out — the prerequisite for any push at all',
+  },
+  {
+    rung: 'app-admin',
+    composition: 'app_admin_surface',
+    serves: 'the Admin screen — gateway restart, GBrain browse, installed-connectors list',
+  },
+  {
+    rung: 'app-persona',
+    composition: 'app_persona_surface',
+    serves: 'the Personality pane — read/write SOUL.md, USER.md, priority-map.md',
   },
   {
     rung: 'app-tabs',
@@ -205,34 +234,6 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
     why: 'createAppLauncherSurface (gateway/http/app-launcher-surface.ts:49) has no non-test call site.',
     costs:
       'The Apps tab is a shipped builtin (tabs/registry.ts:109-114) and app_tabs_surface IS served, so the tab renders and taps through to a screen whose every call 404s (app/lib/launcher-client.ts:79,89,97,109).',
-  },
-  {
-    rung: 'app-reminders',
-    composition: 'app_reminders_surface',
-    why: 'createAppRemindersSurface (gateway/http/app-reminders-surface.ts:118) has no non-test call site — only the JSDoc reference at gateway/composition/input/app-surfaces-input.ts:118.',
-    costs:
-      'A complete reminders UI ships against it — app/lib/reminders-client.ts:78,91,103,111,131 (list/create/snooze/cancel/convert) behind app/app/projects/[id]/reminders.tsx. The reminder push deep link (app/lib/push-deep-link-dispatch.ts:106) lands there too.',
-  },
-  {
-    rung: 'app-admin',
-    composition: 'app_admin_surface',
-    why: 'createAppAdminSurface (gateway/http/app-admin-surface.ts:179) has no non-test call site; gateway/http/app-diagnostics-surface.ts:46 already records it as never wired into open/composer.ts.',
-    costs:
-      'Settings routes to the Admin screen (app/app/settings.tsx:362) and roughly ten of its calls 404 (app/lib/admin-client.ts:289-420). Only the diagnostics pane works, because the earlier appDiagnostics rung claims that one path — a partial failure, which reads as a broken screen rather than a missing one.',
-  },
-  {
-    rung: 'app-persona',
-    composition: 'app_persona_surface',
-    why: 'createAdminPersonalitySurface (gateway/http/admin-personality-surface.ts:154) has no non-test call site.',
-    costs:
-      'The Personality pane inside that same reachable Admin screen cannot read or save SOUL/USER/priority-map (app/lib/admin-personality-client.ts:101,111,128,144 via app/features/admin/PersonalityPane.tsx).',
-  },
-  {
-    rung: 'app-devices',
-    composition: 'app_devices_surface',
-    why: 'createAppDevicesSurface (gateway/http/app-devices-surface.ts:53) has no non-test call site.',
-    costs:
-      'Push-token registration runs on every login and every sign-out (app/lib/push.ts:143,177 → app/lib/devices-client.ts:65,78) and 404s, so no device is ever registered. That disables push notifications entirely, which is also most of why the reminder deep link above is dead.',
   },
   {
     rung: 'app-backups',
