@@ -167,6 +167,25 @@ describe('stuck_agent — real dispatch-site wiring (F4 round-2 blocker)', () =>
         owner_slug: 'owner',
         process_registry: reg,
         inactivity_threshold_ms: 0,
+        // The clock is INJECTED, one millisecond ahead, and that is load-bearing
+        // rather than tidy. `listStuck` compares `busy_since < now() - threshold`
+        // with a STRICT `<` (tools/process-registry.ts:287), so at threshold 0 a
+        // record is only stuck once the wall clock has ticked PAST the moment it
+        // was marked. Everything between `markTurnStarted` and this `detect()` is
+        // in-memory and routinely completes inside a single millisecond, so with
+        // the real `Date.now` this assertion is a coin flip on how the runner is
+        // scheduled — it passed for months and then began failing when an
+        // unrelated PR added two test files, which reshuffled the shard
+        // partition and moved this file onto a busier runner.
+        //
+        // The race was in the TEST, not the product: a strict `<` against a real
+        // 15-minute threshold is correct. What the test means is "a detector run
+        // AT THAT MOMENT sees it", and this states that in the clock instead of
+        // hoping for it. It does not weaken the assertion — remove
+        // `markTurnStarted` from the dispatch site and `busy_since` is null, so
+        // `listStuck` filters the record out regardless of the clock and this
+        // still reds. Verified by mutation.
+        now: () => Date.now() + 1,
       })
       const midTurn = await detector.detect()
       expect(midTurn.length).toBe(1)

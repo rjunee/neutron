@@ -186,6 +186,59 @@ export const CHAT_COMMANDS_KNOWN_UNREACHABLE: readonly KnownUnreachableChatComma
  * and a permission slip: everything in this list is a place the gate has agreed
  * not to look, so each entry has to say what that leaves unwatched.
  */
+/**
+ * Owner-typed commands this gate STRUCTURALLY CANNOT SEE, and the file that
+ * covers each one instead.
+ *
+ * The three lists above are all keyed on chat-command FILTER FACTORIES, because
+ * that is what {@link scanChatCommandFilterFactories} can find and what the
+ * probe's `chat_command_result` assertion matches. A command implemented any
+ * other way is invisible to every one of them — not excluded, not pinned, just
+ * absent, which is the most dangerous of the four states because nothing in this
+ * file mentions it at all.
+ *
+ * `/task` is exactly that shape and it is not an accident of style. It is a
+ * RECEIVER WRAPPER (`wrapWithTasksChatRouter`, returning `IncomingEventReceiver`)
+ * sitting a layer below the filter chain, and it is there because a
+ * `ChatCommandFilterResult` (`contracts/chat-command-filter.ts:35`) carries
+ * `text` / `data` / `deep_link` / `error` and has NO FIELD FOR BUTTONS, while
+ * the Tasks Core answers `/task` and `/task focus` with button rows the client
+ * posts back as `task:done:<id>`. Routed through the filter chain, every one of
+ * those buttons would be silently dropped. So the gap in this gate is the price
+ * of the command working at all, and the right response is to write the cover
+ * down rather than to bend the command into a shape the gate can see.
+ *
+ * It went unwired for exactly as long as it went unlisted: `wrapWithTasksChatRouter`
+ * had zero production callers, `/task` reached the model as prose, and no gate
+ * in this repo was looking.
+ *
+ * The set is PINNED by `reachability-inventory-complete.test.ts`, which asserts
+ * both that each named file exists and that the whole set matches — so deleting
+ * an entry to quiet something fails just as loudly as adding an unbacked one,
+ * and deleting the covering test fails too. An inventory you can empty is not an
+ * inventory.
+ */
+export const CHAT_COMMANDS_COVERED_ELSEWHERE: ReadonlyArray<{
+  readonly command: string
+  /** Why this gate cannot see it. Must name the mechanism, not the symptom. */
+  readonly invisible_because: string
+  /** Repo-relative test that DOES drive it at a real socket. Must exist. */
+  readonly covered_by: string
+}> = [
+  {
+    command: '/task',
+    invisible_because:
+      'Implemented as a receiver wrapper (`gateway/cores/tasks-chat-router.ts:109` ' +
+      '`wrapWithTasksChatRouter`, returning `IncomingEventReceiver`) rather than a ' +
+      'ChatCommandFilter, so the factory scan cannot match it by name or by return type. ' +
+      'It also answers with a full `agent_message` envelope rather than a ' +
+      '`chat_command_result`, so the probe assertion in `reachability.test.ts` would not ' +
+      'recognise a correct answer either. Both differences exist so the Tasks Core can ' +
+      'emit BUTTONS, which the filter result shape cannot carry.',
+    covered_by: 'open/__tests__/open-task-command-wiring.test.ts',
+  },
+]
+
 export const CHAT_COMMAND_EXCLUSIONS: ReadonlyArray<{
   readonly filter: string
   readonly why: string

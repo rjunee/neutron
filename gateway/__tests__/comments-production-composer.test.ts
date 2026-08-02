@@ -1,22 +1,35 @@
 /**
- * P7.2 S1 — production-composer reachability guard for the four
- * comments routes.
+ * P7.2 S1 — ROUTE-BEHAVIOUR guard for the comments routes, given a
+ * correctly-wired surface. Read the next paragraph before trusting the
+ * filename.
  *
- * What this test guards (the recurring anti-pattern Argus has caught
- * repeatedly: a feature ships with unit/integration coverage but the
- * production composer either never wires the dependency OR wires it
- * the wrong way, so the route 404s/503s in prod). The brief
- * (§ 8.1) calls this gate out as MANDATORY: when a future refactor
- * accidentally drops `comments` from `createAppDocsSurface`'s wiring
- * inside `gateway/index.ts`, OR mis-mounts the comments surface in
- * `composeHttpHandler`'s chain, the four comments routes would
- * silently fall to 503 `comments_unavailable` in production. This
- * test fails first.
+ * THIS FILE IS NOT A PRODUCTION-COMPOSER GUARD, despite its name and
+ * despite what this header claimed until 2026-08-02. It builds its own
+ * DocStore + CommentStore + AnchorWalker and threads them into
+ * `createAppDocsSurface` by hand, then asserts the routes answer. That
+ * proves the SURFACE, and it is worth having — but it is blind to the
+ * only question its name implies it answers, "does a composer do this?"
  *
- * Strategy: build the docs surface AS gateway/index.ts builds it
- * (DocStore + CommentStore, threaded into `createAppDocsSurface`),
- * compose through `composeHttpHandler`, and hit each of the four
- * routes. Any 503 or unreachable code path fails the gate.
+ * It was green for months while the answer was no. `new CommentStore(`
+ * had zero non-test call sites in the repo, so `createAppDocsSurface`
+ * fell to `opts.comments ?? null` (`app-docs-surface.ts:159`) in the one
+ * composer Open has, and all six `/docs/comments*` routes answered 503
+ * `comments_unavailable` to a web Documents tab that had been calling
+ * them since WAVE 3. Every route assertion below passed throughout,
+ * because every one of them ran against a surface this file built.
+ *
+ * Its old citations pointed at `gateway/index.ts:2989-3007` for the
+ * "production" wiring. `gateway/index.ts` is 946 lines and has not
+ * composed Open since the OSS split; the line range referred to nothing.
+ * A hand-built fixture plus a dangling citation is precisely the shape
+ * that survives a real outage, so the citations now point at the live
+ * composer and the claim has been narrowed to what is actually checked.
+ *
+ * The producer-side half — boot `buildOpenGraphComposer`, read what it
+ * carries, drive the routes through the composed graph — is
+ * `open/__tests__/doc-comments-wiring.test.ts`. Neither file is
+ * sufficient alone: this one would miss an unwired composer, and that
+ * one would miss a route regression behind a correctly-wired surface.
  *
  * Mirrors the structure of `launcher-production-composer.test.ts` +
  * `tasks-production-composer.test.ts`.
@@ -68,19 +81,23 @@ async function startHarness(): Promise<Harness> {
   const db = ProjectDb.open(join(tmp, 'owner.db'))
   applyMigrations(db.raw())
 
-  // Build the docs surface the SAME way `gateway/index.ts:2989-3007`
-  // does at boot: DocStore + CommentStore + AnchorWalker, with the
-  // walker's `handle` method threaded into `DocStore.onMutationSuccess`
-  // and the CommentStore threaded into `createAppDocsSurface`. If the
-  // wiring shape changes in a way that's incompatible with the
-  // production composer (e.g. an option gets renamed without
-  // updating index.ts), this construction breaks at compile time. If
-  // the wiring is correct but the chain drops a route, the per-route
+  // Build the docs surface in the same SHAPE the live composer uses
+  // (`open/composer.ts:1417` CommentStore, `:2684` AnchorWalker +
+  // DocStore.onMutationSuccess, `:2694` createAppDocsSurface): DocStore
+  // + CommentStore + AnchorWalker, with the walker's `handle` threaded
+  // into `DocStore.onMutationSuccess` and the CommentStore threaded into
+  // `createAppDocsSurface`.
+  //
+  // "Same shape" is the honest claim, and it is weaker than it sounds. A
+  // rename breaks this construction at compile time, so the two cannot
+  // drift in TYPE. They can drift in FACT without a word of warning —
+  // the composer can simply stop passing `comments`, which is the state
+  // this file sat green through. That direction is checked in
+  // `open/__tests__/doc-comments-wiring.test.ts`, not here.
+  //
+  // If the wiring is correct but the chain drops a route, the per-route
   // asserts below catch it. The walker wiring is exercised by the
-  // separate "AnchorWalker reach-through" test further down — a
-  // future refactor that drops the `onMutationSuccess: walker.handle`
-  // line in `gateway/index.ts` would fail that test even though every
-  // route here still passes.
+  // separate "AnchorWalker reach-through" test further down.
   const auth = createAppWsAuthResolver({ project_slug: OWNER, bypass: true })
   const comments = new CommentStore({ owner_home })
   const walker = new AnchorWalker({
@@ -99,10 +116,10 @@ async function startHarness(): Promise<Harness> {
   })
 
   // Boot the production graph with the docs surface threaded through —
-  // this is the contract `gateway/index.ts:boot` honors. If a future
-  // CompositionInput field rename / removal drops `app_docs_surface`
-  // from the typed shape, this construction breaks at compile time
-  // BEFORE the runtime test runs.
+  // the same `app_docs_surface` field `open/composer.ts:2694` fills. If a
+  // future CompositionInput field rename / removal drops
+  // `app_docs_surface` from the typed shape, this construction breaks at
+  // compile time BEFORE the runtime test runs.
   const graph = await composeProductionGraph({
     db,
     project_slug: OWNER,
@@ -315,12 +332,19 @@ test('production composer mounts GET /api/app/projects/<id>/docs/comments/<id>/t
 test('AnchorWalker is wired into DocStore.onMutationSuccess end-to-end (Argus r1 BLOCKER #1)', async () => {
   // Why this test exists: the recurring anti-pattern Argus has flagged
   // 4× in 6 sprints — a feature ships with unit/integration coverage
-  // but the production composer drops the dependency wiring in
-  // `gateway/index.ts`. The P7.2 S2 walker's `onMutationSuccess` hook
-  // had no end-to-end reachability test, so a future refactor that
-  // dropped `onMutationSuccess: walker.handle` from `gateway/index.ts:
-  // 2989-3007` would not fail any test even though every doc edit in
-  // production would skip re-anchor. Walker integration tests pass
+  // but the production composer drops the dependency wiring. The P7.2 S2
+  // walker's `onMutationSuccess` hook had no end-to-end test of the FULL
+  // mutation chain, so a refactor that dropped `onMutationSuccess:
+  // walker.handle` would not fail any test even though every doc edit in
+  // production would skip re-anchor.
+  //
+  // Note the limit, same as the header's: the surface under test is
+  // hand-built here, so this pins the CHAIN, not the composer. Until
+  // 2026-08-02 the live composer built `new DocStore({ owner_home })`
+  // with no walker at all (`open/composer.ts`), and this test was green
+  // the whole time. The composer now wires it at `open/composer.ts:2684`,
+  // and `open/__tests__/doc-comments-wiring.test.ts` is what reds if it
+  // stops. Walker integration tests pass
   // because they call `walker.reanchorAfterEdit(...)` directly; the
   // wiring smoke test in `anchor-walker.test.ts` only verifies
   // DocStore fires the hook in isolation. This test exercises the

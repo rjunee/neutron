@@ -65,6 +65,10 @@ import { persistOwnerTimezoneIfChanged } from '@neutronai/gateway/storage/owner-
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { AppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
 import type { ChatCommandFilter } from '@neutronai/contracts/chat-command-filter.ts'
+import {
+  wrapWithTasksChatRouter,
+  type TasksChatRouterDepsResolver,
+} from '@neutronai/gateway/cores/tasks-chat-router.ts'
 import { buildButtonPrompt, type ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import { buildButtonPromptClaim } from '@neutronai/gateway/wiring/build-button-prompt-claim.ts'
 import {
@@ -282,6 +286,25 @@ export interface WireAppWsDeps {
   attachmentTranscript?: (url: string) => string | null
   /** The chained chat-command filter (/note, /remind, /skills, …). */
   chatCommandFilter: ChatCommandFilter
+  /**
+   * `/task` deps resolver — the Tasks Core's `{ store, pickNext }` keyed by
+   * instance slug, populated at Cores install time.
+   *
+   * `/task` is the one owner-typed command that does NOT ride
+   * {@link chatCommandFilter}, and the reason is the reply shape rather than
+   * taste: a `ChatCommandFilterResult` (`contracts/chat-command-filter.ts:35`)
+   * carries `text` / `data` / `deep_link` / `error` and has no field for
+   * BUTTONS, while the Tasks Core answers `/task` and `/task focus` with button
+   * rows whose `option.value` the client posts back as `task:done:<id>` /
+   * `task:open:<id>`. Routing it through the filter would silently drop every
+   * button. So it wraps the RECEIVER instead, one layer down, where a full
+   * `AppWsOutbound` envelope can be emitted.
+   *
+   * The two layers cannot collide: the filter chain runs first (inside
+   * `createAppWsSurface`) and no filter in it claims `/task`, so the inbound
+   * falls through to `adapter.dispatchInbound` → this wrapped receiver.
+   */
+  tasksChatDeps: TasksChatRouterDepsResolver
   /** The single-owner localhost-trust app-ws auth resolver (Path A). */
   appOwnerAuth: AppWsAuthResolver
   /**
@@ -373,6 +396,7 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     scribeOnUserTurn,
     attachmentTranscript,
     chatCommandFilter,
+    tasksChatDeps,
     appOwnerAuth,
     appWsToken,
     bindIsLoopback,
@@ -935,9 +959,27 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   //     NEVER re-run the agent turn (the `if (!was_new) return` guards trip)
   //   • `resume`/`session_ready.last_seen_seq` gap-free reconnect replay
   //   • delivered/read receipts, reactions, and edit/delete — persisted + fanned
+  // `/task` — intercept before the LLM path. The router parses `/task …` and
+  // the `task:done:<id>` / `task:open:<id>` button postbacks, dispatches the
+  // Tasks Core, and emits the response envelope itself; ANY other body (and any
+  // parser/dispatch failure, and an unresolvable instance) forwards verbatim to
+  // `appWsReceiver`, so the normal chat path is unchanged.
+  //
+  // This wrap is what `wrapWithTasksChatRouter` was built for and never got:
+  // it had zero production callers, so `/task` reached the model as prose and
+  // the Core's buttons were dead UI on both clients.
+  const appWsReceiverWithTasks = wrapWithTasksChatRouter({
+    inner: appWsReceiver,
+    deps: tasksChatDeps,
+    // Open is single-owner: one instance slug per process, and the app-ws
+    // adapter does not stamp `project_slug` on an `IncomingEvent` (see
+    // `TasksChatRouterOptions.resolveOwner`). The composed slug IS the owner.
+    resolveOwner: () => project_slug,
+    replyToTopic: (channel_topic_id, env) => appWsRegistry.send(channel_topic_id, env),
+  })
   const appWsAdapter = new AppWsAdapter({
     registry: appWsRegistry,
-    receiver: appWsReceiver,
+    receiver: appWsReceiverWithTasks,
     chat_log: new AppChatStore({ db }),
     receipt_log: new AppChatReceiptStore({ db }),
     reaction_log: new AppChatReactionStore({ db }),

@@ -754,19 +754,38 @@ export class AgentWatcher {
     // Lock is already held by the outer tick body — direct call.
     await this.comment_store.appendEvent(project_id, input)
     // ISSUE #44 — pin the comment author's "current chat project_id" to
-    // the project we just auto-escalated from. Mirrors the user-clicked
-    // path in `app-docs-surface.ts:handleEscalateComment`; the chat
-    // composer's per-turn LLM wrapper reads this on the very next chat
-    // turn (via the closure threaded into `buildPhaseSpecResolver`) so
-    // the rendered `<escalated_comment_threads>` envelope sources from
-    // THIS sidecar, not the hardcoded `default` project the pre-#41
-    // wiring assumed. user_event.author_id is the user_id of the
-    // comment poster: `listUserCommentsAfter` filters for
-    // `author_kind='user'`, so `author_id` IS the canonical user_id.
-    // When chat_session_projects is null (legacy boot paths, the
-    // existing watcher-only test harness that exercises only the
-    // comments surface) the escalate event still lands in the
-    // sidecar — same shape as before this fix.
+    // the project we just auto-escalated from, so the rendered
+    // `<escalated_comment_threads>` envelope sources from THIS sidecar
+    // and not the hardcoded `default` project the pre-#41 wiring
+    // assumed. Mirrors the user-clicked path in
+    // `app-docs-surface.ts:handleEscalateComment`. user_event.author_id
+    // is the user_id of the comment poster: `listUserCommentsAfter`
+    // filters for `author_kind='user'`, so `author_id` IS the canonical
+    // user_id.
+    //
+    // NOTHING IN A SHIPPED PRODUCT RUNS THIS LINE TODAY, and the comment
+    // that used to sit here ("the chat composer's per-turn LLM wrapper
+    // reads this on the very next chat turn") asserted an end-to-end
+    // pipeline on both counts, wrongly. Two corrections:
+    //
+    //  1. This watcher is DORMANT BY DECISION, not by accident — it is
+    //     one of the two entries in `gateway/composition.ts` DORMANT_LOOPS
+    //     (decision D-7, 2026-07-02), never constructed in any
+    //     composition, and `open/__tests__/loop-inventory-open-composer.ts`
+    //     pins that set. So no auto-escalation happens at all.
+    //  2. Even when it is started, the pin does not reach "the very next
+    //     chat turn". Its only reader is the interview engine's phase-spec
+    //     resolver (`open/composer.ts:1443` →
+    //     `build-phase-spec-resolver.ts:322`), and on Open that engine no
+    //     longer drives chat at all — the phase machine was retired from
+    //     the conversational path (`open/composer.ts:3540-3548`) and
+    //     survives only as the import subsystem owner. The steady-state
+    //     live-agent turn composes its own system prompt and never loads
+    //     escalations. See the fuller note at
+    //     `gateway/http/app-docs-surface.ts:handleEscalateComment`.
+    //
+    // When chat_session_projects is null (the watcher-only test harness)
+    // the escalate event still lands in the sidecar — same shape.
     if (this.chat_session_projects !== null) {
       this.chat_session_projects.setActive(user_event.author_id, project_id)
     }

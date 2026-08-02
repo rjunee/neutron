@@ -654,10 +654,25 @@ describe('escalation-loader composition (P7.2 S3 — production wire-through)', 
   // `commentStore` + `escalation_project_id` pair so the per-turn LLM
   // wrapper splices any pending `escalate_to_chat` events into the
   // system prompt above the persona / conventions blocks. The PROD
-  // wiring at `gateway/index.ts:2434-2455` threads both, matching the
-  // persona-loader plumbing. This test pins that wiring end-to-end:
+  // wiring at `open/composer.ts:1442-1444` threads both, matching the
+  // persona-loader plumbing. This test pins the CONSUMER end-to-end:
   // real CommentStore + real escalation-loader + real resolver, with
   // only the upstream substrate stubbed via fakeSubstrate.
+  //
+  // WHAT IT DOES NOT PIN, and did not admit until now. It calls
+  // `buildPhaseSpecResolver` itself with a hand-built pair, so it proves
+  // the splice works GIVEN the pair and says nothing about whether any
+  // composer supplies one. It passed green for months while no composer
+  // did: `new CommentStore(` had no non-test call site in the repo, so
+  // every `/docs/comments*` route answered 503 and no escalation could
+  // be raised in the first place. Its old citation pointed at
+  // `gateway/index.ts:2434-2455`, a file that is 946 lines long and out
+  // of the Open composition path since the OSS split — a dangling line
+  // reference is exactly how that stayed invisible.
+  //
+  // The producer-side half is `open/__tests__/doc-comments-wiring.test.ts`,
+  // which boots the real composer and reads what it actually carries.
+  // Neither test is sufficient alone.
 
   const bundle = {
     owner_slug: 't1',
