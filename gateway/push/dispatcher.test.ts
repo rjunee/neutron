@@ -252,9 +252,38 @@ describe('PushDispatcher.pushReminder', () => {
     expect(result.delivered).toBe(1)
     expect(result.errored).toBe(1)
     expect(result.ok).toBe(true)
-    expect(entries.length).toBe(1)
     expect(entries[0]?.message).toBe('expo push ticket error')
     expect(entries[0]?.meta?.['error']).toBe('DeviceNotRegistered')
+    // The ticket error is also ACTED on: a `DeviceNotRegistered` token is
+    // deleted, so the dead device is retried at most once rather than on every
+    // reminder for the life of the install. `tok-1` (ok) is untouched.
+    expect(entries.map((e) => e.message)).toEqual([
+      'expo push ticket error',
+      'expo push token pruned',
+    ])
+    expect(store.getByDeviceToken('t1', 'tok-2')).toBeNull()
+    expect(store.getByDeviceToken('t1', 'tok-1')).not.toBeNull()
+  })
+
+  test('a NON-DeviceNotRegistered ticket error leaves the token registered', async () => {
+    // Rate limits, oversized messages and credential problems are transient or
+    // sender-side. Pruning on those would silently end push for the owner's live
+    // phone until their next sign-in.
+    await store.register({
+      project_slug: 't1',
+      user_id: 'u',
+      device_token: 'tok-1',
+      platform: 'ios',
+    })
+    const client = fakeClient([
+      { status: 'error', message: 'rate', details: { error: 'MessageRateExceeded' } },
+    ])
+    const { logger, entries } = recordingLogger()
+    const dispatcher = createPushDispatcher({ store, client, logger })
+    const result = await dispatcher.pushReminder(makeReminder())
+    expect(result.errored).toBe(1)
+    expect(entries.map((e) => e.message)).toEqual(['expo push ticket error'])
+    expect(store.getByDeviceToken('t1', 'tok-1')).not.toBeNull()
   })
 
   test('Expo throws ExpoPushError → result.ok=false, no exception escapes', async () => {

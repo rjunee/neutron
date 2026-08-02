@@ -3483,7 +3483,29 @@ per-project `reminders` table. Three parts:
 The Reminders Core (`cores/free/reminders/`) is the product-surface adapter over
 this store: its `reminders_create` tool accepts an optional `recurrence` label
 OR `recurrence_spec` cron (validated via `isValidCron`), and `snooze` / `update`
-preserve a reminder's cadence across the atomic cancel+create.
+preserve a reminder's cadence across the atomic cancel+create. Its manifest also
+contributes the **Reminders tab** — the `app_tab` ui_component whose
+`props_schema` consts (`/projects/<project_id>/reminders`, label, emoji, order
+40) are what `gateway/http/app-tabs-surface.ts` turns into a descriptor. That
+`props_schema` was missing until 2026-08, and the resolver SKIPS an `app_tab`
+with no declared `path`, so the tab survived only in the mobile pre-fetch
+placeholder and vanished the moment `/tabs` answered.
+
+**Push delivery** (`gateway/push/`). A fired reminder also reaches the owner's
+registered devices. `open/composer.ts` builds ONE `DevicePushTokenStore` and
+hands it to both halves — `/api/app/devices/{register,unregister}` (what the app
+calls on every sign-in/sign-out) and `createPushDispatcher`, supplied as
+`composition.push_dispatcher` and attached by `build-core-modules.ts` to
+`ReminderTickLoop.on_fired`. Three properties make it safe to run unconditionally:
+it fires only AFTER a successful nudge dispatch, so push never announces a
+reminder the owner was not already being told about; with zero registered tokens
+`dispatch` returns before issuing any HTTP request, which is the state of every
+fresh install; and a ticket Expo marks `DeviceNotRegistered` DELETES that token
+row, so a dead device is retried once rather than on every reminder forever
+(other ticket errors — rate limits, credential problems — never prune). Failures
+are caught inside the tick, so an unreachable Expo cannot stop a reminder from
+being marked fired. `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are
+merely rate-limited.
 
 ## Ritual executor — approval-gated code rituals (`reminders/`)
 

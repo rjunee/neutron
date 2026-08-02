@@ -294,6 +294,8 @@ import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-sur
 import { createAppAdminSurface } from '@neutronai/gateway/http/app-admin-surface.ts'
 import { createAdminPersonalitySurface } from '@neutronai/gateway/http/admin-personality-surface.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
+import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
+import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
 import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
@@ -2670,15 +2672,41 @@ export function buildOpenGraphComposer(
     // while this was unmounted NO device could ever register and the
     // `device_push_tokens` table stayed empty on every install.
     //
-    // Registration is only the first half of push. Delivery needs the
-    // `push_dispatcher` composition field, which `build-core-modules.ts:396-398`
-    // attaches to the reminder tick's `on_fired` hook — and NO composer sets it
-    // either (`createPushDispatcher`, `gateway/push/dispatcher.ts:133`, has no
-    // non-test call site). That is a separate wiring gap, tracked outside this
-    // change; it is not a route slot, so the coverage gate cannot see it.
+    // ONE store instance, shared with the delivery half below, so the rows the
+    // register route writes are literally the rows the reminder push reads.
+    const devicePushTokens = new DevicePushTokenStore(db)
     const appDevicesSurface = createAppDevicesSurface({
-      store: new DevicePushTokenStore(db),
+      store: devicePushTokens,
       auth: appOwnerAuth,
+    })
+    // The OTHER half of push. Registration on its own delivers nothing: the
+    // fan-out lives behind the `push_dispatcher` composition field, which
+    // `build-core-modules.ts:396-398` attaches to the reminder tick's `on_fired`
+    // hook — and until now NO composer set it, so `createPushDispatcher`
+    // (`gateway/push/dispatcher.ts:133`) had no non-test call site and the
+    // reminder deep link (`app/lib/push-deep-link-dispatch.ts:93-108`) could
+    // never be reached. It is not a route slot, so the route-slot coverage gate
+    // cannot see the gap; `tests/integration/reminders-tab-and-push.open.test.ts`
+    // is what holds this wiring down.
+    //
+    // ALWAYS ON, and safe to be: `pushReminder` reads the token table first and
+    // `dispatch` returns before any fetch when the message list is empty
+    // (`gateway/push/dispatcher.ts:145-147`), so the zero-device state every
+    // fresh install starts in makes no network call at all. Downstream of a
+    // SUCCESSFUL nudge dispatch only (`reminders/tick.ts:314-323`), so push
+    // never adds a notification for a reminder the owner was not already being
+    // told about, and its own failures are caught and logged without touching
+    // the fired row.
+    //
+    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
+    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
+    const push_dispatcher = createPushDispatcher({
+      store: devicePushTokens,
+      client: createExpoPushClient(
+        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
+          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
+          : {},
+      ),
     })
     // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
     // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
@@ -4696,6 +4724,10 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
+      // The reminder-fired PUSH hook. `build-core-modules.ts:396-398` attaches
+      // it to `ReminderTickLoop.on_fired`, so a fired reminder reaches the
+      // owner's registered devices instead of only the in-app chat topic.
+      push_dispatcher,
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.

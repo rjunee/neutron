@@ -16,9 +16,16 @@ export interface MiscCompositionInput {
    * for recurring). Failure-safe: thrown errors are caught and logged
    * but never block the tick from advancing to the next reminder.
    *
-   * Production wires `createPushDispatcher(...)` (`gateway/push/dispatcher.ts`)
-   * which calls `pushReminder` here. Test/dev paths leave this unset
-   * so the existing reminder tick behaviour is unchanged.
+   * `open/composer.ts` wires `createPushDispatcher(...)`
+   * (`gateway/push/dispatcher.ts`) over the SAME `DevicePushTokenStore` the
+   * `/api/app/devices/register` surface writes to, so a registered device is a
+   * delivered device. Test/dev paths leave this unset so the reminder tick
+   * behaves exactly as it did before push existed.
+   *
+   * (This comment claimed "Production wires createPushDispatcher" for months
+   * while NO composer set the field and the function had no non-test call site.
+   * It is true as of the wiring above; do not let it drift back — the assertion
+   * that holds it is `tests/integration/reminders-tab-and-push.open.test.ts`.)
    */
   push_dispatcher?: {
     onFired(reminder: import('@neutronai/reminders/store.ts').Reminder): Promise<void>
