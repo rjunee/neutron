@@ -46,7 +46,7 @@ function checkerFields(root: string): { name: string; optional: boolean }[] {
   const cfgPath = ts.findConfigFile(root, ts.sys.fileExists, 'tsconfig.json')
   if (cfgPath === undefined) throw new Error('no tsconfig.json at repo root')
   const cfg = ts.parseJsonConfigFileContent(
-    ts.readConfigFile(cfgPath, ts.sys).config as unknown,
+    ts.readConfigFile(cfgPath, (p) => ts.sys.readFile(p)).config as unknown,
     ts.sys,
     root,
   )
