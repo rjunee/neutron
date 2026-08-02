@@ -108,6 +108,11 @@ function buildDeps() {
     appWsChatTurn: null,
     scribeOnUserTurn: undefined,
     chatCommandFilter: { match: async () => null } as ChatCommandFilter,
+    // `/task` deps. `null` = "Tasks Core not installed for this instance", which
+    // the router treats as a quiet fall-through to the inner receiver — so every
+    // assertion in this file exercises the SAME inner-receiver path it did
+    // before the router was wrapped around it.
+    tasksChatDeps: { resolve: async () => null },
     appOwnerAuth: {
       mode: 'dev-bypass',
       resolve: async () => ({ ok: true as const, user_id: 'owner' }),

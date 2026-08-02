@@ -53,6 +53,42 @@ export interface TasksChatOwnerDeps {
   pickNext: PickNextService
 }
 
+/**
+ * The registry the `tasks_core` backend factory populates and the router
+ * resolves through. `boot-cores-factories-types.ts:31` declared the
+ * `TasksCoreOwnerRegistry` INTERFACE and `boot-cores-factories.ts:77` writes to
+ * it, but no implementation of it existed anywhere in the repo — which is one
+ * of the two reasons `/task` reached nobody: even a composer that wired the
+ * router had nothing to hand it as `deps`.
+ *
+ * Population timing is why a bare `Map` is enough and a lazy builder is not
+ * needed: `installBundledCores` awaits each Core's backend factory during the
+ * `cores` graph-module `init` (`gateway/cores/install-bundled.ts:918`), which
+ * runs inside `composeProductionGraph` — long before any socket can carry an
+ * inbound. By the time a `/task` can be typed, the entry is present.
+ *
+ * `resolve` is async only to satisfy {@link TasksChatRouterDepsResolver}; the
+ * lookup itself is synchronous and cannot fail.
+ */
+export class InMemoryTasksCoreOwnerRegistry {
+  private readonly bySlug = new Map<string, TasksChatOwnerDeps>()
+
+  set(project_slug: string, deps: TasksChatOwnerDeps): void {
+    this.bySlug.set(project_slug, deps)
+  }
+
+  get(project_slug: string): TasksChatOwnerDeps | undefined {
+    return this.bySlug.get(project_slug)
+  }
+
+  asResolver(): TasksChatRouterDepsResolver {
+    return {
+      resolve: async (project_slug: string): Promise<TasksChatOwnerDeps | null> =>
+        this.bySlug.get(project_slug) ?? null,
+    }
+  }
+}
+
 export interface TasksChatRouterOptions {
   /** Inner receiver — non-`/task` bodies forward here verbatim. */
   inner: IncomingEventReceiver

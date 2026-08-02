@@ -118,6 +118,7 @@ import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
 import { buildButtonStoreMessageSearchRuntime } from '@neutronai/gateway/composition/message-search-wiring.ts'
 import { mountOpenCores } from '@neutronai/gateway/cores/mount-open-cores.ts'
+import { InMemoryTasksCoreOwnerRegistry } from '@neutronai/gateway/cores/tasks-chat-router.ts'
 import { wireSubstrates } from './wiring/substrates.ts'
 import { wireMemory } from './wiring/memory.ts'
 import { wireLandingStack } from './wiring/landing.ts'
@@ -280,6 +281,9 @@ import { isLoopbackBindHost, assertOwnerCredentialPolicy } from '@neutronai/gate
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { DocStore } from '@neutronai/gateway/http/doc-store.ts'
 import { createAppDocsSurface } from '@neutronai/gateway/http/app-docs-surface.ts'
+import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
+import { AnchorWalker } from '@neutronai/gateway/comments/anchor-walker.ts'
+import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { CoresModuleState } from '@neutronai/gateway/cores/composer-state.ts'
@@ -1355,9 +1359,18 @@ export function buildOpenGraphComposer(
     // `cores/free/tasks/src/backend.ts`). Constructed HERE, above
     // `mountOpenCores`, so all three consumers can bind to it.
     const canonicalTaskStore = new TaskStore(db)
+    // `/task` chat commands. The Tasks Core's `{ store, pickNext }` is built
+    // inside the `tasks_core` backend factory, which `installBundledCores`
+    // awaits during the `cores` graph module's init — so this map is populated
+    // before the socket can carry an inbound, and the router below can resolve
+    // synchronously. Nothing constructed this registry before (the interface at
+    // `gateway/boot-cores-factories-types.ts:31` had no implementation), so the
+    // factory's write was skipped and `/task` had no deps to dispatch against.
+    const tasksCoreRegistry = new InMemoryTasksCoreOwnerRegistry()
     const coresWiring = await mountOpenCores({
       projectDb: db,
       canonicalTaskStore,
+      tasksCoreRegistry,
       owner_home,
       project_slug,
       secretsStore,
@@ -1388,11 +1401,57 @@ export function buildOpenGraphComposer(
       note: coresWiring.oauthConfigured ? 'live-cred-capable' : 'in-memory until Google OAuth connected',
     })
 
+    // ── Document comments: THE store, and THE escalation pin ───────────────
+    // Both are constructed HERE, above `buildPhaseSpecResolver`, because two
+    // consumers built far apart in this file must hold the SAME instances:
+    // the docs surface (~line 2680) serves the comment routes off the store and
+    // writes the pin on escalate; the phase-spec resolver (immediately below)
+    // reads both back. Constructing either at its point of use would give the
+    // two halves separate objects over the same disk, which passes every "the
+    // row is on disk" check and never lets an escalation reach a prompt.
+    //
+    // Before this, NEITHER existed in any composer: `new CommentStore(` had no
+    // non-test call site in the repo, so `createAppDocsSurface` fell to
+    // `opts.comments ?? null` and all six `/docs/comments*` routes answered 503
+    // `comments_unavailable` — to a web Documents tab that has been calling
+    // them since WAVE 3 (`landing/chat-react/docs-client.ts:281-354`).
+    const commentStore = new CommentStore({ owner_home })
+    // ISSUE #41 — the per-process "which project is the owner's chat pointed
+    // at" pin. The escalate route sets it; the resolver's closure reads it.
+    const chatSessionProjects = new InMemoryWebChatSessionProjectRegistry()
+
     const phaseSpecResolver = await buildPhaseSpecResolver({
       substrate: llmCallSubstrate,
       env,
       owner_handle,
       log_slug: project_slug,
+      // P7.2 S3 — the escalation pair. Splicing is enabled only when BOTH are
+      // present (`build-phase-spec-resolver.ts:291`), so these two lines are
+      // the whole difference between an escalated comment thread reaching a
+      // prompt and being written to a sidecar nothing reads.
+      //
+      // SCOPE, STATED PLAINLY BECAUSE THE OLD COMMENTS OVERSTATED IT. Two
+      // production comments claimed the chat composer "reads this on the very
+      // next chat turn"; both were wrong, and wiring these two lines does not
+      // make them right. This resolver belongs to the onboarding INTERVIEW
+      // ENGINE, and the interview phase machine was retired from the
+      // conversational path (see ~line 3540: onboarding is a MODE of the live
+      // `/ws/app/chat` agent, "no `engine.advance`"). `engine.advance` has no
+      // production caller left; the engine survives only as the import
+      // subsystem owner, so the sole remaining emitters are the history-import
+      // transitions in `onboarding/interview/engine-import-routing.ts`.
+      //
+      // So the escalate button records the event and pins the project
+      // correctly, and the only prompt that can read it is one emitted mid
+      // history-import. The steady-state turn
+      // (`build-live-agent-turn.ts:composeFirstTurnPrompt`) never loads
+      // escalations. That gap is REAL and is pinned as broken in
+      // `open/__tests__/reachability-inventory.ts` rather than papered over —
+      // closing it means giving the live-agent turn its own escalation
+      // fragment, which is a product decision, not this wiring change.
+      commentStore,
+      escalation_project_id: (): string | null =>
+        chatSessionProjects.getActive(OWNER_USER_ID),
       owner_data_dir: owner_home,
       personaLoader,
       // Make the first conversational turn AWAIT the pre-warm (bounded) so a cold
@@ -2616,11 +2675,36 @@ export function buildOpenGraphComposer(
     // which the project setup already populates. Mounted via
     // `composition.app_docs_surface` (gateway/composition.ts) → compose.ts route
     // chain. Previously unmounted in Open, so the tab 404'd.
-    const docStore = new DocStore({ owner_home })
+    // P7.2 S2 — the re-anchor walker. A comment is pinned to a character RANGE
+    // in a doc; editing that doc moves the text out from under it. The walker
+    // relocates the anchor (or marks it orphaned) on every write/move/delete,
+    // and `DocStore.onMutationSuccess` is its ONLY entry point. Unwired, every
+    // comment on a doc the owner subsequently edits silently points at the
+    // wrong text.
+    //
+    // Constructed over THE `commentStore` built above `buildPhaseSpecResolver`,
+    // so it walks the same sidecar the routes serve. `handle` never throws by
+    // contract (`anchor-walker.ts:323` — the doc write has already landed, so a
+    // walker failure must not surface as a 500 on a successful save).
+    //
+    // Note this is NOT the dormant comments `AgentWatcher`
+    // (`gateway/composition.ts:74` DORMANT_LOOPS, decision D-7): that one is a
+    // background LLM tick loop deliberately not started. The walker is a
+    // synchronous hook on a write that already happens.
+    const anchorWalker = new AnchorWalker({ commentStore, owner_home })
+    const docStore = new DocStore({ owner_home, onMutationSuccess: anchorWalker.handle })
     const appDocsSurface = createAppDocsSurface({
       store: docStore,
       auth: appOwnerAuth,
       project_slug,
+      // P7.2 — the comment routes. `comments` is what lifts the six
+      // `/docs/comments*` routes off their 503; `chatSessionProjects` is the
+      // registry the escalate handler pins the owner's current project into
+      // (`app-docs-surface.ts:1501`), read back by the phase-spec resolver's
+      // closure. Both instances are built next to that resolver — see the block
+      // above `buildPhaseSpecResolver`.
+      comments: commentStore,
+      chatSessionProjects,
     })
 
     // Late-bound Cores registry. Assigned ONCE by the `on_cores_ready` hook
@@ -4414,6 +4498,10 @@ export function buildOpenGraphComposer(
         return r === null ? null : (r.transcript ?? null)
       },
       chatCommandFilter,
+      // `/task` — see `WireAppWsInput.tasksChatDeps` for why this rides the
+      // receiver rather than `chatCommandFilter` (the filter result shape has
+      // no buttons field, and the Tasks Core answers with button rows).
+      tasksChatDeps: tasksCoreRegistry.asResolver(),
       appOwnerAuth,
       appWsToken,
       bindIsLoopback,

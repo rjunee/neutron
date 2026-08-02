@@ -55,6 +55,7 @@ import { OAuthTokenManager } from './oauth-token-manager.ts'
 import { CoreCredentialResolver } from './core-credential-resolver.ts'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import type { TaskStore as TaskStoreType } from '@neutronai/tasks/store.ts'
+import type { TasksCoreOwnerRegistry } from '../boot-cores-factories-types.ts'
 import { buildCalendarCacheResolver } from './calendar-wiring.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
@@ -97,6 +98,18 @@ export interface MountOpenCoresInput {
    * subscriber-free store (`cores/free/tasks/src/backend.ts`).
    */
   canonicalTaskStore?: TaskStoreType
+  /**
+   * Registry the `tasks_core` backend factory writes its built
+   * `{ store, pickNext }` into (`gateway/boot-cores-factories.ts:77`), so the
+   * `/task` chat router can resolve them at inbound-event time. Threaded
+   * straight through to `buildCoresBackendFactories`.
+   *
+   * Omitted ⇒ the factory's `tasksCoreRegistry !== undefined` guard skips the
+   * write and nothing can resolve Tasks Core deps — which is the state Open
+   * shipped in: `wrapWithTasksChatRouter` had no production caller and no
+   * composer ever passed this, so a typed `/task` fell through to the LLM.
+   */
+  tasksCoreRegistry?: TasksCoreOwnerRegistry
   /** Single-owner data dir (`<owner_home>`). Caches + sidecars live under it. */
   owner_home: string
   /** Instance slug — provenance, audit, OAuth-token keying. */
@@ -344,6 +357,12 @@ export async function mountOpenCores(
     // The one canonical store (see `MountOpenCoresInput.canonicalTaskStore`).
     ...(input.canonicalTaskStore !== undefined
       ? { canonicalTaskStore: input.canonicalTaskStore }
+      : {}),
+    // Populated during `installBundledCores` (the factory is awaited at Cores
+    // install time), so the `/task` router can resolve deps on the first
+    // inbound. See `MountOpenCoresInput.tasksCoreRegistry`.
+    ...(input.tasksCoreRegistry !== undefined
+      ? { tasksCoreRegistry: input.tasksCoreRegistry }
       : {}),
     owner_home: input.owner_home,
     emailResolver,

@@ -1490,14 +1490,47 @@ async function handleEscalateComment(
   }
   const result = await comments.appendEvent(project_id, input)
   // ISSUE #41 — pin the bearer's "current chat project_id" to the
-  // project they just escalated from. The chat composer's per-turn
-  // LLM wrapper reads this on the very next chat turn (via the
-  // closure threaded into buildPhaseSpecResolver) so the rendered
-  // <escalated_comment_threads> envelope sources from THIS sidecar,
+  // project they just escalated from, so the rendered
+  // <escalated_comment_threads> envelope sources from THIS sidecar and
   // not the hardcoded `default` project the pre-#41 wiring assumed.
-  // When chatSessionProjects is null (legacy boot paths, tests that
-  // exercise only the comments surface) the escalation event still
-  // lands in the sidecar — same shape as before.
+  //
+  // WHO ACTUALLY READS THE PIN, stated exactly — this comment used to
+  // say "the chat composer's per-turn LLM wrapper reads this on the
+  // very next chat turn", and BOTH halves of that were wrong. It named
+  // a wiring that did not exist (no composer constructed a CommentStore
+  // at all, so these routes answered 503 and nothing was ever pinned),
+  // and it named the wrong consumer.
+  //
+  // The reader is `open/composer.ts:1443`, which threads a closure over
+  // this registry into `buildPhaseSpecResolver`. That resolver is the
+  // onboarding INTERVIEW ENGINE's, and `loadPendingEscalations` has
+  // exactly one non-test caller — `build-phase-spec-resolver.ts:322`.
+  //
+  // It is NOT the chat composer, and on Open the gap is wider than that
+  // even. The interview phase machine was retired from the conversational
+  // path (`open/composer.ts:3540-3548`: onboarding is a MODE of the live
+  // `/ws/app/chat` agent — "no `engine.advance`"), and `engine.advance`
+  // has no production call site left. The engine survives only as the
+  // import subsystem owner, so the only prompts this resolver still emits
+  // come from the history-import transitions in
+  // `onboarding/interview/engine-import-routing.ts`, reached via
+  // `notifyImportUpload` (`open/wiring/uploads.ts:129`) and the
+  // import-running cron (`open/composer.ts:5003`). The steady-state chat
+  // turn composes its own system prompt
+  // (`gateway/wiring/build-live-agent-turn.ts:composeFirstTurnPrompt`)
+  // and never loads escalations.
+  //
+  // Net: escalating a comment records the event and sets this pin
+  // correctly, and no prompt an owner will realistically see reads it.
+  // That is a live gap, pinned as such in
+  // `open/__tests__/reachability-inventory.ts` so it reds when fixed.
+  // Closing it means giving the live-agent turn its own escalation
+  // fragment — a product decision, not a wiring fix, so it is recorded
+  // here rather than guessed at.
+  //
+  // When chatSessionProjects is null (tests that exercise only the
+  // comments surface) the escalation event still lands in the sidecar —
+  // same shape as before.
   if (chatSessionProjects !== null) {
     chatSessionProjects.setActive(resolved_user_id, project_id)
   }

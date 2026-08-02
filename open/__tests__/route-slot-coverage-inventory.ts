@@ -215,7 +215,17 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
   {
     rung: 'app-docs',
     composition: 'app_docs_surface',
-    serves: 'the Docs tab — tree, read, write, move, folders',
+    // 2026-08-02 — the comments half was added to this line, and the gap it
+    // closes is a limit of THIS GATE worth stating. A slot is served when the
+    // composer sets its `composition` field; `app_docs_surface` was set from the
+    // start, so this entry read as fully served while six of the surface's
+    // routes answered 503 on every install. `createAppDocsSurface` takes
+    // `comments` OPTIONALLY, no composer passed it, and slot granularity cannot
+    // see inside a surface that is half-wired. The route-level check is
+    // `open/__tests__/doc-comments-wiring.test.ts`.
+    serves:
+      'the Docs tab — tree, read, write, move, folders, plus the inline comment threads ' +
+      '(post/list/reply/thread/escalate/resolve) the web Documents pane calls',
   },
   {
     rung: 'app-backups',

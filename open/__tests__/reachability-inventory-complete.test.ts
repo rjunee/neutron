@@ -47,7 +47,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -58,6 +58,7 @@ import {
 } from './chat-command-filter-scan.ts'
 import {
   CHAT_COMMANDS,
+  CHAT_COMMANDS_COVERED_ELSEWHERE,
   CHAT_COMMANDS_KNOWN_UNREACHABLE,
   CHAT_COMMAND_EXCLUSIONS,
 } from './reachability-inventory.ts'
@@ -168,6 +169,41 @@ describe('reachability — the inventory still describes the product', () => {
       (c) => c.why.trim().length < 40 || c.cost.trim().length < 40,
     ).map((c) => c.filter)
     expect(thin).toEqual([])
+  })
+
+  test('every command this gate cannot see is covered by a test that EXISTS', () => {
+    // The three lists above are keyed on filter factories. A command built any
+    // other way is invisible to all of them — and invisible is worse than
+    // excluded, because an exclusion is at least written down. `/task` was that
+    // shape and went unwired for as long as it went unlisted.
+    //
+    // The cover is only worth anything if the file is really there, so this
+    // reads the disk rather than trusting the string. A pointer to a deleted
+    // test is the same dangling citation that let three green tests describe a
+    // `gateway/index.ts:2434-2455` that has not existed since the OSS split.
+    const missing = CHAT_COMMANDS_COVERED_ELSEWHERE.filter(
+      (c) => !existsSync(join(REPO_ROOT, c.covered_by)),
+    ).map((c) => `${c.command} → ${c.covered_by}`)
+    expect(missing).toEqual([])
+
+    // And the reason has to name a MECHANISM. "it is different" is not a reason.
+    const thin = CHAT_COMMANDS_COVERED_ELSEWHERE.filter(
+      (c) => c.invisible_because.trim().length < 40,
+    ).map((c) => c.command)
+    expect(thin).toEqual([])
+  })
+
+  test('the covered-elsewhere set is pinned, so an entry cannot be quietly dropped', () => {
+    // Deliberately an equality against a named set rather than a floor. Every
+    // other list here is protected by the scan — drop an entry and the factory
+    // it accounted for becomes unclassified and the build fails. These entries
+    // have no such backstop precisely BECAUSE the scan cannot see them, so
+    // deleting one would silently restore the invisible state this list exists
+    // to end. Pinning the set is the only thing standing in the way.
+    //
+    // Adding a command here is a deliberate act: extend this list in the same
+    // commit, and only after its covering test is real.
+    expect(CHAT_COMMANDS_COVERED_ELSEWHERE.map((c) => c.command).sort()).toEqual(['/task'])
   })
 })
 
