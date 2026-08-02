@@ -36,9 +36,20 @@
  * by editing the baseline — is `scripts/ci/route-slot-ratchet-guard.sh`, because
  * a test that reads its own baseline cannot catch someone moving the baseline.
  *
+ * ONE SLOT IS DECIDED BY STORED STATE, NOT BY THE COMPOSER. `telegram_webhook`
+ * mounts iff the instance actually has Telegram secrets, because it is an
+ * unauthenticated endpoint whose only auth is a stored secret and there is
+ * nothing to compare against without one. The probe therefore SEEDS those
+ * secrets (see `seedTelegramSecrets`) exactly as it already fakes an API key —
+ * the boot below is meant to be the widest composition an Open instance
+ * produces, and a probe that leaves a configurable surface unconfigured is
+ * measuring its own fixture. What it must NOT do is assert the route is served
+ * on an install that never configured a bot; that would be a false alarm about
+ * a correct absence.
+ *
  * MUTATION TEST: delete a mounted surface's assignment from `open/composer.ts` and
  * that surface's line appears in this file's failure output. Verified against
- * `app_tasks_surface`.
+ * `app_tasks_surface`, and again 2026-08-02 against `telegram_webhook`.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
@@ -48,7 +59,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { ROUTE_SLOTS } from '@neutronai/gateway/http/route-slots.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -106,6 +118,33 @@ function mockSubstrate(): Substrate {
   }
 }
 
+/**
+ * Give the instance a configured Telegram bot before the composer runs.
+ *
+ * `telegram_webhook` is the one slot whose mounting is decided by STORED STATE
+ * rather than by the composer unconditionally setting a field: the surface
+ * exists iff these three secrets do, because the endpoint is unauthenticated
+ * and its only auth is comparing a header against the stored secret. An
+ * instance holding no secret must serve nothing, and a default Open install
+ * holds none — so without this seed the probe would report the slot absent
+ * forever and the ratchet would be pinning the fixture instead of the product.
+ *
+ * Seeding is the same move this file already makes with `ANTHROPIC_API_KEY`
+ * above, for the same stated reason: compose the WIDEST configuration an Open
+ * instance produces, so that "absent here" means "absent everywhere".
+ *
+ * These are synthetic values, never a real bot. The token is shaped like a Bot
+ * API token only so nothing downstream chokes on the format; nothing in this
+ * test reaches the network.
+ */
+async function seedTelegramSecrets(db: ProjectDb): Promise<void> {
+  const secrets = new SecretsStore({ data_dir: process.env['NEUTRON_HOME'] as string, db })
+  const owner_handle = asOwnerHandle(process.env['NEUTRON_INSTANCE_SLUG'] as string)
+  await secrets.put({ owner_handle, kind: 'bot_token', label: 'telegram', plaintext: '111111:synthetic-route-slot-coverage' })
+  await secrets.put({ owner_handle, kind: 'webhook_secret', label: 'telegram', plaintext: 'synthetic-webhook-secret-route-slot-coverage' })
+  await secrets.put({ owner_handle, kind: 'channel_metadata', label: 'telegram-bot-user-id', plaintext: '111111' })
+}
+
 /** rung → whether the composed production graph carries that slot's input. */
 let served = new Map<string, boolean>()
 /** Every slot the registry declares with a composition seam, in ladder order. */
@@ -124,6 +163,7 @@ const declared: RouteSlotBaselineEntry[] = ROUTE_SLOTS.filter(
 async function probeComposedSurfaces(): Promise<void> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH'] as string)
   applyMigrations(db.raw())
+  await seedTelegramSecrets(db)
   const composer = buildOpenGraphComposer({
     env: process.env,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
