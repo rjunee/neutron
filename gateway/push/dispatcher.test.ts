@@ -237,14 +237,33 @@ describe('PushDispatcher.pushReminder', () => {
       device_token: 'tok-2',
       platform: 'android',
     })
-    const client = fakeClient([
-      { status: 'ok', id: 'a' },
-      {
-        status: 'error',
-        message: 'DeviceNotRegistered',
-        details: { error: 'DeviceNotRegistered' },
-      },
-    ])
+    // Ticket i belongs to message i, and the messages come out of
+    // `store.listByOwner`, which is `ORDER BY updated_at DESC` (store.ts:165) —
+    // NOT registration order. Both rows above are written in the same
+    // millisecond, so that ORDER BY is a tie and SQLite may return them either
+    // way round. A positional `[ok, error]` array therefore lands the error on
+    // whichever token sorted first, so the wrong row gets pruned whenever the
+    // tie breaks that way and the `tok-2` assertion below fails.
+    //
+    // It is INTERMITTENT, and measurably so: it failed on CI run 30740607248
+    // (shard 4/4) and then passed on run 30741274758 with the same code, while
+    // failing on every local run on one dev mac. That spread is the signature of
+    // a tie-break, not of a broken assertion — which is exactly why the fix is
+    // to remove the ordering dependence rather than to pin an order.
+    //
+    // Address the tokens BY NAME: the assertion is about WHICH token gets
+    // pruned, so it must not rest on an order the query never promised.
+    const client = fakeClient((messages) =>
+      messages.map((m) =>
+        m.to === 'tok-2'
+          ? {
+              status: 'error' as const,
+              message: 'DeviceNotRegistered',
+              details: { error: 'DeviceNotRegistered' },
+            }
+          : { status: 'ok' as const, id: 'a' },
+      ),
+    )
     const { logger, entries } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
     const result = await dispatcher.pushReminder(makeReminder())
