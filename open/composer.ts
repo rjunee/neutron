@@ -2328,14 +2328,47 @@ export function buildOpenGraphComposer(
     // module's hardcoded `America/Los_Angeles`, so a non-Pacific owner got the
     // daily brief (and its tz-derived day/wording) at the wrong local hour.
     // `resolveLocalTimezone` is the single source: `process.env.TZ` override →
-    // the runtime's resolved zone → a defensive floor. Threaded into the brief
-    // scheduler below; never hardcode a zone per-call.
+    // the runtime's resolved zone → a defensive floor.
+    //
+    // This is the FALLBACK, not the answer. It was the correct answer when
+    // Neutron ran on the owner's own laptop — the host WAS their machine — and
+    // it stays correct for a self-hosted install. It became wrong the moment the
+    // same code was HOSTED: the server runs `Etc/UTC` while the owner lives in
+    // Pacific, so a 7am brief fired at midnight local. "Local" is a property of
+    // the deployment, not of the code. `build-core-modules` therefore layers a
+    // per-tick `instance_metadata.timezone` read on top of this value, and that
+    // read wins whenever the owner's client has reported a zone.
     const localTimezone = resolveLocalTimezone({ env })
     const tasksConfig: NonNullable<CompositionInput['tasks']> = {
+      // P6.1 daily nudge engine — ON whenever there is an LLM to run it with.
+      //
+      // This is the PRODUCER the idle-nudge sweep consumes:
+      // `gateway/tasks/p6/nudge-engine.ts:449` is the only non-test writer of
+      // `current_focus_pick`, and the sweep's `readTodayPick` returns `no_pick`
+      // (`gateway/proactive/idle-nudge-sweep.ts:187`) when that table is empty.
+      // The flag was set when the pair first shipped (49f2bcd3), removed with
+      // `listIdleTopics` when the sweep was deferred (d4b669fc), and NOT
+      // restored when `listIdleTopics` came back — so the consumer shipped ON
+      // with a dead producer and the sweep could never post.
+      //
+      // The `proactiveLlm !== null` guard is a DEPENDENCY, not a feature flag:
+      // an llm-less tick still runs the staleness pass (which decays focus
+      // scores) and then bails at `nudge-engine.ts:337-340` without ever writing
+      // a pick — strictly worse than not registering at all.
+      ...(proactiveLlm !== null
+        ? {
+            enable_nudge_engine_cron: true,
+            // Same warm `cc-llm` substrate the brief composer + nudge rater use,
+            // and the SAME `PersonaPromptLoader` instance as the phase-spec
+            // resolver so the persona mtime cache stays one-per-instance.
+            nudge_engine: { llm: proactiveLlm, personaLoader },
+          }
+        : {}),
       proactive: {
         // Morning brief — ACTIVE. Posts the daily brief to the owner's General
-        // topic through the durable web sink, computed for the host's local
-        // timezone (`localTimezone`) rather than a hardcoded Pacific default.
+        // topic through the durable web sink, computed for the OWNER's timezone
+        // (`instance_metadata.timezone`, resolved per tick in
+        // `build-core-modules`) with `localTimezone` as the fallback.
         sink: proactiveSink,
         resolveGeneralTopic: (): string => proactiveGeneralTopic,
         timezone: localTimezone,

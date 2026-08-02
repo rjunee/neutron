@@ -980,10 +980,17 @@ export function buildCoreModules(
       }
 
       // P6.1 — daily nudge engine cron. Runs the staleness pass + LLM
-      // "do this next" pick once per day per instance. The handler is a
-      // safe no-op when `nudge_engine.llm` is null (no Anthropic
-      // credential) — we still register the cron so a credential
-      // becoming available later resumes the engine without a boot.
+      // "do this next" pick once per day per instance.
+      //
+      // A null `nudge_engine.llm` is NOT a safe no-op (this comment used to
+      // claim it was). `runNudgePass` runs the staleness pass at
+      // `gateway/tasks/p6/nudge-engine.ts:306` — which writes focus-score decay
+      // and skip counts to `tasks` (`staleness-engine.ts:182-215`) — BEFORE it
+      // reaches the `llm === null` bail at `nudge-engine.ts:337-340`. So an
+      // llm-less tick mutates task scores every day and still never writes a
+      // `current_focus_pick` row. Callers must therefore only set
+      // `enable_nudge_engine_cron` when they have an llm to pass; the Open
+      // composer does exactly that (`open/composer.ts`, gated on `proactiveLlm`).
       if (tasksCfg.enable_nudge_engine_cron === true) {
         const ne = tasksCfg.nudge_engine ?? { llm: null }
         const nudgeHandlerDeps: Parameters<typeof buildNudgeEngineHandler>[0] = {
@@ -1082,7 +1089,16 @@ export function buildCoreModules(
             general_topic_id: generalTopic,
             now: () => Date.now(),
           }
+          // The static `tz` is the FALLBACK (the host's zone — right on a
+          // self-hosted laptop, wrong on a hosted box). The owner's stored zone
+          // wins, resolved PER TICK off the dispatched `owner_slug` — never at
+          // composition time, because a fresh install has no `instance_metadata`
+          // row until the first client reports its zone, and a boot-time read
+          // would freeze the host's zone forever. Same seam the P6 nudge cron
+          // uses above (ISSUES #40), now applied to the whole daily rhythm.
           if (proactiveCfg.timezone !== undefined) briefDeps.tz = proactiveCfg.timezone
+          briefDeps.resolveTimezone = (owner_slug: string): string | undefined =>
+            readOwnerTimezone(input.db, owner_slug) ?? undefined
           if (proactiveCfg.brief_hour !== undefined) briefDeps.brief_hour = proactiveCfg.brief_hour
           if (proactiveCfg.composeBrief !== undefined) {
             briefDeps.composeWithLlm = proactiveCfg.composeBrief
@@ -1111,7 +1127,14 @@ export function buildCoreModules(
               listIdleTopics(),
             now: () => Date.now(),
           }
+          // Owner's stored zone wins over the host-derived static `tz`, resolved
+          // per tick (see the brief above). This one is load-bearing twice over:
+          // the sweep's `day` is also the key `readTodayPick` reads the ranker's
+          // pick by, so a host-zone day makes the lookup MISS for the hours the
+          // UTC↔owner offset spans, not merely mistime the post.
           if (proactiveCfg.timezone !== undefined) sweepDeps.tz = proactiveCfg.timezone
+          sweepDeps.resolveTimezone = (owner_slug: string): string | undefined =>
+            readOwnerTimezone(input.db, owner_slug) ?? undefined
           if (proactiveCfg.idle_threshold_ms !== undefined) {
             sweepDeps.idle_threshold_ms = proactiveCfg.idle_threshold_ms
           }

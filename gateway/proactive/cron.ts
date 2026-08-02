@@ -29,14 +29,36 @@ import {
 export const MORNING_BRIEF_HANDLER_NAME = 'proactive.morning_brief'
 export const IDLE_NUDGE_SWEEP_HANDLER_NAME = 'proactive.idle_nudge_sweep'
 
+/**
+ * Resolve the tick's owner timezone, applying the precedence both proactive
+ * crons share with the P6 nudge engine: a per-tick `resolveTimezone(owner_slug)`
+ * result WINS over the static `tz`, and `undefined` falls through to the static
+ * `tz` (which the run function then defaults to `DEFAULT_OWNER_TIMEZONE`).
+ *
+ * This lives in the HANDLER, not in `runMorningBrief`/`runIdleNudgeSweep`,
+ * because `owner_slug` only exists per-fire (`CronHandlerContext`) — and it must
+ * stay per-fire rather than being captured at composition time: a fresh install
+ * has no `instance_metadata` row until the first client connects, so a zone read
+ * at boot would freeze the host's zone forever.
+ */
+function withTickTimezone<D extends { tz?: string; resolveTimezone?: (owner_slug: string) => string | undefined }>(
+  deps: D,
+  owner_slug: string,
+): D {
+  const resolved = deps.resolveTimezone?.(owner_slug)
+  return resolved === undefined ? deps : { ...deps, tz: resolved }
+}
+
 // ---------------------------------------------------------------------------
 // Morning brief
 // ---------------------------------------------------------------------------
 
 export function buildMorningBriefHandler(deps: MorningBriefDeps): CronHandler {
-  return async () => {
+  return async (ctx) => {
     try {
-      const r = await runMorningBrief(deps)
+      // The brief's hour gate + day key belong to the OWNER's clock, not the
+      // host's. Resolve per fire off the dispatched owner.
+      const r = await runMorningBrief(withTickTimezone(deps, ctx.owner_slug))
       // A delivery outage returns `deliver_failed` and MUST surface as an
       // error (not the benign `skipped`) so outages are visible in telemetry
       // (#320). `posted` → ok; `already_posted`/`too_early` → skipped.
@@ -93,9 +115,11 @@ export function registerMorningBriefCron(input: {
 // ---------------------------------------------------------------------------
 
 export function buildIdleNudgeSweepHandler(deps: IdleNudgeSweepDeps): CronHandler {
-  return async () => {
+  return async (ctx) => {
     try {
-      const r = await runIdleNudgeSweep(deps)
+      // Same owner-clock resolution as the brief: the sweep's `day` is the key
+      // `readTodayPick` uses, so the host's zone would make the lookup miss.
+      const r = await runIdleNudgeSweep(withTickTimezone(deps, ctx.owner_slug))
       return {
         status: r.posted > 0 ? 'ok' : 'skipped',
         detail: `posted=${r.posted} skipped=${r.skipped} (active=${r.skip_reasons.active} no_pick=${r.skip_reasons.no_pick} already=${r.skip_reasons.already_nudged} failed=${r.skip_reasons.deliver_failed})`,
