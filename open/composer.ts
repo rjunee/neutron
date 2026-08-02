@@ -289,6 +289,11 @@ import {
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
+import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
+import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
+import { createAppAdminSurface } from '@neutronai/gateway/http/app-admin-surface.ts'
+import { createAdminPersonalitySurface } from '@neutronai/gateway/http/admin-personality-surface.ts'
+import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
@@ -2636,6 +2641,45 @@ export function buildOpenGraphComposer(
     // fires the subscribers `tasksModule.init` attached. It used to build its
     // own `new TaskStore(db)`, which shared the table and nothing else.
     const appTasksSurface = createAppTasksSurface({ store: canonicalTaskStore, auth: appOwnerAuth })
+    // Project reminders backend (`/api/app/projects/<id>/reminders[…]`) — the
+    // sibling of the Tasks surface above, and until now the one that was never
+    // handed to the graph. A complete client ships against it
+    // (`app/lib/reminders-client.ts` list/create/snooze/cancel behind
+    // `app/app/projects/[id]/reminders.tsx`), and the reminder push tap
+    // deep-links straight to that screen (`app/lib/push-deep-link-dispatch.ts`),
+    // so every one of those calls answered 404.
+    //
+    // Unlike `canonicalTaskStore`, a second `ReminderStore` is not a second
+    // source of truth: the class is a stateless wrapper over the ProjectDb
+    // handle (`reminders/store.ts:152-153` — one `db` field, no in-memory
+    // subscribers), so this instance and the reminders module's own
+    // (`gateway/composition/build-core-modules.ts:368`) read and write the same
+    // rows. The composer already relies on that at two other call sites.
+    //
+    // `convertReminderToTask` is deliberately left unwired: the adapter lives on
+    // the Reminders Core backend built in `gateway/cores/mount-open-cores.ts:302`,
+    // which is not in this closure. Per `app-reminders-surface.ts:96-102` the
+    // route then answers 501 `not_implemented` — a defined answer the client can
+    // render, rather than the 404 it gets today. The other four verbs are live.
+    const appRemindersSurface = createAppRemindersSurface({
+      store: new ReminderStore(db),
+      auth: appOwnerAuth,
+    })
+    // Device push-token registration (`/api/app/devices/{register,unregister}`).
+    // `app/lib/push.ts:143,177` calls both on every sign-in and sign-out, so
+    // while this was unmounted NO device could ever register and the
+    // `device_push_tokens` table stayed empty on every install.
+    //
+    // Registration is only the first half of push. Delivery needs the
+    // `push_dispatcher` composition field, which `build-core-modules.ts:396-398`
+    // attaches to the reminder tick's `on_fired` hook — and NO composer sets it
+    // either (`createPushDispatcher`, `gateway/push/dispatcher.ts:133`, has no
+    // non-test call site). That is a separate wiring gap, tracked outside this
+    // change; it is not a route slot, so the coverage gate cannot see it.
+    const appDevicesSurface = createAppDevicesSurface({
+      store: new DevicePushTokenStore(db),
+      auth: appOwnerAuth,
+    })
     // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
     // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
     // which one runs (`instance_metadata.transcription_backend`, migration
@@ -2756,6 +2800,56 @@ export function buildOpenGraphComposer(
             credentialPool: llmPool,
           }),
         ),
+    })
+
+    // P5.7 admin surface (`/api/app/admin/*`) — gateway restart, GBrain browse,
+    // installed-connectors list. Settings routes to the Admin screen
+    // (`app/app/settings.tsx:362`) and `app/lib/admin-client.ts:289-306` calls
+    // all three; unmounted, they 404 while the diagnostics pane beside them
+    // answers, which reads as a broken screen rather than a missing one.
+    //
+    // Ladder position makes this safe to add: `appDiagnostics` is declared
+    // BEFORE `appAdmin` in `gateway/http/route-slots.ts:600-621`, so
+    // `/api/app/admin/diagnostics[…]` is still claimed by the diagnostics
+    // surface and never reaches this one's `unknown_admin_route` 404.
+    //
+    // Two dependency groups are deliberately left unwired, and both degrade to a
+    // DEFINED answer rather than a 404 (`app-admin-surface.ts:101-148`):
+    //   - `projectBackupStore` / `platform` → the `/project-backup/*` family
+    //     answers `{ configured: false }` so the Admin UI hides its Backup tab.
+    //     Wiring a backup store belongs with the separate `app_backups_surface`
+    //     work, which also has a route-precedence problem to settle first.
+    //   - `mintReauthStartToken` → `max-oauth/mint-reauth-token` answers 503
+    //     `reauth_not_configured`. That flow is the hosted overlay's, minted in
+    //     its own boot shell; a single-owner install has no identity host to
+    //     bounce through.
+    // `tier: 'open'` is passed explicitly rather than relying on the default, so
+    // the restart route self-signals SIGTERM and the install's service manager
+    // brings the process back — the behaviour `gateway/http/cores-surface.ts:283`
+    // already tells the owner to expect after installing a Core.
+    const appAdminSurface = createAppAdminSurface({
+      auth: appOwnerAuth,
+      owner_home,
+      project_slug,
+      tier: 'open',
+      coresStore: new CoreInstallationsStore({ db }),
+      memoryStore: gbrainMemory.memoryStore,
+    })
+    // Persona editor (`/api/app/persona/*`) — the Personality pane inside that
+    // same Admin screen (`app/features/admin/PersonalityPane.tsx` via
+    // `app/lib/admin-personality-client.ts:101,111,128,144`). Reads and writes
+    // `<owner_home>/persona/{SOUL,USER,priority-map}.md`, the three files
+    // onboarding's persona-gen commits. Path-disjoint from `/api/app/admin/*`,
+    // so mounting it shadows nothing.
+    //
+    // `onReload` / `onRestartFromScratch` stay unwired, as the surface's own
+    // docs describe: there is no persona cache to invalidate today
+    // (`admin-personality-surface.ts:39-46`), and restart-from-scratch reports
+    // `onboarding_reset: false` so the client can say what it did and did not do.
+    const appPersonaSurface = createAdminPersonalitySurface({
+      auth: appOwnerAuth,
+      owner_home,
+      project_slug,
     })
 
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the
@@ -4873,6 +4967,19 @@ export function buildOpenGraphComposer(
       // P1b — Tasks tab backend + chat attachment upload, so every visible React
       // control has a live backend (no 404s behind a shown tab/button).
       app_tasks_surface: { handler: appTasksSurface.handler },
+      // The Tasks surface's sibling. Mounted here for the same reason: the
+      // Reminders screen and its client ship in the app, so the routes behind
+      // them must exist or every list/create/snooze/cancel 404s.
+      app_reminders_surface: { handler: appRemindersSurface.handler },
+      // Device push-token registration — without this the client's post-login
+      // register call 404s and no device is ever recorded.
+      app_devices_surface: { handler: appDevicesSurface.handler },
+      // The Admin screen's own routes. Precedence is set by the slot order in
+      // `gateway/http/route-slots.ts`, not by this object: `appDiagnostics` is
+      // declared first there and keeps `/api/app/admin/diagnostics`.
+      app_admin_surface: { handler: appAdminSurface.handler },
+      // The Personality pane inside that screen (`/api/app/persona/*`).
+      app_persona_surface: { handler: appPersonaSurface.handler },
       app_upload_surface: { handler: appUploadSurface.handler },
       // Local voice transcription (`/api/app/voice-transcription`) — the
       // Settings-tab install/remove control for the keyless whisper.cpp backend.

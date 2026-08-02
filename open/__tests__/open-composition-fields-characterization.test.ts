@@ -52,12 +52,28 @@ const EXPECTED_COMPOSITION_KEYS = [
   // the key only appears if `composeOpen` actually constructs the surface and hands
   // it to the graph — not merely that the module exists.
   'app_activity_surface',
+  // The Admin screen's own routes (`/api/app/admin/*` — gateway restart, GBrain
+  // browse, connectors). Declared since P5.7 and mounted by no composer until
+  // 2026-08-01, so the screen Settings routes to answered 404 everywhere except
+  // the diagnostics pane below, which an earlier rung claims.
+  'app_admin_surface',
   'app_codex_credential_surface',
+  // Device push-token registration (`/api/app/devices/{register,unregister}`).
+  // The client calls it on every sign-in and sign-out, so while it was unmounted
+  // no device was ever recorded and push had no prerequisite.
+  'app_devices_surface',
   // O5 — read-only diagnostics surface (`GET /api/app/admin/diagnostics`).
   'app_diagnostics_surface',
   'app_docs_surface',
+  // The Personality pane inside the Admin screen (`/api/app/persona/*`) —
+  // read/write of SOUL.md, USER.md, priority-map.md.
+  'app_persona_surface',
   'app_project_credentials_surface',
   'app_projects_surface',
+  // The Tasks surface's sibling (`/api/app/projects/<id>/reminders[…]`). A
+  // complete screen ships against it; same done-means-served proof as the keys
+  // above.
+  'app_reminders_surface',
   // The external system-notice route (`POST /api/app/system-notice`). Same
   // done-means-served proof as the usage key below: it appears only if
   // `composeOpen` really constructs the surface and hands it over, which is what
