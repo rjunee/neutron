@@ -1,10 +1,16 @@
 /**
  * @neutronai/app — project-backups + restore API client (P7.4 restore UI).
  *
- * Thin fetch wrapper for the gateway's
- * `/api/app/projects/<id>/backups[...]` + `/api/app/projects/<id>/restore`
- * routes. Mirrors the P5.4 / P7.0 client shape: pass the bearer token
- * at construction time; each call returns the canonical server view.
+ * Thin fetch wrapper for the gateway's `/api/app/projects/<id>/backups[...]`
+ * routes — every one of them, INCLUDING the restore at
+ * `POST .../backups/restore`. Mirrors the P5.4 / P7.0 client shape: pass the
+ * bearer token at construction time; each call returns the canonical server
+ * view.
+ *
+ * Nothing here may target the bare `/api/app/projects/<id>/restore`. That path
+ * is a different operation on a different surface — un-archiving a project —
+ * and it wins the route, so a request sent there does not fail, it succeeds at
+ * the wrong thing. See `restore()` below.
  *
  * Backing surface: `gateway/http/app-backups-surface.ts`. Backing store:
  * `gateway/git/project-backup-store.ts` — same `.project-backup/` repo

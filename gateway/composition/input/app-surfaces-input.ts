@@ -360,9 +360,14 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
-   * P7.4 restore UI — optional project-backups + restore surface.
-   * Owns `/api/app/projects/<id>/backups[...]` +
-   * `/api/app/projects/<id>/restore`. Surface factory:
+   * P7.4 restore UI — optional project-backups + snapshot-restore surface.
+   * Owns `/api/app/projects/<id>/backups[...]` and NOTHING outside that prefix
+   * — the snapshot restore is `POST .../backups/restore`. It is deliberately
+   * NOT the bare `POST /api/app/projects/<id>/restore`: that path belongs to
+   * `app_projects_surface` (un-archive a project), whose rung is earlier in the
+   * ladder and therefore wins it. While this surface claimed the bare path, a
+   * snapshot restore silently un-archived the project and answered 200. Keep
+   * the two disjoint by shape. Surface factory:
    * `gateway/http/app-backups-surface.ts:createAppBackupsSurface`.
    */
   app_backups_surface?: {
