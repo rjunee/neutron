@@ -31,10 +31,10 @@ export interface ChatCommandCapability {
    */
   readonly probe: string
   /**
-   * The factory in `gateway/boot-chat-command-filters.ts` that provides this
-   * command. The completeness gate matches the gateway's exported factories
-   * against this field, so a NEW filter with no inventory entry fails the build
-   * instead of shipping unreachable.
+   * The exported factory function that provides this command, wherever in the
+   * repo it lives. The completeness gate scans every non-test source for filter
+   * factories and matches them against this field, so a NEW filter with no
+   * inventory entry fails the build instead of shipping unreachable.
    */
   readonly filter: string
 }
@@ -48,6 +48,11 @@ export interface ChatCommandCapability {
  * perfectly healthy box, and a gate that cries wolf is worse than no gate. Those
  * are listed in {@link CHAT_COMMAND_EXCLUSIONS} with the reason rather than
  * quietly dropped.
+ *
+ * Every filter factory in the repo must land in exactly one of three places:
+ * here (probed), {@link CHAT_COMMANDS_KNOWN_UNREACHABLE} (probed, and asserted
+ * BROKEN), or {@link CHAT_COMMAND_EXCLUSIONS} (not probed, with the reason and
+ * the cost). `reachability-inventory-complete.test.ts` enforces that.
  */
 export const CHAT_COMMANDS: readonly ChatCommandCapability[] = [
   {
@@ -77,6 +82,92 @@ export const CHAT_COMMANDS: readonly ChatCommandCapability[] = [
     probe: '/code help',
     filter: 'buildTridentCodeChatCommandFilter',
   },
+  {
+    id: 'skills',
+    command: '/skills',
+    can: 'Review, approve and decline the skills the instance proposes for itself',
+    broken:
+      'Typing /skills in chat no longer lists or approves Skill Forge proposals — the message is sent to the model instead, so a proposal can never be accepted.',
+    // `help` short-circuits in `executeSkillForgeCommand`
+    // (skill-forge/command.ts:108) before the backend is touched, so the claim
+    // does not depend on any proposal existing.
+    probe: '/skills help',
+    filter: 'buildSkillForgeChatCommandFilter',
+  },
+  {
+    id: 'email',
+    command: '/email',
+    can: 'Triage, search and summarise the inbox from chat',
+    broken:
+      'Typing /email in chat no longer reaches the email Core — the message is sent to the model, which will answer about email in general rather than reading the inbox.',
+    // `/email help` returns the cheatsheet (cores/free/email/src/chat-commands.ts:193)
+    // without a Google call. The one thing it does touch is
+    // `EmailProjectCacheResolver.resolve` (chat-bridge.ts:86), which opens a
+    // local sqlite cache under `owner_home` — no credential, no network.
+    probe: '/email help',
+    filter: 'createEmailChatCommandFilter',
+  },
+  {
+    id: 'research',
+    command: '/research',
+    can: 'Capture, list and run research from chat',
+    broken:
+      'Typing /research in chat no longer reaches the research Core — the message is sent to the model, so nothing is captured and nothing is stored.',
+    // `help` short-circuits in `executeResearchCommand`
+    // (cores/free/research/src/chat-commands.ts:114) before the project backend
+    // is resolved.
+    probe: '/research help',
+    filter: 'createResearchChatCommandFilter',
+  },
+]
+
+/**
+ * Commands whose filter EXISTS in the product and is reachable by NOBODY.
+ *
+ * This list is the opposite assertion from {@link CHAT_COMMANDS}, and it exists
+ * so that a known gap cannot be parked in {@link CHAT_COMMAND_EXCLUSIONS} and
+ * quietly forgotten. An exclusion says "this gate does not look here". An entry
+ * here says "this gate looked, and the command is broken today, on purpose,
+ * with the following cost" — and it is pinned by a real probe at a real socket,
+ * so the day someone wires the filter the gate goes RED and tells them to
+ * promote the entry into a probe. A gap that self-clears is a gap; a gap in a
+ * skip list is a permission slip.
+ */
+export interface KnownUnreachableChatCommand {
+  readonly id: string
+  readonly command: string
+  /** The exported factory that exists but reaches no composed chain. */
+  readonly filter: string
+  /** The body typed at the socket. Must be safe on a fresh instance. */
+  readonly probe: string
+  /** Why it is unwired, with the evidence. */
+  readonly why: string
+  /** What the owner cannot do because of it. Not softened. */
+  readonly cost: string
+}
+
+export const CHAT_COMMANDS_KNOWN_UNREACHABLE: readonly KnownUnreachableChatCommand[] = [
+  {
+    id: 'scrape',
+    command: '/scrape',
+    filter: 'createScrapingChatCommandFilter',
+    probe: '/scrape',
+    why:
+      'The scraping Core\'s chat filter is built by `buildProductionScrapingCoreWiring` ' +
+      '(cores/free/scraping/src/wiring-production.ts:63), which is exported from the ' +
+      'core barrel (cores/free/scraping/index.ts:93) and CALLED BY NOTHING — the ' +
+      'composer wires the research Core\'s equivalent (gateway/cores/mount-open-cores.ts:312,397) ' +
+      'and never the scraping one. So `/scrape` is not in any chain. This was found by ' +
+      'widening this gate; it was invisible while the scan read one hardcoded file.',
+    cost:
+      'The owner cannot type `/scrape <url>`; it goes to the model, which answers about ' +
+      'scraping in general instead of scraping anything. The Apify-backed MCP tools ' +
+      '(`scrape_instagram` / `scrape_x`) still work, so the capability is reachable BY THE ' +
+      'AGENT and not by the owner — which breaks the agent-native parity ' +
+      'docs/SYSTEM-OVERVIEW.md:323 claims for this Core in exactly one direction. Fixing it ' +
+      'is a product change (a scraping backend must be threaded to the chain at mount ' +
+      'time), so it is pinned here rather than fixed inside a gate PR.',
+  },
 ]
 
 /**
@@ -87,6 +178,13 @@ export const CHAT_COMMANDS: readonly ChatCommandCapability[] = [
  * accepts a factory as accounted-for only if it is probed above OR excluded here,
  * so a new command cannot slip through unclassified — and an exclusion is a
  * decision someone made on purpose, with its cost written down next to it.
+ *
+ * AN EXCLUSION IS NOT A PLACE TO PUT A BROKEN COMMAND. "Probing it is awkward" is
+ * a reason to be here. "It does not work" is not — that goes in
+ * {@link CHAT_COMMANDS_KNOWN_UNREACHABLE}, where a probe pins the breakage and
+ * reds when it is fixed. The distinction is the whole difference between a gate
+ * and a permission slip: everything in this list is a place the gate has agreed
+ * not to look, so each entry has to say what that leaves unwatched.
  */
 export const CHAT_COMMAND_EXCLUSIONS: ReadonlyArray<{
   readonly filter: string
@@ -103,5 +201,9 @@ export const CHAT_COMMAND_EXCLUSIONS: ReadonlyArray<{
   {
     filter: 'buildCalendarChatCommandFilter',
     why: 'NOT PROBED, and this is a real coverage gap rather than a design choice. `/cal` dispatches into the calendar Core, which on a box with no Google credentials answers over a path this gate has not proven to be deterministic. A probe that is only reliable on a connected box would fire on healthy fresh installs. See docs/SYSTEM-OVERVIEW.md § Reachability gate.',
+  },
+  {
+    filter: 'buildCalendarChatCommandDispatcher',
+    why: 'The INNER half of `/cal` (gateway/cores/calendar-wiring.ts:87) — the object `buildCalendarChatCommandFilter` lazily imports and wraps at gateway/boot-chat-command-filters.ts:233-236. It claims no command the outer filter does not already carry, so it inherits that entry\'s exclusion and its cost verbatim: `/cal` is unprotected end to end, and unwiring EITHER half turns nothing red. Note this factory is named `…Dispatcher`, not `…ChatCommandFilter`: the previous scan could not have seen it under any search root, and it is here only because the widened scan matches on the declared RETURN TYPE as well as the name.',
   },
 ]

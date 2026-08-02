@@ -23,6 +23,14 @@
  * so the next command is covered by adding a line rather than by writing another
  * 270-line file after the next incident.
  *
+ * IT ALSO TYPES THE COMMANDS THAT DO NOT WORK. `CHAT_COMMANDS_KNOWN_UNREACHABLE`
+ * lists filters that exist in the repo and reach no composed chain — `/scrape`
+ * today. Those get the OPPOSITE assertion: they must still be unclaimed. An
+ * admission that a command is broken is worth nothing if nothing checks it is
+ * still true, and the failure mode it guards against is the good one — somebody
+ * wires the command and the note stays behind saying it does not work, leaving
+ * the newly-working command unwatched. Which is where `/code` was.
+ *
  * ONE BOOT FOR ALL COMMANDS. Composing the real graph is the expensive part;
  * doing it per command would triple the cost for nothing.
  *
@@ -46,7 +54,10 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 
-import { CHAT_COMMANDS } from './reachability-inventory.ts'
+import {
+  CHAT_COMMANDS,
+  CHAT_COMMANDS_KNOWN_UNREACHABLE,
+} from './reachability-inventory.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -217,6 +228,42 @@ const CLAIM_TIMEOUT_MS = 10_000
 let socket: OpenSocket | null = null
 /** id → the owner-facing reason it is unreachable, or null when it is fine. */
 const outcome = new Map<string, string | null>()
+/** id → the reason a KNOWN-BROKEN command is no longer broken, or null. */
+const pinnedOutcome = new Map<string, string | null>()
+
+/** What one typed message did. */
+interface ProbeResult {
+  /** A `chat_command_result` came back, correlated to this message. */
+  readonly claimed: boolean
+  /** The mocked model answered it (or a durable agent row appeared). */
+  readonly wentToModel: boolean
+}
+
+/** Type one body at the socket and wait for it to settle. */
+async function typeOne(id: string, body: string): Promise<ProbeResult> {
+  const sock = socket!
+  const db = harness!.db
+  const frameMark = sock.frames.length
+  const rowBaseline = agentRowCount(db)
+
+  sock.ws.send(JSON.stringify({ v: 1, type: 'user_message', body, client_msg_id: id }))
+
+  const claimed = await waitFor(
+    () =>
+      framesOfType(sock.frames, 'chat_command_result').some((f) => f['client_msg_id'] === id),
+    CLAIM_TIMEOUT_MS,
+  )
+  // Settle either way. On a claim this is what proves the chain SHORT-CIRCUITED
+  // the model rather than racing it; on a miss it is what lets the report say
+  // WHERE the message went, which is a materially more useful line than "no
+  // result".
+  await sleep(claimed ? 1_000 : 1_500)
+  const wentToModel =
+    framesOfType(sock.frames.slice(frameMark), 'agent_message').some(
+      (f) => typeof f['body'] === 'string' && (f['body'] as string).includes(AGENT_REPLY_BODY),
+    ) || agentRowCount(db) > rowBaseline
+  return { claimed, wentToModel }
+}
 
 /**
  * Env setup ONLY. Everything that can block — composing the graph, opening the
@@ -255,44 +302,33 @@ async function probeEveryCommand(): Promise<void> {
   // Type every command in turn, one settled probe at a time so a slow answer can
   // never be attributed to the next command.
   for (const cap of CHAT_COMMANDS) {
-    const id = `probe-${cap.id}`
-    const frameMark = socket.frames.length
-    const rowBaseline = agentRowCount(harness.db)
-
-    socket.ws.send(JSON.stringify({ v: 1, type: 'user_message', body: cap.probe, client_msg_id: id }))
-
-    const claimed = await waitFor(
-      () =>
-        framesOfType(socket!.frames, 'chat_command_result').some(
-          (f) => f['client_msg_id'] === id,
-        ),
-      CLAIM_TIMEOUT_MS,
-    )
+    const { claimed, wentToModel } = await typeOne(`probe-${cap.id}`, cap.probe)
     if (!claimed) {
-      // Let the fall-through finish so the report can say WHERE it went — "the
-      // model answered instead" is a materially more useful line than "no result".
-      await sleep(1_500)
-      const wentToModel =
-        framesOfType(socket.frames.slice(frameMark), 'agent_message').some(
-          (f) => typeof f['body'] === 'string' && (f['body'] as string).includes(AGENT_REPLY_BODY),
-        ) || agentRowCount(harness.db) > rowBaseline
       outcome.set(
         cap.id,
         wentToModel ? cap.broken : `${cap.broken} (typing it produced no answer at all)`,
       )
       continue
     }
-
-    // Claimed. Now prove it SHORT-CIRCUITED the model rather than racing it.
-    await sleep(1_000)
-    const alsoWentToModel =
-      framesOfType(socket.frames.slice(frameMark), 'agent_message').some(
-        (f) => typeof f['body'] === 'string' && (f['body'] as string).includes(AGENT_REPLY_BODY),
-      ) || agentRowCount(harness.db) > rowBaseline
     outcome.set(
       cap.id,
-      alsoWentToModel
+      wentToModel
         ? `${cap.command} answered, but the message ALSO reached the model — a build or a reminder can be triggered twice by one command.`
+        : null,
+    )
+  }
+
+  // The commands the inventory says are BROKEN today. Typed for the same reason
+  // the working ones are: an admission that a command does not work is worth
+  // nothing unless something keeps checking it is still true. The day one of
+  // these is claimed, somebody wired it — and it needs a real probe, not a
+  // stale note saying it does not work.
+  for (const cap of CHAT_COMMANDS_KNOWN_UNREACHABLE) {
+    const { claimed } = await typeOne(`pinned-${cap.id}`, cap.probe)
+    pinnedOutcome.set(
+      cap.id,
+      claimed
+        ? `${cap.command} is claimed by the composed chain now, but the inventory still lists it as unreachable (${cap.filter}). Somebody wired it — move it out of CHAT_COMMANDS_KNOWN_UNREACHABLE and into CHAT_COMMANDS with a probe, so it is watched like every other working command.`
         : null,
     )
   }
@@ -323,8 +359,8 @@ describe('reachability — the chat commands, on a real running instance', () =>
     const report =
       lost.length === 0 ? '' : ['Commands the owner has lost:', ...lost.map((l) => `  • ${l}`)].join('\n')
     expect(report).toBe('')
-    // Composing the graph, booting the server and typing three commands settles in
-    // ~10s locally; the ceiling is loose enough that a contended runner is not a
+    // Composing the graph, booting the server and typing the inventory settles in
+    // ~15s locally; the ceiling is loose enough that a contended runner is not a
     // false red, and tight enough that a wedge is reported rather than hung on.
   }, 150_000)
 
@@ -333,6 +369,25 @@ describe('reachability — the chat commands, on a real running instance', () =>
     // failure mode the E2E script next door has (it exits 0 when the server is
     // unreachable, so it has been able to prove nothing for as long as it likes).
     const unprobed = CHAT_COMMANDS.filter((c) => !outcome.has(c.id)).map((c) => c.command)
+    expect(unprobed).toEqual([])
+  })
+
+  test('the commands the inventory admits are broken are still broken', () => {
+    // The inverted assertion, and the one that keeps an admission honest. An
+    // entry in CHAT_COMMANDS_KNOWN_UNREACHABLE is a documented hole; without
+    // this, the day it gets filled the note would stay behind saying the command
+    // does not work, and the command would go back to being unwatched — which is
+    // the state `/code` was in.
+    const fixed = CHAT_COMMANDS_KNOWN_UNREACHABLE.map((c) => pinnedOutcome.get(c.id)).filter(
+      (v): v is string => typeof v === 'string',
+    )
+    expect(fixed.length === 0 ? '' : fixed.join('\n')).toBe('')
+  })
+
+  test('every known-unreachable command was actually probed', () => {
+    const unprobed = CHAT_COMMANDS_KNOWN_UNREACHABLE.filter(
+      (c) => !pinnedOutcome.has(c.id),
+    ).map((c) => c.command)
     expect(unprobed).toEqual([])
   })
 })

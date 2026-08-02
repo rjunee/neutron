@@ -320,9 +320,15 @@ add the token in admin and **never calls Apify**. The Core still installs cleanl
 Two MCP tools (capability-guarded + audited under `network:browse`):
 `scrape_instagram` (modes `json`·`caption`·`summary`) and `scrape_x` (modes
 `json`·`text`·`summary`·`article`, plus `thread` for author-filtered
-conversations). Agent-native parity: the same backend powers the `/scrape <url>
-[mode] [--thread]` chat command (`createScrapingChatCommandFilter`), which
-auto-detects IG vs X from the pasted URL. The production wiring helper
+conversations). The same backend is DESIGNED to power the `/scrape <url> [mode]
+[--thread]` chat command (`createScrapingChatCommandFilter`), which auto-detects
+IG vs X from the pasted URL — but **that half is not wired today**: nothing calls
+`buildProductionScrapingCoreWiring`, so `/scrape` reaches no composed chain and
+falls through to the model. The capability is reachable by the AGENT and not by
+the owner, so the agent-native parity is broken in one direction. Found by the
+widened reachability scan 2026-08-02 and pinned by a live probe in
+`open/__tests__/reachability-inventory.ts` (`CHAT_COMMANDS_KNOWN_UNREACHABLE`) —
+see § Reachability gate. The production wiring helper
 `buildProductionScrapingCoreWiring(secretsAccessor)` builds the one shared
 backend both surfaces use; the MCP path is wired self-sufficiently in
 `buildCoresBackendFactories` (`scraping_core` factory reads
@@ -6611,12 +6617,41 @@ and proves each one against the real thing, in the owner's language.
   `/ws/app/chat` socket and TYPES each declared command with a mocked substrate.
   A command must be **claimed** by the composed chain (a `chat_command_result`
   correlated to the message id) and must **not** reach the model. Currently
-  probed: `/status`, `/reset`, `/code`.
-- **`open/__tests__/reachability-inventory-complete.test.ts`** — the piece that
-  makes it self-extending. It reads the product's real command factories out of
-  `gateway/boot-chat-command-filters.ts` and fails when one is neither probed nor
-  excluded **in writing, with a reason**. A new `/`-command turns this red on the
-  PR that adds it.
+  probed: `/status`, `/reset`, `/code`, `/skills`, `/email`, `/research`.
+  It also types the commands the inventory admits are BROKEN
+  (`CHAT_COMMANDS_KNOWN_UNREACHABLE`) and asserts they are still unclaimed — so
+  the day one is wired, the gate reds and demands a real probe rather than
+  leaving a stale note behind. Today that list holds `/scrape` (see below).
+- **`open/__tests__/reachability-inventory-complete.test.ts`** +
+  **`open/__tests__/chat-command-filter-scan.ts`** — the piece that makes it
+  self-extending. The scan reads every non-test `.ts`/`.tsx` under the repo
+  (minus `node_modules`, `vendor/`, build output) with the TypeScript parser and
+  collects every exported function whose **name or declared return type** ends in
+  `ChatCommandFilter`; the gate fails when one is neither probed, nor pinned as
+  known-broken, nor excluded **in writing, with a reason**. A new `/`-command
+  turns this red on the PR that adds it.
+  **It was blind until 2026-08-02, and the shape of that blindness is worth
+  keeping.** It used to read ONE hardcoded file with ONE `build…` regex: it saw
+  6 factories, the product had 11, and 5 of the 5 it missed were live in the
+  chain — so unwiring `/skills`, `/email`, `/research` or either half of `/cal`
+  reddened nothing, which is the exact `/code` failure the gate was built to
+  prevent. It was defeated by LOCATION (filters outside that file), by NAMING
+  (`create…` rather than `build…`), and by `buildCalendarChatCommandDispatcher`,
+  which names the concept only in its return type. The scan now **refuses
+  loudly** — a root with no sources, sources that never mention the contract, or
+  a filter declared as a `const` all throw rather than reporting an empty set,
+  each with its own fixture test. What it still cannot see is written at the top
+  of the scan file; read that before trusting it.
+  **Known gap it surfaced: `/scrape` is unreachable.**
+  `createScrapingChatCommandFilter` (`cores/free/scraping/src/chat-bridge.ts:40`)
+  is built by `buildProductionScrapingCoreWiring`
+  (`cores/free/scraping/src/wiring-production.ts:63`), which nothing calls — the
+  composer wires the research Core's equivalent
+  (`gateway/cores/mount-open-cores.ts:312,397`) and never the scraping one. The
+  Apify-backed MCP tools still work, so the capability is reachable by the AGENT
+  and not by the owner, breaking the agent-native parity claimed for this Core in
+  one direction. Fixing it means threading a scraping backend to the chain at
+  mount time.
 - **`app/__tests__/reachability-inventory.ts` + `reachability.test.tsx`** — the
   MOBILE half, and the one that covers the voice incident directly. It mounts the
   REAL project shell (`app/projects/[id]/_layout.tsx` over the routing harness,
