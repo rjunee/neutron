@@ -647,9 +647,16 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_docs_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
-  // 0l1. Project backups + restore — P7.4. `/api/app/projects/<id>/backups[…]`
-  //      + `/restore`. AFTER appDocs (disjoint patterns; order matches the
-  //      order the P7 routes were introduced).
+  // 0l1. Project backups + snapshot restore — P7.4. EVERY route it owns is
+  //      under `/api/app/projects/<id>/backups[…]`, INCLUDING the restore
+  //      (`POST .../backups/restore`). That nesting is load-bearing, not
+  //      cosmetic: the surface used to claim the bare `POST .../restore`, which
+  //      `appProjects` (rung 0h2 above, and therefore EARLIER) already owns for
+  //      un-archiving a project. This rung could never win it, so a snapshot
+  //      restore silently un-archived the project and answered 200. Both
+  //      patterns are now disjoint by SHAPE, so reordering the ladder cannot
+  //      resurrect the collision. Order relative to appDocs is likewise
+  //      immaterial (disjoint) and just matches the order P7 introduced them.
   slot({
     key: 'appBackups',
     rung: 'app-backups',

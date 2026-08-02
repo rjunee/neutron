@@ -1,19 +1,17 @@
 /**
- * FOUR APP SURFACES — reachable through the real router, not merely composed.
+ * APP SURFACES — reachable through the real router, not merely composed.
  *
  * `route-slot-coverage.test.ts` asks whether the composed graph CARRIES a
  * slot's `CompositionInput` field. That is a necessary condition and not a
  * sufficient one: a field can be populated while the ladder never dispatches to
- * it, because an earlier rung claims the path (that is exactly the live
- * `app_backups_surface` defect — `/restore` is claimed by the served
- * `appProjects` rung, so the restore button silently un-archives the project).
- * So this file asks the other half of the question and drives real HTTP through
- * the composed `graph.fetch` — the ONE path that maps
- * `composition.app_xxx_surface` onto a route (`gateway/composition.ts`
- * `buildComposedHttpFromComposition`, the ISSUE #32 seam).
+ * it, because an earlier rung claims the path. So this file asks the other half
+ * of the question and drives real HTTP through the composed `graph.fetch` — the
+ * ONE path that maps `composition.app_xxx_surface` onto a route
+ * (`gateway/composition.ts` `buildComposedHttpFromComposition`, the ISSUE #32
+ * seam).
  *
- * The four surfaces here were all declared, all had a shipped client calling
- * them, and none were ever handed to the graph:
+ * The surfaces here were all declared, all had a shipped client calling them,
+ * and none were ever handed to the graph:
  *
  *   - `/api/app/devices/{register,unregister}` — `app/lib/push.ts:143,177` calls
  *     these on every sign-in and sign-out. No device could register at all.
@@ -22,6 +20,12 @@
  *   - `/api/app/admin/*`                       — the Admin screen Settings
  *     routes to (`app/app/settings.tsx:362`).
  *   - `/api/app/persona/*`                     — the Personality pane inside it.
+ *   - `/api/app/projects/<id>/backups[…]`      — the Backups screen
+ *     (`app/app/projects/[id]/backups.tsx`), added 2026-08-02, and the reason
+ *     the last describe block in this file is about ROUTE OWNERSHIP rather than
+ *     reachability. See its own docblock: mounting that surface was blocked on a
+ *     path collision, because "the request reaches A handler" and "the request
+ *     reaches the RIGHT handler" are, again, different claims.
  *
  * WHY THE CONTROLS MATTER. On this ladder an unmounted route and a mistyped one
  * are the same 404, so a bare "not 404" proves little on its own. Each surface
@@ -30,9 +34,9 @@
  * surface can produce), and an invented sibling path under the same prefix still
  * 404s — so a future change that swallows the whole prefix fails here.
  *
- * MUTATION TEST: delete any one of the four `app_*_surface` assignments from
+ * MUTATION TEST: delete any one of the `app_*_surface` assignments from
  * `open/composer.ts` and that surface's block here reds (as does
- * `route-slot-coverage.test.ts`). Verified for all four.
+ * `route-slot-coverage.test.ts`). Verified for all five.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
@@ -198,6 +202,10 @@ describe('the controls — 404 on this ladder means UNMOUNTED, not "bad request"
       '/api/app/devices/not-a-verb',
       '/api/app/projects/p1/reminders/extra/segments/here',
       '/api/app/persona/not-a-file-route',
+      // Neither `restore` nor a 40-hex sha, so the backups surface declines the
+      // path entirely (returns null) and the ladder answers. Pins that mounting
+      // it did not turn `/backups/*` into a black hole.
+      '/api/app/projects/p1/backups/not-a-sha',
     ]) {
       const res = await call(path)
       expect({ path, status: res.status }).toEqual({ path, status: 404 })
@@ -331,5 +339,149 @@ describe('app_persona_surface — reachable through graph.fetch', () => {
   test('unauthenticated is 401 from the surface, not 404 from the ladder', async () => {
     const res = await call('/api/app/persona/files', { auth: false })
     expect(res.status).toBe(401)
+  })
+})
+
+/**
+ * TWO OPERATIONS THAT USED TO SHARE ONE PATH.
+ *
+ * `POST /api/app/projects/<id>/restore` meant two unrelated things:
+ *
+ *   A. UN-ARCHIVE a project, putting it back on the rail
+ *      (`gateway/http/app-projects-surface.ts:560` `RESTORE_PATH_RE`). Served,
+ *      with a live web client at `landing/chat-react/IntegrationsTab.tsx:217`.
+ *   B. RESTORE A SNAPSHOT from the project's backup history
+ *      (`gateway/http/app-backups-surface.ts`). Never served — `app-projects`
+ *      is an earlier rung than `app-backups` in `route-slots.ts`, so A won
+ *      every request.
+ *
+ * The consequence was not a 404. `app/lib/backups-client.ts` POSTed B's body to
+ * that path, A ran, the project got UN-ARCHIVED, and `200 {restored:true}` came
+ * back — a wrong operation reported as a success, which is strictly worse than
+ * the honest failure an unmounted route would have given.
+ *
+ * Reordering the rungs so B won was the wrong fix: it just moves the silent
+ * wrong answer onto A, which is the side that WORKS. So B moved to
+ * `POST .../backups/restore`, nesting it under the prefix its four sibling read
+ * routes already own. The two patterns are now disjoint by SHAPE, so no future
+ * ladder reordering can bring the collision back — and this block pins that.
+ *
+ * WHY THESE PARTICULAR ASSERTIONS. Both handlers can answer 400 and both can
+ * answer 404, so status alone cannot say which one ran. Each test therefore
+ * keys on a marker only ONE surface can emit:
+ *
+ *   - `invalid_file_path` is emitted at `app-backups-surface.ts` and NOWHERE
+ *     else in the repo, and it is emitted BEFORE the handler touches the store —
+ *     so it identifies the backup handler on any host, with or without `git`.
+ *   - `{restored: true, project_id, project_slug}` is the un-archive handler's
+ *     own success envelope (`app-projects-surface.ts:942`), and the archived
+ *     list going empty proves the mutation really happened rather than being
+ *     echoed.
+ *
+ * MUTATION TESTS (both run, both red as described):
+ *   1. Point the backup route back at the bare `/restore` (revert
+ *      `BACKUPS_PATH_RE` and the client): the two `.../backups/restore` tests
+ *      red — the path stops existing and the ladder 404s it.
+ *   2. Delete `app_backups_surface` from `open/composer.ts`: same two tests red,
+ *      as does `route-slot-coverage.test.ts`.
+ * Neither mutation touches the un-archive tests, which is the point — they are
+ * there to catch the OTHER repair, the one that would have broken a working
+ * feature.
+ */
+describe('app_backups_surface — mounted, and the /restore collision is gone', () => {
+  /** Syntactically valid but nonexistent — never reached, see below. */
+  const SHA = 'a'.repeat(40)
+
+  test('POST .../backups/restore reaches the BACKUP handler', async () => {
+    // A body that carries `snapshot_sha` — the field that made this a snapshot
+    // restore rather than an un-archive — plus a `file_path` of the wrong type.
+    // The backups surface rejects that itself, before any store/git call, so the
+    // assertion is deterministic on a host with or without `git` installed.
+    const res = await call('/api/app/projects/p1/backups/restore', {
+      method: 'POST',
+      body: { snapshot_sha: SHA, file_path: 42 },
+    })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { code?: string }
+    // Only `gateway/http/app-backups-surface.ts` emits this code. Getting it
+    // back is proof the ladder dispatched into the backups surface — not into
+    // the projects surface, and not into the default 404.
+    expect(body.code).toBe('invalid_file_path')
+  })
+
+  test('GET .../backups/restore is a 405 from the surface, not a 404 from the ladder', async () => {
+    // The complement of the test above: the path EXISTS and the surface owns it
+    // for POST only. A 404 here would mean unmounted; a 405 can only come from a
+    // surface that matched the path.
+    const res = await call('/api/app/projects/p1/backups/restore')
+    expect(res.status).toBe(405)
+    expect(((await res.json()) as { code?: string }).code).toBe('method_not_allowed')
+  })
+
+  test('unauthenticated is 401 from the surface, not 404 from the ladder', async () => {
+    const res = await call('/api/app/projects/p1/backups/restore', {
+      method: 'POST',
+      auth: false,
+    })
+    expect(res.status).toBe(401)
+  })
+
+  test('the bare .../restore still UN-ARCHIVES, even when the body looks like a snapshot restore', async () => {
+    // This is the behaviour the obvious fix (reorder the rungs so the backups
+    // surface wins) would have destroyed. It is exercised end to end — create,
+    // archive, un-archive — against the real SqliteProjectSettingsStore, so a
+    // regression shows up as a project that will not come back to the rail.
+    const created = await call('/api/app/projects', {
+      method: 'POST',
+      body: { name: 'collision probe' },
+    })
+    expect([200, 201]).toContain(created.status)
+    const project_id = ((await created.json()) as { project: { id: string } }).project.id
+
+    const archived = await call(`/api/app/projects/${project_id}/archive`, { method: 'POST' })
+    expect(archived.status).toBe(200)
+    const listBefore = (await (await call('/api/app/projects/archived')).json()) as {
+      archived: Array<{ id: string }>
+    }
+    expect(listBefore.archived.map((p) => p.id)).toContain(project_id)
+
+    // The SAME body shape the backups client sends. It must NOT divert the
+    // request: this path belongs to un-archive and always did.
+    const res = await call(`/api/app/projects/${project_id}/restore`, {
+      method: 'POST',
+      body: { snapshot_sha: SHA, file_path: 42 },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { restored?: boolean; code?: string }
+    expect(body.restored).toBe(true)
+    // And emphatically NOT the backup handler's rejection of that same body.
+    expect(body.code).toBeUndefined()
+
+    const listAfter = (await (await call('/api/app/projects/archived')).json()) as {
+      archived: Array<{ id: string }>
+    }
+    expect(listAfter.archived.map((p) => p.id)).not.toContain(project_id)
+  })
+
+  test('the snapshot list reaches the real ProjectBackupStore', async () => {
+    // The assertions above all stop at the surface's own input validation, which
+    // proves routing but not that a working store was handed over. This one goes
+    // all the way through to `ProjectBackupStore.listSnapshots`.
+    //
+    // Its answer is host-dependent by design and BOTH answers are correct — a
+    // project with no `.project-backup/` repo yet lists empty, and a host with no
+    // `git` binary degrades to 503 `restore_unavailable`. What is NOT acceptable
+    // on either host is a 404, so that is what this pins, plus the right shape
+    // for whichever branch the host takes.
+    const res = await call('/api/app/projects/p1/backups')
+    expect(res.status).not.toBe(404)
+    if (res.status === 200) {
+      const body = (await res.json()) as { snapshots: unknown[]; next_cursor: string | null }
+      expect(body.snapshots).toEqual([])
+      expect(body.next_cursor).toBeNull()
+    } else {
+      expect(res.status).toBe(503)
+      expect(((await res.json()) as { code?: string }).code).toBe('restore_unavailable')
+    }
   })
 })

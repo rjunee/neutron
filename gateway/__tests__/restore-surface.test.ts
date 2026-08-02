@@ -681,13 +681,13 @@ describe('app-backups HTTP surface', () => {
     expect(json['code']).toBe('invalid_snapshot_path')
   })
 
-  it('POST /restore restores the whole project + returns the recovery sha', async () => {
+  it('POST /backups/restore restores the whole project + returns the recovery sha', async () => {
     if (!GIT_AVAILABLE) return
     const sha = await ensureOneSnapshot()
     const { status, json } = await call(
       h.base,
       'POST',
-      `/api/app/projects/${PROJECT_ID}/restore`,
+      `/api/app/projects/${PROJECT_ID}/backups/restore`,
       { snapshot_sha: sha },
     )
     expect(status).toBe(200)
@@ -697,35 +697,35 @@ describe('app-backups HTTP surface', () => {
     expect(typeof restore['prior_head_sha']).toBe('string')
   })
 
-  it('POST /restore rejects a missing snapshot_sha with 400', async () => {
+  it('POST /backups/restore rejects a missing snapshot_sha with 400', async () => {
     const { status, json } = await call(
       h.base,
       'POST',
-      `/api/app/projects/${PROJECT_ID}/restore`,
+      `/api/app/projects/${PROJECT_ID}/backups/restore`,
       { file_path: 'foo.md' },
     )
     expect(status).toBe(400)
     expect(json['code']).toBe('missing_snapshot_sha')
   })
 
-  it('POST /restore rejects a hostile file_path with 400', async () => {
+  it('POST /backups/restore rejects a hostile file_path with 400', async () => {
     if (!GIT_AVAILABLE) return
     const sha = await ensureOneSnapshot()
     const { status, json } = await call(
       h.base,
       'POST',
-      `/api/app/projects/${PROJECT_ID}/restore`,
+      `/api/app/projects/${PROJECT_ID}/backups/restore`,
       { snapshot_sha: sha, file_path: '../../etc/passwd' },
     )
     expect(status).toBe(400)
     expect(json['code']).toBe('invalid_snapshot_path')
   })
 
-  it('rejects GET on /restore with 405', async () => {
+  it('rejects GET on /backups/restore with 405', async () => {
     const { status, json } = await call(
       h.base,
       'GET',
-      `/api/app/projects/${PROJECT_ID}/restore`,
+      `/api/app/projects/${PROJECT_ID}/backups/restore`,
     )
     expect(status).toBe(405)
     expect(json['code']).toBe('method_not_allowed')
