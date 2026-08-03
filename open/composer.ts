@@ -267,11 +267,13 @@ import {
   createRitualExecutor,
   createRitualRunStore,
   createRitualRegistrationService,
+  enableBundledRitualsAtBoot,
   loadPersistedRitualDefs,
   reapOrphanRitualRuns,
   seedBundledRituals,
   registerBundledRituals,
   ReminderStore,
+  REMINDER_FALLBACK_TIME_ZONE,
   RITUAL_RUN_RETENTION_MS,
 } from '@neutronai/reminders/index.ts'
 import type { RitualRegistrationService } from '@neutronai/reminders/index.ts'
@@ -362,6 +364,7 @@ import {
 import { resolveTranscriber } from '@neutronai/gateway/transcription/resolve-transcriber.ts'
 import { OpenAiKeyStore } from '@neutronai/gateway/transcription/openai-key-store.ts'
 import {
+  isValidIanaTimezone,
   readOwnerTimezone,
   readTranscriptionBackend,
   writeTranscriptionBackend,
@@ -2401,7 +2404,7 @@ export function buildOpenGraphComposer(
             // the owner's tap resolves it through `handleOwnerButtonAnswer`. Assigned
             // to the outer `ritualRegistration` binding so the reminders-Core tools +
             // the live-agent capture deref it.
-            ritualRegistration = createRitualRegistrationService({
+            const registration = createRitualRegistrationService({
               registry,
               rituals_dir,
               approvals,
@@ -2432,6 +2435,57 @@ export function buildOpenGraphComposer(
               },
               log: (m) => log.info('ritual_registration', { detail: m }),
             })
+            ritualRegistration = registration
+            // THE REACHABILITY FIX. Seeding + `registerBundledRituals` above make
+            // the three bundled defs KNOWN — registration is NOT approval, and
+            // until now nothing ever REQUESTED approval for them. The approval
+            // request lives in `requestApprovalAndEmit`, reached only from
+            // `propose()` (agent-authored rituals) and `enable()`, and no boot
+            // path called `enable()`. So no owner-tappable prompt was ever
+            // emitted, an unapproved ritual can never fire, and the owner had NO
+            // path to turn his own bundled rituals on — while status reported
+            // them as "awaiting approval" for a prompt that did not exist.
+            //
+            // This drives the existing `enable()` once per never-enabled bundled
+            // ritual, on its default cron in the owner's zone. It NEVER approves:
+            // `enable()` writes only the `<id>.def.json`, requests the
+            // content-hash-bound grant(s), and emits the CODE-rendered prompt —
+            // the owner still taps, and the ritual stays unschedulable until he
+            // does. IDEMPOTENT (an existing `<id>.def.json` ends it for that id,
+            // so a restart never re-prompts and a DECLINED ritual stays declined)
+            // and FAIL-SOFT (per-ritual catch; the whole sweep is fire-and-forget
+            // so nothing here can delay or crash boot).
+            //
+            // Zone: the per-instance `instance_metadata.timezone` — the SAME
+            // source the tick loop resolves cron cadences against — falling back
+            // to the reminder default when unset. Only the FIRST `fire_at` is
+            // computed here; the tick loop recomputes every later occurrence
+            // against the zone read fresh at fire time, so a zone reported after
+            // boot self-corrects without a restart.
+            // `isValidIanaTimezone` guards the read for the same reason
+            // build-core-modules does: a zone that does not construct makes the
+            // cron resolution throw, and a bad stored zone must cost an hour, not
+            // the approval prompt.
+            const storedRitualTimeZone = readOwnerTimezone(db, project_slug)
+            const ritualTimeZone =
+              storedRitualTimeZone !== null && isValidIanaTimezone(storedRitualTimeZone)
+                ? storedRitualTimeZone
+                : REMINDER_FALLBACK_TIME_ZONE
+            fireAndForget(
+              'composer.enableBundledRituals',
+              enableBundledRitualsAtBoot({
+                service: registration,
+                registry,
+                rituals_dir,
+                time_zone: ritualTimeZone,
+                log: (m) => log.info('ritual_bundled_enable', { detail: m }),
+              }),
+              (err: unknown) => {
+                log.warn('ritual_bundled_enable_failed', {
+                  error: err instanceof Error ? err.message : String(err),
+                })
+              },
+            )
             return createRitualExecutor({
               registry,
               approvals,
