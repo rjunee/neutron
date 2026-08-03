@@ -147,8 +147,13 @@ describe('ChatApp render (happy-dom)', () => {
       sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm1', body_delta: 'Sam', ts: 2 })
       await tick()
     })
-    // While streaming, the typing indicator is up (Stop button present).
-    expect(container.textContent).toContain('Stop')
+    // While streaming there is NO Stop control (ISSUES #450 — it was inert and
+    // was removed on the owner's instruction). The send button stays MOUNTED
+    // but disabled, so the composer does not reflow on every turn.
+    expect(container.textContent).not.toContain('Stop')
+    const streamingSend = container.querySelector<HTMLButtonElement>('.car-send')
+    if (streamingSend === null) throw new Error('send button unmounted while streaming')
+    expect(streamingSend.disabled).toBe(true)
 
     await act(async () => {
       sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'Hi Sam', ts: 3 })
