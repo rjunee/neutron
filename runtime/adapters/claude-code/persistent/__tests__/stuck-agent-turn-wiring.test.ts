@@ -144,7 +144,14 @@ async function until(pred: () => boolean, budgetMs = 5000): Promise<boolean> {
 
 describe('stuck_agent — real dispatch-site wiring (F4 round-2 blocker)', () => {
   it('marks the live record BUSY mid-turn and CLEARS it once the turn settles', async () => {
-    const reg = new ProcessRegistry()
+    // MANUAL CLOCK, on the REGISTRY. `listStuck` compares against the
+    // ProcessRegistry's OWN `this.now()` (tools/process-registry.ts:286-287),
+    // so this is the only clock that can make the mid-turn assertion below
+    // deterministic. See the note at the `detect()` call for the flake this
+    // replaces — the previous attempt injected a clock into the DETECTOR,
+    // which never participates in the comparison at all.
+    let clockMs = 1_700_000_000_000
+    const reg = new ProcessRegistry({ now: () => clockMs })
     const clear = pushAmbientProcessRegistry(reg)
     try {
       const { host, releaseReply } = makeGatedHost()
@@ -167,26 +174,37 @@ describe('stuck_agent — real dispatch-site wiring (F4 round-2 blocker)', () =>
         owner_slug: 'owner',
         process_registry: reg,
         inactivity_threshold_ms: 0,
-        // The clock is INJECTED, one millisecond ahead, and that is load-bearing
-        // rather than tidy. `listStuck` compares `busy_since < now() - threshold`
-        // with a STRICT `<` (tools/process-registry.ts:287), so at threshold 0 a
-        // record is only stuck once the wall clock has ticked PAST the moment it
-        // was marked. Everything between `markTurnStarted` and this `detect()` is
-        // in-memory and routinely completes inside a single millisecond, so with
-        // the real `Date.now` this assertion is a coin flip on how the runner is
-        // scheduled — it passed for months and then began failing when an
-        // unrelated PR added two test files, which reshuffled the shard
-        // partition and moved this file onto a busier runner.
-        //
-        // The race was in the TEST, not the product: a strict `<` against a real
-        // 15-minute threshold is correct. What the test means is "a detector run
-        // AT THAT MOMENT sees it", and this states that in the clock instead of
-        // hoping for it. It does not weaken the assertion — remove
-        // `markTurnStarted` from the dispatch site and `busy_since` is null, so
-        // `listStuck` filters the record out regardless of the clock and this
-        // still reds. Verified by mutation.
-        now: () => Date.now() + 1,
+        // Same manual clock as the registry, so alert ids / payload timestamps
+        // are deterministic too. NOTE this is NOT what makes the assertion
+        // below sound — see the tick immediately after this.
+        now: () => clockMs,
       })
+
+      // ── THE FIX (ISSUES #438; flaked in CI 2026-08-02 shard 2/4 and
+      // 2026-08-03 shard 3/4, always `Expected: 1, Received: 0` here) ────────
+      //
+      // `listStuck` is `busy_since !== null && busy_since < this.now() - threshold`
+      // with a STRICT `<` and the REGISTRY's own clock. At threshold 0 the record
+      // is only stuck once the clock has ticked PAST the instant it was marked.
+      // Everything between `markTurnStarted` and this `detect()` is in-memory and
+      // routinely finishes inside one millisecond, so under real `Date.now` this
+      // was a coin flip on runner scheduling.
+      //
+      // The PREVIOUS attempt to fix exactly this passed `now: () => Date.now() + 1`
+      // to the DETECTOR and documented itself as settling the race. It could not:
+      // `detect()` delegates the cutoff to `registry.listStuck(...)`, so the
+      // detector's clock is used only for alert ids and payload fields and NEVER
+      // for the comparison. The flake survived that fix and its claim of being
+      // "verified by mutation" was untestable — the mutation it cited (drop
+      // `markTurnStarted`) nulls `busy_since`, which reds with or without the
+      // clock, so it could not distinguish the two.
+      //
+      // Advancing the REGISTRY's clock is what actually states "a detector run at
+      // that moment sees it". It does not weaken the assertion: drop
+      // `markTurnStarted` at the dispatch site and `busy_since` is null, so the
+      // record is filtered regardless of any clock and this still reds.
+      clockMs += 1
+
       const midTurn = await detector.detect()
       expect(midTurn.length).toBe(1)
       expect(midTurn[0]?.payload['turn_id']).toBe(rec.busy_turn_id)
