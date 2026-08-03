@@ -285,6 +285,12 @@ import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
 import { AnchorWalker } from '@neutronai/gateway/comments/anchor-walker.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
+import { createAppLauncherSurface } from '@neutronai/gateway/http/app-launcher-surface.ts'
+import { SqliteProjectLauncherStore } from '@neutronai/gateway/http/sqlite-project-launcher-store.ts'
+import {
+  DEFAULT_LAUNCHER_SEED,
+  deriveLauncherSeedFromBundledCores,
+} from '@neutronai/gateway/http/project-launcher-store.ts'
 import { CoreInstallationsStore } from '@neutronai/cores-runtime/installations-store.ts'
 import type { CoresModuleState } from '@neutronai/gateway/cores/composer-state.ts'
 import { createAppProjectsSurface } from '@neutronai/gateway/http/app-projects-surface.ts'
@@ -2731,6 +2737,31 @@ export function buildOpenGraphComposer(
       auth: appOwnerAuth,
       cores: () => coresState,
       installations: new CoreInstallationsStore({ db }),
+    })
+
+    // The Apps launcher backend (`/api/app/projects/<id>/launcher[*]`). The Apps
+    // tab is a shipped builtin (`tabs/registry.ts:109-114`) and `app_tabs_surface`
+    // above IS served, so the tab renders and taps through — into a screen whose
+    // every call 404'd, because `createAppLauncherSurface` had no non-test call
+    // site anywhere (ISSUES #447). The screen ships complete: a grid, a rename
+    // modal, drag-reorder, and a client calling all four routes
+    // (`app/lib/launcher-client.ts:79,89,97,109`).
+    //
+    // Backed by SQLite, NOT the in-memory store. Mounting against the in-memory
+    // one would have swapped the 404 for a worse failure — a rename or a
+    // drag-reorder that silently forgets itself on the next gateway restart. The
+    // 404 was at least honest about being broken.
+    //
+    // The seed is a GETTER over `coresState` for the same reason the tabs surface
+    // above uses one: reading it at composition time would latch `null` forever
+    // and every project's grid would fall back to the static default, never
+    // showing an actually-installed Core.
+    const appLauncherSurface = createAppLauncherSurface({
+      store: new SqliteProjectLauncherStore(db, {
+        seedProvider: () =>
+          coresState === null ? DEFAULT_LAUNCHER_SEED : deriveLauncherSeedFromBundledCores(coresState),
+      }),
+      auth: appOwnerAuth,
     })
 
     // P1b — Tasks tab backend (`/api/app/projects/<id>/tasks*`) + chat upload
@@ -5229,6 +5260,9 @@ export function buildOpenGraphComposer(
       // P1b — the tab resolver so the React ProjectShell shows the Documents/Tasks
       // tabs (without it, it falls back to Chat-only and the docs tab is hidden).
       app_tabs_surface: { handler: appTabsSurface.handler },
+      // The Apps launcher backend. Without this line the tab the resolver above
+      // returns leads to four 404s (ISSUES #447).
+      app_launcher_surface: { handler: appLauncherSurface.handler },
       // Project list (GET) + create (POST /api/app/projects) surface — feeds the
       // mobile app's project list AND the project-rail Create Project button.
       app_projects_surface: { handler: appProjectsSurface.handler },

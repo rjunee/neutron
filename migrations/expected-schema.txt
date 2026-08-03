@@ -149,6 +149,10 @@ CREATE INDEX idx_proactive_topic_state_project
 CREATE INDEX idx_project_credentials_scope
     ON project_credentials (owner_slug, project_id)
 
+[index] idx_project_launcher_entries_project (tbl=project_launcher_entries)
+CREATE INDEX idx_project_launcher_entries_project
+  ON project_launcher_entries (project_slug, project_id, reorder_index)
+
 [index] idx_project_members_user (tbl=project_members)
 CREATE INDEX idx_project_members_user
     ON project_members (user_id)
@@ -1039,6 +1043,21 @@ CREATE TABLE project_credentials (
     -- One credential per (owner, project-or-global, service). A re-set
     -- overwrites in place (the store upserts on this key).
     UNIQUE (owner_slug, project_id, service)
+) STRICT
+
+[table] project_launcher_entries (tbl=project_launcher_entries)
+CREATE TABLE project_launcher_entries (
+  project_slug   TEXT    NOT NULL,
+  project_id     TEXT    NOT NULL,
+  slug           TEXT    NOT NULL,
+  -- NULL = no rename; the tile shows the Core's own label from the registry.
+  display_name   TEXT,
+  -- Position within the project's grid, 0-based and contiguous after any
+  -- mutation. Rows materialised together are numbered in catalogue order.
+  reorder_index  INTEGER NOT NULL,
+  -- 1 = the owner removed this tile from THIS project's grid.
+  uninstalled    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_slug, project_id, slug)
 ) STRICT
 
 [table] project_members (tbl=project_members)

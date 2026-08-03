@@ -72,6 +72,11 @@ const EXPECTED_COMPOSITION_KEYS = [
   // O5 — read-only diagnostics surface (`GET /api/app/admin/diagnostics`).
   'app_diagnostics_surface',
   'app_docs_surface',
+  // The Apps launcher backend (`/api/app/projects/<id>/launcher[*]`). Same
+  // done-means-served proof as the keys around it: the Apps tab is a shipped
+  // builtin and this key is what stops tapping it from reaching four 404s, as it
+  // did in every install until ISSUES #447.
+  'app_launcher_surface',
   // The Personality pane inside the Admin screen (`/api/app/persona/*`) —
   // read/write of SOUL.md, USER.md, priority-map.md.
   'app_persona_surface',

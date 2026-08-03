@@ -101,6 +101,12 @@ export const MIN_EXPECTED_MOUNTED_SLOTS = 20
  */
 export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
   {
+    rung: 'app-launcher',
+    composition: 'app_launcher_surface',
+    serves:
+      'the four /api/app/projects/<id>/launcher routes behind the Apps tab — list, reorder, rename, uninstall (ISSUES #447)',
+  },
+  {
     rung: 'chat-history',
     composition: 'chat_history_surface',
     serves: 'GET /api/v1/chat/history — the web chat hydrates its transcript on load',
@@ -275,13 +281,6 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
     why: 'No composer sets it; the field has no setter anywhere outside its own declaration (gateway/composition/input/http-surfaces-input.ts:104).',
     costs:
       'The dead-REPL detector tells the operator to POST /admin/respawn-session (runtime/adapters/claude-code/persistent/dead-repl-detector.ts:110,125,134 and channel-unbound-respawn.ts:103). Following that instruction hits a 404, so the documented recovery for a wedged REPL does not exist.',
-  },
-  {
-    rung: 'app-launcher',
-    composition: 'app_launcher_surface',
-    why: 'createAppLauncherSurface (gateway/http/app-launcher-surface.ts:49) has no non-test call site.',
-    costs:
-      'The Apps tab is a shipped builtin (tabs/registry.ts:109-114) and app_tabs_surface IS served, so the tab renders and taps through to a screen whose every call 404s (app/lib/launcher-client.ts:79,89,97,109).',
   },
   {
     rung: 'cores-oauth',
