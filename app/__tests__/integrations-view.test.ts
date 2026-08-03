@@ -108,3 +108,46 @@ describe('summarizeIntegrations', () => {
     expect(view.totalCount).toBe(3);
   });
 });
+
+describe('oauthRow title — composite labels must not leak a hash to the owner', () => {
+  const base = {
+    kind: 'oauth' as const,
+    scope: 'https://www.googleapis.com/auth/calendar',
+    core_slugs: ['calendar_core'],
+    connected: true,
+    scopes: ['https://www.googleapis.com/auth/calendar'],
+    connected_at: 1,
+    last_refresh_at: null,
+    last_refresh_outcome: 'ok' as const,
+    expires_at: null,
+  }
+
+  test('a multi-account label renders a human service name, not the account key', () => {
+    // Labels became `<service>#<account_key>` when a service gained multiple
+    // accounts. `title` is rendered straight into the Integrations list, so the
+    // raw label would put a hex digest in front of the owner.
+    const row = oauthRow({ ...base, label: 'google_calendar#a1b2c3d4', email: 'me@example.com' })
+    expect(row.title).toBe('Google Calendar')
+    expect(row.title).not.toContain('#')
+    expect(row.title).not.toContain('a1b2c3d4')
+    // The ACCOUNT is identified on the status line, so the title needn't repeat it.
+    expect(row.statusLabel).toBe('Connected as me@example.com')
+    // `id` keeps the FULL label — it is the row key and must stay unique across
+    // two accounts on the same service.
+    expect(row.id).toBe('google_calendar#a1b2c3d4')
+  })
+
+  test('two accounts on one service get distinct ids but the same title', () => {
+    const a = oauthRow({ ...base, label: 'google_calendar#aaaa1111', email: 'work@example.com' })
+    const b = oauthRow({ ...base, label: 'google_calendar#bbbb2222', email: 'personal@example.com' })
+    expect(a.id).not.toBe(b.id)
+    expect(a.title).toBe(b.title)
+    expect(a.statusLabel).not.toBe(b.statusLabel)
+  })
+
+  test('a legacy un-keyed label still renders (no # to strip)', () => {
+    const row = oauthRow({ ...base, label: 'gmail_compose', email: null })
+    expect(row.title).toBe('Gmail Compose')
+    expect(row.id).toBe('gmail_compose')
+  })
+})
