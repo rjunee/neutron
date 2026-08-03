@@ -340,8 +340,8 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
   {
     rung: 'internal-cache-invalidate',
     composition: 'internal_cache_invalidate',
-    why: 'No composer sets it.',
+    why: 'No composer sets it, and it is SUPERSEDED rather than merely uncalled — a different design solved the problem it was built for.',
     costs:
-      'No caller found in this repo or the hosting overlay. It was built for a slug-rename orchestrator to poke after a rename commits; on Open the owner handle is frozen, so there is no rename to invalidate.',
+      "None, and the reason is worth writing down because the previous note here was misleading. It said 'the owner handle is frozen, so there is no rename to invalidate', which reads as if renames do not happen. They do: the rename orchestrator is built and live in the hosting overlay and runs during the claim flow. What makes this slot unnecessary is narrower — the instance identifies by the FROZEN handle (NEUTRON_INSTANCE_SLUG, which the unit name, tenant_home and unix user all key off and which a url_slug rename deliberately does NOT rewrite), so a rename changes the public routing name and nothing the instance holds. The failure a naive reading predicts — a post-rename token meeting a stale instance — is REAL and DID happen: a P0 owner lockout on 2026-07-19, where every token minted against the old slug stopped resolving and the owner was locked out of a healthy instance. It was fixed by resolving a token's slug through the recorded rename redirects at the identity layer, NOT by poking this route. So this seam addresses a real problem that another mechanism already owns; deleting it removes a second way to solve something once.",
   },
 ]
