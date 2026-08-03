@@ -109,6 +109,22 @@ function reconnectRows(): PromptRow[] {
 const realFetch = globalThis.fetch
 let anthropicResponse: (() => Response) | null = null
 
+const ANTHROPIC_HOST = 'api.anthropic.com'
+
+/**
+ * Match on the parsed HOSTNAME, never a substring of the URL. A substring test
+ * says yes to `https://evil.example/?x=api.anthropic.com`, and a stub that
+ * intercepts by accident is a test asserting something other than what it reads
+ * as. An unparseable URL matches nothing and falls through to the real fetch.
+ */
+function isAnthropic(url: string): boolean {
+  try {
+    return new URL(url).hostname === ANTHROPIC_HOST
+  } catch {
+    return false
+  }
+}
+
 function installFetchStub(): void {
   globalThis.fetch = (async (input: unknown, init?: unknown): Promise<Response> => {
     const url =
@@ -117,7 +133,7 @@ function installFetchStub(): void {
         : input instanceof URL
           ? input.toString()
           : String((input as { url?: unknown })?.url ?? '')
-    if (url.includes('api.anthropic.com') && anthropicResponse !== null) {
+    if (isAnthropic(url) && anthropicResponse !== null) {
       return anthropicResponse()
     }
     return (realFetch as (i: unknown, ii?: unknown) => Promise<Response>)(input, init)
