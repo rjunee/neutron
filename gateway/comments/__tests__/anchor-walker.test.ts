@@ -1216,23 +1216,34 @@ describe('Argus r1 IMPORTANT #3 — large-doc safety: step 4 global widen does n
     const fivemb = 5 * 1024 * 1024
     const newBody = 'Z'.repeat(fivemb - 1)
     writeFileSync(join(h.docsRoot, 'big.md'), newBody, 'utf8')
-    const t0 = performance.now()
     const counts = await h.walker.reanchorAfterEdit(
       PROJECT_ID,
       'big.md',
       newBody,
       2_000_000,
     )
-    const elapsed = performance.now() - t0
-    // The body is well past the 256 KB step-4 ceiling, so the matcher
-    // falls through to step 5 (dead). The wall-clock budget is
-    // intentionally generous (5 s) so a slow / contended CI runner
-    // doesn't flake; the pre-fix shape is tens of seconds at minimum.
-    // Bumped 2026-05-22 from 2 s after observing 2.9 s wall-clock under
-    // concurrent test pressure — the regression-prevention contract is
-    // "doesn't hang for many seconds", not "completes within 2 s on
-    // every box".
-    expect(elapsed).toBeLessThan(5000)
+    // The body is well past the 256 KB step-4 ceiling, so the matcher falls
+    // through to step 5 (dead).
+    //
+    // THE "DOESN'T HANG" CONTRACT IS THE TEST TIMEOUT (10 s, below), and it is
+    // stated exactly once. There used to be a second, tighter wall-clock
+    // assertion here — `expect(elapsed).toBeLessThan(5000)` — and it was the
+    // flaky one. ISSUES #438.
+    //
+    // Measured 2026-08-03 rather than estimated: unloaded this call takes
+    // ~760-990 ms, but under 2x CPU oversubscription (16 spinners on 8 cores)
+    // four runs gave 3659 / 4719 / 3882 / 3820 ms. The worst was 94% of the
+    // 5 s budget — a 6% margin, i.e. the next contended CI runner reds it.
+    //
+    // It had ALREADY been widened once (2 s -> 5 s on 2026-05-22, after one
+    // 2.9 s observation) and flaked anyway, which is the whole lesson:
+    // widening a bound that races a shared runner just moves the coin flip.
+    // So this removes the bound instead of raising it again. Nothing is lost —
+    // the assertion's own comment said the contract was "doesn't hang for many
+    // seconds", NOT "completes within 2 s on every box", and the pre-fix
+    // regression shape is TENS of seconds, which the 10 s timeout catches
+    // outright. What remains here are the deterministic outcome assertions,
+    // which are what actually pin the step-5 fall-through.
     expect(counts.dead).toBe(1)
     expect(counts.relocated).toBe(0)
     expect(counts.drifted).toBe(0)
