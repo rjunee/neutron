@@ -58,6 +58,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 import type { ButtonStore } from '@neutronai/channels/button-store.ts'
+import type { ButtonOption } from '@neutronai/channels/button-primitive.ts'
 import {
   buildButtonPrompt,
   MAX_OPTIONS_TELEGRAM,
@@ -424,6 +425,30 @@ const RETRY_FALLBACK_TEXT = 'Please try my previous message again.'
  * Distinctive enough that a user is exceedingly unlikely to type it verbatim.
  */
 export const RECONNECT_AUTH_VALUE = '__reconnect_auth__'
+
+/**
+ * The reconnect AFFORDANCE itself, as one exported shape.
+ *
+ * There are two producers of an auth-reconnect bubble and they must be
+ * indistinguishable to the owner:
+ *   • REACTIVE — `sendAuthReconnect` below, on a turn that died holding an
+ *     invalid credential. Requires him to have typed something.
+ *   • PROACTIVE — `open/credential-lapse-notice.ts`, fired off the periodic
+ *     credential probe when the token stops being accepted with nobody typing.
+ *     That is the one that matters once he depends on the box: every proactive
+ *     surface (morning brief, rituals, nudges) dies silently on a lapsed
+ *     credential, and the reactive bubble cannot fire because a proactive
+ *     surface produces no turn to fail.
+ *
+ * Two hand-rolled copies of "Reconnect" would drift into reading like two
+ * different problems, and a divergent `value` would route the tap somewhere the
+ * runner does not special-case — i.e. a dead button. Callers spread this rather
+ * than mutating it, so the shared array is never rewritten under another
+ * producer.
+ */
+export const AUTH_RECONNECT_OPTIONS: readonly ButtonOption[] = [
+  { label: OPTION_LABELS[0]!, body: 'Reconnect', value: RECONNECT_AUTH_VALUE },
+]
 
 /**
  * Compose the in-chat reply body for a reconnect tap: the freshly-minted install-token
@@ -2237,9 +2262,7 @@ async function sendAuthReconnect(
   turn: LiveAgentTurnRequest,
   includeReconnectButton: boolean,
 ): Promise<void> {
-  const options = includeReconnectButton
-    ? [{ label: OPTION_LABELS[0]!, body: 'Reconnect', value: RECONNECT_AUTH_VALUE }]
-    : []
+  const options = includeReconnectButton ? [...AUTH_RECONNECT_OPTIONS] : []
   let reply_prompt_id: string | null = null
   try {
     const prompt = buildButtonPrompt({
