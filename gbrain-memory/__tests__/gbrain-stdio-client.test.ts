@@ -16,8 +16,18 @@ import { GBrainUnavailableError } from '../memory-store.ts'
 
 describe('GBrainStdioMcpClient — binary-missing latch', () => {
   test('missing binary → GBrainUnavailableError on first call, fast latched failure on the second', async () => {
+    // SPAWN COUNTER (ISSUES #438). `resolveDynamicEnv` is consumed by
+    // `composeGbrainChildEnv` (gbrain-stdio-client.ts:117) on the connect path
+    // — AFTER the latch check at the top of `ensureConnected` and BEFORE the
+    // `StdioClientTransport` is constructed. So its call count IS the number of
+    // spawn attempts, observed through a seam production already ships.
+    let spawnAttempts = 0
     const client = new GBrainStdioMcpClient({
       command: 'neutron-test-definitely-not-a-real-binary-xyz',
+      resolveDynamicEnv: async () => {
+        spawnAttempts += 1
+        return {}
+      },
     })
     // First call attempts the spawn and fails.
     let first: unknown = null
@@ -28,20 +38,28 @@ describe('GBrainStdioMcpClient — binary-missing latch', () => {
     }
     expect(first).toBeInstanceOf(GBrainUnavailableError)
 
-    // Second call must fail fast from the latch (no re-spawn). A spawn
-    // attempt costs >1ms; the latch path is a synchronous throw inside
-    // the promise — bound it generously at 50ms to keep CI happy while
-    // still proving no transport work happened.
-    const t0 = performance.now()
+    // The first call attempted exactly one spawn.
+    expect(spawnAttempts).toBe(1)
+
+    // Second call must fail fast FROM THE LATCH, without re-spawning.
+    //
+    // ISSUES #438 — this used to assert `elapsed < 50ms`, with a comment
+    // claiming that "still prov[ed] no transport work happened". It did not,
+    // and the guard was VACUOUS: measured 2026-08-03, an UNLATCHED spawn
+    // attempt against a missing binary costs 0.46-6.74 ms (ENOENT is fast), so
+    // a 50 ms bound passes just as happily when the latch is completely broken
+    // and every call re-spawns. It could not fail for the reason it claimed to
+    // test, which is the exact defect this test exists to catch.
+    //
+    // Counting the spawns settles it directly: 1, not 2. No clock involved.
     let second: unknown = null
     try {
       await client.call('get_links', { slug: 'x' })
     } catch (err) {
       second = err
     }
-    const elapsed = performance.now() - t0
     expect(second).toBeInstanceOf(GBrainUnavailableError)
-    expect(elapsed).toBeLessThan(50)
+    expect(spawnAttempts).toBe(1)
   })
 })
 
