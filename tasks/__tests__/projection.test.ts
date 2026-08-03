@@ -261,7 +261,20 @@ describe('projection — writer (debounced atomic write)', () => {
         project_id === ''
           ? null
           : { dir: join(projectsDir, project_id), name: project_id },
-      debounce_ms: 100,
+      // ISSUES #438 — a LONG debounce plus an explicit flush, instead of a
+      // 100 ms window the burst had to beat.
+      //
+      // The old shape raced ten awaited SQLite inserts against a real 100 ms
+      // timer: if the burst overran the window the debounce fired mid-burst,
+      // producing 2+ writes and reding `writes === 1`. Nothing about the
+      // property under test needs that race — the property is "mutations
+      // arriving inside one window coalesce into a single write", and the
+      // window only has to be open, not short.
+      //
+      // 60 s cannot elapse during ten in-memory inserts, so the timer provably
+      // never fires here and `flushNow()` (the writer's own testing seam) is
+      // what performs the write. Deterministic on any runner, at any load.
+      debounce_ms: 60_000,
     })
     for (let i = 0; i < 10; i++) {
       await store.create({
@@ -270,12 +283,14 @@ describe('projection — writer (debounced atomic write)', () => {
         title: `t-${i}`,
       })
     }
-    // Wait for the single coalesced write to land (load-robust poll past the
-    // 100 ms debounce window).
-    await waitUntil(() => writer.stats().writes >= 1)
+    await writer.flushNow()
     const stats = writer.stats()
     expect(stats.writes).toBe(1)
-    expect(stats.coalesced).toBeGreaterThan(0)
+    // EXACT, not `> 0`. Ten mutations to one project schedule ten times; the
+    // first finds no pending entry, the next nine each coalesce onto it. Now
+    // that the window cannot close early, that count is fully determined —
+    // and it pins the coalescing itself rather than merely "something merged".
+    expect(stats.coalesced).toBe(9)
     await writer.stop()
   })
 
