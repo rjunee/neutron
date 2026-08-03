@@ -39,9 +39,16 @@
  * EVERY UNWIRED ENTRY CARRIES ITS REASON, and the reason is the point. A bare
  * list of names rots into permission: the next reader sees an established
  * allowlist and adds one more. A written reason is a claim someone can check,
- * and `costs` says out loud what the owner is currently missing — one of the
- * four below is a live gap, not a decision, and the list should read that way
- * until it is fixed.
+ * and `costs` says out loud what the owner is currently missing.
+ *
+ * As of 2026-08-03 all four unwired fields are DECISIONS rather than gaps. The
+ * last one carrying a "GAP" label was `onboarding_telemetry`, and it was
+ * relabelled only after reading what the omitted cron actually sends — a
+ * product-market-fit survey, which is the wrong thing to put in front of a
+ * self-hoster. That relabelling is the behaviour this list wants: a reason is a
+ * CLAIM, and the way it stops being a gap is that someone checks the claim, not
+ * that someone gets tired of seeing it. If a future entry says GAP, it should
+ * stay saying GAP until the code changes or the claim is disproved.
  *
  * VERIFIED 2026-08-02 against the composed production graph, on a credentialed
  * boot: 29 fields in scope, 25 set, 4 not. (`onboarding_overnight_cron` moved
@@ -223,8 +230,8 @@ export const UNWIRED_FIELDS: readonly CompositionFieldUnwiredEntry[] = [
   {
     field: 'onboarding_telemetry',
     why:
-      'GAP, partial. Every sub-field is optional and `gateway/composition/build-core-modules.ts:710-721` reads them all with `?.`, so telemetry itself still builds with its default stdout logger. What the omission drops is `sean_ellis` — the module registers that cron ONLY when the config supplies a channel + topic resolver, and no composer supplies one.',
+      "DECISION, not a gap — reclassified 2026-08-03 after reading what the cron actually sends. Every sub-field is optional and `gateway/composition/build-core-modules.ts:710-721` reads them all with `?.`, so telemetry itself still builds with its default stdout logger; the only thing the omission drops is the `sean_ellis` cron, which registers ONLY when the config supplies a channel + topic resolver. Leaving that unsupplied in Open is CORRECT. The message is a product-market-fit survey — `onboarding/telemetry/sean-ellis-trigger.ts:53` asks 'How would you feel if you could no longer use Neutron?' four weeks in — and a self-hoster INSTALLED this thing and may well be building on it. Surveying them about losing access to software they run themselves is a category error, and the answer would land in `sean_ellis_responses` in their OWN database where nobody reads it. So this is per-deployment config in the same family as the Google OAuth client: absent by default, supplied by a deployment that actually wants the signal. A hosted deployment that wants PMF data supplies channel + topic like any other config; it does not require changing Open.",
     costs:
-      'the Sean Ellis PMF survey never runs on an Open install. Onboarding telemetry is otherwise intact.',
+      'nothing on a self-hosted install — an unread survey not being sent is the correct outcome. A deployment that wants the signal opts in via config.',
   },
 ]
