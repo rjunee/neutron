@@ -124,6 +124,15 @@ export default [
   // in `migrations/runner.ts` — its per-migration BEGIN/COMMIT + PRAGMA
   // preamble mechanics need the unserialized handle), hence the ignore.
   //
+  // `migrations/scope-rekey.ts` (#451) is the second, and for the same reason:
+  // it is a BOOT STEP in the same band, running immediately after the runner
+  // and before the module graph exists, so there is no other writer for the
+  // mutex to serialize against. It needs the unserialized handle for the same
+  // two mechanics — its own `BEGIN IMMEDIATE`/`COMMIT`, and `VACUUM INTO`,
+  // which SQLite refuses inside a transaction. Like the runner it exposes a
+  // `{ raw(): Database }`-taking wrapper so no CALLER outside this band ever
+  // reaches for `raw()` itself.
+  //
   // Scope notes:
   //  * Test files are exempt — fixtures/assertions legitimately reach for the
   //    bare connection to seed and inspect state out-of-band.
@@ -136,6 +145,7 @@ export default [
     files: ['**/*.ts', '**/*.tsx'],
     ignores: [
       'migrations/runner.ts',
+      'migrations/scope-rekey.ts',
       '**/*.test.ts',
       '**/__tests__/**',
       'tests/**',

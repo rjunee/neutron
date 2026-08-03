@@ -43,15 +43,37 @@
     "onboarding_state": {
       "owner": "onboarding/interview/sqlite-state-store.ts",
       "writers": [
+        "migrations/scope-rekey.ts",
         "onboarding/interview/sqlite-state-store.ts"
       ],
       "notes": [
-        "Single-writer. The telemetry factory's mint-on-miss attempt_id",
+        "The telemetry factory's mint-on-miss attempt_id",
         "transaction (onboarding/telemetry/event-emitter.ts) moved verbatim",
         "into SqliteOnboardingStateStore.resolveOrMintAttemptId in P4.",
         "resume-cron's SQL json_remove writer (the plan's second dialect) was",
         "deleted by K11b1 before this unit landed \u2014 the store's JS",
-        "shallow-merge is now the only phase_state write dialect."
+        "shallow-merge is now the only phase_state write dialect.",
+        "migrations/scope-rekey.ts is a DELIBERATE second writer (#451): the",
+        "boot scope reconciler resolves an old-key vs current-key pair for the",
+        "same user_id by DELETING the less authoritative row before the generic",
+        "re-key move. It cannot route through the store \u2014 the store's own",
+        "rekey() THROWS on exactly this collision (by design; the rename",
+        "orchestrator's pre-flight is supposed to prevent it), whereas the",
+        "reconciler exists precisely to repair databases where it already",
+        "happened. It is also a boot-step in the migrations band, which cannot",
+        "import the onboarding band. Scope: DELETE only, only during a re-key."
+      ]
+    },
+    "instance_scope_ledger": {
+      "owner": "migrations/scope-rekey.ts",
+      "writers": [
+        "migrations/scope-rekey.ts"
+      ],
+      "notes": [
+        "Single-writer singleton (#451). Records which scope key this database's",
+        "slug-scoped rows are written under. Written ONLY as the last statement",
+        "of the reconciler's transaction, so a crash rolls the ledger back",
+        "together with the row moves it describes."
       ]
     },
     "gbrain_sync_state": {

@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { WebSocketHandler } from 'bun'
 import { applyMigrationsToProjectDb } from '@neutronai/migrations/runner.ts'
+import {
+  reconcileInstanceScopeOnProjectDb,
+  type ScopeReconcileResult,
+} from '@neutronai/migrations/scope-rekey.ts'
 import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import {
   ProjectDb,
@@ -275,6 +279,67 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // is always a live owner.
   const systemEventSink = new SystemEventsStore({ db })
   const clearOwnedSystemEventSink = pushSystemEventSink(systemEventSink)
+
+  // ISSUES #451 — SCOPE RECONCILIATION. Every slug-scoped table in this database
+  // is keyed on the RENAMEABLE url_slug we just resolved, so a rename strands
+  // every pre-rename row under the old key while this process reads the new one.
+  // The worst consequence is `onboarding_state`: the composer's onboarding
+  // predicate fail-closes on a miss, so a `completed` owner reads as still
+  // onboarding — the bundled-ritual sweep then defers on every boot and every
+  // ordinary message keeps running through the onboarding-answer extractor.
+  // `reconcileInstanceScope` migrates stranded rows FORWARD onto the boot slug
+  // (the boot value is load-bearing for auth equality — the owner gate compares
+  // the session cookie to it — so the key itself cannot move).
+  //
+  // POSITION IS LOAD-BEARING, on both sides. It runs AFTER the sink registration
+  // so a repair is journalled, and BEFORE the module graph is composed so every
+  // boot-time reader — the ritual sweep above all — sees one whole database
+  // rather than two halves. On the overwhelmingly common boot the ledger already
+  // agrees and this is a single SELECT.
+  //
+  // Fails the boot rather than degrading: serving an owner half his own data is
+  // the defect this closes, so an unrepairable database must be loud. Cleanup
+  // mirrors the guards above (`bootFailureCleanup` is not declared yet here).
+  let scopeReconcile: ScopeReconcileResult
+  try {
+    scopeReconcile = reconcileInstanceScopeOnProjectDb(db, project_slug, { dbPath })
+  } catch (err) {
+    clearOwnedSystemEventSink()
+    await systemEventSink.drain()
+    db.close()
+    throw err
+  }
+  if (scopeReconcile.action === 'rekeyed') {
+    log.warn('instance_scope_rekeyed', {
+      to: scopeReconcile.current_slug,
+      from: scopeReconcile.rekeys.map((r) => r.from).join(','),
+      moved: scopeReconcile.moved_total,
+      dropped: scopeReconcile.dropped_total,
+      snapshot: scopeReconcile.snapshot_path ?? 'none',
+    })
+    fireAndForget(
+      'gateway.scope_rekey_journal',
+      systemEventSink.record({
+        event: 'instance_scope_rekeyed',
+        module: 'gateway',
+        level: 'warn',
+        project_slug: scopeReconcile.current_slug,
+        payload: {
+          from: scopeReconcile.rekeys.map((r) => r.from),
+          moved: scopeReconcile.moved_total,
+          dropped: scopeReconcile.dropped_total,
+          onboarding_conflicts_resolved: scopeReconcile.rekeys.reduce(
+            (a, r) => a + r.onboarding_conflicts_resolved,
+            0,
+          ),
+          snapshot_path: scopeReconcile.snapshot_path,
+          tables: scopeReconcile.rekeys.flatMap((r) =>
+            r.tables.map((t) => ({ table: t.table, moved: t.moved, dropped: t.dropped })),
+          ),
+        },
+      }),
+    )
+  }
 
   // Compose the module graph if the caller supplied a composer. We capture
   // the composition output BEFORE composing so we can read any graph-level

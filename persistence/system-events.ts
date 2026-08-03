@@ -76,6 +76,13 @@ export type SystemEventName =
   | 'dead_turn_notice'
   | 'session_size_alert'
   | 'rate_limit_banner'
+  // #451 — the boot scope reconciler migrated stranded rows forward after a
+  // rename. NOT a silent-degradation entry (it follows the `watchdog_alert`
+  // precedent): a REPAIR happened to the owner's database and the row is the
+  // durable record of exactly which tables moved, how many rows, and where the
+  // pre-repair snapshot lives. Emitted at most once per boot, and only when
+  // something actually moved.
+  | 'instance_scope_rekeyed'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'gbrain_unavailable',
@@ -91,6 +98,7 @@ export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'dead_turn_notice',
   'session_size_alert',
   'rate_limit_banner',
+  'instance_scope_rekeyed',
 ]
 
 /** What a degrade site passes to {@link emitSystemEventSafe}. */
