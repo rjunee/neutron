@@ -39,6 +39,7 @@ import { writeOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts
 import { BUNDLED_RITUAL_DEFAULT_CRONS } from '@neutronai/reminders/index.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
+import { OWNER_USER_ID } from '../owner-identity.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -119,6 +120,23 @@ function ritualReminderRows(): Array<{ ritual_id: string | null; recurrence_spec
     .all()
 }
 
+/**
+ * Put the owner past onboarding — the gate the sweep waits on. These approval
+ * prompts are durability-'reply' messages on the General topic, so firing them
+ * mid-onboarding would replace the welcome opener and capture the owner's next
+ * message as a ritual answer; the sweep defers until onboarding is terminal.
+ */
+async function completeOnboarding(): Promise<void> {
+  const now = Date.now()
+  await db.run(
+    `INSERT INTO onboarding_state
+       (project_slug, user_id, phase, phase_state_json, started_at, last_advanced_at,
+        completed_at, persona_files_committed, wow_fired)
+     VALUES (?, ?, 'completed', '{}', ?, ?, ?, 1, 1)`,
+    ['owner', OWNER_USER_ID, now, now, now],
+  )
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 async function waitFor(pred: () => boolean, timeoutMs = 20_000): Promise<void> {
@@ -197,6 +215,7 @@ afterEach(() => {
 
 describe('bundled rituals are reachable — the boot enable sweep', () => {
   test('one boot emits exactly ONE owner-tappable approval prompt per bundled ritual', async () => {
+    await completeOnboarding()
     await bootOnce({ waitForPrompts: true })
 
     for (const id of BUNDLED_IDS) {
@@ -237,6 +256,7 @@ describe('bundled rituals are reachable — the boot enable sweep', () => {
   }, 120_000)
 
   test('a SECOND boot re-prompts nothing — a restart does not re-ask', async () => {
+    await completeOnboarding()
     await bootOnce({ waitForPrompts: true })
     const afterFirst = promptRows().length
 
@@ -252,6 +272,7 @@ describe('bundled rituals are reachable — the boot enable sweep', () => {
   }, 180_000)
 
   test('the rituals stay UNAPPROVED and UNSCHEDULED until the owner taps', async () => {
+    await completeOnboarding()
     await bootOnce({ waitForPrompts: true })
 
     const rows = approvalRows()
@@ -268,4 +289,33 @@ describe('bundled rituals are reachable — the boot enable sweep', () => {
     // reminder row, so the tick loop has nothing to fire.
     expect(ritualReminderRows()).toEqual([])
   }, 120_000)
+
+  test('a boot MID-ONBOARDING prompts nothing — the welcome opener owns that screen', async () => {
+    // No `completeOnboarding()`: a brand-new instance has no `onboarding_state`
+    // row at all, which the composer's onboarding predicate reads as "still
+    // onboarding". These prompts are durability-'reply' messages on the General
+    // topic, so each becomes the topic's ACTIVE prompt — fired here they would
+    // put four approval walls where the welcome opener belongs and capture the
+    // owner's next message as a ritual answer instead of an onboarding answer.
+    // An ungated first draft of this sweep did exactly that and broke
+    // `tests/integration/onboarding-welcome-seed-once.open.test.ts` plus the
+    // `last_seen_seq:0` fresh-topic assertion in
+    // `open/__tests__/open-app-ws-durable-chatlog.test.ts`.
+    await bootOnce()
+
+    for (const id of BUNDLED_IDS) expect(contentPrompts(id).length).toBe(0)
+    for (const id of EGRESS_IDS) expect(egressPrompts(id).length).toBe(0)
+    expect(approvalRows()).toEqual([])
+    // Deferred, not half-done: no durable enable marker is left behind, so the
+    // first boot AFTER onboarding completes still emits the prompts.
+    for (const id of BUNDLED_IDS) {
+      expect(existsSync(join(tmpDir, 'rituals', `${id}.def.json`))).toBe(false)
+    }
+
+    // And that next boot does exactly that — the deferral costs a restart, not
+    // the feature.
+    await completeOnboarding()
+    await bootOnce({ waitForPrompts: true })
+    for (const id of BUNDLED_IDS) expect(contentPrompts(id).length).toBe(1)
+  }, 180_000)
 })

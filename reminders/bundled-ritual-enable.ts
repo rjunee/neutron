@@ -34,10 +34,25 @@
  * ritual keeps its def.json and is therefore never re-prompted either — a
  * decline stays declined across reboots.
  *
+ * NOT BEFORE ONBOARDING COMPLETES. These prompts are owner-facing chat messages
+ * on the General topic, emitted with durability 'reply' — each one becomes the
+ * topic's ACTIVE prompt. Fired on a brand-new instance they would (a) make the
+ * owner's very first screen four ritual approval walls instead of the welcome
+ * opener, and (b) capture his next message as an answer to a ritual approval
+ * instead of an onboarding answer. So the sweep waits for a terminal
+ * `onboarding_state`; on the first boot after onboarding completes it runs
+ * exactly as described above. (Found by `tests/integration/
+ * onboarding-welcome-seed-once.open.test.ts` + the `last_seen_seq:0` fresh-topic
+ * assertion in `open/__tests__/open-app-ws-durable-chatlog.test.ts`, which an
+ * ungated first draft of this sweep broke — the durable rows made a "fresh"
+ * topic non-empty.)
+ *
  * FAIL-SOFT. Every per-ritual failure is caught and logged; the sweep continues
  * to the next id and always resolves. Nothing here can block or crash boot (the
  * `seedBundledRituals` contract). A failed enable rolls its own def.json back
- * inside `enable()`, so the NEXT boot simply retries.
+ * inside `enable()`, so the NEXT boot simply retries. A GATE read that throws is
+ * treated as "still onboarding" — fail-closed, because a spurious prompt storm
+ * over a live onboarding is worse than one more restart's delay.
  *
  * SCHEDULE. Cron (`recurrence_spec`), not a coarse label: cron is wall-clock
  * anchored and DST-correct in the owner's zone, so "07:00" stays 07:00 across a
@@ -86,6 +101,12 @@ export interface EnableBundledRitualsResult {
   already_enabled: string[]
   /** Ids whose enable failed (logged, rolled back by `enable()`, retried next boot). */
   failed: string[]
+  /**
+   * True when the whole sweep was deferred because the owner is still
+   * onboarding. Nothing was written, nothing was prompted; the next boot after
+   * onboarding reaches a terminal state runs it.
+   */
+  deferred_onboarding: boolean
 }
 
 export interface EnableBundledRitualsInput {
@@ -97,6 +118,11 @@ export interface EnableBundledRitualsInput {
   rituals_dir: string
   /** The owner's IANA zone; the caller resolves it and its fallback. */
   time_zone: string
+  /**
+   * "Is the owner STILL onboarding?" — the composer's single onboarding-active
+   * predicate. `true` (or a throw) defers the whole sweep; see the file header.
+   */
+  is_onboarding_active: () => Promise<boolean>
   /** Clock seam (epoch ms). Defaults to `Date.now`. */
   now?: () => number
   /** Structured-log sink. Never throws out of the sweep. */
@@ -115,7 +141,28 @@ export async function enableBundledRitualsAtBoot(
   const { service, registry, rituals_dir, time_zone } = input
   const now = input.now ?? ((): number => Date.now())
   const log = input.log ?? ((): void => undefined)
-  const result: EnableBundledRitualsResult = { enabled: [], already_enabled: [], failed: [] }
+  const result: EnableBundledRitualsResult = {
+    enabled: [],
+    already_enabled: [],
+    failed: [],
+    deferred_onboarding: false,
+  }
+
+  // THE ONBOARDING GATE. Fail-CLOSED: a throwing read defers rather than
+  // prompting, because a prompt storm over a live onboarding is worse than
+  // waiting for the next restart.
+  let onboarding_active: boolean
+  try {
+    onboarding_active = await input.is_onboarding_active()
+  } catch (err) {
+    onboarding_active = true
+    log(`enableBundledRituals: onboarding check failed, deferring: ${(err as Error).message}`)
+  }
+  if (onboarding_active) {
+    result.deferred_onboarding = true
+    log('enableBundledRituals: owner is still onboarding — deferred to the next boot')
+    return result
+  }
 
   for (const def of BUNDLED_RITUAL_DEFS) {
     const cron = BUNDLED_RITUAL_DEFAULT_CRONS[def.id]

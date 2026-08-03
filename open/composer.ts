@@ -2456,6 +2456,18 @@ export function buildOpenGraphComposer(
             // and FAIL-SOFT (per-ritual catch; the whole sweep is fire-and-forget
             // so nothing here can delay or crash boot).
             //
+            // NOT BEFORE ONBOARDING COMPLETES. These are owner-facing chat
+            // prompts on the General topic with durability 'reply', so each
+            // becomes the topic's ACTIVE prompt. On a brand-new instance that
+            // would put four ritual approval walls where the welcome opener
+            // belongs and capture his next message as a ritual answer instead of
+            // an onboarding answer. `isOnboardingActive` is the composer's ONE
+            // onboarding-active predicate (it also treats a missing row as still
+            // onboarding, which is what a fresh install is), forward-referenced
+            // the same way `buildAppWsSendReply` is: this factory runs inside
+            // `remindersModule.start`, long after composition has executed that
+            // binding — never during composition.
+            //
             // Zone: the per-instance `instance_metadata.timezone` — the SAME
             // source the tick loop resolves cron cadences against — falling back
             // to the reminder default when unset. Only the FIRST `fire_at` is
@@ -2478,6 +2490,7 @@ export function buildOpenGraphComposer(
                 registry,
                 rituals_dir,
                 time_zone: ritualTimeZone,
+                is_onboarding_active: () => isOnboardingActive(OWNER_USER_ID),
                 log: (m) => log.info('ritual_bundled_enable', { detail: m }),
               }),
               (err: unknown) => {
