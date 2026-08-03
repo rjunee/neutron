@@ -96,6 +96,28 @@ export interface CoresCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * The BROKER half of the same flow — owns `/oauth/cores/pending/register`
+   * and `/oauth/cores/google/callback` (ISSUES #448).
+   *
+   * Google only redirects to a redirect_uri pre-registered on the OAuth client,
+   * so a deployment serving many instances cannot give each one its own; they
+   * share one URI and the broker routes each callback to the right instance by
+   * `state`. Until this field existed the instance registered its pending state
+   * with a path NOTHING served, so no Google grant could ever complete and three
+   * bundled Cores failed to install on every boot.
+   *
+   * ONE FLOW, TWO DEPLOYMENTS (SPEC § Decisions Log 2026-08-02): an Open
+   * self-host supplies this alongside `cores.oauth` and is its OWN broker
+   * (`identityBaseUrl` = its own base URL); Managed runs the same code centrally
+   * and its instances leave this unset. The difference is configuration, not a
+   * second code path.
+   *
+   * Surface factory: `gateway/http/cores-oauth-broker-surface.ts:createCoresOAuthBroker`.
+   */
+  cores_oauth_broker_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * WAVE 2 Track A — unified Integrations admin surface. Owns
    * `GET /api/cores/integrations` + `/api/cores/api-keys/*`. Auto-built by
    * `wireCoresSurfaces` whenever Cores + a bearer-auth resolver are present,

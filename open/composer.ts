@@ -285,6 +285,16 @@ import { CommentStore } from '@neutronai/gateway/comments/comment-store.ts'
 import { AnchorWalker } from '@neutronai/gateway/comments/anchor-walker.ts'
 import { InMemoryWebChatSessionProjectRegistry } from '@neutronai/gateway/http/chat-bridge.ts'
 import { createAppTabsSurface } from '@neutronai/gateway/http/app-tabs-surface.ts'
+import {
+  BROKER_CALLBACK_PATH,
+  createCoresOAuthBroker,
+  deriveColocatedBrokerSecret,
+} from '@neutronai/gateway/http/cores-oauth-broker-surface.ts'
+import {
+  GOOGLE_CLIENT_ID_ENV,
+  GOOGLE_CLIENT_SECRET_ENV,
+} from '@neutronai/gateway/cores/mount-open-cores.ts'
+import { ensureKey } from '@neutronai/auth/secrets-store.ts'
 import { createAppLauncherSurface } from '@neutronai/gateway/http/app-launcher-surface.ts'
 import { SqliteProjectLauncherStore } from '@neutronai/gateway/http/sqlite-project-launcher-store.ts'
 import {
@@ -1315,6 +1325,38 @@ export function buildOpenGraphComposer(
     // `.neutron-aes-key` keyfile). Constructed HERE (before mountOpenCores) so the
     // Cores' credential accessors can bind to it.
     const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
+
+    // ── Cores Google OAuth: the grant flow, and this instance as its own broker ─
+    // ISSUES #448. Both halves are gated on the SAME per-deployment client pair,
+    // because neither half is useful alone: a broker with no client has nothing
+    // to route for, and the instance surface with no client cannot redeem a code.
+    // Unset (the zero-creds default) leaves both unmounted and the Google-backed
+    // Cores uninstalled — which is the honest state, and is why the boot line
+    // below reports it rather than failing silently.
+    const coresGoogleClientId = (env[GOOGLE_CLIENT_ID_ENV] ?? '').trim()
+    const coresGoogleClientSecret = (env[GOOGLE_CLIENT_SECRET_ENV] ?? '').trim()
+    const coresOAuthConfigured =
+      coresGoogleClientId.length > 0 && coresGoogleClientSecret.length > 0
+    // Self-to-self HMAC for the co-located broker. Derived from the instance's
+    // existing AES keyfile so there is no NEW secret to generate, store, back up
+    // or leak — if that keyfile is gone the instance already cannot read any
+    // stored credential, so this adds no failure mode of its own.
+    const coresBrokerSecret = coresOAuthConfigured
+      ? deriveColocatedBrokerSecret(ensureKey(owner_home, () => false).toString('hex'))
+      : ''
+    const coresGoogleOAuth = coresOAuthConfigured
+      ? {
+          clientId: coresGoogleClientId,
+          clientSecret: coresGoogleClientSecret,
+          identityBaseUrl: connectBaseUrl,
+          ownerBaseUrl: connectBaseUrl,
+          redirectUri: `${connectBaseUrl}${BROKER_CALLBACK_PATH}`,
+          internalSharedSecret: coresBrokerSecret,
+        }
+      : undefined
+    const coresOAuthBroker = coresOAuthConfigured
+      ? createCoresOAuthBroker({ db, internalSharedSecret: coresBrokerSecret })
+      : undefined
     // Codex subscription credential (trident cross-model review). Codex is a
     // GLOBAL, trident-wide credential (trident runs across ANY project), so the
     // PRIMARY connect surface is the account-wide General admin UI; the store
@@ -4996,7 +5038,31 @@ export function buildOpenGraphComposer(
         // (API-key collection). Without it the surface was never mounted in Open
         // → the admin/integrations routes 404'd. Single-owner localhost trust.
         auth: appOwnerAuth,
+        // The Google grant flow (ISSUES #448). Supplying this is what makes
+        // `wireCoresSurfaces` build `/api/cores/oauth/google/*`; without it those
+        // routes 404'd, so no owner could ever complete a grant and calendar /
+        // email / google-workspace failed to install on EVERY boot of EVERY
+        // install. Exactly the omission the `auth` comment above describes,
+        // one field later.
+        //
+        // A self-hosted Open instance is its OWN broker, so `identityBaseUrl` is
+        // its own origin — same code as Managed's central broker, different
+        // config (SPEC § Decisions Log 2026-08-02). `connectBaseUrl` is reused
+        // deliberately rather than adding a second "where does the outside world
+        // reach me" env: it is the same fact about the deployment, and two envs
+        // that must agree is a drift bug waiting to happen.
+        //
+        // Absent the client env pair this stays undefined and the surface stays
+        // unmounted — the client is per-deployment and MUST NOT be baked into
+        // Open (SPEC:1000). That is a real operator step, not a defect.
+        ...(coresGoogleOAuth !== undefined ? { oauth: coresGoogleOAuth } : {}),
       },
+      // The broker half — Google's registered redirect target and the state
+      // registry behind it. Mounted whenever the OAuth client is configured,
+      // because an Open self-host serves BOTH roles in one process.
+      ...(coresOAuthBroker !== undefined
+        ? { cores_oauth_broker_surface: { handler: coresOAuthBroker.handler } }
+        : {}),
       // Hand the composed Cores registry back up to the tab resolver built
       // above. This is the only moment the registry exists AND the surface is
       // still upstream of any request, so it is the seam that makes

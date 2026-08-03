@@ -118,6 +118,10 @@ CREATE INDEX idx_connected_members_home_instance
 CREATE INDEX idx_connected_members_status
     ON connected_members (status)
 
+[index] idx_cores_oauth_broker_pending_expires (tbl=cores_oauth_broker_pending)
+CREATE INDEX idx_cores_oauth_broker_pending_expires
+  ON cores_oauth_broker_pending (expires_at)
+
 [index] idx_cron_state_last_run_at (tbl=cron_state)
 CREATE INDEX idx_cron_state_last_run_at ON cron_state(last_run_at)
 
@@ -635,6 +639,22 @@ CREATE TABLE core_installations (
     stopped_at                  INTEGER,
     uninstalled_at              INTEGER, install_state TEXT NOT NULL DEFAULT 'install_ok',                            -- soft-delete marker; NULL for live installs
     PRIMARY KEY (project_slug, core_slug)
+) STRICT
+
+[table] cores_oauth_broker_pending (tbl=cores_oauth_broker_pending)
+CREATE TABLE cores_oauth_broker_pending (
+  -- The opaque state handle minted by the instance; also the join key Google
+  -- echoes back on the callback.
+  state         TEXT    NOT NULL PRIMARY KEY,
+  -- Which instance registered it. Checked against the relay target so a state
+  -- minted for one instance can never be dispatched to another.
+  project_slug  TEXT    NOT NULL,
+  -- Absolute URL the authorization code is relayed to (the instance's
+  -- `/api/cores/oauth/google/ingest`).
+  dispatch_url  TEXT    NOT NULL,
+  -- Epoch ms. Past this the row is dead even if never consumed.
+  expires_at    INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL
 ) STRICT
 
 [table] cores_oauth_pending (tbl=cores_oauth_pending)

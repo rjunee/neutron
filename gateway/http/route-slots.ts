@@ -194,6 +194,7 @@ export interface RouteSlotComposition
   cores_surface?: SurfaceHandler
   /** Cores OAuth — `/api/cores/oauth/google/*`. */
   cores_oauth_surface?: SurfaceHandler
+  cores_oauth_broker_surface?: SurfaceHandler
   /** WAVE 2 Track A — `/api/cores/integrations` + `/api/cores/api-keys/*`. */
   cores_integrations_surface?: SurfaceHandler
   /**
@@ -663,6 +664,21 @@ export const ROUTE_SLOTS = [
     composition: 'app_backups_surface',
     gated: true,
     promote: (c) => pluckHandler(c.app_backups_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
+  // 0m1a. Cores OAuth BROKER — `/oauth/cores/pending/register` +
+  //        `/oauth/cores/google/callback`. NOT under `/api/`: the callback path
+  //        is the URI registered on the Google OAuth client, so it is a
+  //        deployment-visible contract rather than an internal route, and moving
+  //        it means re-registering with Google. Sits ahead of the instance-side
+  //        OAuth surface below because a self-hosted Open instance serves BOTH
+  //        roles and the broker's paths must not be shadowed by anything.
+  slot({
+    key: 'coresOAuthBroker',
+    rung: 'cores-oauth-broker',
+    composition: 'cores_oauth_broker_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.cores_oauth_broker_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
   // 0m1. Cores OAuth — `/api/cores/oauth/google/*`. BEFORE cores.

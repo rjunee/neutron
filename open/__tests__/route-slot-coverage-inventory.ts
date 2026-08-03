@@ -107,6 +107,18 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
       'the four /api/app/projects/<id>/launcher routes behind the Apps tab — list, reorder, rename, uninstall (ISSUES #447)',
   },
   {
+    rung: 'cores-oauth',
+    composition: 'cores_oauth_surface',
+    serves:
+      'the Google grant routes /api/cores/oauth/google/{start,ingest,disconnect,status} — mounted once a per-deployment client is configured (ISSUES #448)',
+  },
+  {
+    rung: 'cores-oauth-broker',
+    composition: 'cores_oauth_broker_surface',
+    serves:
+      "Google's registered redirect target /oauth/cores/google/callback + the /oauth/cores/pending/register state registry behind it; a self-hosted Open instance is its own broker (ISSUES #448)",
+  },
+  {
     rung: 'chat-history',
     composition: 'chat_history_surface',
     serves: 'GET /api/v1/chat/history — the web chat hydrates its transcript on load',
@@ -281,13 +293,6 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
     why: 'No composer sets it; the field has no setter anywhere outside its own declaration (gateway/composition/input/http-surfaces-input.ts:104).',
     costs:
       'The dead-REPL detector tells the operator to POST /admin/respawn-session (runtime/adapters/claude-code/persistent/dead-repl-detector.ts:110,125,134 and channel-unbound-respawn.ts:103). Following that instruction hits a 404, so the documented recovery for a wedged REPL does not exist.',
-  },
-  {
-    rung: 'cores-oauth',
-    composition: 'cores_oauth_surface',
-    why: 'gateway/composition/wire-cores-surfaces.ts:102 auto-builds it only when `cores.oauth` is supplied, and no composer supplies that field. Not env-conditional: the field has no setter at all.',
-    costs:
-      'Settings routes to Integrations (app/app/settings.tsx:378) and the Google connect/status/disconnect calls 404 (app/lib/cores-client.ts:161,168,175), so Google-backed Cores cannot be connected from the app.',
   },
 
   // ── Dead at both ends → mounting alone would serve nothing ────────────────
