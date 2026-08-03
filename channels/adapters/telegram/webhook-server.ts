@@ -57,6 +57,15 @@ export interface TelegramUpdate {
   }
 }
 
+/** Sliding-window cap on accepted updates. */
+export interface TelegramWebhookRateLimit {
+  windowMs: number
+  maxRequests: number
+}
+
+/** Default: generous for a human, bounded for a runaway. */
+const DEFAULT_RATE_LIMIT: TelegramWebhookRateLimit = { windowMs: 60_000, maxRequests: 20 }
+
 export interface WebhookHandlerOptions {
   /**
    * The bot's own user id. Used in concert with the SelfEchoFilter to drop
@@ -66,6 +75,22 @@ export interface WebhookHandlerOptions {
   /** Per-instance secret token registered with setWebhook. Required. */
   secret_token: string
   receiver: IncomingEventReceiver
+  /**
+   * Cap on ACCEPTED updates per window (ISSUES #442). Default 20 / 60s.
+   *
+   * The threat is not a stranger: an unauthenticated request is refused by the
+   * constant-time secret compare above without parsing a body. It is whoever
+   * HOLDS the secret — a compromised or careless bot token — because every
+   * accepted update drives a real agent turn that spends tokens and wall-clock.
+   * The cap is what turns "uncapped spend" into "bounded spend".
+   *
+   * 20/60s is chosen to be far above a human owner's real rate (a person sends
+   * a handful of messages a minute) and far below anything that could run a
+   * bill up unattended.
+   */
+  rate_limit?: TelegramWebhookRateLimit
+  /** DI clock (tests). */
+  now?: () => number
   /** Optional self-echo filter; recommended in production. */
   self_echo_filter?: SelfEchoFilter
   /**
@@ -255,6 +280,10 @@ export async function dispatchStartCommandIfOnboarding(
  * Telegram doesn't retry a malformed update for hours.
  */
 export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request) => Promise<Response> {
+  // PER-SURFACE bucket, deliberately not module-level: two gateways mounting a
+  // webhook in one process must not share a window, or one instance's traffic
+  // silences the other's. The admin-respawn limiter took this same correction.
+  const rateHits: number[] = []
   return async (req) => {
     if (req.method !== 'POST') {
       return new Response('method not allowed', { status: 405 })
@@ -284,6 +313,39 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
       !timingSafeEqual(providedBuf, expectedBuf)
     ) {
       return new Response('forbidden', { status: 403 })
+    }
+
+    // ── Accepted-update cap (ISSUES #442) ─────────────────────────────────
+    // Placed AFTER the secret compare so an unauthenticated caller still costs
+    // only a constant-time compare, and BEFORE the body parse so an over-limit
+    // request costs a timestamp push and nothing else — no JSON, no dispatch,
+    // no agent turn.
+    //
+    // OVER-LIMIT ANSWERS 200, NOT 429, AND THAT IS THE WHOLE DESIGN DECISION.
+    // Telegram re-sends non-2xx for hours — this file already returns 200 for
+    // malformed JSON and for dropped callback queries for exactly that reason.
+    // A 429 here would convert a spend problem into a RETRY STORM and make the
+    // limiter the cause of the load it exists to cap. Acking and dropping costs
+    // Telegram nothing, costs us nothing, and leaves the sender's own retry
+    // machinery idle.
+    //
+    // The bucket is per-mounted-surface, not module-global: two gateways in one
+    // process must not share a window (the same correction the admin-respawn
+    // limiter took).
+    {
+      const cfg = opts.rate_limit ?? DEFAULT_RATE_LIMIT
+      const nowMs = (opts.now ?? Date.now)()
+      const cutoff = nowMs - cfg.windowMs
+      // Drop expired hits first so a quiet period always restores full budget.
+      while (rateHits.length > 0 && (rateHits[0] as number) <= cutoff) rateHits.shift()
+      if (rateHits.length >= cfg.maxRequests) {
+        log.warn('rate_limited_update_dropped', {
+          window_ms: cfg.windowMs,
+          max_requests: cfg.maxRequests,
+        })
+        return new Response('ok', { status: 200 })
+      }
+      rateHits.push(nowMs)
     }
 
     let parsed: unknown
