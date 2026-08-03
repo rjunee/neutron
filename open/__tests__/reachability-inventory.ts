@@ -65,6 +65,40 @@ export const CHAT_COMMANDS: readonly ChatCommandCapability[] = [
     filter: 'buildStatusChatCommandFilter',
   },
   {
+    id: 'remind',
+    command: '/remind',
+    can: 'Schedule a nudge from chat',
+    broken:
+      'Typing /remind in chat no longer schedules anything — the message is sent to the model instead.',
+    // BARE `/remind`, deliberately. The old exclusion was right that a
+    // phrasing-dependent probe is untrustworthy: a reminder body has to survive
+    // `parseAndExecuteRemindCommand`, so a red would be ambiguous between "the
+    // filter is unwired" and "that phrasing stopped parsing". The bare command
+    // has no phrasing to get wrong — `chat-commands.ts:208` returns
+    // `{kind:'help'}` for it, and `executeRemindCommand:681` answers that as its
+    // FIRST branch, before touching the backend. So a red here can only mean the
+    // filter is unreachable, which is the one thing this gate is for.
+    probe: '/remind',
+    filter: 'buildRemindersChatCommandFilter',
+  },
+  {
+    id: 'cal',
+    command: '/cal',
+    can: "Read and write the owner's calendar from chat",
+    broken:
+      'Typing /cal in chat no longer reaches the calendar — the message is sent to the model instead.',
+    // BARE `/cal`, for the credential half of the same problem. The old exclusion
+    // was right that dispatching into the calendar Core is not deterministic
+    // without Google credentials — but `parseCalCommand:117` returns
+    // `{kind:'help'}` for an empty body and `executeCalCommand:135` answers it
+    // with a static string WITHOUT touching `ctx.client`. So this probe is
+    // identical on a connected box and a fresh install, which is exactly the
+    // property the exclusion said was missing. Same technique `/code help`
+    // already uses above.
+    probe: '/cal',
+    filter: 'buildCalendarChatCommandFilter',
+  },
+  {
     id: 'reset',
     command: '/reset',
     can: 'Clear the conversation and start fresh',
@@ -248,15 +282,7 @@ export const CHAT_COMMAND_EXCLUSIONS: ReadonlyArray<{
     why: 'The chain combinator itself. It claims no command of its own — it is the thing every probe above runs THROUGH, so the probes already prove it is composed.',
   },
   {
-    filter: 'buildRemindersChatCommandFilter',
-    why: 'NOT PROBED, and this is a real coverage gap rather than a design choice. `/remind` is claimed only when `parseAndExecuteRemindCommand` returns a response, so the claim depends on the parse succeeding — which makes "the chain did not claim it" ambiguous between "the filter is unwired" and "that phrasing did not parse". Probing it needs a phrasing proven stable against the parser first; until then a red here would not be trustworthy, so it stays out. See docs/SYSTEM-OVERVIEW.md § Reachability gate.',
-  },
-  {
-    filter: 'buildCalendarChatCommandFilter',
-    why: 'NOT PROBED, and this is a real coverage gap rather than a design choice. `/cal` dispatches into the calendar Core, which on a box with no Google credentials answers over a path this gate has not proven to be deterministic. A probe that is only reliable on a connected box would fire on healthy fresh installs. See docs/SYSTEM-OVERVIEW.md § Reachability gate.',
-  },
-  {
     filter: 'buildCalendarChatCommandDispatcher',
-    why: 'The INNER half of `/cal` (gateway/cores/calendar-wiring.ts:87) — the object `buildCalendarChatCommandFilter` lazily imports and wraps at gateway/boot-chat-command-filters.ts:233-236. It claims no command the outer filter does not already carry, so it inherits that entry\'s exclusion and its cost verbatim: `/cal` is unprotected end to end, and unwiring EITHER half turns nothing red. Note this factory is named `…Dispatcher`, not `…ChatCommandFilter`: the previous scan could not have seen it under any search root, and it is here only because the widened scan matches on the declared RETURN TYPE as well as the name.',
+    why: 'The INNER half of `/cal` (gateway/cores/calendar-wiring.ts:87) — the object `buildCalendarChatCommandFilter` lazily imports and wraps at gateway/boot-chat-command-filters.ts:233-236, and it claims no command the outer filter does not already carry. It is excluded because it is COVERED, not because it is unprotected: the `/cal` probe above types the command end to end, and since the outer filter does nothing but lazily construct and delegate to this object, unwiring EITHER half now reds that probe. That is a change of kind from the previous note, which recorded this factory as inheriting an exclusion and left `/cal` unprotected at both ends. Note the name is `…Dispatcher`, not `…ChatCommandFilter`: the scan sees it only because it matches on the declared RETURN TYPE as well as the name.',
   },
 ]
