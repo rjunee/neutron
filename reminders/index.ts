@@ -17,7 +17,7 @@ export type {
   ReminderRecurrence,
 } from './store.ts'
 
-export { ReminderTickLoop } from './tick.ts'
+export { ReminderTickLoop, REMINDER_FALLBACK_TIME_ZONE } from './tick.ts'
 export type {
   ReminderDispatcher,
   ReminderFiredHook,
@@ -125,6 +125,19 @@ export {
   seedBundledRituals,
   registerBundledRituals,
 } from './bundled-rituals.ts'
+
+// Boot ENABLE of the bundled rituals — the missing half of the above. Seeding +
+// registering makes the defs KNOWN; nothing ever requested the owner's approval
+// for them, so no approvable prompt was ever emitted and a bundled ritual could
+// never fire. This sweep drives the existing `enable()` path once per ritual.
+export {
+  enableBundledRitualsAtBoot,
+  BUNDLED_RITUAL_DEFAULT_CRONS,
+} from './bundled-ritual-enable.ts'
+export type {
+  EnableBundledRitualsInput,
+  EnableBundledRitualsResult,
+} from './bundled-ritual-enable.ts'
 
 // Extracted register-time def validation (plan task 8) — shared by the registry
 // and the agent-callable registration service.
