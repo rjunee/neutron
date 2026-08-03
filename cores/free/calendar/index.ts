@@ -77,7 +77,16 @@ export {
   type GoogleCalendarClientOptions,
   type InviteInput,
   type TimeSlot,
+  type AccountReadOutcome,
+  type CalendarListAcrossAccounts,
 } from './src/backend.ts'
+
+export {
+  buildMultiAccountGoogleCalendarClient,
+  type CalendarAccountDescriptor,
+  type CalendarAccountsResolver,
+  type MultiAccountCalendarClientOptions,
+} from './src/multi-account.ts'
 
 export {
   buildTools,

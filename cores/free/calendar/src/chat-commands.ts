@@ -33,6 +33,7 @@
 
 import {
   DEFAULT_CALENDAR_ID,
+  type AccountReadOutcome,
   type CalendarClient,
   type CalendarEventRow,
   type TimeSlot,
@@ -446,14 +447,29 @@ async function executeShow(
     if (ctx.project_id !== undefined && ctx.project_id.length > 0) {
       listInput.project_id = ctx.project_id
     }
-    const results = await ctx.client.list(listInput)
+    // Read across every connected account when the client fans out, so a
+    // failing account is NAMED instead of silently shortening the agenda.
+    const across =
+      ctx.client.listAcrossAccounts !== undefined
+        ? await ctx.client.listAcrossAccounts(listInput)
+        : { events: await ctx.client.list(listInput), accounts: [] }
+    const results = across.events
+    const degraded = degradedAccountsLine(across.accounts)
+    // Only label lines when there is genuinely more than one account to tell
+    // apart — a suffix on every line of a single-account agenda is noise.
+    const multi = across.accounts.length > 1
     if (results.length === 0) {
-      return { text: `No events for ${cmd.label}.`, data: { events: [] } }
+      return {
+        text: `No events for ${cmd.label}.${degraded}`,
+        data: { events: [], accounts: across.accounts },
+      }
     }
-    const lines = results.map((row) => `• ${formatRow(row, ctx.user_tz)}`)
+    const lines = results.map(
+      (row) => `• ${formatRow(row, ctx.user_tz)}${multi ? accountSuffix(row) : ''}`,
+    )
     return {
-      text: `${results.length} event(s) for ${cmd.label}:\n${lines.join('\n')}`,
-      data: { events: results },
+      text: `${results.length} event(s) for ${cmd.label}:\n${lines.join('\n')}${degraded}`,
+      data: { events: results, accounts: across.accounts },
     }
   } catch (err) {
     return mapClientError(err)
@@ -601,7 +617,31 @@ function formatRow(row: CalendarEventRow, tz?: string): string {
         hour: 'numeric',
         minute: '2-digit',
       })
+  // Name the account only when it is knowable AND several are connected —
+  // suffixing every line on a single-account install would be noise. The
+  // caller decides; `showAccount` carries that decision.
   return `${time} — ${row.title}`
+}
+
+/**
+ * Which account a row came from, rendered for a human. Empty when unknown, so
+ * a single-account install and the in-memory client read exactly as before.
+ */
+function accountSuffix(row: CalendarEventRow): string {
+  const who = row.account_email ?? row.account_id
+  return who === undefined ? '' : ` [${who}]`
+}
+
+/**
+ * One line naming every account that could NOT be read. This is the difference
+ * between an owner seeing a short day and an owner knowing their work calendar
+ * is missing from it — the failure has to reach the human, not just the log.
+ */
+function degradedAccountsLine(accounts: readonly AccountReadOutcome[]): string {
+  const failed = accounts.filter((a) => !a.ok)
+  if (failed.length === 0) return ''
+  const named = failed.map((a) => a.account_email ?? a.account_id).join(', ')
+  return `\n⚠ Could not read ${named} — reconnect ${failed.length === 1 ? 'that account' : 'those accounts'}; events from ${failed.length === 1 ? 'it' : 'them'} are missing above.`
 }
 
 function formatSlot(slot: TimeSlot, tz?: string): string {

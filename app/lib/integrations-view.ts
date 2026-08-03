@@ -47,6 +47,23 @@ function coresDetail(cores: string[]): string {
   return `Used by ${cores.join(', ')}`;
 }
 
+/**
+ * Human title for an OAuth row.
+ *
+ * Labels became COMPOSITE when a service gained multiple accounts:
+ * `<service>#<account_key>`, where the key is a hash. `title` is rendered
+ * straight into the Integrations list, so using the raw label would put a hex
+ * digest in front of the owner — `google_calendar#a1b2c3d4`. Strip the account
+ * key and humanise the service; the ACCOUNT is already identified on the
+ * status line ("Connected as …"), so it is not repeated here.
+ *
+ * Legacy un-keyed labels have no `#` and pass through the same path unchanged.
+ */
+function oauthTitle(label: string): string {
+  const service = label.split('#')[0] ?? label;
+  return service.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function oauthRow(account: OAuthAccountIntegration): IntegrationRow {
   const statusLabel = account.connected
     ? account.email !== null
@@ -54,9 +71,11 @@ export function oauthRow(account: OAuthAccountIntegration): IntegrationRow {
       : 'Connected'
     : 'Not connected';
   return {
+    // `id` stays the FULL composite label — it is the stable row key and must
+    // stay unique across two accounts on the same service.
     id: account.label,
     kind: 'oauth',
-    title: account.label,
+    title: oauthTitle(account.label),
     connected: account.connected,
     statusLabel,
     detail: coresDetail(account.core_slugs),

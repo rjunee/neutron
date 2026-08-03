@@ -27,6 +27,7 @@ import { applyDraftVisibilityLabels } from './draft-policy.ts'
 import {
   DEFAULT_LABEL,
   type EmailSummarizer,
+  type AccountReadOutcome,
   type EmailSummary,
   type GmailClient,
   type GmailDraftInput,
@@ -53,7 +54,15 @@ import {
 import type { EmailProjectCache } from './cache.ts'
 
 export interface EmailListToolInput extends GmailListInput {}
-export interface EmailListToolOutput extends GmailListResult {}
+export interface EmailListToolOutput extends GmailListResult {
+  /**
+   * Per-account read outcome, present when the client spans several connected
+   * accounts. An entry with `ok:false` means that inbox's messages are MISSING
+   * from `results` — the agent must say so rather than presenting the merged
+   * list as everything the owner has received.
+   */
+  accounts?: AccountReadOutcome[]
+}
 
 export interface EmailReadToolInput {
   message_id: string
@@ -186,6 +195,13 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     tool_name: 'email_list',
     capability_required: READ_CAPABILITY,
     fn: async (input: EmailListToolInput): Promise<EmailListToolOutput> => {
+      // Prefer the across-accounts read when the client fans out, so the agent
+      // is told WHICH inbox failed rather than being handed a short list it
+      // would report to the owner as a quiet morning.
+      if (deps.client.listMessagesAcrossAccounts !== undefined) {
+        const out = await deps.client.listMessagesAcrossAccounts(input)
+        return { results: out.results, accounts: out.accounts }
+      }
       return deps.client.listMessages(input)
     },
   })

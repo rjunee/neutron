@@ -22,6 +22,16 @@ export interface GmailMessageMeta {
   /** ISO-8601 datetime derived from Gmail's epoch-ms `internalDate`. */
   internal_date: string
   label_ids: string[]
+  /**
+   * WHICH connected account this message was read from. Stamped by the fan-out
+   * client (`buildMultiAccountGmailClient`) on every row it returns. A merged
+   * inbox is unusable without it — an owner cannot tell a client email from a
+   * personal one, and cannot tell which account a reply would come from.
+   * Absent on single-backend clients that never fan out (the in-memory fake).
+   */
+  account_id?: string
+  /** Address of the account in `account_id`, when known. */
+  account_email?: string
 }
 
 /**
@@ -264,6 +274,37 @@ export interface GmailClient {
    * `Neutron/<project_id>`) to a freshly-created draft's thread.
    */
   modifyThread(input: GmailThreadModifyInput): Promise<GmailThreadModifyResult>
+  /**
+   * `listMessages`, plus the per-account outcome of the read. Present ONLY on
+   * the fan-out client — a single-backend client has nothing to report.
+   *
+   * `listMessages` alone cannot distinguish "that inbox is quiet" from "that
+   * inbox could not be read". Callers that render for a human (the `/email`
+   * filter, the `email_list` tool) use this to name the account that failed.
+   */
+  listMessagesAcrossAccounts?(
+    input: GmailListInput,
+  ): Promise<GmailListAcrossAccounts>
+}
+
+/**
+ * Outcome of reading ONE account during a fan-out. `ok:false` carries the
+ * reason so a broken grant reaches the owner instead of being absorbed into a
+ * quieter-looking inbox.
+ */
+export interface AccountReadOutcome {
+  account_id: string
+  account_email: string | null
+  ok: boolean
+  /** Failure reason when `ok` is false. */
+  error?: string
+}
+
+export interface GmailListAcrossAccounts {
+  /** Merged messages across every account that answered, newest first. */
+  results: GmailMessageMeta[]
+  /** One entry per connected account, in fan-out order. */
+  accounts: AccountReadOutcome[]
 }
 
 /**

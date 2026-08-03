@@ -443,14 +443,31 @@ describe('GET /api/cores/oauth/google/status', () => {
 
     const second = await authedFetch(bench.base, '/api/cores/oauth/google/status')
     const secondBody = (await second.json()) as {
-      google: { connected: boolean; labels: Array<{ label: string; connected: boolean; email: string | null }> }
+      google: {
+        connected: boolean
+        labels: Array<{
+          label: string
+          service: string
+          account_key: string | null
+          connected: boolean
+          email: string | null
+        }>
+      }
     }
     expect(secondBody.google.connected).toBe(true)
+    // Status is now one row per connected ACCOUNT, so a service is located by
+    // `service` and its label carries the account key. An owner with three
+    // accounts gets three rows here — which is what lets the admin surface
+    // show and disconnect them individually.
     const calendarStatus = secondBody.google.labels.find(
-      (l) => l.label === 'google_calendar',
+      (l) => l.service === 'google_calendar' && l.connected,
     )
     expect(calendarStatus?.connected).toBe(true)
     expect(calendarStatus?.email).toBe('user@example.com')
+    expect(calendarStatus?.account_key).not.toBeNull()
+    expect(calendarStatus?.label).toBe(
+      `google_calendar#${calendarStatus?.account_key ?? ''}`,
+    )
   })
 })
 

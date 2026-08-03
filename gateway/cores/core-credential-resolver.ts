@@ -25,6 +25,15 @@
  *   2. Legacy Google OAuth backing store — `OAuthTokenManager.getAccessToken`
  *      (transparent refresh) for the three Google labels, as the global default.
  *   3. `null` — uncredentialed (the Core renders its graceful empty state).
+ *
+ * ── MANY ACCOUNTS PER SERVICE ──────────────────────────────────────────────────
+ * `accountsFor(service)` — not `resolve` — is the primitive. It returns EVERY
+ * connected account for a service, each with its own lazy token accessor, so a
+ * Core that reads (calendar, mail) can span all of them and tag what it found.
+ * `resolve` is the same chain narrowed to the primary account, which is what a
+ * write path and a single-account service want. Keeping one primitive means
+ * "which accounts are connected" is answered in one place, and the resolution
+ * ORDER above holds identically whether you ask for one account or all of them.
  */
 
 import type { OAuthTokenManager } from './oauth-token-manager.ts'
@@ -62,6 +71,24 @@ export function scopeForService(service: string): ServiceScope {
   return SERVICE_SCOPE[service] ?? 'project'
 }
 
+/** `account_id` for a manually-pasted `project_credentials` token. */
+export const MANUAL_ACCOUNT_ID = 'manual' as const
+/** `account_id` for a legacy un-keyed OAuth grant (pre-multi-account install). */
+export const LEGACY_ACCOUNT_ID = 'default' as const
+
+/**
+ * One connected account, as a Core consumes it: an id to tag results with, the
+ * address to show the owner, and a lazy token accessor for THAT account.
+ */
+export interface ResolvedAccount {
+  /** Stable id for this account within its service. Tags every returned item. */
+  account_id: string
+  /** Account address, when known. Null for a manually-pasted token. */
+  account_email: string | null
+  /** Resolve this account's access token. Throws on a failed refresh. */
+  accessToken: () => Promise<string | null>
+}
+
 export interface CoreCredentialResolverInput {
   /**
    * Server-derived owner boundary — the FROZEN instance handle (branded
@@ -96,13 +123,20 @@ export class CoreCredentialResolver {
   }
 
   /**
-   * Resolve a plaintext credential for `service` against the active project
-   * (per-project → global → legacy → unset). The active project id is read from
-   * the ambient `runWithActiveProject` frame unless `opts.projectId` overrides it
-   * (tests + call sites that already hold the id). GLOBAL-scope services ignore
-   * the active project entirely.
+   * EVERY connected account for `service`, primary first, each carrying its own
+   * lazy token accessor. Same resolution order as `resolve`; the active project
+   * id is read from the ambient `runWithActiveProject` frame unless
+   * `opts.projectId` overrides it. GLOBAL-scope services ignore it entirely.
+   *
+   * A per-project / global `project_credentials` row is a MANUALLY supplied
+   * token for one account, so it yields exactly one account and short-circuits
+   * the OAuth grants — the same precedence `resolve` has always had, just
+   * expressed once.
    */
-  async resolve(service: string, opts?: { projectId?: string }): Promise<string | null> {
+  async accountsFor(
+    service: string,
+    opts?: { projectId?: string },
+  ): Promise<ResolvedAccount[]> {
     const scope = scopeForService(service)
     const activeProjectId = opts?.projectId ?? currentActiveProjectId()
     // GLOBAL-scope services (Email/Calendar) resolve instance-wide: force the
@@ -111,15 +145,64 @@ export class CoreCredentialResolver {
 
     // 1. project_credentials — per-project → global (THE path).
     const resolved = this.store.resolve(this.owner_slug, effectiveProjectId, service)
-    if (resolved !== null) return resolved.plaintext
+    if (resolved !== null) {
+      const plaintext = resolved.plaintext
+      return [
+        {
+          account_id: MANUAL_ACCOUNT_ID,
+          account_email: null,
+          accessToken: async (): Promise<string | null> => plaintext,
+        },
+      ]
+    }
 
-    // 2. legacy Google OAuth backing store — the global default (transparent refresh).
+    // 2. Google OAuth backing store — the global default (transparent refresh),
+    //    fanned out over every account granted for this service.
     if (this.oauthTokens !== null && GOOGLE_OAUTH_LABELS.has(service)) {
-      return await this.oauthTokens.getAccessToken(service)
+      const tokens = this.oauthTokens
+      const grants = await tokens.listGrants(service)
+      return grants.map((grant) => ({
+        // A legacy un-keyed grant has no account key; it is the only account of
+        // its kind by construction, so a fixed id is unambiguous and stable.
+        account_id: grant.account_key ?? LEGACY_ACCOUNT_ID,
+        account_email: grant.email,
+        accessToken: (): Promise<string> => tokens.getAccessToken(grant.label),
+      }))
     }
 
     // 3. unset.
-    return null
+    return []
+  }
+
+  /**
+   * Resolve a plaintext credential for `service` against the active project
+   * (per-project → global → legacy → unset), narrowed to the PRIMARY account.
+   * The write paths and single-account services use this.
+   */
+  async resolve(service: string, opts?: { projectId?: string }): Promise<string | null> {
+    const accounts = await this.accountsFor(service, opts)
+    const primary = accounts[0]
+    if (primary === undefined) return null
+    return await primary.accessToken()
+  }
+
+  /**
+   * A lazy accounts resolver a fan-out Core client consumes verbatim. Read at
+   * CALL time, so an account connected after boot joins the fan-out with no
+   * restart — the multi-account counterpart of `accessorFor`. Fail-soft: any
+   * error resolving the SET of accounts degrades to "nothing connected" rather
+   * than throwing, exactly as `accessorFor` does. A failure to read one
+   * account's TOKEN is a different thing and is surfaced per-account by the
+   * fan-out client, never swallowed here.
+   */
+  accountsResolverFor(service: string): () => Promise<ResolvedAccount[]> {
+    return async (): Promise<ResolvedAccount[]> => {
+      try {
+        return await this.accountsFor(service)
+      } catch {
+        return []
+      }
+    }
   }
 
   /**

@@ -78,6 +78,12 @@ export {
   type GoogleGmailClientOptions,
   type InMemoryGmailSeed,
   type SeededInMemoryGmailClient,
+  type AccountReadOutcome,
+  type GmailListAcrossAccounts,
+  buildMultiAccountGmailClient,
+  type GmailAccountDescriptor,
+  type GmailAccountsResolver,
+  type MultiAccountGmailClientOptions,
 } from './src/backend.ts'
 
 export {

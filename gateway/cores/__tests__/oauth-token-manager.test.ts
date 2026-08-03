@@ -12,6 +12,8 @@ import {
   OAuthTokenManager,
   refreshLabel,
   metaLabel,
+  accountKeyFromEmail,
+  serviceAccountLabel,
   GOOGLE_TOKEN_URL,
   GOOGLE_USERINFO_URL,
   GOOGLE_REVOKE_URL,
@@ -87,21 +89,25 @@ test('exchangeAndPersist writes three rows + ciphertexts != plaintext', async ()
     labels: [LABEL],
   })
   const rows = await secretsStore.list({ owner_handle: OWNER, kind: 'oauth_token' })
+  // Multi-account: a grant is filed under `<service>#<account_key>`, keyed on
+  // the address userinfo resolved, so a second account ADDS a grant rather than
+  // overwriting this one.
+  const GRANT = serviceAccountLabel(LABEL, accountKeyFromEmail('user@example.com'))
   const labels = rows.map((r) => r.label).sort()
-  expect(labels).toEqual([LABEL, metaLabel(LABEL), refreshLabel(LABEL)].sort())
+  expect(labels).toEqual([GRANT, metaLabel(GRANT), refreshLabel(GRANT)].sort())
   // Ciphertext is not the plaintext.
-  const accessRow = rows.find((r) => r.label === LABEL)!
+  const accessRow = rows.find((r) => r.label === GRANT)!
   expect(accessRow.ciphertext.includes('access-1')).toBe(false)
   // access row has expires_at set.
   expect(accessRow.expires_at).toBe(1_700_000_000_000 + 3600 * 1000)
   // refresh row has no expiry.
-  const refreshRow = rows.find((r) => r.label === refreshLabel(LABEL))!
+  const refreshRow = rows.find((r) => r.label === refreshLabel(GRANT))!
   expect(refreshRow.expires_at).toBeNull()
   // meta row contains scopes + email.
   const metaPlain = await secretsStore.get({
     owner_handle: OWNER,
     kind: 'oauth_token',
-    label: metaLabel(LABEL),
+    label: metaLabel(GRANT),
   })
   expect(metaPlain).not.toBeNull()
   const meta = JSON.parse(metaPlain!) as { scopes: string[]; email: string | null }

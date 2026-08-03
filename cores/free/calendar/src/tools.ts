@@ -30,6 +30,7 @@ import {
   DEFAULT_CALENDAR_ID,
   durationMinutes,
   parseAgenda,
+  type AccountReadOutcome,
   type CalendarClient,
   type CalendarCreateInput,
   type CalendarEventRow,
@@ -46,6 +47,13 @@ export interface CalendarListToolInput extends CalendarListInput {}
 
 export interface CalendarListToolOutput {
   results: CalendarEventRow[]
+  /**
+   * Per-account read outcome, present when the client spans several connected
+   * accounts. An entry with `ok:false` means that account's events are MISSING
+   * from `results` — the agent must say so rather than presenting the merged
+   * list as the owner's whole day.
+   */
+  accounts?: AccountReadOutcome[]
 }
 
 export interface CalendarCreateToolInput extends CalendarCreateInput {}
@@ -157,6 +165,13 @@ export function buildTools(deps: ToolDeps): BuiltTools {
     tool_name: 'calendar_list',
     capability_required: READ_CAPABILITY,
     fn: async (input: CalendarListToolInput): Promise<CalendarListToolOutput> => {
+      // Prefer the across-accounts read when the client fans out, so the agent
+      // is told WHICH account failed rather than being handed a short list it
+      // would report to the owner as a quiet day.
+      if (deps.client.listAcrossAccounts !== undefined) {
+        const out = await deps.client.listAcrossAccounts(input)
+        return { results: out.events, accounts: out.accounts }
+      }
       const results = await deps.client.list(input)
       return { results }
     },
