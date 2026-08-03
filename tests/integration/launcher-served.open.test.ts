@@ -138,11 +138,18 @@ async function boot(): Promise<Harness> {
   })
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)
-  if (graph.fetch === undefined) throw new Error('composer produced no fetch')
+  // Narrow BOTH before Bun.serve: `exactOptionalPropertyTypes` makes passing an
+  // explicit `undefined` to an optional prop an error, so `websocket` has to be a
+  // value, not `X | undefined`.
+  if (graph.fetch === undefined || graph.websocket === undefined) {
+    throw new Error('composer produced no fetch/websocket')
+  }
+  const composedFetch = graph.fetch
+  const composedWebsocket = graph.websocket
   const server = Bun.serve({
     port: 0,
-    fetch: (req, srv) => graph.fetch!(req, srv),
-    websocket: graph.websocket,
+    fetch: (req, srv) => composedFetch(req, srv),
+    websocket: composedWebsocket,
   })
   const h: Harness = {
     base: `http://127.0.0.1:${server.port}`,
@@ -168,6 +175,20 @@ function authed(path: string, init: RequestInit = {}): RequestInit & { path: str
 async function call(h: Harness, path: string, init: RequestInit = {}): Promise<Response> {
   const { path: p, ...rest } = authed(path, init)
   return fetch(`${h.base}${p}`, rest)
+}
+
+/** One tile as the surface returns it. Declared locally — this suite asserts on
+ *  the JSON a client receives, so it deliberately does not import the engine type. */
+interface WireEntry {
+  slug: string
+  display_name: string
+}
+
+/** The surface returns the ordered list; tolerate either an `{entries}` envelope
+ *  or a bare array so the assertion is about persistence, not payload shape. */
+async function readEntries(h: Harness, path: string): Promise<WireEntry[]> {
+  const body = (await (await call(h, path)).json()) as WireEntry[] | { entries: WireEntry[] }
+  return Array.isArray(body) ? body : body.entries
 }
 
 test('the REAL Open composer supplies app_launcher_surface', async () => {
@@ -214,8 +235,8 @@ test('a rename survives a restart — the store is durable, not process-local', 
   const first = await boot()
   const base = `/api/app/projects/${PROJECT_ID}/launcher`
 
-  const before = await (await call(first, base)).json()
-  const target = (before.entries ?? before)[0]
+  const before = await readEntries(first, base)
+  const target = before[0]
   expect(target).toBeDefined()
 
   const renamed = await call(first, `${base}/rename`, {
@@ -230,9 +251,8 @@ test('a rename survives a restart — the store is durable, not process-local', 
   await dead.close()
 
   const second = await boot()
-  const after = await (await call(second, base)).json()
-  const entries = after.entries ?? after
-  const found = entries.find((e: { slug: string }) => e.slug === target.slug)
+  const after = await readEntries(second, base)
+  const found = after.find((e) => e.slug === target!.slug)
   expect(found?.display_name).toBe('Renamed By Owner')
   // Two full composer boots in one test.
 }, 60_000)
