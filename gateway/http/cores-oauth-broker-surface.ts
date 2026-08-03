@@ -47,6 +47,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import type { SQLQueryBindings } from 'bun:sqlite'
 
 import {
   signInternalRequest,
@@ -58,19 +59,26 @@ import { jsonResponse } from './surface-kit.ts'
  * The ONLY database capability the broker needs.
  *
  * Declared structurally rather than as `ProjectDb` so the SAME broker runs in
- * both deployments the flow supports. An Open self-host passes its `ProjectDb`
- * (which satisfies this shape as-is); Managed's central identity host — whose
- * store is a raw `bun:sqlite` Database, not a `ProjectDb` — passes a handful of
- * lines of adapter. Without this the "one flow, two deployments" decision
+ * both deployments the flow supports. An Open self-host passes its `ProjectDb`;
+ * Managed's central identity host — whose store is a raw `bun:sqlite` Database,
+ * not a `ProjectDb` — passes a handful of lines of adapter.
+ *
+ * The params type is `SQLQueryBindings[]` and NOT `unknown[]` for a reason worth
+ * keeping: `unknown[]` is WIDER, so by parameter contravariance a method that
+ * accepts `SQLQueryBindings[]` is not assignable to one declared to accept
+ * `unknown[]`, and `ProjectDb` — the very type this exists to accommodate —
+ * failed to satisfy it. The first draft asserted in this comment that ProjectDb
+ * "satisfies this shape as-is"; the typechecker disagreed. Matching the binding
+ * type is what makes the claim true rather than merely written down. Without this the "one flow, two deployments" decision
  * (SPEC § Decisions Log 2026-08-02) would have been aspirational: the broker
  * would have been mountable only where a `ProjectDb` happened to exist, and
  * Managed would have needed a second implementation, which is the dual code path
  * that decision exists to prevent.
  */
 export interface CoresOAuthBrokerDb {
-  get<R>(sql: string, params: unknown[]): R | null
-  run(sql: string, params: unknown[]): Promise<void>
-  runSync(sql: string, params: unknown[]): unknown
+  get<R>(sql: string, params: SQLQueryBindings[]): R | null
+  run(sql: string, params: SQLQueryBindings[]): Promise<void>
+  runSync(sql: string, params: SQLQueryBindings[]): unknown
 }
 
 /** Path the instance registers its pending state on. Must stay in lockstep with

@@ -23,6 +23,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { SQLQueryBindings } from 'bun:sqlite'
+
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
@@ -232,12 +234,13 @@ test('the broker runs on a RAW bun:sqlite handle too — the cross-deployment cl
   // the adapter Managed would actually write.
   const raw = db.raw()
   const adapted = {
-    get: <R,>(sql: string, params: unknown[]): R | null =>
+    get: <R,>(sql: string, params: SQLQueryBindings[]): R | null =>
       (raw.query(sql).get(...(params as never[])) as R | null) ?? null,
-    run: async (sql: string, params: unknown[]): Promise<void> => {
+    run: async (sql: string, params: SQLQueryBindings[]): Promise<void> => {
       raw.query(sql).run(...(params as never[]))
     },
-    runSync: (sql: string, params: unknown[]): unknown => raw.query(sql).run(...(params as never[])),
+    runSync: (sql: string, params: SQLQueryBindings[]): unknown =>
+      raw.query(sql).run(...(params as never[])),
   }
   const onRaw = createCoresOAuthBroker({
     db: adapted,
