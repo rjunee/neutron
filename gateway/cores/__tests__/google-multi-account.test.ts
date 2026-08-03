@@ -361,7 +361,9 @@ function fakeGoogleNet(input: {
       // rather than merely return nothing.
       return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })
     }
-    if (url.includes('/calendar/v3/calendars/')) {
+    // Match on the full origin + path prefix, not a substring: a bare
+    // `includes` would also match a host that merely CONTAINS the name.
+    if (url.startsWith('https://www.googleapis.com/calendar/v3/calendars/')) {
       calendarTokens.push(bearer)
       if (dead.has(bearer)) {
         return new Response('revoked', { status: 401 })
@@ -378,7 +380,7 @@ function fakeGoogleNet(input: {
         headers: { 'content-type': 'application/json' },
       })
     }
-    if (url.includes('gmail.googleapis.com')) {
+    if (url.startsWith('https://gmail.googleapis.com/')) {
       gmailTokens.push(bearer)
       if (dead.has(bearer)) {
         return new Response('revoked', { status: 401 })
