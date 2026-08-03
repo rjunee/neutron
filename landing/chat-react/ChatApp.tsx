@@ -1558,6 +1558,24 @@ function Composer({
           onChange={onPick}
         />
         <ComposerPrimitive.Input className="car-input" placeholder="Message Neutron…" autoFocus rows={1} />
+        {/*
+          There is deliberately NO Stop/cancel control here. One used to render
+          in this slot (`ComposerPrimitive.Cancel`) and it was permanently
+          inert: assistant-ui disables Cancel unless the runtime adapter
+          supplies an `onCancel`, and ours never did — see ISSUES #450. It was
+          removed on the owner's instruction ("I never asked for it, I don't
+          want it confusing us in the future").
+
+          Do NOT reinstate it as a UI change. The chat protocol has no inbound
+          cancel frame, and `aborted` already MEANS "the turn froze" to
+          `isFreezeTimeout` — so a Stop wired to the existing AbortController
+          would be read as a wedge and SILENTLY RE-DISPATCH the turn, billing
+          the owner twice for asking it to stop. Decision + full reasoning:
+          SPEC.md Decisions Log 2026-08-03.
+
+          While a turn is running the send button stays PRESENT but disabled,
+          rather than unmounting, so the composer doesn't reflow on every turn.
+        */}
         <ThreadPrimitive.If running={false}>
           <button
             type="button"
@@ -1570,9 +1588,9 @@ function Composer({
           </button>
         </ThreadPrimitive.If>
         <ThreadPrimitive.If running>
-          <ComposerPrimitive.Cancel className="car-send car-cancel" aria-label="Stop">
-            Stop
-          </ComposerPrimitive.Cancel>
+          <button type="button" className="car-send" aria-label="Send" disabled>
+            Send
+          </button>
         </ThreadPrimitive.If>
       </ComposerPrimitive.Root>
     </div>
