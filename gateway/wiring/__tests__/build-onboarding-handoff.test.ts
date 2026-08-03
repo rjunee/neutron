@@ -56,27 +56,30 @@ describe('mapWithBoundedConcurrency', () => {
       inFlight -= 1
       return 0
     })
-    expect(peak).toBeLessThanOrEqual(4)
-    expect(peak).toBeGreaterThan(1) // actually parallelised
+    // EXACTLY the pool size, not merely "more than one" (ISSUES #438).
+    //
+    // `mapWithBoundedConcurrency` pushes `min(concurrency, items.length)`
+    // workers in a synchronous loop, and each runs as far as its first `await`
+    // inside `fn` — which is after `inFlight += 1`. So all four increment
+    // before any timer resolves, and the peak is deterministically 4. This is
+    // strictly stronger than the old `> 1`: it proves the pool SATURATES, not
+    // just that something overlapped.
+    expect(peak).toBe(4)
   })
 
-  test('parallel batch is faster than serial when work is genuinely slow', async () => {
-    // 8 items × 50 ms per item.
-    // Serial would be ~400 ms; pool=4 should be roughly ~100 ms.
-    // Pin a generous upper bound that still proves parallelism.
-    const items = Array.from({ length: 8 }, (_, i) => i)
-    const t0 = Date.now()
-    await mapWithBoundedConcurrency(items, 4, async () => {
-      await new Promise<void>((r) => setTimeout(r, 50))
-      return 0
-    })
-    const elapsed = Date.now() - t0
-    // Serial floor would be 8 × 50 = 400ms. Parallel(4) floor is
-    // ceil(8/4) × 50 = 100ms. Assert WELL under the serial floor
-    // with extra CI slack — proving parallelism is the goal, not
-    // pinning a tight latency target.
-    expect(elapsed).toBeLessThan(350)
-  })
+  // DELETED (ISSUES #438): 'parallel batch is faster than serial when work is
+  // genuinely slow'.
+  //
+  // It ran 8 items × a real 50 ms sleep at pool=4 and asserted
+  // `elapsed < 350ms` against a ~100 ms parallel floor. That is a WALL-CLOCK
+  // PROXY for parallelism — and parallelism is already proven deterministically
+  // by the test above, which counts actual in-flight tasks. Two guards for one
+  // contract, and this was the one that races a contended CI runner.
+  //
+  // Deleting it loses no coverage: `peak === 4` above is a STRONGER statement
+  // than "it finished faster than serial would have" (a saturated pool is
+  // precisely why it is faster), and it cannot flake because it never consults
+  // a clock. The surviving assertion still reds if the pool is made serial.
 
   test('empty input returns empty array', async () => {
     const out = await mapWithBoundedConcurrency([], 4, async () => 'x')
