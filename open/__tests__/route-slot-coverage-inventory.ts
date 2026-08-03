@@ -333,9 +333,9 @@ export const UNMOUNTED_SLOTS: readonly RouteSlotUnservedEntry[] = [
   {
     rung: 'slug-check',
     composition: 'slug_check_handler',
-    why: 'No composer sets it.',
+    why: 'No composer sets it, and RE-VERIFIED 2026-08-03: the reason below is accurate, so nobody needs to investigate this a third time.',
     costs:
-      'Nothing calls the per-instance route. The name collides with a Managed control-plane route of the same shape, which is served by Managed itself and does not reach here — so this slot is a leftover of the slug-rename work, not a hosting seam.',
+      "None. The evidence, positively rather than by absence: this slot owns GET /api/v1/slug/check and NO client in app/, landing/ or open/ fetches any slug-check path. The picker that needs the check is the CLAIM page, which the hosting overlay serves and which fetches the SAME-ORIGIN relative '/v1/slug/check' — a different path, answered by the overlay's own route, never reaching an instance. And a self-hosted Open install has no claim flow and no picker at all: its identity is the frozen handle, so there is nothing to check availability for. So the capability is not missing, it lives where its only caller does. Deleting this slot would be correct and is deliberately deferred as low-value ladder churn rather than left as an open question.",
   },
   {
     rung: 'internal-cache-invalidate',
