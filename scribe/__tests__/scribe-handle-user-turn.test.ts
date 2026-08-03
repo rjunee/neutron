@@ -66,7 +66,10 @@ interface RecordedWrite {
 }
 
 /** Build a scribe wired to an inspectable substrate + recording writeEntity. */
-function makeHarness(extractionJson: string): {
+function makeHarness(
+  extractionJson: string,
+  model_preference?: ReadonlyArray<string>,
+): {
   scribe: ReturnType<typeof createScribe>
   specs: AgentSpec[]
   writes: Map<string, RecordedWrite>
@@ -120,6 +123,7 @@ function makeHarness(extractionJson: string): {
     budget: createState(join(mkdtempSync(join(tmpdir(), 'scribe-wire-b-')), '.s.json'), t0),
     writeEntity: recordingWriteEntity,
     now: () => t0,
+    ...(model_preference !== undefined ? { model_preference } : {}),
   })
   return { scribe, specs, writes }
 }
@@ -153,6 +157,31 @@ describe('scribe.handleUserTurn — direct extract→substrate→write wiring', 
     // Extraction is a tool-less single call with a model preference set.
     expect(spec.tools).toEqual([])
     expect(spec.model_preference.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test("a caller's model_preference reaches the substrate EXACTLY — the tier is not silently upgraded", async () => {
+    // M2 fix-lift. `runExtraction` falls back to `[getBestModel()]` when the
+    // caller passes no preference (`scribe/extract.ts:189-192`), and Open's
+    // wiring passed none — so every user turn spent a FRONTIER generation on
+    // background entity extraction. The predecessor system shipped the same bug
+    // and measured it at roughly $33/week before pinning the fast tier.
+    //
+    // This pins the contract that fix depends on: a preference handed to
+    // `createScribe` must arrive at the substrate spec UNCHANGED. `>= 1` (the
+    // assertion above) would pass just as happily while the frontier default
+    // silently won, so it could not have caught the bug.
+    const { scribe, specs } = makeHarness(EXTRACTION_JSON, ['test-fast-tier-model'])
+    scribe.handleUserTurn({
+      owner_slug: 'acme',
+      user_id: 'u-1',
+      topic_id: 'web:u-1',
+      text: LONG_TURN,
+      observed_at: t0,
+    })
+    await new Promise((r) => setTimeout(r, 30))
+
+    expect(specs.length).toBe(1)
+    expect(specs[0]!.model_preference).toEqual(['test-fast-tier-model'])
   })
 
   test('fans the parsed extraction to writeEntity with content + own-origin provenance', async () => {
