@@ -33,6 +33,34 @@ bundled Cores. Two different entrypoints hand `boot()` that composer:
   still safely run `bun start`, then falls back to the Open composer
   instead of an empty one).
 
+### Scope reconciliation — the boot step between migrations and composition
+
+Between "apply migrations" and "compose the graph", `boot()` runs
+`reconcileInstanceScopeOnProjectDb` (`migrations/scope-rekey.ts`). It exists
+because an instance's `url_slug` is RENAMEABLE while ~38 tables are scoped by
+it: the slug is resolved once at boot and handed to the whole module graph, so
+after a rename every pre-rename row is stranded under the old key while the
+running process reads the new one. `onboarding_state` is the damaging case —
+the composer's `isOnboardingActive` fail-closes on a miss, so a `completed`
+owner reads as still onboarding, which permanently defers the bundled-ritual
+sweep and pins the onboarding preamble + answer-extractor onto every turn
+(ISSUES #451).
+
+The repair migrates stranded rows FORWARD onto the boot slug rather than moving
+the key: the boot value is load-bearing for auth equality (`open/wiring/owner-gate.ts`
+and `landing/auth-gate.ts` compare the session cookie to it), and a self-host has
+no frozen handle to key on instead. `instance_scope_ledger` (migration 0114) is a
+singleton recording which key the DB is scoped to, so the common boot is a single
+SELECT; a disagreement (or an absent ledger, whose stale keys are discovered from
+`onboarding_state` as the anchor table) triggers a `VACUUM INTO` snapshot followed
+by one `BEGIN IMMEDIATE` transaction that moves the rows and writes the ledger
+last — crash-safe and idempotent by construction. Collisions resolve to the
+current-key row, except in `onboarding_state`, where the more authoritative row
+(terminal phase, then greater `last_advanced_at`) wins so a post-rename fresh row
+can never shadow `completed`. Columns naming ANOTHER instance are explicitly
+excluded; `migrations/__tests__/scope-sweep-coverage.test.ts` forces every new
+slug-ish column to be classified as swept or excluded.
+
 ## Cores
 
 Bundled Cores live under `cores/free/`. Each Core's production runtime is
