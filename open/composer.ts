@@ -266,7 +266,11 @@ import { OWNER_USER_ID, resolveNeutronHome, resolveOpenInstanceInfo } from './ow
 import { resolveConnectNodeIdentity } from './connect-node-identity.ts'
 import { buildConnectNodeWiring } from './wiring/connect-node.ts'
 import { buildConnectOwnerSurfaceDeps } from './wiring/connect-owner-surface.ts'
-import { connectHostFromBaseUrl, resolveConnectBaseUrl } from './connect-base-url.ts'
+import {
+  CONNECT_BASE_URL_ENV,
+  connectHostFromBaseUrl,
+  resolveConnectBaseUrlWithSource,
+} from './connect-base-url.ts'
 // L3 (2026-07) — build the Open agent-profile backend HERE (composition root)
 // and inject it into `mountOpenCores`, so the gateway core no longer imports the
 // `open` band.
@@ -756,11 +760,12 @@ export function buildOpenGraphComposer(
     // ISSUES #421 — Neutron Connect. Resolved HERE (early) so both halves share
     // one origin: the owner-side invite link the app renders, and the
     // data-locality disclosure the invitee sees before accepting.
-    const connectBaseUrl = resolveConnectBaseUrl({
+    const connectBaseUrlResolved = resolveConnectBaseUrlWithSource({
       env,
       bindHost,
       port: options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787),
     })
+    const connectBaseUrl = connectBaseUrlResolved.base_url
     // This install's OWN Ed25519 identity: it signs the collaborator bearers it
     // issues and trusts no key but its own. First boot mints + persists it.
     const connectIdentity = await resolveConnectNodeIdentity(owner_home)
@@ -1335,8 +1340,33 @@ export function buildOpenGraphComposer(
     // below reports it rather than failing silently.
     const coresGoogleClientId = (env[GOOGLE_CLIENT_ID_ENV] ?? '').trim()
     const coresGoogleClientSecret = (env[GOOGLE_CLIENT_SECRET_ENV] ?? '').trim()
-    const coresOAuthConfigured =
+    // The origin handed to Google MUST be one the owner declared. A fallback
+    // origin is a GUESS derived from the bind address, and the guess fails as far
+    // from here as a failure can: Google rejects the mismatch on its OWN error
+    // page, minutes later, with nothing naming this env var. Refusing to arm is
+    // the difference between a confusing `redirect_uri_mismatch` and a line in
+    // this instance's own boot log that says exactly what to set.
+    //
+    // Keyed on WHETHER IT WAS DECLARED, not on whether it looks like localhost.
+    // Google permits loopback redirect URIs for desktop-style clients, so a local
+    // self-hoster who DECLARES `http://localhost:8787` is legitimate and must not
+    // be blocked. A malformed value counts as undeclared — the owner believes
+    // they set it, which makes silently substituting a guess the worse failure.
+    const coresOAuthOriginDeclared = connectBaseUrlResolved.source === 'configured'
+    const coresOAuthClientPresent =
       coresGoogleClientId.length > 0 && coresGoogleClientSecret.length > 0
+    if (coresOAuthClientPresent && !coresOAuthOriginDeclared) {
+      log.error('cores_oauth_base_url_undeclared', {
+        detail:
+          `A Google client is configured but ${CONNECT_BASE_URL_ENV} is unset or malformed, ` +
+          `so the redirect URI would be derived from the bind address (${connectBaseUrl}) — ` +
+          'an origin Google cannot reach. The Cores OAuth surface is NOT being served. ' +
+          `Set ${CONNECT_BASE_URL_ENV}=https://<your-host> and register ` +
+          '<origin>/oauth/cores/google/callback on the OAuth client.',
+        derived_origin: connectBaseUrl,
+      })
+    }
+    const coresOAuthConfigured = coresOAuthClientPresent && coresOAuthOriginDeclared
     // Self-to-self HMAC for the co-located broker. Derived from the instance's
     // existing AES keyfile so there is no NEW secret to generate, store, back up
     // or leak — if that keyfile is gone the instance already cannot read any

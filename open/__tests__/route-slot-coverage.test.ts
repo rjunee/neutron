@@ -91,6 +91,7 @@ const SAVED_ENV_KEYS = [
   'NOTIFY_SOCKET',
   'NEUTRON_CORES_GOOGLE_CLIENT_ID',
   'NEUTRON_CORES_GOOGLE_CLIENT_SECRET',
+  'NEUTRON_CONNECT_PUBLIC_BASE_URL',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -210,6 +211,13 @@ beforeAll(async () => {
   // Google.
   process.env['NEUTRON_CORES_GOOGLE_CLIENT_ID'] = 'route-slot-coverage.apps.googleusercontent.com'
   process.env['NEUTRON_CORES_GOOGLE_CLIENT_SECRET'] = 'route-slot-coverage-client-secret'
+  // The OAuth rungs also require a DECLARED public origin — the redirect URI is
+  // derived from it, and the composer refuses to arm OAuth on a bind-derived
+  // guess (ISSUES #448 follow-up 1). Seeding it keeps this probe measuring the
+  // widest composition rather than a half-configured one; without it the two
+  // OAuth rungs silently regress to unserved and the ratchet — correctly —
+  // reports that surfaces stopped being served.
+  process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL'] = 'https://route-slot-coverage.example.com'
   // A credentialed boot: the widest composition an Open instance produces, so a
   // surface that is absent HERE is absent everywhere.
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-route-slot-coverage'
