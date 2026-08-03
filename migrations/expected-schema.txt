@@ -847,6 +847,16 @@ CREATE TABLE instance_metadata (
   timezone TEXT
 , transcription_backend TEXT)
 
+[table] instance_scope_ledger (tbl=instance_scope_ledger)
+CREATE TABLE instance_scope_ledger (
+  -- Singleton. The CHECK is the whole point: a second row is a bug, not a state.
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  -- The scope key every slug-scoped row in this database is written under.
+  project_slug TEXT    NOT NULL,
+  -- unix-ms of the last reconciliation.
+  updated_at   INTEGER NOT NULL
+) STRICT
+
 [table] invites (tbl=invites)
 CREATE TABLE invites (
     token_id TEXT PRIMARY KEY NOT NULL,
