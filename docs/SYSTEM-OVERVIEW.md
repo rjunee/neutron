@@ -6617,7 +6617,19 @@ and proves each one against the real thing, in the owner's language.
   `/ws/app/chat` socket and TYPES each declared command with a mocked substrate.
   A command must be **claimed** by the composed chain (a `chat_command_result`
   correlated to the message id) and must **not** reach the model. Currently
-  probed: `/status`, `/reset`, `/code`, `/skills`, `/email`, `/research`.
+  probed: `/status`, `/reset`, `/code`, `/skills`, `/email`, `/research`,
+  `/remind`, `/cal`. The last two joined on 2026-08-03, closing the only two
+  entries the inventory had ever admitted were a REAL COVERAGE GAP rather than a
+  design choice. Both are probed with the BARE command, which is what made them
+  probeable: `/remind`'s exclusion was that a phrasing-dependent probe is
+  ambiguous between "unwired" and "stopped parsing", and `/cal`'s was that
+  dispatching into the calendar Core is not deterministic without Google
+  credentials. The bare form has no phrasing to get wrong and answers from the
+  parser's `help` branch WITHOUT touching the calendar client, so the probe reads
+  identically on a fresh install and a connected one. Same technique `/code help`
+  already used. There are now NO exclusions on the grounds of coverage — the
+  three that remain are the chain combinator itself and the inner `/cal`
+  dispatcher, each excluded because it is genuinely covered by another probe.
   It also types the commands the inventory admits are BROKEN
   (`CHAT_COMMANDS_KNOWN_UNREACHABLE`) and asserts they are still unclaimed — so
   the day one is wired, the gate reds and demands a real probe rather than
