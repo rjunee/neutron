@@ -52,8 +52,26 @@ import {
   signInternalRequest,
   verifyInternalRequest,
 } from '@neutronai/runtime/internal-signature.ts'
-import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { jsonResponse } from './surface-kit.ts'
+
+/**
+ * The ONLY database capability the broker needs.
+ *
+ * Declared structurally rather than as `ProjectDb` so the SAME broker runs in
+ * both deployments the flow supports. An Open self-host passes its `ProjectDb`
+ * (which satisfies this shape as-is); Managed's central identity host — whose
+ * store is a raw `bun:sqlite` Database, not a `ProjectDb` — passes a handful of
+ * lines of adapter. Without this the "one flow, two deployments" decision
+ * (SPEC § Decisions Log 2026-08-02) would have been aspirational: the broker
+ * would have been mountable only where a `ProjectDb` happened to exist, and
+ * Managed would have needed a second implementation, which is the dual code path
+ * that decision exists to prevent.
+ */
+export interface CoresOAuthBrokerDb {
+  get<R>(sql: string, params: unknown[]): R | null
+  run(sql: string, params: unknown[]): Promise<void>
+  runSync(sql: string, params: unknown[]): unknown
+}
 
 /** Path the instance registers its pending state on. Must stay in lockstep with
  *  `cores-oauth-surface.ts`'s `registerPath`. */
@@ -73,7 +91,7 @@ interface BrokerRow {
 }
 
 export interface CoresOAuthBrokerOptions {
-  db: ProjectDb
+  db: CoresOAuthBrokerDb
   /** Shared HMAC secret — the same value the instances sign with. */
   internalSharedSecret: string
   /** Injected for tests. */
@@ -195,7 +213,7 @@ export function createCoresOAuthBroker(opts: CoresOAuthBrokerOptions): CoresOAut
           return page('Not connected', 'The callback was missing its code or state.', 400)
         }
         sweep()
-        const row = db.get<BrokerRow, [string]>(
+        const row = db.get<BrokerRow>(
           `SELECT state, project_slug, dispatch_url, expires_at
              FROM cores_oauth_broker_pending WHERE state = ?`,
           [state],

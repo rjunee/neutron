@@ -223,6 +223,65 @@ test('paths the broker does not own fall through', async () => {
   expect(await broker().handler(new Request(`${BASE}/api/cores/list`))).toBeNull()
 })
 
+test('the broker runs on a RAW bun:sqlite handle too — the cross-deployment claim, asserted', async () => {
+  // Managed's central identity host stores state in a raw `bun:sqlite` Database,
+  // NOT a ProjectDb. If the broker could only run where a ProjectDb happens to
+  // exist, "one flow, two deployments" (SPEC Decisions Log 2026-08-02) would be
+  // aspirational and Managed would need a SECOND implementation — the dual code
+  // path that decision exists to prevent. So this drives the real broker through
+  // the adapter Managed would actually write.
+  const raw = db.raw()
+  const adapted = {
+    get: <R,>(sql: string, params: unknown[]): R | null =>
+      (raw.query(sql).get(...(params as never[])) as R | null) ?? null,
+    run: async (sql: string, params: unknown[]): Promise<void> => {
+      raw.query(sql).run(...(params as never[]))
+    },
+    runSync: (sql: string, params: unknown[]): unknown => raw.query(sql).run(...(params as never[])),
+  }
+  const onRaw = createCoresOAuthBroker({
+    db: adapted,
+    internalSharedSecret: SECRET,
+    now: () => clock,
+    fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      relays.push({ url: String(url), body: String(init?.body ?? ''), sig: '', ts: '' })
+      return new Response('{}', { status: 200 })
+    }) as unknown as typeof globalThis.fetch,
+  })
+
+  const body = JSON.stringify({
+    state: 'raw-state',
+    project_slug: OWNER,
+    dispatch_url: DISPATCH,
+    expires_at: clock + 600_000,
+  })
+  const sig = signInternalRequest({
+    method: 'POST',
+    path: BROKER_REGISTER_PATH,
+    body,
+    shared_secret: SECRET,
+    timestamp_ms: clock,
+  })
+  const reg = await onRaw.handler(
+    new Request(`${BASE}${BROKER_REGISTER_PATH}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-internal-signature': sig,
+        'x-internal-timestamp': String(clock),
+      },
+      body,
+    }),
+  )
+  expect(reg?.status).toBe(200)
+
+  const cb = await onRaw.handler(
+    new Request(`${BASE}${BROKER_CALLBACK_PATH}?code=raw-code&state=raw-state`),
+  )
+  expect(cb?.status).toBe(200)
+  expect(JSON.parse(relays.at(-1)!.body)).toEqual({ code: 'raw-code', state: 'raw-state' })
+})
+
 test('the co-located secret is stable, unguessable, and not the key itself', () => {
   const a = deriveColocatedBrokerSecret('instance-key-material')
   expect(deriveColocatedBrokerSecret('instance-key-material')).toBe(a)

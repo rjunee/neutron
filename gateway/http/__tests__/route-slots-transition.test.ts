@@ -101,6 +101,7 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   ['app-devices', 'appDevices', 'app_devices_surface', true],
   ['app-docs', 'appDocs', 'app_docs_surface', true],
   ['app-backups', 'appBackups', 'app_backups_surface', true],
+  ['cores-oauth-broker', 'coresOAuthBroker', 'cores_oauth_broker_surface', true],
   ['cores-oauth', 'coresOAuth', 'cores_oauth_surface', true],
   ['cores-integrations', 'coresIntegrations', 'cores_integrations_surface', true],
   ['cores', 'cores', 'cores_surface', true],
@@ -202,6 +203,7 @@ const DISCLAIMING_ORDER = [
   'app-devices',
   'app-docs',
   'app-backups',
+  'cores-oauth-broker',
   'cores-oauth',
   'cores-integrations',
   'cores',
@@ -291,6 +293,7 @@ function fullyWiredInput(calls: string[]): ComposeHttpHandlerInput {
     appDevices: disclaim('app-devices'),
     appDocs: disclaim('app-docs'),
     appBackups: disclaim('app-backups'),
+    coresOAuthBroker: disclaim('cores-oauth-broker'),
     coresOAuth: disclaim('cores-oauth'),
     coresIntegrations: disclaim('cores-integrations'),
     cores: disclaim('cores'),
@@ -476,6 +479,7 @@ function fullComposition(): RouteSlotComposition {
     app_codex_credential_surface: { handler: h() },
     app_backups_surface: { handler: h() },
     cores_surface: { handler: h() },
+    cores_oauth_broker_surface: { handler: h() },
     cores_oauth_surface: { handler: h() },
     cores_integrations_surface: { handler: h() },
     connect_api: {},
@@ -528,6 +532,7 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_codex_credential_surface',
   'app_backups_surface',
   'cores_surface',
+  'cores_oauth_broker_surface',
   'cores_oauth_surface',
   'cores_integrations_surface',
   // ── C4 divergence-fix additions (RATCHET CHANGE, documented) ──────────
@@ -601,6 +606,7 @@ describe('C4 transition — generated mapping equals the pre-C4 literal mapping'
     expect(out.appDocs?.handler).toBe(c.app_docs_surface!.handler)
     expect(out.appBackups?.handler).toBe(c.app_backups_surface!.handler)
     expect(out.cores?.handler).toBe(c.cores_surface!.handler)
+    expect(out.coresOAuthBroker?.handler).toBe(c.cores_oauth_broker_surface!.handler)
     expect(out.coresOAuth?.handler).toBe(c.cores_oauth_surface!.handler)
     expect(out.coresIntegrations?.handler).toBe(c.cores_integrations_surface!.handler)
 
