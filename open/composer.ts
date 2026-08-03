@@ -398,6 +398,7 @@ import { createActivitySurface } from '@neutronai/gateway/http/activity-surface.
 import { createAppUsageSurface } from '@neutronai/gateway/http/app-usage-surface.ts'
 import { createSystemNoticeSurface } from '@neutronai/gateway/http/system-notice-surface.ts'
 import { CredentialUsageMonitor } from './credential-usage-monitor.ts'
+import { createCredentialLapseNotifier } from './credential-lapse-notice.ts'
 import {
   ActivityInspector,
   activityRowFromSubstrateEvent,
@@ -3697,7 +3698,23 @@ export function buildOpenGraphComposer(
     // and ARMED at the very end of composition alongside `reflectLoop`, so a
     // later composition throw can never leak a live interval; the quiescing
     // cleanup is registered immediately below for shutdown ordering.
-    const credentialUsageMonitor = new CredentialUsageMonitor({ env })
+    //
+    // The SAME probe answers a second question nobody was listening to: whether
+    // the credential is still ACCEPTED at all. A 401 tick means every proactive
+    // surface on this box (morning brief, rituals, nudges, fired reminders) is
+    // already dead and will stay dead until the token is replaced — and none of
+    // them can report it, because the only credential notice that existed lives
+    // in the failure handler of a real user TURN, and a dying cron produces no
+    // turn. So the owner found out hours later, by typing. `onStanding` closes
+    // that: the notifier posts the SAME `AUTH_RECONNECT_BODY` bubble with the
+    // SAME Reconnect button through the SAME `deliver` seam fired reminders use,
+    // durably (it is waiting for him with nothing connected), exactly once per
+    // lapse, and never on a transient network failure. See
+    // `credential-lapse-notice.ts` for why each of those three is load-bearing.
+    const credentialUsageMonitor = new CredentialUsageMonitor({
+      env,
+      onStanding: createCredentialLapseNotifier({ deliver, topic_id: ownerNoticeTopic }),
+    })
     realmodeCleanups.push(async () => {
       try {
         await credentialUsageMonitor.loop.stop()

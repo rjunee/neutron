@@ -27,8 +27,22 @@
  * API key or no credential at all resolves to an unavailable answer WITHOUT
  * touching the network, so an unauthenticated install never generates upstream
  * traffic it has no business generating.
+ *
+ * SECOND READING, SAME PROBE: IS THE CREDENTIAL STILL VALID AT ALL. Utilization
+ * and validity are different questions and only one of them was ever answered
+ * here. A tick that comes back 401 used to do nothing but blank a bar — while a
+ * 401 means every PROACTIVE surface on the box (the morning brief, rituals,
+ * nudges, reminders) is already dead and will stay dead until the token is
+ * replaced. The reactive notice cannot cover this: it lives in the failure
+ * handler of a real user TURN (`gateway/wiring/build-live-agent-turn.ts`), so it
+ * only ever fires for someone who is already typing — and a proactive surface
+ * dying produces no turn to fail. So the owner learns hours late, by typing.
+ * {@link CredentialStanding} is that second reading, reported to an injected
+ * observer; the notice itself is built in `credential-lapse-notice.ts`, which
+ * owns the once-per-lapse latch and the durable delivery.
  */
 
+import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop } from '@neutronai/loop/index.ts'
 import type { CredentialUsagePayload } from '@neutronai/contracts/credential-usage.ts'
 import {
@@ -52,6 +66,40 @@ export const USAGE_POLL_INTERVAL_MS = 60_000
  */
 export const USAGE_MAX_AGE_MS = 5 * 60_000
 
+const moduleLog = createLogger('credential-usage')
+
+/**
+ * What one measurement says about whether the credential is still ACCEPTED —
+ * deliberately three-valued, because the middle value is what protects the owner
+ * from alarm fatigue.
+ *
+ *   • `lapsed`        — upstream REJECTED the credential we hold (401/403). This
+ *                       is a property of the credential, not of the network, and
+ *                       it does not fix itself.
+ *   • `healthy`       — upstream accepted it. Includes the windowless API-key
+ *                       answer: `no-windows` means "authenticated, nothing to
+ *                       meter", which is a perfectly valid credential.
+ *   • `indeterminate` — we did not learn anything. A dropped packet, a timeout, a
+ *                       5xx, or a box with no measurable credential to ask about.
+ *
+ * The distinction between `lapsed` and `indeterminate` is the whole safety
+ * property. Telling the owner to reconnect his account because a packet dropped
+ * teaches him to ignore the message, and then the real one lands on a reader who
+ * has already learned it means nothing. `indeterminate` is silence — it neither
+ * alerts nor counts as recovery, so a lapse that flickers behind a network blip
+ * stays one lapse rather than becoming two notices.
+ */
+export type CredentialStanding = 'healthy' | 'lapsed' | 'indeterminate'
+
+/**
+ * Where a standing goes. Called once per tick with the reading that tick
+ * produced; may be async. Whatever it does with the reading (latch, notify,
+ * ignore) is not this module's business — see `credential-lapse-notice.ts`.
+ */
+export type CredentialStandingObserver = (
+  standing: CredentialStanding,
+) => void | Promise<void>
+
 export interface CredentialUsageMonitorDeps {
   env?: NodeJS.ProcessEnv
   now?: () => number
@@ -59,6 +107,12 @@ export interface CredentialUsageMonitorDeps {
   probe?: (token: string) => Promise<CredentialUsageProbeOutcome>
   probeDeps?: UsageProbeDeps
   credentialDeps?: ActiveCredentialDeps
+  /**
+   * Told what each tick learned about the credential's VALIDITY. Optional so the
+   * monitor stays usable as a pure meter; the production composer always wires
+   * it (`open/composer.ts`) because an unwatched lapse is the defect.
+   */
+  onStanding?: CredentialStandingObserver
   /** `SupervisedLoop` timer seams, threaded straight through for tests. */
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
@@ -75,6 +129,7 @@ export class CredentialUsageMonitor {
   private readonly now: () => number
   private readonly probe: (token: string) => Promise<CredentialUsageProbeOutcome>
   private readonly credentialDeps: ActiveCredentialDeps
+  private readonly onStanding: CredentialStandingObserver | undefined
 
   /** Last SUCCESSFUL measurement, if there has ever been one. */
   private cached: CachedReading | null = null
@@ -93,6 +148,7 @@ export class CredentialUsageMonitor {
       ((token: string): Promise<CredentialUsageProbeOutcome> =>
         probeCredentialUsage(token, probeDeps ?? {}))
     this.credentialDeps = deps.credentialDeps ?? {}
+    this.onStanding = deps.onStanding
     this.loop = new SupervisedLoop({
       name: 'credential-usage',
       intervalMs: USAGE_POLL_INTERVAL_MS,
@@ -126,9 +182,13 @@ export class CredentialUsageMonitor {
   async measureOnce(): Promise<void> {
     const credential = resolveActiveCredential(this.env, this.credentialDeps)
     if (credential.kind === 'unmeasurable') {
-      // No network call: there is nothing to ask about.
+      // No network call: there is nothing to ask about. Nothing was learned about
+      // any credential's validity either — an API-key box and a fresh pre-auth
+      // install both land here, and neither has a subscription token that could
+      // have lapsed. Silence, not an alarm.
       this.cached = null
       this.unavailable = { available: false, reason: credential.reason }
+      await this.report('indeterminate')
       return
     }
     const outcome = await this.probe(credential.token)
@@ -137,22 +197,54 @@ export class CredentialUsageMonitor {
         this.cached = {
           payload: { available: true, measured_at: this.now(), ...outcome.reading },
         }
+        await this.report('healthy')
         return
       case 'no-windows':
         this.cached = null
         this.unavailable = { available: false, reason: 'unsupported_credential' }
+        // No meter, but the credential ANSWERED — it is alive. Reporting this as
+        // anything but healthy would leave a latch stuck open across a swap from
+        // a subscription token to an API key.
+        await this.report('healthy')
         return
       case 'unauthorized':
         // The credential we hold is dead. Whatever we last measured described a
         // credential that no longer answers, so it is dropped outright.
         this.cached = null
         this.unavailable = { available: false, reason: 'no_credential' }
+        await this.report('lapsed')
         return
       case 'error':
         // Transient. Keep the last good reading — `snapshot()` ages it out on its
-        // own if the outage outlasts the staleness ceiling.
+        // own if the outage outlasts the staleness ceiling — and, for the same
+        // reason, claim nothing about the credential itself.
         this.unavailable = { available: false, reason: 'probe_failed' }
+        await this.report('indeterminate')
         return
+    }
+  }
+
+  /**
+   * Hand the tick's validity reading to the observer, fail-soft.
+   *
+   * The observer posts to chat, which means it touches a DB and a socket, which
+   * means it can throw. A throw here must not become a tick failure: the meter is
+   * the monitor's contract and it has already been updated by the time this runs,
+   * and repeated tick failures escalate the loop. So the throw is logged and
+   * swallowed. The observer's own retry story is its own (the notice latch does
+   * not commit until delivery succeeds, so a swallowed throw is re-attempted on
+   * the next tick rather than lost).
+   */
+  private async report(standing: CredentialStanding): Promise<void> {
+    const observer = this.onStanding
+    if (observer === undefined) return
+    try {
+      await observer(standing)
+    } catch (err) {
+      moduleLog.warn('standing_observer_failed', {
+        standing,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 }
