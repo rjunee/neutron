@@ -1,6 +1,6 @@
 {
   "$comment": [
-    "P4 (world-class refactor, 2026-07) — committed table-ownership map:",
+    "P4 (world-class refactor, 2026-07) \u2014 committed table-ownership map:",
     "'one owning module per table'. For every table listed here, the set of",
     "non-test source files containing a WRITE statement (INSERT [OR ...] INTO /",
     "UPDATE ... SET / DELETE FROM / REPLACE INTO) must EXACTLY equal the",
@@ -10,7 +10,7 @@
     "Migrations (*.sql + the runner) and test files are exempt: schema",
     "evolution and fixtures are not runtime writers.",
     "To extend coverage to another table, add an entry with its honest",
-    "current writer set — the test picks it up automatically."
+    "current writer set \u2014 the test picks it up automatically."
   ],
   "tables": {
     "projects": {
@@ -22,10 +22,10 @@
       ],
       "notes": [
         "gateway/projects/sqlite-store.ts is the owning settings/lifecycle store",
-        "(seed, PATCH, archive/restore, activity stamps — incl.",
+        "(seed, PATCH, archive/restore, activity stamps \u2014 incl.",
         "touchActivityIncludingArchived, moved verbatim from open/composer.ts).",
         "gateway/wiring/project-create.ts is the sanctioned",
-        "project-CREATION writer (refactor-plan §P4: creation converges on",
+        "project-CREATION writer (refactor-plan \u00a7P4: creation converges on",
         "sqlite-store.ts + project-create.ts; the second creation writer at",
         "onboarding/wow-moment/actions/03-project-shells.ts was deleted by",
         "K11b1 before this unit landed, so there is nothing to converge).",
@@ -34,7 +34,7 @@
         "cores band, where importing the gateway store would violate the",
         "cores-use-sdk-only dependency rule. Folding it in needs a",
         "dependency-inversion seam (inject a lifecycle-writer interface built",
-        "in the gateway wiring) — deliberate follow-up, out of P4 scope.",
+        "in the gateway wiring) \u2014 deliberate follow-up, out of P4 scope.",
         "FOLLOW-UP: touchActivity vs touchActivityIncludingArchived differ only",
         "by 'archived_at IS NULL'; converge deliberately once the archived-row",
         "stamp semantics are decided (byte-identical-move rule kept them apart)."
@@ -50,7 +50,7 @@
         "transaction (onboarding/telemetry/event-emitter.ts) moved verbatim",
         "into SqliteOnboardingStateStore.resolveOrMintAttemptId in P4.",
         "resume-cron's SQL json_remove writer (the plan's second dialect) was",
-        "deleted by K11b1 before this unit landed — the store's JS",
+        "deleted by K11b1 before this unit landed \u2014 the store's JS",
         "shallow-merge is now the only phase_state write dialect."
       ]
     },
@@ -60,13 +60,13 @@
         "gateway/wiring/gbrain-sync-state-store.ts"
       ],
       "notes": [
-        "P9 (world-class refactor) — GBrain sync observability. Single-writer:",
+        "P9 (world-class refactor) \u2014 GBrain sync observability. Single-writer:",
         "the `createGbrainSyncStateStore` sink UPSERTs the one per-scope health",
         "row (status/latch/last-success/deferred-count). It is the concrete",
         "`GbrainSyncStateSink` implementation injected into GBrainSyncHook; the",
         "hook (gbrain-memory, platform band) owns no DB and only calls the port,",
         "so the write stays in the composition band where DB access lives.",
-        "Pure side-observation — this unit adds visibility, not behavior; the",
+        "Pure side-observation \u2014 this unit adds visibility, not behavior; the",
         "fail-soft sync path is byte-identical."
       ]
     },
@@ -77,11 +77,24 @@
       ],
       "notes": [
         "Executor-mode reminders (plan task 4; migration 0106 PART B). Durable",
-        "ritual run history — one row per fire ATTEMPT (skips included), retained",
+        "ritual run history \u2014 one row per fire ATTEMPT (skips included), retained",
         "on its own window (NOT pruned on the subagent liveness prune). Single-",
         "writer: `createRitualRunStore` owns every INSERT (skipped/running/failed)",
         "and the terminal UPDATE (finished/failed/timed_out/crashed + ended_at +",
         "truncated output_summary). The retention prune lands with plan task 5."
+      ]
+    },
+    "project_launcher_entries": {
+      "owner": "gateway/http/sqlite-project-launcher-store.ts",
+      "writers": [
+        "gateway/http/sqlite-project-launcher-store.ts"
+      ],
+      "notes": [
+        "Per-project Apps-launcher CUSTOMISATION only (order, renames, per-project",
+        "tile removals). The tile CATALOGUE is read live from the bundled-Cores",
+        "registry on every list(), never from this table, so a Core installed after",
+        "a project's first write still appears in that project's grid.",
+        "Rows are materialised on the first MUTATION, never on a read (ISSUES #412)."
       ]
     }
   }
