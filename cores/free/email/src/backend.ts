@@ -67,7 +67,16 @@ export type {
   GmailThreadGetInput,
   GmailThreadModifyInput,
   GmailThreadModifyResult,
+  AccountReadOutcome,
+  GmailListAcrossAccounts,
 } from './contract.ts'
+
+export { buildMultiAccountGmailClient } from './multi-account.ts'
+export type {
+  GmailAccountDescriptor,
+  GmailAccountsResolver,
+  MultiAccountGmailClientOptions,
+} from './multi-account.ts'
 
 export {
   DraftLabelingError,

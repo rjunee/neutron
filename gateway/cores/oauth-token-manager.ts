@@ -10,6 +10,34 @@
  *                                              connected_at, last_refresh_at,
  *                                              last_refresh_outcome}
  *
+ * ── MULTIPLE ACCOUNTS PER SERVICE ──────────────────────────────────────────────
+ * A label is `<service>#<account_key>` — the SERVICE (what a Core's manifest
+ * declares: `google_calendar`, `gmail_compose`, `google_workspace`) plus a
+ * STABLE ACCOUNT KEY, so an owner who runs several accounts on the same service
+ * has one independent grant per account instead of one that clobbers the last.
+ * Before this the label named the service alone, so a second grant overwrote the
+ * first and a read only ever spanned one account.
+ *
+ * The account key is derived from the ONE identity the grant already carries:
+ * the account address the token exchange resolves from Google's userinfo
+ * endpoint and persists into `:meta`. It is a truncated SHA-256 of the
+ * lowercased address rather than the address itself, for two reasons — the
+ * SecretsStore's `label` column is NOT encrypted (only ciphertext is), so a raw
+ * address would put a plaintext identifier at rest that the encrypted `:meta`
+ * already holds properly; and a hex key can never collide with the `:refresh` /
+ * `:meta` suffix grammar the way an arbitrary address could.
+ *
+ * ── THE UPGRADE PATH (no manual step) ──────────────────────────────────────────
+ * An install that already holds a bare `google_calendar` grant keeps working
+ * untouched: `listGrants` ADOPTS an un-keyed row as an account whose
+ * `account_key` is null, and every read path resolves through `listGrants`, so
+ * the legacy grant is simply the first account. Nothing is rewritten at boot and
+ * no row is rebuilt, so there is no window in which the owner is disconnected.
+ * The row converts to the keyed shape the next time that same address is
+ * re-granted (`exchangeAndPersist` retires a bare row whose `:meta` address
+ * matches what it just wrote — and ONLY on an exact address match, so a grant
+ * whose address could not be resolved never destroys an unrelated one).
+ *
  * `getAccessToken(label)` is the transparent-refresh entry point. The
  * Cores SDK's bare `secretsAccessor.read({label})` still returns the
  * access_token verbatim for callers that don't refresh themselves —
@@ -19,6 +47,8 @@
  *
  * Per docs/plans/cores-oauth-secret-resolution-sprint-brief.md § 2.3 + § 2.4.
  */
+
+import { createHash } from 'node:crypto'
 
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import type { OwnerHandle } from '@neutronai/persistence/index.ts'
@@ -76,8 +106,36 @@ export interface OAuthTokenMeta {
   last_refresh_outcome: 'ok' | 'invalid_grant' | 'error' | null
 }
 
+/**
+ * One connected account for one service. This — not a bare label — is what
+ * every read path enumerates, which is what makes N accounts per service work
+ * and what makes the legacy un-keyed grant keep working with no migration.
+ */
+export interface OAuthGrant {
+  /** The full SecretsStore label. Pass THIS to `getAccessToken`. */
+  label: string
+  /** Service part of the label (`google_calendar`, `gmail_compose`, …). */
+  service: string
+  /**
+   * Stable per-account key, or `null` for a legacy un-keyed grant (an install
+   * that connected before labels carried an account, or one whose address
+   * Google's userinfo never returned — see `exchangeAndPersist`).
+   */
+  account_key: string | null
+  /** Connected account address from `:meta`; null when it could not be read. */
+  email: string | null
+  scopes: string[]
+  connected_at: number | null
+  expires_at: number | null
+  last_refresh_outcome: 'ok' | 'invalid_grant' | 'error' | null
+}
+
 export interface OAuthTokenStatus {
   label: string
+  /** Service part of `label` — stable across accounts. */
+  service: string
+  /** Account key part of `label`; null for a legacy un-keyed grant. */
+  account_key: string | null
   connected: boolean
   scopes: string[]
   email: string | null
@@ -119,6 +177,16 @@ interface GoogleUserInfoResponse {
 const REFRESH_LABEL_SUFFIX = ':refresh'
 const META_LABEL_SUFFIX = ':meta'
 
+/**
+ * Separator between the SERVICE part of a grant label and its ACCOUNT key.
+ * Chosen because it appears in no service name, no hex account key, and no
+ * suffix (`:refresh` / `:meta`), so `parseGrantLabel` is unambiguous.
+ */
+export const ACCOUNT_KEY_SEPARATOR = '#'
+
+/** Length of the truncated SHA-256 used as an account key. */
+const ACCOUNT_KEY_LENGTH = 12
+
 export class OAuthTokenManager {
   private readonly secretsStore: SecretsStore
   private readonly owner_handle: OwnerHandle
@@ -149,17 +217,27 @@ export class OAuthTokenManager {
   }
 
   /**
-   * Exchange a Google authorization_code for an access/refresh pair AND
-   * write the resulting rows into the per-instance SecretsStore for every
-   * supplied label. Returns the canonical email (resolved via userinfo)
-   * + the granted scope list.
+   * Exchange a Google authorization_code for an access/refresh pair AND write
+   * the resulting rows into the per-instance SecretsStore for every supplied
+   * SERVICE. Returns the canonical email (resolved via userinfo), the granted
+   * scope list, the account key the grant was filed under, and the labels
+   * actually written.
+   *
+   * `input.labels` are SERVICES (what a Core's manifest declares). The labels
+   * written are per-account, so granting a second account leaves the first
+   * account's rows untouched.
    */
   async exchangeAndPersist(input: {
     code: string
     code_verifier: string
     redirect_uri: string
     labels: ReadonlyArray<string>
-  }): Promise<{ email: string | null; scopes: string[] }> {
+  }): Promise<{
+    email: string | null
+    scopes: string[]
+    labels: string[]
+    account_key: string | null
+  }> {
     const tokenRes = await this.fetchImpl(GOOGLE_TOKEN_URL, {
       method: 'POST',
       headers: {
@@ -213,7 +291,17 @@ export class OAuthTokenManager {
       // Non-fatal — userinfo is metadata, not auth-critical.
     }
 
-    for (const label of input.labels) {
+    // Each incoming label names a SERVICE. Write the grant under that service's
+    // per-account label so connecting a second account adds a grant instead of
+    // overwriting the first. When userinfo gave us no address there is no
+    // identity to key on, so the grant lands on the bare service label — which
+    // is exactly the pre-existing single-account shape, and is enumerated as an
+    // un-keyed account rather than being hidden.
+    const account_key = email !== null ? accountKeyFromEmail(email) : null
+    const written: string[] = []
+    for (const service of input.labels) {
+      const label =
+        account_key !== null ? serviceAccountLabel(service, account_key) : service
       const putInput: OAuthTokenPutInput = {
         label,
         access_token,
@@ -223,8 +311,121 @@ export class OAuthTokenManager {
       }
       if (email !== null) putInput.email = email
       await this.put(putInput)
+      written.push(label)
+      if (account_key !== null) await this.retireLegacyRowFor(service, email)
     }
-    return { email, scopes }
+    return { email, scopes, labels: written, account_key }
+  }
+
+  /**
+   * Retire a pre-existing un-keyed `<service>` grant once the SAME address has
+   * been re-granted under its keyed label — the in-place half of the upgrade
+   * path. Guarded on an EXACT address match: a bare row whose `:meta` address
+   * is absent or different belongs to a different (or unidentifiable) account
+   * and is left completely alone, so this can never delete a working grant the
+   * owner still depends on.
+   */
+  private async retireLegacyRowFor(service: string, email: string | null): Promise<void> {
+    if (email === null) return
+    const legacyMeta = await this.readMeta(service)
+    if (legacyMeta === null || legacyMeta.email === null) return
+    if (!sameAccount(legacyMeta.email, email)) return
+    const rows = await this.secretsStore.list({
+      owner_handle: this.owner_handle,
+      kind: 'oauth_token',
+    })
+    for (const suffix of ['', REFRESH_LABEL_SUFFIX, META_LABEL_SUFFIX]) {
+      const match = rows.find((r) => r.label === `${service}${suffix}`)
+      if (match !== undefined) await this.secretsStore.delete(match.id)
+    }
+  }
+
+  /**
+   * Every connected account for `service`, oldest connection first.
+   *
+   * THE enumeration seam: fan-out reads, status, and the single-account
+   * accessors all resolve through this, so there is one definition of "which
+   * accounts are connected" and adding an account changes no caller.
+   *
+   * A legacy un-keyed `<service>` row is adopted as an account with
+   * `account_key: null`. It is dropped ONLY when a keyed grant for the same
+   * address already exists — otherwise a half-migrated install would read the
+   * same mailbox twice and show every item duplicated.
+   */
+  async listGrants(service: string): Promise<OAuthGrant[]> {
+    const rows = await this.secretsStore.list({
+      owner_handle: this.owner_handle,
+      kind: 'oauth_token',
+    })
+    const labels = new Set(rows.map((r) => r.label))
+    const grants: OAuthGrant[] = []
+    for (const row of rows) {
+      if (
+        row.label.endsWith(REFRESH_LABEL_SUFFIX) ||
+        row.label.endsWith(META_LABEL_SUFFIX)
+      ) {
+        continue
+      }
+      const parsed = parseGrantLabel(row.label)
+      if (parsed.service !== service) continue
+      // An un-keyed row is a GRANT only if `put` wrote it — which always
+      // produces a `:refresh` and a `:meta` companion. A bare access row with
+      // neither is the Core install lifecycle echoing the token it was just
+      // handed back under the manifest label (`cores/runtime/lifecycle.ts`
+      // persistOrRotate). Counting that echo would list the same account twice
+      // and make the fan-out read one mailbox two times.
+      if (
+        parsed.account_key === null &&
+        !labels.has(refreshLabel(row.label)) &&
+        !labels.has(metaLabel(row.label))
+      ) {
+        continue
+      }
+      const meta = await this.readMeta(row.label)
+      grants.push({
+        label: row.label,
+        service,
+        account_key: parsed.account_key,
+        email: meta?.email ?? null,
+        scopes: meta?.scopes ?? [],
+        connected_at: meta?.connected_at ?? null,
+        expires_at: row.expires_at ?? null,
+        last_refresh_outcome: meta?.last_refresh_outcome ?? null,
+      })
+    }
+    const keyed = new Set(
+      grants
+        .filter((g) => g.account_key !== null)
+        .map((g) => g.account_key as string),
+    )
+    const deduped = grants.filter(
+      (g) =>
+        g.account_key !== null ||
+        g.email === null ||
+        !keyed.has(accountKeyFromEmail(g.email)),
+    )
+    // Oldest connection first, so the account the owner has had longest stays
+    // the primary (the one writes go to). Label breaks ties deterministically.
+    deduped.sort((a, b) => {
+      const at = a.connected_at ?? 0
+      const bt = b.connected_at ?? 0
+      if (at !== bt) return at - bt
+      return a.label < b.label ? -1 : a.label > b.label ? 1 : 0
+    })
+    return deduped
+  }
+
+  /**
+   * Access token for the PRIMARY (first-connected) account of `service`.
+   * The single-account entry point for callers that genuinely address one
+   * account — writes, and services the owner only ever connects once.
+   * Returns null when nothing is connected.
+   */
+  async getServiceAccessToken(service: string): Promise<string | null> {
+    const grants = await this.listGrants(service)
+    const primary = grants[0]
+    if (primary === undefined) return null
+    return await this.getAccessToken(primary.label)
   }
 
   /**
@@ -414,9 +615,12 @@ export class OAuthTokenManager {
     })
     const accessRow = rows.find((r) => r.label === label) ?? null
     const metaRow = rows.find((r) => r.label === metaLabel(label)) ?? null
+    const parsed = parseGrantLabel(label)
     if (accessRow === null && metaRow === null) {
       return {
         label,
+        service: parsed.service,
+        account_key: parsed.account_key,
         connected: false,
         scopes: [],
         email: null,
@@ -426,23 +630,11 @@ export class OAuthTokenManager {
         expires_at: null,
       }
     }
-    let meta: OAuthTokenMeta | null = null
-    if (metaRow !== null) {
-      const raw = await this.secretsStore.get({
-        owner_handle: this.owner_handle,
-        kind: 'oauth_token',
-        label: metaLabel(label),
-      })
-      if (raw !== null) {
-        try {
-          meta = JSON.parse(raw) as OAuthTokenMeta
-        } catch {
-          meta = null
-        }
-      }
-    }
+    const meta = metaRow !== null ? await this.readMeta(label) : null
     return {
       label,
+      service: parsed.service,
+      account_key: parsed.account_key,
       connected: accessRow !== null,
       scopes: meta?.scopes ?? [],
       email: meta?.email ?? null,
@@ -451,6 +643,17 @@ export class OAuthTokenManager {
       last_refresh_outcome: meta?.last_refresh_outcome ?? null,
       expires_at: accessRow?.expires_at ?? null,
     }
+  }
+
+  /** Decode a label's `:meta` row, or null when absent / unparseable. */
+  private async readMeta(label: string): Promise<OAuthTokenMeta | null> {
+    const raw = await this.secretsStore.get({
+      owner_handle: this.owner_handle,
+      kind: 'oauth_token',
+      label: metaLabel(label),
+    })
+    if (raw === null) return null
+    return safeParseMeta(raw)
   }
 
   private async upsert(input: {
@@ -518,6 +721,48 @@ export class OAuthTokenManager {
       plaintext: JSON.stringify(next),
     })
   }
+}
+
+/**
+ * Stable account key for a Google account address. Truncated SHA-256 of the
+ * lowercased, trimmed address: stable across reconnects (same account ⇒ same
+ * key ⇒ the grant rotates in place instead of accumulating rows), and hex-only
+ * so it can never be confused with the `:refresh` / `:meta` suffix grammar.
+ *
+ * 12 hex chars = 48 bits. Collision needs two of the owner's OWN addresses to
+ * agree on 48 bits — far outside the handful of accounts one person connects.
+ */
+export function accountKeyFromEmail(email: string): string {
+  return createHash('sha256')
+    .update(email.trim().toLowerCase(), 'utf8')
+    .digest('hex')
+    .slice(0, ACCOUNT_KEY_LENGTH)
+}
+
+/** Compose the per-account grant label for a service. */
+export function serviceAccountLabel(service: string, account_key: string): string {
+  return `${service}${ACCOUNT_KEY_SEPARATOR}${account_key}`
+}
+
+/**
+ * Split a grant label into its service and account key. A label with no
+ * separator is a legacy un-keyed grant — service only, `account_key: null`.
+ */
+export function parseGrantLabel(label: string): {
+  service: string
+  account_key: string | null
+} {
+  const at = label.indexOf(ACCOUNT_KEY_SEPARATOR)
+  if (at < 0) return { service: label, account_key: null }
+  return {
+    service: label.slice(0, at),
+    account_key: label.slice(at + ACCOUNT_KEY_SEPARATOR.length),
+  }
+}
+
+/** Do two addresses name the same account? Case- and whitespace-insensitive. */
+function sameAccount(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
 }
 
 export function refreshLabel(label: string): string {

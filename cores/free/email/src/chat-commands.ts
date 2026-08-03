@@ -15,7 +15,7 @@
 
 import { applyDraftVisibilityLabels } from './draft-policy.ts'
 import type { EmailProjectCache } from './cache.ts'
-import type { GmailClient } from './backend.ts'
+import type { AccountReadOutcome, GmailClient } from './backend.ts'
 import {
   composeBriefSummary,
   briefTemplateHash,
@@ -290,7 +290,14 @@ async function runTriage(ctx: EmailCommandContext): Promise<EmailCommandResponse
     max_results: 50,
   }
   if (ctx.project_id !== null) listInput.project_id = ctx.project_id
-  const { results: inbox } = await ctx.client.listMessages(listInput)
+  // Read across every connected account when the client fans out, so an inbox
+  // that could not be read is NAMED rather than quietly missing from triage.
+  const across =
+    ctx.client.listMessagesAcrossAccounts !== undefined
+      ? await ctx.client.listMessagesAcrossAccounts(listInput)
+      : { results: (await ctx.client.listMessages(listInput)).results, accounts: [] }
+  const inbox = across.results
+  const degraded = degradedAccountsLine(across.accounts)
   const triage = await composeTriage({
     inbox,
     userTz: ctx.user_tz,
@@ -305,15 +312,30 @@ async function runTriage(ctx: EmailCommandContext): Promise<EmailCommandResponse
     top5_json: JSON.stringify(triage.items),
   })
   if (triage.items.length === 0) {
-    return { text: 'Email triage: inbox is empty.', data: { triage } }
+    return {
+      text: `Email triage: inbox is empty.${degraded}`,
+      data: { triage, accounts: across.accounts },
+    }
   }
   const lines = triage.items.map(
     (it) => `${it.rank}. ${it.from} — ${it.subject}: ${it.reason}`,
   )
   return {
-    text: `Top ${triage.items.length} for today:\n${lines.join('\n')}`,
-    data: { triage },
+    text: `Top ${triage.items.length} for today:\n${lines.join('\n')}${degraded}`,
+    data: { triage, accounts: across.accounts },
   }
+}
+
+/**
+ * One line naming every account that could NOT be read. Without it an owner
+ * whose work grant expired sees a plausible-looking triage that is silently
+ * missing an entire mailbox.
+ */
+function degradedAccountsLine(accounts: readonly AccountReadOutcome[]): string {
+  const failed = accounts.filter((a) => !a.ok)
+  if (failed.length === 0) return ''
+  const named = failed.map((a) => a.account_email ?? a.account_id).join(', ')
+  return `\n⚠ Could not read ${named} — reconnect ${failed.length === 1 ? 'that account' : 'those accounts'}; mail from ${failed.length === 1 ? 'it' : 'them'} is missing above.`
 }
 
 async function runSummarize(

@@ -66,6 +66,16 @@ export interface CalendarEventRow {
    * extended-properties bag.
    */
   project_id?: string
+  /**
+   * WHICH connected account this row was read from. Stamped by the fan-out
+   * client (`buildMultiAccountGoogleCalendarClient`) on every row it returns.
+   * Without it a merged agenda is unreadable — an owner running work and
+   * personal accounts cannot tell a client meeting from a school pickup.
+   * Absent on single-backend clients that never fan out (the in-memory fake).
+   */
+  account_id?: string
+  /** Address of the account in `account_id`, when known. */
+  account_email?: string
 }
 
 export interface CalendarListInput {
@@ -218,6 +228,36 @@ export interface CalendarClient {
    * compare).
    */
   invite(input: InviteInput): Promise<CalendarEventRow>
+  /**
+   * `list`, plus the per-account outcome of the read. Present ONLY on the
+   * fan-out client — a single-backend client has nothing to report.
+   *
+   * This exists because `list` alone cannot tell the difference between "your
+   * work calendar is empty" and "your work calendar could not be read". Callers
+   * that render for a human (the `/cal` filter, the `calendar_list` tool) use
+   * it to say which account failed instead of quietly showing a short day.
+   */
+  listAcrossAccounts?(input: CalendarListInput): Promise<CalendarListAcrossAccounts>
+}
+
+/**
+ * Outcome of reading ONE account during a fan-out. `ok:false` carries the
+ * reason so the failure reaches the owner rather than being absorbed into a
+ * shorter result set.
+ */
+export interface AccountReadOutcome {
+  account_id: string
+  account_email: string | null
+  ok: boolean
+  /** Failure reason when `ok` is false. */
+  error?: string
+}
+
+export interface CalendarListAcrossAccounts {
+  /** Merged rows across every account that answered. */
+  events: CalendarEventRow[]
+  /** One entry per connected account, in fan-out order. */
+  accounts: AccountReadOutcome[]
 }
 
 /**

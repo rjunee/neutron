@@ -31,7 +31,7 @@
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { asOwnerHandle, type ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApiKeyStore, ApiKeyStoreError, type ApiKeyProvider } from '@neutronai/auth/api-key-store.ts'
-import { metaLabel, refreshLabel } from './oauth-token-manager.ts'
+import { metaLabel, parseGrantLabel, refreshLabel } from './oauth-token-manager.ts'
 import type {
   OAuthTokenManager,
   OAuthTokenStatus,
@@ -265,15 +265,22 @@ export async function buildIntegrationsStatus(
   const oauthSlots = collectOAuthSlots(input.registry)
   const apiKeySlots = collectAllApiKeySlots(input.registry)
 
+  // One row per CONNECTED ACCOUNT. A service the owner has connected three
+  // accounts to shows three rows, each independently disconnectable; a service
+  // with none shows its single disconnected row so a Connect action can render.
   const oauth: OAuthAccountIntegration[] = []
-  for (const [label, slot] of oauthSlots) {
-    const status = await input.tokens.getStatus(label)
-    oauth.push({
-      kind: 'oauth',
-      ...status,
-      scope: slot.scope,
-      core_slugs: slot.core_slugs,
-    })
+  for (const [service, slot] of oauthSlots) {
+    const grants = await input.tokens.listGrants(service)
+    const labels = grants.length > 0 ? grants.map((g) => g.label) : [service]
+    for (const label of labels) {
+      const status = await input.tokens.getStatus(label)
+      oauth.push({
+        kind: 'oauth',
+        ...status,
+        scope: slot.scope,
+        core_slugs: slot.core_slugs,
+      })
+    }
   }
 
   // One list() read (no decrypt) → label-presence set for every api-key.
@@ -456,14 +463,42 @@ export interface DisconnectOAuthResult {
 export async function disconnectOAuth(
   input: DisconnectOAuthInput,
 ): Promise<DisconnectOAuthResult> {
-  const { deleted } = await input.tokens.disconnect(input.label)
+  // A grant label is `<service>#<account_key>`; a manifest declares the
+  // SERVICE. Addressing an ACCOUNT disconnects that account; addressing the
+  // SERVICE disconnects every account of it — which is what "Disconnect
+  // Google Calendar" has always meant and must keep meaning.
+  const { service, account_key } = parseGrantLabel(input.label)
+  // Addressing the service also clears the BARE `<service>` row. That row is
+  // either a legacy grant or the token the Core install lifecycle echoed back
+  // under the manifest label; "Disconnect Google Calendar" must leave nothing
+  // behind either way, or a revoked service would still look connected to the
+  // install path.
+  const targets =
+    account_key !== null
+      ? [input.label]
+      : [
+          ...new Set([
+            ...(await input.tokens.listGrants(service)).map((g) => g.label),
+            service,
+          ]),
+        ]
+  let deleted = false
+  for (const target of targets) {
+    const result = await input.tokens.disconnect(target)
+    if (result.deleted) deleted = true
+  }
+  // Cores are only dependency-missing when the LAST account for the service is
+  // gone. Disconnecting one of several accounts must not tear down a Core that
+  // still has working accounts to read.
+  const remaining = await input.tokens.listGrants(service)
   // Lazy import to avoid a static cycle with the install lifecycle (mirrors
   // the OAuth surface's onInvalidGrant callback).
   const { updateInstallState } = await import('./install-bundled.ts')
   const affected_cores: string[] = []
   for (const core of input.registry.list()) {
-    if (core.manifest.secrets.some((s) => s.label === input.label)) {
+    if (core.manifest.secrets.some((s) => s.label === service)) {
       affected_cores.push(core.slug)
+      if (remaining.length > 0) continue
       try {
         await updateInstallState(
           input.projectDb,

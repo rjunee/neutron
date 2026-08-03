@@ -469,6 +469,32 @@ const NOOP_SECRETS_PROMPTER: SecretsPrompter = {
  * the same plaintext — a no-op write that re-affirms the row + writes
  * an audit `put` entry, which is the documented happy path.
  */
+/**
+ * The label to read a SERVICE's grant under: the service itself when a legacy
+ * un-keyed grant is present, otherwise the first per-account grant. Returns
+ * null when the service has no grant at all.
+ *
+ * Deliberately a plain function over already-listed rows rather than a call
+ * into `OAuthTokenManager` — the install lifecycle must not depend on the
+ * Google client being configured, and it needs no decryption to answer this.
+ */
+function resolveServiceGrantLabel(
+  rows: ReadonlyArray<{ label: string }>,
+  service: string,
+): string | null {
+  // A keyed grant wins over the bare label: after a Core installs, the
+  // lifecycle echoes the token back under the manifest label, and that echo
+  // never refreshes. Preferring the keyed grant keeps install reading the row
+  // the OAuth manager actually maintains.
+  const prefix = `${service}#`
+  const keyed = rows
+    .map((r) => r.label)
+    .filter((l) => l.startsWith(prefix) && !l.endsWith(':refresh') && !l.endsWith(':meta'))
+    .sort()
+  if (keyed[0] !== undefined) return keyed[0]
+  return rows.some((r) => r.label === service) ? service : null
+}
+
 export class SecretsStorePrompter implements SecretsPrompter {
   constructor(
     private readonly opts: {
@@ -489,17 +515,25 @@ export class SecretsStorePrompter implements SecretsPrompter {
     install_prompt: string
     required: boolean
   }): Promise<{ access_token: string; expires_at?: number } | null> {
-    const value = await this.opts.secretsStore.get({
-      owner_handle: asOwnerHandle(this.opts.project_slug),
+    const owner_handle = asOwnerHandle(this.opts.project_slug)
+    const rows = await this.opts.secretsStore.list({
+      owner_handle,
       kind: 'oauth_token',
-      label: input.label,
+    })
+    // A manifest declares a SERVICE; a grant is stored per account under
+    // `<service>#<account_key>`. Install only needs to know the service is
+    // connected AT ALL, so resolve the service's first grant — matching the
+    // exact label alone would report every multi-account install as
+    // dependency-missing and refuse to install the Core.
+    const label = resolveServiceGrantLabel(rows, input.label)
+    if (label === null) return null
+    const value = await this.opts.secretsStore.get({
+      owner_handle,
+      kind: 'oauth_token',
+      label,
     })
     if (value === null) return null
-    const rows = await this.opts.secretsStore.list({
-      owner_handle: asOwnerHandle(this.opts.project_slug),
-      kind: 'oauth_token',
-    })
-    const row = rows.find((r) => r.label === input.label)
+    const row = rows.find((r) => r.label === label)
     if (row?.expires_at !== undefined && row.expires_at !== null) {
       return { access_token: value, expires_at: row.expires_at }
     }

@@ -65,18 +65,21 @@ import { collectTokensToString } from '../wiring/build-llm-call-substrate.ts'
 
 import type { CalendarClient } from '@neutronai/calendar-core'
 import {
-  buildGoogleCalendarClient,
   buildInMemoryCalendarClient,
+  buildMultiAccountGoogleCalendarClient,
   OAUTH_SECRET_LABEL as CALENDAR_OAUTH_LABEL,
 } from '@neutronai/calendar-core'
 import type { GmailClient } from '@neutronai/email-managed-core'
 import {
   EmailProjectCacheResolver,
-  buildGoogleGmailClient,
   buildInMemoryGmailClient,
+  buildMultiAccountGmailClient,
   createEmailChatCommandFilter,
   OAUTH_SECRET_LABEL as EMAIL_OAUTH_LABEL,
 } from '@neutronai/email-managed-core'
+import { createLogger } from '@neutronai/logger'
+
+const mountLog = createLogger('open-cores')
 import { buildReminderStoreBackend, buildSmartWrapComposer } from '@neutronai/reminders-core'
 import { buildProductionResearchCoreWiring } from '@neutronai/research-core'
 
@@ -253,9 +256,13 @@ export async function mountOpenCores(
   // OAuth client is unconfigured the accessor is null → in-memory fallback clients.
   const googleOAuthAccessToken: ((label: string) => Promise<string | null>) | null =
     oauthConfigured
-      ? async (label: string): Promise<string | null> => {
+      ? async (service: string): Promise<string | null> => {
           try {
-            return await oauthTokens.getAccessToken(label)
+            // The PRIMARY account's token. Labels are per-account now, so a
+            // service name is no longer a label — resolving through the grant
+            // list is what keeps this accessor working for both a legacy
+            // un-keyed grant and a keyed one.
+            return await oauthTokens.getServiceAccessToken(service)
           } catch {
             return null
           }
@@ -286,12 +293,22 @@ export async function mountOpenCores(
   // ── Shared per-Core backends (one instance → MCP tools AND chat filter) ─────
   // Calendar: ONE client powers the `calendar_core` MCP tools (via the pre-built
   // `calendarClient` seam) AND the `/cal` filter (+ the brief scheduler elsewhere).
+  //
+  // The read spans EVERY connected Google account, not one. An owner running
+  // several accounts previously saw only the most recently granted calendar;
+  // the fan-out client merges them and tags each event with the account it came
+  // from. `accountsResolverFor` is read per request, so an account connected
+  // later joins without a restart, and one broken grant degrades to a partial
+  // result plus a named failure rather than an empty day.
   const calendarClient: CalendarClient =
     googleOAuthAccessToken !== null
-      ? buildGoogleCalendarClient({
+      ? buildMultiAccountGoogleCalendarClient({
           // D2: route through the resolver (GLOBAL scope for Calendar — the
           // active project is ignored, so effective behavior is unchanged).
-          accessToken: credentialResolver.accessorFor(CALENDAR_OAUTH_LABEL),
+          accounts: credentialResolver.accountsResolverFor(CALENDAR_OAUTH_LABEL),
+          onAccountError: (event) => {
+            mountLog.warn('calendar_account_read_failed', { ...event })
+          },
         })
       : buildInMemoryCalendarClient()
   const calendarCache = buildCalendarCacheResolver(input.owner_home)
@@ -301,10 +318,15 @@ export async function mountOpenCores(
   // account (same token manager) / both an empty in-memory inbox when OAuth-less.
   const gmailClient: GmailClient =
     emailOAuthTokens !== undefined
-      ? buildGoogleGmailClient({
+      ? buildMultiAccountGmailClient({
           // D2: route through the resolver (GLOBAL scope for Email — the active
-          // project is ignored, so effective behavior is unchanged).
-          accessToken: credentialResolver.accessorFor(EMAIL_OAUTH_LABEL),
+          // project is ignored, so effective behavior is unchanged). Every
+          // connected account is read and merged; each message carries the
+          // account it arrived in.
+          accounts: credentialResolver.accountsResolverFor(EMAIL_OAUTH_LABEL),
+          onAccountError: (event) => {
+            mountLog.warn('email_account_read_failed', { ...event })
+          },
         })
       : buildInMemoryGmailClient()
   const emailResolver = new EmailProjectCacheResolver({ owner_home: input.owner_home })

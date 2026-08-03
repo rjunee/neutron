@@ -49,9 +49,18 @@ function makeStore(): ProjectCredentialStore {
   return new ProjectCredentialStore(db, { crypto: secretsStore })
 }
 
-/** A fake OAuthTokenManager that returns a fixed token per label (the global grant). */
+/**
+ * A fake OAuthTokenManager that returns a fixed token per label (the global
+ * grant). Multi-account: the resolver enumerates a service's grants before
+ * asking for a token, so the fake answers `listGrants` from the same map — one
+ * grant per label that has a token.
+ */
 function fakeOAuth(byLabel: Record<string, string | null>): OAuthTokenManager {
   return {
+    listGrants: async (service: string) =>
+      byLabel[service] === undefined || byLabel[service] === null
+        ? []
+        : [{ label: service, service, account_key: null, email: null }],
     getAccessToken: async (label: string): Promise<string | null> => byLabel[label] ?? null,
   } as unknown as OAuthTokenManager
 }
@@ -198,6 +207,9 @@ test('accessorFor reads the ACTIVE project from the ambient runWithActiveProject
 test('accessorFor fail-soft: a resolver throw becomes null (Core degrades, never crashes)', async () => {
   const store = makeStore()
   const throwingOAuth = {
+    listGrants: async (service: string) => [
+      { label: service, service, account_key: null, email: null },
+    ],
     getAccessToken: async (): Promise<string | null> => {
       throw new Error('token endpoint down')
     },

@@ -121,16 +121,33 @@ export async function buildCoresBackendFactories(
       // installs the Core (dispatches against an empty calendar) —
       // preserves the existing __tests__/install-lifecycle.test.ts
       // shape + the dev boot.
+      //
+      // Multi-account (2026-08): the read spans EVERY connected Google
+      // account and merges, tagging each event with its account. ONE client
+      // shape covers both cases — with a resolver the accounts come from the
+      // grant list; without one the raw accessor is expressed as a single
+      // account. That keeps this a single code path rather than a
+      // single-account branch beside a multi-account one.
       if (googleOAuthAccessToken !== null) {
         // D2: route through the resolver (Email/Calendar stay GLOBAL scope —
         // the active project is ignored for `google_calendar`), else the raw
-        // per-instance accessor. Effective behavior identical for Calendar.
+        // per-instance accessor.
         return {
-          client: mod.buildGoogleCalendarClient({
-            accessToken:
+          client: mod.buildMultiAccountGoogleCalendarClient({
+            accounts:
               credentialResolver !== undefined
-                ? credentialResolver.accessorFor(mod.OAUTH_SECRET_LABEL)
-                : () => googleOAuthAccessToken(mod.OAUTH_SECRET_LABEL),
+                ? credentialResolver.accountsResolverFor(mod.OAUTH_SECRET_LABEL)
+                : async () => [
+                    {
+                      account_id: 'default',
+                      account_email: null,
+                      accessToken: () =>
+                        googleOAuthAccessToken(mod.OAUTH_SECRET_LABEL),
+                    },
+                  ],
+            onAccountError: (event) => {
+              moduleLog.warn('calendar_account_read_failed', { ...event })
+            },
           }),
         }
       }
@@ -146,22 +163,37 @@ export async function buildCoresBackendFactories(
       // mirrors in PR #248's sibling sprint. Per
       // docs/plans/email-managed-core-tier1-brief.md § 4.
       const mod = await import('@neutronai/email-managed-core')
+      // Multi-account (2026-08): the read spans EVERY connected Google account
+      // and merges newest-first, tagging each message with the account it
+      // arrived in. ONE client shape covers both cases — see the calendar
+      // factory above for why this is not a dual path.
       const client =
         emailOAuthTokens !== undefined
-          ? mod.buildGoogleGmailClient({
+          ? mod.buildMultiAccountGmailClient({
               // D2: route through the resolver (Email stays GLOBAL scope — the
               // active project is ignored for `gmail_compose`), else the raw
-              // per-instance OAuthTokenManager read. Effective behavior identical.
-              accessToken:
+              // per-instance OAuthTokenManager read.
+              accounts:
                 credentialResolver !== undefined
-                  ? credentialResolver.accessorFor(mod.OAUTH_SECRET_LABEL)
-                  : async () => {
-                      try {
-                        return await emailOAuthTokens.getAccessToken(mod.OAUTH_SECRET_LABEL)
-                      } catch {
-                        return null
-                      }
-                    },
+                  ? credentialResolver.accountsResolverFor(mod.OAUTH_SECRET_LABEL)
+                  : async () => [
+                      {
+                        account_id: 'default',
+                        account_email: null,
+                        accessToken: async (): Promise<string | null> => {
+                          try {
+                            return await emailOAuthTokens.getServiceAccessToken(
+                              mod.OAUTH_SECRET_LABEL,
+                            )
+                          } catch {
+                            return null
+                          }
+                        },
+                      },
+                    ],
+              onAccountError: (event) => {
+                moduleLog.warn('email_account_read_failed', { ...event })
+              },
             })
           : mod.buildInMemoryGmailClient()
       const factoryDeps: {

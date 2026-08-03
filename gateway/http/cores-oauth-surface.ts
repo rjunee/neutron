@@ -43,6 +43,7 @@ import type { CoresOAuthPendingStore } from '../cores/oauth-pending-store.ts'
 import {
   refreshLabel,
   metaLabel,
+  parseGrantLabel,
   OAuthRefreshError,
   type OAuthTokenManager,
   type OAuthTokenStatus,
@@ -255,7 +256,11 @@ export function createCoresOAuthSurface(
         return await handleStatus({ tokens, knownLabels })
       }
 
-      const disconnectMatch = /^\/api\/cores\/oauth\/google\/disconnect\/([A-Za-z0-9_\-:.]+)\/?$/.exec(
+      // `#` is in the class because a grant label is `<service>#<account_key>`
+      // — disconnecting ONE of several connected accounts addresses that
+      // account's label, and a class that stopped at the service would only
+      // ever be able to disconnect a legacy un-keyed grant.
+      const disconnectMatch = /^\/api\/cores\/oauth\/google\/disconnect\/([A-Za-z0-9_\-:.#]+)\/?$/.exec(
         pathname,
       )
       if (disconnectMatch !== null && req.method === 'POST') {
@@ -588,7 +593,11 @@ async function handleDisconnect(input: {
   projectDb: ProjectDb
   project_slug: string
 }): Promise<Response> {
-  if (!input.knownLabels.has(input.label)) {
+  // Validate the SERVICE part: a manifest declares a service, and a grant label
+  // is that service plus an account key. Checking the whole label would reject
+  // every per-account disconnect.
+  const { service } = parseGrantLabel(input.label)
+  if (!input.knownLabels.has(service)) {
     return jsonResponse(400, {
       ok: false,
       code: 'unknown_label',
@@ -616,9 +625,20 @@ async function handleStatus(input: {
   tokens: OAuthTokenManager
   knownLabels: Map<string, BundledLabelEntry>
 }): Promise<Response> {
+  // One entry per CONNECTED ACCOUNT, not one per service — an owner running
+  // several accounts needs to see (and be able to disconnect) each of them
+  // individually. A service with no grant still gets its disconnected
+  // placeholder so the admin surface can offer a Connect action for it.
   const labels: OAuthTokenStatus[] = []
-  for (const label of input.knownLabels.keys()) {
-    labels.push(await input.tokens.getStatus(label))
+  for (const service of input.knownLabels.keys()) {
+    const grants = await input.tokens.listGrants(service)
+    if (grants.length === 0) {
+      labels.push(await input.tokens.getStatus(service))
+      continue
+    }
+    for (const grant of grants) {
+      labels.push(await input.tokens.getStatus(grant.label))
+    }
   }
   const connected = labels.some((l) => l.connected)
   return jsonResponse(200, {
