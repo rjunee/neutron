@@ -89,6 +89,8 @@ const SAVED_ENV_KEYS = [
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH',
   'NOTIFY_SOCKET',
+  'NEUTRON_CORES_GOOGLE_CLIENT_ID',
+  'NEUTRON_CORES_GOOGLE_CLIENT_SECRET',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -199,6 +201,15 @@ beforeAll(async () => {
   process.env['NEUTRON_INSTANCE_SLUG'] = 'owner'
   process.env['NEUTRON_LANDING_STATIC_DIR'] = LANDING_DIR
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'route-slot-coverage-secret-0123456789'
+  // The Cores Google client pair. Same move as the Telegram seed above and for
+  // the same reason: the OAuth rungs mount iff a per-deployment client is
+  // configured, so without this the probe would report them absent and the
+  // ratchet would be measuring the FIXTURE rather than the product. Seeding
+  // widens the probe to match this file's own claim — "the widest composition an
+  // Open instance produces". The values are synthetic; nothing here talks to
+  // Google.
+  process.env['NEUTRON_CORES_GOOGLE_CLIENT_ID'] = 'route-slot-coverage.apps.googleusercontent.com'
+  process.env['NEUTRON_CORES_GOOGLE_CLIENT_SECRET'] = 'route-slot-coverage-client-secret'
   // A credentialed boot: the widest composition an Open instance produces, so a
   // surface that is absent HERE is absent everywhere.
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-synthetic-route-slot-coverage'
