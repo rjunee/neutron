@@ -237,7 +237,10 @@ test('a rename survives a restart — the store is durable, not process-local', 
 
   const before = await readEntries(first, base)
   const target = before[0]
-  expect(target).toBeDefined()
+  // A real guard, not `expect(...).toBeDefined()`: that asserts but does not
+  // NARROW, and an empty grid should fail with a sentence rather than a
+  // downstream `undefined.slug`.
+  if (target === undefined) throw new Error('launcher returned no tiles to rename')
 
   const renamed = await call(first, `${base}/rename`, {
     method: 'POST',
@@ -252,7 +255,7 @@ test('a rename survives a restart — the store is durable, not process-local', 
 
   const second = await boot()
   const after = await readEntries(second, base)
-  const found = after.find((e) => e.slug === target!.slug)
+  const found = after.find((e) => e.slug === target.slug)
   expect(found?.display_name).toBe('Renamed By Owner')
   // Two full composer boots in one test.
 }, 60_000)
