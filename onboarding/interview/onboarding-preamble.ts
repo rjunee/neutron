@@ -36,6 +36,18 @@ import {
 export interface OnboardingPreambleInput {
   /** Whether an AI history-import (ChatGPT/Claude) is offered on this box. */
   import_offered: boolean
+  /**
+   * ISSUES #306 — the owner's already-captured IANA timezone, read from
+   * `instance_metadata.timezone` (the table the web client's `?tz=` param
+   * writes through `persistOwnerTimezoneIfChanged`). `null`/absent when the
+   * client never reported one (Telegram signups, older browsers).
+   *
+   * This does NOT gate the never-ask rule below — that rule is unconditional,
+   * because "we don't know it yet" was never a licence to ask. The value only
+   * decides whether the preamble can additionally tell the agent WHAT the
+   * timezone is, so it can use it without surfacing it.
+   */
+  known_timezone?: string | null
 }
 
 /**
@@ -146,6 +158,33 @@ export function buildOnboardingPreamble(input: OnboardingPreambleInput): string 
     'with a name — never ask "what should you call me" or suggest names for yourself.',
     'The personality above is the last thing you need from them.',
   )
+  lines.push('')
+  // ISSUES #306 — the never-ask-timezone rule, ported to the LIVE preamble.
+  //
+  // It previously existed ONLY in two markdown files
+  // (`onboarding/interview/skills/_envelope.md`, `prompts/onboarding/
+  // interview-base.md`) that NOTHING loads, guarded by a test that read one of
+  // those same files. A closed loop: the rule was asserted, and never reached
+  // an LLM. This block is the copy that actually ships, because
+  // `buildOnboardingPreamble` is wired into the live turn at
+  // `open/composer.ts` → `LiveAgentOnboardingSeam.systemPreamble`.
+  //
+  // Unconditional on purpose. The old envelope text made the *reference* to a
+  // captured value conditional, not the prohibition — an unknown timezone
+  // still must not produce a question.
+  lines.push(
+    'NEVER ask the owner for their timezone, location, city, country, or "where are you',
+    'based" / "what time is it for you", and NEVER ask them to confirm or correct a',
+    'timezone. It is auto-detected silently from the browser and recorded for you.',
+    'Asking about it is a hard mistake.',
+  )
+  if (typeof input.known_timezone === 'string' && input.known_timezone.length > 0) {
+    lines.push(
+      `Their timezone is already known to be ${input.known_timezone} — use it directly when`,
+      'it is relevant (scheduling, "good morning", a reminder time), but do not surface or',
+      'restate it back to them.',
+    )
+  }
   lines.push('')
   lines.push('Offering choices (tappable buttons):')
   lines.push(

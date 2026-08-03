@@ -226,6 +226,32 @@ export type OpenComposition = CompositionInput &
       | 'app_voice_transcription_surface'
     >
   >
+
+/**
+ * ISSUES #306 — resolve the owner's onboarding preamble against the LIVE
+ * `instance_metadata` row.
+ *
+ * This exists as a named export rather than an inline closure so the wiring
+ * itself is testable: the bug it closes was not "the preamble text is wrong",
+ * it was "the composer never read the timezone it already had". A test that
+ * hand-built a `known_timezone` input would have passed throughout the bug.
+ * Exercising THIS function against a real migrated DB proves the reader, the
+ * schema and the rendering together.
+ *
+ * The `?tz=` capture path (`app-ws-surface` → `on_client_timezone` →
+ * `persistOwnerTimezoneIfChanged`) always worked; nothing read it back.
+ */
+export function buildOwnerOnboardingPreamble(
+  db: CompositionInput['db'],
+  project_slug: string,
+  import_offered: boolean,
+): string {
+  return buildOnboardingPreamble({
+    import_offered,
+    known_timezone: readOwnerTimezone(db, project_slug),
+  })
+}
+
 import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-sweep.ts'
 import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
@@ -336,6 +362,7 @@ import {
 import { resolveTranscriber } from '@neutronai/gateway/transcription/resolve-transcriber.ts'
 import { OpenAiKeyStore } from '@neutronai/gateway/transcription/openai-key-store.ts'
 import {
+  readOwnerTimezone,
   readTranscriptionBackend,
   writeTranscriptionBackend,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
@@ -4139,15 +4166,20 @@ export function buildOpenGraphComposer(
     rearmFromDurableState()
     // The onboarding interview preamble (offer history import only when a
     // synthesis substrate exists to actually run it).
-    const onboardingPreambleText = buildOnboardingPreamble({
-      import_offered: importOffered,
-    })
+    // ISSUES #306 — resolved PER TURN, not once at boot, and that is the whole
+    // point of the change. The owner's timezone lands in `instance_metadata`
+    // when the web client connects with `?tz=`, which happens AFTER the
+    // composer has booted. A boot-time read returns null on exactly the case
+    // that matters (a fresh install, where onboarding is about to run), so the
+    // preamble has to resolve the value at the moment the turn is built.
+    const onboardingPreambleFor = (): string =>
+      buildOwnerOnboardingPreamble(db, project_slug, importOffered)
     // The live-agent onboarding seam — active while the owner isn't onboarded.
     const onboardingSeam: LiveAgentOnboardingSeam | undefined =
       onboardingExtractor !== null
         ? {
             isActive: (user_id: string): Promise<boolean> => isOnboardingActive(user_id),
-            systemPreamble: (): string => onboardingPreambleText,
+            systemPreamble: (): string => onboardingPreambleFor(),
             // Per-turn grounding: re-inject the import-analysis the agent already
             // presented (proposed projects + curation status) so the warm session
             // KNOWS what it proposed and can honor "drop X" / "keep the rest".
