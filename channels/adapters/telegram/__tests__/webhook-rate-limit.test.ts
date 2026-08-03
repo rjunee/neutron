@@ -25,7 +25,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { buildWebhookHandler } from '../webhook-server.ts'
-import type { IncomingEventReceiver } from '../../../receiver.ts'
+import type { IncomingEventReceiver } from '../../../types.ts'
 
 const SECRET = 'webhook-secret-for-rate-limit-tests'
 const BOT_ID = 4242
