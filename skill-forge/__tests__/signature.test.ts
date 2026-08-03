@@ -29,16 +29,19 @@ test('normalizeAction leaves a non-trailing paren group intact (regex parity)', 
   expect(normalizeAction('open ( now')).toBe('open ( now')
 })
 
-test('normalizeAction completes in <50ms on adversarial paren input', () => {
+test('normalizeAction does not backtrack catastrophically on adversarial paren input', () => {
   // `'('.repeat(n)` is the pathological case for the old `/\s*\(.*\)\s*$/`:
   // `.*` matches to end, fails to find `\)`, then the engine restarts the
   // match at every offset — O(n²). The linear scan returns it unchanged.
+  //
+  // ISSUES #438 — the guard is the TEST TIMEOUT, not a `<50ms` assertion. The
+  // regression is a HANG (a quadratic scan of 500k chars is ~2 minutes), not a
+  // near-miss, so a millisecond budget guards the wrong distance: it sat ~39x
+  // from the passing case (measured ~1.3 ms) while the failure is ~36,000x
+  // away. The timeout catches the real shape with far more slack.
   const evil = '('.repeat(500_000)
-  const t0 = performance.now()
   const out = normalizeAction(evil)
-  const elapsed = performance.now() - t0
   expect(out).toBe(evil)
-  expect(elapsed).toBeLessThan(50)
 })
 
 test('workflowSignature is stable across volatile args (uses normalizeAction)', () => {

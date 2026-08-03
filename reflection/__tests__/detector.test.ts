@@ -126,17 +126,19 @@ describe('extractJsonObject (fence strip is redos-hardened)', () => {
     expect(extractJsonObject('prefix {"d":4} suffix')).toEqual({ d: 4 })
   })
 
-  test('completes in <50ms on an unterminated fence + whitespace flood', () => {
+  test('does not backtrack catastrophically on an unterminated fence + whitespace flood', () => {
     // The old `/```(?:json)?\s*([\s\S]+?)```/` backtracks on a fence opener
     // followed by a long whitespace run with no closing fence: `\s*` and
     // `[\s\S]+?` both match spaces, so the engine retries the split at every
     // offset — O(n²). With the leading `\s*` dropped there is no overlap.
+    //
+    // ISSUES #438 — the guard is the TEST TIMEOUT, not a `<50ms` assertion.
+    // The regression is a HANG (a quadratic scan of 500k chars is ~2 minutes),
+    // not a near-miss, so a millisecond budget guards the wrong distance. The
+    // timeout catches the real shape with far more slack and cannot flake.
     const evil = '```' + ' '.repeat(500_000)
-    const t0 = performance.now()
     const out = extractJsonObject(evil)
-    const elapsed = performance.now() - t0
     expect(out).toBeNull()
-    expect(elapsed).toBeLessThan(50)
   })
 })
 
