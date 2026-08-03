@@ -30,6 +30,7 @@ import {
   DEFAULT_CORRECTION_SCAN_LIMIT,
   type ReflectPassDeps,
 } from '@neutronai/scribe/index.ts'
+import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 import { writeEntity as defaultWriteEntity } from '@neutronai/runtime/entity-writer.ts'
 import { SupervisedLoop } from '@neutronai/loop'
 import {
@@ -252,6 +253,18 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
           ownerDataDir: owner_home,
           owner_slug: project_slug,
           budget: createState(defaultStatePath(owner_home)),
+          // M2 fix-lift — scribe extraction runs on the FAST model, not the
+          // frontier one. `runExtraction` defaults to `[getBestModel()]` when no
+          // preference is passed (`scribe/extract.ts:189-192`), and this call
+          // site passed none — so every single user turn silently spent a
+          // frontier generation on background entity extraction.
+          //
+          // The predecessor system shipped this exact bug and measured it before
+          // fixing it the same way: roughly $33/week of silent extraction. It is
+          // pure overhead here — extraction is structured span-picking over one
+          // turn of text, which is what the fast tier is for, and the output is
+          // consumed by the sync hook rather than read by the owner.
+          model_preference: [FAST_MODEL],
         })
       : null
 
