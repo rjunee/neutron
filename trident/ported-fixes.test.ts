@@ -358,6 +358,7 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
     // The model IDS are threaded from runtime/models.ts via args — the workflow
     // must NOT hard-pin an id literal (it can't import the registry).
     expect(src).not.toContain('claude-fable-5')
+    expect(src).not.toContain('claude-opus-5')
     expect(src).not.toContain('claude-opus-4-8')
     expect(src).not.toContain('claude-sonnet-4-6')
     // Every spawn is logged with its resolved model so a run is TALLY-ABLE.

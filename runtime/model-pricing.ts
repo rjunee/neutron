@@ -56,6 +56,10 @@ export interface ModelPricingEntry {
 const PRICING_SOURCE_URL = 'https://docs.claude.com/en/docs/about-claude/pricing'
 const PRICING_VERIFIED_AT = '2026-05-17'
 
+/** Opus 5 rates, read off Anthropic's launch post on the date below. */
+const OPUS_5_PRICING_SOURCE_URL = 'https://www.anthropic.com/news/claude-opus-5'
+const OPUS_5_PRICING_VERIFIED_AT = '2026-08-03'
+
 /**
  * The pricing registry. Keys are canonical Anthropic model ids. The
  * date-suffixed snapshot id (e.g. `claude-haiku-4-5-20251001`) is registered
@@ -83,6 +87,19 @@ export const MODEL_PRICING_TABLE: Readonly<
   // identically across the 4.x generation ($5 in / $25 out per MTok), so this
   // matches the 4-7 row; it MUST exist because `resolvePricingFor(getBestModel())`
   // is called at import-job build time and throws on an unregistered id.
+  // The current `runtime/models.ts:BEST_MODEL` default. Opus stays $5 in / $25
+  // out across the generation boundary, so this matches the 4.x rows — verified
+  // against Anthropic's own Opus 5 announcement rather than assumed from the
+  // pattern, because this table carries a `verified_at` and a guess in a field
+  // named "verified" is worse than a missing row.
+  'claude-opus-5': Object.freeze({
+    input_usd_per_m: 5,
+    output_usd_per_m: 25,
+    verified_at: OPUS_5_PRICING_VERIFIED_AT,
+    source_url: OPUS_5_PRICING_SOURCE_URL,
+  }),
+  // Retained: the BEST_MODEL default before the 2026-08-03 Opus 5 bump, and
+  // still the id on any install pinning `NEUTRON_BEST_MODEL`.
   'claude-opus-4-8': Object.freeze({
     input_usd_per_m: 5,
     output_usd_per_m: 25,

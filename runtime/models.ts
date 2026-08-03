@@ -36,7 +36,7 @@
 
 /**
  * The user's Max-subscription best model. Override via `NEUTRON_BEST_MODEL`.
- * Defaults to Claude Opus 4.8.
+ * Defaults to Claude Opus 5.
  *
  * **This constant is the FRESH-INSTALL SEED, not the live runtime value.** It
  * is bound ONCE at module load and a runtime model upgrade cannot mutate a
@@ -50,7 +50,7 @@
  * Keep the seed current AND route live spawns through {@link getBestModel}.
  */
 export const BEST_MODEL: string =
-  process.env['NEUTRON_BEST_MODEL'] ?? 'claude-opus-4-8'
+  process.env['NEUTRON_BEST_MODEL'] ?? 'claude-opus-5'
 
 /**
  * FABLE_MODEL — the ORCHESTRATOR / max-reasoning planning model (Ryan-locked

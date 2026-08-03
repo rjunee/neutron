@@ -32,7 +32,7 @@ async function freshImport(): Promise<typeof import('../models.ts')> {
 describe('runtime/models', () => {
   test('BEST_MODEL defaults to Claude Opus 4.8 when env is unset', async () => {
     const { BEST_MODEL } = await freshImport()
-    expect(BEST_MODEL).toBe('claude-opus-4-8')
+    expect(BEST_MODEL).toBe('claude-opus-5')
   })
 
   test('FAST_MODEL defaults to Claude Haiku 4.5 when env is unset', async () => {

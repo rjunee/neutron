@@ -49,7 +49,7 @@ export type EnvBag = Record<string, string | undefined>
 
 export const DEFAULTS = {
   // runtime/models.ts:53/71/89/96
-  bestModel: 'claude-opus-4-8',
+  bestModel: 'claude-opus-5',
   fableModel: 'claude-fable-5',
   sonnetModel: 'claude-sonnet-4-6',
   fastModel: 'claude-haiku-4-5-20251001',
