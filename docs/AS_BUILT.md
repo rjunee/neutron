@@ -6842,3 +6842,58 @@ under the same load.
 **Every deletion was mutation-tested**: the guarding behaviour was broken in the
 real source and the surviving assertions were shown to still red. Tests only —
 no source file changed, no schema change, no feature flag.
+
+## 2026-08-04 — one OpenAI key serves every OpenAI-backed feature (ISSUES #496)
+
+The owner pasted an OpenAI key in Settings to turn on semantic search, then
+found voice transcription still reporting `openai_key_missing`. That was not a
+defect: `gateway/transcription/openai-key-store.ts` reserved its own credential
+name, `openai_transcription`, and the docblock beneath it argued the separation
+was deliberate — a generic OpenAI credential would be read by whatever else
+wanted an OpenAI key, so pasting a key for one purpose would silently switch on
+another.
+
+**That reasoning is now retired** (SPEC § Decisions Log 2026-08-04). It protects
+a user from a metered feature they did not choose to enable, and Neutron is
+single-owner: he pastes his own key and knows what he pays for. Making him paste
+the same secret twice to get voice notes working reads as a bug, not a
+safeguard.
+
+**What shipped — a resolution ORDER, not a branch.** `OpenAiKeyStore.resolve()`
+tries, in order: the dedicated `openai_transcription` credential → the SHARED
+general OpenAI credential → `OPENAI_API_KEY` from the environment. First
+non-empty answer wins. One key works everywhere by default; a dedicated key
+still scopes transcription spend for anyone who wants that, because it outranks
+the shared one. No flag, no mode, no second code path.
+
+**The fallback crosses a store boundary, which is the whole difficulty.** The
+general key is NOT a `project_credentials` row and has no `service` name. It
+lives in `ApiKeyStore` over `SecretsStore` (tables `api_keys` + `secrets`),
+keyed `provider='openai', label='onboarding'` — secrets label `openai:onboarding`
+(`auth/api-key-store.ts:101`, `gateway/cores/integrations.ts:145-146`), written
+by the onboarding optional-key offer and by Settings → Integrations, read by
+`gateway/wiring/resolve-onboarding-openai-key.ts`. A naive "also read service
+`openai`" fix would have compiled, passed a careless test, and done nothing:
+`project_credentials` rows with a hand-typed `openai` service are inert — no
+production reader consults them. So the composer injects
+`resolveOnboardingOpenAiKey` as a REQUIRED lazy thunk (the same thunk the GBrain
+embedder wiring already uses, lazy for the same reason: the composer runs once
+at boot but the key is pasted later, over the running server). Required rather
+than optional so a construction site cannot silently omit it — which the
+typechecker immediately proved by flagging the two test sites that had.
+
+`resolve()` and `status()` became async and walk the SAME order, deliberately:
+if they drift, Settings reports "no key" while voice notes transcribe. A new
+`shared` source label reports the provenance rather than hiding it, and DELETE
+returns 409 `key_from_shared_credential` pointing at Integrations rather than a
+200 that reads as "deleted" over a box that still transcribes.
+
+**Tests + mutation results.** New `gateway/transcription/__tests__/openai-key-store.test.ts`
+(16 tests over a service-AWARE fake store — the sibling surface fake answers to
+any name, which cannot distinguish a correct lookup from a wrong one) plus five
+end-to-end cases on the HTTP surface. Four mutations, each red: removing the
+fallback reds "shared is used" (3 tests); inverting the precedence reds
+"dedicated wins"; dropping the shared step from `status()` alone reds the
+status/resolve agreement suite (4 tests); dropping the blank-key guard reds the
+fall-through and missing-key tests (4 tests). The `openai_key_missing` path is
+covered directly and is unchanged.

@@ -2663,14 +2663,34 @@ voice note without a restart):
 owner-entered credential lives: the AES-256-GCM `ProjectCredentialStore`
 (migration 0092, shared `.neutron-aes-key`), GLOBAL scope, reserved service name
 `openai_transcription` — the same shape as the Codex subscription bundle.
-`gateway/transcription/openai-key-store.ts` owns it. The key resolves
-stored-credential → `OPENAI_API_KEY` from the server environment, so a box that
-already had the env var keeps working without a re-paste, and the status object
-reports WHICH source supplied it. **It is write-only**: responses carry
-`{ present, source, saved_at }` and never the key or any slice of it (this repo
-omits secret material rather than masking it), and an environment-supplied key
-cannot be deleted over HTTP — that returns 409 `key_from_environment` pointing at
-the server's `.env`.
+`gateway/transcription/openai-key-store.ts` owns it.
+
+**ONE OpenAI key serves every OpenAI-backed feature** (SPEC § Decisions Log
+2026-08-04). The key resolves in THREE steps — dedicated `openai_transcription`
+credential → the SHARED general OpenAI credential → `OPENAI_API_KEY` from the
+server environment — and the status object reports WHICH source supplied it
+(`stored` / `shared` / `environment`). Step 2 is why a key pasted once for
+semantic search also transcribes voice notes: the general credential lives in a
+DIFFERENT store — `ApiKeyStore` over `SecretsStore` (tables `api_keys` +
+`secrets`, secrets label `openai:onboarding`), written by the onboarding
+optional-key offer and by Settings → Integrations, read by
+`gateway/wiring/resolve-onboarding-openai-key.ts` — not in `project_credentials`,
+so the fallback crosses a store boundary via a lazy thunk the composer injects
+(the same thunk the GBrain embedder wiring uses, lazy for the same reason: the
+composer runs once at boot, the key is pasted later). Step 1 still outranks it,
+which is how anyone who wants transcription billed to a SEPARATE key gets that.
+This replaces an earlier isolation rule — a distinct service name so a key
+pasted for one purpose could not switch on another — which was retired because it
+protects a user Neutron does not have: there is one owner, he pastes his own key,
+and a second mandatory paste read as a bug.
+
+**It is write-only**: responses carry `{ present, source, saved_at }` and never
+the key or any slice of it (this repo omits secret material rather than masking
+it). A key this surface does not own cannot be deleted over HTTP — an
+environment key returns 409 `key_from_environment` pointing at the server's
+`.env`, and a shared key returns 409 `key_from_shared_credential` pointing at
+Integrations. `saved_at` is `null` for both, because that timestamp would imply
+the key is this panel's to manage.
 
 **Install is opt-in, from Settings — nothing ships in `install.sh`.**
 `whisper-catalog.ts` pins the whisper.cpp release build and each ggml model by

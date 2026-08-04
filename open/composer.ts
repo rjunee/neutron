@@ -369,6 +369,7 @@ import {
 } from '@neutronai/gateway/http/app-upload-surface.ts'
 import { resolveTranscriber } from '@neutronai/gateway/transcription/resolve-transcriber.ts'
 import { OpenAiKeyStore } from '@neutronai/gateway/transcription/openai-key-store.ts'
+import { resolveOnboardingOpenAiKey } from '@neutronai/gateway/wiring/resolve-onboarding-openai-key.ts'
 import {
   isValidIanaTimezone,
   readOwnerTimezone,
@@ -3066,6 +3067,15 @@ export function buildOpenGraphComposer(
       store: projectCredentialStore,
       owner_slug: asOwnerHandle(project_slug),
       env,
+      // The SHARED OpenAI credential, so the key the owner pasted once (for
+      // semantic memory) also transcribes his voice notes — he should not have
+      // to paste the same secret twice. Same lazy thunk the GBrain embedder
+      // wiring uses (`open/wiring/memory.ts`), and lazy for the same reason:
+      // the composer runs ONCE at boot but the key is captured later, over the
+      // already-running server, so an eager read would miss every freshly
+      // pasted key until a restart.
+      resolveSharedKey: () =>
+        resolveOnboardingOpenAiKey({ db, owner_home, owner_handle, project_slug }),
     })
     const appUploadSurface = createAppUploadSurface({
       auth: appOwnerAuth,
@@ -3080,7 +3090,7 @@ export function buildOpenGraphComposer(
           env,
           neutron_home: owner_home,
           choice: readTranscriptionBackend(db, project_slug),
-          openai_api_key: openAiTranscriptionKeys.resolve(),
+          openai_api_key: await openAiTranscriptionKeys.resolve(),
         })
         if (backend.client === null) {
           // NOT silent. A voice note that produces no transcript because the

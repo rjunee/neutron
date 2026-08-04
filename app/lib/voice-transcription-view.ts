@@ -132,6 +132,12 @@ export function describeKeySource(status: VoiceTranscriptionStatus): string | nu
     // it from here either, otherwise has no way to understand where it is from.
     return 'Using OPENAI_API_KEY from the server environment. To change it here, save a key below; to remove it, edit the server.';
   }
+  if (key.source === 'shared') {
+    // Same reasoning as `environment`: the key was never typed HERE and DELETE
+    // here will not remove it, so naming where it actually lives is the only
+    // honest answer.
+    return 'Using your OpenAI key from Integrations — the same key that powers semantic memory. Save a key below only if you want transcription billed to a separate one.';
+  }
   return key.saved_at !== null ? `Key saved ${formatSavedAt(key.saved_at)}.` : 'Key saved.';
 }
 
