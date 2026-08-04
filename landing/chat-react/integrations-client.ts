@@ -9,6 +9,20 @@
  *   POST   /api/cores/api-keys/<label>       → store/rotate a BYO API key
  *   DELETE /api/cores/api-keys/<label>       → clear a stored API key
  *
+ * …plus the two Google-OAuth connection routes the Admin tab drives
+ * (`gateway/http/cores-oauth-surface.ts`):
+ *
+ *   GET  /api/cores/oauth/google/start?labels=…      → { ok, authorize_url, … }
+ *   POST /api/cores/oauth/google/disconnect/<label>  → revoke + delete tokens
+ *
+ * `/start` is BEARER-GATED, so it can never be rendered as an `<a href>` — a
+ * browser navigation carries no Authorization header and the route 401s
+ * (cores-oauth-surface.ts resolveBearer). The caller does this authenticated
+ * round-trip and then navigates to the returned `authorize_url`, which is the
+ * PUBLIC `accounts.google.com` consent URL and needs no credential. Same
+ * server-side start the mobile client and the agent-native `integrations_connect`
+ * tool run — one code path, three callers.
+ *
  * NO plaintext secrets ever come back from GET — each slot carries a `connected`
  * boolean only, never the key value. The web Admin tab reflects that boolean and
  * lets the owner set / clear keys + see which OAuth accounts are connected.
@@ -78,6 +92,21 @@ export interface ApiKeyDeleteResponse {
   deleted: boolean
 }
 
+/** `/api/cores/oauth/google/start` — `authorize_url` is the PUBLIC Google
+ *  consent URL (never a gateway link), safe to navigate to without a bearer. */
+export interface OAuthStartResponse {
+  ok: boolean
+  authorize_url: string
+  state: string
+  expires_at: number
+}
+
+export interface OAuthDisconnectResponse {
+  ok: boolean
+  disconnected: string[]
+  affected_cores: string[]
+}
+
 /* ─── client ─── */
 
 export type IntegrationsClientOptions = GatewayHttpClientOptions
@@ -114,6 +143,35 @@ export class IntegrationsClient extends GatewayHttpClient {
     return await this.req<ApiKeyDeleteResponse>(
       `/api/cores/api-keys/${encodeURIComponent(label)}`,
       { method: 'DELETE' },
+    )
+  }
+
+  /**
+   * Start a Google OAuth grant and get back the public consent URL to navigate
+   * to. `labels` are SERVICE labels (`google_calendar`), never composite
+   * per-account ones — `/start` validates them against the manifest-declared
+   * slots and a `<service>#<account_key>` would 400 `unknown_label`.
+   *
+   * This authenticated round-trip is mandatory: `/start` is bearer-gated, so a
+   * plain link to it 401s in the browser.
+   */
+  async oauthStart(labels: string[]): Promise<OAuthStartResponse> {
+    const q = encodeURIComponent(labels.join(','))
+    return await this.req<OAuthStartResponse>(
+      `/api/cores/oauth/google/start?labels=${q}`,
+    )
+  }
+
+  /**
+   * Revoke + delete one account's Google tokens. `label` is the FULL grant
+   * label off the row (composite when the service holds several accounts), so
+   * disconnecting one account leaves the others connected. POST, per
+   * `cores-oauth-surface.ts` — the route only matches `req.method === 'POST'`.
+   */
+  async oauthDisconnect(label: string): Promise<OAuthDisconnectResponse> {
+    return await this.req<OAuthDisconnectResponse>(
+      `/api/cores/oauth/google/disconnect/${encodeURIComponent(label)}`,
+      { method: 'POST' },
     )
   }
 }

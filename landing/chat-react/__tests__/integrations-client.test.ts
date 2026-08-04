@@ -177,3 +177,76 @@ describe('IntegrationsClientError', () => {
     }
   })
 })
+
+describe('IntegrationsClient — Google OAuth connect / disconnect', () => {
+  it('oauthStart GETs the bearer-gated /start with comma-joined SERVICE labels', async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = []
+    const client = new IntegrationsClient({
+      base_url: 'https://h',
+      token: 't',
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init })
+        return json({
+          ok: true,
+          authorize_url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=cid',
+          state: 'st',
+          expires_at: 42,
+        })
+      },
+    })
+
+    const res = await client.oauthStart(['google_calendar', 'google_workspace'])
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe(
+      'https://h/api/cores/oauth/google/start?labels=google_calendar%2Cgoogle_workspace',
+    )
+    expect(calls[0]!.init?.method ?? 'GET').toBe('GET')
+    // The bearer is what makes this route usable at all — /start 401s without
+    // it, which is why a plain <a href> to it can never work.
+    expect((calls[0]!.init?.headers as Record<string, string>).authorization).toBe('Bearer t')
+    // What the caller navigates to is Google's PUBLIC consent URL.
+    expect(res.authorize_url).toStartWith('https://accounts.google.com/')
+  })
+
+  it('oauthDisconnect POSTs the FULL composite label, percent-encoded', async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = []
+    const client = new IntegrationsClient({
+      base_url: 'https://h',
+      token: 't',
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init })
+        return json({ ok: true, disconnected: ['google_calendar#a1b2c3d4'], affected_cores: ['calendar'] })
+      },
+    })
+
+    const res = await client.oauthDisconnect('google_calendar#a1b2c3d4')
+
+    // POST, not DELETE — cores-oauth-surface.ts only matches POST.
+    expect(calls[0]!.init?.method).toBe('POST')
+    // `#` MUST be percent-encoded: left literal it opens a URL fragment, which
+    // is never transmitted, and the server would see only the bare service.
+    expect(calls[0]!.url).toBe(
+      'https://h/api/cores/oauth/google/disconnect/google_calendar%23a1b2c3d4',
+    )
+    expect(calls[0]!.url).not.toContain('#')
+    expect(res.disconnected).toEqual(['google_calendar#a1b2c3d4'])
+  })
+
+  it('a rejected start surfaces the coded server error rather than a silent no-op', async () => {
+    const client = new IntegrationsClient({
+      base_url: 'https://h',
+      token: 't',
+      fetchImpl: async () =>
+        json({ ok: false, code: 'unknown_label', message: "label='nope' is not declared" }, 400),
+    })
+    try {
+      await client.oauthStart(['nope'])
+      throw new Error('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(IntegrationsClientError)
+      expect((err as IntegrationsClientError).code).toBe('unknown_label')
+      expect((err as IntegrationsClientError).status).toBe(400)
+    }
+  })
+})

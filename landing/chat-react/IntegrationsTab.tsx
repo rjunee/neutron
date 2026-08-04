@@ -13,6 +13,29 @@
  * `connected` boolean, so the tab reflects connection state and lets the owner
  * paste a new value (write-only) or clear a stored one.
  *
+ * ── Google accounts are MANAGED here, not just displayed ────────────────────
+ * The OAuth section used to be a viewer: a "Connected"/"Not connected" badge
+ * and nothing to click, so the owner could not connect Google from the web at
+ * all (the mobile client had the full flow). It now drives the same two routes
+ * the mobile client uses:
+ *
+ *   - CONNECT does an AUTHENTICATED `GET /api/cores/oauth/google/start` through
+ *     {@link IntegrationsClient} and then navigates to the returned
+ *     `authorize_url`. It is NOT a link to `/start`: that route is bearer-gated
+ *     and a browser navigation carries no Authorization header, so an `href`
+ *     would 401. `authorize_url` is the public `accounts.google.com` consent
+ *     URL and needs no credential.
+ *   - DISCONNECT confirms, then `POST .../disconnect/<label>` with the row's
+ *     FULL label, and reloads the list.
+ *
+ * Rows are GROUPED BY SERVICE (see `integrations-oauth-view.ts`) because a
+ * service can hold several accounts: the server returns one row per connected
+ * account under a composite `<service>#<account_key>` label, so each account
+ * gets its own Disconnect, and a service that already has one keeps an "Add
+ * another account" action — otherwise the second and third Google account could
+ * never be added. Connect always sends the bare SERVICE label; the composite
+ * one is not manifest-declared and `/start` would reject it.
+ *
  * Loading / error / empty states mirror the sibling `DocumentsTab`. No feature
  * flag — the tab is always live when present in the resolved tab set.
  */
@@ -25,10 +48,23 @@ import {
   type ApiKeyIntegration,
   type OAuthAccountIntegration,
 } from './integrations-client.ts'
+import {
+  groupOAuthAccounts,
+  oauthAccountStatus,
+} from './integrations-oauth-view.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
 import { ThemeControl } from './ThemeToggle.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
+
+/** Hand the browser off to Google's consent page. Injected in tests so the
+ *  hand-off is OBSERVABLE — a Connect that fetches `/start` and then fails to
+ *  navigate is exactly the "built but never wired" defect this seam catches. */
+type NavigateImpl = (url: string) => void
+
+/** Destructive-action confirmation. Injected in tests (`window.confirm` is a
+ *  blocking browser modal with no headless equivalent). */
+type ConfirmImpl = (message: string) => boolean
 
 /** An archived project row the Admin tab lists with a Restore button
  *  (archived-projects sprint). Mirrors the server `ArchivedProjectItem`. */
@@ -39,15 +75,21 @@ interface ArchivedProject {
   archived_at: string
 }
 
-function oauthSubtitle(acc: OAuthAccountIntegration): string {
-  if (!acc.connected) return 'Not connected'
-  if (acc.email !== null && acc.email.length > 0) return acc.email
-  return 'Connected'
+/** Busy/error map key for a service's connect (or add-another) action. */
+function connectKey(service: string): string {
+  return `connect:${service}`
+}
+
+/** Busy/error map key for one account's disconnect action. */
+function disconnectKey(label: string): string {
+  return `disconnect:${label}`
 }
 
 export function IntegrationsTab({
   config,
   fetchImpl,
+  navigate,
+  confirmImpl,
 }: {
   /** Present for API-shape parity with the other builtin tabs; unused (the
    *  integrations surface is per-instance, not per-project). */
@@ -55,6 +97,10 @@ export function IntegrationsTab({
   config: BootstrapConfig
   /** Injected in tests; defaults to the global fetch inside IntegrationsClient. */
   fetchImpl?: FetchImpl
+  /** Injected in tests; defaults to a real top-level browser navigation. */
+  navigate?: NavigateImpl
+  /** Injected in tests; defaults to `window.confirm`. */
+  confirmImpl?: ConfirmImpl
 }): React.JSX.Element {
   // ── Unmount safety (#380 sweep) ─────────────────────────────────────────────
   // Mirrors the DocumentsTab fix: a fetch that SETTLES after this tab unmounts
@@ -167,6 +213,13 @@ export function IntegrationsTab({
   const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [rowError, setRowError] = useState<Record<string, string>>({})
 
+  // ── Google account connect / disconnect ──
+  // Kept in their OWN maps (not the api-key `busy`/`rowError` ones) so a service
+  // label can never collide with an api-key slot label, and namespaced by action
+  // so one account's disconnect spinner is independent of its service's connect.
+  const [oauthBusy, setOauthBusy] = useState<Record<string, boolean>>({})
+  const [oauthError, setOauthError] = useState<Record<string, string>>({})
+
   // ── archived projects (archived-projects sprint) ──
   const [archived, setArchived] = useState<ArchivedProject[]>([])
   const [archivedLoading, setArchivedLoading] = useState(true)
@@ -264,6 +317,91 @@ export function IntegrationsTab({
 
   useEffect(() => load(), [load])
 
+  const oauthGroups = useMemo(() => groupOAuthAccounts(oauth), [oauth])
+
+  const doNavigate: NavigateImpl = useMemo(
+    () => navigate ?? ((url: string): void => { window.location.assign(url) }),
+    [navigate],
+  )
+  const doConfirm: ConfirmImpl = useMemo(
+    () => confirmImpl ?? ((message: string): boolean => window.confirm(message)),
+    [confirmImpl],
+  )
+
+  /**
+   * Start a grant for a SERVICE and hand the browser to Google.
+   *
+   * Two-step ON PURPOSE: `/start` is bearer-gated, so the authenticated fetch
+   * has to happen here and only the `authorize_url` it returns — the public
+   * Google consent page — is safe to navigate to. Rendering `/start` as a link
+   * would 401. Used by BOTH the first Connect and "Add another account": the
+   * service label is what `/start` accepts either way, and Google's
+   * `prompt=consent` lets the owner pick a different account on the re-grant.
+   */
+  const connectOAuth = useCallback(
+    (service: string): void => {
+      const key = connectKey(service)
+      setOauthBusy((m) => ({ ...m, [key]: true }))
+      setOauthError((m) => ({ ...m, [key]: '' }))
+      void client
+        .oauthStart([service])
+        .then((res) => {
+          if (!mountedRef.current) return
+          setOauthBusy((m) => ({ ...m, [key]: false }))
+          if (!res.ok || typeof res.authorize_url !== 'string' || res.authorize_url.length === 0) {
+            setOauthError((m) => ({
+              ...m,
+              [key]: 'could not start the Google consent flow — try again',
+            }))
+            return
+          }
+          doNavigate(res.authorize_url)
+        })
+        .catch((err: unknown) => {
+          if (!mountedRef.current) return
+          setOauthBusy((m) => ({ ...m, [key]: false }))
+          setOauthError((m) => ({
+            ...m,
+            [key]: err instanceof Error ? err.message : 'failed to start the connect flow',
+          }))
+        })
+    },
+    [client, doNavigate],
+  )
+
+  /**
+   * Revoke ONE account. `label` is the row's full (possibly composite) label,
+   * so a service holding three accounts drops exactly the one asked for. On
+   * success the whole list reloads — the account row disappears and, when it
+   * was the last one, the service falls back to its not-connected placeholder.
+   */
+  const disconnectOAuth = useCallback(
+    (label: string, title: string): void => {
+      if (!doConfirm(`Disconnect ${title}? Tools that depend on it stop working until you reconnect.`)) {
+        return
+      }
+      const key = disconnectKey(label)
+      setOauthBusy((m) => ({ ...m, [key]: true }))
+      setOauthError((m) => ({ ...m, [key]: '' }))
+      void client
+        .oauthDisconnect(label)
+        .then(() => {
+          if (!mountedRef.current) return
+          setOauthBusy((m) => ({ ...m, [key]: false }))
+          load()
+        })
+        .catch((err: unknown) => {
+          if (!mountedRef.current) return
+          setOauthBusy((m) => ({ ...m, [key]: false }))
+          setOauthError((m) => ({
+            ...m,
+            [key]: err instanceof Error ? err.message : 'failed to disconnect',
+          }))
+        })
+    },
+    [client, doConfirm, load],
+  )
+
   const saveKey = useCallback(
     (label: string): void => {
       const value = (drafts[label] ?? '').trim()
@@ -351,30 +489,107 @@ export function IntegrationsTab({
           <div className="cdoc-empty">Loading…</div>
         ) : (
           <>
-            {/* ── OAuth accounts ── */}
+            {/* ── OAuth accounts ── one block per SERVICE, one row per account. */}
             <section className="cint-section" aria-label="Connected accounts">
               <h3 className="cint-section-title">Connected accounts</h3>
-              {oauth.length === 0 ? (
+              {oauthGroups.length === 0 ? (
                 <div className="cdoc-empty">No OAuth accounts are configured.</div>
               ) : (
                 <ul className="cint-list">
-                  {oauth.map((acc) => (
-                    <li key={acc.label} className="cint-row">
-                      <div className="cint-row-main">
-                        <span className="cint-row-label">{acc.label}</span>
-                        <span className="cint-row-sub">{oauthSubtitle(acc)}</span>
-                        {acc.scopes.length > 0 ? (
-                          <span className="cint-row-scopes">{acc.scopes.join(', ')}</span>
+                  {oauthGroups.map((group) => {
+                    const cKey = connectKey(group.service)
+                    const connectBusy = oauthBusy[cKey] === true
+                    const connectErr = oauthError[cKey]
+                    return (
+                      <li key={group.service} className="cint-row cint-row-oauth">
+                        <div className="cint-row-main">
+                          <span className="cint-row-label">{group.title}</span>
+                          {group.coreSlugs.length > 0 ? (
+                            <span className="cint-row-scopes">
+                              Used by {group.coreSlugs.join(', ')}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <ul className="cint-account-list">
+                          {group.accounts.map((acc) => {
+                            const dKey = disconnectKey(acc.label)
+                            const discBusy = oauthBusy[dKey] === true
+                            const discErr = oauthError[dKey]
+                            return (
+                              <li
+                                key={acc.label}
+                                className="cint-account"
+                                data-oauth-label={acc.label}
+                              >
+                                <div className="cint-row-main">
+                                  <span className="cint-row-sub">{oauthAccountStatus(acc)}</span>
+                                  {acc.scopes.length > 0 ? (
+                                    <span className="cint-row-scopes">
+                                      {acc.scopes.join(', ')}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <span
+                                  className={`cint-badge${acc.connected ? ' cint-badge-on' : ''}`}
+                                  aria-label={acc.connected ? 'Connected' : 'Not connected'}
+                                >
+                                  {acc.connected ? 'Connected' : 'Not connected'}
+                                </span>
+                                {acc.connected ? (
+                                  <button
+                                    type="button"
+                                    className="cdoc-btn"
+                                    aria-label={`Disconnect ${group.title}${
+                                      acc.email !== null && acc.email.length > 0
+                                        ? ` (${acc.email})`
+                                        : ''
+                                    }`}
+                                    disabled={discBusy}
+                                    onClick={() => disconnectOAuth(acc.label, group.title)}
+                                  >
+                                    {discBusy ? 'Disconnecting…' : 'Disconnect'}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="cdoc-btn cdoc-btn-primary"
+                                    aria-label={`Connect ${group.title}`}
+                                    disabled={connectBusy}
+                                    onClick={() => connectOAuth(group.service)}
+                                  >
+                                    {connectBusy ? 'Connecting…' : 'Connect'}
+                                  </button>
+                                )}
+                                {discErr !== undefined && discErr.length > 0 ? (
+                                  <div className="cdoc-comments-error">{discErr}</div>
+                                ) : null}
+                              </li>
+                            )
+                          })}
+                        </ul>
+
+                        {/* A service with accounts still needs a way to add the
+                            NEXT one — the owner runs several Google accounts. */}
+                        {group.connectedCount > 0 ? (
+                          <div className="cint-key-actions">
+                            <button
+                              type="button"
+                              className="cdoc-btn"
+                              aria-label={`Add another ${group.title} account`}
+                              disabled={connectBusy}
+                              onClick={() => connectOAuth(group.service)}
+                            >
+                              {connectBusy ? 'Connecting…' : 'Add another account'}
+                            </button>
+                          </div>
                         ) : null}
-                      </div>
-                      <span
-                        className={`cint-badge${acc.connected ? ' cint-badge-on' : ''}`}
-                        aria-label={acc.connected ? 'Connected' : 'Not connected'}
-                      >
-                        {acc.connected ? 'Connected' : 'Not connected'}
-                      </span>
-                    </li>
-                  ))}
+                        {connectErr !== undefined && connectErr.length > 0 ? (
+                          <div className="cdoc-comments-error">{connectErr}</div>
+                        ) : null}
+                      </li>
+                    )
+                  })}
                 </ul>
               )}
             </section>

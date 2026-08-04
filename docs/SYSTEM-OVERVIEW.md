@@ -4777,8 +4777,16 @@ indicator. No feature flags — one live path.
 > (`ButtonOptionRow`/image-gallery) and posts the choice back — onboarding runs
 > inline in the same chat surface, no special client path. The **web admin panel**
 > (`IntegrationsTab` + `integrations-client` over `/api/cores/integrations` +
-> `/api/cores/api-keys/<label>`) surfaces the global `admin` tab in the web
-> ProjectShell. Verified in a real headless Chromium (system Playwright):
+> `/api/cores/api-keys/<label>` + `/api/cores/oauth/google/{start,disconnect}`)
+> surfaces the global `admin` tab in the web ProjectShell. Google accounts are
+> MANAGED there, not merely displayed: rows are grouped by service
+> (`integrations-oauth-view.ts`), each connected account carries its own
+> Disconnect, and a service that already holds accounts still offers "Add another
+> account" — the owner runs several Google accounts, so one row per service would
+> strand the second and third. Connect does the AUTHENTICATED `/start` fetch and
+> then navigates to the `authorize_url` it returns; `/start` is bearer-gated, so
+> it can never be rendered as an `<a href>` (that 401s).
+> Verified in a real headless Chromium (system Playwright):
 > `tests/e2e-browser/onboarding_walkthrough.py` (CI-skippable) — `/chat` → React →
 > fresh onboarding renders + advances over the single socket; Documents + Admin
 > tabs render.
