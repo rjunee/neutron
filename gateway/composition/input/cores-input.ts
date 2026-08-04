@@ -74,6 +74,21 @@ export interface CoresCompositionInput {
       redirectUri: string
       internalSharedSecret: string
     }
+    /**
+     * Chat notice for a Google grant that died / came back
+     * (`gateway/cores/oauth-reconnect-notice.ts`).
+     *
+     * The SAME notifier instance the composer hands `mountOpenCores`, because
+     * the two halves of the feature live on two different `OAuthTokenManager`s:
+     * a grant DIES on the Cores' runtime manager and comes BACK on the surface
+     * manager built here (the OAuth ingest calls `exchangeAndPersist` on it).
+     * One shared instance is what makes the latch and its reset arm agree;
+     * two would notify once and never again.
+     */
+    oauthGrantNotifier?: {
+      onInvalidGrant: (label: string) => void | Promise<void>
+      onGrantHealthy: (label: string) => void | Promise<void>
+    }
   }
   /**
    * P3 — `GET /api/cores` HTTP handler. When supplied, the composed

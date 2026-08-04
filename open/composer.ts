@@ -118,6 +118,8 @@ import { DocSearchRuntime } from '@neutronai/doc-search/runtime.ts'
 import { buildLiveProjectEnumerator } from './doc-search-live-enumerator.ts'
 import { buildButtonStoreMessageSearchRuntime } from '@neutronai/gateway/composition/message-search-wiring.ts'
 import { mountOpenCores } from '@neutronai/gateway/cores/mount-open-cores.ts'
+import { createOAuthReconnectNotifier } from '@neutronai/gateway/cores/oauth-reconnect-notice.ts'
+import { readGrantMeta } from '@neutronai/gateway/cores/oauth-token-manager.ts'
 import { InMemoryTasksCoreOwnerRegistry } from '@neutronai/gateway/cores/tasks-chat-router.ts'
 import { wireSubstrates } from './wiring/substrates.ts'
 import { wireMemory } from './wiring/memory.ts'
@@ -1465,6 +1467,32 @@ export function buildOpenGraphComposer(
       coresBroker !== null && coresBroker.serve_locally
         ? createCoresOAuthBroker({ db, internalSharedSecret: coresBroker.shared_secret })
         : undefined
+    // A Google grant that Google has expired now SAYS SO, in chat. Built ONCE
+    // here and shared by both `OAuthTokenManager`s on the box, because the two
+    // edges land on different managers: a grant dies on the Cores' runtime
+    // manager (`mountOpenCores`, below) and comes back on the surface manager
+    // `wireCoresSurfaces` builds (the OAuth ingest re-grants through it). One
+    // instance is what lets the once-per-death latch and its reset arm agree.
+    //
+    // `deliver` is read LAZILY: the ONE F5 seam is constructed far below, so
+    // this takes the same forward-reference holder the substrate notice sinks
+    // take and derefs it at fire time, long after boot.
+    const oauthGrantNotifier = createOAuthReconnectNotifier({
+      deliver: () => noticeDeliverHolder.deliver,
+      owner_topic_id: ownerNoticeTopic,
+      readAccountEmail: async (label: string): Promise<string | null> =>
+        (
+          await readGrantMeta({
+            secretsStore,
+            owner_handle: asOwnerHandle(project_slug),
+            label,
+          })
+        )?.email ?? null,
+      // Absent the OAuth client there is no grant to expire, so the null branch
+      // is unreachable in practice — it is the honest degrade (name the page
+      // instead of linking to it) rather than a fabricated origin.
+      owner_base_url: coresGoogleOAuth?.ownerBaseUrl ?? null,
+    })
     // Codex subscription credential (trident cross-model review). Codex is a
     // GLOBAL, trident-wide credential (trident runs across ANY project), so the
     // PRIMARY connect surface is the account-wide General admin UI; the store
@@ -1530,6 +1558,9 @@ export function buildOpenGraphComposer(
       owner_home,
       project_slug,
       secretsStore,
+      // The manager built inside is the one every Google-backed Core resolves
+      // its token through, so this is where a dead grant is DETECTED.
+      oauthGrantNotifier,
       projectCredentialStore,
       projectAccountSelectionStore,
       env,
@@ -5281,6 +5312,10 @@ export function buildOpenGraphComposer(
         // unmounted — the client is per-deployment and MUST NOT be baked into
         // Open (SPEC:1000). That is a real operator step, not a defect.
         ...(coresGoogleOAuth !== undefined ? { oauth: coresGoogleOAuth } : {}),
+        // Same instance `mountOpenCores` got. The reconnect (OAuth ingest →
+        // `exchangeAndPersist`) lands on the manager `wireCoresSurfaces` builds,
+        // so this is the half that CLEARS the latch.
+        oauthGrantNotifier,
       },
       // The broker half — Google's registered redirect target and the state
       // registry behind it. Mounted when the OAuth client is configured AND no

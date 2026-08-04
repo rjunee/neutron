@@ -81,7 +81,20 @@ export async function wireCoresSurfaces(
               }
             }
           }
+          // …and TELL THE OWNER. Marking the install row is internal state that
+          // only shows up to someone already looking at the Integrations list;
+          // the notice is what reaches him unprompted.
+          await input.cores?.oauthGrantNotifier?.onInvalidGrant(label)
         },
+        // The RESET ARM has to be on THIS manager: the reconnect lands here.
+        // `POST /api/cores/oauth/google/ingest` drives
+        // `tokens.exchangeAndPersist` → `put` on the manager built right here
+        // (`../http/cores-oauth-surface.ts:594`), so this is where a grant is
+        // observed coming back to life. Without it the notice latch never
+        // clears and next week's expiry is silent.
+        ...(input.cores.oauthGrantNotifier !== undefined
+          ? { onGrantHealthy: input.cores.oauthGrantNotifier.onGrantHealthy }
+          : {}),
       })
 
       // `startOAuth` — the in-process grant start the chat `integrations_connect`
