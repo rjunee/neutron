@@ -25,10 +25,10 @@
  * DELIVERY, concretely. A recorded event alone sits in the ring buffer until
  * something captures a report, so an ACTIONABLE failure also captures one,
  * which persists it to the queue. `components/DiagnosticsSync.tsx` flushes the
- * queue on the first authenticated render of a launch, and `app/login.tsx`
- * calls `enablePushForUser` BEFORE `setUser` (`app/login.tsx:219-220`) — so the
- * report queued by a failed enable is delivered by the very same launch that
- * produced it.
+ * queue on the first authenticated render of a launch, and `app/app/login.tsx`
+ * calls `enablePushForUser` BEFORE `setUser` (`:228-229`) — so the report
+ * queued by a failed enable is delivered by the very same launch that produced
+ * it.
  *
  * WHAT COUNTS AS ACTIONABLE. `unsupported_platform` is the web build, where
  * native push does not exist; capturing a report every time the owner opens the

@@ -12,8 +12,8 @@
  * REGISTRATION IS LOGIN-ONLY, and this comment used to claim otherwise
  * ("and again on app foreground when the Expo token rotates"). It never
  * was: `enablePushForUser` has exactly two call sites, both inside
- * `app/login.tsx` (`tryEnablePush` at `app/login.tsx:219` and `:343`), and
- * nothing subscribes to AppState to re-register. So when the OS rotates the
+ * `app/app/login.tsx` (`tryEnablePush` at `:228` and `:352`), and nothing
+ * subscribes to AppState to re-register. So when the OS rotates the
  * token, the app is reinstalled, or Expo invalidates it, the stored row goes
  * stale and push stops — silently, until the owner happens to sign in again.
  * ISSUES #487 makes that failure VISIBLE (see `push-observability.ts`); it

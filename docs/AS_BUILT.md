@@ -6624,7 +6624,7 @@ reaches a report.
 
 **Residual, stated not fixed.** Registration is **login-only**.
 `enablePushForUser` has exactly two call sites, both in `app/app/login.tsx`
-(`:219`, `:343`), and nothing re-registers on foreground — so an OS token
+(`:228`, `:352`), and nothing re-registers on foreground — so an OS token
 rotation, a reinstall or an Expo invalidation ends push until the next sign-in.
 `app/lib/devices-client.ts` claimed otherwise in a comment ("and again on app
 foreground when the Expo token rotates"); the comment is corrected to describe
