@@ -460,6 +460,55 @@ daily-driver, **reusing the Managed mechanism — not a fork**:
   surfaces' bearer-token contract — is a documented follow-up; the token-present
   install path is already wired and tested.)
 
+### The Google grant flow and its BROKER — `gateway/http/cores-oauth-{surface,broker-surface}.ts`
+
+Google only redirects to a redirect_uri pre-registered on the OAuth client, so
+whatever sits behind that one URI has to work out which instance a given callback
+belongs to. `state` is the handle and the **broker** is the lookup. The instance
+surface (`/api/cores/oauth/google/{start,ingest,disconnect/<label>,status}`) mints
+a 192-bit random `state` plus a PKCE verifier it keeps **locally**, POSTs a
+routing row (`state → project_slug + dispatch_url`) to the broker's
+`/oauth/cores/pending/register`, and sends the owner to Google. Google redirects
+to the broker's `/oauth/cores/google/callback`, which consumes the row
+(single-use, short-lived) and relays `{code, state}` to that row's `dispatch_url`
+— the instance's own `/ingest`, which holds the verifier and the client secret and
+performs the exchange. **The broker never holds an OAuth secret**; it holds
+routing metadata. Both the register call and the relay are HMAC-signed
+(`runtime/internal-signature.ts`, ±5 min window).
+
+`register` is **insert-only / same-owner**: on `ON CONFLICT(state)` it updates
+only while the stored `project_slug` equals the incoming one, so a signature
+holder who learned somebody else's `state` can create a registration but never
+take one over; a mismatch is a no-op answering 409 `state_owner_mismatch`. Retry
+idempotency is unaffected — the same state for the same slug still refreshes its
+dispatch_url and expiry (SPEC § Decisions Log 2026-08-04).
+
+**Where the broker runs is CONFIGURATION, one implementation either way**
+(`open/cores-broker-binding.ts`, resolved in `open/composer.ts` right after the
+declared-origin guard):
+
+- **Nothing declared → CO-LOCATED.** The instance is its own broker.
+  `identityBaseUrl` / `ownerBaseUrl` / `redirectUri` are all its own
+  `NEUTRON_CONNECT_PUBLIC_BASE_URL` origin, the HMAC secret is derived from the
+  instance's existing AES keyfile (`deriveColocatedBrokerSecret` — no new secret
+  to generate, store, back up or leak), and `cores_oauth_broker_surface` **is**
+  mounted. This is every self-host.
+- **`NEUTRON_CORES_OAUTH_BROKER_BASE_URL` + `NEUTRON_CORES_OAUTH_BROKER_SECRET`
+  → CENTRAL.** `identityBaseUrl` and `redirectUri` point at that origin, the
+  secret is the supplied deployment-wide one, and the local broker surface is
+  **not** mounted (the "instances leave this unset" case
+  `gateway/composition/input/cores-input.ts` describes). **`ownerBaseUrl` stays
+  the instance's own origin** — it becomes the `dispatch_url` the broker relays
+  back to, so pointing it at the broker makes the callback undeliverable.
+- **Half a declaration is refused**, not silently downgraded: the boot log carries
+  `cores_oauth_broker_misconfigured` naming the missing env and the OAuth surface
+  stays unarmed, the same trade as the undeclared-origin guard above it. The
+  secret is never logged.
+
+Both configurations are pinned against the real composer output in
+`tests/integration/cores-oauth-remote-broker.open.test.ts`; the origin guard is
+`tests/integration/cores-oauth-base-url-guard.open.test.ts`.
+
 ## Native-MCP tool transport (P0-1) — how the spawned agent invokes tools
 
 The live chat agent is a spawned interactive `claude` REPL driven over the

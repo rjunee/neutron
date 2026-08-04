@@ -299,6 +299,12 @@ import {
   connectHostFromBaseUrl,
   resolveConnectBaseUrlWithSource,
 } from './connect-base-url.ts'
+// WHICH Cores-OAuth broker this instance uses, and whether it serves it itself.
+import {
+  CORES_BROKER_BASE_URL_ENV,
+  CORES_BROKER_SECRET_ENV,
+  resolveCoresBrokerBinding,
+} from './cores-broker-binding.ts'
 // L3 (2026-07) — build the Open agent-profile backend HERE (composition root)
 // and inject it into `mountOpenCores`, so the gateway core no longer imports the
 // `open` band.
@@ -1398,26 +1404,58 @@ export function buildOpenGraphComposer(
       })
     }
     const coresOAuthConfigured = coresOAuthClientPresent && coresOAuthOriginDeclared
-    // Self-to-self HMAC for the co-located broker. Derived from the instance's
-    // existing AES keyfile so there is no NEW secret to generate, store, back up
-    // or leak — if that keyfile is gone the instance already cannot read any
-    // stored credential, so this adds no failure mode of its own.
-    const coresBrokerSecret = coresOAuthConfigured
-      ? deriveColocatedBrokerSecret(ensureKey(owner_home, () => false).toString('hex'))
-      : ''
-    const coresGoogleOAuth = coresOAuthConfigured
-      ? {
-          clientId: coresGoogleClientId,
-          clientSecret: coresGoogleClientSecret,
-          identityBaseUrl: connectBaseUrl,
-          ownerBaseUrl: connectBaseUrl,
-          redirectUri: `${connectBaseUrl}${BROKER_CALLBACK_PATH}`,
-          internalSharedSecret: coresBrokerSecret,
-        }
-      : undefined
-    const coresOAuthBroker = coresOAuthConfigured
-      ? createCoresOAuthBroker({ db, internalSharedSecret: coresBrokerSecret })
-      : undefined
+    // WHICH broker, and is it this process? One binding answers both, resolved
+    // from configuration (`open/cores-broker-binding.ts`). Declare nothing and
+    // it resolves CO-LOCATED — this origin, a self-to-self HMAC derived from the
+    // instance's existing AES keyfile (no NEW secret to generate, store, back up
+    // or leak; if that keyfile is gone the instance already cannot read any
+    // stored credential), broker served here. Declare a broker origin + the
+    // deployment-wide secret and it resolves REMOTE — that origin, that secret,
+    // and the local broker surface stays unmounted, which is the
+    // `cores_oauth_broker_surface` field `cores-input.ts:111-113` has always
+    // said those instances leave unset. Same code, two configurations.
+    const coresBrokerResolved = coresOAuthConfigured
+      ? resolveCoresBrokerBinding({
+          env,
+          ownBaseUrl: connectBaseUrl,
+          colocatedSecret: () =>
+            deriveColocatedBrokerSecret(ensureKey(owner_home, () => false).toString('hex')),
+        })
+      : null
+    if (coresBrokerResolved !== null && !coresBrokerResolved.ok) {
+      // Half a declaration is the worst state to guess about: silently arming as
+      // its own broker against an origin the operator believes is central fails
+      // on Google's error page minutes later, naming nothing here. Refusing is
+      // the same trade the undeclared-origin guard above makes. Never log the
+      // secret — `detail` names envs only.
+      log.error('cores_oauth_broker_misconfigured', {
+        detail:
+          `${coresBrokerResolved.detail}. The Cores OAuth surface is NOT being served. ` +
+          `Set BOTH ${CORES_BROKER_BASE_URL_ENV} and ${CORES_BROKER_SECRET_ENV} to use a ` +
+          'central broker, or NEITHER to serve the broker from this instance.',
+      })
+    }
+    const coresBroker =
+      coresBrokerResolved !== null && coresBrokerResolved.ok ? coresBrokerResolved.binding : null
+    const coresGoogleOAuth =
+      coresBroker !== null
+        ? {
+            clientId: coresGoogleClientId,
+            clientSecret: coresGoogleClientSecret,
+            identityBaseUrl: coresBroker.origin,
+            // NOT the broker origin, in either configuration. This becomes the
+            // `dispatch_url` the broker relays the code BACK to
+            // (`cores-oauth-surface.ts:381`), so it must stay the address of the
+            // instance that holds the PKCE verifier and the client secret.
+            ownerBaseUrl: connectBaseUrl,
+            redirectUri: `${coresBroker.origin}${BROKER_CALLBACK_PATH}`,
+            internalSharedSecret: coresBroker.shared_secret,
+          }
+        : undefined
+    const coresOAuthBroker =
+      coresBroker !== null && coresBroker.serve_locally
+        ? createCoresOAuthBroker({ db, internalSharedSecret: coresBroker.shared_secret })
+        : undefined
     // Codex subscription credential (trident cross-model review). Codex is a
     // GLOBAL, trident-wide credential (trident runs across ANY project), so the
     // PRIMARY connect surface is the account-wide General admin UI; the store
@@ -5192,11 +5230,18 @@ export function buildOpenGraphComposer(
         // one field later.
         //
         // A self-hosted Open instance is its OWN broker, so `identityBaseUrl` is
-        // its own origin — same code as Managed's central broker, different
-        // config (SPEC § Decisions Log 2026-08-02). `connectBaseUrl` is reused
-        // deliberately rather than adding a second "where does the outside world
-        // reach me" env: it is the same fact about the deployment, and two envs
-        // that must agree is a drift bug waiting to happen.
+        // its own origin — same code as a central broker, different config
+        // (SPEC § Decisions Log 2026-08-02). `connectBaseUrl` is still reused for
+        // that rather than a second "where does the outside world reach me" env:
+        // it is the same fact about the deployment, and two envs that must AGREE
+        // is a drift bug waiting to happen.
+        //
+        // The broker envs added since do not weaken that. They answer a
+        // DIFFERENT question — where somebody ELSE's broker lives — which the
+        // instance genuinely cannot derive, so there is nothing for them to
+        // agree with. Declare them and `identityBaseUrl` + `redirectUri` follow
+        // that origin while `ownerBaseUrl` stays this instance's own; declare
+        // neither and every value here is what it always was.
         //
         // Absent the client env pair this stays undefined and the surface stays
         // unmounted — the client is per-deployment and MUST NOT be baked into
@@ -5204,8 +5249,10 @@ export function buildOpenGraphComposer(
         ...(coresGoogleOAuth !== undefined ? { oauth: coresGoogleOAuth } : {}),
       },
       // The broker half — Google's registered redirect target and the state
-      // registry behind it. Mounted whenever the OAuth client is configured,
-      // because an Open self-host serves BOTH roles in one process.
+      // registry behind it. Mounted when the OAuth client is configured AND no
+      // central broker was declared, because a self-host serves BOTH roles in
+      // one process while an instance pointed at a central broker must not
+      // stand up a second one it would never be redirected to.
       ...(coresOAuthBroker !== undefined
         ? { cores_oauth_broker_surface: { handler: coresOAuthBroker.handler } }
         : {}),

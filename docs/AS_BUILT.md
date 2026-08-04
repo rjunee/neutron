@@ -2,6 +2,62 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — the Cores OAuth broker can live somewhere else, and its register cannot be stolen
+
+Branch `feat/cores-broker-remote-config`. Changed:
+`gateway/http/cores-oauth-broker-surface.ts`, `open/composer.ts`,
+`docs/SYSTEM-OVERVIEW.md`. New: `open/cores-broker-binding.ts`,
+`tests/integration/cores-oauth-remote-broker.open.test.ts`. Tests:
+`gateway/__tests__/cores-oauth-broker-surface.test.ts`.
+
+**Why — half of a two-deployment flow was unreachable.** The broker was written
+to run either co-located (a self-host is its own broker) or centrally (one host
+serves many instances), and `gateway/composition/input/cores-input.ts` says
+outright that in the central deployment "its instances leave this unset". Nothing
+let them. The composer derived the HMAC secret from this instance's own random
+AES keyfile — a value no other host can know — pinned `identityBaseUrl`,
+`ownerBaseUrl` and `redirectUri` all to one env, and mounted the local broker
+surface unconditionally. A hosting layer had no way to point an instance at a
+central broker.
+
+**And `register` was a blind upsert.** `ON CONFLICT(state)` overwrote
+`project_slug` alongside `dispatch_url`, so any holder of the shared HMAC secret
+who learned somebody else's `state` could take the row over entirely and repoint
+the callback at a host they control. PKCE kept the payoff small — the verifier
+never leaves the originating instance, so a stolen code is unexchangeable — but
+that is a reason the blast radius was small, not a reason to keep the primitive.
+
+**What landed.** `open/cores-broker-binding.ts` resolves ONE binding (origin,
+secret, and whether this process serves the broker) from two optional envs.
+Declare neither and everything is exactly what it was: own origin everywhere,
+keyfile-derived secret, broker mounted. Declare
+`NEUTRON_CORES_OAUTH_BROKER_BASE_URL` + `NEUTRON_CORES_OAUTH_BROKER_SECRET` and
+`identityBaseUrl` + `redirectUri` follow that origin, the secret is the supplied
+deployment-wide one, and the local broker surface is not mounted — while
+`ownerBaseUrl` stays this instance, because it is the `dispatch_url` the broker
+relays back to and following the broker there makes the callback undeliverable.
+Half a declaration is refused with a named env in the boot log rather than
+silently downgraded. No flag, no second path: the downstream code reads the same
+three fields whichever way they resolved.
+
+Separately (its own commit), the conflict clause now updates only while the
+stored `project_slug` matches the incoming one and drops `project_slug` from the
+SET entirely; a mismatch is a no-op answering 409 `state_owner_mismatch`. Retry
+idempotency, the reason the upsert exists, still works — an honest re-start always
+mints a fresh random `state`, so a cross-owner collision never happens
+legitimately, and a self-host with one owner can never trip the guard.
+
+**Tests attack the properties, in both directions.** The takeover test reads the
+row back out of the table, because a rejection that still wrote is not a
+rejection. Mutation-verified: restoring the blind upsert reds the takeover test;
+`DO NOTHING`, or refusing every conflict, reds the same-owner retry test; moving
+`ownerBaseUrl` to the broker origin, always mounting the broker, keeping the
+co-located secret, or treating a partial declaration as co-located each red the
+seam test. Every seam assertion reads the value the real
+`buildOpenGraphComposer` produced, never a hand-built config object.
+
+Per SPEC § Decisions Log 2026-08-04.
+
 ## 2026-08-03 — a credential set inside one project no longer changes every project
 
 Branch `fix/credential-scope-boundary`. Changed:
