@@ -2,6 +2,84 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — a second Google account no longer overwrites the first (ISSUES #494)
+
+Branch `fix/oauth-identity-scope-494`. Changed:
+`gateway/http/cores-oauth-surface.ts`, `gateway/cores/oauth-token-manager.ts`,
+`docs/SYSTEM-OVERVIEW.md`. New:
+`gateway/__tests__/cores-oauth-identity-scope.test.ts`. Also
+`gateway/cores/__tests__/google-multi-account.test.ts` (one added case).
+
+**The bug was one missing scope, not a missing feature.** Per-account grant
+labels (`<service>#<account_key>`) already existed and were already read through
+by every path. The key is minted from the address `exchangeAndPersist` resolves
+at Google's userinfo endpoint — but `runOAuthStart` built the authorize URL's
+`scope` param as the union of the Cores' MANIFEST-declared scopes, and a sweep of
+every declared scope in the tree yields only `calendar`, `gmail.*`, `drive`,
+`documents`, `spreadsheets`. No `openid`, no `userinfo.email`. So userinfo could
+never answer, every grant was anonymous, every grant for a service landed on the
+bare `<service>` label, and the second account replaced the first. The whole
+multi-account scheme was inert on a scope nobody had asked for.
+
+**Which identity scope, and why that one.** Chosen from the endpoint actually
+being called rather than from convention. `GOOGLE_USERINFO_URL` is
+`.../oauth2/v3/userinfo`, the alias of the `userinfo_endpoint` in Google's OpenID
+discovery document (`https://openidconnect.googleapis.com/v1/userinfo`) — the
+OIDC UserInfo endpoint, which serves only tokens issued with `openid`. `openid`
+alone returns just `sub`, so the `email` claim needs the email scope too
+(Google's own OpenID Connect guide gives the request as
+`scope=openid profile email`). Both are requested; `profile` is not — the address
+is the entire requirement and name/picture would widen the consent screen for
+data nothing reads. Seeded into the scope set in `runOAuthStart`, so it applies
+to every grant this gateway starts, not only to newly-added Cores.
+
+`prompt` became `select_account consent`. Without `select_account` a second
+account is unreachable for an owner with one signed-in Google session: Google
+resolves the consent against that session, so "add another account" silently
+re-grants the one already connected — correct labels, still one account.
+
+**The migration was decided, not defaulted.** `retireLegacyRowFor` already
+retired a bare row on an EXACT address match and left a differently-addressed one
+alone. It also returned early on a bare row with NO address, which is exactly the
+#494 population — and leaving those is not neutral: `listGrants` adopts an
+un-keyed row as an account, so after re-consent the install would carry the keyed
+grant AND a phantom anonymous one, reading the same mailbox twice, forever. It
+can never resolve itself either, because that row's access token was minted
+without `openid`, so re-querying userinfo with it returns nothing and no future
+exchange can ever match it. An anonymous bare row is now retired unconditionally
+once a keyed grant has been written for the service. Safe by construction: a bare
+label is one row per service, so it holds the LAST account to consent and no
+other — any earlier account's tokens were already overwritten, which is the bug
+itself. Identified bare rows keep the exact-match rule untouched.
+
+**Both shapes read during the transition.** Nothing is rewritten at boot, so the
+grant an install holds today keeps working until its owner re-consents.
+Confirmed against the code, not assumed: `listGrants` adopts the un-keyed row
+(and skips the Core-install echo, which has no `:refresh`/`:meta` companion);
+`CoreCredentialResolver.accountsFor` maps it to `account_id: 'default'` with a
+working accessor; `getServiceAccessToken`, `getStatus`, `handleStatus`,
+`buildIntegrationsStatus` and install's `resolveServiceGrantLabel` all resolve
+through it. A resolver-level case for the ANONYMOUS shape (the owner's actual
+rows — the pre-existing case covered only an identified one) was added.
+
+**The tests run the causal chain, not its shape**: real `/start` → the real
+authorize URL → a fake Google that honours the scope it was asked for → real
+`/ingest` → how many grants exist. Nine mutations were run and all nine red:
+emptying the identity scopes, dropping either scope alone, not seeding the set,
+dropping `select_account`, reverting the retire guard, making retire
+unconditional, making the account key non-deterministic, and making a null email
+fatal. **Three of those did not red on the first attempt** — the fake Google
+computed its identity requirement from `GOOGLE_IDENTITY_SCOPES`, so emptying the
+constant made `every()` vacuously true and the test agreed with the source by
+construction. Google's rule is now spelled out literally in the fake.
+
+**One pre-existing defect observed and NOT fixed here** (out of scope, no bearing
+on the anonymous rows this migrates): on every ingest the Core install lifecycle
+echoes the token it was handed back under the bare MANIFEST label
+(`cores/runtime/lifecycle.ts` persistOrRotate), which for a legacy IDENTIFIED
+un-keyed grant is that grant's own access row — so it transiently holds the
+just-connected account's token until that token expires and the row's own
+refresh_token takes over. Worth an ISSUES entry.
 ## 2026-08-04 — bounded transient recovery for the ritual background path (ISSUES #489)
 
 Branch `fix/ritual-transient-recovery`. New: `reminders/ritual-retry.ts`,

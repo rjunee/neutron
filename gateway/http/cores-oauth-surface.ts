@@ -72,6 +72,38 @@ function ownsPath(pathname: string): boolean {
 
 export const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 
+/**
+ * Identity scopes requested on EVERY Google grant, on top of whatever the
+ * Cores' manifests declare.
+ *
+ * Without these the grant is anonymous, and an anonymous grant cannot be filed
+ * under an account: `OAuthTokenManager.exchangeAndPersist` keys a grant on the
+ * address it resolves from the userinfo endpoint, so with no address every
+ * grant for a service lands on the same bare `<service>` label and the next
+ * account CLOBBERS the last one. That was ISSUES #494 — connecting a second
+ * Google account silently replaced the first.
+ *
+ * The two values are chosen from the endpoint being called, not from
+ * convention. `GOOGLE_USERINFO_URL` is `.../oauth2/v3/userinfo`, the alias of
+ * the `userinfo_endpoint` Google publishes in its OpenID discovery document
+ * (`https://openidconnect.googleapis.com/v1/userinfo`) — i.e. the OIDC UserInfo
+ * endpoint, which serves only tokens issued with `openid`. `openid` alone
+ * returns just the `sub` claim, so the `email` claim needs the email scope as
+ * well; Google's own OpenID Connect guide states the request shape as
+ * `scope=openid profile email`. We ask for identity but NOT `profile` — the
+ * address is the whole requirement, and name/picture would widen the consent
+ * screen for data nothing reads.
+ *
+ * The URI form (`.../auth/userinfo.email`) rather than the bare `email` alias
+ * so the granted-scope string Google echoes back — which is what lands in the
+ * grant's encrypted `:meta.scopes` — reads in the same form as every other
+ * scope in the tree.
+ */
+export const GOOGLE_IDENTITY_SCOPES: ReadonlyArray<string> = [
+  'openid',
+  'https://www.googleapis.com/auth/userinfo.email',
+]
+
 /** Required env vars for the connectors Google OAuth client. */
 export const ENV_CLIENT_ID = 'NEUTRON_CORES_GOOGLE_CLIENT_ID'
 export const ENV_CLIENT_SECRET = 'NEUTRON_CORES_GOOGLE_CLIENT_SECRET'
@@ -358,7 +390,11 @@ async function runOAuthStart(
       }
     }
   }
-  const scopes = new Set<string>()
+  // Seeded with the identity scopes, so EVERY grant this gateway starts can be
+  // filed under an account — not just the ones whose Core happened to declare
+  // an identity scope in its manifest (none do, and none should: identity is a
+  // property of the grant store, not of any one Core's API surface).
+  const scopes = new Set<string>(GOOGLE_IDENTITY_SCOPES)
   for (const l of labels) {
     const entry = input.knownLabels.get(l)
     if (entry !== undefined && entry.scope.length > 0) {
@@ -424,11 +460,20 @@ async function runOAuthStart(
   authorize.searchParams.set('code_challenge', codeChallenge)
   authorize.searchParams.set('code_challenge_method', 'S256')
   authorize.searchParams.set('access_type', 'offline')
-  // `prompt=consent` forces Google to return a refresh_token even on
-  // repeat grants by the same user. Without it, a re-consent flow with
-  // an existing grant returns access_token only and refresh stays NULL,
-  // which would break getAccessToken's refresh path on the next expiry.
-  authorize.searchParams.set('prompt', 'consent')
+  // `prompt` is a space-delimited list (per Google's web-server OAuth guide).
+  //
+  // `consent` forces Google to return a refresh_token even on repeat grants by
+  // the same user. Without it, a re-consent flow with an existing grant returns
+  // access_token only and refresh stays NULL, which would break
+  // getAccessToken's refresh path on the next expiry.
+  //
+  // `select_account` ("prompt the user to select an account") is what makes
+  // connecting a SECOND account reachable at all. With `consent` alone and a
+  // single signed-in Google session, Google resolves the consent against that
+  // session, so an owner asking to add another account would silently re-grant
+  // the one already connected — the per-account labels would be correct and
+  // there would still be exactly one account.
+  authorize.searchParams.set('prompt', 'select_account consent')
 
   return {
     ok: true,
