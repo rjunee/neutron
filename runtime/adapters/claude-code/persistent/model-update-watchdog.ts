@@ -22,6 +22,13 @@
  * ── INVARIANTS (verbatim from the port brief) ─────────────────────────────
  *   • Probe NEVER passes `--fallback-model` ({@link buildProbeArgs} — pinned by
  *     test). A known-fallback id is treated as an outage, not a new model.
+ *   • ADOPT ONLY WHAT IS DEMONSTRABLY NEWER (ISSUES #491). "Different from the
+ *     baseline" is NOT "newer than the baseline". {@link compareModelRecency}
+ *     ranks the probed id against the baseline by family + version tuple, and
+ *     only a `newer` verdict may be adopted/persisted; `older` and `unknown`
+ *     are logged and refused ({@link decideModelUpdate} → `skip-downgrade` /
+ *     `skip-unrecognized`). The same rank gates the restart re-apply below, so a
+ *     bad id cannot be re-pinned on every boot.
  *   • New-id detection is EDGE-triggered: fires once per genuinely-new id, not
  *     repeatedly while it stays new ({@link decideModelUpdate} → `notify` then
  *     `suppress`). A renotify cadence re-nags only after a long interval.
@@ -110,6 +117,83 @@ export function isFallbackModel(id: string, known: ReadonlySet<string>): boolean
   return false
 }
 
+/**
+ * How a probed model id RANKS against the baseline it would replace.
+ *
+ * `unknown` is not a soft "probably fine" — it is the verdict for any id this
+ * code cannot rank at all (unparseable/garbled, or a different model family
+ * than the baseline). The watchdog treats it as "do not adopt": an id we cannot
+ * rank is exactly the case where we must not gamble the owner's runtime on a
+ * guess.
+ */
+export type ModelRecency = 'newer' | 'older' | 'same' | 'unknown'
+
+/** A model id decomposed into its family + numeric version tuple. */
+export interface ParsedModelId {
+  /** The model family — e.g. `opus`, `sonnet`, `haiku`, `fable`. */
+  family: string
+  /** The version tuple — `claude-opus-4-7` → `[4, 7]`; `claude-opus-5` → `[5]`. */
+  version: number[]
+}
+
+/**
+ * Anthropic's current id shape: `claude-<family>-<v1>[-<v2>…]`, optionally with
+ * a trailing `-YYYYMMDD` snapshot suffix that {@link normalizeModelId} strips
+ * before this matches (`claude-opus-5`, `claude-opus-4-7`,
+ * `claude-haiku-4-5-20251001`). Ids that do NOT match — the legacy
+ * `claude-3-5-sonnet` ordering, an operator alias, a garbled probe answer — are
+ * deliberately UNPARSEABLE here, which ranks them `unknown` and blocks adoption.
+ */
+const MODEL_ID_SHAPE = /^claude-([a-z][a-z0-9]*)-(\d+(?:-\d+)*)$/
+
+/**
+ * Parse a model id into {@link ParsedModelId}, or `undefined` when it does not
+ * match Anthropic's `claude-<family>-<version>` shape.
+ */
+export function parseModelId(id: string): ParsedModelId | undefined {
+  const m = normalizeModelId(id.trim()).match(MODEL_ID_SHAPE)
+  if (m === null) return undefined
+  const family = m[1]
+  const versionRaw = m[2]
+  if (family === undefined || versionRaw === undefined) return undefined
+  return { family, version: versionRaw.split('-').map((seg) => Number(seg)) }
+}
+
+/**
+ * Rank `probed` against `baseline`. THE NEWNESS SIGNAL — the whole point of
+ * ISSUES #491: "different from the baseline" is not "newer than the baseline",
+ * and only a demonstrable version INCREASE may be auto-adopted.
+ *
+ * Ranking is derived from the id itself rather than from a registry of known
+ * models ON PURPOSE. A registry-membership test would rank every genuinely NEW
+ * model as unrecognised — which is precisely the model we most need to adopt —
+ * so it would trade this bug for the exact stale-model incident this watchdog
+ * exists to prevent. Deriving the order from the id means `claude-opus-6` ranks
+ * newer than `claude-opus-5` on the day it ships, with no code change.
+ *
+ * Comparison is family-scoped: a different family is `unknown`, never a rank.
+ * `claude-sonnet-5` is not "newer than `claude-opus-5`" in any sense that should
+ * move the owner's runtime, and cross-family downgrades are a real gap the
+ * known-fallback set ({@link isFallbackModel}) does not close — that set lists
+ * specific lower-tier ids, so an unlisted lower-tier id would sail past it.
+ * Missing version segments compare as 0, so `claude-opus-5` ranks older than
+ * `claude-opus-5-1` and equal to `claude-opus-5-0`.
+ */
+export function compareModelRecency(probed: string, baseline: string): ModelRecency {
+  const p = parseModelId(probed)
+  const b = parseModelId(baseline)
+  if (p === undefined || b === undefined) return 'unknown'
+  if (p.family !== b.family) return 'unknown'
+  const len = Math.max(p.version.length, b.version.length)
+  for (let i = 0; i < len; i++) {
+    const pv = p.version[i] ?? 0
+    const bv = b.version[i] ?? 0
+    if (pv > bv) return 'newer'
+    if (pv < bv) return 'older'
+  }
+  return 'same'
+}
+
 /** Persisted across ticks (small JSON file). All timestamps ISO-8601 strings. */
 export interface ModelUpdateState {
   /** The model id currently adopted/known. Baseline for "is this new?". */
@@ -153,6 +237,12 @@ export type ModelUpdateDecision =
   /** Probed id matches the configured/known model — nothing to do. `seed` is set
    *  on the first-ever probe so `last_known_model` gets recorded. */
   | { action: 'no-change'; current: string; seed?: string }
+  /** Probed id is RECOGNISED but OLDER than the baseline (ISSUES #491). Never
+   *  adopted, never persisted — the runtime stays on the model it is already on. */
+  | { action: 'skip-downgrade'; probed: string; baseline: string }
+  /** Probed id cannot be RANKED against the baseline — unparseable, or a
+   *  different model family (ISSUES #491). Never adopted. */
+  | { action: 'skip-unrecognized'; probed: string; baseline: string }
   /** A genuinely new top-tier model — fire the notice + upgrade (edge `kind`). */
   | { action: 'notify'; kind: 'initial' | 'renotify'; newModel: string; oldModel: string }
   /** New model already notified inside the renotify window — stay quiet. */
@@ -196,7 +286,31 @@ export function decideModelUpdate(args: {
       : { action: 'no-change', current: probe.model, seed: configuredModel }
   }
 
-  // A genuinely new model. Edge-latch on `last_notified_model` / `last_notified_at`.
+  // ── THE #491 GUARD: "different" is NOT "newer" ──────────────────────────
+  // Before this, EVERY id that merely differed from the baseline fell straight
+  // through to the notify arm below — and that arm ADOPTS the id as the runtime
+  // default and PERSISTS it. So a single probe answering with an older id, a
+  // variant, or a garbled value silently DOWNGRADED the owner's model, and
+  // because the downgrade was persisted it survived restarts with no moment at
+  // which it would correct itself. Auto-adopt ONLY on a demonstrable version
+  // increase within the same model family.
+  const recency = compareModelRecency(probe.model, baseline)
+  if (recency === 'same') {
+    // Version-equal but string-different (e.g. `claude-opus-5` vs
+    // `claude-opus-5-0`). That is the SAME model, so it is a no-change — not a
+    // downgrade and certainly not an upgrade.
+    return state.last_known_model
+      ? { action: 'no-change', current: probe.model }
+      : { action: 'no-change', current: probe.model, seed: configuredModel }
+  }
+  if (recency === 'older') {
+    return { action: 'skip-downgrade', probed: probe.model, baseline }
+  }
+  if (recency === 'unknown') {
+    return { action: 'skip-unrecognized', probed: probe.model, baseline }
+  }
+
+  // A genuinely NEWER model. Edge-latch on `last_notified_model` / `last_notified_at`.
   if (state.last_notified_model && normalizeModelId(state.last_notified_model) !== probedNorm) {
     // An even newer model rolled than the one the outstanding notice is for —
     // notify immediately so the user never acks a stale version.
@@ -512,15 +626,25 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
   // the `no-change` path, and NEVER re-applies the override — so fresh sessions
   // silently revert to the stale env/default `BEST_MODEL` until an even-newer
   // model ships (the auto-upgrade quietly un-does itself across restarts).
-  // Restore it here, but ONLY when the persisted model genuinely differs from the
-  // configured base (so a plain seed is a no-op) and is not a fallback id.
+  // Restore it here, but ONLY when the persisted model is demonstrably NEWER
+  // than the configured base (so a plain seed is a no-op) and is not a fallback id.
+  //
+  // ISSUES #491: this guard used to re-apply on mere INEQUALITY, which made it a
+  // second, restart-scoped copy of the same bug — and the one that outlives the
+  // process. It re-applied a persisted id in two cases it should not have:
+  //   1. a downgraded id written by the pre-#491 notify arm, re-pinned on every
+  //      subsequent boot, so the downgrade never healed; and
+  //   2. a persisted id that a LATER release's `BEST_MODEL` seed has since
+  //      overtaken — re-applying `claude-opus-5` over a fresh binary's
+  //      `claude-opus-6` seed, silently undoing the upgrade the owner installed.
+  // Ranking instead of comparing fixes both.
   try {
     const persisted = deps.loadState()
     const adopted = persisted.last_known_model
     if (
       adopted !== undefined &&
       !isFallbackModel(adopted, deps.knownFallbacks()) &&
-      normalizeModelId(adopted) !== normalizeModelId(deps.getConfiguredModel())
+      compareModelRecency(adopted, deps.getConfiguredModel()) === 'newer'
     ) {
       deps.adoptModel(adopted)
       log(`model-update: re-applied persisted model ${adopted} on start`)
@@ -568,6 +692,34 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
           deps.saveState(next)
           break
         }
+        case 'skip-downgrade':
+          // ISSUES #491. Recognised, but OLDER than what we run today. Do NOT
+          // adopt and do NOT persist — the runtime stays on the good model.
+          // The gate IS advanced (unlike `skip-outage`): an outage is the probe
+          // LYING, and the truth returns within minutes-to-hours, so a fast
+          // retry recovers quickly. A downgrade answer may instead be the CLI's
+          // stable, correct report about a changed world, and a 15-min retry
+          // loop would then spawn a probe child four times an hour forever with
+          // no path to resolution. Nothing is broken meanwhile — we never
+          // adopted it — so the normal 6h cadence is the right re-check.
+          log(
+            `model-update: REFUSED downgrade — probe returned ${decision.probed}, which is ` +
+              `OLDER than the current ${decision.baseline}. Staying on ${decision.baseline}; ` +
+              `not adopted, not persisted. A downgrade answer suggests something is wrong upstream.`,
+          )
+          deps.saveState({ ...state, last_checked_at: nowIso })
+          break
+        case 'skip-unrecognized':
+          // ISSUES #491. An id we cannot RANK is the case where we most need to
+          // refuse: a guess here would gamble the owner's runtime. Log it (the
+          // owner can find out a weird probe happened) and change nothing.
+          log(
+            `model-update: REFUSED unrecognized id — probe returned ${decision.probed}, which ` +
+              `cannot be ranked against the current ${decision.baseline} (unparseable, or a ` +
+              `different model family). Staying on ${decision.baseline}; not adopted, not persisted.`,
+          )
+          deps.saveState({ ...state, last_checked_at: nowIso })
+          break
         case 'suppress':
           deps.saveState({ ...state, last_checked_at: nowIso })
           break

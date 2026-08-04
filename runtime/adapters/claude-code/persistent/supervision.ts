@@ -829,6 +829,18 @@ export function startModelUpdateWatchdogForInstance(
           : {}),
       })
     },
+    // ISSUES #491: these two were NOT passed, so `startModelUpdateWatchdog`'s
+    // `log` fell back to its `() => {}` default and every operational line the
+    // watchdog emits — probe failed, fallback-id outage, and now the refused
+    // downgrade / unrecognized id — went NOWHERE in a real install. The graceful
+    // upgrade below was already wired to `log.info`; the watchdog itself was
+    // not. A guard whose observability is dead code cannot tell the owner that a
+    // weird probe happened, so wire both to the same logger.
+    log: (msg) => log.info(msg),
+    onError: (err) =>
+      log.error('model-update-tick-error', {
+        error: err instanceof Error ? err.message : String(err),
+      }),
     ...(options.modelCheckTickMs !== undefined ? { intervalMs: options.modelCheckTickMs } : {}),
     ...(options.modelCheckIntervalMs !== undefined ? { checkIntervalMs: options.modelCheckIntervalMs } : {}),
   }

@@ -20,6 +20,8 @@ import {
   extractModelId,
   normalizeModelId,
   isFallbackModel,
+  parseModelId,
+  compareModelRecency,
   shouldRunModelUpdateCheck,
   decideModelUpdate,
   isSessionIdleForUpgrade,
@@ -86,6 +88,40 @@ describe('isFallbackModel', () => {
   })
   it('does NOT flag a genuine top-tier id', () => {
     expect(isFallbackModel('claude-opus-4-8', FALLBACKS)).toBe(false)
+  })
+})
+
+describe('compareModelRecency — the newness signal (ISSUES #491)', () => {
+  it('ranks a higher version tuple NEWER (the case that must keep working)', () => {
+    expect(compareModelRecency('claude-opus-4-8', 'claude-opus-4-7')).toBe('newer')
+    expect(compareModelRecency('claude-opus-5', 'claude-opus-4-8')).toBe('newer')
+    expect(compareModelRecency('claude-opus-6', 'claude-opus-5')).toBe('newer')
+  })
+  it('ranks a lower version tuple OLDER (the downgrade this issue is about)', () => {
+    expect(compareModelRecency('claude-opus-4-7', 'claude-opus-4-8')).toBe('older')
+    expect(compareModelRecency('claude-opus-4-8', 'claude-opus-5')).toBe('older')
+  })
+  it('ranks a version-equal id SAME regardless of snapshot suffix or trailing zero', () => {
+    expect(compareModelRecency('claude-opus-5-20260101', 'claude-opus-5')).toBe('same')
+    expect(compareModelRecency('claude-opus-5-0', 'claude-opus-5')).toBe('same')
+  })
+  it('ranks a DIFFERENT FAMILY unknown — never a rank (the cross-family downgrade hole)', () => {
+    // `claude-sonnet-5` is not in the known-fallback set, so `isFallbackModel`
+    // would wave it through; ranking is what stops it.
+    expect(compareModelRecency('claude-sonnet-5', 'claude-opus-5')).toBe('unknown')
+    expect(compareModelRecency('claude-fable-5', 'claude-opus-5')).toBe('unknown')
+  })
+  it('ranks an unparseable / garbled id unknown', () => {
+    expect(compareModelRecency('MODELID', 'claude-opus-5')).toBe('unknown')
+    expect(compareModelRecency('claude-opus', 'claude-opus-5')).toBe('unknown')
+    expect(compareModelRecency('claude-3-5-sonnet', 'claude-opus-5')).toBe('unknown')
+    expect(compareModelRecency('claude-opus-5', 'not-a-model')).toBe('unknown')
+  })
+  it('parseModelId splits family from the version tuple', () => {
+    expect(parseModelId('claude-opus-4-7')).toEqual({ family: 'opus', version: [4, 7] })
+    expect(parseModelId('claude-haiku-4-5-20251001')).toEqual({ family: 'haiku', version: [4, 5] })
+    expect(parseModelId('claude-opus-5')).toEqual({ family: 'opus', version: [5] })
+    expect(parseModelId('gpt-4')).toBeUndefined()
   })
 })
 
@@ -197,6 +233,61 @@ describe('decideModelUpdate', () => {
       now,
     })
     expect(d).toMatchObject({ action: 'notify', kind: 'renotify' })
+  })
+
+  it('#491: a RECOGNISED OLDER id → skip-downgrade, NEVER notify (different is not newer)', () => {
+    const d = decideModelUpdate({
+      probe: ok('claude-opus-4-7'),
+      configuredModel: 'claude-opus-5',
+      state: { last_known_model: 'claude-opus-5' },
+      knownFallbacks: FALLBACKS,
+      now,
+    })
+    expect(d).toEqual({
+      action: 'skip-downgrade',
+      probed: 'claude-opus-4-7',
+      baseline: 'claude-opus-5',
+    })
+  })
+
+  it('#491: an UNRECOGNISED id → skip-unrecognized, NEVER notify', () => {
+    const d = decideModelUpdate({
+      probe: ok('claude-opus-experimental'),
+      configuredModel: 'claude-opus-5',
+      state: { last_known_model: 'claude-opus-5' },
+      knownFallbacks: FALLBACKS,
+      now,
+    })
+    expect(d).toEqual({
+      action: 'skip-unrecognized',
+      probed: 'claude-opus-experimental',
+      baseline: 'claude-opus-5',
+    })
+  })
+
+  it('#491: an unlisted LOWER-TIER family id → skip-unrecognized (the fallback set misses it)', () => {
+    // `claude-sonnet-5` is NOT in `knownFallbacks`, so `isFallbackModel` waves it
+    // through — pre-#491 it was adopted as the new best model.
+    expect(isFallbackModel('claude-sonnet-5', FALLBACKS)).toBe(false)
+    const d = decideModelUpdate({
+      probe: ok('claude-sonnet-5'),
+      configuredModel: 'claude-opus-5',
+      state: { last_known_model: 'claude-opus-5' },
+      knownFallbacks: FALLBACKS,
+      now,
+    })
+    expect(d.action).toBe('skip-unrecognized')
+  })
+
+  it('#491: a version-equal variant (`-0` suffix) is a no-change, not a downgrade', () => {
+    const d = decideModelUpdate({
+      probe: ok('claude-opus-5-0'),
+      configuredModel: 'claude-opus-5',
+      state: { last_known_model: 'claude-opus-5' },
+      knownFallbacks: FALLBACKS,
+      now,
+    })
+    expect(d.action).toBe('no-change')
   })
 
   it('a SECOND newer model inside the window notifies immediately (no stale ack)', () => {
@@ -369,28 +460,34 @@ describe('runGracefulUpgrade — round-robin, idle-gated, bounded', () => {
 })
 
 describe('startModelUpdateWatchdog — the cadence + adopt path', () => {
-  function harness(probe: ProbeResult, state: ModelUpdateState = {}) {
+  function harness(
+    probe: ProbeResult,
+    state: ModelUpdateState = {},
+    configuredModel = 'claude-opus-4-7',
+  ) {
     let saved: ModelUpdateState = { ...state }
     const notices: Array<{ newModel: string; oldModel: string }> = []
     const adopted: string[] = []
     const upgrades: string[] = []
+    const logs: string[] = []
     const wd = startModelUpdateWatchdog({
       probeModel: () => Promise.resolve(probe),
       loadState: () => saved,
       saveState: (s) => (saved = s),
-      getConfiguredModel: () => 'claude-opus-4-7',
+      getConfiguredModel: () => configuredModel,
       adoptModel: (m) => adopted.push(m),
       knownFallbacks: () => FALLBACKS,
       postNotice: (n) => notices.push({ newModel: n.newModel, oldModel: n.oldModel }),
       runUpgrade: (m) => {
         upgrades.push(m)
       },
+      log: (m) => logs.push(m),
       checkIntervalMs: 0, // gate always open so we can drive ticks directly
       setIntervalFn: () => 0,
       clearIntervalFn: () => {},
       now: () => 1_700_000_000_000,
     })
-    return { wd, notices, adopted, upgrades, getState: () => saved }
+    return { wd, notices, adopted, upgrades, logs, getState: () => saved }
   }
 
   it('on a new model: notifies once, adopts it, kicks the upgrade, persists state', async () => {
@@ -457,6 +554,73 @@ describe('startModelUpdateWatchdog — the cadence + adopt path', () => {
       { last_known_model: 'claude-haiku-4-5-20251001' },
     )
     expect(h.adopted).toEqual([])
+    h.wd.stop()
+  })
+
+  // ── ISSUES #491: adopt ONLY what is demonstrably newer ────────────────────
+
+  it('#491 DOWNGRADE: a recognised OLDER probe does NOT adopt and does NOT persist', async () => {
+    const h = harness(
+      { ok: true, model: 'claude-opus-4-7' },
+      { last_known_model: 'claude-opus-5' },
+      'claude-opus-5',
+    )
+    await h.wd.tick()
+    expect(h.adopted).toEqual([]) // the runtime default is untouched
+    expect(h.notices).toEqual([])
+    expect(h.upgrades).toEqual([])
+    // The downgrade is NOT written back as the new baseline — this is what made
+    // the pre-fix bug survive restarts.
+    expect(h.getState().last_known_model).toBe('claude-opus-5')
+    expect(h.getState().last_notified_model).toBeUndefined()
+    // …but it IS surfaced, not silently swallowed.
+    expect(h.logs.join('\n')).toContain('REFUSED downgrade')
+    expect(h.logs.join('\n')).toContain('claude-opus-4-7')
+    h.wd.stop()
+  })
+
+  it('#491 UNRECOGNISED: an unrankable probe does NOT adopt and does NOT persist', async () => {
+    const h = harness(
+      { ok: true, model: 'claude-opus-experimental' },
+      { last_known_model: 'claude-opus-5' },
+      'claude-opus-5',
+    )
+    await h.wd.tick()
+    expect(h.adopted).toEqual([])
+    expect(h.notices).toEqual([])
+    expect(h.upgrades).toEqual([])
+    expect(h.getState().last_known_model).toBe('claude-opus-5')
+    expect(h.logs.join('\n')).toContain('REFUSED unrecognized id')
+    h.wd.stop()
+  })
+
+  it('#491 REGRESSION ARM: a genuinely NEWER probe STILL adopts, notifies, persists, upgrades', async () => {
+    // The whole point of this watchdog. If the #491 guard breaks this, we traded
+    // one silent failure (downgrade) for another (the box rots on a stale model).
+    const h = harness(
+      { ok: true, model: 'claude-opus-6' },
+      { last_known_model: 'claude-opus-5' },
+      'claude-opus-5',
+    )
+    await h.wd.tick()
+    expect(h.adopted).toEqual(['claude-opus-6'])
+    expect(h.notices).toEqual([{ newModel: 'claude-opus-6', oldModel: 'claude-opus-5' }])
+    expect(h.upgrades).toEqual(['claude-opus-6'])
+    expect(h.getState().last_known_model).toBe('claude-opus-6')
+    expect(h.getState().last_notified_model).toBe('claude-opus-6')
+    expect(h.getState().last_checked_at).toBeDefined()
+    h.wd.stop()
+  })
+
+  it('#491 RESTART: a persisted OLDER id is NOT re-applied on start', async () => {
+    // Covers a state file written by the pre-fix build (or a `BEST_MODEL` seed
+    // bump that has since overtaken the persisted id).
+    const h = harness(
+      { ok: true, model: 'claude-opus-6' },
+      { last_known_model: 'claude-opus-5' },
+      'claude-opus-6',
+    )
+    expect(h.adopted).toEqual([]) // NOT re-pinned to the older claude-opus-5
     h.wd.stop()
   })
 

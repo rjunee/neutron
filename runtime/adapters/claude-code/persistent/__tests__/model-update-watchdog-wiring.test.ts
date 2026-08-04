@@ -8,8 +8,9 @@
  *   3. idle-gated graceful-respawn the warm session onto the new model — the
  *      respawn argv carries `--model <newModel>` and `--resume <sid>`, and the
  *      registry record's `model` is rewritten BEFORE the respawn.
- * And a probe that returns a known FALLBACK id (the Opus-outage→Haiku trap) must
- * do NONE of that.
+ * And a probe that returns a known FALLBACK id (the Opus-outage→Haiku trap) —
+ * or, per ISSUES #491, any id that is merely DIFFERENT rather than demonstrably
+ * NEWER — must do NONE of that.
  */
 
 import { describe, it, expect, afterEach, beforeEach } from 'bun:test'
@@ -26,10 +27,23 @@ import {
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
 import { BEST_MODEL, getBestModel, setBestModelOverride } from '../../../../models.ts'
-import type { ProbeResult } from '../model-update-watchdog.ts'
+import { compareModelRecency, type ProbeResult } from '../model-update-watchdog.ts'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+/**
+ * A probe id that is demonstrably NEWER than whatever `BEST_MODEL` currently
+ * seeds. Deliberately far ahead so a future seed bump cannot quietly overtake it.
+ * This fixture used to be a literal `claude-opus-4-9`; once the seed moved on to
+ * `claude-opus-5`, the "upgrade" assertions below were silently asserting that a
+ * DOWNGRADE was correct behaviour — which is exactly ISSUES #491, and which the
+ * new guard caught. The rank assertion in each test now fails loudly rather than
+ * mysteriously if that ever recurs.
+ */
+const NEWER_THAN_SEED = 'claude-opus-99'
+/** A recognised id that is OLDER than the seed — the #491 downgrade case. */
+const OLDER_THAN_SEED = 'claude-opus-4-7'
 
 beforeEach(() => setBestModelOverride(undefined))
 afterEach(async () => {
@@ -146,9 +160,11 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
     const stateDir = mkdtempSync(join(tmpdir(), 'neutron-mu-wire-'))
     mkdirSync(stateDir, { recursive: true })
     try {
+      // The fixture must genuinely outrank the seed, or this test proves nothing.
+      expect(compareModelRecency(NEWER_THAN_SEED, BEST_MODEL)).toBe('newer')
       const { host, spawns } = makeHost()
       const notices: Array<{ newModel: string; oldModel: string }> = []
-      const opts = optsWith(host, stateDir, { ok: true, model: 'claude-opus-4-9' }, {
+      const opts = optsWith(host, stateDir, { ok: true, model: NEWER_THAN_SEED }, {
         onModelUpdate: (notice) => notices.push({ newModel: notice.newModel, oldModel: notice.oldModel }),
       })
       registerSupervisedSubstrate(opts)
@@ -165,16 +181,16 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
       await wd!.tick()
 
       // 1. The notice fired once (edge).
-      expect(notices).toEqual([{ newModel: 'claude-opus-4-9', oldModel: BEST_MODEL }])
+      expect(notices).toEqual([{ newModel: NEWER_THAN_SEED, oldModel: BEST_MODEL }])
       // 2. The model was adopted as the runtime default.
-      expect(getBestModel()).toBe('claude-opus-4-9')
+      expect(getBestModel()).toBe(NEWER_THAN_SEED)
 
       // 3. The idle session was respawned onto the new model (fire-and-forget
       //    upgrade — poll for the respawn argv).
       const respawned = await until(() =>
         spawns()
           .slice(spawnsBefore)
-          .some((argv) => argv.includes('--resume') && argv.includes('claude-opus-4-9')),
+          .some((argv) => argv.includes('--resume') && argv.includes(NEWER_THAN_SEED)),
       )
       expect(respawned).toBe(true)
 
@@ -184,11 +200,11 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
       expect(upgradeSpawn).toBeDefined()
       // `--model` is emitted LAST and carries the new id.
       const mIdx = upgradeSpawn!.indexOf('--model')
-      expect(upgradeSpawn![mIdx + 1]).toBe('claude-opus-4-9')
+      expect(upgradeSpawn![mIdx + 1]).toBe(NEWER_THAN_SEED)
 
       // The registry record's model was rewritten BEFORE the respawn.
-      await until(() => getReplRegistrySnapshot(opts.replRegistryPath as string)[key]?.model === 'claude-opus-4-9')
-      expect(getReplRegistrySnapshot(opts.replRegistryPath as string)[key]?.model).toBe('claude-opus-4-9')
+      await until(() => getReplRegistrySnapshot(opts.replRegistryPath as string)[key]?.model === NEWER_THAN_SEED)
+      expect(getReplRegistrySnapshot(opts.replRegistryPath as string)[key]?.model).toBe(NEWER_THAN_SEED)
     } finally {
       rmSync(stateDir, { recursive: true, force: true })
     }
@@ -218,6 +234,44 @@ describe('model-update watchdog — substrate wiring (row #16)', () => {
       expect(getBestModel()).toBe(BEST_MODEL) // NOT downgraded to Haiku
       const newSpawns = spawns().slice(spawnsBefore)
       expect(newSpawns.filter((argv) => argv.includes('--resume'))).toEqual([])
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true })
+    }
+  })
+
+  it('#491: a recognised OLDER id → no notice, no adopt, no respawn, nothing persisted', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'neutron-mu-wire-'))
+    mkdirSync(stateDir, { recursive: true })
+    try {
+      // The fixture must genuinely be a downgrade, or this test proves nothing.
+      expect(compareModelRecency(OLDER_THAN_SEED, BEST_MODEL)).toBe('older')
+      const { host, spawns } = makeHost()
+      const notices: unknown[] = []
+      const opts = optsWith(host, stateDir, { ok: true, model: OLDER_THAN_SEED }, {
+        onModelUpdate: (n2) => notices.push(n2),
+      })
+      registerSupervisedSubstrate(opts)
+
+      const sub = createPersistentReplSubstrate(opts)
+      await drainOK(sub.start({ prompt: 'hi', tools: [], model_preference: [BEST_MODEL] }))
+      const spawnsBefore = spawns().length
+
+      startModelUpdateWatchdogForInstance(opts)
+      const wd = peekModelUpdateWatchdogForTest(opts.modelUpdateStatePath as string)
+      await wd!.tick()
+      await Bun.sleep(50) // give any (erroneous) async upgrade a chance to fire
+
+      expect(notices).toEqual([])
+      // The whole point: the owner's runtime default is NOT moved backwards.
+      expect(getBestModel()).toBe(BEST_MODEL)
+      const newSpawns = spawns().slice(spawnsBefore)
+      expect(newSpawns.filter((argv) => argv.includes('--resume'))).toEqual([])
+      // …and the downgrade is not written back as the baseline, so a restart
+      // cannot re-apply it.
+      const persisted = JSON.parse(
+        await Bun.file(opts.modelUpdateStatePath as string).text(),
+      ) as { last_known_model?: string }
+      expect(persisted.last_known_model).not.toBe(OLDER_THAN_SEED)
     } finally {
       rmSync(stateDir, { recursive: true, force: true })
     }
