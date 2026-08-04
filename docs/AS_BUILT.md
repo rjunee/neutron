@@ -6579,3 +6579,55 @@ the better page. Mutation: reverting `mergeCluster` to a hard delete turns 10 of
 the 12 red.
 
 No schema change, no feature flag. Gateway/scribe code — reaches a box on deploy.
+
+## 2026-08-03 — push: a device registration that fails is no longer invisible
+
+`device_push_tokens` was found holding **zero rows** on a live instance, so every
+proactive surface — rituals, the morning brief, nudges, the lapsed-credential
+notice — reached the app and nothing reached the phone. It was caught by checking
+the first ritual fire, not by a report, and the reason is structural: nothing on
+the registration path logged anything. `gateway/http/app-devices-surface.ts` had
+no logger, `gateway/push/store.ts` has none, and `app/lib/push.ts` is documented
+as never throwing — it turns every failure into a typed result the login screen
+`console.warn`ed and dropped. So "the app never called register" and "the app
+called and was refused" produced byte-identical evidence: none.
+
+**Server (`gateway/http/app-devices-surface.ts`).** EVERY request now emits
+exactly one `@neutronai/logger` line whatever the outcome — `device_registered`
+(with `first_registration`, derived from `registered_at === updated_at`, so a new
+phone is distinguishable from the same phone signing in again),
+`device_register_rejected`, `device_request_unauthorized` (the expired-bearer
+case that used to look like silence), `device_request_rejected`,
+`device_unregistered`, `device_unregister_rejected`. A store failure during
+register no longer throws out of the handler: it logs `device_register_failed`
+and answers **500 `register_failed`**. **The token is never logged** — lines carry
+`token_fp`, the first 12 hex chars of its SHA-256, which correlates a register
+with the unregister or the Expo prune that later removes it and is useless to
+anyone else.
+
+**Client (`app/lib/push-observability.ts`, new).** `enablePushForUser` records
+every outcome into the existing diagnostics ring buffer and, for an ACTIONABLE
+failure, captures a report — a fifth `ReportReason`, `push_registration_failed`,
+because this failure is not an error anything caught. `unsupported_platform` (the
+web build) is recorded but not escalated, or opening the app in a browser would
+bury the real failures. Login calls this before `setUser`, so `DiagnosticsSync`
+flushes the queued report on the same launch. No token is recorded — a success
+carries the platform and the token's LENGTH.
+
+**Test surface.** `gateway/__tests__/app-devices-surface.test.ts` (25/0) drives
+the real surface with the REAL logger behind a capturing sink and asserts on
+rendered lines, including one test that fires every path and proves the raw token
+appears in none of them; logging the token instead of the fingerprint turns 3
+red. `app/__tests__/push-observability.test.ts` (8/0) asserts a failure is
+recorded AND filed, a benign skip is recorded and NOT filed, and the token never
+reaches a report.
+
+**Residual, stated not fixed.** Registration is **login-only**.
+`enablePushForUser` has exactly two call sites, both in `app/app/login.tsx`
+(`:219`, `:343`), and nothing re-registers on foreground — so an OS token
+rotation, a reinstall or an Expo invalidation ends push until the next sign-in.
+`app/lib/devices-client.ts` claimed otherwise in a comment ("and again on app
+foreground when the Expo token rotates"); the comment is corrected to describe
+what the code does. Self-healing re-registration is a separate change.
+
+No schema change, no feature flag. Gateway + app code.

@@ -100,7 +100,16 @@ async function tryEnablePush(base_url: string, token: string): Promise<void> {
   // P5.6 — best-effort push registration. Sign-in must NOT be blocked by a
   // permission-denied / unsupported-platform / gateway-unreachable error.
   // `enablePushForUser` never throws; it surfaces every failure mode as a
-  // structured result that we log for the dev loop.
+  // structured result.
+  //
+  // The result is no longer only console-logged (ISSUES #487): as of the
+  // observability change `enablePushForUser` records every outcome into the
+  // diagnostics buffer and queues a report for the owner's own gateway when
+  // the failure is actionable — see `lib/push-observability.ts`. The
+  // `console.warn` below stays for the developer loop only; it is not the
+  // reporting path, because a console line on a phone is not observable by
+  // anyone. This call sits BEFORE `setUser` on purpose (see below): the
+  // queued report is flushed by `DiagnosticsSync` on this same launch.
   try {
     const result = await enablePushForUser({ base_url, token });
     if (!result.ok) console.warn(`[push] skipped: ${result.reason}`, result.detail ?? '');

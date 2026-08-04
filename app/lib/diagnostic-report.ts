@@ -33,8 +33,21 @@ import {
   truncate,
 } from './diagnostic-redact';
 
-/** Why a report was created. */
-export type ReportReason = 'js_error' | 'unhandled_rejection' | 'render_crash' | 'manual';
+/**
+ * Why a report was created.
+ *
+ * `push_registration_failed` (ISSUES #487) is not an error the app CAUGHT — it
+ * is an outcome the app was told about and used to discard. Push registration
+ * cannot throw by design, so a phone that silently stops receiving anything
+ * produces no js_error, no rejection and no crash; without its own reason it
+ * would produce no report either. See `lib/push-observability.ts`.
+ */
+export type ReportReason =
+  | 'js_error'
+  | 'unhandled_rejection'
+  | 'render_crash'
+  | 'manual'
+  | 'push_registration_failed';
 
 /** Device / build context. Everything here is non-identifying build metadata. */
 export interface ReportAppContext {

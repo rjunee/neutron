@@ -6,9 +6,18 @@
  * Reminders / Tasks client shape: pass the bearer token at
  * construction time, return the post-mutation response.
  *
- * The expo-notifications integration in `push.ts` calls
- * `registerToken` once on login (and again on app foreground when the
- * Expo token rotates) and `unregisterToken` from the sign-out flow.
+ * The expo-notifications integration in `push.ts` calls `registerToken`
+ * once on login and `unregisterToken` from the sign-out flow.
+ *
+ * REGISTRATION IS LOGIN-ONLY, and this comment used to claim otherwise
+ * ("and again on app foreground when the Expo token rotates"). It never
+ * was: `enablePushForUser` has exactly two call sites, both inside
+ * `app/login.tsx` (`tryEnablePush` at `app/login.tsx:219` and `:343`), and
+ * nothing subscribes to AppState to re-register. So when the OS rotates the
+ * token, the app is reinstalled, or Expo invalidates it, the stored row goes
+ * stale and push stops — silently, until the owner happens to sign in again.
+ * ISSUES #487 makes that failure VISIBLE (see `push-observability.ts`); it
+ * does not yet make it self-healing. Recorded as a residual, not fixed here.
  *
  * Per SPEC.md § Phases→Steps / P5.6 and
  * docs/engineering-plan.md § B.P5.
