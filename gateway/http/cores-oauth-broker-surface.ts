@@ -202,8 +202,9 @@ export function createCoresOAuthBroker(opts: CoresOAuthBrokerOptions): CoresOAut
         // instance's `state` a REPOINT primitive: re-register that state with
         // your own slug and your own dispatch_url, and the row — owner and
         // callback target both — became yours. PKCE meant the relayed code was
-        // unexchangeable by the thief (`cores-oauth-surface.ts:371` mints the
-        // verifier into the LOCAL pending store only), so the payoff was denial
+        // unexchangeable by the thief (`cores-oauth-surface.ts:370` mints the
+        // verifier, `:371-377` persists it in the LOCAL pending store only and
+        // nowhere else), so the payoff was denial
         // of one in-flight grant rather than credential theft. That is a reason
         // the blast radius was small, not a reason to keep the primitive.
         //

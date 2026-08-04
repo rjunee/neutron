@@ -22,8 +22,8 @@
  * WHAT DOES *NOT* MOVE — and this is the subtle one. Only `identityBaseUrl` and
  * `redirectUri` follow the broker. `ownerBaseUrl` stays THIS instance's own
  * origin, always: it becomes the `dispatch_url` the broker relays the code back
- * to (`gateway/http/cores-oauth-surface.ts:381`, consumed at
- * `cores-oauth-broker-surface.ts:398`). Point it at the broker and the callback
+ * to (built at `gateway/http/cores-oauth-surface.ts:381`, dialled at
+ * `cores-oauth-broker-surface.ts:296`). Point it at the broker and the callback
  * is undeliverable — the broker would relay to itself, and the grant would die
  * one hop from completion with nothing in either log naming the cause. So this
  * module never returns an owner origin at all; it returns only what legitimately
