@@ -246,7 +246,7 @@ describe('awaitPrewarmReady — bounded first-turn gate (2026-06-18 cold-spawn f
       NEUTRON_PREWARM_AWAIT_CAP_MS: '60',
     } as unknown as NodeJS.ProcessEnv)
     const elapsed = Date.now() - start
-    // KEPT DELIBERATELY, and it is the only assertion that can fail here. This
+    // WALL-CLOCK-BOUND-OK: KEPT DELIBERATELY, and it is the only assertion that can fail here. This
     // pre-warm NEVER settles, so the cap is the sole thing that can resolve the
     // gate: reaching this line already proves the cap fired, and a regression
     // that dropped the cap would hang and red on the test timeout. What the

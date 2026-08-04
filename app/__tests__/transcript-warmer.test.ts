@@ -346,7 +346,7 @@ describe('a real warm', () => {
     setForegroundBusy(true);
     await warming;
     const elapsed = Date.now() - started;
-    // KEPT DELIBERATELY — this is the only guard, and unlike the bounds removed
+    // WALL-CLOCK-BOUND-OK: KEPT DELIBERATELY — this is the only guard, and unlike the bounds removed
     // elsewhere for ISSUES #438 it is nowhere near its threshold. Without the
     // foreground-gate subscription the warm resolves on the open deadline
     // (WARM_OPEN_TIMEOUT_MS, 6 s); with it, it resolves on the gate. Both

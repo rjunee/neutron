@@ -96,8 +96,15 @@ describe('the harness clock', () => {
     expect(Date.now()).not.toBe(real_now);
     uninstallHarnessClock();
 
-    // The real clock is back...
-    expect(Math.abs(Date.now() - real_now)).toBeLessThan(60_000);
+    // The real clock is back — asserted as MONOTONICITY against the timestamp
+    // captured before the install, which is exact rather than approximate. Under
+    // the harness clock `Date.now()` counts from 0 (the assertion above pins
+    // that), so a failed uninstall lands ~1.7e12 ms BELOW `real_now` and reds
+    // here; a working one can only have moved forward. This replaces a
+    // `Math.abs(Date.now() - real_now) < 60_000` window, which measured real
+    // elapsed time against a constant (ISSUES #438) to state a contract that has
+    // nothing to do with how long anything took.
+    expect(Date.now()).toBeGreaterThanOrEqual(real_now);
     // ...and so is the real timer: this delayed callback has to run on its own,
     // with nobody advancing anything.
     await new Promise<void>((resolve) => setTimeout(resolve, 5));

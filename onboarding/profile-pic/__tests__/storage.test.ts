@@ -340,7 +340,7 @@ describe('buildProfilePicEngineHook', () => {
     const elapsed = Date.now() - start
     // Must not have waited for the (blocked) Gemini call.
     //
-    // KEPT DELIBERATELY, and it is the only guard. `await_timeout_ms: 0` is
+    // WALL-CLOCK-BOUND-OK: KEPT DELIBERATELY, and it is the only guard. `await_timeout_ms: 0` is
     // supposed to disable the soft-wait race; if it were ignored the code falls
     // back to a 5000 ms wait (storage.ts:556) and then returns `pending`
     // ANYWAY — so `ensure.kind` below cannot see the difference, and 5 s is

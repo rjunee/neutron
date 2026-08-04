@@ -67,6 +67,18 @@ describe('chunkMarkdown', () => {
     const heading = '#' + ' '.repeat(50000) + 'x' + ' '.repeat(50000)
     const start = performance.now()
     const { chunks } = chunkMarkdown(`${heading}\n\nbody`)
+    // WALL-CLOCK-BOUND-OK: this is a COMPLEXITY assertion, and elapsed time is
+    // the only observable that separates linear scanning from catastrophic
+    // backtracking. Nothing deterministic can replace it: a ReDoS regression
+    // returns the SAME `chunks` this test already checks, just exponentially
+    // later, so the heading assertion below cannot see it. The per-test timeout
+    // is not a substitute either — it only catches a total hang, while the
+    // regression this guards against (a quadratic rescan) lands in the hundreds
+    // of ms, under the timeout and over any honest budget. The threshold
+    // discriminates two outcomes orders of magnitude apart and the margin is
+    // measured, not hoped for: 0.25 ms unloaded, and 0.33/0.38/0.44 ms with a
+    // 6.0 ms first-run outlier under 2x CPU oversubscription (16 spinners on 8
+    // cores), against the 1000 ms budget — 0.6% of it at worst. ISSUES #438.
     expect(performance.now() - start).toBeLessThan(1000)
     expect(chunks[0]!.heading).toContain('x')
   })

@@ -138,9 +138,16 @@ describe('ActionRunner', () => {
         () => new Promise<WowActionResult>(() => {}),
       )
       const ctx = buildContext(fix)
-      const t0 = Date.now()
+      // THE "CONVERTED, NOT HUNG" CONTRACT IS `reason === 'timeout'` PLUS THE
+      // TEST TIMEOUT, and both are stated below. This action's `run()` is
+      // pending forever, so the await has exactly two fates: the per-action
+      // timeout fires and `run` resolves with `reason: 'timeout'`, or the
+      // timeout is broken and it never settles at all — in which case the test
+      // times out rather than reaching any assertion. The wall-clock bound that
+      // used to sit here (`Date.now() - t0 < 5000` against a 50 ms timeout) was
+      // a third guard on that one contract, and the only one a loaded runner
+      // could flip. ISSUES #438.
       const out = await runner.run({ module, ctx })
-      expect(Date.now() - t0).toBeLessThan(5_000)
       expect(out.fired).toBe(false)
       expect(out.reason).toBe('timeout')
       // Telemetry records the timeout so wow_events answers "what hung?".
