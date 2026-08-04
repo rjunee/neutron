@@ -223,8 +223,11 @@ async function bootOpenGraph(): Promise<GraphHarness> {
     app_work_board_surface: surface('app-work-board', (u) =>
       /^\/api\/app\/projects\/[^/]+\/work-board(\/|$)/.test(u.pathname),
     ),
-    app_project_credentials_surface: surface('app-project-credentials', (u) =>
-      /^\/api\/app\/projects\/[^/]+\/credentials(\/|$)/.test(u.pathname),
+    app_project_credentials_surface: surface(
+      'app-project-credentials',
+      (u) =>
+        /^\/api\/app\/credentials(\/|$)/.test(u.pathname) ||
+        /^\/api\/app\/projects\/[^/]+\/credentials(\/|$)/.test(u.pathname),
     ),
     app_codex_credential_surface: surface(
       'app-codex-credential',
@@ -309,7 +312,10 @@ describe('G1 — Open composition route matrix (real graph)', () => {
     ['app-tabs(project)', 'GET', '/api/app/projects/p1/tabs', 'app-tabs'],
     ['app-tabs(global)', 'GET', '/api/app/tabs', 'app-tabs'],
     ['app-work-board', 'GET', '/api/app/projects/p1/work-board', 'app-work-board'],
-    ['app-project-credentials', 'GET', '/api/app/projects/p1/credentials', 'app-project-credentials'],
+    ['app-project-credentials(project)', 'GET', '/api/app/projects/p1/credentials', 'app-project-credentials'],
+    // The GLOBAL family (ISSUES #486) — no project segment, so this is the rung
+    // that has to claim it before anything more generic does.
+    ['app-project-credentials(global)', 'GET', '/api/app/credentials', 'app-project-credentials'],
     ['app-codex-credential(global)', 'GET', '/api/app/codex-auth', 'app-codex-credential'],
     ['app-codex-credential(project)', 'GET', '/api/app/projects/p1/codex-auth', 'app-codex-credential'],
     ['app-projects(list)', 'GET', '/api/app/projects', 'app-projects'],

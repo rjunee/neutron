@@ -2486,10 +2486,24 @@ the `secrets` AES-256-GCM envelope (shared `.neutron-aes-key`); `list` returns
 metadata only.
 
 **Surfaces + resolver + awareness.** Bearer-gated CRUD
-(`gateway/http/project-credentials-surface.ts`) owns
-`/api/app/projects/<id>/credentials[/<service>]` (GET/POST/DELETE), wired into
-`open/composer.ts` → `composition.ts` → `compose.ts` ahead of `appProjects`
-(mirrors work-board precedence). The same canonical `ProjectCredentialStore`
+(`gateway/http/project-credentials-surface.ts`) owns TWO route families — one
+per scope, because **the route is the scope** — wired into `open/composer.ts` →
+`composition.ts` → `compose.ts` ahead of `appProjects` (mirrors work-board
+precedence), both on the one `app-project-credentials` rung:
+
+- **GLOBAL** — `/api/app/credentials[/<service>]` (GET/POST/DELETE). The only
+  way to write an instance-wide default. Authored in **General → Admin**
+  (`IntegrationsTab` § Shared credentials; mobile: Integrations screen).
+- **PROJECT** — `/api/app/projects/<id>/credentials[/<service>]`
+  (GET/POST/DELETE). Writes only that project. The GET still RETURNS the
+  inherited globals so the Settings tab can show them, labelled and read-only.
+
+The project family **cannot** write global state (ISSUES #486). It used to: a
+`scope` field in the POST body and `?scope=global` on the DELETE were honoured
+there, so a credential written while standing in ONE project silently changed
+the default EVERY project inherits — two writers for one fact. Both now return
+HTTP 400 `scope_not_allowed` rather than downgrading silently, so a stale client
+surfaces an error instead of a write landing where the owner was not looking. The same canonical `ProjectCredentialStore`
 backs the resolver AND the agent awareness: a per-turn `<available_services>`
 DATA block (`project-credentials/fragment.ts`), keyed on the real per-turn
 `project_id` (`LiveAgentTurnRequest.project_id`, parsed from the topic), spliced

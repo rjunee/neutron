@@ -1,25 +1,34 @@
 /**
  * landing/chat-react — web PROJECT CREDENTIALS API client (Settings tab).
  *
- * A thin fetch wrapper over the gateway's per-project credential surface
- * (bearer-gated, `project-credentials/`), the store the agent's tool calls read
- * their per-project API keys / tokens from:
+ * A thin fetch wrapper over the gateway's credential surface (bearer-gated,
+ * `project-credentials/`), the store the agent's tool calls read their API keys
+ * / tokens from. TWO route families, one per scope:
  *
- *   GET    /api/app/projects/<id>/credentials                 list (metadata)
- *   POST   /api/app/projects/<id>/credentials                 set / replace
- *   DELETE /api/app/projects/<id>/credentials/<service>       remove
+ *   PROJECT (a project's Settings tab)
+ *   GET    /api/app/projects/<id>/credentials                 list (own + inherited)
+ *   POST   /api/app/projects/<id>/credentials                 set / replace THIS project's
+ *   DELETE /api/app/projects/<id>/credentials/<service>       remove THIS project's
+ *
+ *   GLOBAL (the Admin tab)
+ *   GET    /api/app/credentials                               list the global defaults
+ *   POST   /api/app/credentials                               set / replace a global default
+ *   DELETE /api/app/credentials/<service>                     remove a global default
  *
  * ── Metadata only, never the secret ─────────────────────────────────────────
  * The list route returns credential METADATA (`id`, `service`, `scope`, `label`,
  * timestamps) but NEVER the token value — a set is write-only. The Settings tab
  * therefore renders "a key exists for <service>" affordances, not the secret.
  *
- * ── project vs global scope ─────────────────────────────────────────────────
+ * ── project vs global scope (ISSUES #486) ───────────────────────────────────
  * A credential is either `project`-scoped (this project only) or `global` (an
  * instance-wide default a project inherits when it has no project-scoped key for
- * that service). The list splits them into `project` + `global` so the tab can
- * label inherited rows; DELETE takes the scope as a query param so removing an
- * inherited default doesn't require knowing its owning project.
+ * that service). The METHOD you call decides which — there is no `scope`
+ * argument, because there is no call that can be pointed at the other scope by
+ * mistake. `set`/`remove` only ever touch the named project; `setGlobal`/
+ * `removeGlobal` only ever touch the instance-wide defaults, and they are the
+ * only pair the Admin tab holds. The project `list` still returns the inherited
+ * globals so the Settings tab can SHOW them, labelled and read-only.
  *
  * Wire shapes mirror the gateway types but are re-declared here (rather than
  * imported across the workspace boundary) so the browser bundle stays free of a
@@ -56,11 +65,13 @@ export interface Rec {
   expires_at: string | null
 }
 
-/** Input for a set (POST). `token` is the only write-only field. */
+/**
+ * Input for a set (POST). `token` is the only write-only field. There is NO
+ * `scope` here on purpose (ISSUES #486): the method you call is the scope.
+ */
 export interface SetCredentialInput {
   service: string
   token: string
-  scope: CredentialScope
   label?: string
   expires_at?: string
 }
@@ -71,6 +82,11 @@ interface ListResponse {
   /** Credentials scoped to this project. */
   project: Rec[]
   /** Instance-wide defaults this project inherits. */
+  global: Rec[]
+}
+
+interface GlobalListResponse {
+  ok: boolean
   global: Rec[]
 }
 interface SetResponse {
@@ -108,18 +124,35 @@ export class WebProjectCredentialsClient extends GatewayHttpClient {
     return { project: res.project ?? [], global: res.global ?? [] }
   }
 
-  /** Store (or replace) a credential for a service at the given scope. */
+  /** Store (or replace) THIS PROJECT's credential for a service. */
   async set(project_id: string, input: SetCredentialInput): Promise<Rec> {
     const path = `/api/app/projects/${encodeURIComponent(project_id)}/credentials`
     const res = await this.req<SetResponse>(path, { method: 'POST', body: input })
     return res.credential
   }
 
-  /** Remove a service's credential at the given scope (project | global). */
-  async remove(project_id: string, service: string, scope: CredentialScope): Promise<void> {
+  /** Remove THIS PROJECT's credential for a service. */
+  async remove(project_id: string, service: string): Promise<void> {
     const path =
-      `/api/app/projects/${encodeURIComponent(project_id)}/credentials/${encodeURIComponent(service)}` +
-      `?scope=${encodeURIComponent(scope)}`
-    await this.req<{ ok: boolean; deleted: boolean; scope: CredentialScope }>(path, { method: 'DELETE' })
+      `/api/app/projects/${encodeURIComponent(project_id)}/credentials/${encodeURIComponent(service)}`
+    await this.req<{ ok: boolean; deleted: string; scope: CredentialScope }>(path, { method: 'DELETE' })
+  }
+
+  /** The instance-wide default credentials (metadata) — the Admin tab's list. */
+  async listGlobal(): Promise<Rec[]> {
+    const res = await this.req<GlobalListResponse>('/api/app/credentials')
+    return res.global ?? []
+  }
+
+  /** Store (or replace) an instance-wide default credential. Admin tab only. */
+  async setGlobal(input: SetCredentialInput): Promise<Rec> {
+    const res = await this.req<SetResponse>('/api/app/credentials', { method: 'POST', body: input })
+    return res.credential
+  }
+
+  /** Remove an instance-wide default credential. Admin tab only. */
+  async removeGlobal(service: string): Promise<void> {
+    const path = `/api/app/credentials/${encodeURIComponent(service)}`
+    await this.req<{ ok: boolean; deleted: string; scope: CredentialScope }>(path, { method: 'DELETE' })
   }
 }

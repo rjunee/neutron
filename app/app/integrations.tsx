@@ -9,6 +9,11 @@
  *     in webviews); Disconnect revokes + deletes the tokens.
  *   - Standalone API keys — per-Core `byo_api_key` slots (e.g. Research
  *     Core's Tavily). Paste a key to store it; Clear removes it.
+ *   - Shared credentials — the free-form credential store's GLOBAL defaults:
+ *     services the owner names themselves, available to every project. This is
+ *     the ONE place they are authored (ISSUES #486). A project's Settings tab
+ *     lists them read-only, because a global write made from inside one project
+ *     silently changed every other one.
  *
  * Agent-native parity: the same actions are available in chat via the
  * `integrations_connect` / `integrations_disconnect` tools — this screen is
@@ -45,6 +50,10 @@ import {
   type IntegrationsResponse,
 } from '../lib/cores-client';
 import {
+  ProjectCredentialsClient,
+  type ProjectCredentialRecord,
+} from '../lib/project-credentials-client';
+import {
   summarizeIntegrations,
   type IntegrationRow,
 } from '../lib/integrations-view';
@@ -59,7 +68,19 @@ export default function IntegrationsScreen() {
     return new CoresClient({ base_url: config.base_url, token: user.token });
   }, [user, config.base_url]);
 
+  const credsClient = useMemo(() => {
+    if (user === null) return null;
+    return new ProjectCredentialsClient({ base_url: config.base_url, token: user.token });
+  }, [user, config.base_url]);
+
   const [data, setData] = useState<IntegrationsResponse | null>(null);
+  // ── Shared (global-scope) credentials ──
+  const [sharedCreds, setSharedCreds] = useState<ProjectCredentialRecord[]>([]);
+  const [credService, setCredService] = useState('');
+  const [credToken, setCredToken] = useState('');
+  const [credLabel, setCredLabel] = useState('');
+  const [credBusy, setCredBusy] = useState(false);
+  const [credError, setCredError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -89,9 +110,69 @@ export default function IntegrationsScreen() {
     }
   }, [client]);
 
+  const fetchSharedCreds = useCallback(async () => {
+    if (credsClient === null) return;
+    setCredError(null);
+    try {
+      setSharedCreds(await credsClient.listGlobal());
+    } catch (err) {
+      setSharedCreds([]);
+      setCredError(formatErr(err));
+    }
+  }, [credsClient]);
+
   useEffect(() => {
     void fetchAll();
-  }, [fetchAll]);
+    void fetchSharedCreds();
+  }, [fetchAll, fetchSharedCreds]);
+
+  const handleAddSharedCred = useCallback(async () => {
+    if (credsClient === null) return;
+    const service = credService.trim();
+    const secret = credToken.trim();
+    if (service.length === 0 || secret.length === 0 || credBusy) return;
+    const label = credLabel.trim();
+    setCredBusy(true);
+    setCredError(null);
+    try {
+      await credsClient.setGlobal({ service, token: secret, ...(label.length > 0 ? { label } : {}) });
+      setCredService('');
+      setCredToken('');
+      setCredLabel('');
+      await fetchSharedCreds();
+    } catch (err) {
+      setCredError(formatErr(err));
+    } finally {
+      setCredBusy(false);
+    }
+  }, [credsClient, credService, credToken, credLabel, credBusy, fetchSharedCreds]);
+
+  const handleRemoveSharedCred = useCallback(
+    (service: string) => {
+      if (credsClient === null) return;
+      Alert.alert(
+        'Remove shared credential',
+        `Remove the shared ${service} credential? Every project that relies on it loses access.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => {
+              setCredBusy(true);
+              setCredError(null);
+              credsClient
+                .removeGlobal(service)
+                .then(() => fetchSharedCreds())
+                .catch((err) => setCredError(formatErr(err)))
+                .finally(() => setCredBusy(false));
+            },
+          },
+        ],
+      );
+    },
+    [credsClient, fetchSharedCreds],
+  );
 
   // Refetch when the app returns to the foreground. `Connect` hands off to the
   // system browser (Google blocks OAuth in webviews) via `Linking.openURL`,
@@ -350,6 +431,93 @@ export default function IntegrationsScreen() {
               </View>
             </View>
           ))}
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Shared credentials</Text>
+          <Text style={styles.muted}>
+            Keys every project can use. A project that stores its own key for the same
+            service uses that one instead.
+          </Text>
+          {credError !== null ? <Text style={styles.bannerError}>{credError}</Text> : null}
+          {sharedCreds.length === 0 ? (
+            <Text style={styles.muted} testID="shared-creds-empty">
+              No shared credentials yet.
+            </Text>
+          ) : null}
+          {sharedCreds.map((rec) => (
+            <View key={rec.service} style={styles.row} testID={`shared-cred-${rec.service}`}>
+              <View style={styles.rowText}>
+                <Text style={styles.rowTitle}>{rec.service}</Text>
+                {rec.label !== null && rec.label.length > 0 ? (
+                  <Text style={styles.rowDetail}>{rec.label}</Text>
+                ) : null}
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Remove shared ${rec.service} credential`}
+                testID={`shared-cred-remove-${rec.service}`}
+                disabled={credBusy}
+                onPress={() => handleRemoveSharedCred(rec.service)}
+                style={({ pressed }) => [
+                  styles.dangerBtn,
+                  credBusy && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.dangerBtnText}>Remove</Text>
+              </Pressable>
+            </View>
+          ))}
+          <View style={styles.keyControls}>
+            <TextInput
+              style={styles.keyInput}
+              testID="shared-cred-service"
+              placeholder="Service (e.g. openai)"
+              placeholderTextColor={THEME.text_muted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!credBusy}
+              value={credService}
+              onChangeText={setCredService}
+            />
+            <TextInput
+              style={styles.keyInput}
+              testID="shared-cred-token"
+              placeholder="Paste the secret"
+              placeholderTextColor={THEME.text_muted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!credBusy}
+              value={credToken}
+              onChangeText={setCredToken}
+            />
+            <TextInput
+              style={styles.keyInput}
+              testID="shared-cred-label"
+              placeholder="Label (optional)"
+              placeholderTextColor={THEME.text_muted}
+              editable={!credBusy}
+              value={credLabel}
+              onChangeText={setCredLabel}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Add shared credential"
+              testID="shared-cred-add"
+              disabled={credBusy || credService.trim().length === 0 || credToken.trim().length === 0}
+              onPress={() => void handleAddSharedCred()}
+              style={({ pressed }) => [
+                styles.secondaryBtn,
+                (credBusy || credService.trim().length === 0 || credToken.trim().length === 0) &&
+                  styles.btnDisabled,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.secondaryBtnText}>Add</Text>
+            </Pressable>
+          </View>
         </View>
 
         <Text style={styles.footnote}>

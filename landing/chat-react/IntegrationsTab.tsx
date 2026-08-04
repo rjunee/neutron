@@ -13,6 +13,16 @@
  * `connected` boolean, so the tab reflects connection state and lets the owner
  * paste a new value (write-only) or clear a stored one.
  *
+ * ── Two different key stores, deliberately (ISSUES #486) ────────────────────
+ * "API keys" above is the CORE-DECLARED slot list: a fixed set of
+ * `byo_api_key` labels a Core's manifest asked for. "Shared credentials" below
+ * is the free-form credential store (`project-credentials/`), where the owner
+ * names the service themselves — and it is the ONE place the instance-wide
+ * defaults are authored. A project's Settings tab shows them, labelled
+ * inherited, but can no longer write them: a global write from inside one
+ * project changed every project, which is the defect this section closes by
+ * moving the authoring to the surface that is actually global-scoped.
+ *
  * ── Google accounts are MANAGED here, not just displayed ────────────────────
  * The OAuth section used to be a viewer: a "Connected"/"Not connected" badge
  * and nothing to click, so the owner could not connect Google from the web at
@@ -53,6 +63,7 @@ import {
   oauthAccountStatus,
 } from './integrations-oauth-view.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
+import { WebProjectCredentialsClient, type Rec } from './project-credentials-client.ts'
 import { ThemeControl } from './ThemeToggle.tsx'
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
@@ -207,6 +218,92 @@ export function IntegrationsTab({
         setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
       })
   }, [codexClient])
+
+  // ── Shared credentials (GLOBAL scope — the instance-wide defaults) ──
+  // The ONLY authoring surface for them: a project's Settings tab reads them
+  // and says so, but writes only its own (ISSUES #486).
+  const credsClient = useMemo(
+    () =>
+      new WebProjectCredentialsClient({
+        base_url: config.origin,
+        token: config.token,
+        fetchImpl: withSignal,
+      }),
+    [config.origin, config.token, withSignal],
+  )
+  const [globalCreds, setGlobalCreds] = useState<Rec[]>([])
+  const [credsLoading, setCredsLoading] = useState(true)
+  const [credsError, setCredsError] = useState<string | null>(null)
+  const [credService, setCredService] = useState('')
+  const [credToken, setCredToken] = useState('')
+  const [credLabel, setCredLabel] = useState('')
+  const [credSaving, setCredSaving] = useState(false)
+  const [credBusyService, setCredBusyService] = useState<string | null>(null)
+
+  const loadGlobalCreds = useCallback((): void => {
+    setCredsLoading(true)
+    setCredsError(null)
+    void credsClient
+      .listGlobal()
+      .then((rows) => {
+        if (!mountedRef.current) return
+        setGlobalCreds(rows)
+        setCredsLoading(false)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        setGlobalCreds([])
+        setCredsLoading(false)
+        setCredsError(err instanceof Error ? err.message : 'failed to load shared credentials')
+      })
+  }, [credsClient])
+
+  useEffect(() => loadGlobalCreds(), [loadGlobalCreds])
+
+  const addGlobalCred = useCallback((): void => {
+    const svc = credService.trim()
+    const tok = credToken
+    if (svc.length === 0 || tok.length === 0 || credSaving) return
+    setCredSaving(true)
+    setCredsError(null)
+    const lbl = credLabel.trim()
+    void credsClient
+      .setGlobal({ service: svc, token: tok, ...(lbl.length > 0 ? { label: lbl } : {}) })
+      .then(() => {
+        if (!mountedRef.current) return
+        setCredSaving(false)
+        setCredService('')
+        setCredToken('')
+        setCredLabel('')
+        loadGlobalCreds()
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        setCredSaving(false)
+        setCredsError(err instanceof Error ? err.message : 'failed to save credential')
+      })
+  }, [credsClient, credService, credToken, credLabel, credSaving, loadGlobalCreds])
+
+  const removeGlobalCred = useCallback(
+    (service: string): void => {
+      if (credBusyService !== null) return
+      setCredBusyService(service)
+      setCredsError(null)
+      void credsClient
+        .removeGlobal(service)
+        .then(() => {
+          if (!mountedRef.current) return
+          setCredBusyService(null)
+          loadGlobalCreds()
+        })
+        .catch((err: unknown) => {
+          if (!mountedRef.current) return
+          setCredBusyService(null)
+          setCredsError(err instanceof Error ? err.message : 'failed to delete credential')
+        })
+    },
+    [credsClient, credBusyService, loadGlobalCreds],
+  )
 
   // Per-slot draft input + in-flight / per-slot error state, keyed by label.
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -658,6 +755,99 @@ export function IntegrationsTab({
                   })}
                 </ul>
               )}
+            </section>
+
+            {/* ── Shared credentials (GLOBAL scope) ──────────────────────────
+                The instance-wide defaults every project inherits, authored HERE
+                and nowhere else. A project's Settings tab lists them read-only
+                and points back at this section (ISSUES #486). */}
+            <section className="cint-section" aria-label="Shared credentials">
+              <h3 className="cint-section-title">Shared credentials</h3>
+              <p className="cint-row-sub">
+                API keys and tokens <strong>every</strong> project can use. A project that
+                stores its own key for the same service uses that one instead. The value is
+                encrypted on your server and never shown again after you save it.
+              </p>
+
+              {credsError !== null ? (
+                <div className="cdoc-comments-error">{credsError}</div>
+              ) : null}
+
+              {credsLoading ? (
+                <div className="cdoc-empty">Loading…</div>
+              ) : globalCreds.length === 0 ? (
+                <div className="cdoc-empty">No shared credentials yet.</div>
+              ) : (
+                <ul className="cint-list" aria-label="Shared credentials">
+                  {globalCreds.map((rec) => (
+                    <li key={rec.service} className="cint-row cint-row-key" data-cred-service={rec.service}>
+                      <div className="cint-row-main">
+                        <span className="cint-row-label">{rec.service}</span>
+                        {rec.label !== null && rec.label.length > 0 ? (
+                          <span className="cint-row-sub">{rec.label}</span>
+                        ) : null}
+                      </div>
+                      <div className="cint-key-actions">
+                        <button
+                          type="button"
+                          className="cdoc-btn"
+                          aria-label={`Remove shared ${rec.service} credential`}
+                          disabled={credBusyService === rec.service}
+                          onClick={() => removeGlobalCred(rec.service)}
+                        >
+                          {credBusyService === rec.service ? 'Removing…' : 'Remove'}
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <form
+                className="cset-form"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  addGlobalCred()
+                }}
+              >
+                <div className="cint-key-actions">
+                  <input
+                    className="cint-key-input"
+                    aria-label="Service"
+                    placeholder="Service — e.g. openai, github"
+                    value={credService}
+                    disabled={credSaving}
+                    onChange={(e) => setCredService(e.target.value)}
+                  />
+                  <input
+                    type="password"
+                    className="cint-key-input"
+                    aria-label="Shared credential value"
+                    autoComplete="off"
+                    placeholder="Paste the secret…"
+                    value={credToken}
+                    disabled={credSaving}
+                    onChange={(e) => setCredToken(e.target.value)}
+                  />
+                  <input
+                    className="cint-key-input"
+                    aria-label="Label (optional)"
+                    placeholder="Label (optional)"
+                    value={credLabel}
+                    disabled={credSaving}
+                    onChange={(e) => setCredLabel(e.target.value)}
+                  />
+                  <button
+                    type="submit"
+                    className="cdoc-btn cdoc-btn-primary"
+                    disabled={
+                      credSaving || credService.trim().length === 0 || credToken.length === 0
+                    }
+                  >
+                    {credSaving ? 'Saving…' : 'Add shared credential'}
+                  </button>
+                </div>
+              </form>
             </section>
 
             {/* ── Codex cross-model review (GLOBAL, trident-wide) ── */}

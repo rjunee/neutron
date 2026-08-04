@@ -1,10 +1,14 @@
 /**
- * Component test for the per-project SETTINGS tab archive action
- * (archived-projects sprint). Renders `SettingsTab` in happy-dom over an
- * injected `fetchImpl` and asserts:
+ * Component test for the per-project SETTINGS tab. Renders `SettingsTab` in
+ * happy-dom over an injected `fetchImpl` and asserts:
  *   - the two-step Archive → Confirm flow POSTs /api/app/projects/<id>/archive;
  *   - a successful archive flips the section to the "Project archived" notice;
- *   - Cancel aborts without a POST.
+ *   - Cancel aborts without a POST;
+ *   - the CREDENTIAL SCOPE BOUNDARY (ISSUES #486) — every request this tab can
+ *     be driven to emit is project-scoped. These assert on what reaches the
+ *     server (captured method + URL + body), not on which controls are on
+ *     screen: a UI with no toggle that still posts `scope: 'global'` would pass
+ *     a control-presence check and fail these.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
@@ -57,6 +61,8 @@ async function mount(handler: Handler): Promise<{
   root: { unmount: () => void }
   act: (cb: () => void | Promise<void>) => Promise<void>
   calls: string[]
+  /** Every request, with its parsed JSON body — the wire, not the DOM. */
+  requests: Array<{ method: string; url: string; body: unknown }>
 }> {
   const { createRoot } = await import('react-dom/client')
   const { act } = await import('react')
@@ -64,8 +70,23 @@ async function mount(handler: Handler): Promise<{
   const React = await import('react')
 
   const calls: string[] = []
+  const requests: Array<{ method: string; url: string; body: unknown }> = []
   const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
     calls.push(`${init?.method ?? 'GET'} ${url}`)
+    requests.push({
+      method: init?.method ?? 'GET',
+      url,
+      body:
+        typeof init?.body === 'string'
+          ? ((): unknown => {
+              try {
+                return JSON.parse(init.body as string)
+              } catch {
+                return init.body
+              }
+            })()
+          : undefined,
+    })
     const res = handler(url, init) ?? baseHandler(url)
     if (res !== null) return res
     return json({ ok: false, code: 'request_failed' }, 404)
@@ -85,7 +106,7 @@ async function mount(handler: Handler): Promise<{
     await tick()
     await tick()
   })
-  return { container, root: root as unknown as { unmount: () => void }, act, calls }
+  return { container, root: root as unknown as { unmount: () => void }, act, calls, requests }
 }
 
 function btn(container: HTMLElement, text: string): HTMLButtonElement {
@@ -240,6 +261,156 @@ describe('SettingsTab Codex override (happy-dom)', () => {
     expect(container.textContent).not.toContain('○ Not connected')
     // Override row gone → no remove button.
     expect(btn(container, 'Remove override')).toBeUndefined()
+    root.unmount()
+  })
+})
+
+describe('SettingsTab credential scope boundary (ISSUES #486)', () => {
+  const PROJECT_CREDS = 'https://sam.neutron.test/api/app/projects/acme/credentials'
+
+  /** Serve one project-owned credential and one inherited global default. */
+  function credsHandler(onWrite?: (method: string) => void): Handler {
+    return (url, init) => {
+      if (url.startsWith(PROJECT_CREDS)) {
+        const method = init?.method ?? 'GET'
+        if (method === 'GET') {
+          return json({
+            ok: true,
+            project_id: 'acme',
+            project: [
+              {
+                id: 'p1',
+                owner_slug: 'sam',
+                project_id: 'acme',
+                scope: 'project',
+                service: 'apify',
+                label: null,
+                created_at: '2026-06-20T00:00:00Z',
+                updated_at: '2026-06-20T00:00:00Z',
+                expires_at: null,
+              },
+            ],
+            global: [
+              {
+                id: 'g1',
+                owner_slug: 'sam',
+                project_id: '',
+                scope: 'global',
+                service: 'openai',
+                label: 'shared',
+                created_at: '2026-06-20T00:00:00Z',
+                updated_at: '2026-06-20T00:00:00Z',
+                expires_at: null,
+              },
+            ],
+          })
+        }
+        onWrite?.(method)
+        return json({ ok: true, credential: { service: 'x' }, deleted: 'x' }, method === 'POST' ? 201 : 200)
+      }
+      return null
+    }
+  }
+
+  function setInputValue(el: HTMLInputElement, value: string): void {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+      ?.set as ((v: string) => void) | undefined
+    setter?.call(el, value)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  it('the add form posts a project-scoped write and never puts a global scope on the wire', async () => {
+    const { container, root, act, requests } = await mount(credsHandler())
+
+    const service = container.querySelector('#cset-service') as HTMLInputElement
+    const token = container.querySelector('#cset-token') as HTMLInputElement
+    await act(async () => {
+      setInputValue(service, 'stripe')
+      setInputValue(token, 'sk-live-xxx')
+      await tick()
+    })
+    await act(async () => {
+      btn(container, 'Add credential').click()
+      await tick()
+      await tick()
+    })
+
+    const posts = requests.filter((r) => r.method === 'POST' && r.url.includes('/credentials'))
+    expect(posts).toHaveLength(1)
+    // The URL is the project's, and the body carries no scope at all — there is
+    // nothing a project surface could set to reach instance-wide state.
+    expect(posts[0]!.url).toBe(PROJECT_CREDS)
+    expect(posts[0]!.body).toEqual({ service: 'stripe', token: 'sk-live-xxx' })
+    expect(Object.keys(posts[0]!.body as object)).not.toContain('scope')
+    root.unmount()
+  })
+
+  it('there is no request this tab can emit that carries scope=global', async () => {
+    const seen: string[] = []
+    const { container, root, act, requests } = await mount(credsHandler((m) => seen.push(m)))
+
+    // Drive every credential control the tab has: fill + submit the form, then
+    // click every remove control rendered on the list.
+    const service = container.querySelector('#cset-service') as HTMLInputElement
+    const token = container.querySelector('#cset-token') as HTMLInputElement
+    await act(async () => {
+      setInputValue(service, 'stripe')
+      setInputValue(token, 'sk-live-xxx')
+      await tick()
+    })
+    await act(async () => {
+      btn(container, 'Add credential').click()
+      await tick()
+      await tick()
+    })
+    const removes = Array.from(
+      container.querySelectorAll('.cset-cred-ul button'),
+    ) as HTMLButtonElement[]
+    for (const b of removes) {
+      await act(async () => {
+        b.click()
+        await tick()
+        await tick()
+      })
+    }
+
+    const writes = requests.filter((r) => r.method !== 'GET' && r.url.includes('/credentials'))
+    expect(writes.length).toBeGreaterThan(0)
+    for (const w of writes) {
+      expect(w.url).toStartWith(PROJECT_CREDS)
+      expect(w.url).not.toContain('scope=global')
+      expect((w.body as Record<string, unknown> | undefined)?.['scope']).toBeUndefined()
+    }
+    expect(seen.length).toBeGreaterThan(0)
+    root.unmount()
+  })
+
+  it('shows the inherited global default, read-only, and points at the global surface', async () => {
+    const { container, root, act, requests } = await mount(credsHandler())
+
+    // Both rows render — reading the inherited default here is the useful part.
+    expect(container.textContent).toContain('openai')
+    expect(container.textContent).toContain('global default')
+    expect(container.textContent).toContain('Change in General → Admin')
+
+    // …but the inherited row carries NO control. Clicking every button in the
+    // list must not produce a delete addressed at the global default.
+    const rows = Array.from(container.querySelectorAll('.cset-cred-row')) as HTMLElement[]
+    const inherited = rows.find((r) => r.textContent?.includes('global default'))
+    expect(inherited).not.toBeUndefined()
+    expect(inherited!.querySelectorAll('button')).toHaveLength(0)
+
+    // The project's OWN row still has its remove, and it deletes the project row.
+    const own = rows.find((r) => r.textContent?.includes('apify'))
+    const ownRemove = own!.querySelector('button') as HTMLButtonElement
+    await act(async () => {
+      ownRemove.click()
+      await tick()
+      await tick()
+    })
+    const deletes = requests.filter((r) => r.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]!.url).toBe(`${PROJECT_CREDS}/apify`)
     root.unmount()
   })
 })
