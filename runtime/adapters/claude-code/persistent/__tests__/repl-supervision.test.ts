@@ -843,14 +843,29 @@ describe('S2 supervision — health probe has a deadline (Codex P2)', () => {
     const server = Bun.serve({
       port: 0,
       hostname: '127.0.0.1',
+      // `idleTimeout: 0` DISABLES Bun's request-idle timer, and it is load-bearing
+      // rather than decoration. The default is 10 s, which meant this "never
+      // answers" server actually DID answer — it failed the request after 10 s,
+      // so `httpHealth` resolved `false` through its catch even with the probe
+      // deadline removed. Measured 2026-08-04: with the deadline stripped from
+      // `httpHealth`, this test still PASSED in 12.2 s. The server has to really
+      // never answer for the absence of a deadline to be observable at all.
+      idleTimeout: 0,
       fetch: () => new Promise<Response>((res) => { hang = res }), // never resolves
     })
     try {
-      const start = Date.now()
+      // THE "NOT HUNG" CONTRACT IS `ok === false` PLUS THE TEST TIMEOUT, and it
+      // is stated exactly once. This server NEVER answers, so the probe promise
+      // has exactly two possible fates: the deadline fires and it resolves
+      // `false`, or there is no deadline and it never resolves at all. Reaching
+      // the assertion below therefore already proves the deadline fired; a
+      // deadline-less regression cannot get here to be measured. The wall-clock
+      // bound that used to sit here (`elapsed < 2000` on a 150 ms deadline) was
+      // a second guard on that same one contract, and it was the flaky one —
+      // it reddens on a loaded runner for a reason unrelated to the change
+      // under review. ISSUES #438.
       const ok = await httpHealth(server.port as number, { timeoutMs: 150 })
-      const elapsed = Date.now() - start
       expect(ok).toBe(false)
-      expect(elapsed).toBeLessThan(2000) // bounded by the deadline, not hung
     } finally {
       hang?.(new Response('late'))
       server.stop(true)

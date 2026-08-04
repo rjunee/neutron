@@ -339,6 +339,20 @@ describe('buildProfilePicEngineHook', () => {
     })
     const elapsed = Date.now() - start
     // Must not have waited for the (blocked) Gemini call.
+    //
+    // KEPT DELIBERATELY, and it is the only guard. `await_timeout_ms: 0` is
+    // supposed to disable the soft-wait race; if it were ignored the code falls
+    // back to a 5000 ms wait (storage.ts:556) and then returns `pending`
+    // ANYWAY — so `ensure.kind` below cannot see the difference, and 5 s is
+    // under the 15 s per-test timeout, so that cannot either. Only elapsed can.
+    //
+    // The threshold discriminates two far-apart outcomes (a synchronous return
+    // vs. a 5 s wait), and the margin is measured: 0 ms unloaded, and 0/1/0/0 ms
+    // across four runs under 2x CPU oversubscription (16 spinners on 8 cores,
+    // load average 70), against the 100 ms budget. Deliberately NOT widened —
+    // the number is not the problem here, and raising it would only blur a
+    // discriminator that currently has two orders of magnitude of room on both
+    // sides. ISSUES #438.
     expect(elapsed).toBeLessThan(100)
     expect(ensure.kind).toBe('pending')
     if (ensure.kind === 'pending') {

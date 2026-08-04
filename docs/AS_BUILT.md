@@ -6687,3 +6687,57 @@ foreground when the Expo token rotates"); the comment is corrected to describe
 what the code does. Self-healing re-registration is a separate change.
 
 No schema change, no feature flag. Gateway + app code.
+
+## Wall-clock timing assertions in tests — triaged, mostly removed (ISSUES #438)
+
+**What changed.** A sweep of every test assertion that compares REAL elapsed wall
+time against a threshold. These red when the machine is loaded, which is exactly
+when CI is busiest, and a gate that reddens for a reason unrelated to the change
+under review is a gate people learn to merge past. 16 live assertions were found
+across 10 files (the swept grep also matches a comment in
+`gateway/comments/__tests__/anchor-walker.test.ts:1230`, which documents the
+earlier removal this change generalises).
+
+**The rule applied, in order.** (1) If a deterministic assertion already covered
+the same contract, the timing bound was DELETED. (2) Otherwise, if the contract
+could be restated as an ordering or a discriminant, it was CONVERTED. (3) Only
+where neither applied was a bound KEPT, and then with a comment naming the
+regression it catches and a measured margin. Nothing was bulk-widened; exactly
+one number in the tree changed, and it changed to zero numbers by deletion.
+
+**Outcome: 9 deleted, 4 converted, 3 kept.** The conversions are the interesting
+half. `onboarding/synthesis/__tests__/synthesis-session.test.ts` now asserts
+WHICH wedge detector fired by reading the distinct failure messages off the
+injectable `logFailure` sink, instead of inferring it from a stopwatch — strictly
+stronger, because the old bound would also have passed on the wrong detector
+firing early. `open/__tests__/open-app-ws-durable-chatlog.test.ts` samples the
+agent-reply frame count at the instant the HTTP response lands, so
+"returned before the turn finished" is an ordering that load cannot reorder
+rather than a 500 ms budget. `open/__tests__/onboarding-warm-conversational.test.ts`
+sets the pre-warm cap an hour out so the pre-warm is the only thing that can
+resolve the gate, making the test's own completion the proof.
+
+**Two premises corrected while doing it.** The health-probe test in
+`runtime/adapters/claude-code/persistent/__tests__/repl-supervision.test.ts`
+described a server that "never resolves", but `Bun.serve` defaults to a 10 s
+request idle timeout — so it DID answer, and with the probe deadline stripped the
+test still passed in 12.2 s. It now sets `idleTimeout: 0`, which is what makes
+the deadline's absence observable at all. And the bound in
+`tests/integration/profile-pic-pipeline.test.ts` allowed 60 s while the test runs
+under CI's 15 s per-test timeout — it could never have failed.
+
+**The three kept bounds, and why.** Two in
+`runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts`
+are LOWER bounds that are the only thing distinguishing the inactivity watchdog
+from the absolute ceiling — both deliberately emit the same error
+(`pool.ts:605`) — and load moves a lower bound away from its threshold. The
+`app/__tests__/transcript-warmer.test.ts` bound is the only guard separating a
+gate-driven abandon from the 6 s open deadline, and measured 8 ms against a
+3000 ms budget under 2x CPU oversubscription. The
+`onboarding/profile-pic/__tests__/storage.test.ts` bound discriminates a
+synchronous return from a 5 s fallback wait and measured 0-1 ms against 100 ms
+under the same load.
+
+**Every deletion was mutation-tested**: the guarding behaviour was broken in the
+real source and the surviving assertions were shown to still red. Tests only —
+no source file changed, no schema change, no feature flag.

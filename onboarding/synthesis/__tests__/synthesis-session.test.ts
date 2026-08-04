@@ -484,27 +484,34 @@ describe('synthesis session — stream-activity heartbeat wedge-detector', () =>
     })
     expect(prepass.reading_batches.length).toBe(1)
 
-    // Every turn emits nothing and hangs. idle=60ms catches it; the ceiling is
-    // huge (10s), so if the idle-heartbeat were NOT the detector this test would
-    // run ~10s+ and blow the test budget. It finishes in well under a second.
-    const start = Date.now()
+    // Every turn emits nothing and hangs. idle=60ms must catch it; the ceiling is
+    // huge (10s) and must NOT be what fires.
+    //
+    // WHICH DETECTOR FIRED IS ASSERTED DIRECTLY, not inferred from a stopwatch.
+    // `logFailure` is a first-class dep (SynthesisSessionDeps.logFailure) and the
+    // two gates log DISTINCT messages — 'idle-heartbeat' vs 'absolute ceiling'
+    // (synthesis-session.ts:586-592). Reading the discriminant off that sink says
+    // exactly what the test name claims, where the old wall-clock bound
+    // (`elapsed < 3000`) only said "it was fast", which is the same sentence a
+    // loaded CI runner disagrees with. ISSUES #438.
+    const failures: string[] = []
     const result = await runImportSynthesis(
       {
         substrateFactory: alwaysHangFactory(),
         rawStore,
         idle_timeout_ms: 60,
         timeout_ms: 10000,
+        logFailure: (_stage, err) => failures.push(String(err)),
       },
       { prepass },
     )
-    const elapsed = Date.now() - start
 
     expect(result.read_passes_attempted).toBeGreaterThan(0)
     expect(result.read_passes_succeeded).toBe(0)
     expect(result.user_model.projects.length).toBe(0)
-    // Idle (60ms), not the ceiling (10000ms), caught the wedge: read + retry +
-    // consolidate + its retry ≈ 4 × ~60ms ≪ the ceiling.
-    expect(elapsed).toBeLessThan(3000)
+    // Idle (60ms) caught the wedge, and the ceiling (10000ms) never did.
+    expect(failures.some((f) => f.includes('idle-heartbeat'))).toBe(true)
+    expect(failures.some((f) => f.includes('absolute ceiling'))).toBe(false)
   })
 
   test('the absolute ceiling still backstops a turn that streams forever (dodges the idle window)', async () => {
@@ -517,22 +524,29 @@ describe('synthesis session — stream-activity heartbeat wedge-detector', () =>
 
     // A status event every 20ms forever → the idle window (10s) NEVER fires, so
     // ONLY the absolute ceiling (200ms) can stop it. Proves the backstop.
-    const start = Date.now()
+    //
+    // Asserted on the failure discriminant rather than a stopwatch, for the same
+    // reason as the sibling test above: the old bound (`elapsed < 10000`) was
+    // measuring the machine, and it could not actually distinguish the two gates
+    // — an idle window that wrongly fired would ALSO land under 10 s and pass.
+    // The message check below cannot. ISSUES #438.
+    const failures: string[] = []
     const result = await runImportSynthesis(
       {
         substrateFactory: makeForeverStreamFactory(20).factory,
         rawStore,
         idle_timeout_ms: 10000, // never fires — activity every 20ms
         timeout_ms: 200, // the only thing that can abort a forever-stream
+        logFailure: (_stage, err) => failures.push(String(err)),
       },
       { prepass },
     )
-    const elapsed = Date.now() - start
 
     expect(result.read_passes_succeeded).toBe(0)
     expect(result.user_model.projects.length).toBe(0)
-    // The ceiling (200ms) caught it well before the idle window (10000ms) could.
-    expect(elapsed).toBeLessThan(10000)
+    // The ceiling caught it; the idle window never fired.
+    expect(failures.some((f) => f.includes('absolute ceiling'))).toBe(true)
+    expect(failures.some((f) => f.includes('idle-heartbeat'))).toBe(false)
   })
 })
 
@@ -568,15 +582,17 @@ describe('drainWithHeartbeat — child-liveness defeats the time-to-first-token 
     // window. With isAlive()=true the drain must treat the silence as liveness, NOT
     // a wedge — so it survives multiple idle windows and only the absolute ceiling
     // can stop a forever-silent-but-alive turn.
-    const start = Date.now()
     const res = await drainWithHeartbeat(silentForeverStream(), {
       idleMs: 50,
       ceilingMs: 300,
       isAlive: () => true,
     })
-    const elapsed = Date.now() - start
+    // `reason` IS the contract, stated once. The stream is silent forever, so the
+    // drain can only end by one of the two gates, and the discriminant names
+    // which — 'ceiling' means the idle window was defeated by liveness, which is
+    // the whole claim. The elapsed floor that used to sit beside this
+    // (`>= 250`) restated that same fact in stopwatch form. ISSUES #438.
     expect(res.reason).toBe('ceiling') // NOT 'idle' — liveness defeated the false wedge
-    expect(elapsed).toBeGreaterThanOrEqual(250) // survived several idle windows
   })
 
   test('a SILENT turn whose child EXITS is wedged FAST at the idle window (true hang)', async () => {
@@ -584,15 +600,15 @@ describe('drainWithHeartbeat — child-liveness defeats the time-to-first-token 
     setTimeout(() => {
       alive = false
     }, 60)
-    const start = Date.now()
     const res = await drainWithHeartbeat(silentForeverStream(), {
       idleMs: 40,
       ceilingMs: 10000,
       isAlive: () => alive,
     })
-    const elapsed = Date.now() - start
+    // Same as above: `reason: 'idle'` already says "the idle wedge fired, not the
+    // 10 s ceiling" — and says it more precisely than `elapsed < 2000` did, since
+    // that bound would also have passed on a ceiling that fired early. ISSUES #438.
     expect(res.reason).toBe('idle')
-    expect(elapsed).toBeLessThan(2000) // idle wedge, not the 10s ceiling
   })
 
   test('with NO isAlive probe a silent turn wedges at the idle window (back-compat)', async () => {

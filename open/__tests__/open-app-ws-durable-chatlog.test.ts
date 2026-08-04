@@ -304,13 +304,14 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
     const sock = await openSocket(harness.base)
     await waitFor(() => framesOfType(sock.frames, 'session_ready').length > 0)
 
-    const t0 = Date.now()
     const res = await fetch(`${harness.base}/api/app/chat/send`, {
       method: 'POST',
       headers: { authorization: 'Bearer dev:owner', 'content-type': 'application/json' },
       body: JSON.stringify({ body: 'http hello', client_msg_id: 'h-1' }),
     })
-    const elapsed = Date.now() - t0
+    // SAMPLED THE INSTANT THE RESPONSE LANDED — this is the ordering the test is
+    // actually about, captured as an ordering rather than as a duration.
+    const agentRepliesAtResponse = framesOfType(sock.frames, 'agent_message').length
     const json = (await res.json()) as { ok: boolean; echo?: { seq?: number; client_msg_id?: string } }
 
     // The response returned the durable echo (with seq) WITHOUT blocking on the
@@ -319,7 +320,16 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
     expect(json.ok).toBe(true)
     expect(typeof json.echo?.seq).toBe('number')
     expect(json.echo?.client_msg_id).toBe('h-1')
-    expect(elapsed).toBeLessThan(STEADY_TURN_DELAY_MS) // returned before the turn finished
+    // RETURNED BEFORE THE TURN FINISHED — stated as the ordering it is. The turn
+    // announces its completion by fanning an `agent_message` over the socket, so
+    // "no agent reply had been fanned yet when the HTTP response landed" IS the
+    // fire-and-forget claim, directly. The bound this replaces
+    // (`elapsed < STEADY_TURN_DELAY_MS`, i.e. 500 ms) tested the same thing by
+    // proxy and reddened whenever a loaded runner made the HTTP round-trip take
+    // longer than the agent's simulated think time — a machine verdict, not a
+    // code one. An ordering cannot be flipped by load, because contention slows
+    // the response and the turn together. ISSUES #438.
+    expect(agentRepliesAtResponse).toBe(0)
 
     // The turn still ran — its reply fans over the WS afterwards.
     await waitFor(() =>

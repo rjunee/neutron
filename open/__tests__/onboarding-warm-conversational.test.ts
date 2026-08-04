@@ -224,12 +224,19 @@ async function drainSessionLessTurn(substrate: Substrate, prompt: string): Promi
 
 describe('awaitPrewarmReady — bounded first-turn gate (2026-06-18 cold-spawn fix)', () => {
   test('resolves as soon as the pre-warm settles (no needless wait)', async () => {
-    const start = Date.now()
+    // THE CAP IS SET BEYOND ANY RUNNABLE TEST, WHICH IS WHAT MAKES THIS
+    // DETERMINISTIC. `awaitPrewarmReady` resolves on whichever of the pre-warm
+    // and the cap fires first (composer.ts:5670); with the cap an hour out, the
+    // pre-warm is the ONLY thing that can resolve it, so this test RETURNING AT
+    // ALL is the proof — a gate that sat out its cap instead would hang and red
+    // on the 15 s per-test timeout CI runs with (scripts/run-tests.sh:77). That
+    // replaces the wall-clock bound that used to be here
+    // (`Date.now() - start < 2000`), which asserted the same one contract in the
+    // one form a loaded runner can flip. Safe against a leaked hour-long timer:
+    // the cap timer is cleared in a `finally` (composer.ts:5671). ISSUES #438.
     await awaitPrewarmReady(Bun.sleep(10).then(() => undefined), {
-      NEUTRON_PREWARM_AWAIT_CAP_MS: '5000',
+      NEUTRON_PREWARM_AWAIT_CAP_MS: '3600000',
     } as unknown as NodeJS.ProcessEnv)
-    // Returned on the prewarm (~10ms), nowhere near the 5s cap.
-    expect(Date.now() - start).toBeLessThan(2000)
   })
 
   test('a hanging pre-warm resolves at the cap (never blocks forever)', async () => {
@@ -239,8 +246,17 @@ describe('awaitPrewarmReady — bounded first-turn gate (2026-06-18 cold-spawn f
       NEUTRON_PREWARM_AWAIT_CAP_MS: '60',
     } as unknown as NodeJS.ProcessEnv)
     const elapsed = Date.now() - start
+    // KEPT DELIBERATELY, and it is the only assertion that can fail here. This
+    // pre-warm NEVER settles, so the cap is the sole thing that can resolve the
+    // gate: reaching this line already proves the cap fired, and a regression
+    // that dropped the cap would hang and red on the test timeout. What the
+    // floor adds is the OTHER direction — a cap that fired far too EARLY (or was
+    // ignored in favour of some smaller constant) still resolves, and only the
+    // floor catches that. It is a LOWER bound at 55 ms against a 60 ms cap, so
+    // load — which can only delay the timer — moves it away from the threshold.
+    // The sibling upper bound (`elapsed < 2000`) was the load-flaky one and is
+    // gone; nothing was lost, since the hang case is covered above. ISSUES #438.
     expect(elapsed).toBeGreaterThanOrEqual(55)
-    expect(elapsed).toBeLessThan(2000)
   })
 
   test('prewarmSubstrate returns a never-rejecting promise even when start() throws', async () => {

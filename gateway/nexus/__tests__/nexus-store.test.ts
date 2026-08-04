@@ -557,15 +557,24 @@ describe('NexusStore — REAL cross-process concurrency (subprocess)', () => {
         // C-level busy_timeout, so only the withBusyRetry ladder can
         // carry this write through.
         await waitForLine(holder.stdout, 'HELD', 15_000)
-        const t0 = Date.now()
+        // THE CONTENTION IS PROVEN BY THE HANDSHAKE ABOVE PLUS THE APPEND
+        // SUCCEEDING, not by a stopwatch. `HELD` means the holder is sitting on
+        // BEGIN IMMEDIATE, so this append provably starts against a held write
+        // lock; the holder's window (400 ms) is four times the C-level
+        // busy_timeout (100 ms), so without the withBusyRetry ladder this call
+        // raises SQLITE_BUSY and the test reds on the throw.
+        //
+        // The elapsed floor that used to be here (`> 150`) was, unusually for a
+        // LOWER bound, flaky IN THE SLOW DIRECTION: the holder's 400 ms is wall
+        // clock that starts before `HELD` is read, so a loaded runner that is
+        // late reading that line leaves under 150 ms of window remaining and the
+        // append legitimately finishes under the floor. It measured how promptly
+        // the test observed the handshake, not whether the write contended.
+        // ISSUES #438.
         const written = await h.store.appendEvent(
           PROJECT_ID,
           input({ body: 'wrote through contention' }),
         )
-        const elapsed = Date.now() - t0
-        // Proves the write actually contended (an uncontended append
-        // is single-digit ms) and waited out the holder's window.
-        expect(elapsed).toBeGreaterThan(150)
         const exit = await holder.exited
         expect(exit).toBe(0)
         const events = await h.store.readRecent(PROJECT_ID)

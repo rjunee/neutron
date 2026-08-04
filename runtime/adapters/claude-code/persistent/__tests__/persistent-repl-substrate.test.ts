@@ -912,8 +912,14 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
     setTimeout(() => clearInterval(ticker), 700)
     await expect(drain(sub.start(spec('long active build')))).rejects.toThrow(/turn timeout/)
     const elapsed = performance.now() - started
-    // Survived WELL past the 300ms idle window (activity kept resetting it), then
-    // tripped only after activity ceased (~700ms + one idle window).
+    // KEPT DELIBERATELY. Survived WELL past the 300ms idle window (activity kept
+    // resetting it), then tripped only after activity ceased (~700ms + one idle
+    // window). No deterministic assertion can replace this: the regression it
+    // catches is "PTY activity stopped resetting the deadline", whose ONLY
+    // observable is that the turn dies early — the error it dies with is
+    // byte-identical either way (pool.ts:605 emits one message for both trip
+    // reasons). A LOWER bound is also the safe direction under load: contention
+    // can only push elapsed up, away from the 600 ms floor. ISSUES #438.
     expect(elapsed).toBeGreaterThan(600)
     clearInterval(ticker)
   })
@@ -924,11 +930,14 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
     const sub = createPersistentReplSubstrate(
       baseOptions(host, { turnTimeoutMs: 250, idleQuietMs: 0, idleMaxMs: 50 }),
     )
-    const started = performance.now()
+    // THE "NOT HELD OPEN" CONTRACT IS THE REJECTION PLUS THE TEST TIMEOUT.
+    // This child never emits and never completes, so the drain has exactly two
+    // fates: the inactivity watchdog trips and it rejects with /turn timeout/,
+    // or the watchdog is broken and it never settles at all — in which case the
+    // test times out rather than reaching any assertion. The wall-clock bound
+    // that used to sit here (`elapsed < 3000` against a 250 ms window) was a
+    // second guard on that one contract, and it was the flaky one. ISSUES #438.
     await expect(drain(sub.start(spec('frozen turn')))).rejects.toThrow(/turn timeout/)
-    const elapsed = performance.now() - started
-    // Tripped near the idle window, not held open.
-    expect(elapsed).toBeLessThan(3_000)
   })
 
   it('enforces the ABSOLUTE CEILING even while the turn keeps producing PTY output', async () => {
@@ -950,9 +959,16 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
     await expect(drain(sub.start(spec('livelocked')))).rejects.toThrow(/turn timeout/)
     clearInterval(ticker)
     const elapsed = performance.now() - started
-    // Activity kept the 200ms idle window from firing (survived well past it), and
-    // the 600ms ceiling bounded the livelocked turn.
+    // KEPT DELIBERATELY, and it is the only assertion here that can tell the two
+    // watchdogs apart. Both the inactivity window and the absolute ceiling emit
+    // the SAME `persistent-repl: turn timeout` error on purpose (pool.ts:605 —
+    // the composer classifies one code), so the rejection above proves "a
+    // watchdog fired" but NOT "the ceiling fired". Only the elapsed floor does:
+    // activity every 80 ms means a wrongly-firing 200 ms idle window would land
+    // here at ~200 ms, under the 400 ms floor, and red. It is a LOWER bound, so
+    // machine load — which can only make the turn take longer — moves it away
+    // from the threshold, not toward it. That is why it is not the flake class
+    // the sibling upper bound was. ISSUES #438.
     expect(elapsed).toBeGreaterThan(400)
-    expect(elapsed).toBeLessThan(3_000)
   })
 })

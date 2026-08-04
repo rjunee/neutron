@@ -270,7 +270,6 @@ describe('getUnifiedProjects', () => {
       })
     }
 
-    const started = performance.now()
     const r = await getUnifiedProjects({
       user_instance_slug: 'alice',
       local_solo_projects: localSolo,
@@ -289,10 +288,15 @@ describe('getUnifiedProjects', () => {
       fetch: fakeFetch,
       timeout_ms: 30,
     })
-    const elapsed = performance.now() - started
-
-    // Settled near the deadline, NOT hung indefinitely.
-    expect(elapsed).toBeLessThan(2_000)
+    // THE "NOT HUNG" CONTRACT IS `error: 'timeout'` PLUS THE TEST TIMEOUT.
+    // `stallingBody` pulls forever and only ever ends by abort, so if the
+    // deadline stopped firing this call would never resolve and the test would
+    // red on its own timeout — it could not reach an assertion to be measured.
+    // Better still, the error discriminant below names the exact mechanism
+    // ('timeout', not merely "something went wrong"), which the wall-clock bound
+    // that used to sit here never did. That bound (`elapsed < 2000` against a
+    // 30 ms deadline) was a second guard on one contract, and the flaky one.
+    // ISSUES #438.
     expect(r.projects.map((p) => p.project_id).sort()).toEqual([
       'p-fast',
       'p-solo-1',
