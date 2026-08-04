@@ -2,6 +2,68 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — the model watchdog adopts only what is demonstrably newer
+
+Branch `fix/issue-491-model-watchdog-newer-only`. Changed:
+`runtime/adapters/claude-code/persistent/model-update-watchdog.ts`,
+`runtime/adapters/claude-code/persistent/supervision.ts`,
+`runtime/adapters/claude-code/persistent/__tests__/model-update-watchdog.test.ts`,
+`runtime/adapters/claude-code/persistent/__tests__/model-update-watchdog-wiring.test.ts`.
+
+**The problem.** `decideModelUpdate` compared the probed model id to the baseline
+for EQUALITY. Equal meant `no-change`; everything else fell through to a comment
+reading "A genuinely new model" and returned `notify` — and the `notify` arm
+adopts the id as the runtime default and writes it to `last_known_model`. So
+"different from what we run" was being read as "newer than what we run", which it
+is not. A probe answering with an older id, a variant, or a garbled value moved
+the owner's model backwards, and because the answer was persisted the downgrade
+survived restarts with no moment at which it would correct itself.
+
+**The fix is a rank, not a comparison.** `compareModelRecency` parses an id into a
+family plus a numeric version tuple (`claude-opus-4-7` → `opus` + `[4,7]`) and
+ranks the probe against the baseline. Only `newer` may be adopted. `older` and
+`unknown` — unparseable, or a different model family — are refused and logged.
+The rank is derived from the id itself rather than from a registry of known
+models on purpose: a registry-membership test would rank every genuinely new
+model as unrecognised, which is precisely the model the watchdog exists to pick
+up, so it would trade this bug for the stale-model incident that motivated the
+watchdog. `claude-opus-6` ranks newer than `claude-opus-5` on the day it ships,
+with no code change.
+
+**The same bug had a second, restart-scoped copy.** The re-hydrate-on-start path
+re-applied a persisted `last_known_model` on mere inequality with the configured
+base. That re-pinned a downgraded id on every subsequent boot, and it also meant
+a persisted id could override a LATER release's `BEST_MODEL` seed — silently
+undoing an upgrade the owner installed. It now requires a `newer` rank too.
+
+**Family-scoped ranking closes a hole the fallback set could not.**
+`isFallbackModel` lists specific lower-tier ids, so an unlisted one such as
+`claude-sonnet-5` sailed past it and would have been adopted as the new best
+model. A different family now ranks `unknown` and is refused regardless of
+whether anyone remembered to list it.
+
+**The watchdog's log channel was dead.** `startModelUpdateWatchdogForInstance`
+never passed `log` or `onError`, so `startModelUpdateWatchdog` fell back to its
+`() => {}` default and every operational line it emits — probe failed, fallback-id
+outage — went nowhere in a real install. The graceful upgrade underneath it was
+already wired to `log.info`; the watchdog itself was not. Both are now wired to
+the same logger, because a guard whose observability is dead code cannot tell the
+owner that a weird probe happened.
+
+**A stale test fixture was asserting the bug was correct.** The wiring test
+probed `claude-opus-4-9` and asserted the runtime flipped to it. Once the
+`BEST_MODEL` seed moved to `claude-opus-5`, that assertion was demanding a
+DOWNGRADE — and it passed, because the code under test performed one. The fixture
+is now a constant with an explicit rank assertion, so the same rot fails loudly
+instead of silently inverting the test's meaning.
+
+Refused probes advance the 6h gate rather than retrying in 15 minutes like
+`skip-outage` does. An outage is the probe lying and the truth returns within
+hours, so a fast retry recovers; a downgrade or unrankable answer may be the
+CLI's stable, correct report about a changed world, and a fast retry loop would
+then spawn a probe child four times an hour forever with no path to resolution.
+Nothing is broken meanwhile — the id was never adopted.
+
 ## 2026-08-04 — an expired Google grant now says so, in chat
 
 Branch `feat/oauth-reconnect-chat-notice`. New:
