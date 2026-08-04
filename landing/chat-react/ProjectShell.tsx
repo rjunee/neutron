@@ -506,6 +506,36 @@ export function ProjectShell({
     }
   }, [client, projectId, isGeneral])
 
+  // ISSUES #495 — `?tab=<key>` boot deep-link. A completed Google OAuth grant
+  // returns the owner to `<origin>/chat?tab=admin`
+  // (`gateway/http/cores-oauth-broker-surface.ts` `INTEGRATIONS_RETURN_PATH`)
+  // instead of dead-ending on a "close this tab" page, so the shell has to be
+  // able to open ON that tab.
+  //
+  // AN EFFECT, NOT A `useState` INITIAL VALUE. The resolver above runs on mount
+  // and unconditionally `setActiveKey(CHAT_KEY)` before any tab set exists, so a
+  // seeded initial value would be overwritten before it ever rendered.
+  //
+  // ONE-SHOT, latched on the FIRST resolved scope rather than on a match: if it
+  // latched only when the key was found, a boot key that General doesn't have
+  // would lie in wait and hijack the first project switch whose tab set happened
+  // to contain it.
+  //
+  // AND IT DOES NOT CHECK THE KEY AGAINST THE TAB SET. A guard here would be
+  // dead code: `resolvedActiveKey` below already falls back to Chat for any
+  // active key not in `visibleTabs`, and the tab bar renders THAT, so an unknown
+  // `?tab=` degrades to Chat with or without it. Written the other way first —
+  // a mutation deleting the guard stayed green, which is what proved it
+  // redundant rather than protective.
+  const bootTabApplied = useRef(false)
+  useEffect(() => {
+    if (bootTabApplied.current) return
+    if (tabsScope === null) return
+    bootTabApplied.current = true
+    const key = config.initialTabKey
+    if (key !== undefined) setActiveKey(key)
+  }, [config.initialTabKey, tabsScope])
+
   // P-A — resolve a pending doc-link tap: once the shell is scoped to the
   // link's project AND that project's tabs have RESOLVED (not the previous
   // project's stale set) AND its Documents tab exists, activate that tab and

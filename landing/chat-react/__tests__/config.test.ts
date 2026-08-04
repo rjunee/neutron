@@ -7,6 +7,7 @@ import {
   decodeJwtSub,
   detectClientTimezone,
   initialProjectIdFromLocation,
+  initialTabKeyFromLocation,
   resolveBootstrapConfig,
   wsUrlForScope,
   type BootstrapConfig,
@@ -59,6 +60,49 @@ describe('initialProjectIdFromLocation (#375)', () => {
     expect(initialProjectIdFromLocation('?project=ghost', projects)).toBeNull()
     expect(initialProjectIdFromLocation('?project=', projects)).toBeNull()
     expect(initialProjectIdFromLocation('?project=bad%2Fslash', projects)).toBeNull()
+  })
+})
+
+describe('initialTabKeyFromLocation (ISSUES #495)', () => {
+  it('reads the ?tab=<key> the OAuth broker returns the owner on', () => {
+    // Written as the literal URL the broker emits, NOT built from its constant —
+    // the point is that the two ends agree on a real string.
+    expect(initialTabKeyFromLocation('?tab=admin')).toBe('admin')
+    expect(initialTabKeyFromLocation(new URL('https://sam.example.com/chat?tab=admin').search)).toBe(
+      'admin',
+    )
+  })
+  it('returns null for a bare load, so nothing changes on a normal /chat boot', () => {
+    expect(initialTabKeyFromLocation('')).toBeNull()
+    expect(initialTabKeyFromLocation('?project=p1')).toBeNull()
+    expect(initialTabKeyFromLocation('?tab=')).toBeNull()
+  })
+  it('refuses a key that is not a bare descriptor key', () => {
+    // A hostile link must not be able to smuggle markup, a path, or a URL into
+    // the shell through this param.
+    expect(initialTabKeyFromLocation('?tab=%3Cscript%3E')).toBeNull()
+    expect(initialTabKeyFromLocation('?tab=..%2F..%2Fetc')).toBeNull()
+    expect(initialTabKeyFromLocation('?tab=https%3A%2F%2Fevil.example.com')).toBeNull()
+    expect(initialTabKeyFromLocation('?tab=a%20b')).toBeNull()
+  })
+  it('keeps the keys the engine actually mints', () => {
+    expect(initialTabKeyFromLocation('?tab=work_board')).toBe('work_board')
+    expect(initialTabKeyFromLocation('?tab=google-calendar')).toBe('google-calendar')
+  })
+})
+
+describe('resolveBootstrapConfig surfaces the boot tab (ISSUES #495)', () => {
+  it('sets initialTabKey from ?tab= and leaves it undefined otherwise', () => {
+    const withTab = resolveBootstrapConfig(
+      win({
+        location: { protocol: 'https:', host: 'sam.example.com', search: '?tab=admin', pathname: '/chat' },
+        __neutron_user_id: 'sam',
+      }),
+    )
+    expect(withTab.initialTabKey).toBe('admin')
+
+    const bare = resolveBootstrapConfig(win({ __neutron_user_id: 'sam' }))
+    expect(bare.initialTabKey).toBeUndefined()
   })
 })
 

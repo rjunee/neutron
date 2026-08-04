@@ -2,6 +2,68 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — a finished Google connect returns the owner to his accounts (ISSUES #495)
+
+Branch `fix/oauth-callback-redirect-495`. Changed:
+`gateway/http/cores-oauth-broker-surface.ts`, `landing/chat-react/config.ts`,
+`landing/chat-react/ProjectShell.tsx`, `docs/SYSTEM-OVERVIEW.md`. New:
+`landing/chat-react/__tests__/oauth-return-tab-boot.test.tsx`. Also
+`gateway/__tests__/cores-oauth-broker-surface.test.ts` and
+`landing/chat-react/__tests__/config.test.ts`.
+
+**The reported bug, and the second one underneath it.** Completing a Google
+grant ended on a static page reading "Connected — you can close this tab and
+return to Neutron", so getting back to the connected-accounts list meant closing
+the tab and navigating there by hand. The owner reported it twice. The obvious
+fix — redirect instead of rendering — could not be written as stated, because
+there was no URL to redirect TO: the web shell's active tab was
+`useState(CHAT_KEY)` and nothing anywhere in the client read a tab from the page
+URL (`?tab=`, `#admin` and `/admin` were all inert). Sending him to `/chat` would
+have landed him on Chat, one navigation short of where he asked to be. So the
+deep-link is half the change.
+
+**What shipped.** The broker's success path returns `303 See Other` to
+`<instance-origin>/chat?tab=admin` — a real HTTP redirect, because the consumer
+is a browser mid-redirect-chain from Google and redirect handling is the one
+thing that can be relied on there. The origin comes from the pending row's
+`dispatch_url`, which is the instance's own base URL (`ownerBaseUrl`, which
+deliberately never follows the broker); no new config value, no hardcoded host,
+and correct whether the broker is co-located or central. `?tab=admin` names the
+global Admin descriptor, and carries no `?project=` on purpose — Admin is
+global-scope and renders only in General, so pinning a project would open a tab
+set without it.
+
+**The grant cannot ride along.** The target is `new URL(dispatch_url).origin`
+plus a module constant; `.origin` discards path, query and fragment, and neither
+`code` nor `state` is in scope where it is built. The callback's OWN URL still
+carries them, so the response also sets `referrer-policy: no-referrer` — without
+it a same-origin (self-host) redirect would hand the full callback URL to the app
+as a `Referer`. That closes a leak the module docblock had been claiming was
+already closed.
+
+**Failures deliberately do NOT redirect.** Every error arm keeps its terminal
+page. A silent bounce back to Settings after a grant that did not complete looks
+exactly like success; the reason stays on screen instead.
+
+**Client side.** `initialTabKeyFromLocation` parses `?tab=<key>` (shape-validated
+to a bare descriptor key, so a hostile link cannot smuggle markup or a URL), and
+`ProjectShell` applies it once the scope's tab set has resolved. It has to be an
+effect: the tab resolver runs on mount and unconditionally resets the active tab
+to Chat, so a seeded `useState` value never renders. The apply is latched to the
+first resolved scope, or the key would re-select itself on every later project
+switch.
+
+**Mutation results.** Fourteen mutations, all red — seven on the broker
+(reverting the page, sourcing the origin from a constant, leaking `state` into
+the query, dropping the referrer header, redirecting on failure, pointing at the
+wrong tab key, renaming the engine's `admin` key), seven on the client. The
+expected URLs are written out literally rather than composed from the shipped
+constant, without which several of those mutations would have agreed with
+themselves and stayed green. One mutation SURVIVED and changed the code: an
+earlier draft screened the boot key against the tab set, and deleting that guard
+stayed green because `resolvedActiveKey` already clamps an unknown key to Chat.
+The guard was deleted as dead code rather than the mutation waved through.
+
 ## 2026-08-04 — a second Google account no longer overwrites the first (ISSUES #494)
 
 Branch `fix/oauth-identity-scope-494`. Changed:
