@@ -237,6 +237,68 @@ test('UPGRADE PATH — a pre-existing un-keyed grant keeps working with no migra
   expect(await accounts[0]?.accessToken()).toBe('legacy-access')
 })
 
+test('UPGRADE PATH — an ANONYMOUS un-keyed grant (ISSUES #494) still resolves through the seam every Core reads', async () => {
+  const bench = makeBench()
+  // The rows an install written before the authorize URL asked for an identity
+  // scope holds: a real, working grant whose `:meta` carries NO address,
+  // because userinfo had no scope to answer with. This is the shape the owner
+  // is sitting on right now, so it is the shape the read paths must tolerate
+  // between deploying the fix and re-consenting.
+  await bench.secretsStore.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: CALENDAR_LABEL,
+    plaintext: 'anonymous-access',
+    expires_at: Date.now() + 3600_000,
+  })
+  await bench.secretsStore.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: refreshLabel(CALENDAR_LABEL),
+    plaintext: 'anonymous-refresh',
+  })
+  await bench.secretsStore.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: metaLabel(CALENDAR_LABEL),
+    plaintext: JSON.stringify({
+      scopes: ['https://www.googleapis.com/auth/calendar'],
+      email: null,
+      connected_at: 1,
+      last_refresh_at: null,
+      last_refresh_outcome: null,
+    }),
+  })
+
+  const tokens = new OAuthTokenManager({
+    secretsStore: bench.secretsStore,
+    owner_handle: OWNER,
+    client_id: 'c',
+    client_secret: 's',
+    fetch: async () => new Response('{}', { status: 500 }),
+  })
+
+  const grants = await tokens.listGrants(CALENDAR_LABEL)
+  expect(grants).toHaveLength(1)
+  expect(grants[0]?.label).toBe(CALENDAR_LABEL)
+  expect(grants[0]?.account_key).toBeNull()
+  expect(grants[0]?.email).toBeNull()
+  expect(await tokens.getServiceAccessToken(CALENDAR_LABEL)).toBe('anonymous-access')
+
+  // An unknown ADDRESS must not become an unresolvable ACCOUNT: the resolver
+  // still hands the Core a working credential, tagged with the legacy id.
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store: bench.projectCredentialStore,
+    oauthTokens: tokens,
+  })
+  const accounts = await resolver.accountsFor(CALENDAR_LABEL)
+  expect(accounts).toHaveLength(1)
+  expect(accounts[0]?.account_email).toBeNull()
+  expect(await accounts[0]?.accessToken()).toBe('anonymous-access')
+  expect(await resolver.resolve(CALENDAR_LABEL)).toBe('anonymous-access')
+})
+
 test('UPGRADE PATH — adding a SECOND account alongside a legacy grant yields two accounts, legacy still readable', async () => {
   const bench = makeBench()
   await bench.secretsStore.put({

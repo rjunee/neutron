@@ -20,7 +20,12 @@
  *
  * The account key is derived from the ONE identity the grant already carries:
  * the account address the token exchange resolves from Google's userinfo
- * endpoint and persists into `:meta`. It is a truncated SHA-256 of the
+ * endpoint and persists into `:meta`. That address only exists because the
+ * authorize URL asks for an identity scope — see `GOOGLE_IDENTITY_SCOPES` in
+ * `gateway/http/cores-oauth-surface.ts`. Without it userinfo answers nothing,
+ * every grant is anonymous, and this whole per-account scheme silently
+ * collapses back to one-grant-per-service (ISSUES #494). It is a truncated
+ * SHA-256 of the
  * lowercased address rather than the address itself, for two reasons — the
  * SecretsStore's `label` column is NOT encrypted (only ciphertext is), so a raw
  * address would put a plaintext identifier at rest that the encrypted `:meta`
@@ -33,10 +38,12 @@
  * `account_key` is null, and every read path resolves through `listGrants`, so
  * the legacy grant is simply the first account. Nothing is rewritten at boot and
  * no row is rebuilt, so there is no window in which the owner is disconnected.
- * The row converts to the keyed shape the next time that same address is
- * re-granted (`exchangeAndPersist` retires a bare row whose `:meta` address
- * matches what it just wrote — and ONLY on an exact address match, so a grant
- * whose address could not be resolved never destroys an unrelated one).
+ * The row converts to the keyed shape the next time that service is granted:
+ * `exchangeAndPersist` retires a bare row that names the SAME address it just
+ * wrote, or one that names NO address at all (the #494 population, which can
+ * never be identified and so would otherwise be adopted as a phantom second
+ * account forever). A bare row naming a DIFFERENT address is a real second
+ * account and is never touched. See `retireLegacyRowFor`.
  *
  * `getAccessToken(label)` is the transparent-refresh entry point. The
  * Cores SDK's bare `secretsAccessor.read({label})` still returns the
@@ -318,18 +325,47 @@ export class OAuthTokenManager {
   }
 
   /**
-   * Retire a pre-existing un-keyed `<service>` grant once the SAME address has
-   * been re-granted under its keyed label — the in-place half of the upgrade
-   * path. Guarded on an EXACT address match: a bare row whose `:meta` address
-   * is absent or different belongs to a different (or unidentifiable) account
-   * and is left completely alone, so this can never delete a working grant the
-   * owner still depends on.
+   * Retire a pre-existing un-keyed `<service>` grant once a keyed grant has
+   * been written for the same service — the in-place half of the upgrade path.
+   * Only ever called with a non-null `account_key` in hand, so there is always
+   * a keyed grant standing behind whatever this removes.
+   *
+   * Two shapes of bare row exist, and they retire under different rules:
+   *
+   *   - **Identified** (`:meta.email` present). Retired on an EXACT address
+   *     match only. A bare row naming a DIFFERENT account is a real, readable
+   *     second account: it is left completely alone and migrates itself the
+   *     next time THAT address is granted.
+   *
+   *   - **Anonymous** (`:meta.email` null). Retired unconditionally. This is
+   *     the ISSUES #494 population — grants written before the authorize URL
+   *     asked for an identity scope, so userinfo returned no address and the
+   *     grant landed bare. Such a row can never be identified after the fact:
+   *     its access token was minted WITHOUT `openid`, so re-querying userinfo
+   *     with it returns nothing, and no future exchange can ever match it. It
+   *     therefore can never migrate, and `listGrants` would adopt it forever
+   *     ALONGSIDE the keyed grant — the same mailbox read twice, every item
+   *     duplicated, indefinitely. Retiring it is the only end state that
+   *     converges.
+   *
+   *     Retiring is also safe by construction: because a bare label is one row
+   *     per service, an anonymous bare row holds the LAST account to consent to
+   *     that service and no other — any earlier account's tokens were already
+   *     overwritten (that is the #494 bug). So it is either the account that
+   *     just re-consented (retire = de-duplicate), or an account whose grant is
+   *     unidentifiable and which the owner recovers, correctly keyed, with one
+   *     re-consent.
+   *
+   * A bare access row with NO `:meta` at all is not a grant this manager wrote
+   * — it is the Core install lifecycle echoing its token back under the
+   * manifest label (`cores/runtime/lifecycle.ts` persistOrRotate). `listGrants`
+   * already skips that echo, so it is left untouched.
    */
   private async retireLegacyRowFor(service: string, email: string | null): Promise<void> {
     if (email === null) return
     const legacyMeta = await this.readMeta(service)
-    if (legacyMeta === null || legacyMeta.email === null) return
-    if (!sameAccount(legacyMeta.email, email)) return
+    if (legacyMeta === null) return
+    if (legacyMeta.email !== null && !sameAccount(legacyMeta.email, email)) return
     const rows = await this.secretsStore.list({
       owner_handle: this.owner_handle,
       kind: 'oauth_token',
