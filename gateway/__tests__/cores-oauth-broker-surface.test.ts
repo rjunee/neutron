@@ -269,7 +269,12 @@ test('the return target is the INSTANCE origin from the routing row, not the bro
 
   const location = res.headers.get('location') ?? ''
   expect(location).toBe('https://other-owner.example.com/chat?tab=admin')
-  expect(location.startsWith(BASE)).toBe(false)
+  // Compared as a PARSED ORIGIN, not a string prefix. `startsWith(BASE)` was the
+  // first draft and CodeQL flagged it (js/incomplete-url-substring-sanitization,
+  // high): a prefix test treats `https://broker.example.com.evil.test` as the
+  // broker. Harmless in a negative assertion, but the parsed form is both
+  // stronger and the one that should be copied if this is ever reused.
+  expect(new URL(location).origin).not.toBe(new URL(BASE).origin)
 })
 
 test('neither the code nor the state can reach the redirect target', async () => {
