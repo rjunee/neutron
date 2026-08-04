@@ -1529,6 +1529,26 @@
   .cset-btn-danger { color: #c0392b; border-color: #c0392b; font-weight: 600; }
   .cset-btn-danger:hover:not(:disabled) { background: #c0392b; color: #fff; border-color: #c0392b; }
   .cset-archive { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px; }
+  /* Per-project connected-account selection (ISSUES #500). A disabled account
+     is OFF, not broken — the empty state says so in words rather than leaving
+     an unexplained blank where a calendar or inbox used to be. */
+  .cset-acct-group { margin: 0 0 14px; }
+  .cset-acct-group:last-child { margin-bottom: 0; }
+  .cset-acct-service { font-size: 13px; font-weight: 600; color: var(--fg); margin: 0 0 6px; }
+  .cset-acct-off { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+  .cset-acct-ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .cset-acct-row {
+    display: flex; align-items: center; min-height: 34px;
+    padding: 4px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
+  }
+  .cset-acct-row[data-account-enabled="false"] { opacity: .62; }
+  .cset-acct-label { display: flex; align-items: center; gap: 9px; cursor: pointer; min-width: 0; width: 100%; }
+  .cset-acct-toggle { flex: 0 0 auto; accent-color: var(--accent); cursor: pointer; }
+  .cset-acct-toggle:disabled { cursor: default; }
+  .cset-acct-name {
+    flex: 1 1 auto; min-width: 0; font-size: 14px; color: var(--fg);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   /* Local voice transcription — status line, download progress bar. */
   .cset-asr-status { font-size: 13px; color: var(--muted); margin: 0 0 10px; }
   .cset-asr-status[data-backend="local"] { color: var(--fg); font-weight: 600; }

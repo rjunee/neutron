@@ -33,6 +33,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { McpServer } from '@neutronai/mcp/server.ts'
 
@@ -47,7 +48,8 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!()
 })
 
-function makeStore(): ProjectCredentialStore {
+/** Both per-project stores over ONE db, as production shares them. */
+function makeStores(): { store: ProjectCredentialStore; selection: ProjectAccountSelectionStore } {
   const owner_home = mkdtempSync(join(tmpdir(), 'x6-boundary-'))
   cleanups.push(() => rmSync(owner_home, { recursive: true, force: true }))
   const dbPath = join(owner_home, 'owner.db')
@@ -57,7 +59,10 @@ function makeStore(): ProjectCredentialStore {
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   const secretsStore = new SecretsStore({ data_dir: owner_home, db })
-  return new ProjectCredentialStore(db, { crypto: secretsStore })
+  return {
+    store: new ProjectCredentialStore(db, { crypto: secretsStore }),
+    selection: new ProjectAccountSelectionStore(db),
+  }
 }
 
 const schema = { type: 'object', properties: {} }
@@ -109,7 +114,7 @@ async function dispatchToken(
 }
 
 test('X6 e2e: a project-scoped credential resolves PER-PROJECT on the native tool path', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
   await store.set(OWNER, {
     service: 'google_workspace',
@@ -117,7 +122,12 @@ test('X6 e2e: a project-scoped credential resolves PER-PROJECT on the native too
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   const server = serverResolving(resolver, 'google_workspace', true)
 
   // Dispatching for the project → the project's own token.
@@ -129,7 +139,7 @@ test('X6 e2e: a project-scoped credential resolves PER-PROJECT on the native too
 })
 
 test('X6 e2e: a static service token (meta_ads) scopes per-project on the native tool path', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'meta_ads', plaintext: 'global-meta', scope: 'global' })
   await store.set(OWNER, {
     service: 'meta_ads',
@@ -137,7 +147,12 @@ test('X6 e2e: a static service token (meta_ads) scopes per-project on the native
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   const server = serverResolving(resolver, 'meta_ads', true)
 
   expect(await dispatchToken(server, PROJECT)).toBe('project-meta')
@@ -145,7 +160,7 @@ test('X6 e2e: a static service token (meta_ads) scopes per-project on the native
 })
 
 test('X6 e2e: GLOBAL-scope services (gmail_compose) ignore the active project — no regression', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   // A stray per-project gmail row MUST NOT shadow the shared grant even though the
   // frame IS bound to the project on the native tool path.
   await store.set(OWNER, {
@@ -155,14 +170,19 @@ test('X6 e2e: GLOBAL-scope services (gmail_compose) ignore the active project �
     project_id: PROJECT,
   })
   await store.set(OWNER, { service: 'gmail_compose', plaintext: 'global-gmail', scope: 'global' })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   const server = serverResolving(resolver, 'gmail_compose', true)
 
   expect(await dispatchToken(server, PROJECT)).toBe('global-gmail')
 })
 
 test('X6 regression guard: WITHOUT the boundary hook the SAME dispatch resolves GLOBAL', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
   await store.set(OWNER, {
     service: 'google_workspace',
@@ -170,7 +190,12 @@ test('X6 regression guard: WITHOUT the boundary hook the SAME dispatch resolves 
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   // No bindActiveProject wired → the frame is never bound → global scope.
   const server = serverResolving(resolver, 'google_workspace', false)
 
@@ -178,7 +203,7 @@ test('X6 regression guard: WITHOUT the boundary hook the SAME dispatch resolves 
 })
 
 test('X6 e2e: the bound frame does not leak — a later unbound dispatch resolves GLOBAL', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
   await store.set(OWNER, {
     service: 'google_workspace',
@@ -186,7 +211,12 @@ test('X6 e2e: the bound frame does not leak — a later unbound dispatch resolve
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   const server = serverResolving(resolver, 'google_workspace', true)
 
   // First dispatch binds PROJECT for its own lifetime only.

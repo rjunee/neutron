@@ -1050,6 +1050,21 @@ CREATE TABLE profile_pic_pending (
         CHECK (auto_retry_attempted IN (0, 1))
 , job_id TEXT) STRICT
 
+[table] project_account_selection (tbl=project_account_selection)
+CREATE TABLE project_account_selection (
+    owner_slug  TEXT NOT NULL,               -- server-derived instance handle (owner boundary)
+    project_id  TEXT NOT NULL,               -- REAL project id; '' is never stored
+    service     TEXT NOT NULL,               -- resolver service key
+    account_id  TEXT NOT NULL,               -- ResolvedAccount.account_id
+    disabled_at TEXT NOT NULL,               -- ISO-8601 UTC
+    -- '' is the no-project frame (General topic / cron / system dispatch). It
+    -- must always mean "no selection", so it can never carry a disable row.
+    CHECK (project_id <> ''),
+    CHECK (service <> ''),
+    CHECK (account_id <> ''),
+    PRIMARY KEY (owner_slug, project_id, service, account_id)
+) STRICT
+
 [table] project_credentials (tbl=project_credentials)
 CREATE TABLE project_credentials (
     id            TEXT PRIMARY KEY NOT NULL,   -- ULID

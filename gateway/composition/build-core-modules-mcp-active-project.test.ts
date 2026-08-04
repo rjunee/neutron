@@ -33,6 +33,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { McpServer } from '@neutronai/mcp/server.ts'
@@ -50,8 +51,11 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!()
 })
 
-/** A REAL owner-scoped ProjectCredentialStore (in-memory SQLite + AES crypto). */
-function makeCredentialStore(): ProjectCredentialStore {
+/** REAL owner-scoped per-project stores (in-memory SQLite + AES crypto), one db. */
+function makeCredentialStore(): {
+  store: ProjectCredentialStore
+  selection: ProjectAccountSelectionStore
+} {
   const owner_home = mkdtempSync(join(tmpdir(), 'x6-composition-'))
   cleanups.push(() => rmSync(owner_home, { recursive: true, force: true }))
   const dbPath = join(owner_home, 'owner.db')
@@ -61,7 +65,10 @@ function makeCredentialStore(): ProjectCredentialStore {
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   const secretsStore = new SecretsStore({ data_dir: owner_home, db })
-  return new ProjectCredentialStore(db, { crypto: secretsStore })
+  return {
+    store: new ProjectCredentialStore(db, { crypto: secretsStore }),
+    selection: new ProjectAccountSelectionStore(db),
+  }
 }
 
 /** A minimal ProjectDb for the CompositionInput (the gateway's own instance db). */
@@ -138,7 +145,7 @@ async function dispatchToken(server: McpServer, project_id: string | null): Prom
 }
 
 test('X6 production wiring: a McpServer built by buildCoreModules scopes credentials PER-PROJECT', async () => {
-  const store = makeCredentialStore()
+  const { store, selection } = makeCredentialStore()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
   await store.set(OWNER, {
     service: 'google_workspace',
@@ -146,7 +153,12 @@ test('X6 production wiring: a McpServer built by buildCoreModules scopes credent
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
 
   const db = makeProjectDb()
   const server = productionMcpServer(db, registryResolving(resolver, 'google_workspace'))
@@ -162,7 +174,7 @@ test('X6 production wiring: a McpServer built by buildCoreModules scopes credent
 })
 
 test('X6 production wiring: the frame bound at the boundary does not leak across dispatches', async () => {
-  const store = makeCredentialStore()
+  const { store, selection } = makeCredentialStore()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
   await store.set(OWNER, {
     service: 'google_workspace',
@@ -170,7 +182,12 @@ test('X6 production wiring: the frame bound at the boundary does not leak across
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
 
   const db = makeProjectDb()
   const server = productionMcpServer(db, registryResolving(resolver, 'google_workspace'))

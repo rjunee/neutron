@@ -202,6 +202,33 @@ state).
   token** (Meta Ads, Google Ads, an Apify key, …) resolve **PER-PROJECT →
   global**: a project's pasted token wins; else the instance default.
 
+**Per-project connected-account selection (ISSUES #500).** CONNECTING an account
+stays global — one consent, one access token, one refresh token, one thing to
+rotate — and only SELECTION is per-project. `accountsFor` (the primitive every
+Core reads through; `resolve` narrows it, `accountsResolverFor` wraps it) filters
+the connected set against `project_account_selection` (migration `0115`, STRICT)
+before returning it, so a work project stops sweeping a personal mailbox without
+disconnecting anything. Enforced at that ONE seam, so every Core inherits it and
+none implements its own filter.
+
+Rows are **DISABLES**, and that is the contract, not a storage detail: a project
+with no rows reads every account (the pre-#500 behaviour, so shipping this
+changes nothing until the owner narrows something), and a newly connected
+account has an `account_id` no existing row can name, so it is visible in every
+project including ones that already narrowed. An enable-list would need a second
+"configured yet?" bit for the first and would hide the second until every project
+was re-visited. Disabling the LAST account for a service is allowed — a project
+that does not use Gmail is a legitimate configuration — and the surface says so
+in words rather than rendering an unexplained blank.
+
+Note the deliberate asymmetry with `SERVICE_SCOPE` above: the scope policy forces
+the GLOBAL sentinel when choosing which credential STORE supplies the material,
+but the selection filter uses the REAL active project id even for global-scope
+services. Email and Calendar are exactly the services an owner connects several
+accounts to, so forcing the sentinel there would make the feature a no-op for the
+only services that need it. A blank project id (General topic, cron, system
+dispatch) has no selection and filters nothing.
+
 **Active-project plumbing.** The per-instance Core clients are built once at boot
 with a `() => Promise<string|null>` accessor that carries no per-call project
 argument, so the active project is bound as **ambient async context**
@@ -2645,6 +2672,42 @@ project and gracefully refuses the rest, and switching projects flips
 availability within one turn. Wiring the existing Cores to CALL the resolver is
 a named follow-up (needs per-call `project_id` threaded into each Core's token
 provider — the deferred Phase-3 Cores rework).
+
+### Connected accounts — the per-project selection (ISSUES #500)
+
+The Settings tab's **Connected accounts** section is the owner-facing half of the
+`accountsFor` filter described under *Per-project credential resolution (D2)*. It
+lists every selectable service (`google_calendar`, `gmail_compose`,
+`google_workspace`) with one checkbox per connected account, each labelled by its
+address — `account_id` is a SHA-256 prefix and never reaches the screen, so the
+server sends a HUMANISED `label` (`humaniseAccount`) and the client renders that.
+A service with every account off shows an explicit "Off for this project" line,
+because off must not look like broken.
+
+This lives on a PROJECT route while #486 moved global credential authoring OFF
+project surfaces, and the two are consistent rather than in tension: #486 was
+about a project surface authoring INSTANCE-WIDE state; an account selection can
+only ever mean something inside one project, so the project surface is its
+correct home.
+
+- `GET /api/app/projects/<id>/accounts` → `{ project_id, services: [{ service,
+  accounts: [{ account_id, label, account_email, enabled }] }] }`. Every
+  selectable service is listed regardless of what is connected, so the response
+  shape does not fluctuate with connection state.
+- `PUT /api/app/projects/<id>/accounts` with `{ service, account_id, enabled }`
+  toggles exactly one account and returns the WHOLE refreshed view, so the client
+  renders from the server's truth instead of patching a local copy. PUT because
+  the operation is idempotent both ways: enabling DELETES the disable row,
+  disabling inserts one.
+
+Both routes are served by `gateway/http/project-credentials-surface.ts` on the
+existing `app-project-credentials` rung, bearer-gated, with `owner_slug` derived
+from the bearer exactly as the credential families are. Store:
+`project-credentials/account-selection-store.ts` — no secret material passes
+through it. The Settings surface reads its view from the SAME
+`CoreCredentialResolver` the Cores resolve against
+(`accountSelectionView(projectId)`), so what the owner toggles is definitionally
+what his projects sweep.
 
 ### Connect Codex — a GLOBAL credential for the trident cross-model reviewer
 

@@ -23,6 +23,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 
 import { createProjectCredentialsSurface } from '../project-credentials-surface.ts'
 
@@ -48,7 +49,15 @@ beforeEach(() => {
   db = ProjectDb.open(join(tmp, 'project.db'))
   applyMigrations(db.raw())
   store = new ProjectCredentialStore(db, { crypto: new SecretsStore({ data_dir: tmp, db }) })
-  handler = createProjectCredentialsSurface({ store, auth }).handler
+  handler = createProjectCredentialsSurface({
+    store,
+    auth,
+    accountSelection: new ProjectAccountSelectionStore(db),
+    // This file is about the #486 credential-scope boundary; the #500 account
+    // view is exercised in `project-account-selection.test.ts`. An empty view
+    // keeps this surface constructible without pulling a whole resolver in.
+    credentialResolver: { accountSelectionView: async () => [] },
+  }).handler
 })
 
 afterEach(() => {

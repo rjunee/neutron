@@ -24,6 +24,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import type { OAuthTokenManager } from '../oauth-token-manager.ts'
 import { CoreCredentialResolver, scopeForService } from '../core-credential-resolver.ts'
 import { runWithActiveProject } from '../active-project-context.ts'
@@ -36,7 +37,13 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!()
 })
 
-function makeStore(): ProjectCredentialStore {
+/**
+ * Both per-project stores over ONE db — the credential store under test and the
+ * #500 account-selection store the resolver now filters through. Sharing the db
+ * is deliberate: production shares it too, so a test can never pass because two
+ * stores disagreed about which database they were looking at.
+ */
+function makeStores(): { store: ProjectCredentialStore; selection: ProjectAccountSelectionStore } {
   const owner_home = mkdtempSync(join(tmpdir(), 'cred-resolver-'))
   cleanups.push(() => rmSync(owner_home, { recursive: true, force: true }))
   const dbPath = join(owner_home, 'owner.db')
@@ -46,7 +53,15 @@ function makeStore(): ProjectCredentialStore {
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   const secretsStore = new SecretsStore({ data_dir: owner_home, db })
-  return new ProjectCredentialStore(db, { crypto: secretsStore })
+  return {
+    store: new ProjectCredentialStore(db, { crypto: secretsStore }),
+    selection: new ProjectAccountSelectionStore(db),
+  }
+}
+
+/** `makeStores()` when the test only needs the credential half. */
+function makeStore(): ProjectCredentialStore {
+  return makeStores().store
 }
 
 /**
@@ -77,7 +92,7 @@ test('scope policy: Email/Calendar are GLOBAL, Workspace + static tokens are per
 // ── Per-project override ─────────────────────────────────────────────────────
 
 test('per-project override: a project’s own Drive token wins over the global default', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
   await store.set(OWNER, {
     service: 'google_workspace',
@@ -85,22 +100,37 @@ test('per-project override: a project’s own Drive token wins over the global d
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
 
   expect(await resolver.resolve('google_workspace', { projectId: PROJECT })).toBe('project-drive')
 })
 
 test('global fallback: no project row → the global default is used', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
 
   expect(await resolver.resolve('google_workspace', { projectId: PROJECT })).toBe('global-drive')
 })
 
 test('static service token: per-project → global → unset', async () => {
-  const store = makeStore()
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const { store, selection } = makeStores()
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
 
   // unset
   expect(await resolver.resolve('meta_ads', { projectId: PROJECT })).toBeNull()
@@ -120,7 +150,7 @@ test('static service token: per-project → global → unset', async () => {
 // ── Email/Calendar stay GLOBAL (no regression) ───────────────────────────────
 
 test('Email/Calendar no-regression: a per-project row is IGNORED — global scope forced', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   // Someone sets a per-project gmail/calendar row; it MUST NOT shadow the grant.
   await store.set(OWNER, {
     service: 'gmail_compose',
@@ -139,6 +169,7 @@ test('Email/Calendar no-regression: a per-project row is IGNORED — global scop
     owner_slug: OWNER,
     store,
     oauthTokens: fakeOAuth({ gmail_compose: 'oauth-gmail', google_calendar: 'oauth-cal' }),
+    accountSelection: selection,
   })
 
   expect(await resolver.resolve('gmail_compose', { projectId: PROJECT })).toBe('oauth-gmail')
@@ -146,12 +177,13 @@ test('Email/Calendar no-regression: a per-project row is IGNORED — global scop
 })
 
 test('Email/Calendar GLOBAL project_credentials row still applies (uniform plumbing)', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'gmail_compose', plaintext: 'global-override', scope: 'global' })
   const resolver = new CoreCredentialResolver({
     owner_slug: OWNER,
     store,
     oauthTokens: fakeOAuth({ gmail_compose: 'oauth-gmail' }),
+    accountSelection: selection,
   })
   // A global project_credentials row (step 1) wins over the OAuth fallback (step 2).
   expect(await resolver.resolve('gmail_compose', { projectId: PROJECT })).toBe('global-override')
@@ -160,19 +192,25 @@ test('Email/Calendar GLOBAL project_credentials row still applies (uniform plumb
 // ── Legacy Google OAuth fallback ─────────────────────────────────────────────
 
 test('legacy fallback: no project_credentials row → OAuthTokenManager supplies the Google token', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   const resolver = new CoreCredentialResolver({
     owner_slug: OWNER,
     store,
     oauthTokens: fakeOAuth({ google_workspace: 'oauth-drive' }),
+    accountSelection: selection,
   })
   // Workspace with no pasted token falls through project_credentials to the OAuth grant.
   expect(await resolver.resolve('google_workspace', { projectId: PROJECT })).toBe('oauth-drive')
 })
 
 test('unset: no project_credentials row + no OAuth grant → null (Core renders empty state)', async () => {
-  const store = makeStore()
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: fakeOAuth({}) })
+  const { store, selection } = makeStores()
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: fakeOAuth({}),
+    accountSelection: selection,
+  })
   expect(await resolver.resolve('google_workspace', { projectId: PROJECT })).toBeNull()
   expect(await resolver.resolve('meta_ads', { projectId: PROJECT })).toBeNull()
 })
@@ -180,7 +218,7 @@ test('unset: no project_credentials row + no OAuth grant → null (Core renders 
 // ── accessorFor reads ambient active-project context ─────────────────────────
 
 test('accessorFor reads the ACTIVE project from the ambient runWithActiveProject frame', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   await store.set(OWNER, { service: 'google_workspace', plaintext: 'global-drive', scope: 'global' })
   await store.set(OWNER, {
     service: 'google_workspace',
@@ -188,7 +226,12 @@ test('accessorFor reads the ACTIVE project from the ambient runWithActiveProject
     scope: 'project',
     project_id: PROJECT,
   })
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: null })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   const accessor = resolver.accessorFor('google_workspace')
 
   // Bound to the project → per-project token.
@@ -205,7 +248,7 @@ test('accessorFor reads the ACTIVE project from the ambient runWithActiveProject
 })
 
 test('accessorFor fail-soft: a resolver throw becomes null (Core degrades, never crashes)', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   const throwingOAuth = {
     listGrants: async (service: string) => [
       { label: service, service, account_key: null, email: null },
@@ -214,7 +257,12 @@ test('accessorFor fail-soft: a resolver throw becomes null (Core degrades, never
       throw new Error('token endpoint down')
     },
   } as unknown as OAuthTokenManager
-  const resolver = new CoreCredentialResolver({ owner_slug: OWNER, store, oauthTokens: throwingOAuth })
+  const resolver = new CoreCredentialResolver({
+    owner_slug: OWNER,
+    store,
+    oauthTokens: throwingOAuth,
+    accountSelection: selection,
+  })
   // google_workspace has no project_credentials row → hits the throwing OAuth fallback.
   expect(await resolver.accessorFor('google_workspace')()).toBeNull()
 })
@@ -225,7 +273,7 @@ test('accessorFor fail-soft: a resolver throw becomes null (Core degrades, never
 // on the (post-rename) mutable url_slug — the exact silent-credential-loss the
 // OwnerHandle brand exists to prevent, demonstrated at runtime (not just types).
 test('rename regression: a credential written under the frozen handle is NOT readable under a renamed url_slug', async () => {
-  const store = makeStore()
+  const { store, selection } = makeStores()
   const FROZEN = asOwnerHandle('acme-frozen-handle')
   const RENAMED_URL_SLUG = asOwnerHandle('acme-renamed') // what a rename would canonicalise the url_slug to
 
@@ -233,14 +281,24 @@ test('rename regression: a credential written under the frozen handle is NOT rea
   await store.set(FROZEN, { service: 'meta_ads', plaintext: 'secret-token', scope: 'global' })
 
   // The resolver keyed on the FROZEN handle finds it.
-  const frozenResolver = new CoreCredentialResolver({ owner_slug: FROZEN, store, oauthTokens: null })
+  const frozenResolver = new CoreCredentialResolver({
+    owner_slug: FROZEN,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   expect(await frozenResolver.resolve('meta_ads')).toBe('secret-token')
 
   // The resolver keyed on the RENAMED url_slug misses entirely — the 2026-05-12
   // outage. The brand makes constructing this wrong resolver require an explicit
   // asOwnerHandle of a value known to be the url_slug (a code smell), but if it
   // happens the credential is silently absent, exactly as this test pins.
-  const renamedResolver = new CoreCredentialResolver({ owner_slug: RENAMED_URL_SLUG, store, oauthTokens: null })
+  const renamedResolver = new CoreCredentialResolver({
+    owner_slug: RENAMED_URL_SLUG,
+    store,
+    oauthTokens: null,
+    accountSelection: selection,
+  })
   expect(await renamedResolver.resolve('meta_ads')).toBeNull()
 
   // And the store itself keys on the exact handle (direct assertion).

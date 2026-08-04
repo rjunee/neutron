@@ -33,6 +33,7 @@ import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createProjectCredentialsSurface } from '../http/project-credentials-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 
 const OWNER = 'creds-composer-owner'
@@ -63,7 +64,12 @@ async function startHarness(): Promise<Harness> {
   const auth = createAppWsAuthResolver({ project_slug: OWNER, bypass: true })
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
-  const surface = createProjectCredentialsSurface({ store, auth })
+  const surface = createProjectCredentialsSurface({
+    store,
+    auth,
+    accountSelection: new ProjectAccountSelectionStore(db),
+    credentialResolver: { accountSelectionView: async () => [] },
+  })
 
   // Boot the production graph with the surface threaded through. A future
   // CompositionInput rename/removal that drops `app_project_credentials_surface`

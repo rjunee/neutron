@@ -2,6 +2,111 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — enable/disable connected accounts per project (ISSUES #500)
+
+Branch `feat/per-project-account-selection`. New:
+`migrations/0115_project_account_selection.sql`,
+`project-credentials/account-selection-store.ts`,
+`gateway/cores/__tests__/project-account-selection.test.ts`,
+`gateway/http/__tests__/project-accounts-surface.test.ts`,
+`landing/chat-react/__tests__/settings-tab-accounts.test.tsx`. Changed:
+`gateway/cores/core-credential-resolver.ts`, `gateway/cores/mount-open-cores.ts`,
+`gateway/http/project-credentials-surface.ts`, `gateway/http/route-slots.ts`,
+`gateway/composition/input/app-surfaces-input.ts`, `open/composer.ts`,
+`landing/chat-react/SettingsTab.tsx`,
+`landing/chat-react/project-credentials-client.ts`, `landing/chat-react.html`,
+`migrations/scope-rekey.ts`, `migrations/expected-schema.txt`,
+`docs/SYSTEM-OVERVIEW.md`, plus the fixtures in six existing test files.
+
+**The problem.** Every project read every connected account. Core installations
+are `scope='global'` and documented "Project-agnostic"
+(`cores/runtime/installations-store.ts:53`), and
+`CoreCredentialResolver.accountsFor` returned EVERY account for a service
+(`gateway/cores/core-credential-resolver.ts:30`) — so a question asked inside a
+work project swept a personal calendar and mailbox, and each newly connected
+account made every query in every project noisier and slower.
+
+**Connecting stays global; only selection is per-project.** A grant is a fact
+about the owner's identity — one consent, one access token, one refresh token,
+one thing to rotate. Making the GRANT project-scoped would mean re-consenting to
+the same Google account once per project and keeping N copies of one credential
+alive. So the grant is untouched and `accountsFor` gained a filter.
+
+**Enforced at the resolver seam.** `accountsFor` is the primitive every Core
+reads through — `resolve` narrows it to the primary, `accountsResolverFor` wraps
+it lazily — so filtering there means every consumer honours the selection and
+none can drift. The connected-set construction moved to a private
+`connectedAccountsFor`; `accountsFor` is now that call plus one `filter`, a
+single return point with no branch to bypass.
+
+**The subtle part: which project id the filter uses.** `SERVICE_SCOPE` forces the
+GLOBAL sentinel for Email/Calendar when choosing which credential STORE supplies
+the material. The filter deliberately does NOT reuse that forced value — it uses
+the REAL active project id, because Email and Calendar are exactly the services
+an owner connects several accounts to. Reusing the sentinel would have compiled,
+passed a shape test, and made the whole feature a no-op for the only services
+that need it. Mutation M2 below is that exact mistake, and it reds.
+
+**Unset means enabled, by construction.** Storage is a DISABLE list
+(`project_account_selection`, STRICT, PK `(owner_slug, project_id, service,
+account_id)` which is also the read index). A project with no rows sees every
+account — the pre-#500 behaviour, so shipping this changes nothing until the
+owner narrows something — and a newly connected account has an `account_id` no
+existing row can name, so it stays visible everywhere including in projects that
+already narrowed. An enable-list needed a second "configured yet?" bit for the
+first property and would have hidden the second until every project was
+re-visited. A CHECK forbids the `''` project id, so the General/cron frame can
+never inherit a narrowing. `owner_slug` is registered in
+`migrations/scope-rekey.ts` — stranding these rows on a rename would silently
+RE-ENABLE accounts a project had turned off.
+
+**Surface.** `GET`/`PUT /api/app/projects/<id>/accounts` on the existing
+`app-project-credentials` rung. PUT is idempotent both ways (enable DELETEs the
+row, disable inserts one) and returns the whole refreshed view so the client
+cannot drift from the server. It reads that view from the SAME resolver the
+Cores resolve against, so the toggles shown are definitionally the accounts
+swept. This is a project route while #486 moved GLOBAL credential authoring off
+project surfaces — consistent, not in tension: #486 was about instance-wide
+state, and an account selection can only ever mean something inside one project.
+Disabling the last account for a service is allowed and the UI says "Off for
+this project" so off never reads as broken. `account_id` is a SHA-256 prefix, so
+the server sends a humanised label and the client renders that.
+
+**Consumers that bypass the seam.** None in production. The three
+`credentialResolver === undefined` fallbacks in `gateway/boot-cores-factories.ts`
+(lines 138, 177, 234) call `googleOAuthAccessToken` → `OAuthTokenManager
+.getServiceAccessToken` directly, but `gateway/cores/mount-open-cores.ts:417`
+always supplies the resolver, so those branches are reachable only from
+resolver-less tests. `gateway/cores/integrations.ts:273,481,493` and
+`gateway/http/cores-oauth-surface.ts:714` also call `listGrants` directly — those
+are the CONNECT/DISCONNECT management surfaces, which must stay global by
+definition (you connect and revoke an account instance-wide), so they are
+correctly outside the filter, not bypassing it.
+
+**Tests + mutation results.** 29 targeted tests across three new files
+(resolver/store behaviour, HTTP surface, web UI). Every expectation is a literal
+— emails, ids and counts typed out rather than derived from the fake's own data.
+Sixteen mutations, all red: M1 remove the filter (6 fail); M2 filter with the
+global-forced project id (6); M3 `disabledAccountIds` always empty (9); M4 invert
+to an enable-list (8); M5 swap the `setEnabled` branches (11); M6 view always
+reports enabled (2); M7 `humaniseAccount` leaks the hex id (2); M8 drop
+`owner_slug` from the store's WHERE (1); M9 surface PUT writes a constant project
+(3); M10 surface accepts a non-boolean `enabled` (1); M11 UI sends the unflipped
+value (2); M12 UI drops the all-off notice (1); M13 UI renders the raw
+`account_id` (1); M14 store stops rejecting the `''` sentinel (1); M15 store
+stops rejecting a blank `account_id` (2); M16 view drops services with no
+accounts (1).
+
+Two of those survived first and both were real findings, fixed rather than
+excused. M14 survived because the SQL CHECK also refuses the row, so "something
+threw" passed while the store's own guard was dead — but a raw SQLite constraint
+error escapes the surface's error mapping as a 500 where the contract is a 400,
+so the test now asserts the typed `AccountSelectionValidationError` and its code.
+M16 survived because the fake OAuth manager answered `listGrants` for any service
+name, so "every selectable service is listed regardless of what is connected" was
+never actually exercised; the fake is now service-aware and the property is
+pinned.
+
 ## 2026-08-04 — a finished Google connect returns the owner to his accounts (ISSUES #495)
 
 Branch `fix/oauth-callback-redirect-495`. Changed:
