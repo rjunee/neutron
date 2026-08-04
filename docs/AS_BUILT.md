@@ -2,6 +2,86 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — an expired Google grant now says so, in chat
+
+Branch `feat/oauth-reconnect-chat-notice`. New:
+`gateway/cores/oauth-reconnect-notice.ts`,
+`gateway/cores/__tests__/oauth-reconnect-notice.test.ts`. Changed:
+`gateway/cores/oauth-token-manager.ts`, `gateway/cores/mount-open-cores.ts`,
+`gateway/composition/wire-cores-surfaces.ts`,
+`gateway/composition/input/cores-input.ts`, `open/composer.ts`.
+
+**The problem.** A Google OAuth client left in Testing has its refresh tokens
+expired by Google roughly weekly, so a connected account dies on a schedule. The
+system already KNEW: a refresh that comes back `invalid_grant` fires
+`onInvalidGrant` (`gateway/cores/oauth-token-manager.ts:599`), and the one
+supplied callback marked every affected Core `install_failed_runtime`
+(`gateway/composition/wire-cores-surfaces.ts:66`). That is internal state visible
+only to someone already looking at the Integrations list. Nobody told the owner,
+so a Core stopped working and he found out days later by noticing that something
+he relies on had quietly not been happening.
+
+**Both halves existed; the join did not.** The detector was wired and
+`gateway/http/deliver.ts` is the one out-of-turn delivery seam with an existing
+precedent for exactly this shape (`open/credential-lapse-notice.ts`). This change
+is the missing consumer: `onInvalidGrant` now also posts ONE durable
+`durability: 'inert'` message per dead grant, naming the account and carrying a
+reconnect link. One message per expired thing, never a digest — two grants dying
+in the same hour produce two messages, so acting on either is one unambiguous
+act.
+
+**It was wired to the wrong manager, and would never have fired.** There are TWO
+`OAuthTokenManager`s on a box. The one carrying `onInvalidGrant`
+(`wire-cores-surfaces.ts:61`) serves the HTTP surfaces and chat tools, which read
+status and never drive a refresh. The one every Google-backed Core actually
+resolves its token through (`gateway/cores/mount-open-cores.ts:282`) had no
+callback at all. So the detector fired on the manager that does not refresh and
+was absent from the one that does — a feature that compiles, tests, and never
+runs in production. The notifier is now built once at the composition root and
+shared by both: a grant DIES on the runtime manager and comes BACK on the surface
+manager (the OAuth ingest re-grants through `exchangeAndPersist`), and one shared
+instance is what lets the latch and its reset arm agree.
+
+**The link is the Integrations page, not a consent URL.** Minting a Google
+consent URL into the message looks right and cannot work: starting a grant writes
+a `cores_oauth_pending` row with a TEN-MINUTE TTL
+(`gateway/cores/oauth-pending-store.ts:18`), swept on expiry. This notice exists
+precisely because the owner is not looking when a scheduled refresh fails, so a
+URL minted at notice time is dead by the time he reads it — failing in the worst
+way, as a link that looks like the fix and errors. The message instead links to
+`INTEGRATIONS_RETURN_PATH` (`gateway/http/cores-oauth-broker-surface.ts:135`),
+the same destination a completed grant already returns him to, whose Connect
+control mints a fresh consent URL at the moment he taps it. It is a markdown
+link rather than a `ButtonOption` because a tapped button's `value` is handed to
+the model as `user_text` unless it matches one of two hardcoded sentinels
+(`gateway/wiring/build-live-agent-turn.ts:960,975`); a markdown link is tappable
+on both clients with no model turn in between, and options ride only on
+`durability: 'reply'` (`gateway/http/deliver.ts:163`) anyway.
+
+**Dedup, and its reset arm.** `onInvalidGrant` fires per REFRESH ATTEMPT and
+every Core retries, so the naive join buries the chat. The latch is
+`IncidentEdgeTracker` — the same rising-edge dedup the watchdog and the
+credential-lapse notifier use — keyed by grant label, committed only after the
+durable row lands, so a persist failure re-attempts instead of swallowing the one
+message that mattered. `OAuthTokenManager` gained `onGrantHealthy`, fired from
+`put` (the reconnect edge) and from a refresh that succeeded; without it the latch
+never clears and the feature would notify once and then stay silent through every
+future expiry. Two honest limits, both inherited from the precedent: the latch is
+in-memory, so a restart while a grant is still dead re-tells him once; and unlike
+the tick-driven precedent this notifier is called CONCURRENTLY, so a synchronous
+in-flight check-and-set closes the window where `candidates` would hand the same
+uncommitted incident to two callers.
+
+**Tests + mutation results.** New `gateway/cores/__tests__/oauth-reconnect-notice.test.ts`
+(15 tests). Four mutations, each red: removing the dedup latch reds 3 tests
+including "three refresh attempts post exactly ONE notice"; removing the
+in-flight guard reds the concurrent-refresh test; neutering `onGrantHealthy` reds
+"after a reconnect, the NEXT death notifies again"; and dropping the
+`noteHealthy` call from `put` reds the wiring test that proves the reset arm is
+more than a field. The message is asserted to name the account, to never render
+the hex account key, and to degrade to the SERVICE name rather than an anonymous
+"a token expired" when the address cannot be read.
+
 ## 2026-08-04 — enable/disable connected accounts per project (ISSUES #500)
 
 Branch `feat/per-project-account-selection`. New:

@@ -92,6 +92,17 @@ export interface OAuthTokenManagerOptions {
   now?: () => number
   /** Optional callback fired when a refresh exchange returns invalid_grant. */
   onInvalidGrant?: (label: string) => void | Promise<void>
+  /**
+   * Optional callback fired when a label's token is known-good again — a fresh
+   * grant persisted by {@link OAuthTokenManager.put} (the owner reconnected) or
+   * a refresh exchange that succeeded.
+   *
+   * This is the RESET ARM for anything latching on `onInvalidGrant`. A consumer
+   * that suppresses duplicate alerts for a dead grant (see
+   * `./oauth-reconnect-notice.ts`) has no other way to learn the grant came
+   * back, and without it a once-per-death notice degrades into once-ever.
+   */
+  onGrantHealthy?: (label: string) => void | Promise<void>
 }
 
 export interface OAuthTokenPutInput {
@@ -203,6 +214,7 @@ export class OAuthTokenManager {
   private readonly fetchImpl: FetchLike
   private readonly now: () => number
   private readonly onInvalidGrant?: (label: string) => void | Promise<void>
+  private readonly onGrantHealthy?: (label: string) => void | Promise<void>
   /** In-process refresh dedupe — collapses concurrent getAccessToken
    *  calls into a single Google fetch per label. Per brief § 2.4. */
   private readonly inflight = new Map<string, Promise<string>>()
@@ -221,6 +233,7 @@ export class OAuthTokenManager {
           : globalThis.fetch(input, init))
     this.now = opts.now ?? ((): number => Date.now())
     if (opts.onInvalidGrant !== undefined) this.onInvalidGrant = opts.onInvalidGrant
+    if (opts.onGrantHealthy !== undefined) this.onGrantHealthy = opts.onGrantHealthy
   }
 
   /**
@@ -496,6 +509,20 @@ export class OAuthTokenManager {
       label: metaLabel(input.label),
       plaintext: JSON.stringify(meta),
     })
+    // The grant is good again — this is the RECONNECT edge. Fire after all three
+    // rows land so no consumer can observe "healthy" against a half-written
+    // bundle. Best-effort: a listener's throw must never fail a persisted grant.
+    await this.noteHealthy(input.label)
+  }
+
+  /** Fire `onGrantHealthy`, swallowing anything the listener throws. */
+  private async noteHealthy(label: string): Promise<void> {
+    if (this.onGrantHealthy === undefined) return
+    try {
+      await this.onGrantHealthy(label)
+    } catch {
+      // best-effort
+    }
   }
 
   /**
@@ -604,6 +631,10 @@ export class OAuthTokenManager {
       last_refresh_at: now,
       last_refresh_outcome: 'ok',
     }))
+    // A refresh that WORKED is equally proof the grant is alive — a grant can
+    // recover without a re-grant (a transient Google-side rejection), and a
+    // latch that only cleared on `put` would stay stuck through it.
+    await this.noteHealthy(label)
     return newAccess
   }
 
@@ -683,13 +714,11 @@ export class OAuthTokenManager {
 
   /** Decode a label's `:meta` row, or null when absent / unparseable. */
   private async readMeta(label: string): Promise<OAuthTokenMeta | null> {
-    const raw = await this.secretsStore.get({
+    return await readGrantMeta({
+      secretsStore: this.secretsStore,
       owner_handle: this.owner_handle,
-      kind: 'oauth_token',
-      label: metaLabel(label),
+      label,
     })
-    if (raw === null) return null
-    return safeParseMeta(raw)
   }
 
   private async upsert(input: {
@@ -757,6 +786,28 @@ export class OAuthTokenManager {
       plaintext: JSON.stringify(next),
     })
   }
+}
+
+/**
+ * Decode a grant's encrypted `:meta` row, or null when absent / unparseable.
+ *
+ * Exported because the reconnect notifier needs the connected ADDRESS to name
+ * the account in the message, and it is built at the composition root before
+ * either `OAuthTokenManager` exists. The class's own `readMeta` delegates here,
+ * so there is one decoder rather than two that can drift.
+ */
+export async function readGrantMeta(input: {
+  secretsStore: SecretsStore
+  owner_handle: OwnerHandle
+  label: string
+}): Promise<OAuthTokenMeta | null> {
+  const raw = await input.secretsStore.get({
+    owner_handle: input.owner_handle,
+    kind: 'oauth_token',
+    label: metaLabel(input.label),
+  })
+  if (raw === null) return null
+  return safeParseMeta(raw)
 }
 
 /**

@@ -122,6 +122,25 @@ export interface MountOpenCoresInput {
    *  composer (`new SecretsStore({ data_dir: owner_home, db })`). */
   secretsStore: SecretsStore
   /**
+   * Tell the owner in chat when a Google grant dies / came back
+   * (`./oauth-reconnect-notice.ts`).
+   *
+   * THIS is the manager that matters for the dying half. The OTHER
+   * `OAuthTokenManager` on the box (`../composition/wire-cores-surfaces.ts:61`)
+   * serves the HTTP surfaces and chat tools, which READ status and never drive a
+   * refresh; the one built here is what every Google-backed Core resolves its
+   * access token through, so an `invalid_grant` on a Core's scheduled run
+   * surfaces HERE and nowhere else. Wiring the notice only onto the surface
+   * manager would have produced a feature that compiled, tested, and never
+   * fired in production.
+   *
+   * Omitted ⇒ no notice (the callbacks are the only consumers).
+   */
+  oauthGrantNotifier?: {
+    onInvalidGrant: (label: string) => void | Promise<void>
+    onGrantHealthy: (label: string) => void | Promise<void>
+  }
+  /**
    * D2 (2026-07-01) — the canonical per-project credential store (the SAME
    * instance the Settings CRUD surface mounts). The Cores' credential accessors
    * resolve through it (`resolveCredential(activeProjectId, service)`:
@@ -265,6 +284,12 @@ export async function mountOpenCores(
     owner_handle: ownerHandle,
     client_id: googleClientId,
     client_secret: env[GOOGLE_CLIENT_SECRET_ENV] ?? '',
+    ...(input.oauthGrantNotifier !== undefined
+      ? {
+          onInvalidGrant: input.oauthGrantNotifier.onInvalidGrant,
+          onGrantHealthy: input.oauthGrantNotifier.onGrantHealthy,
+        }
+      : {}),
   })
   // Lazy access-token accessor. Non-null ONLY when the OAuth client is configured,
   // exactly mirroring the Managed gate (`gateway/index.ts` supplies the accessor
