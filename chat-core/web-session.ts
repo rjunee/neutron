@@ -26,6 +26,7 @@ import { SendQueue } from './send-queue.ts'
 import { InMemoryStore, type Store } from './store.ts'
 import { SyncEngine } from './sync-engine.ts'
 import {
+  isTransientSystemNotice,
   normalizeEditUpdate,
   normalizeInbound,
   normalizePromptResolved,
@@ -362,6 +363,24 @@ export class WebChatSession {
       if (applied) this.emitChange()
       return
     }
+    // FIX #333, WEB HALF — a TRANSIENT system notice (a supervisor alert, the
+    // cold-start "⏳ Waking up…" ack) is LIVE-ONLY. It has already reached the UI
+    // through `onFrame` above, which renders it as a quiet centered pill.
+    // Persisting it here would put it in the durable transcript forever.
+    //
+    // The mobile session has guarded this since #333
+    // (`app/lib/chat-core/mobile-session.ts:361`); web never did, and
+    // `normalizeInbound` is documented as deliberately presentation-blind
+    // ("a caller that persists must consult this BEFORE normalizeInbound",
+    // `chat-core/types.ts:488-491`) — so every such frame was being written to
+    // the OPFS store. The server assigns these no `seq` (`AppWsAdapter.send`
+    // skips the `chat_log` append for `system_notice`), and
+    // `compareForDisplay` sorts unsequenced rows AFTER every sequenced one, so
+    // each persisted copy became a permanent bubble pinned below the live
+    // transcript — printing its own true date under today's messages, which is
+    // what made the timeline read as mis-ordered. It is also a row the resume
+    // replay can never reconcile.
+    if (isTransientSystemNotice(data)) return
     const msg = normalizeInbound(data)
     if (msg === null) return
     await this.engine.applyInbound(this.topic_id, msg)

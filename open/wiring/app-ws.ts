@@ -219,6 +219,45 @@ export function resolveImportRunningStatusDelivery(args: {
   return attempts <= 1 ? 'durable' : 'suppress'
 }
 
+/**
+ * Build the app-ws frame for a fired supervision-watchdog alert.
+ *
+ * The alert is broadcast STRAIGHT to the socket registry, deliberately bypassing
+ * `AppWsAdapter.send` — the only path that appends a `chat_log` row and stamps a
+ * `seq`. Its durable home is the `watchdog_alerts` ledger (written by
+ * `WatchdogSupervisor.runOnce` before this fires) plus the O4 `system_events`
+ * journal, so the push is a best-effort SECONDARY surface, not the record.
+ *
+ * That makes `system_notice: true` a statement of fact about the frame, and it
+ * is load-bearing. Without it a client persists an UNSEQUENCED agent row, and
+ * `compareForDisplay` (`chat-core/store.ts`) orders every `seq === null` row
+ * after all sequenced ones — so the alert parks permanently at the bottom of the
+ * transcript, under messages sent days later, while still printing its own true
+ * date. That is the same tail-pinning seam `resolveImportRunningStatusDelivery`
+ * above documents for the import status bubble; the two differ only in the right
+ * remedy (that one wants durability, an alert wants ephemerality).
+ *
+ * `ts` is the EMIT time, which is what the wire contract means (migration 0079:
+ * "unix-ms emit time, used as the wire `ts` on replay"), and it is what the
+ * client renders as the message clock. Do NOT substitute `alert.detected_at`:
+ * detectors write that field in SECONDS (`watchdog/detectors.ts` — `now / 1000`)
+ * while every chat timestamp in this system is MILLISECONDS, so it would date
+ * each alert to 1970. `now` is injectable purely so the unit test can pin it.
+ */
+export function buildWatchdogAlertEnvelope(
+  alert: { id: string; kind: string; owner_slug: string },
+  now: () => number = Date.now,
+): AppWsOutboundAgentMessage {
+  return {
+    v: 1,
+    type: 'agent_message',
+    body: `⚠️ Supervisor alert: ${alert.kind} (${alert.owner_slug})`,
+    message_id: `watchdog:${alert.id}`,
+    ts: now(),
+    system_notice: true,
+  }
+}
+
 /** The Path-1 closing / per-project opening delivery seam value (`onboardingMsg`). */
 export type OnboardingMsgEmit = (input: {
   user_id: string

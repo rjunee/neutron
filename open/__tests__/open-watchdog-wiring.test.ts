@@ -28,6 +28,7 @@ import {
 } from '@neutronai/persistence/system-events.ts'
 import type { WatchdogAlert } from '@neutronai/watchdog/types.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
+import { buildWatchdogAlertEnvelope } from '../wiring/app-ws.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -243,4 +244,37 @@ describe('Open supervision-watchdog prod-boot wiring (F4)', () => {
       throw err
     }
   }, 20_000)
+})
+
+describe('buildWatchdogAlertEnvelope — the alert frame is TRANSIENT and EMIT-timed', () => {
+  const alert = { id: 'a1', kind: 'overrun_cron', owner_slug: 'owner' }
+
+  // THE FIX. The push bypasses `AppWsAdapter.send`, so nothing else can mark it
+  // non-durable. Without this flag a client persists an UNSEQUENCED agent row,
+  // and `compareForDisplay` sorts every `seq === null` row after all sequenced
+  // ones — so the alert parks at the BOTTOM of the transcript under messages
+  // sent days later, still printing its own true date. That is the mis-ordered
+  // timeline this fixes.
+  test('carries system_notice: true so no client persists it', () => {
+    expect(buildWatchdogAlertEnvelope(alert).system_notice).toBe(true)
+  })
+
+  // THE UNITS TRAP. `detected_at` is written in SECONDS
+  // (`watchdog/detectors.ts` — `now / 1000`) while every chat timestamp is
+  // MILLISECONDS. `ts` is the EMIT time per the wire contract; swapping in
+  // `detected_at` would date every alert to 1970 rather than fix anything.
+  test('ts is emit-time MILLISECONDS, never the seconds-valued detected_at', () => {
+    const env = buildWatchdogAlertEnvelope(alert, () => 1_754_300_000_000)
+    expect(env.ts).toBe(1_754_300_000_000)
+    // A milliseconds epoch for any date after 2001 exceeds 1e12; a seconds one
+    // does not. This is the assertion that catches the tempting wrong fix.
+    expect(env.ts).toBeGreaterThan(1e12)
+  })
+
+  test('body + message_id identify the alert', () => {
+    const env = buildWatchdogAlertEnvelope(alert)
+    expect(env.body).toBe('⚠️ Supervisor alert: overrun_cron (owner)')
+    expect(env.message_id).toBe('watchdog:a1')
+    expect(env.type).toBe('agent_message')
+  })
 })

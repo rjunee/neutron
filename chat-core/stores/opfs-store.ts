@@ -32,6 +32,34 @@ interface OpfsDirHandle {
 
 type SnapshotShape = Record<string, ChatMessage[]>
 
+/**
+ * Is this snapshot row transient-notice residue that must never be re-hydrated?
+ *
+ * An AGENT row with no `seq` cannot legitimately exist in a durable snapshot.
+ * Every real agent message is sequenced by the server on its way out
+ * (`AppWsAdapter.send` appends the `chat_log` row and stamps `envelope.seq`),
+ * and the only unsequenced rows the client is supposed to hold are its OWN
+ * optimistic sends, which are `role: 'user'`. So `role === 'agent' && seq ===
+ * null` identifies exactly one thing: a `system_notice` frame — a supervisor
+ * alert or a cold-start "⏳ Waking up…" ack — that a client persisted when it
+ * should not have.
+ *
+ * Those rows are unreconcilable AND mis-sorted: resume replay works off `seq`
+ * and will never match them, and `compareForDisplay` puts every `seq === null`
+ * row after all sequenced ones, so each one sits permanently at the bottom of
+ * the transcript printing its own older date beneath newer messages.
+ *
+ * The write side is fixed (`web-session.ts` now honours
+ * `isTransientSystemNotice`, matching mobile), but a browser that already ran
+ * the buggy build still holds the rows — the fix is invisible to the owner
+ * until they are dropped. Filtering on hydrate is a one-time self-repair that
+ * costs one predicate per row and is safe to leave in place permanently: once
+ * no such row can be written, the predicate simply never matches.
+ */
+function isUnreconcilableAgentRow(row: ChatMessage): boolean {
+  return row.role === 'agent' && row.seq === null
+}
+
 export class OpfsChatStore implements Store {
   private readonly mem = new InMemoryStore()
   private readonly dir: OpfsDirHandle
@@ -65,7 +93,10 @@ export class OpfsChatStore implements Store {
         const rows = parsed[topic]
         if (!Array.isArray(rows)) continue
         this.knownTopics.add(topic)
-        for (const row of rows) await this.mem.upsert(row)
+        for (const row of rows) {
+          if (isUnreconcilableAgentRow(row)) continue
+          await this.mem.upsert(row)
+        }
       }
     } catch {
       // Corrupt / unreadable snapshot — start empty rather than throw. The

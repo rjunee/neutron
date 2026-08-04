@@ -127,7 +127,7 @@ import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { buildAppWsApprovalNotifier } from './wiring/approval-notifier.ts'
-import { wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
+import { buildWatchdogAlertEnvelope, wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
 import { late } from './wiring/late.ts'
@@ -4953,14 +4953,10 @@ export function buildOpenGraphComposer(
     const watchdogNotifier: WatchdogNotifier = {
       notify: async (alert: WatchdogAlert): Promise<void> => {
         try {
-          const body = `⚠️ Supervisor alert: ${alert.kind} (${alert.owner_slug})`
-          const env: AppWsOutboundAgentMessage = {
-            v: 1,
-            type: 'agent_message',
-            body,
-            message_id: `watchdog:${alert.id}`,
-            ts: Date.now(),
-          }
+          // TRANSIENT by construction (`system_notice: true`) — see
+          // `buildWatchdogAlertEnvelope` for why that flag is load-bearing and
+          // why `ts` must stay the EMIT time rather than `alert.detected_at`.
+          const env = buildWatchdogAlertEnvelope(alert)
           // Broadcast to all live topics is INTENDED here (round-11 sweep): a
           // six-detector `WatchdogAlert` is a SYSTEM-WIDE condition (stale
           // heartbeat, DB-lock contention, cooldown saturation) — it carries NO

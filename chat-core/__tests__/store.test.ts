@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it } from 'bun:test'
 
 import { InMemoryStore, compareForDisplay, type Store } from '../store.ts'
 import { createWebStore } from '../stores/opfs-store.ts'
@@ -71,6 +71,64 @@ describe('InMemoryStore — Store contract', () => {
     const optimistic = msg({ client_msg_id: 'b', seq: null, created_at: 2 })
     expect(compareForDisplay(sequenced, optimistic)).toBeLessThan(0)
     expect(compareForDisplay(optimistic, sequenced)).toBeGreaterThan(0)
+  })
+})
+
+// ONE-TIME SELF-REPAIR. A browser that ran the buggy build already has transient
+// system notices (supervisor alerts, cold-start acks) written into its OPFS
+// snapshot as UNSEQUENCED agent rows. The write side is fixed, but those rows
+// survive in the owner's browser and keep sorting to the bottom of the
+// transcript under newer messages — so the fix is invisible until hydrate drops
+// them.
+describe('OpfsChatStore.hydrate — drops unreconcilable agent rows', () => {
+  // The fake OPFS is installed on the global `navigator` and MUST be removed
+  // again: leaving it in place makes the later `createWebStore` degradation test
+  // find a working OPFS (and this snapshot), which is a cross-test pollution
+  // that fails a completely unrelated assertion.
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  afterEach(() => {
+    if (originalNavigator !== undefined) {
+      Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    } else {
+      delete (globalThis as { navigator?: unknown }).navigator
+    }
+  })
+
+  function fakeOpfs(snapshot: unknown): void {
+    const text = JSON.stringify(snapshot)
+    const fileHandle = {
+      getFile: async () => ({ text: async () => text }),
+      createWritable: async () => ({
+        write: async (_d: string) => undefined,
+        close: async () => undefined,
+      }),
+    }
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { storage: { getDirectory: async () => ({ getFileHandle: async () => fileHandle }) } },
+    })
+  }
+
+  it('keeps sequenced agent rows + optimistic USER sends, drops seq-less agent rows', async () => {
+    const realReply = msg({ client_msg_id: '', message_id: 'm1', seq: 1, role: 'agent', body: 'real reply', status: 'acked' })
+    const alertResidue = msg({ client_msg_id: '', message_id: 'watchdog:a1', seq: null, role: 'agent', body: '⚠️ Supervisor alert: overrun_cron (owner)', status: 'acked' })
+    const ackResidue = msg({ client_msg_id: '', message_id: 'ack1', seq: null, role: 'agent', body: '⏳ Waking up, one moment…', status: 'acked' })
+    const pendingSend = msg({ client_msg_id: 'c-queued', seq: null, role: 'user', body: 'my unsent message', status: 'queued' })
+    fakeOpfs({ [TOPIC]: [realReply, alertResidue, ackResidue, pendingSend] })
+
+    const { OpfsChatStore } = await import('../stores/opfs-store.ts')
+    const store = await OpfsChatStore.open()
+    const rows = await store.list(TOPIC)
+    const bodies = rows.map((r) => r.body)
+    // The residue is gone — both the alert and the cold-start ack.
+    expect(bodies).not.toContain('⚠️ Supervisor alert: overrun_cron (owner)')
+    expect(bodies).not.toContain('⏳ Waking up, one moment…')
+    // A real agent reply is untouched, and so is the owner's un-acked send —
+    // dropping a queued local message would LOSE user data, which is the one
+    // thing this repair must never do.
+    expect(bodies).toContain('real reply')
+    expect(bodies).toContain('my unsent message')
+    expect(rows.some((r) => r.role === 'agent' && r.seq === null)).toBe(false)
   })
 })
 

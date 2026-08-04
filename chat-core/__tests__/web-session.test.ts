@@ -196,6 +196,67 @@ describe('WebChatSession — gap-free reconnect (resume)', () => {
     expect(msgs.length).toBe(1)
   })
 
+  // FIX #333, WEB HALF. A supervisor alert (and the cold-start "Waking up…"
+  // ack) is broadcast straight to the socket, bypassing `AppWsAdapter.send` —
+  // so it carries `system_notice: true` and NO `seq`. The web session used to
+  // persist it anyway, and because `compareForDisplay` orders every unsequenced
+  // row after all sequenced ones, the alert became a permanent bubble pinned
+  // BELOW every later message while still printing its own older date. That is
+  // the mis-ordered timeline the owner reported. Mobile has guarded this since
+  // #333; this pins the web half.
+  it('does NOT persist a system_notice frame, but still surfaces it to onFrame', async () => {
+    const captured: FakeSocket[] = []
+    const frames: unknown[] = []
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store: new InMemoryStore(),
+      createSocket: () => { const s = new FakeSocket(); captured.push(s); return s },
+      onFrame: (f) => { frames.push(f) },
+      generateId: () => 'cmid-sn',
+      now: () => 1,
+    })
+    session.start()
+    captured[0]!.open()
+    captured[0]!.deliver(readyFrame())
+    // A real, sequenced agent reply — persists normally.
+    captured[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'real reply', ts: 100 })
+    // The transient supervisor alert — live-only, never durable.
+    captured[0]!.deliver({
+      v: 1, type: 'agent_message', message_id: 'watchdog:a1',
+      body: '⚠️ Supervisor alert: overrun_cron (owner)', ts: 200, system_notice: true,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    // It DID reach the UI — suppression is about the store, not visibility.
+    const bodies = frames.map((f) => (f as Record<string, unknown>)['body'])
+    expect(bodies).toContain('⚠️ Supervisor alert: overrun_cron (owner)')
+    // ...but it is NOT in the durable transcript.
+    const msgs = await session.messages()
+    expect(msgs.map((m) => m.body)).toEqual(['real reply'])
+    // The specific corruption we are preventing: an unsequenced agent row.
+    expect(msgs.some((m) => m.role === 'agent' && m.seq === null)).toBe(false)
+  })
+
+  // The cold-start ack has no `system_notice` flag on older servers — it is
+  // recognised by BODY (`isColdStartAck`). Same rule, same suppression.
+  it('does NOT persist the cold-start ack recognised by body alone', async () => {
+    const captured: FakeSocket[] = []
+    const session = new WebChatSession({
+      url: 'wss://test/ws/app/chat',
+      topic_id: TOPIC,
+      store: new InMemoryStore(),
+      createSocket: () => { const s = new FakeSocket(); captured.push(s); return s },
+      generateId: () => 'cmid-cs',
+      now: () => 1,
+    })
+    session.start()
+    captured[0]!.open()
+    captured[0]!.deliver(readyFrame())
+    captured[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'ack1', body: '⏳ Waking up, one moment…', ts: 5 })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(await session.messages()).toEqual([])
+  })
+
   it('reconciles the optimistic bubble when its server echo (with seq) arrives', async () => {
     const { session, sockets } = setup()
     session.start()
