@@ -100,4 +100,14 @@ if ! bun "$HERE/console-ban-check.mjs"; then
   fail=1
 fi
 
+# ── CHECK 5: wall-clock timing-assertion ban (ISSUES #438) ─────────────
+# A test that compares REAL elapsed time against a threshold measures the
+# machine, so it reddens when the runner is loaded rather than when the code is
+# wrong. The tree was swept once (4437e8c7); this stops the class regrowing.
+# Bounds with no deterministic substitute carry a justified WALL-CLOCK-BOUND-OK
+# marker. See wall-clock-bound-check.mjs.
+if ! bun "$HERE/wall-clock-bound-check.mjs"; then
+  fail=1
+fi
+
 exit "$fail"

@@ -69,6 +69,10 @@ function make(
     installed?: boolean
     choice?: TranscriptionBackendChoice | null
     storedKey?: string
+    /** Override the download transport. The default answers instantly, which
+     *  makes "did the handler await the download?" unobservable — a test that
+     *  needs that ordering passes a fetch that never settles. */
+    fetchImpl?: typeof fetch
   } = {},
 ) {
   const home = mkdtempSync(join(tmpdir(), 'neutron-asr-surface-'))
@@ -82,7 +86,8 @@ function make(
   const installer = new WhisperInstaller({
     neutron_home: home,
     which: () => null,
-    fetch_impl: (async () => new Response(new Uint8Array(8))) as unknown as typeof fetch,
+    fetch_impl:
+      opts.fetchImpl ?? ((async () => new Response(new Uint8Array(8))) as unknown as typeof fetch),
     free_bytes: async () => 10 * 1024 ** 3,
   })
   const creds = fakeCredentialStore(opts.storedKey)
@@ -360,13 +365,19 @@ describe('the OpenAI key', () => {
 describe('voice-transcription surface (install)', () => {
 
   test('POST returns 202 IMMEDIATELY — the download is never held open in the request', async () => {
-    const { surface } = make()
-    const t0 = Date.now()
+    // THE DOWNLOAD NEVER SETTLES, WHICH IS WHAT MAKES "NOT HELD OPEN" OBSERVABLE
+    // AT ALL. This test used to run against the default fake transport, which
+    // answers instantly — so a handler that DID await the download would have
+    // returned just as fast, and the wall-clock bound that used to sit here
+    // (`Date.now() - t0 < 2000`) could never have failed. It measured the fake,
+    // not the handler. With a fetch that never resolves, the handler awaiting it
+    // would never produce a response and the test reds on its own timeout;
+    // getting a 202 back AT ALL is now the proof. ISSUES #438.
+    const { surface } = make({
+      fetchImpl: (() => new Promise<Response>(() => {})) as unknown as typeof fetch,
+    })
     const res = await surface.handler(req('POST', 'good', { model_id: 'base' }))
     expect(res!.status).toBe(202)
-    // Not a timing assertion of the download itself — just that the handler did
-    // not await it. A real model fetch is minutes.
-    expect(Date.now() - t0).toBeLessThan(2_000)
   })
 
   test('POST with an unknown model is a 400, not a started job', async () => {

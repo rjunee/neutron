@@ -238,7 +238,6 @@ describe('composition wiring — projection writer attaches to canonical store',
   })
 
   test('two writes inside the debounce window coalesce to one STATUS.md rewrite', async () => {
-    const before = Date.now()
     await authedFetch(harness.base, `/api/app/projects/${PROJECT}/tasks`, {
       method: 'POST',
       body: JSON.stringify({ title: 'first', priority: 2 }),
@@ -256,10 +255,15 @@ describe('composition wiring — projection writer attaches to canonical store',
       '- [ ] first [P1]',
       '- [ ] second [P2]',
     ])
+    // REACHING HERE IS THE PROOF THAT THE DEBOUNCE FIRED. `waitForFileContaining`
+    // above polls until BOTH rows are on disk and throws if they never arrive, so
+    // a debounce that never flushed reds there — it cannot get this far to be
+    // timed. The wall-clock bound that used to sit here (`Date.now() - before <
+    // 2000`) was labelled a file-mtime sanity guard but never read the mtime; it
+    // timed the whole test body, which is the flush latency this test's own
+    // comment above says the coalescing guarantee is NOT about. ISSUES #438.
     expect(status).toContain('- [ ] first [P1]')
     expect(status).toContain('- [ ] second [P2]')
-    // Sanity guard: the file mtime is recent (the debounce fired).
-    expect(Date.now() - before).toBeLessThan(2000)
   })
 })
 

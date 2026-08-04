@@ -2,6 +2,107 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — a lint so wall-clock timing assertions cannot regrow (ISSUES #438)
+
+Branch `test/wall-clock-bound-gate`. New: `scripts/ci/wall-clock-bound-check.mjs`,
+`scripts/ci/wall-clock-bound-check.d.mts`, `scripts/ci/wall-clock-bound-check.test.ts`.
+Changed: `scripts/ci/lint.sh` (CHECK 5), plus six test files triaged below.
+
+**What changed.** The sweep two entries down removed the wall-clock timing
+assertions that existed; this adds the gate that stops the class coming back. A
+new assertion comparing REAL elapsed time against a threshold now fails
+`scripts/ci/lint.sh` on the PR that introduces it, rather than being discovered
+weeks later by a red shard on somebody else's branch.
+
+**The matcher is AST-based, and keys on the EXPRESSION rather than the variable
+name.** This is the whole design point. The ad-hoc grep that found the original
+violations keyed on variables called `elapsed` / `took` / `duration` / `ms`, and
+was wrong in both directions: it missed
+`expect(Date.now() - start).toBeLessThan(2000)` entirely (same flake class, but
+the delta is bound to no name at all), and it flagged a doc-comment that QUOTED a
+removed bound plus a fake-timer harness call that was never a violation. The gate
+recognises exactly one shape — **a real-wall-clock DELTA as the subject of an
+`expect(...)` with a threshold matcher** — however that delta is spelled: inline,
+bound to any name, or wrapped in `Math.abs` / arithmetic. It reads every clock
+source (`Date.now`, `performance.now`, `Bun.nanoseconds`, `process.hrtime`,
+`new Date().getTime()`), not just the two that happened to be in the tree.
+
+Three exclusions are decided on principle rather than by allowlist, which is what
+keeps the false-positive rate at zero without a hand-maintained file:
+
+- **A comment is never an AST node**, so quoted bounds are structurally invisible.
+- **Exact-equality matchers (`toBe`, `toEqual`) are out of scope.** A delta can
+  only be asserted exactly equal to a constant under a LOGICAL clock — real wall
+  time is never exactly N — so `expect(Date.now() - started).toBe(900)` under
+  `installHarnessClock()` is correctly ignored, with no knowledge of the harness.
+- **The delta must be an ASSERTION SUBJECT.** That separates the ~40
+  `while (Date.now() - start < timeoutMs)` polling loops and `waitFor` helpers in
+  the repo (a test WAITING for something) from a test asserting how fast the box
+  is. A clock read minus a numeric CONSTANT is likewise a past timestamp, not a
+  duration, so fixtures like `last_event_at: Date.now() - 10 * 60_000` are not hits.
+
+**The gate ships GREEN, via a marker that requires an argument.** A bound with no
+deterministic substitute carries `// WALL-CLOCK-BOUND-OK: <justification>` on the
+assertion. At least 60 characters of prose after the colon is REQUIRED —
+continuation `//` lines count — and a bare marker is rejected as its own failure
+class, so an opt-out stays an argued exception rather than a silent one. Starting
+green is deliberate: a standing-red gate trains people to merge past it, which is
+precisely how a permanently-failing check in this repo once hid a second,
+completely dead check for days.
+
+**The sweep's own census was wrong, and this found six it missed.** The prior
+commit reported "3 kept"; its message then described four, and the tree actually
+carried five surviving `KEPT DELIBERATELY` bounds. Running the AST matcher over
+`main` returned **11**. The six the name-keyed grep never saw are triaged here in
+the same fixed order (delete if a deterministic assertion already covers the
+contract, else convert, else keep with a written justification) — five of the six
+are the inline `Date.now() - x` form, exactly the blind spot predicted:
+
+- **Deleted** — `onboarding/wow-moment/__tests__/action-runner.test.ts` (a
+  never-settling action already asserts `reason: 'timeout'` twice, and a broken
+  timeout never settles at all, so it reds on the test timeout);
+  `gateway/__tests__/composition-tasks-projection-wiring.test.ts` (labelled an
+  mtime sanity guard but never read the mtime — it timed the whole test body,
+  which the test's own comment says the coalescing guarantee is not about, and
+  `waitForFileContaining` above already gates on the flush);
+  `runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts:465`
+  (the 60 s construction ceiling it guarded against is four times the 15 s
+  per-test timeout, so a regression reds on the timeout first).
+- **Converted** — `app/__tests__/harness-clock-selfcheck.test.ts`, from a
+  `Math.abs(Date.now() - real_now) < 60_000` window to
+  `expect(Date.now()).toBeGreaterThanOrEqual(real_now)`. Strictly stronger: a
+  failed uninstall lands ~1.7e12 ms below the captured timestamp, and monotonicity
+  cannot flake in either direction.
+  `gateway/http/__tests__/voice-transcription-surface.test.ts` — its bound was
+  VACUOUS, the same defect the sweep found in the profile-pic pipeline: the fake
+  transport answered instantly, so a handler that DID await the download would
+  have returned just as fast. `make()` now takes a `fetchImpl`, the test passes a
+  fetch that never settles, and getting a 202 back at all is the proof.
+- **Kept with a marker** — `doc-search/chunk.test.ts`, the ReDoS guard. Elapsed
+  time is the only observable separating linear scanning from catastrophic
+  backtracking: a regression returns the SAME chunks, just exponentially later,
+  and the per-test timeout only catches a total hang rather than the quadratic
+  rescan this guards against. Measured 0.25 ms unloaded and 0.33/0.38/0.44 ms
+  (6.0 ms first-run outlier) under 2x CPU oversubscription, against 1000 ms.
+
+**Survivors: six, each marked.** The five from the sweep
+(`app/__tests__/transcript-warmer.test.ts`,
+`onboarding/profile-pic/__tests__/storage.test.ts`,
+`open/__tests__/onboarding-warm-conversational.test.ts`, and two in
+`persistent-repl-substrate.test.ts`) keep their existing paragraph-long
+justifications, now prefixed with the machine-readable marker, plus the ReDoS
+bound above.
+
+**The gate was mutation-tested, because a guard that cannot fail for the reason
+it claims to test is worthless.** Injecting
+`expect(Date.now() - mutT0).toBeLessThan(2_000)` — the inline form the old grep
+missed — fails the gate with exit 1 and names the file:line. Re-marking that same
+bound `// WALL-CLOCK-BOUND-OK: flaky` still fails, under the distinct
+"unjustified" heading. Stripping the marker token from all six survivors makes all
+six reappear as offenders, proving the markers are load-bearing rather than
+decorative. 24 unit tests pin the detector, one per false positive and false
+negative described above.
+
 ## 2026-08-04 — the Cores OAuth broker can live somewhere else, and its register cannot be stolen
 
 Branch `feat/cores-broker-remote-config`. Changed:

@@ -457,12 +457,17 @@ describe('PersistentReplSubstrate — per-turn timeout override (AgentSpec.turn_
     const sub = createPersistentReplSubstrate(
       baseOptions(silentHost, { turnTimeoutMs: 60_000, idleQuietMs: 0, idleMaxMs: 50 }),
     )
-    const started = performance.now()
+    // THE PER-TEST TIMEOUT IS WHAT PROVES THE OVERRIDE DROVE THIS. The child
+    // never emits, so the only two outcomes are the 120 ms per-spec override
+    // firing (this rejects promptly) or the 60 s construction ceiling firing
+    // instead — and 60 s is four times the 15 s per-test timeout CI runs with
+    // (scripts/run-tests.sh:77), so the ceiling case reds on the timeout without
+    // ever reaching an assertion. The wall-clock bound that used to sit here
+    // (`performance.now() - started < 10_000`) was a second guard on that one
+    // contract, and the only one machine load could flip. ISSUES #438.
     await expect(
       drain(sub.start({ ...spec('hang please'), turn_timeout_ms: 120 })),
     ).rejects.toThrow(/turn timeout/)
-    // Comfortably under the 60s construction ceiling → the override drove it.
-    expect(performance.now() - started).toBeLessThan(10_000)
   })
 })
 
@@ -912,7 +917,7 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
     setTimeout(() => clearInterval(ticker), 700)
     await expect(drain(sub.start(spec('long active build')))).rejects.toThrow(/turn timeout/)
     const elapsed = performance.now() - started
-    // KEPT DELIBERATELY. Survived WELL past the 300ms idle window (activity kept
+    // WALL-CLOCK-BOUND-OK: KEPT DELIBERATELY. Survived WELL past the 300ms idle window (activity kept
     // resetting it), then tripped only after activity ceased (~700ms + one idle
     // window). No deterministic assertion can replace this: the regression it
     // catches is "PTY activity stopped resetting the deadline", whose ONLY
@@ -959,7 +964,7 @@ describe('PersistentReplSubstrate — activity-based (inactivity) turn timeout',
     await expect(drain(sub.start(spec('livelocked')))).rejects.toThrow(/turn timeout/)
     clearInterval(ticker)
     const elapsed = performance.now() - started
-    // KEPT DELIBERATELY, and it is the only assertion here that can tell the two
+    // WALL-CLOCK-BOUND-OK: KEPT DELIBERATELY, and it is the only assertion here that can tell the two
     // watchdogs apart. Both the inactivity window and the absolute ceiling emit
     // the SAME `persistent-repl: turn timeout` error on purpose (pool.ts:605 —
     // the composer classifies one code), so the rejection above proves "a
