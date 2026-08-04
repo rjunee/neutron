@@ -295,6 +295,7 @@ describe('bundled ritual fires UNAPPROVED by default (REAL ApprovalManager path)
 
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       // REAL approval path — zero approval rows means unapproved. OMIT
       // build_approval_check so the production createRitualApprovalCheck runs.
@@ -332,6 +333,7 @@ describe('bundled ritual fires UNAPPROVED by default (REAL ApprovalManager path)
 
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -374,6 +376,7 @@ describe('bundled ritual approved fire — spec shape', () => {
       return { result: 'brief done', status: 'completed' }
     })
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -430,6 +433,7 @@ describe('bundled ritual approved fire — spec shape', () => {
       return { result: 'SYSTEMIC: the same correction landed 4 times.', status: 'completed' }
     })
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',

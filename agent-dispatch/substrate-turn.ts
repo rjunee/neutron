@@ -23,7 +23,7 @@
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import { drainToOutcome } from '@neutronai/runtime/substrate-text.ts'
-import type { DispatchTurn, DispatchTurnResult } from './service.ts'
+import type { DispatchTurn, DispatchTurnFailure, DispatchTurnResult } from './service.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface CancellableDispatchTurnOptions {
@@ -112,11 +112,36 @@ export function buildCancellableDispatchTurn(
     }
 
     if (outcome.status === 'completed') return { result: outcome.text, status: 'completed' }
+    // CARRY the O3 class the drain already captured. `drainToOutcome` builds a
+    // `SubstrateCallError` from the terminal `error` event with its `code` /
+    // `retryable` / `retry_after_ms` verbatim, and this runner used to drop all
+    // three on the floor — so a background caller (the ritual executor) saw an
+    // overloaded upstream and a missing binary as the same opaque `'failed'` and
+    // could not tell which one was worth re-attempting (ISSUES #489). An absent
+    // `error` (an exhausted stream that never stamped anything) stays absent:
+    // "unclassified" is a real answer and must not be forged into a class.
+    const failure: DispatchTurnFailure | undefined =
+      outcome.error === undefined
+        ? undefined
+        : {
+            code: outcome.error.code,
+            retryable: outcome.error.retryable,
+            ...(outcome.error.retry_after_ms !== undefined
+              ? { retry_after_ms: outcome.error.retry_after_ms }
+              : {}),
+          }
+    const withFailure = (
+      status: 'failed' | 'cancelled' | 'timed_out',
+    ): DispatchTurnResult => ({
+      result: outcome.text,
+      status,
+      ...(failure !== undefined ? { failure } : {}),
+    })
     // Precedence — abort (a real `/dispatch stop`) wins, then the wall-clock
     // timeout, then any other non-success terminal (error event / paused stream
     // that closed without a completion; paused ≠ finished → failed).
-    if (outcome.status === 'aborted') return { result: outcome.text, status: 'cancelled' }
-    if (timedOut) return { result: outcome.text, status: 'timed_out' }
-    return { result: outcome.text, status: 'failed' }
+    if (outcome.status === 'aborted') return withFailure('cancelled')
+    if (timedOut) return withFailure('timed_out')
+    return withFailure('failed')
   }
 }
