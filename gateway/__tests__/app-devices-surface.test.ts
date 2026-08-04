@@ -19,12 +19,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
+import { createLogger } from '@neutronai/logger'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { DevicePushTokenStore } from '../push/store.ts'
 import {
   MAX_DEVICE_TOKEN_LEN,
   createAppDevicesSurface,
+  type AppDevicesLogger,
 } from '../http/app-devices-surface.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
 
@@ -51,16 +53,30 @@ interface Harness {
   store: DevicePushTokenStore
   db: ProjectDb
   tmp: string
+  /** Every log line the surface actually rendered, in order. */
+  lines: string[]
   close(): Promise<void>
 }
 
-async function startGateway(): Promise<Harness> {
+interface StartOpts {
+  /** Swap the store for one that fails, to exercise the 500 path. */
+  store?: DevicePushTokenStore
+}
+
+async function startGateway(opts: StartOpts = {}): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-devices-'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
   applyMigrations(db.raw())
-  const store = new DevicePushTokenStore(db)
+  const store = opts.store ?? new DevicePushTokenStore(db)
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
-  const surface = createAppDevicesSurface({ store, auth })
+  // The REAL logger with a capturing sink, not a mock: these tests assert on
+  // the rendered `[app-devices] event=… k=v` line, which is what an operator
+  // reads and what the "never log the token" guarantee has to hold for.
+  const lines: string[] = []
+  const logger: AppDevicesLogger = createLogger('app-devices', {
+    sink: (_level, line) => lines.push(line),
+  })
+  const surface = createAppDevicesSurface({ store, auth, logger })
   const composed = composeHttpHandler({
     appDevices: { handler: surface.handler },
     defaultHandler: () => new Response('not found', { status: 404 }),
@@ -72,6 +88,7 @@ async function startGateway(): Promise<Harness> {
     store,
     db,
     tmp,
+    lines,
     close: async () => {
       __composedHandlers.delete(host)
       db.close()
@@ -356,6 +373,166 @@ describe('app-devices surface — POST /api/app/devices/unregister', () => {
     expect(res.status).toBe(200)
     expect(harness.store.getByDeviceToken('demo', 'shared-tok')).toBeNull()
     expect(harness.store.getByDeviceToken('other-project', 'shared-tok')).not.toBeNull()
+  })
+})
+
+/**
+ * ISSUES #487 — the registration path used to be UNOBSERVABLE.
+ *
+ * `device_push_tokens` was found with zero rows on a live instance. Nothing on
+ * this surface logged, so "the app never called register" and "the app called
+ * and was rejected" were indistinguishable: both left no trace at all. Every
+ * test below asserts a DIAGNOSTIC exists for an outcome that previously
+ * produced silence — and the last one asserts what must never be in it.
+ */
+describe('app-devices surface — registration is observable', () => {
+  const TOKEN = 'ExponentPushToken[SECRET-DEVICE-CREDENTIAL-abc999]'
+  let harness: Harness
+  let previousLevel: string | undefined
+
+  beforeEach(async () => {
+    previousLevel = process.env['NEUTRON_LOG_LEVEL']
+    process.env['NEUTRON_LOG_LEVEL'] = 'info'
+    harness = await startGateway()
+  })
+  afterEach(async () => {
+    if (previousLevel === undefined) delete process.env['NEUTRON_LOG_LEVEL']
+    else process.env['NEUTRON_LOG_LEVEL'] = previousLevel
+    await harness.close()
+  })
+
+  it('a successful registration says so, with the device fingerprinted', async () => {
+    const res = await authedFetch(harness.base, '/api/app/devices/register', {
+      method: 'POST',
+      body: JSON.stringify({ device_token: TOKEN, platform: 'ios' }),
+    })
+    expect(res.status).toBe(200)
+    const line = harness.lines.find((l) => l.includes('event=device_registered'))
+    expect(line).toBeDefined()
+    expect(line).toContain('project_slug=demo')
+    expect(line).toContain('user_id=sam')
+    expect(line).toContain('platform=ios')
+    expect(line).toContain('first_registration=true')
+    expect(line).toMatch(/token_fp=[0-9a-f]{12}\b/)
+  })
+
+  it('re-registering the same device is distinguishable from a new one', async () => {
+    const body = JSON.stringify({ device_token: TOKEN, platform: 'ios' })
+    await authedFetch(harness.base, '/api/app/devices/register', { method: 'POST', body })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await authedFetch(harness.base, '/api/app/devices/register', { method: 'POST', body })
+    const registrations = harness.lines.filter((l) => l.includes('event=device_registered'))
+    expect(registrations.length).toBe(2)
+    expect(registrations[0]).toContain('first_registration=true')
+    expect(registrations[1]).toContain('first_registration=false')
+    // Same phone, same fingerprint — which is the point of having one.
+    const fp = (l: string): string => /token_fp=([0-9a-f]{12})/.exec(l)?.[1] ?? ''
+    expect(fp(registrations[0] as string)).toBe(fp(registrations[1] as string))
+    expect(fp(registrations[0] as string).length).toBe(12)
+  })
+
+  it('a REJECTED registration emits a diagnostic instead of vanishing', async () => {
+    const res = await authedFetch(harness.base, '/api/app/devices/register', {
+      method: 'POST',
+      body: JSON.stringify({ device_token: TOKEN, platform: 'desktop' }),
+    })
+    expect(res.status).toBe(400)
+    const line = harness.lines.find((l) => l.includes('event=device_register_rejected'))
+    expect(line).toBeDefined()
+    expect(line).toContain('reason=invalid_platform')
+  })
+
+  it('an unauthenticated attempt is logged — the app CALLING and being refused', async () => {
+    // This is the case the empty table could not be told apart from "the app
+    // never called at all", and the one an expired bearer produces.
+    const res = await fetch(`${harness.base}/api/app/devices/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_token: TOKEN, platform: 'ios' }),
+    })
+    expect(res.status).toBe(401)
+    const line = harness.lines.find((l) => l.includes('event=device_request_unauthorized'))
+    expect(line).toBeDefined()
+    expect(line).toContain('route=register')
+    expect(line).toContain('reason=missing_bearer')
+  })
+
+  it('a store failure is logged AND answered, instead of throwing into the void', async () => {
+    const exploding = {
+      register: async () => {
+        throw new Error('database is locked')
+      },
+    } as unknown as DevicePushTokenStore
+    const broken = await startGateway({ store: exploding })
+    try {
+      const res = await authedFetch(broken.base, '/api/app/devices/register', {
+        method: 'POST',
+        body: JSON.stringify({ device_token: TOKEN, platform: 'ios' }),
+      })
+      expect(res.status).toBe(500)
+      const json = (await res.json()) as { code: string }
+      expect(json.code).toBe('register_failed')
+      const line = broken.lines.find((l) => l.includes('event=device_register_failed'))
+      expect(line).toBeDefined()
+      expect(line).toContain('database is locked')
+    } finally {
+      await broken.close()
+    }
+  })
+
+  it('an unregister — how the table goes back to empty — is logged', async () => {
+    await authedFetch(harness.base, '/api/app/devices/register', {
+      method: 'POST',
+      body: JSON.stringify({ device_token: TOKEN, platform: 'ios' }),
+    })
+    const res = await authedFetch(harness.base, '/api/app/devices/unregister', {
+      method: 'POST',
+      body: JSON.stringify({ device_token: TOKEN }),
+    })
+    expect(res.status).toBe(200)
+    const line = harness.lines.find((l) => l.includes('event=device_unregistered'))
+    expect(line).toBeDefined()
+    expect(line).toMatch(/token_fp=[0-9a-f]{12}\b/)
+  })
+
+  it('an unregister for an unknown device is logged as a rejection', async () => {
+    const res = await authedFetch(harness.base, '/api/app/devices/unregister', {
+      method: 'POST',
+      body: JSON.stringify({ device_token: 'never-registered' }),
+    })
+    expect(res.status).toBe(404)
+    const line = harness.lines.find((l) => l.includes('event=device_unregister_rejected'))
+    expect(line).toBeDefined()
+    expect(line).toContain('reason=device_not_found')
+  })
+
+  // THE POINT OF THE CHANGE. A device push token is a credential: anyone
+  // holding it can push to the owner's phone. Observability that writes it to
+  // journald would trade one defect for a worse one.
+  it('NEVER writes the raw device token to the log, on any path', async () => {
+    const paths: Array<[string, unknown]> = [
+      ['/api/app/devices/register', { device_token: TOKEN, platform: 'ios' }],
+      ['/api/app/devices/register', { device_token: TOKEN, platform: 'desktop' }],
+      ['/api/app/devices/register', { device_token: TOKEN }],
+      ['/api/app/devices/unregister', { device_token: TOKEN }],
+      ['/api/app/devices/unregister', { device_token: `${TOKEN}-unknown` }],
+    ]
+    for (const [path, body] of paths) {
+      await authedFetch(harness.base, path, { method: 'POST', body: JSON.stringify(body) })
+    }
+    // Also the unauthenticated path, which never gets as far as a handler.
+    await fetch(`${harness.base}/api/app/devices/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ device_token: TOKEN, platform: 'ios' }),
+    })
+
+    expect(harness.lines.length).toBeGreaterThanOrEqual(6)
+    const all = harness.lines.join('\n')
+    expect(all).not.toContain(TOKEN)
+    // Not even a recognisable slice of it.
+    expect(all).not.toContain('SECRET-DEVICE-CREDENTIAL')
+    expect(all).not.toContain('ExponentPushToken')
   })
 })
 

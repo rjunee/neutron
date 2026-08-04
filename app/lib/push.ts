@@ -30,6 +30,7 @@ import * as Notifications from 'expo-notifications';
 
 import { DevicesClient, type DevicePlatform } from './devices-client';
 import { resolvePushRoute, type PushPayload } from './push-deep-link-dispatch';
+import { reportPushEnableOutcome } from './push-observability';
 import {
   pushTapDedupeStore,
   type PushTapDedupeStore,
@@ -129,13 +130,26 @@ export async function getExpoPushTokenForDevice(): Promise<PushEnableResult> {
  * record. Never throws — every failure (permission denied, network,
  * Expo error) is surfaced as `{ skipped: true, ... }` so login flows
  * stay healthy when push is unavailable.
+ *
+ * NOT-THROWING IS NOT THE SAME AS NOT-FAILING (ISSUES #487). Every exit
+ * from here — including the successful one — is recorded through
+ * `./push-observability`, which puts it in the diagnostics buffer and, for
+ * an actionable failure, queues a report for the owner's own gateway. The
+ * returned result is unchanged; callers that already branch on it keep
+ * working. This exists because the table of registered devices was found
+ * EMPTY on a live instance with no trace anywhere of why, and a result
+ * object nobody persists is indistinguishable from a call that never
+ * happened.
  */
 export async function enablePushForUser(input: {
   base_url: string;
   token: string;
 }): Promise<PushEnableResult & { registered?: boolean }> {
   const local = await getExpoPushTokenForDevice();
-  if (!local.ok) return local;
+  if (!local.ok) {
+    await reportPushEnableOutcome(local);
+    return local;
+  }
   // Foreground handler only needs to install once a device has any
   // chance of receiving a notification, so we defer it until past the
   // permission gate.
@@ -143,15 +157,19 @@ export async function enablePushForUser(input: {
   const client = new DevicesClient({ base_url: input.base_url, token: input.token });
   try {
     await client.registerToken(local.device_token, local.platform);
-    return { ...local, registered: true };
+    const registered = { ...local, registered: true };
+    await reportPushEnableOutcome(registered);
+    return registered;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    return {
+    const failed: PushEnableResult = {
       ok: false,
       skipped: true,
       reason: 'token_error',
       detail: `gateway register failed: ${detail}`,
     };
+    await reportPushEnableOutcome(failed);
+    return failed;
   }
 }
 

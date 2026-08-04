@@ -776,6 +776,19 @@ logcat` or an emulator. This closes the JS blind spot only.
 - **Manual push.** Settings → Diagnostics → "Send diagnostics" snapshots the
   current window and delivers everything queued, for "it is misbehaving right
   now" — which no automatic trigger can know about.
+- **A non-crash failure can file a report too (`app/lib/push-observability.ts`,
+  ISSUES #487).** Push registration is designed never to throw — it returns a
+  typed result — so a phone that silently stops receiving anything produces no
+  js_error, no rejection and no crash. The fifth `ReportReason`,
+  `push_registration_failed`, exists for exactly that shape: `enablePushForUser`
+  records EVERY outcome into the ring buffer and, for an actionable failure
+  (`permission_denied`, `no_project_id`, `token_error`) also captures a report,
+  so it travels. `unsupported_platform` — the web build, where native push does
+  not exist — is recorded but never escalated, or a browser session would bury
+  the real failures. The token itself is never recorded; a success carries the
+  platform and the token's LENGTH. Login calls this BEFORE `setUser`, so
+  `DiagnosticsSync` flushes the queued report on the same launch that produced
+  it.
 ## Login-first instance discovery — `app/lib/identity-client.ts`, `app/app/login.tsx`
 
 **The app opens on LOGIN and learns its own address.** Ryan: *"why does it have
