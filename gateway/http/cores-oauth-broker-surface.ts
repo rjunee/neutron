@@ -38,6 +38,9 @@
  * DEFENCES, and what each one is actually for:
  *   - register is HMAC-signed with a ±5 min timestamp, so only a real instance
  *     can plant a routing row;
+ *   - register is INSERT-ONLY / SAME-OWNER, so a row that exists can never
+ *     change hands: signature possession lets you create a registration, never
+ *     take one over (SPEC § Decisions Log 2026-08-04);
  *   - the row is SINGLE-USE and short-lived, so a replayed `state` finds nothing;
  *   - the relay is HMAC-signed too, so an instance's `/ingest` accepts the code
  *     only from its broker;
@@ -192,16 +195,56 @@ export function createCoresOAuthBroker(opts: CoresOAuthBrokerOptions): CoresOAut
             ? body.expires_at
             : now() + DEFAULT_TTL_MS
         sweep()
+        // INSERT-ONLY / SAME-OWNER (SPEC § Decisions Log 2026-08-04).
+        //
+        // This clause used to overwrite `project_slug` as well as `dispatch_url`,
+        // which handed any holder of the shared secret who learned another
+        // instance's `state` a REPOINT primitive: re-register that state with
+        // your own slug and your own dispatch_url, and the row — owner and
+        // callback target both — became yours. PKCE meant the relayed code was
+        // unexchangeable by the thief (`cores-oauth-surface.ts:370` mints the
+        // verifier, `:371-377` persists it in the LOCAL pending store only and
+        // nowhere else), so the payoff was denial
+        // of one in-flight grant rather than credential theft. That is a reason
+        // the blast radius was small, not a reason to keep the primitive.
+        //
+        // The `WHERE` is what removes it: on a conflict the row is updated only
+        // while the stored owner equals the incoming one, so an existing
+        // registration can never change hands. `project_slug` is dropped from
+        // the SET for the same reason — under this guard the two values are
+        // already equal, and not writing the column at all is the stronger
+        // statement.
+        //
+        // Retry idempotency, which is why the upsert exists, is untouched: a
+        // legitimate retry re-registers the SAME state for the SAME slug and
+        // still refreshes its dispatch_url and expiry. An honest re-start always
+        // mints a fresh 192-bit random state (`cores-oauth-surface.ts:369`), so
+        // a cross-owner collision never happens legitimately — which is why
+        // rejecting one costs nothing and a self-host, having exactly one owner,
+        // can never trip it.
         await db.run(
           `INSERT INTO cores_oauth_broker_pending
              (state, project_slug, dispatch_url, expires_at, created_at)
            VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(state) DO UPDATE SET
-             project_slug = excluded.project_slug,
              dispatch_url = excluded.dispatch_url,
-             expires_at   = excluded.expires_at`,
+             expires_at   = excluded.expires_at
+           WHERE cores_oauth_broker_pending.project_slug = excluded.project_slug`,
           [state, project_slug, dispatch_url, expires_at, now()],
         )
+        // The guard above makes the mismatch a silent no-op at the SQL level, so
+        // the caller is told by reading back what actually stands. Answering 200
+        // to a registration that was refused would be the worse failure: the
+        // instance would send its owner to Google against a state the broker
+        // will never route.
+        const stored = db.get<{ project_slug: string }>(
+          'SELECT project_slug FROM cores_oauth_broker_pending WHERE state = ?',
+          [state],
+        )
+        if (stored === null || stored.project_slug !== project_slug) {
+          log({ kind: 'cores_oauth_broker_register_owner_mismatch', project_slug })
+          return jsonResponse(409, { ok: false, code: 'state_owner_mismatch' })
+        }
         log({ kind: 'cores_oauth_broker_registered', project_slug })
         return jsonResponse(200, { ok: true })
       }

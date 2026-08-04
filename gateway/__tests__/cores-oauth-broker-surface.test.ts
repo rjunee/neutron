@@ -16,6 +16,19 @@
  * the broker sent, and then verifies that payload's signature with the same
  * verifier `/ingest` itself uses. The stub is the assertion target, not a
  * stand-in for the code under test.
+ *
+ * INSERT-ONLY / SAME-OWNER REGISTER (SPEC § Decisions Log 2026-08-04). Two of
+ * the tests below cover the guard that stops a holder of the shared secret from
+ * taking an existing routing row over, and they are written to fail in BOTH
+ * directions — a rejection that nevertheless wrote is not a rejection, and a
+ * guard that also refuses honest retries has broken the reason the upsert
+ * exists. Verified by making each change and re-running:
+ *   - restore `project_slug = excluded.project_slug` to the conflict clause →
+ *     "a DIFFERENT owner cannot take an existing state over" reds (409 → 200).
+ *   - over-tighten to `ON CONFLICT(state) DO NOTHING` → "a SAME-OWNER retry
+ *     still succeeds" reds (the stored dispatch_url never refreshes).
+ *   - over-tighten further so any conflict is refused → the same retry test reds
+ *     (200 → 409).
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -283,6 +296,76 @@ test('the broker runs on a RAW bun:sqlite handle too — the cross-deployment cl
   )
   expect(cb?.status).toBe(200)
   expect(JSON.parse(relays.at(-1)!.body)).toEqual({ code: 'raw-code', state: 'raw-state' })
+})
+
+/** Read the stored routing row straight out of the table, bypassing the broker
+ *  — a rejection that nevertheless WROTE must fail these tests, and only the row
+ *  itself can prove it did not. */
+function storedRow(state: string): { project_slug: string; dispatch_url: string } | null {
+  return db.get<{ project_slug: string; dispatch_url: string }>(
+    'SELECT project_slug, dispatch_url FROM cores_oauth_broker_pending WHERE state = ?',
+    [state],
+  )
+}
+
+test('a SAME-OWNER retry still succeeds and refreshes the row — idempotency is why the upsert exists', async () => {
+  expect((await register()).status).toBe(200)
+
+  // The legitimate retry: same state, same slug, a dispatch_url that moved (the
+  // instance's declared origin changed between attempts) and a later expiry.
+  const retry = await register({
+    dispatch_url: 'https://owner.example.com/api/cores/oauth/google/ingest?v=2',
+    expires_at: clock + 900_000,
+  })
+  expect(retry.status).toBe(200)
+  expect(((await retry.json()) as { ok: boolean }).ok).toBe(true)
+  expect(storedRow('state-1')).toEqual({
+    project_slug: OWNER,
+    dispatch_url: 'https://owner.example.com/api/cores/oauth/google/ingest?v=2',
+  })
+
+  // And the refreshed row still routes: over-tightening the guard so a
+  // legitimate retry stops registering shows up here as a dead callback.
+  expect((await callback('code=c-retry&state=state-1')).status).toBe(200)
+  expect(relays).toHaveLength(1)
+  expect(relays[0]!.url).toBe('https://owner.example.com/api/cores/oauth/google/ingest?v=2')
+})
+
+test('a DIFFERENT owner cannot take an existing state over — the row is not mutated at all', async () => {
+  expect((await register()).status).toBe(200)
+
+  // The attack the insert-only guard exists to kill: a holder of the shared
+  // secret who has learned somebody else's `state` re-registers it under their
+  // own slug, pointing the callback at a host they control.
+  const stolen = await register({
+    project_slug: 'other-owner',
+    dispatch_url: 'https://attacker.example.com/api/cores/oauth/google/ingest',
+  })
+  expect(stolen.status).toBe(409)
+  expect((await stolen.json()) as { ok: boolean; code: string }).toEqual({
+    ok: false,
+    code: 'state_owner_mismatch',
+  })
+
+  // THE LOAD-BEARING ASSERTION. A 409 that still wrote is not a rejection — it
+  // is the same takeover with a worse status code. Both columns must be
+  // untouched, which is what restoring the blind upsert breaks.
+  expect(storedRow('state-1')).toEqual({ project_slug: OWNER, dispatch_url: DISPATCH })
+
+  // And the original owner's grant still completes, to its OWN ingest.
+  expect((await callback('code=c1&state=state-1')).status).toBe(200)
+  expect(relays).toHaveLength(1)
+  expect(relays[0]!.url).toBe(DISPATCH)
+})
+
+test('an EXPIRED row does not block a later registration of the same state', async () => {
+  // The sweep runs before the insert, so a dead row is gone rather than standing
+  // as a permanent tombstone that would refuse every future state collision.
+  await register({ project_slug: 'first-owner', expires_at: clock + 1_000 })
+  clock += 60_000
+  const later = await register({ project_slug: 'second-owner' })
+  expect(later.status).toBe(200)
+  expect(storedRow('state-1')?.project_slug).toBe('second-owner')
 })
 
 test('the co-located secret is stable, unguessable, and not the key itself', () => {
