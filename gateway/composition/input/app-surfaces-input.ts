@@ -339,8 +339,12 @@ export interface AppSurfacesCompositionInput {
   }
   /**
    * Per-project credential CRUD (Settings tab, FOUNDATION). Owns
-   * `/api/app/projects/<id>/credentials[/<service>]`. Dispatches the SAME
-   * `ProjectCredentialStore` the resolver + per-turn awareness injection use.
+   * `/api/app/projects/<id>/credentials[/<service>]`, the global family
+   * `/api/app/credentials[/<service>]`, and the per-project connected-account
+   * selection `/api/app/projects/<id>/accounts` (#500 — GET the view, PUT one
+   * toggle). Dispatches the SAME `ProjectCredentialStore` the resolver +
+   * per-turn awareness injection use, and the SAME `CoreCredentialResolver` the
+   * Cores read accounts through.
    * Surface factory:
    * `gateway/http/project-credentials-surface.ts:createProjectCredentialsSurface`.
    */

@@ -151,6 +151,10 @@ export const SCOPE_SWEEP_COLUMNS: readonly ScopedColumn[] = [
   { table: 'profile_pic_pending', column: 'project_slug' },
   // Same axis under a different name: the owner boundary on stored credentials.
   { table: 'project_credentials', column: 'owner_slug' },
+  // Same owner boundary again, on the per-project connected-account selection
+  // (#500). Stranding these on a rename would silently re-enable accounts a
+  // project had turned off — a privacy regression, not just lost data.
+  { table: 'project_account_selection', column: 'owner_slug' },
   { table: 'project_launcher_entries', column: 'project_slug' },
   { table: 'reminders', column: 'project_slug' },
   { table: 'sean_ellis_responses', column: 'project_slug' },

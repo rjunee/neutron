@@ -540,7 +540,9 @@ export const ROUTE_SLOTS = [
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
   // 0h1c. Per-project credential CRUD (Settings tab) —
-  //       `/api/app/projects/<id>/credentials[/<service>]`.
+  //       `/api/app/projects/<id>/credentials[/<service>]`, the global family
+  //       `/api/app/credentials[/<service>]`, and the per-project
+  //       connected-account selection `/api/app/projects/<id>/accounts` (#500).
   slot({
     key: 'appProjectCredentials',
     rung: 'app-project-credentials',

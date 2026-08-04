@@ -95,6 +95,32 @@ interface SetResponse {
   project_id: string
 }
 
+/* ─── per-project connected-account selection (#500) ─── */
+
+/**
+ * One connected account as the project Settings toggles address it. `label` is
+ * HUMANISED server-side (the address, or plain English when there is none) —
+ * `account_id` is a hex digest and must never be rendered.
+ */
+export interface AccountSelectionEntry {
+  account_id: string
+  label: string
+  account_email: string | null
+  enabled: boolean
+}
+
+/** One selectable service and every account connected for it. */
+export interface ServiceAccountSelection {
+  service: string
+  accounts: AccountSelectionEntry[]
+}
+
+interface AccountSelectionResponse {
+  ok: boolean
+  project_id: string
+  services: ServiceAccountSelection[]
+}
+
 /** The list split by scope, as the Settings tab renders it. */
 export interface CredentialList {
   project: Rec[]
@@ -154,5 +180,29 @@ export class WebProjectCredentialsClient extends GatewayHttpClient {
   async removeGlobal(service: string): Promise<void> {
     const path = `/api/app/credentials/${encodeURIComponent(service)}`
     await this.req<{ ok: boolean; deleted: string; scope: CredentialScope }>(path, { method: 'DELETE' })
+  }
+
+  /**
+   * Which connected accounts THIS project reads (#500). Connecting stays
+   * global — this only narrows what an already-connected account is used for.
+   */
+  async listAccounts(project_id: string): Promise<ServiceAccountSelection[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/accounts`
+    const res = await this.req<AccountSelectionResponse>(path)
+    return res.services ?? []
+  }
+
+  /**
+   * Turn one account on or off for THIS project. Returns the WHOLE refreshed
+   * view the server computed, so the caller renders from the server's truth
+   * rather than patching a local copy that can drift from it.
+   */
+  async setAccountEnabled(
+    project_id: string,
+    input: { service: string; account_id: string; enabled: boolean },
+  ): Promise<ServiceAccountSelection[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/accounts`
+    const res = await this.req<AccountSelectionResponse>(path, { method: 'PUT', body: input })
+    return res.services ?? []
   }
 }

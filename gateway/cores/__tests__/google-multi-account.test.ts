@@ -30,6 +30,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { OAUTH_SECRET_LABEL as CALENDAR_LABEL } from '@neutronai/calendar-core'
 import { OAUTH_SECRET_LABEL as EMAIL_LABEL } from '@neutronai/email-managed-core'
 
@@ -59,6 +60,7 @@ interface Bench {
   owner_home: string
   secretsStore: SecretsStore
   projectCredentialStore: ProjectCredentialStore
+  projectAccountSelectionStore: ProjectAccountSelectionStore
 }
 
 function makeBench(): Bench {
@@ -72,7 +74,8 @@ function makeBench(): Bench {
   cleanups.push(() => db.close())
   const secretsStore = new SecretsStore({ data_dir: owner_home, db })
   const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
-  return { db, owner_home, secretsStore, projectCredentialStore }
+  const projectAccountSelectionStore = new ProjectAccountSelectionStore(db)
+  return { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore }
 }
 
 /**
@@ -230,6 +233,7 @@ test('UPGRADE PATH — a pre-existing un-keyed grant keeps working with no migra
     owner_slug: OWNER,
     store: bench.projectCredentialStore,
     oauthTokens: tokens,
+    accountSelection: bench.projectAccountSelectionStore,
   })
   const accounts = await resolver.accountsFor(CALENDAR_LABEL)
   expect(accounts).toHaveLength(1)
@@ -291,6 +295,7 @@ test('UPGRADE PATH — an ANONYMOUS un-keyed grant (ISSUES #494) still resolves 
     owner_slug: OWNER,
     store: bench.projectCredentialStore,
     oauthTokens: tokens,
+    accountSelection: bench.projectAccountSelectionStore,
   })
   const accounts = await resolver.accountsFor(CALENDAR_LABEL)
   expect(accounts).toHaveLength(1)
@@ -495,6 +500,7 @@ async function mount(bench: Bench) {
     project_slug: OWNER,
     secretsStore: bench.secretsStore,
     projectCredentialStore: bench.projectCredentialStore,
+    projectAccountSelectionStore: bench.projectAccountSelectionStore,
     env: { [GOOGLE_CLIENT_ID_ENV]: 'test-client-id' },
     substrate: null,
   })

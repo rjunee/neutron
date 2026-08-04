@@ -18,6 +18,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import { installBundledCores } from '../install-bundled.ts'
 import { mountOpenCores, GOOGLE_CLIENT_ID_ENV } from '../mount-open-cores.ts'
@@ -35,6 +36,7 @@ function makeBench(env: NodeJS.ProcessEnv = {}): {
   owner_home: string
   secretsStore: SecretsStore
   projectCredentialStore: ProjectCredentialStore
+  projectAccountSelectionStore: ProjectAccountSelectionStore
   env: NodeJS.ProcessEnv
 } {
   const owner_home = mkdtempSync(join(tmpdir(), 'mount-open-cores-'))
@@ -47,17 +49,19 @@ function makeBench(env: NodeJS.ProcessEnv = {}): {
   cleanups.push(() => db.close())
   const secretsStore = new SecretsStore({ data_dir: owner_home, db })
   const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
-  return { db, owner_home, secretsStore, projectCredentialStore, env }
+  const projectAccountSelectionStore = new ProjectAccountSelectionStore(db)
+  return { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore, env }
 }
 
 test('composes the bundled free-Core backend factory map (Calendar/Email/Google + siblings)', async () => {
-  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore, env } = makeBench()
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
     projectCredentialStore,
+    projectAccountSelectionStore,
     env,
     substrate: null,
   })
@@ -81,7 +85,7 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
     '@neutronai/agent-settings'
   )
   const { buildOpenAgentProfileBackend } = await import('@neutronai/open/agent-profile-backend.ts')
-  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore, env } = makeBench()
   const reloads: string[] = []
   const mounted = await mountOpenCores({
     projectDb: db,
@@ -89,6 +93,7 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
     project_slug: OWNER,
     secretsStore,
     projectCredentialStore,
+    projectAccountSelectionStore,
     env,
     substrate: null,
     // L3 — the agent-profile backend is now INJECTED (built by the composer),
@@ -130,13 +135,14 @@ test('agent_settings is threaded with a LIVE profile (update_agent_name persists
 })
 
 test('chains the free-Core chat-command filters — /cal and /email are ROUTED', async () => {
-  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore, env } = makeBench()
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
     projectCredentialStore,
+    projectAccountSelectionStore,
     env,
     substrate: null,
   })
@@ -171,13 +177,14 @@ test('chains the free-Core chat-command filters — /cal and /email are ROUTED',
 })
 
 test('optional-until-credentialed: zero creds → in-memory clients, composes, never throws', async () => {
-  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench() // env has no Google client id
+  const { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore, env } = makeBench() // env has no Google client id
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
     projectCredentialStore,
+    projectAccountSelectionStore,
     env,
     substrate: null,
   })
@@ -200,13 +207,14 @@ test('exposes the live calendarClient + gmailClient (M2-1: the scribe fan-out ar
   // the Cores→scribe memory fan-out with the real clients (not the disconnected
   // in-memory stand-ins the fan-out fell back to pre-M2-1). Zero creds → the
   // in-memory fallbacks are exposed and are usable.
-  const { db, owner_home, secretsStore, projectCredentialStore, env } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore, env } = makeBench()
   const mounted = await mountOpenCores({
     projectDb: db,
     owner_home,
     project_slug: OWNER,
     secretsStore,
     projectCredentialStore,
+    projectAccountSelectionStore,
     env,
     substrate: null,
   })
@@ -235,6 +243,7 @@ test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth 
     project_slug: OWNER,
     secretsStore: a.secretsStore,
     projectCredentialStore: a.projectCredentialStore,
+    projectAccountSelectionStore: a.projectAccountSelectionStore,
     env: a.env,
     substrate: null,
   })
@@ -268,6 +277,7 @@ test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth 
     project_slug: OWNER,
     secretsStore: b.secretsStore,
     projectCredentialStore: b.projectCredentialStore,
+    projectAccountSelectionStore: b.projectAccountSelectionStore,
     env: b.env,
     substrate: null,
   })
@@ -286,7 +296,7 @@ test('install layer: Google Cores are HIDDEN with no grant, LIVE once the OAuth 
 })
 
 test('with Google OAuth client configured → oauthConfigured flips true (live-cred path)', async () => {
-  const { db, owner_home, secretsStore, projectCredentialStore } = makeBench()
+  const { db, owner_home, secretsStore, projectCredentialStore, projectAccountSelectionStore } = makeBench()
   const env: NodeJS.ProcessEnv = {
     [GOOGLE_CLIENT_ID_ENV]: 'test-client-id.apps.googleusercontent.com',
     NEUTRON_CORES_GOOGLE_CLIENT_SECRET: 'test-secret',
@@ -297,6 +307,7 @@ test('with Google OAuth client configured → oauthConfigured flips true (live-c
     project_slug: OWNER,
     secretsStore,
     projectCredentialStore,
+    projectAccountSelectionStore,
     env,
     substrate: null,
   })

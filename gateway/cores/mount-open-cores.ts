@@ -54,6 +54,7 @@ import type { ChatCommandFilter } from '../http/app-ws-surface.ts'
 import { OAuthTokenManager } from './oauth-token-manager.ts'
 import { CoreCredentialResolver } from './core-credential-resolver.ts'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import type { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import type { TaskStore as TaskStoreType } from '@neutronai/tasks/store.ts'
 import type { TasksCoreOwnerRegistry } from '../boot-cores-factories-types.ts'
 import { buildCalendarCacheResolver } from './calendar-wiring.ts'
@@ -129,6 +130,14 @@ export interface MountOpenCoresInput {
    * global. Required — the resolver is THE path (no flag, no legacy dual path).
    */
   projectCredentialStore: ProjectCredentialStore
+  /**
+   * The per-project connected-account SELECTION store (#500) — the ONE instance
+   * shared with the Settings surface that writes it. Rows are DISABLES, so a
+   * project that has never been configured has none and reads every connected
+   * account, exactly as it did before this existed. Required for the same
+   * reason `projectCredentialStore` is: the filter is THE path, not a flag.
+   */
+  projectAccountSelectionStore: ProjectAccountSelectionStore
   /** Process env (Google OAuth client config). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv
   /**
@@ -194,6 +203,14 @@ export interface MountedOpenCores {
    * the `/email` filter use. Exposed for the same scribe fan-out arming.
    */
   readonly gmailClient: GmailClient
+  /**
+   * The ONE credential resolver every Core reads through — exposed so the
+   * per-project Settings surface renders its account-selection view from the
+   * SAME seam the Cores resolve against (#500). Reading the selection from a
+   * second enumeration is how a settings screen drifts from the behaviour it
+   * claims to control.
+   */
+  readonly credentialResolver: CoreCredentialResolver
   /** Close the per-Core cache/sidecar handles. Register on `realmode_cleanups`. */
   cleanup(): void
 }
@@ -288,6 +305,7 @@ export async function mountOpenCores(
     owner_slug: ownerHandle,
     store: input.projectCredentialStore,
     oauthTokens,
+    accountSelection: input.projectAccountSelectionStore,
   })
 
   // ── Shared per-Core backends (one instance → MCP tools AND chat filter) ─────
@@ -448,6 +466,7 @@ export async function mountOpenCores(
     oauthConfigured,
     calendarClient,
     gmailClient,
+    credentialResolver,
     cleanup(): void {
       try {
         calendarCache.closeAll()

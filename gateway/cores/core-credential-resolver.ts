@@ -34,10 +34,20 @@
  * write path and a single-account service want. Keeping one primitive means
  * "which accounts are connected" is answered in one place, and the resolution
  * ORDER above holds identically whether you ask for one account or all of them.
+ *
+ * ── PER-PROJECT ACCOUNT SELECTION (ISSUES #500) ────────────────────────────────
+ * CONNECTING stays global — one consent, one refresh token, one thing to rotate.
+ * SELECTION is per-project: `accountsFor` filters the connected set through
+ * `project_account_selection` before returning it, so a work project can stop
+ * sweeping a personal mailbox without disconnecting anything. Because this is
+ * the primitive, every Core inherits it; no Core implements its own filter.
+ * Rows are DISABLES, so an unconfigured project sees everything (unchanged
+ * behaviour) and a newly connected account is visible in every project.
  */
 
 import type { OAuthTokenManager } from './oauth-token-manager.ts'
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import type { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import { currentActiveProjectId } from './active-project-context.ts'
 
@@ -71,10 +81,58 @@ export function scopeForService(service: string): ServiceScope {
   return SERVICE_SCOPE[service] ?? 'project'
 }
 
+/**
+ * The services a project can narrow its account selection over (#500) — the
+ * services an owner can hold MORE THAN ONE account for. Ordered for display.
+ * A single-account service has nothing to choose between, so listing it would
+ * be a toggle whose only setting is "break this project".
+ */
+export const SELECTABLE_ACCOUNT_SERVICES: readonly string[] = [
+  'google_calendar',
+  'gmail_compose',
+  'google_workspace',
+]
+
 /** `account_id` for a manually-pasted `project_credentials` token. */
 export const MANUAL_ACCOUNT_ID = 'manual' as const
 /** `account_id` for a legacy un-keyed OAuth grant (pre-multi-account install). */
 export const LEGACY_ACCOUNT_ID = 'default' as const
+
+/**
+ * One account as the per-project Settings surface shows it: the id the toggle
+ * addresses, a HUMANISED label (never the raw hex account key), and whether
+ * this project currently reads it.
+ */
+export interface AccountSelectionEntry {
+  account_id: string
+  /** The address when known; a plain-English stand-in when it is not. */
+  label: string
+  account_email: string | null
+  enabled: boolean
+}
+
+/** One selectable service and every account connected for it. */
+export interface ServiceAccountSelection {
+  service: string
+  accounts: AccountSelectionEntry[]
+}
+
+/**
+ * A humanised name for an account. `account_id` is a SHA-256 prefix
+ * (`accountKeyFromEmail`), so it must never reach the owner's screen; the
+ * address is what he recognises. The two id sentinels get plain English instead
+ * of a digest: a legacy un-keyed grant predates account addresses, and a
+ * manually-pasted token never had one.
+ */
+export function humaniseAccount(account: {
+  account_id: string
+  account_email: string | null
+}): string {
+  const email = (account.account_email ?? '').trim()
+  if (email.length > 0) return email
+  if (account.account_id === MANUAL_ACCOUNT_ID) return 'Pasted token'
+  return 'Connected account'
+}
 
 /**
  * One connected account, as a Core consumes it: an id to tag results with, the
@@ -105,6 +163,13 @@ export interface CoreCredentialResolverInput {
    * then only `project_credentials` can supply a token.
    */
   oauthTokens: OAuthTokenManager | null
+  /**
+   * The per-project connected-account SELECTION (ISSUES #500). Rows are
+   * DISABLES, so an unconfigured project has none and sees every account —
+   * the pre-#500 behaviour — and a newly connected account is visible
+   * everywhere until a project explicitly turns it off.
+   */
+  accountSelection: ProjectAccountSelectionStore
 }
 
 /**
@@ -115,25 +180,100 @@ export class CoreCredentialResolver {
   private readonly owner_slug: OwnerHandle
   private readonly store: ProjectCredentialStore
   private readonly oauthTokens: OAuthTokenManager | null
+  private readonly accountSelection: ProjectAccountSelectionStore
 
   constructor(input: CoreCredentialResolverInput) {
     this.owner_slug = input.owner_slug
     this.store = input.store
     this.oauthTokens = input.oauthTokens
+    this.accountSelection = input.accountSelection
   }
 
   /**
-   * EVERY connected account for `service`, primary first, each carrying its own
-   * lazy token accessor. Same resolution order as `resolve`; the active project
-   * id is read from the ambient `runWithActiveProject` frame unless
-   * `opts.projectId` overrides it. GLOBAL-scope services ignore it entirely.
+   * EVERY connected account for `service` that THIS project reads, primary
+   * first, each carrying its own lazy token accessor.
+   *
+   * Two different project questions are answered here, and conflating them is
+   * the bug this shape exists to prevent:
+   *
+   *   1. WHICH CREDENTIAL STORE supplies the material — `connectedAccountsFor`
+   *      below, governed by `SERVICE_SCOPE`. Email/Calendar are forced GLOBAL
+   *      so a stray per-project row can never shadow the shared grant.
+   *   2. WHICH OF THE CONNECTED ACCOUNTS this project may read — the filter
+   *      here, governed by `project_account_selection`. This uses the REAL
+   *      active project id even for GLOBAL-scope services, because
+   *      Email/Calendar are precisely the services an owner connects several
+   *      accounts to and wants narrowed per project. Forcing the global
+   *      sentinel here would make the feature a no-op for the only services
+   *      that need it.
+   *
+   * Enforced at THIS seam, not per-Core: `accountsFor` is the primitive every
+   * Core reads through (`accountsResolverFor` wraps it, `resolve` narrows it),
+   * so every consumer honours the selection automatically and none can drift.
+   *
+   * Unset means enabled — see `ProjectAccountSelectionStore`. A blank project id
+   * (General topic, cron, system dispatch) has no selection and filters nothing.
+   */
+  async accountsFor(
+    service: string,
+    opts?: { projectId?: string },
+  ): Promise<ResolvedAccount[]> {
+    const accounts = await this.connectedAccountsFor(service, opts)
+    const disabled = this.accountSelection.disabledAccountIds(
+      this.owner_slug,
+      opts?.projectId ?? currentActiveProjectId(),
+      service,
+    )
+    return accounts.filter((account) => !disabled.has(account.account_id))
+  }
+
+  /**
+   * The per-project Settings read model (#500): every SELECTABLE service, every
+   * account connected for it, and whether `projectId` currently reads it.
+   *
+   * Built from the SAME `connectedAccountsFor` + `disabledAccountIds` pair
+   * `accountsFor` filters with, so what the owner toggles is definitionally what
+   * the Cores read — a second enumeration here is exactly how a settings screen
+   * drifts from the behaviour it claims to control.
+   *
+   * A service with no connected account yields an empty `accounts` array rather
+   * than being dropped, so the surface can say "nothing connected" for it
+   * instead of silently omitting a service the owner is looking for.
+   */
+  async accountSelectionView(projectId: string): Promise<ServiceAccountSelection[]> {
+    const out: ServiceAccountSelection[] = []
+    for (const service of SELECTABLE_ACCOUNT_SERVICES) {
+      const connected = await this.connectedAccountsFor(service, { projectId })
+      const disabled = this.accountSelection.disabledAccountIds(
+        this.owner_slug,
+        projectId,
+        service,
+      )
+      out.push({
+        service,
+        accounts: connected.map((account) => ({
+          account_id: account.account_id,
+          label: humaniseAccount(account),
+          account_email: account.account_email,
+          enabled: !disabled.has(account.account_id),
+        })),
+      })
+    }
+    return out
+  }
+
+  /**
+   * Every account CONNECTED for `service`, before the per-project selection is
+   * applied. The active project id is read from the ambient
+   * `runWithActiveProject` frame unless `opts.projectId` overrides it;
+   * GLOBAL-scope services ignore it entirely.
    *
    * A per-project / global `project_credentials` row is a MANUALLY supplied
    * token for one account, so it yields exactly one account and short-circuits
    * the OAuth grants — the same precedence `resolve` has always had, just
    * expressed once.
    */
-  async accountsFor(
+  private async connectedAccountsFor(
     service: string,
     opts?: { projectId?: string },
   ): Promise<ResolvedAccount[]> {

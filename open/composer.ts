@@ -422,6 +422,7 @@ import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
@@ -1368,6 +1369,13 @@ export function buildOpenGraphComposer(
     // `.neutron-aes-key` keyfile). Constructed HERE (before mountOpenCores) so the
     // Cores' credential accessors can bind to it.
     const projectCredentialStore = new ProjectCredentialStore(db, { crypto: secretsStore })
+    // Per-project connected-account SELECTION (#500) — the ONE instance shared by
+    // the Cores' credential resolver (which FILTERS through it) and the Settings
+    // surface (which WRITES it). Holds no secret material: connecting stays
+    // global, only which of the already-connected accounts a project reads is
+    // per-project. Rows are DISABLES, so an install that never touches Settings
+    // behaves exactly as it did before this store existed.
+    const projectAccountSelectionStore = new ProjectAccountSelectionStore(db)
 
     // ── Cores Google OAuth: the grant flow, and this instance as its own broker ─
     // ISSUES #448. Both halves are gated on the SAME per-deployment client pair,
@@ -1523,6 +1531,7 @@ export function buildOpenGraphComposer(
       project_slug,
       secretsStore,
       projectCredentialStore,
+      projectAccountSelectionStore,
       env,
       substrate: coresSubstrate,
       // Plan task 8 — late-bound getter so the reminders-Core `rituals_propose` /
@@ -3807,6 +3816,10 @@ export function buildOpenGraphComposer(
     const projectCredentialsSurface = createProjectCredentialsSurface({
       store: projectCredentialStore,
       auth: appOwnerAuth,
+      accountSelection: projectAccountSelectionStore,
+      // The SAME resolver the Cores read through, so the toggles the owner sees
+      // are definitionally the accounts his projects sweep (#500).
+      credentialResolver: coresWiring.credentialResolver,
     })
     // Part B — the admin-panel "Connect Codex" surface
     // (`/api/app/projects/<id>/codex-auth`), same bearer auth as the credentials

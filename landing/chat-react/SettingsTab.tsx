@@ -35,7 +35,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BootstrapConfig } from './config.ts'
-import { WebProjectCredentialsClient, type Rec } from './project-credentials-client.ts'
+import {
+  WebProjectCredentialsClient,
+  type Rec,
+  type ServiceAccountSelection,
+} from './project-credentials-client.ts'
+import { oauthServiceTitle } from './integrations-oauth-view.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
 import {
   WebVoiceTranscriptionClient,
@@ -126,6 +131,16 @@ export function SettingsTab({
 
   // Per-row delete guard so a double-click can't fire two deletes.
   const [busyKey, setBusyKey] = useState<string | null>(null)
+
+  // ── connected accounts this project reads (#500) ──
+  // Rows come from the server ALREADY joined with the live grants, so an
+  // account connected after this tab loaded shows up on the next load rather
+  // than being inferred here from a stale local list.
+  const [accountServices, setAccountServices] = useState<ServiceAccountSelection[]>([])
+  const [accountsLoading, setAccountsLoading] = useState(true)
+  const [accountsError, setAccountsError] = useState<string | null>(null)
+  // Per-toggle guard, keyed `<service>:<account_id>`.
+  const [accountBusyKey, setAccountBusyKey] = useState<string | null>(null)
 
   // ── codex connect (Part B) ──
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null)
@@ -363,6 +378,45 @@ export function SettingsTab({
       })
   }, [client, projectId])
 
+  const loadAccounts = useCallback((): void => {
+    setAccountsLoading(true)
+    setAccountsError(null)
+    void client
+      .listAccounts(projectId)
+      .then((services) => {
+        if (!mountedRef.current) return
+        setAccountServices(services)
+        setAccountsLoading(false)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        setAccountServices([])
+        setAccountsLoading(false)
+        setAccountsError(err instanceof Error ? err.message : 'failed to load connected accounts')
+      })
+  }, [client, projectId])
+
+  const toggleAccount = useCallback(
+    (service: string, account_id: string, enabled: boolean): void => {
+      const key = `${service}:${account_id}`
+      setAccountBusyKey(key)
+      setAccountsError(null)
+      void client
+        .setAccountEnabled(projectId, { service, account_id, enabled })
+        .then((services) => {
+          if (!mountedRef.current) return
+          setAccountServices(services)
+          setAccountBusyKey(null)
+        })
+        .catch((err: unknown) => {
+          if (!mountedRef.current) return
+          setAccountBusyKey(null)
+          setAccountsError(err instanceof Error ? err.message : 'failed to update account')
+        })
+    },
+    [client, projectId],
+  )
+
   const loadSettings = useCallback((): void => {
     setNameLoaded(false)
     void doFetch(`${config.origin}/api/app/projects/${encodeURIComponent(projectId)}/settings`, {
@@ -416,11 +470,15 @@ export function SettingsTab({
     setArchived(false)
     setArchiveError(null)
     setMembers([])
+    setAccountServices([])
+    setAccountBusyKey(null)
+    setAccountsError(null)
     loadCreds()
+    loadAccounts()
     loadSettings()
     loadCodex()
     loadAsr()
-  }, [loadCreds, loadSettings, loadCodex, loadAsr, projectId])
+  }, [loadCreds, loadAccounts, loadSettings, loadCodex, loadAsr, projectId])
 
   const addCredential = useCallback((): void => {
     const svc = service.trim()
@@ -655,6 +713,70 @@ export function SettingsTab({
             </button>
           </div>
         </form>
+      </section>
+
+      {/* ── Connected accounts this project reads (ISSUES #500) ──────────────
+          CONNECTING an account is global and lives in General → Admin. This
+          only narrows which of the already-connected accounts THIS project
+          sweeps, so a work project stops reading a personal mailbox without
+          anything being disconnected or re-consented. ── */}
+      <section className="cset-section" aria-label="Connected accounts">
+        <h2 className="cset-h">Connected accounts</h2>
+        <p className="cset-sub">
+          Which of your connected accounts this project reads. Turning one off here
+          changes <strong>this project only</strong> — nothing is disconnected, and the
+          account keeps working everywhere else. Accounts are connected once in{' '}
+          <strong>General → Admin</strong>, and a newly connected account is on
+          everywhere until you turn it off.
+        </p>
+
+        {accountsError !== null ? <div className="cset-error">{accountsError}</div> : null}
+
+        {accountsLoading ? (
+          <div className="cset-empty">Loading…</div>
+        ) : accountServices.every((svc) => svc.accounts.length === 0) ? (
+          <div className="cset-empty">
+            No accounts connected yet. Connect one in General → Admin.
+          </div>
+        ) : (
+          accountServices
+            .filter((svc) => svc.accounts.length > 0)
+            .map((svc) => (
+              <div className="cset-acct-group" key={svc.service} data-service={svc.service}>
+                <h3 className="cset-acct-service">{oauthServiceTitle(svc.service)}</h3>
+                {/* Every account off is a legitimate "this project doesn't use
+                    it" choice — but it must READ as off, not as broken. */}
+                {svc.accounts.every((a) => !a.enabled) ? (
+                  <div className="cset-acct-off" data-testid={`accounts-off-${svc.service}`}>
+                    Off for this project — {oauthServiceTitle(svc.service)} is not read here.
+                  </div>
+                ) : null}
+                <ul className="cset-acct-ul" aria-label={`${oauthServiceTitle(svc.service)} accounts`}>
+                  {svc.accounts.map((acct) => {
+                    const key = `${svc.service}:${acct.account_id}`
+                    return (
+                      <li className="cset-acct-row" key={key} data-account-enabled={acct.enabled}>
+                        <label className="cset-acct-label">
+                          <input
+                            type="checkbox"
+                            className="cset-acct-toggle"
+                            checked={acct.enabled}
+                            disabled={accountBusyKey === key}
+                            onChange={() =>
+                              toggleAccount(svc.service, acct.account_id, !acct.enabled)
+                            }
+                          />
+                          {/* `label` is humanised server-side — account_id is a
+                              hex digest and never reaches the screen. */}
+                          <span className="cset-acct-name">{acct.label}</span>
+                        </label>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            ))
+        )}
       </section>
 
       {/* ── Codex review OVERRIDE (optional — the primary/global connect lives

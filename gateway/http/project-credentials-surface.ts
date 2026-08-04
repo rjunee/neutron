@@ -41,6 +41,16 @@
  * (owner_slug, sanitized-url-project_id); a global write lands under
  * (owner_slug, '' sentinel). `list` returns METADATA ONLY — ciphertext and
  * plaintext never leave the store.
+ *
+ * ── Per-project connected-account selection (#500) ──────────────────────────
+ * The surface also owns `/api/app/projects/<id>/accounts` — GET the view (every
+ * selectable service, every connected account, whether this project reads it),
+ * PUT one toggle. CONNECTING an account stays global and is unchanged: one
+ * consent, one refresh token, one thing to rotate. Only SELECTION is
+ * per-project, which is why it lives on a project route rather than in Admin —
+ * it is the counterpart to #486, not a regression of it. No secret material is
+ * read or written by that family; the id it toggles is the resolver's own
+ * `account_id`, and the owner is shown a humanised label, never the hex key.
  */
 
 import { asOwnerHandle, type OwnerHandle } from '@neutronai/persistence/index.ts'
@@ -51,11 +61,32 @@ import {
   type CredentialScope,
   type ProjectCredentialStore,
 } from '@neutronai/project-credentials/store.ts'
+import {
+  AccountSelectionValidationError,
+  type ProjectAccountSelectionStore,
+} from '@neutronai/project-credentials/account-selection-store.ts'
+import type { ServiceAccountSelection } from '../cores/core-credential-resolver.ts'
 import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts'
+
+/**
+ * The read side of the per-project account selection (#500), typed
+ * structurally so this surface depends on the CAPABILITY rather than on the
+ * whole `CoreCredentialResolver`. Satisfied by `CoreCredentialResolver`.
+ */
+export interface AccountSelectionReader {
+  accountSelectionView(projectId: string): Promise<ServiceAccountSelection[]>
+}
 
 export interface ProjectCredentialsSurfaceOptions {
   store: ProjectCredentialStore
   auth: AppWsAuthResolver
+  /** Writes the per-project connected-account selection (#500). */
+  accountSelection: ProjectAccountSelectionStore
+  /**
+   * Reads it back joined with the LIVE connected accounts — the same resolver
+   * the Cores read through, so the toggles shown are the accounts swept.
+   */
+  credentialResolver: AccountSelectionReader
 }
 
 export interface ProjectCredentialsSurface {
@@ -72,6 +103,14 @@ const PROJECT_CREDENTIALS_PATH_RE =
 /** The GLOBAL family — no project segment, because there is no project. */
 const GLOBAL_PATH_PREFIX = '/api/app/credentials'
 const GLOBAL_CREDENTIALS_PATH_RE = /^\/api\/app\/credentials(?:\/([^/]+))?$/
+/**
+ * Per-project CONNECTED-ACCOUNT selection (#500). Genuinely project-scoped —
+ * it authors no instance-wide state, which is what makes it the correct
+ * counterpart to #486 rather than a regression of it: #486 moved GLOBAL
+ * credential authoring out of a project surface; this puts a setting that can
+ * only ever mean something inside one project back where it belongs.
+ */
+const PROJECT_ACCOUNTS_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/accounts$/
 
 const MAX_SERVICE_SEGMENT_LEN = 128
 
@@ -88,11 +127,35 @@ const SCOPE_NOT_ALLOWED =
 export function createProjectCredentialsSurface(
   opts: ProjectCredentialsSurfaceOptions,
 ): ProjectCredentialsSurface {
-  const { store, auth } = opts
+  const { store, auth, accountSelection, credentialResolver } = opts
   return {
     handler: async (req) => {
       const url = new URL(req.url)
       const pathname = url.pathname
+
+      // ── Per-project connected-account selection (#500) ──────────────────
+      const accountsMatch = PROJECT_ACCOUNTS_PATH_RE.exec(pathname)
+      if (accountsMatch !== null) {
+        const sanitized = sanitizeProjectId(accountsMatch[1] ?? '')
+        if (sanitized === null) {
+          return jsonError(
+            400,
+            'invalid_project_id',
+            'project_id must be 1-128 chars from [A-Za-z0-9_.-]',
+          )
+        }
+        const auth_result = await resolveBearer(req, auth)
+        if ('code' in auth_result) {
+          return jsonError(401, auth_result.code, auth_result.message)
+        }
+        return handleAccounts({
+          req,
+          project_id: sanitized,
+          owner_slug: asOwnerHandle(auth_result.project_slug),
+          accountSelection,
+          credentialResolver,
+        })
+      }
 
       // Resolve the SCOPE from the path before anything else — the route is the
       // scope, and no request body or query param can move a call between them.
@@ -231,6 +294,72 @@ async function handleDelete(
   }
   return jsonOk(
     project_id === null ? { deleted: service, scope } : { deleted: service, scope, project_id },
+  )
+}
+
+/**
+ * `GET  /api/app/projects/<id>/accounts` — every selectable service, every
+ * connected account, and whether THIS project reads it.
+ * `PUT  /api/app/projects/<id>/accounts` — body `{ service, account_id,
+ * enabled }`, toggling exactly one account for this project.
+ *
+ * PUT rather than POST because the operation is idempotent in both directions:
+ * the store deletes a disable row to enable and inserts one to disable, so a
+ * double-tapped toggle converges instead of erroring or double-counting.
+ *
+ * There is deliberately NO "disable every account" guard. A project that does
+ * not use Gmail is a legitimate configuration, and the response still reports
+ * the empty selection honestly so the surface can say so out loud rather than
+ * looking broken.
+ */
+async function handleAccounts(input: {
+  req: Request
+  project_id: string
+  owner_slug: OwnerHandle
+  accountSelection: ProjectAccountSelectionStore
+  credentialResolver: AccountSelectionReader
+}): Promise<Response> {
+  const { req, project_id, owner_slug, accountSelection, credentialResolver } = input
+  const method = req.method
+  if (method === 'GET') {
+    return jsonOk({
+      project_id,
+      services: await credentialResolver.accountSelectionView(project_id),
+    })
+  }
+  if (method === 'PUT') {
+    const body = await readJsonBody(req)
+    if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
+    const fields = body as Record<string, unknown>
+    const enabled = fields['enabled']
+    if (typeof enabled !== 'boolean') {
+      return jsonError(400, 'invalid_enabled', 'enabled must be a boolean')
+    }
+    try {
+      await accountSelection.setEnabled(owner_slug, {
+        project_id,
+        service: fields['service'] as string,
+        account_id: fields['account_id'] as string,
+        enabled,
+      })
+    } catch (err) {
+      if (err instanceof AccountSelectionValidationError) {
+        return jsonError(400, err.code, err.message)
+      }
+      throw err
+    }
+    // Return the WHOLE refreshed view, not just the row that moved: the client
+    // renders from one source of truth and cannot drift from the server by
+    // patching its local copy.
+    return jsonOk({
+      project_id,
+      services: await credentialResolver.accountSelectionView(project_id),
+    })
+  }
+  return jsonError(
+    405,
+    'method_not_allowed',
+    `method '${method}' not allowed on /accounts`,
   )
 }
 

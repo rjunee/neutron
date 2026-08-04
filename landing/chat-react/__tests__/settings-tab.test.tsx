@@ -50,6 +50,9 @@ function baseHandler(url: string): Response | null {
   if (url.endsWith('/api/app/projects/acme/credentials')) {
     return json({ ok: true, project: [], global: [] })
   }
+  if (url.endsWith('/api/app/projects/acme/accounts')) {
+    return json({ ok: true, project_id: 'acme', services: [] })
+  }
   if (url.endsWith('/api/app/projects/acme/settings')) {
     return json({ ok: true, project: { name: 'Acme', emoji: '🏢', members: [] } })
   }
