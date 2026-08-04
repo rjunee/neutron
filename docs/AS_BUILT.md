@@ -82,6 +82,81 @@ more than a field. The message is asserted to name the account, to never render
 the hex account key, and to degrade to the SERVICE name rather than an anonymous
 "a token expired" when the address cannot be read.
 
+## 2026-08-04 — supervisor alerts stop corrupting the timeline; the rail goes quiet at rest
+
+Branch `fix/rail-idle-dot-and-alert-timestamp`. Two independent defects the owner
+hit in live use, one PR, two commits. Changed: `open/wiring/app-ws.ts`,
+`open/composer.ts`, `chat-core/web-session.ts`, `chat-core/stores/opfs-store.ts`,
+`landing/chat-react/ChatApp.tsx`, `landing/chat-react.html`,
+`app/components/ProjectRail.tsx`, `docs/SYSTEM-OVERVIEW.md`, plus four test files.
+
+### 1. Supervisor alerts sorted to the bottom of the transcript
+
+**The symptom.** The owner sent a message and days-old `⚠️ Supervisor alert`
+bubbles jumped BELOW it, each still printing its own true date, so the transcript
+grew a `Fri Jul 24` divider underneath today's messages.
+
+**Not a timestamp bug.** The tempting read is that the alert envelope's
+`ts: Date.now()` is a push time that should be the event time. It is not: `ts` is
+the EMIT time by contract (migration 0079 — "unix-ms emit time, used as the wire
+`ts` on replay"), the alert is emitted the moment it fires, and the rendered
+clocks were always correct. Substituting `WatchdogAlert.detected_at` would have
+been actively wrong — detectors write it in SECONDS (`watchdog/detectors.ts`,
+`now / 1000`) while every chat timestamp is MILLISECONDS, so it dates each alert
+to 1970. A test asserts `ts > 1e12` precisely to kill that fix.
+
+**The real cause is the missing `seq`.** The notifier broadcasts straight to the
+socket registry, deliberately bypassing `AppWsAdapter.send` — the only path that
+appends a `chat_log` row and stamps a `seq`. The frame is therefore a
+`durability: 'none'` send, but it never said so, and `chat-core/web-session.ts`
+persisted it anyway. `compareForDisplay` (`chat-core/store.ts`) orders every
+`seq === null` row after all sequenced ones, so each persisted alert became a
+permanent bubble pinned below the live transcript. `resolveImportRunningStatusDelivery`
+already documents this exact tail-pinning seam for the import status bubble; the
+two differ only in the right remedy (that one wants durability, an alert wants
+ephemerality).
+
+**Three parts.** (a) `buildWatchdogAlertEnvelope` — new pure exported builder in
+`open/wiring/app-ws.ts`, consumed by the composer — tags the frame
+`system_notice: true`, which is simply the truth about it. (b)
+`chat-core/web-session.ts` now honours `isTransientSystemNotice` before
+persisting: this is the WEB HALF of FIX #333, which mobile has had since
+`mobile-session.ts:361` and web never got, so web was also persisting every
+cold-start "⏳ Waking up…" ack. (c) `OpfsChatStore.hydrate` drops unreconcilable
+agent rows (`role === 'agent' && seq === null`) — a browser that already ran the
+buggy build still holds them, so without this one-time self-repair the fix is
+invisible to the owner.
+
+**Known trade-off, deliberately not decided here.** A `system_notice` frame
+renders as the centred pill, which self-clears after 15s
+(`controller.ts` `systemNoticeStaleMs`). That is consistent with the composer's
+own framing of this push as a best-effort SECONDARY surface over the durable
+`watchdog_alerts` ledger, but it does make an alert easy to miss. Choosing a
+louder surface is a product decision for the SPEC, not something to smuggle into
+a bug fix — flagged rather than taken.
+
+### 2. The rail's idle dot painted a hollow grey ring
+
+The owner: "i dont want this hollow grey circle when there is no activity. I only
+want to see a pulsing indicator when there is activity." `railDotClass` now
+returns `car-rail-dot-none` for idle, a rule with no background, border or ring —
+matching the phone rail, which made the same change first and which this PR's
+docblock update stops describing as a deliberate divergence.
+
+Only the PAINT changed. The function stays TOTAL and the span stays in the tree
+with its `role="button"`, `tabIndex`, `aria-label`, keyboard handler and `::after`
+hit pad, because the dot is the Activity Inspector's ONLY entry point — nothing
+else calls `onOpenActivity`. Rendering no element would have removed it and made
+an idle scope uninspectable, which is the property the original always-visible
+ring existed to protect.
+
+`attention` is untouched and still paints. `railDotClass` never sees the
+inspector's `wedged`/`dead` vocabulary at all — the rail runs on `ProjectActivity`
+(`idle | working | attention`) from `deriveProjectActivity`, whose `attention` arm
+covers a failed not-done item or a stalled live run. A regression test asserts
+`attention` resolves to a class with a real fill; mutating that arm to fall
+through to the unpainted slot reds it.
+
 ## 2026-08-04 — enable/disable connected accounts per project (ISSUES #500)
 
 Branch `feat/per-project-account-selection`. New:
@@ -1100,7 +1175,7 @@ Branch `fix/rail-idle-dot-invisible`. WAVE 3.5 made the rail's corner dot the Ac
 
 The obvious implementation — return `null` for idle — would have done the visible half correctly and silently unshipped the feature, because the target is sized from the box the dot occupies and nobody would notice an invisible control had stopped working. That is what the new tests are for.
 
-**Deliberate web/mobile divergence.** The web rail keeps `.car-rail-dot-idle`; the complaint is specific to the narrow phone rail, where eight resting rings read as a wall of state. Both `ProjectRail.tsx` and `docs/SYSTEM-OVERVIEW.md` § "The dot is the entry point" say so, so the next reader does not file it as drift and reconcile it back.
+**Web/mobile divergence — CLOSED (2026-08-04).** This entry originally recorded the web rail keeping `.car-rail-dot-idle`, on the reasoning that the complaint was specific to the narrow phone rail. The owner then raised the identical complaint about the web rail, so web now paints nothing at rest too (`car-rail-dot-none`) and the two surfaces are one rule. See the 2026-08-04 entry below.
 
 **Tests.** `app/__tests__/rail-idle-dot-not-painted.test.tsx` (new, 6 tests) pins all three halves: nothing is painted (asserted on computed fill and border width, not just on the absence of a testID, so "make it very subtle instead" fails too); the corner box matches a painted dot's geometry exactly; and pressing the active row's invisible corner still opens the inspector without also switching project. The geometry assertion was mutation-tested — collapsing `dotSlot` to 0×0 reds it. `rail-dot-misclick.test.tsx` is unchanged in behaviour; its "inert, not removed" case is annotated to say it is about a dot that has something to report.
 

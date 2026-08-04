@@ -3297,17 +3297,34 @@ is a nested `Pressable` with `hitSlop`, present only on the ACTIVE row (an inact
 row's corner is inert, so a thumb aimed at a project cannot open the inspector for it
 instead).
 
-**Web and mobile deliberately differ at REST.** Web still draws the quiet hollow ring
-(`.car-rail-dot-idle`). Mobile draws NOTHING: `ActivityDot` renders a transparent
-DOT-sized `dotSlot` for `idle`, so the pulsing dot appears only when there is
-activity (the owner, on device, 2026-07-31 — a grey ring on every row of a 72px rail read as
-a wall of state at a moment when nothing was happening). The affordance is unchanged
-by that: `railDotKind` still returns `idle`, the slot holds the corner box open, and
-the active row's Pressable keeps its full touch target — so on mobile the inspector is
-an invisible-but-tappable advanced affordance, and rows do not shift when a dot lights
-up. `app/__tests__/rail-idle-dot-not-painted.test.tsx` pins all three halves (nothing
-painted / box preserved / tap still opens). Treat a future web change here as its own
-decision rather than drift to reconcile.
+**Neither surface paints anything at REST.** Mobile went first (the owner, on device,
+2026-07-31 — a grey ring on every row of a 72px rail read as a wall of state at a moment
+when nothing was happening); web followed on the identical complaint about the web rail
+("i dont want this hollow grey circle when there is no activity. I only want to see a
+pulsing indicator when there is activity"). Mobile's `ActivityDot` renders a transparent
+DOT-sized `dotSlot` for `idle`; web's `railDotClass` returns `car-rail-dot-none`, a rule
+with no background, border or ring.
+
+Only the PAINT was removed, and that distinction is the whole design. `railDotKind` /
+`railDotClass` both stay TOTAL and still resolve `idle`, the element stays in the tree,
+and it keeps its full hit target — mobile's `dotPress` Pressable with `hitSlop`, web's
+`role="button"` span with its `::after` pad, `tabIndex`, `aria-label` and keyboard
+handler. So an idle scope remains INSPECTABLE (the property the original always-visible
+ring existed to protect — you cannot tell a resting session from a hung one without
+opening the panel), the inspector is an invisible-but-tappable advanced affordance, and
+a row does not shift the moment a dot lights up. Returning `null`, or rendering no
+element, is what would actually unship the feature.
+
+**`attention` is unaffected and still paints.** A quiet rail must never be bought by
+hiding a broken scope: `deriveProjectActivity` (`open/project-rail.ts`) returns
+`attention` for a failed not-done item or a stalled live run, and that stays a static
+amber dot on both surfaces. Only the resting state went dark.
+
+`app/__tests__/rail-idle-dot-not-painted.test.tsx` pins the mobile halves; on web,
+`landing/chat-react/__tests__/component.test.tsx` asserts idle → `-none` (and that the
+retired `.car-rail-dot-idle` rule is gone from the stylesheet, not merely unreferenced)
+plus a dedicated case that `attention` still resolves to a class with a real fill, and
+`activity-inspector-panel.test.tsx` asserts the unpainted dot is still clickable.
 
 The chat surface keeps showing only its minimal curated messages — that terseness is
 correct and stays. This is a separate surface.

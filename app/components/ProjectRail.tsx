@@ -111,9 +111,11 @@ function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: 
   // does not shift the moment activity starts or stops, because only the colour
   // ever appears and disappears.
   //
-  // Deliberate divergence from the web rail's `.car-rail-dot-idle`, which still
-  // draws its resting ring: the complaint is specific to the narrow phone rail.
-  // Treat a future web change as its own decision, not as drift to "fix".
+  // No longer a divergence: the owner raised the identical complaint about the
+  // web rail, and its resting ring is gone too (`.car-rail-dot-none` +
+  // `railDotClass`, `landing/chat-react/ChatApp.tsx`). Both rails now paint
+  // nothing at rest and keep the same invisible-but-clickable Inspector target,
+  // so treat this as ONE rule across the two surfaces rather than a phone quirk.
   if (kind === 'idle') {
     return <Animated.View testID="rail-dot-none" style={styles.dotSlot} />;
   }

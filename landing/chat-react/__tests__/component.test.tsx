@@ -1278,28 +1278,67 @@ describe('rail helpers (M1 UX redesign — pure)', () => {
     expect(formatRailTime('not-a-date', now)).toBe('')
   })
 
-  // BEHAVIOUR CHANGE (SPEC § WAVE 3.5), not a relaxed assertion. This used to
-  // assert `null` for idle and for General. The dot is now the Activity Inspector's
-  // entry point and the acceptance requires it to stay clickable when idle, because
-  // an idle session must be distinguishable from a wedged one — a dot that vanishes
-  // at rest cannot be clicked to find out which you are looking at. So the function
-  // is now TOTAL. The one piece of the old contract that survives: General never
-  // shows ATTENTION (it has no bound runs) — it degrades to idle.
-  it('railDotClass is TOTAL: working→work, attention→attention, otherwise idle', async () => {
+  // BEHAVIOUR CHANGE — the resting dot PAINTS NOTHING. The owner: "i dont want
+  // this hollow grey circle when there is no activity. I only want to see a
+  // pulsing indicator when there is activity." Idle now maps to
+  // `car-rail-dot-none`, whose rule sets no background, no border and no ring.
+  //
+  // The function stays TOTAL on purpose. WAVE 3.5's real property was that an
+  // idle scope remains INSPECTABLE, and the dot is the Inspector's only entry
+  // point (`ChatApp.tsx` wires `onOpenActivity` from the dot's onClick/onKeyDown
+  // and nowhere else). Returning null — or rendering no element — would remove
+  // that entry point and make an idle scope unreachable. A transparent class
+  // keeps the span, its role="button", its keyboard handler and its hit pad, so
+  // only the paint went away. That is the distinction these assertions pin.
+  it('railDotClass is TOTAL, and idle PAINTS NOTHING (-none, never a ring)', async () => {
     const { railDotClass } = await import('../ChatApp.tsx')
     expect(railDotClass('working', false)).toBe('car-rail-dot-work')
     expect(railDotClass('attention', false)).toBe('car-rail-dot-attention')
-    expect(railDotClass('idle', false)).toBe('car-rail-dot-idle')
-    expect(railDotClass(undefined, false)).toBe('car-rail-dot-idle')
+    expect(railDotClass('idle', false)).toBe('car-rail-dot-none')
+    expect(railDotClass(undefined, false)).toBe('car-rail-dot-none')
     // General is a real chat scope with its own warm session, so it IS inspectable.
     expect(railDotClass('working', true)).toBe('car-rail-dot-work')
-    expect(railDotClass('idle', true)).toBe('car-rail-dot-idle')
-    // ...but General's attention degrades to idle (no bound runs to stall).
-    expect(railDotClass('attention', true)).toBe('car-rail-dot-idle')
-    // Never null, on any input — every rail row gets a clickable entry point.
+    expect(railDotClass('idle', true)).toBe('car-rail-dot-none')
+    // ...but General's attention degrades to the unpainted slot (no bound runs).
+    expect(railDotClass('attention', true)).toBe('car-rail-dot-none')
+    // Never null, on any input — every rail row keeps a clickable entry point.
     for (const a of ['idle', 'working', 'attention', undefined] as const) {
       for (const g of [true, false]) expect(railDotClass(a, g)).not.toBeNull()
     }
+    // The retired ring must not come back under any input.
+    for (const a of ['idle', 'working', 'attention', undefined] as const) {
+      for (const g of [true, false]) expect(railDotClass(a, g)).not.toBe('car-rail-dot-idle')
+    }
+  })
+
+  // THE REGRESSION THIS FIX IS MOST LIKELY TO INTRODUCE. Quieting the rail must
+  // not be bought by hiding a BROKEN scope. `attention` is the rail's
+  // broken-state signal — `deriveProjectActivity` (`open/project-rail.ts:47`)
+  // returns it for a failed not-done item OR a stalled live run — so it must
+  // still resolve to a class that actually paints. If someone collapses
+  // "anything that is not working → nothing", a stalled or failed project goes
+  // silently invisible, which is strictly worse than the grey ring we removed.
+  it('attention still PAINTS: a stalled/failed project never goes invisible', async () => {
+    const { railDotClass } = await import('../ChatApp.tsx')
+    const cls = railDotClass('attention', false)
+    expect(cls).toBe('car-rail-dot-attention')
+    // Explicitly NOT the unpainted slot — the whole point of this assertion.
+    expect(cls).not.toBe('car-rail-dot-none')
+    // ...and the stylesheet must give that class a real fill, else "visible" is
+    // a claim about a class name rather than about pixels.
+    const css = await Bun.file(
+      new URL('../../chat-react.html', import.meta.url).pathname,
+    ).text()
+    expect(css).toMatch(/\.car-rail-dot-attention\s*\{[^}]*background:\s*var\(--attention\)/)
+    // The resting slot, conversely, must paint nothing at all.
+    const noneRule = /\.car-rail-dot-none\s*\{([^}]*)\}/.exec(css)
+    expect(noneRule).not.toBeNull()
+    expect(noneRule![1]).toMatch(/background:\s*transparent/)
+    expect(noneRule![1]).toMatch(/border:\s*none/)
+    expect(noneRule![1]).not.toMatch(/solid/)
+    // And the retired ring rule must be GONE from the stylesheet, not merely
+    // unreferenced — a dead rule is how the old paint creeps back.
+    expect(css).not.toContain('.car-rail-dot-idle')
   })
 
   // PARITY with mobile `railDotKind` (`app/lib/project-rail-view.ts`). The two
@@ -1310,19 +1349,23 @@ describe('rail helpers (M1 UX redesign — pure)', () => {
   // other, which is exactly the drift this makes visible.
   it('matches the shared rail-dot truth table (mobile asserts the same one)', async () => {
     const { railDotClass } = await import('../ChatApp.tsx')
+    // Mobile's `railDotKind` still returns the KIND `idle` (it decides paint at
+    // render time, in `ActivityDot`); web encodes the same decision in the class
+    // name, so `idle` maps to the unpainted `-none` slot. The truth table below
+    // is the shared one — only web's spelling of the resting cell differs.
     const TABLE: Array<[
       'idle' | 'working' | 'attention' | undefined,
       boolean,
-      'work' | 'attention' | 'idle',
+      'work' | 'attention' | 'none',
     ]> = [
       ['working', false, 'work'],
       ['working', true, 'work'],
       ['attention', false, 'attention'],
-      ['attention', true, 'idle'],
-      ['idle', false, 'idle'],
-      ['idle', true, 'idle'],
-      [undefined, false, 'idle'],
-      [undefined, true, 'idle'],
+      ['attention', true, 'none'],
+      ['idle', false, 'none'],
+      ['idle', true, 'none'],
+      [undefined, false, 'none'],
+      [undefined, true, 'none'],
     ]
     for (const [activity, isGeneral, expected] of TABLE) {
       expect(railDotClass(activity, isGeneral)).toBe(`car-rail-dot-${expected}`)
@@ -1414,12 +1457,12 @@ describe('TopicRail 2-line rows + branding (M1 UX redesign)', () => {
     const rows = Array.from(container.querySelectorAll('.car-rail-item'))
     // General + 2 projects.
     expect(rows.length).toBe(3)
-    // BEHAVIOUR CHANGE (SPEC § WAVE 3.5): this used to assert General had NO dot.
-    // Every row now carries one, because the dot is the Activity Inspector's entry
-    // point and must stay clickable at rest — General included (it is a real chat
-    // scope with its own warm session). General with no activity gets the quiet
-    // `idle` dot.
-    expect(rows[0]!.querySelector('.car-rail-dot-idle')).not.toBeNull()
+    // Every row carries a dot ELEMENT, because it is the Activity Inspector's
+    // entry point and must stay clickable at rest — General included (it is a
+    // real chat scope with its own warm session). At rest that element paints
+    // NOTHING (`-none`): present in the DOM, invisible on screen.
+    expect(rows[0]!.querySelector('.car-rail-dot-none')).not.toBeNull()
+    expect(rows[0]!.querySelector('.car-rail-dot-idle')).toBeNull()
     // p1 pulses a work dot; p2 shows the static attention dot.
     expect(rows[1]!.querySelector('.car-rail-dot-work')).not.toBeNull()
     expect(rows[2]!.querySelector('.car-rail-dot-attention')).not.toBeNull()
