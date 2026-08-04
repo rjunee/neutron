@@ -124,7 +124,7 @@ export function createVoiceTranscriptionSurface(
       ...(opts.which !== undefined ? { which: opts.which } : {}),
     })
     const choice = opts.readChoice()
-    const key_status = keys.status()
+    const key_status = await keys.status()
     // ASK THE RESOLVER. Never re-derive the rule here.
     //
     // `keys.resolve()` decrypts, so a status poll (1/sec while a model is
@@ -138,7 +138,7 @@ export function createVoiceTranscriptionSurface(
       env,
       neutron_home,
       choice,
-      openai_api_key: keys.resolve(),
+      openai_api_key: await keys.resolve(),
       ...(opts.which !== undefined ? { which: opts.which } : {}),
     })
     return {
@@ -214,12 +214,27 @@ export function createVoiceTranscriptionSurface(
           }
           case 'DELETE': {
             const removed = await keys.remove()
-            if (!removed && keys.status().source === 'environment') {
+            // `remove()` only ever clears THIS surface's dedicated row. When
+            // nothing was removed and a key is still resolving, it belongs to
+            // somewhere this endpoint has no authority over — say which, rather
+            // than returning a 200 that reads as "deleted" over a box that
+            // still transcribes.
+            const source = removed ? null : (await keys.status()).source
+            if (source === 'environment') {
               return jsonError(
                 409,
                 'key_from_environment',
                 'that key comes from OPENAI_API_KEY in the server environment, not from this app — ' +
                   'remove it from the server\'s .env or unit file to unset it',
+              )
+            }
+            if (source === 'shared') {
+              return jsonError(
+                409,
+                'key_from_shared_credential',
+                'that key is your general OpenAI credential from Settings → Integrations, which also ' +
+                  'powers semantic memory — remove it there if you want it gone, or save a ' +
+                  'transcription-only key here to override it',
               )
             }
             return jsonOk(await buildStatus())

@@ -315,6 +315,25 @@ describe('status + progress copy', () => {
     expect(describeKeySource(status())).toBeNull();
   });
 
+  it('a shared Integrations key says where it lives — it is not this panel to delete', () => {
+    // Same reasoning as the environment case. Naming Integrations is the point:
+    // DELETE here will not remove it, and the owner needs to know which key is
+    // being billed when a voice note transcribes.
+    const shared = status({ openai_key: { present: true, source: 'shared', saved_at: null } });
+    const copy = describeKeySource(shared);
+    expect(copy).toContain('Integrations');
+    expect(copy).toContain('semantic memory');
+    // It must NOT read as a key saved on this screen.
+    expect(copy).not.toContain('Key saved');
+  });
+
+  it('a shared key clears the openai blocker — one pasted key is enough', () => {
+    // The mobile mirror of the fix: the OpenAI option must stop reporting
+    // "No API key" once the general Integrations key exists.
+    const shared = status({ openai_key: { present: true, source: 'shared', saved_at: null } });
+    expect(backendBlocker(shared, 'openai')).toBeNull();
+  });
+
   it('neither option is sold as the better one, and slowness is blamed on the hardware', () => {
     // The measured timings in the catalog come from a server with no GPU. Copy
     // that called local "slower" full stop would be wrong on a Mac with Metal.

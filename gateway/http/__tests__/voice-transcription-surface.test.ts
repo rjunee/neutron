@@ -69,6 +69,8 @@ function make(
     installed?: boolean
     choice?: TranscriptionBackendChoice | null
     storedKey?: string
+    /** The general Integrations OpenAI key, when the owner has saved one. */
+    sharedKey?: string
     /** Override the download transport. The default answers instantly, which
      *  makes "did the handler await the download?" unobservable — a test that
      *  needs that ordering passes a fetch that never settles. */
@@ -95,6 +97,7 @@ function make(
     store: creds.store,
     owner_slug: 'alice' as never,
     env: opts.env ?? {},
+    resolveSharedKey: async () => opts.sharedKey ?? null,
   })
   let choice: TranscriptionBackendChoice | null = opts.choice ?? null
   const surface = createVoiceTranscriptionSurface({
@@ -119,7 +122,12 @@ function noChoiceNoKey(env: Record<string, string | undefined>) {
   return {
     readChoice: () => null,
     writeChoice: async () => {},
-    keys: new OpenAiKeyStore({ store: fakeCredentialStore().store, owner_slug: 'alice' as never, env }),
+    keys: new OpenAiKeyStore({
+      store: fakeCredentialStore().store,
+      owner_slug: 'alice' as never,
+      env,
+      resolveSharedKey: async () => null,
+    }),
   }
 }
 
@@ -359,6 +367,61 @@ describe('the OpenAI key', () => {
     const res = await surface.handler(req('PUT', 'nope', { api_key: SECRET }, KEY_PATH))
     expect(res!.status).toBe(401)
     expect(creds.rows()).toBeNull()
+  })
+
+  // ── The shared general OpenAI credential ────────────────────────────────
+  // SPEC § Decisions Log 2026-08-04 — one OpenAI key serves every OpenAI-backed
+  // feature. These assert the fallback END TO END over HTTP, not just in the
+  // key store: the owner pastes ONE key under Integrations and the transcription
+  // surface must report a working OpenAI backend without a second paste.
+
+  test('a shared Integrations key alone makes OpenAI transcription work — no second paste', async () => {
+    const { surface } = make({ sharedKey: 'sk-shared-from-integrations', choice: 'openai' })
+    const body = (await (await surface.handler(req('GET')))!.json()) as Record<string, unknown>
+    // The bug this closes: this used to be `none` / `openai_key_missing`.
+    expect(body['backend']).toBe('openai')
+    expect(body['backend_reason']).toBeNull()
+    const key = body['openai_key'] as Record<string, unknown>
+    expect(key['present']).toBe(true)
+    expect(key['source']).toBe('shared')
+  })
+
+  test('a dedicated key still outranks the shared one', async () => {
+    const { surface } = make({ sharedKey: 'sk-shared-from-integrations', storedKey: SECRET })
+    const body = (await (await surface.handler(req('GET')))!.json()) as Record<string, unknown>
+    expect((body['openai_key'] as Record<string, unknown>)['source']).toBe('stored')
+  })
+
+  test('DELETE falls back to the shared key rather than reporting the box uncredentialed', async () => {
+    const { surface, creds } = make({ sharedKey: 'sk-shared-from-integrations', storedKey: SECRET })
+    const res = await surface.handler(req('DELETE', 'good', undefined, KEY_PATH))
+    expect(res!.status).toBe(200)
+    expect(creds.rows()).toBeNull()
+    const key = ((await res!.json()) as Record<string, unknown>)['openai_key'] as Record<string, unknown>
+    expect(key['present']).toBe(true)
+    expect(key['source']).toBe('shared')
+  })
+
+  test('DELETE of a shared-only key is a 409 that points at Integrations', async () => {
+    // Same honesty rule as the environment case: this endpoint cannot remove a
+    // credential it does not own, so it must not answer 200.
+    const { surface } = make({ sharedKey: 'sk-shared-from-integrations' })
+    const res = await surface.handler(req('DELETE', 'good', undefined, KEY_PATH))
+    expect(res!.status).toBe(409)
+    const body = (await res!.json()) as Record<string, unknown>
+    expect(body['code']).toBe('key_from_shared_credential')
+    expect(String(body['message'])).toContain('Integrations')
+    // The 409 explains where the key lives; it must not quote the key itself.
+    expect(String(body['message'])).not.toContain('sk-shared-from-integrations')
+  })
+
+  test('no key in any of the three sources still reports openai_key_missing', async () => {
+    // The regression guard: the fallback must not invent a key on a bare box.
+    const { surface } = make({ choice: 'openai' })
+    const body = (await (await surface.handler(req('GET')))!.json()) as Record<string, unknown>
+    expect(body['backend']).toBe('none')
+    expect(body['backend_reason']).toBe('openai_key_missing')
+    expect((body['openai_key'] as Record<string, unknown>)['present']).toBe(false)
   })
 })
 

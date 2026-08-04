@@ -964,9 +964,11 @@ export function SettingsTab({
                 ? 'Add a key from platform.openai.com to use OpenAI transcription. It is stored encrypted on your own server and is never shown again.'
                 : asr.openai_key.source === 'environment'
                   ? 'Using OPENAI_API_KEY from the server environment. To change it here, save a key below; to remove it, edit the server.'
-                  : asr.openai_key.saved_at !== null
-                    ? `Key saved ${new Date(asr.openai_key.saved_at).toLocaleDateString()}.`
-                    : 'Key saved.'}
+                  : asr.openai_key.source === 'shared'
+                    ? 'Using your OpenAI key from Integrations — the same key that powers semantic memory. Save a key below only if you want transcription billed to a separate one.'
+                    : asr.openai_key.saved_at !== null
+                      ? `Key saved ${new Date(asr.openai_key.saved_at).toLocaleDateString()}.`
+                      : 'Key saved.'}
             </p>
             <form
               className="cset-form"

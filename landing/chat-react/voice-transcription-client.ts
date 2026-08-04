@@ -31,8 +31,12 @@ export type TranscriptionBackendChoice = 'local' | 'openai'
 /** Why nothing is transcribing, when `backend` is `'none'`. */
 export type NoTranscriberReason = 'unconfigured' | 'unchosen' | 'local_not_installed' | 'openai_key_missing'
 
-/** Where a configured OpenAI key came from. */
-export type OpenAiKeySource = 'stored' | 'environment'
+/**
+ * Where a configured OpenAI key came from. `shared` is the general OpenAI
+ * credential saved under Integrations (the semantic-memory key), which
+ * transcription falls back to when no dedicated key is saved here.
+ */
+export type OpenAiKeySource = 'stored' | 'shared' | 'environment'
 
 export type WhisperInstallPhase =
   | 'idle'
@@ -189,7 +193,10 @@ export class WebVoiceTranscriptionClient {
   }
 
   /** Forget the stored key. Fails with `key_from_environment` if the key is the
-   *  server's `OPENAI_API_KEY`, which only the server operator can unset. */
+   *  server's `OPENAI_API_KEY`, which only the server operator can unset, or
+   *  with `key_from_shared_credential` if it is the general OpenAI key from
+   *  Integrations — that one is removed there, or overridden by saving a
+   *  transcription-only key here. */
   removeOpenAiKey(): Promise<VoiceTranscriptionStatus> {
     return this.call('DELETE', undefined, '/openai-key')
   }
