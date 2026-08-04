@@ -25,8 +25,8 @@
  * `gateway/http/cores-oauth-surface.ts`. Without it userinfo answers nothing,
  * every grant is anonymous, and this whole per-account scheme silently
  * collapses back to one-grant-per-service (ISSUES #494). It is a truncated
- * SHA-256 of the
- * lowercased address rather than the address itself, for two reasons — the
+ * SHA-256 of the lowercased address rather than the address itself, for two
+ * reasons — the
  * SecretsStore's `label` column is NOT encrypted (only ciphertext is), so a raw
  * address would put a plaintext identifier at rest that the encrypted `:meta`
  * already holds properly; and a hex key can never collide with the `:refresh` /
