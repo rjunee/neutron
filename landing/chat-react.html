@@ -898,14 +898,19 @@
      STATIC amber (`--attention`) reserved for a genuine stall/failed-not-done. */
   .car-rail-dot-work { background: var(--phase-build-fg); animation: cwb-pulse 2s ease-in-out infinite; }
   .car-rail-dot-attention { background: var(--attention); }
-  /* SPEC § WAVE 3.5 — the IDLE dot. Present and clickable at rest (it is the
-     Activity Inspector's entry point, and the acceptance requires an idle session
-     to be distinguishable from a wedged one), but visually quiet: a hollow muted
-     ring, no fill, no pulse. It must read as "nothing happening", never as state. */
-  .car-rail-dot-idle {
+  /* The RESTING corner: a dot-sized hole in the paint. No fill, no border, no
+     ring, no pulse — nothing renders. WAVE 3.5 drew a hollow muted ring here so
+     the Inspector's entry point would always be visible to click; across a full
+     rail that is a grey circle on every row and reads as a column of pending
+     things while nothing is happening. Only the PAINT is superseded: the span is
+     still in the DOM, still `role="button"`, still carries the `::after` hit pad
+     below, so an idle scope stays inspectable by mouse AND keyboard and the row
+     does not twitch when a dot lights up. Anything visible here — a dimmed ring,
+     a low-opacity fill — is the exact thing that was removed. */
+  .car-rail-dot-none {
     background: transparent;
-    border: 1.5px solid var(--muted);
-    opacity: .5;
+    border: none;
+    box-shadow: none;
   }
   /* The dot is an interactive control now — give it a real hit target and a
      visible focus ring. The 8px dot is far below the ~24px minimum, so the

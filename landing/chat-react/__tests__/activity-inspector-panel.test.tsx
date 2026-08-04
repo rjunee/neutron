@@ -421,16 +421,25 @@ describe('the clickable rail dot — the inspector’s entry point', () => {
     await cleanup()
   })
 
-  it('the dot is clickable when IDLE — idle must be distinguishable from wedged', async () => {
-    // Acceptance: "The dot stays clickable when IDLE". A dot that disappeared at rest
-    // could not be clicked to find out whether the silence is idle or a hang.
+  it('the UNPAINTED idle dot is still clickable — invisible, not absent', async () => {
+    // The resting dot no longer paints (the owner does not want a grey ring on
+    // every row), but the acceptance it was protecting survives: an idle scope
+    // must still be inspectable, because you cannot tell idle from hung without
+    // opening the panel. This is the test that keeps "paints nothing" from
+    // sliding into "renders nothing" — the dot is invisible, NOT removed, so the
+    // Inspector's only entry point (`onOpenActivity` is wired from this element
+    // and nowhere else) is intact.
     const { container, opened, act, cleanup } = await renderRail([
       { id: 'p1', label: 'Neutron', emoji: '🚀', unread: 0, activity: 'idle' },
     ])
     const rows = Array.from(container.querySelectorAll('.car-rail-item'))
     const dot = rows[1]!.querySelector('.car-rail-dot') as HTMLElement
     expect(dot).not.toBeNull()
-    expect(dot.className).toContain('car-rail-dot-idle')
+    expect(dot.className).toContain('car-rail-dot-none')
+    // Invisible, but a real control: role + accessible name + keyboard reachable.
+    expect(dot.getAttribute('role')).toBe('button')
+    expect(dot.getAttribute('aria-label')).toContain('Show activity for')
+    expect(dot.getAttribute('tabindex')).toBe('0')
     await act(async () => dot.click())
     expect(opened).toEqual(['p1'])
     await cleanup()

@@ -1053,28 +1053,46 @@ export function formatDayDivider(ms: number, now: Date): string {
 }
 
 /**
- * The rail avatar's work-activity dot modifier class: `working` → pulsing --work,
- * `attention` → static --attention, otherwise the dim static `idle` dot.
+ * The rail avatar's work-activity dot modifier class: `working` → pulsing
+ * --phase-build-fg, `attention` → static --attention, otherwise `-none`, which
+ * PAINTS NOTHING.
  *
- * ALWAYS RETURNS A CLASS — never null (SPEC § WAVE 3.5). The dot is now the ENTRY
- * POINT to the Activity Inspector, and the acceptance is explicit that it stays
- * clickable when idle, because an idle session must be distinguishable from a
- * wedged one. A dot that vanishes at rest cannot be clicked to find out which of
- * the two you are looking at, so the previous `idle → null` (and
- * `isGeneral → null`) behaviour is deliberately replaced by a dim idle dot.
+ * IDLE PAINTS NOTHING. WAVE 3.5 drew a quiet hollow ring at rest so the dot
+ * would always be there to click. With every project resting that is a grey
+ * circle on EVERY row, which reads as a column of pending things at a moment
+ * when nothing is happening anywhere. The owner, on the web rail: "i dont want
+ * this hollow grey circle when there is no activity. I only want to see a
+ * pulsing indicator when there is activity."
  *
- * General gets one too: it is a real chat scope with its own warm session, so it
- * is inspectable like any project. `isGeneral` is retained in the signature
- * because General never shows the ATTENTION state (it has no bound runs) — a
- * distinction the caller should not have to know.
+ * What is superseded is only the PAINT — and that distinction is the whole point
+ * of this function still being TOTAL. It keeps returning a class for idle, the
+ * caller still renders the same `<span role="button">`, and the span still
+ * occupies its dot-sized corner. So the Activity Inspector's entry point keeps
+ * exactly the geometry and the keyboard semantics it had (invisible but
+ * clickable), an idle scope stays inspectable, and a row does not twitch when a
+ * dot lights up, because only the colour ever appears and disappears. Returning
+ * null here — or rendering no element — is what would actually destroy the
+ * property WAVE 3.5 was protecting; a transparent class does not.
+ *
+ * `attention` is UNAFFECTED and stays visible: it is the rail's broken-state
+ * signal (`deriveProjectActivity`, `open/project-rail.ts` — a failed not-done
+ * item or a stalled live run), and a quiet rail must never be bought by hiding
+ * those. Only the resting state went dark.
+ *
+ * This brings web into line with the phone rail, which made the same change
+ * first (`app/components/ProjectRail.tsx` `ActivityDot`, testID `rail-dot-none`).
+ *
+ * `isGeneral` is retained in the signature because General never shows the
+ * ATTENTION state (it has no bound runs) — a distinction the caller should not
+ * have to know.
  */
 export function railDotClass(
   activity: 'idle' | 'working' | 'attention' | undefined,
   isGeneral: boolean,
-): 'car-rail-dot-work' | 'car-rail-dot-attention' | 'car-rail-dot-idle' {
+): 'car-rail-dot-work' | 'car-rail-dot-attention' | 'car-rail-dot-none' {
   if (activity === 'working') return 'car-rail-dot-work'
   if (activity === 'attention' && !isGeneral) return 'car-rail-dot-attention'
-  return 'car-rail-dot-idle'
+  return 'car-rail-dot-none'
 }
 
 /** The ⚛ atom mark (accent-lit): 3 rotated ellipses + a center dot. Inline SVG so
