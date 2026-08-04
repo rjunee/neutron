@@ -256,15 +256,33 @@ export function createCoresOAuthSurface(
         return await handleStatus({ tokens, knownLabels })
       }
 
-      // `#` is in the class because a grant label is `<service>#<account_key>`
-      // — disconnecting ONE of several connected accounts addresses that
-      // account's label, and a class that stopped at the service would only
-      // ever be able to disconnect a legacy un-keyed grant.
-      const disconnectMatch = /^\/api\/cores\/oauth\/google\/disconnect\/([A-Za-z0-9_\-:.#]+)\/?$/.exec(
+      // A grant label is `<service>#<account_key>` — disconnecting ONE of
+      // several connected accounts addresses that account's label, and a class
+      // that stopped at the service could only ever disconnect a legacy
+      // un-keyed grant.
+      //
+      // `%` is in the class, and the segment is DECODED, because `#` cannot
+      // survive the wire literally: in a URL it opens the fragment, and a
+      // fragment is never sent to the server. So every HTTP client
+      // percent-encodes the label (`encodeURIComponent`, as both the web and RN
+      // clients do) and the path arrives holding `%23`. Matching only the raw
+      // `#` therefore made composite disconnect UNREACHABLE over HTTP — the
+      // route 404'd for every multi-account label. `decodeGrantLabelSegment`
+      // decodes and then re-checks the decoded value against the original
+      // character class, so widening the class admits the encoded form without
+      // admitting anything the route did not already accept.
+      const disconnectMatch = /^\/api\/cores\/oauth\/google\/disconnect\/([A-Za-z0-9_\-:.#%]+)\/?$/.exec(
         pathname,
       )
       if (disconnectMatch !== null && req.method === 'POST') {
-        const label = disconnectMatch[1] ?? ''
+        const label = decodeGrantLabelSegment(disconnectMatch[1] ?? '')
+        if (label === null) {
+          return jsonResponse(400, {
+            ok: false,
+            code: 'unknown_label',
+            message: 'disconnect label is not a well-formed grant label',
+          })
+        }
         return await handleDisconnect({
           label,
           knownLabels,
@@ -583,6 +601,23 @@ async function handleIngest(input: {
     labels: row.labels,
     reinstalled,
   })
+}
+
+/**
+ * Percent-decode a disconnect path segment back into a grant label, or null if
+ * it does not decode to one. The decoded value must still match the label
+ * character class the route has always accepted (`[A-Za-z0-9_\-:.#]+`), so an
+ * encoded `%2F` / `%00` / anything else exotic is rejected rather than smuggled
+ * through the widened path class into the token store.
+ */
+function decodeGrantLabelSegment(segment: string): string | null {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch {
+    return null
+  }
+  return /^[A-Za-z0-9_\-:.#]+$/.test(decoded) ? decoded : null
 }
 
 async function handleDisconnect(input: {

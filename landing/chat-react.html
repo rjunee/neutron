@@ -1459,6 +1459,16 @@
     border-radius: 999px; padding: 2px 10px; white-space: nowrap; align-self: flex-start;
   }
   .cint-badge-on { color: var(--on-accent); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+  /* One OAuth SERVICE block: title on top, its accounts stacked underneath,
+     then the add-another action. Stretches so nested rows fill the width. */
+  .cint-row-oauth { flex-direction: column; align-items: stretch; gap: 10px; }
+  .cint-account-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .cint-account {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  }
+  .cint-account .cint-row-main { flex: 1 1 160px; }
+  .cint-account .cint-badge { margin-left: auto; }
   .cint-key-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
   .cint-key-input {
     flex: 1 1 200px; min-width: 0; background: var(--bg); color: var(--fg);

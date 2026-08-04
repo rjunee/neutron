@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-03 — the web Admin tab could show a Google account but not connect one
+
+Branch `feat/web-admin-oauth-connect`. Changed: `landing/chat-react/IntegrationsTab.tsx`,
+`landing/chat-react/integrations-client.ts`, `landing/chat-react.html`,
+`gateway/http/cores-oauth-surface.ts`, `docs/SYSTEM-OVERVIEW.md`. New:
+`landing/chat-react/integrations-oauth-view.ts`,
+`landing/chat-react/__tests__/integrations-oauth-view.test.ts`. Tests:
+`landing/chat-react/__tests__/integrations-tab.test.tsx`,
+`landing/chat-react/__tests__/integrations-tab-unmount.test.tsx`,
+`landing/chat-react/__tests__/integrations-client.test.ts`,
+`gateway/__tests__/cores-oauth-surface.test.ts`.
+
+**Why.** The Admin tab's "Connected accounts" section was a viewer. It mapped
+each account to a label, a status line, its scopes and a Connected / Not
+connected badge, and stopped there — no action control anywhere in the section.
+The only Connect button on the whole tab was Connect Codex. So the owner sat in
+front of rows reading "Not connected" with nothing to click, and could not
+connect Google from the web at all. The mobile client had had the full flow
+since WAVE 2; the web client got the read half of it.
+
+**What landed.** `IntegrationsClient` gains `oauthStart` / `oauthDisconnect`,
+mirroring the RN `CoresClient`, and the tab drives them. Connect is a two-step on
+purpose: `/start` is bearer-gated, so the tab does the authenticated fetch and
+then navigates to the `authorize_url` that comes back — the public
+`accounts.google.com` consent page. A link straight to `/start` would 401, which
+is why the control is a button over the client seam and not an anchor. The
+navigation goes through an injected seam so a test can watch the hand-off
+actually happen; asserting the button renders would pass against a button wired
+to nothing, and that is the failure mode this repo keeps producing.
+
+Rows are now grouped by SERVICE rather than listed flat, because a service holds
+more than one account. The server returns one row per connected account under a
+composite `<service>#<account_key>` label, so each account gets its own
+Disconnect addressed by its full label, and a service that already has accounts
+keeps an "Add another account" action — without it the second and third Google
+account are unreachable, and the owner runs three. Connect always sends the bare
+service label; the composite one is not manifest-declared and `/start` rejects
+it. The account key is a hex digest, so the displayed title is the humanised
+service and the account is named on the status line instead, matching what the
+mobile client already did.
+
+**The disconnect route was unreachable.** Widening the web client alone would not
+have worked: per-account disconnect could not be performed by ANY HTTP client.
+The route matched a literal `#` in the path, and `#` cannot survive the wire —
+in a URL it opens the fragment, and a fragment is never sent to the server. Every
+client percent-encodes the label, so the path arrived holding `%23`, missed the
+character class, and fell through to a 404. The route now accepts the encoded
+form and decodes it, re-checking the decoded value against the character class it
+always enforced so nothing new gets in. Mobile was hitting the same 404 and is
+fixed by the same change.
+
 ## 2026-08-01 — the rest of the tasks block was never switched on
 
 Branch `fix/wire-tasks-crons-shared-store`. Changed: `open/composer.ts`,

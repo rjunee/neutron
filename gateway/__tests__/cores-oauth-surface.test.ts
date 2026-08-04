@@ -403,6 +403,52 @@ describe('POST /api/cores/oauth/google/disconnect/<label>', () => {
       .get(OWNER, 'calendar_core')
     expect(row?.install_state).toBe('install_failed_dependency_missing')
   })
+
+  // A grant label for a service holding several accounts is COMPOSITE:
+  // `<service>#<account_key>`. `#` cannot travel literally — in a URL it opens
+  // the fragment, and a fragment is never sent to the server — so every client
+  // percent-encodes it and the path arrives holding `%23`. The route used to
+  // match only a literal `#`, which made per-account disconnect unreachable
+  // over HTTP: it 404'd `unknown_route` for every multi-account label, so the
+  // Disconnect button on both the web and mobile clients could not have worked.
+  test('accepts a PERCENT-ENCODED composite label (per-account disconnect is reachable)', async () => {
+    const bench = await makeBench()
+    const res = await authedFetch(
+      bench.base,
+      `/api/cores/oauth/google/disconnect/${encodeURIComponent('google_calendar#a1b2c3d4')}`,
+      { method: 'POST' },
+    )
+    // RED pre-fix: 404 unknown_route (the regex never matched `%23`).
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { ok: boolean; code?: string }
+    expect(body.ok).toBe(true)
+    expect(body.code).toBeUndefined()
+  })
+
+  test('still rejects an unknown SERVICE inside a composite label', async () => {
+    const bench = await makeBench()
+    const res = await authedFetch(
+      bench.base,
+      `/api/cores/oauth/google/disconnect/${encodeURIComponent('not_a_service#a1b2c3d4')}`,
+      { method: 'POST' },
+    )
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { code: string }
+    expect(body.code).toBe('unknown_label')
+  })
+
+  test('an encoded path separator does not smuggle through the widened path class', async () => {
+    const bench = await makeBench()
+    // `%2F` decodes to `/`, which the label character class has never allowed.
+    const res = await authedFetch(
+      bench.base,
+      '/api/cores/oauth/google/disconnect/google_calendar%2F..%2Fetc',
+      { method: 'POST' },
+    )
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { code: string }
+    expect(body.code).toBe('unknown_label')
+  })
 })
 
 describe('GET /api/cores/oauth/google/status', () => {

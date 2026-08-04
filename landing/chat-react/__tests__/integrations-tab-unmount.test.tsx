@@ -52,6 +52,52 @@ function json(body: unknown, status = 200): Response {
 const STATUS_URL = 'https://sam.neutron.test/api/cores/integrations'
 const ARCHIVED_URL = 'https://sam.neutron.test/api/app/projects/archived'
 const CODEX_URL = 'https://sam.neutron.test/api/app/codex-auth'
+const START_PREFIX = 'https://sam.neutron.test/api/cores/oauth/google/start'
+const DISCONNECT_PREFIX = 'https://sam.neutron.test/api/cores/oauth/google/disconnect/'
+
+/** A not-yet-connected Google service — the server's bare placeholder row. */
+const OAUTH_DISCONNECTED = {
+  ok: true,
+  oauth: [
+    {
+      kind: 'oauth',
+      label: 'google_calendar',
+      connected: false,
+      scopes: [],
+      email: null,
+      connected_at: null,
+      last_refresh_at: null,
+      last_refresh_outcome: null,
+      expires_at: null,
+      scope: 'calendar.readonly',
+      core_slugs: ['calendar-core'],
+    },
+  ],
+  api_keys: [],
+}
+
+const OAUTH_CONNECTED = {
+  ok: true,
+  oauth: [
+    {
+      ...OAUTH_DISCONNECTED.oauth[0],
+      label: 'google_calendar#a1b2c3d4',
+      connected: true,
+      email: 'sam@example.com',
+      connected_at: 1,
+      last_refresh_outcome: 'ok',
+    },
+  ],
+  api_keys: [],
+}
+
+function findBtn(container: HTMLElement, label: string): HTMLButtonElement {
+  const found = Array.from(container.querySelectorAll('button')).find(
+    (b) => b.getAttribute('aria-label') === label,
+  )
+  if (found === undefined) throw new Error(`no button with aria-label='${label}'`)
+  return found as HTMLButtonElement
+}
 
 describe('IntegrationsTab unmount safety (#380 sweep)', () => {
   it('(a) unmounting mid-flight ABORTS the in-flight integrations READ and never throws past the pane (RED pre-fix)', async () => {
@@ -151,6 +197,170 @@ describe('IntegrationsTab unmount safety (#380 sweep)', () => {
     expect(container.querySelector('.cdoc-comments-error')).not.toBeNull()
     expect(container.textContent).toContain('Integrations')
     await act(async () => root.unmount())
+    container.remove()
+  })
+
+  // ── (c)/(d) the OAuth connect + disconnect paths, added with the Admin tab's
+  // Connect/Disconnect controls. Both are async continuations that setState, so
+  // they are exactly the shape the #380 regression had; and Connect additionally
+  // NAVIGATES, which must not fire for a tab the owner has already left.
+  it('(c) unmounting mid-connect neither navigates nor setStates after unmount', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { IntegrationsTab } = await import('../IntegrationsTab.tsx')
+    const React = await import('react')
+
+    let releaseStart: (r: Response) => void = () => {}
+    const heldStart = new Promise<Response>((r) => {
+      releaseStart = r
+    })
+    let startSignal: AbortSignal | undefined
+    const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.startsWith(START_PREFIX)) {
+        startSignal = init?.signal ?? undefined
+        return await heldStart
+      }
+      if (url === STATUS_URL) return json(OAUTH_DISCONNECTED)
+      if (url === ARCHIVED_URL) return json({ ok: true, archived: [] })
+      if (url === CODEX_URL) return json({ status: 'not_connected' })
+      return json({ ok: false }, 404)
+    }
+
+    const navigations: string[] = []
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const realErr = console.error
+    const errs: string[] = []
+    console.error = (...a: unknown[]): void => void errs.push(String(a[0] ?? ''))
+    let escaped: unknown = null
+    try {
+      await act(async () => {
+        root.render(
+          <React.StrictMode>
+            <IntegrationsTab
+              config={config}
+              fetchImpl={fetchImpl}
+              navigate={(u) => void navigations.push(u)}
+              confirmImpl={() => true}
+            />
+          </React.StrictMode>,
+        )
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+
+      await act(async () => {
+        findBtn(container, 'Connect Google Calendar').click()
+        await tick()
+      })
+
+      // Leave the tab while the start round-trip is still in flight, THEN let
+      // it settle.
+      await act(async () => {
+        root.unmount()
+        await tick()
+      })
+      await act(async () => {
+        releaseStart(
+          json({ ok: true, authorize_url: 'https://accounts.google.com/o/oauth2/v2/auth?x=1', state: 's', expires_at: 9 }),
+        )
+        await tick()
+        await tick()
+      })
+    } catch (e) {
+      escaped = e
+    } finally {
+      console.error = realErr
+    }
+
+    // /start is a GET, so the pane's read-abort covers it on unmount…
+    expect(startSignal).toBeInstanceOf(AbortSignal)
+    expect(startSignal?.aborted).toBe(true)
+    // …and either way the continuation bails: no navigation is forced on an
+    // owner who already left the tab, and nothing setStates on a gone pane.
+    expect(navigations).toEqual([])
+    expect(escaped).toBeNull()
+    expect(errs.some((e) => e.includes('unmount') || e.includes('fiber'))).toBe(false)
+    container.remove()
+  })
+
+  it('(d) a disconnect POST fired just before unmount still REACHES the server, and its continuation setStates nothing', async () => {
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react')
+    const { IntegrationsTab } = await import('../IntegrationsTab.tsx')
+    const React = await import('react')
+
+    let releaseDisc: (r: Response) => void = () => {}
+    const heldDisc = new Promise<Response>((r) => {
+      releaseDisc = r
+    })
+    let discSignal: AbortSignal | undefined | null = null
+    let discReached = false
+    const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.startsWith(DISCONNECT_PREFIX)) {
+        discReached = true
+        discSignal = init?.signal ?? undefined
+        return await heldDisc
+      }
+      if (url === STATUS_URL) return json(OAUTH_CONNECTED)
+      if (url === ARCHIVED_URL) return json({ ok: true, archived: [] })
+      if (url === CODEX_URL) return json({ status: 'not_connected' })
+      return json({ ok: false }, 404)
+    }
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const realErr = console.error
+    const errs: string[] = []
+    console.error = (...a: unknown[]): void => void errs.push(String(a[0] ?? ''))
+    let escaped: unknown = null
+    try {
+      await act(async () => {
+        root.render(
+          <React.StrictMode>
+            <IntegrationsTab
+              config={config}
+              fetchImpl={fetchImpl}
+              navigate={() => {}}
+              confirmImpl={() => true}
+            />
+          </React.StrictMode>,
+        )
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+
+      await act(async () => {
+        findBtn(container, 'Disconnect Google Calendar (sam@example.com)').click()
+        await tick()
+      })
+      await act(async () => {
+        root.unmount()
+        await tick()
+      })
+      await act(async () => {
+        releaseDisc(json({ ok: true, disconnected: ['google_calendar#a1b2c3d4'], affected_cores: [] }))
+        await tick()
+        await tick()
+      })
+    } catch (e) {
+      escaped = e
+    } finally {
+      console.error = realErr
+    }
+
+    // A WRITE the owner already fired is never aborted — it must still land on
+    // the server. Only its continuation is suppressed.
+    expect(discReached).toBe(true)
+    expect(discSignal).toBeUndefined()
+    expect(escaped).toBeNull()
+    expect(errs.some((e) => e.includes('unmount') || e.includes('fiber'))).toBe(false)
     container.remove()
   })
 })
