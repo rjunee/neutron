@@ -476,6 +476,20 @@ performs the exchange. **The broker never holds an OAuth secret**; it holds
 routing metadata. Both the register call and the relay are HMAC-signed
 (`runtime/internal-signature.ts`, ±5 min window).
 
+**On success the callback RETURNS the owner** (ISSUES #495): a `303` to
+`<instance-origin>/chat?tab=admin`, the connected-accounts view. The origin is
+taken from the consumed row's `dispatch_url` (the instance's own base URL), so
+one central broker sends each owner to their own instance with no extra config.
+The target is `origin` + a constant — `code`/`state` are not in scope where it is
+built and `.origin` discards any query or fragment — and the response sets
+`referrer-policy: no-referrer` so the callback's own URL cannot leak the grant as
+a `Referer`. `?tab=admin` is read at boot by `initialTabKeyFromLocation`
+(`landing/chat-react/config.ts`) and applied by `ProjectShell` once the scope's
+tab set resolves; it carries no `?project=` because Admin is global-scope and
+renders only in General. **Failures do not redirect** — every error arm keeps a
+terminal page naming the reason, since a silent bounce back to Settings after a
+grant that never completed is indistinguishable from success.
+
 `register` is **insert-only / same-owner**: on `ON CONFLICT(state)` it updates
 only while the stored `project_slug` equals the incoming one, so a signature
 holder who learned somebody else's `state` can create a registration but never

@@ -44,9 +44,9 @@
  *   - the row is SINGLE-USE and short-lived, so a replayed `state` finds nothing;
  *   - the relay is HMAC-signed too, so an instance's `/ingest` accepts the code
  *     only from its broker;
- *   - the callback returns a plain HTML page and NEVER echoes `code` or `state`
- *     back into the response body, so a grant cannot leak through a screenshot,
- *     a shared URL bar, or a referrer.
+ *   - the callback NEVER echoes `code` or `state` back — not into a page body,
+ *     and not into the redirect it issues on success — so a grant cannot leak
+ *     through a screenshot, a shared URL bar, or a referrer.
  */
 
 import { createHash } from 'node:crypto'
@@ -118,9 +118,76 @@ export interface CoresOAuthBroker {
 }
 
 /**
- * A terminal page for the human. Deliberately text-only and self-contained: no
- * `code`, no `state`, no external assets. The owner's next step lives in the app,
- * not here.
+ * Where a COMPLETED grant returns the owner: the connected-accounts view on
+ * their OWN instance.
+ *
+ * `tab=admin` names the global Admin tab descriptor (`tabs/registry.ts` —
+ * `key: 'admin'`, `scope: 'global'`), which is what mounts the integrations list
+ * on web (`landing/chat-react/ProjectShell.tsx` maps `mount.target === 'admin'`
+ * to `IntegrationsTab`). The param is read at boot by
+ * `initialTabKeyFromLocation` in `landing/chat-react/config.ts` and applied once
+ * the scope's tab set resolves.
+ *
+ * NO `?project=` / `?topic=`, deliberately. Admin is GLOBAL-scope and appears
+ * only in General; pinning a project would open a tab set that has no Admin in
+ * it, and the deep-link would silently do nothing. A bare `/chat` boots General.
+ */
+export const INTEGRATIONS_RETURN_PATH = '/chat?tab=admin'
+
+/**
+ * Send the owner back to their instance's Integrations surface.
+ *
+ * A REAL 303, not a meta-refresh or a JS bounce: this response is consumed by a
+ * browser that has just been redirected here by Google, so the one thing we can
+ * rely on is HTTP redirect handling. 303 (rather than 302) states the outcome
+ * exactly — "your grant is done, GET this other resource" — and is the status
+ * defined to convert any method into a GET, so no client can be tempted to
+ * replay the callback's semantics against the app.
+ *
+ * THE RETURN ORIGIN IS THE ROUTING ROW'S, NOT THIS HOST'S. `dispatch_url` is the
+ * instance's own origin plus the ingest path (built in `cores-oauth-surface.ts`
+ * from `ownerBaseUrl`, which `open/cores-broker-binding.ts` documents as never
+ * following the broker). Using it is what makes this correct in BOTH
+ * deployments: co-located, the origin is this host anyway; central, it is the
+ * one instance the grant belongs to. There is no new config value and no
+ * hardcoded host.
+ *
+ * `new URL(...)` cannot throw here: `dispatch_url` was parsed and constrained to
+ * http(s) before the row was ever written, and the relay above has already
+ * re-parsed this exact value.
+ *
+ * WHAT CANNOT RIDE ALONG. The target is `origin` + a module constant. `.origin`
+ * discards any path, query, and fragment, and neither `code` nor `state` is in
+ * scope for its construction — so a grant cannot reach the app URL. The
+ * callback's OWN url still carries them, which is why `referrer-policy:
+ * no-referrer` is set: without it a same-origin (self-host) redirect would hand
+ * the full callback URL — code and state included — to the next request as a
+ * `Referer`. That is the leak the module docblock claims not to have, so it is
+ * closed here rather than merely asserted.
+ */
+function returnToIntegrations(dispatch_url: string): Response {
+  const target = `${new URL(dispatch_url).origin}${INTEGRATIONS_RETURN_PATH}`
+  return new Response(null, {
+    status: 303,
+    headers: {
+      location: target,
+      'referrer-policy': 'no-referrer',
+      'cache-control': 'no-store',
+    },
+  })
+}
+
+/**
+ * A terminal page for the human — the FAILURE surface only.
+ *
+ * Deliberately text-only and self-contained: no `code`, no `state`, no external
+ * assets. A failed connect stops here on purpose (ISSUES #495): bouncing someone
+ * silently back to Settings after a grant that did not complete hides the
+ * failure behind a screen that looks like success, so the reason stays on screen
+ * and the owner restarts the connection deliberately. The SUCCESS path does not
+ * come here at all — it 303s to {@link INTEGRATIONS_RETURN_PATH} on the
+ * instance, because "close this tab and navigate back yourself" was the dead end
+ * the owner reported twice.
  */
 function page(title: string, detail: string, status: number): Response {
   const esc = (s: string): string =>
@@ -315,7 +382,9 @@ export function createCoresOAuthBroker(opts: CoresOAuthBrokerOptions): CoresOAut
           return page('Not connected', 'Neutron refused the connection attempt.', 502)
         }
         log({ kind: 'cores_oauth_broker_relayed', project_slug: row.project_slug })
-        return page('Connected', 'Your Google account is now connected to Neutron.', 200)
+        // ISSUES #495 — the grant is complete, so the owner goes back to the
+        // surface that shows it, not to a page telling him to navigate there.
+        return returnToIntegrations(row.dispatch_url)
       }
 
       return null

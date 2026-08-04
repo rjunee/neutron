@@ -29,6 +29,23 @@
  *     still succeeds" reds (the stored dispatch_url never refreshes).
  *   - over-tighten further so any conflict is refused → the same retry test reds
  *     (200 → 409).
+ *
+ * THE SUCCESS PATH RETURNS THE OWNER (ISSUES #495). The callback used to end on
+ * a static "Connected — you can close this tab" page; it now 303s to the
+ * instance's own Integrations surface. Seven mutations, each confirmed RED:
+ *   - restore the old `page('Connected', …)` on success → 9 tests red;
+ *   - build the target from a constant instead of the row's `dispatch_url` →
+ *     the two location assertions red (this is the one that matters when one
+ *     broker serves many instances);
+ *   - append the `state` to the target's query → the leak test reds;
+ *   - drop the `referrer-policy: no-referrer` header → the referrer test reds;
+ *   - make `page()` redirect too → 6 tests red, including the failure-path one;
+ *   - point the constant at `tab=settings` → both location assertions red;
+ *   - rename the engine's `admin` tab key in `tabs/registry.ts` → the
+ *     descriptor test reds, so a link to a tab that stopped existing cannot ship.
+ * The expected URLs here are written out literally rather than composed from
+ * `INTEGRATIONS_RETURN_PATH`; derived from it, every one of those mutations
+ * would have stayed green by agreeing with itself.
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -39,6 +56,7 @@ import { join } from 'node:path'
 import type { SQLQueryBindings } from 'bun:sqlite'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { resolveTabs } from '@neutronai/tabs/registry.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   signInternalRequest,
@@ -144,7 +162,7 @@ test('the full round trip: register, then Google calls back, and the code reache
   expect((await register()).status).toBe(200)
 
   const res = await callback('code=auth-code-xyz&state=state-1')
-  expect(res.status).toBe(200)
+  expect(res.status).toBe(303)
 
   expect(relays).toHaveLength(1)
   expect(relays[0]!.url).toBe(DISPATCH)
@@ -184,7 +202,7 @@ test('an unsigned or wrongly-signed register is refused, and says nothing about 
 
 test('a state is SINGLE-USE — the second callback relays nothing', async () => {
   await register()
-  expect((await callback('code=c1&state=state-1')).status).toBe(200)
+  expect((await callback('code=c1&state=state-1')).status).toBe(303)
 
   const replay = await callback('code=c1&state=state-1')
   expect(replay.status).toBe(400)
@@ -211,12 +229,116 @@ test('an expired row is refused', async () => {
   expect(relays).toHaveLength(0)
 })
 
-test('the terminal page never echoes the code or the state', async () => {
+test('the FAILURE page never echoes the code or the state', async () => {
   await register()
+  // An already-consumed state: the second callback still carries a real code on
+  // its URL, and the page it renders must not repeat it back.
+  await callback('code=super-secret-code&state=state-1')
   const html = await (await callback('code=super-secret-code&state=state-1')).text()
   // A grant must not survive a screenshot, a shared URL, or a referrer header.
   expect(html).not.toContain('super-secret-code')
   expect(html).not.toContain('state-1')
+})
+
+// ── ISSUES #495 — the success path RETURNS the owner, it does not dead-end ────
+//
+// The owner reported this twice: after granting Google access he landed on a
+// static "you can close this tab" page and had to navigate back to Settings
+// himself. These assertions pin the redirect AND the two things that must stay
+// true about it — that the grant cannot ride along on the URL, and that a
+// FAILURE still stops on a page that says what went wrong.
+//
+// The expected URL below is written out in full, deliberately. Building it from
+// the module's own `INTEGRATIONS_RETURN_PATH` would make the test agree with the
+// code by construction and pass no matter what that constant became.
+
+test('a completed grant RETURNS the owner to the connected-accounts view (ISSUES #495)', async () => {
+  await register()
+  const res = await callback('code=auth-code-xyz&state=state-1')
+
+  expect(res.status).toBe(303)
+  expect(res.headers.get('location')).toBe('https://owner.example.com/chat?tab=admin')
+})
+
+test('the return target is the INSTANCE origin from the routing row, not the broker host', async () => {
+  // The central deployment: the broker serves many instances from its own host,
+  // so a target derived from the request URL — or from any constant — would send
+  // every owner to the wrong place. Only the row knows whose grant this is.
+  await register({ dispatch_url: 'https://other-owner.example.com/api/cores/oauth/google/ingest' })
+  const res = await callback('code=auth-code-xyz&state=state-1')
+
+  const location = res.headers.get('location') ?? ''
+  expect(location).toBe('https://other-owner.example.com/chat?tab=admin')
+  // Compared as a PARSED ORIGIN, not a string prefix. `startsWith(BASE)` was the
+  // first draft and CodeQL flagged it (js/incomplete-url-substring-sanitization,
+  // high): a prefix test treats `https://broker.example.com.evil.test` as the
+  // broker. Harmless in a negative assertion, but the parsed form is both
+  // stronger and the one that should be copied if this is ever reused.
+  expect(new URL(location).origin).not.toBe(new URL(BASE).origin)
+})
+
+test('neither the code nor the state can reach the redirect target', async () => {
+  await register()
+  const res = await callback('code=super-secret-code&state=state-1')
+
+  // Not in the path, not in the query, not in the fragment — check the whole
+  // header, then the parsed parts, so a future `?code=`/`#state=` cannot slip in.
+  const location = res.headers.get('location') ?? ''
+  expect(location).not.toContain('super-secret-code')
+  expect(location).not.toContain('state-1')
+  const target = new URL(location)
+  expect(target.pathname).toBe('/chat')
+  expect([...target.searchParams.keys()]).toEqual(['tab'])
+  expect(target.hash).toBe('')
+
+  // Nothing else in the response carries them either — a redirect body is not
+  // rendered, but it is still bytes on the wire.
+  expect(await res.text()).not.toContain('super-secret-code')
+  for (const [, value] of res.headers.entries()) {
+    expect(value).not.toContain('super-secret-code')
+    expect(value).not.toContain('state-1')
+  }
+})
+
+test('the redirect suppresses the referrer, so the callback URL cannot leak the grant', async () => {
+  // The CALLBACK's own URL carries `?code=…&state=…`. Following a redirect from
+  // it would, same-origin (a self-host, where broker and instance are one host),
+  // send that full URL to the app as a `Referer`. This header is what makes the
+  // module docblock's no-referrer-leak claim true rather than merely written.
+  await register()
+  const res = await callback('code=super-secret-code&state=state-1')
+  expect(res.headers.get('referrer-policy')).toBe('no-referrer')
+})
+
+test('a FAILED callback still stops on a readable page — it never bounces to the app', async () => {
+  // A silent redirect to Settings after a grant that did NOT complete looks
+  // exactly like success. Each failure mode keeps its terminal page.
+  await register()
+  relayThrows = true
+  const relayFailed = await callback('code=c1&state=state-1')
+  expect(relayFailed.status).toBe(502)
+  expect(relayFailed.headers.get('location')).toBeNull()
+  expect(await relayFailed.text()).toContain('could not be reached')
+
+  const declined = await callback('error=access_denied&state=state-1')
+  expect(declined.status).toBe(400)
+  expect(declined.headers.get('location')).toBeNull()
+  expect(await declined.text()).toContain('access_denied')
+
+  const unknown = await callback('code=c1&state=no-such-state')
+  expect(unknown.status).toBe(400)
+  expect(unknown.headers.get('location')).toBeNull()
+  expect(await unknown.text()).toContain('expired')
+})
+
+test('`tab=admin` names the tab that actually renders the connected accounts', () => {
+  // The redirect is only useful if that key is real. Resolved from the ENGINE's
+  // own global tab set — the same descriptors the web client fetches — so
+  // renaming the Admin tab reds here instead of shipping a link to nothing.
+  const admin = resolveTabs('global', []).find((t) => t.key === 'admin')
+  expect(admin).toBeDefined()
+  expect(admin?.scope).toBe('global')
+  expect(admin?.mount.target).toBe('admin')
 })
 
 test('a non-http dispatch_url is refused, so the broker is not an SSRF primitive', async () => {
@@ -294,7 +416,7 @@ test('the broker runs on a RAW bun:sqlite handle too — the cross-deployment cl
   const cb = await onRaw.handler(
     new Request(`${BASE}${BROKER_CALLBACK_PATH}?code=raw-code&state=raw-state`),
   )
-  expect(cb?.status).toBe(200)
+  expect(cb?.status).toBe(303)
   expect(JSON.parse(relays.at(-1)!.body)).toEqual({ code: 'raw-code', state: 'raw-state' })
 })
 
@@ -326,7 +448,7 @@ test('a SAME-OWNER retry still succeeds and refreshes the row — idempotency is
 
   // And the refreshed row still routes: over-tightening the guard so a
   // legitimate retry stops registering shows up here as a dead callback.
-  expect((await callback('code=c-retry&state=state-1')).status).toBe(200)
+  expect((await callback('code=c-retry&state=state-1')).status).toBe(303)
   expect(relays).toHaveLength(1)
   expect(relays[0]!.url).toBe('https://owner.example.com/api/cores/oauth/google/ingest?v=2')
 })
@@ -353,7 +475,7 @@ test('a DIFFERENT owner cannot take an existing state over — the row is not mu
   expect(storedRow('state-1')).toEqual({ project_slug: OWNER, dispatch_url: DISPATCH })
 
   // And the original owner's grant still completes, to its OWN ingest.
-  expect((await callback('code=c1&state=state-1')).status).toBe(200)
+  expect((await callback('code=c1&state=state-1')).status).toBe(303)
   expect(relays).toHaveLength(1)
   expect(relays[0]!.url).toBe(DISPATCH)
 })

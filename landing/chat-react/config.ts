@@ -133,6 +133,19 @@ export interface BootstrapConfig {
    * undefined so existing config literals (tests) need no change.
    */
   initialDocLink?: { projectId: string; path: string }
+  /**
+   * ISSUES #495 — the tab to open on boot, from `?tab=<key>` on the page URL.
+   *
+   * Exists because a completed Google OAuth grant now returns the owner to
+   * `<origin>/chat?tab=admin` (`gateway/http/cores-oauth-broker-surface.ts`
+   * `INTEGRATIONS_RETURN_PATH`) instead of dead-ending on a "close this tab"
+   * page. Without a way to name a tab in the URL, that redirect would land on
+   * Chat and the owner would still have to navigate to Admin by hand — which was
+   * the complaint. `ProjectShell` consumes this ONCE, after the scope's tab set
+   * resolves. Absent on a normal `/chat` boot; an unknown key is simply never
+   * matched and the shell stays on Chat.
+   */
+  initialTabKey?: string
 }
 
 export interface WindowLike {
@@ -249,6 +262,33 @@ export function initialProjectIdFromLocation(
   // Only open a project the client actually knows about (the server injects the
   // full list at boot), so a bad deep-link degrades to General, never a dead scope.
   return projects.some((p) => p.id === raw) ? raw : null
+}
+
+/** Tab-key character class. Descriptor keys are engine-minted — builtin
+ *  identifiers (`admin`, `work_board`, …) or a Core slug — so this is
+ *  deliberately narrower than the id class above: no dots, no room for markup,
+ *  a path, or a URL to ride in on a hostile link. */
+const TAB_KEY_RE = /^[A-Za-z0-9_-]+$/
+
+/**
+ * ISSUES #495 — the tab named by `?tab=<key>` on the page URL, or null.
+ *
+ * Validated for SHAPE only. Whether the key names a tab that exists is not
+ * knowable here — the tab set is fetched per scope at runtime — so `ProjectShell`
+ * resolves it against the descriptors it actually received and quietly stays on
+ * Chat if nothing matches. That is the same degrade-to-a-safe-default posture
+ * {@link initialProjectIdFromLocation} takes for a stale `?project=`.
+ */
+export function initialTabKeyFromLocation(search: string): string | null {
+  let params: URLSearchParams
+  try {
+    params = new URLSearchParams(search)
+  } catch {
+    return null
+  }
+  const raw = params.get('tab')
+  if (raw === null || raw.length === 0) return null
+  return TAB_KEY_RE.test(raw) ? raw : null
 }
 
 /** Build the app-ws WebSocket URL for a host + token (+ optional project +
@@ -378,5 +418,9 @@ export function resolveBootstrapConfig(win: WindowLike): BootstrapConfig {
     origin,
   )
   if (initialDocLink !== null) config.initialDocLink = initialDocLink
+  // ISSUES #495 — `?tab=<key>`, the boot tab. Set ONLY when the URL names one,
+  // so a normal `/chat` boot leaves it undefined and nothing changes.
+  const initialTabKey = initialTabKeyFromLocation(win.location.search)
+  if (initialTabKey !== null) config.initialTabKey = initialTabKey
   return config
 }
