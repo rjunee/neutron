@@ -213,7 +213,8 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
   {
     rung: 'app-project-credentials',
     composition: 'app_project_credentials_surface',
-    serves: 'per-project credential CRUD in project Settings',
+    serves:
+      'credential CRUD — per-project in project Settings, and the global defaults in Admin',
   },
   {
     rung: 'app-codex-credential',

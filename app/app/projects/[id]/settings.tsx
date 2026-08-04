@@ -10,6 +10,13 @@
  *      An add form POSTs a new credential then refetches; a per-row delete
  *      control removes then refetches. Token VALUES are never displayed —
  *      the wire records are metadata-only (see `project-credentials-client.ts`).
+ *
+ *      This screen READS the global defaults and never authors them
+ *      (ISSUES #486). The add form used to carry a project/global toggle and
+ *      every inherited row had a delete, so a credential written from inside
+ *      ONE project silently changed EVERY project. Both are gone: the form
+ *      writes this project, inherited rows are read-only, and the instance-wide
+ *      defaults are managed on the global surface (Admin → Integrations).
  *   2. Project — the editable project name (rename via the settings PATCH
  *      `{ name }`) plus the editable rail emoji (PATCH `{ emoji }` through the
  *      same surface).
@@ -35,7 +42,6 @@ import {
 import { loadAppConfig } from '../../../lib/config';
 import {
   ProjectCredentialsClient,
-  type CredentialScope,
   type ProjectCredentialRecord,
   type ProjectCredentialsList,
 } from '../../../lib/project-credentials-client';
@@ -76,7 +82,6 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
   const [credsError, setCredsError] = useState<string | null>(null);
   const [addService, setAddService] = useState('');
   const [addToken, setAddToken] = useState('');
-  const [addScope, setAddScope] = useState<CredentialScope>('project');
   const [addLabel, setAddLabel] = useState('');
   const [adding, setAdding] = useState(false);
   const [credActionError, setCredActionError] = useState<string | null>(null);
@@ -115,7 +120,6 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
       .set(projectId, {
         service,
         token: secret,
-        scope: addScope,
         ...(label.length > 0 ? { label } : {}),
       })
       .then(() => {
@@ -129,15 +133,16 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
         setAdding(false);
         setCredActionError(err instanceof Error ? err.message : 'failed to save credential');
       });
-  }, [credClient, projectId, addService, addToken, addScope, addLabel, adding, refreshCreds]);
+  }, [credClient, projectId, addService, addToken, addLabel, adding, refreshCreds]);
 
+  // Removes THIS PROJECT's credential only. An inherited global default has no
+  // delete control here — removing it would change every other project.
   const deleteCredential = useCallback(
-    (service: string, scope: CredentialScope): void => {
-      const busyKey = `${scope}:${service}`;
-      setBusyCred(busyKey);
+    (service: string): void => {
+      setBusyCred(`project:${service}`);
       setCredActionError(null);
       credClient
-        .remove(projectId, service, scope)
+        .remove(projectId, service)
         .then(() => {
           setBusyCred(null);
           refreshCreds();
@@ -257,17 +262,11 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
               rec={rec}
               inherited={false}
               busy={busyCred === `project:${rec.service}`}
-              onDelete={() => deleteCredential(rec.service, 'project')}
+              onDelete={() => deleteCredential(rec.service)}
             />
           ))}
           {creds.global.map((rec) => (
-            <CredentialRow
-              key={`global:${rec.service}`}
-              rec={rec}
-              inherited={true}
-              busy={busyCred === `global:${rec.service}`}
-              onDelete={() => deleteCredential(rec.service, 'global')}
-            />
+            <CredentialRow key={`global:${rec.service}`} rec={rec} inherited={true} busy={false} />
           ))}
         </View>
       )}
@@ -312,20 +311,10 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
           accessibilityLabel="Credential label"
           testID="settings-cred-label"
         />
-        <View style={styles.scopeRow}>
-          <ScopeToggle
-            label="This project"
-            active={addScope === 'project'}
-            onPress={() => setAddScope('project')}
-            testID="settings-cred-scope-project"
-          />
-          <ScopeToggle
-            label="Global"
-            active={addScope === 'global'}
-            onPress={() => setAddScope('global')}
-            testID="settings-cred-scope-global"
-          />
-        </View>
+        <Text style={styles.sectionHint} testID="settings-cred-scope-note">
+          Saved for this project only. Defaults every project inherits are managed in
+          Admin → Integrations.
+        </Text>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Add credential"
@@ -450,10 +439,11 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
 }
 
 /**
- * One credential row: service + optional label + scope tag, and a delete
- * control. `inherited` marks a `global` default the project reads through
- * (labeled "global default"). NEVER renders a token value — the record has
- * none.
+ * One credential row: service + optional label + scope tag, and — for THIS
+ * project's own rows — a delete control. `inherited` marks a `global` default
+ * the project reads through: it is labeled "global default" and carries no
+ * delete, because deleting it from here would change every other project
+ * (ISSUES #486). NEVER renders a token value — the record has none.
  */
 function CredentialRow({
   rec,
@@ -464,7 +454,7 @@ function CredentialRow({
   rec: ProjectCredentialRecord;
   inherited: boolean;
   busy: boolean;
-  onDelete: () => void;
+  onDelete?: () => void;
 }) {
   return (
     <View style={styles.credRow} testID={`settings-cred-row-${rec.service}`}>
@@ -473,49 +463,23 @@ function CredentialRow({
         {rec.label !== null && rec.label.length > 0 ? (
           <Text style={styles.credLabel}>{rec.label}</Text>
         ) : null}
-        <Text style={styles.credScope}>{inherited ? 'global default' : 'this project'}</Text>
+        <Text style={styles.credScope}>
+          {inherited ? 'global default — manage in Admin → Integrations' : 'this project'}
+        </Text>
       </View>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`Delete ${rec.service} credential`}
-        disabled={busy}
-        onPress={onDelete}
-        style={({ pressed }) => [styles.deleteBtn, pressed && styles.pressed, busy && styles.btnDisabled]}
-        testID={`settings-cred-delete-${rec.service}`}
-      >
-        <Text style={styles.deleteBtnText}>{busy ? '…' : 'Delete'}</Text>
-      </Pressable>
+      {inherited ? null : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Delete ${rec.service} credential`}
+          disabled={busy}
+          onPress={onDelete}
+          style={({ pressed }) => [styles.deleteBtn, pressed && styles.pressed, busy && styles.btnDisabled]}
+          testID={`settings-cred-delete-${rec.service}`}
+        >
+          <Text style={styles.deleteBtnText}>{busy ? '…' : 'Delete'}</Text>
+        </Pressable>
+      )}
     </View>
-  );
-}
-
-/** A single scope-toggle pill for the add form. */
-function ScopeToggle({
-  label,
-  active,
-  onPress,
-  testID,
-}: {
-  label: string;
-  active: boolean;
-  onPress: () => void;
-  testID: string;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      accessibilityLabel={label}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.scopePill,
-        active && styles.scopePillActive,
-        pressed && styles.pressed,
-      ]}
-      testID={testID}
-    >
-      <Text style={[styles.scopePillText, active && styles.scopePillTextActive]}>{label}</Text>
-    </Pressable>
   );
 }
 
@@ -608,24 +572,6 @@ const styles = StyleSheet.create({
     fontSize: TYPOGRAPHY.body.fontSize,
     lineHeight: TYPOGRAPHY.body.lineHeight,
   },
-  scopeRow: { flexDirection: 'row', gap: SPACING.sm },
-  scopePill: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: SPACING.sm,
-    borderRadius: SPACING.sm,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface,
-  },
-  scopePillActive: { borderColor: THEME.link, backgroundColor: THEME.surface_raised },
-  scopePillText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
-  scopePillTextActive: { color: THEME.text_primary },
-
   primaryBtn: {
     alignItems: 'center',
     paddingHorizontal: SPACING.lg,

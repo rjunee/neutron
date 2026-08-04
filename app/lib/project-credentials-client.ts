@@ -1,12 +1,23 @@
 /**
  * @neutronai/app — project-scoped CREDENTIAL API client (Settings tab).
  *
- * The mobile twin of the gateway's per-project credential surface. A thin
- * fetch wrapper mirroring `lib/work-board-client.ts`:
+ * The mobile twin of the gateway's credential surface. A thin fetch wrapper
+ * mirroring `lib/work-board-client.ts`, with TWO route families — one per
+ * scope, because the route IS the scope (ISSUES #486):
  *
  *   GET    /api/app/projects/<id>/credentials             list (project ∪ global)
- *   POST   /api/app/projects/<id>/credentials             set (create / rotate)
- *   DELETE /api/app/projects/<id>/credentials/<service>   remove
+ *   POST   /api/app/projects/<id>/credentials             set THIS project's
+ *   DELETE /api/app/projects/<id>/credentials/<service>   remove THIS project's
+ *
+ *   GET    /api/app/credentials                           list the global defaults
+ *   POST   /api/app/credentials                           set a global default
+ *   DELETE /api/app/credentials/<service>                 remove a global default
+ *
+ * There is no `scope` argument on any of them. `set`/`remove` can only ever
+ * touch the named project; `setGlobal`/`removeGlobal` can only ever touch the
+ * instance-wide defaults, and only the Integrations (admin) screen holds them.
+ * The project `list` still returns the inherited globals so the Settings screen
+ * can SHOW them read-only.
  *
  * Pass the bearer at construction; every call returns the canonical server
  * view (server-authoritative). The list comes back split into the project's
@@ -54,11 +65,11 @@ export interface ProjectCredentialsList {
   global: ProjectCredentialRecord[];
 }
 
+/** Input to a write. No `scope` — the method you call is the scope (#486). */
 export interface SetCredentialInput {
   service: string;
   /** The secret to store. Sent up on write; never returned on any read. */
   token: string;
-  scope: CredentialScope;
   label?: string;
 }
 
@@ -74,6 +85,11 @@ interface ListResponse {
 interface SetResponse {
   ok: boolean;
   credential: ProjectCredentialRecord;
+}
+
+interface GlobalListResponse {
+  ok: boolean;
+  global: ProjectCredentialRecord[];
 }
 
 export class ProjectCredentialsClientError extends GatewayClientError {
@@ -95,18 +111,35 @@ export class ProjectCredentialsClient extends GatewayHttpClient {
     return { project: res.project ?? [], global: res.global ?? [] };
   }
 
-  /** Create or rotate a credential. The server returns the stored metadata. */
+  /** Create or rotate THIS PROJECT's credential. Returns the stored metadata. */
   async set(project_id: string, input: SetCredentialInput): Promise<ProjectCredentialRecord> {
     const path = `/api/app/projects/${encodeURIComponent(project_id)}/credentials`;
     const res = await this.req<SetResponse>(path, { method: 'POST', body: input });
     return res.credential;
   }
 
-  /** Delete the credential for `service` in the given scope. 404 → throws. */
-  async remove(project_id: string, service: string, scope: CredentialScope): Promise<void> {
-    const path =
-      `/api/app/projects/${encodeURIComponent(project_id)}/credentials/${encodeURIComponent(service)}` +
-      `?scope=${encodeURIComponent(scope)}`;
+  /** Delete THIS PROJECT's credential for `service`. 404 → throws. */
+  async remove(project_id: string, service: string): Promise<void> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/credentials/${encodeURIComponent(service)}`;
     await this.req<{ ok: boolean }>(path, { method: 'DELETE' });
+  }
+
+  /** The instance-wide default credentials (metadata). Admin screen only. */
+  async listGlobal(): Promise<ProjectCredentialRecord[]> {
+    const res = await this.req<GlobalListResponse>('/api/app/credentials');
+    return res.global ?? [];
+  }
+
+  /** Create or rotate an instance-wide default. Admin screen only. */
+  async setGlobal(input: SetCredentialInput): Promise<ProjectCredentialRecord> {
+    const res = await this.req<SetResponse>('/api/app/credentials', { method: 'POST', body: input });
+    return res.credential;
+  }
+
+  /** Delete an instance-wide default. Admin screen only. */
+  async removeGlobal(service: string): Promise<void> {
+    await this.req<{ ok: boolean }>(`/api/app/credentials/${encodeURIComponent(service)}`, {
+      method: 'DELETE',
+    });
   }
 }

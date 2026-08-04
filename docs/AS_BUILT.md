@@ -2,6 +2,54 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-03 — a credential set inside one project no longer changes every project
+
+Branch `fix/credential-scope-boundary`. Changed:
+`gateway/http/project-credentials-surface.ts`,
+`landing/chat-react/project-credentials-client.ts`,
+`landing/chat-react/SettingsTab.tsx`, `landing/chat-react/IntegrationsTab.tsx`,
+`landing/chat-react.html`, `app/lib/project-credentials-client.ts`,
+`app/app/projects/[id]/settings.tsx`, `app/app/integrations.tsx`,
+`open/__tests__/route-slot-coverage-inventory.ts`, `docs/SYSTEM-OVERVIEW.md`.
+New: `gateway/http/__tests__/project-credentials-surface-scope.test.ts`. Tests:
+`landing/chat-react/__tests__/project-credentials-client.test.ts`,
+`landing/chat-react/__tests__/settings-tab.test.tsx`,
+`landing/chat-react/__tests__/integrations-tab.test.tsx`,
+`gateway/__tests__/project-credentials-production-composer.test.ts`,
+`gateway/__tests__/open-route-matrix.test.ts`.
+
+**Why.** A project's Settings tab carried a project/global scope toggle on its
+add-credential form, and a delete on every inherited row. The server honoured
+both, so a key typed while standing inside ONE project rewrote the default EVERY
+other project inherits, and an ✕ next to an inherited row deleted it everywhere.
+Two writers for one fact, from a screen whose whole frame says "this project".
+The owner found it by clicking around: global settings living inside project
+settings tabs.
+
+**What landed.** The route is now the scope. The credentials surface grew a
+project-less GLOBAL family (`/api/app/credentials[/<service>]`) alongside the
+per-project one, mirroring how `codex-credential-surface.ts` already splits its
+global and per-project routes, and both are served by the same
+`app-project-credentials` rung. The project routes reject `scope: 'global'` (and
+`?scope=global`) with HTTP 400 `scope_not_allowed` — a refusal, not a silent
+downgrade, so a stale client shows an error instead of writing somewhere the
+owner was not looking. Neither client has a `scope` argument left to pass: the
+method you call decides.
+
+The capability MOVED rather than disappearing. Authoring the instance-wide
+defaults now lives on the surface that is actually global — a "Shared
+credentials" section in the web Admin tab and on the mobile Integrations screen,
+with the same add / list / remove it had before. Project Settings keeps SHOWING
+the inherited defaults, because knowing the key exists is what makes a project's
+settings legible; each one is labelled with where it is changed.
+
+**Verified.** The server tests read the store back after a REFUSED request, so a
+400 that still wrote would fail them. Mutation-tested: restoring the old
+scope-honouring handler turns 5 of them red. The client tests assert the
+captured request (method + URL + body), not which controls are on screen — a tab
+with no toggle that still posted `scope: 'global'` would pass a
+control-presence check and fails these.
+
 ## 2026-08-03 — the web Admin tab could show a Google account but not connect one
 
 Branch `feat/web-admin-oauth-connect`. Changed: `landing/chat-react/IntegrationsTab.tsx`,

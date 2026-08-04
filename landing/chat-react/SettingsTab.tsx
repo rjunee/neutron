@@ -12,6 +12,14 @@
  *      defaults, an add form, and a per-row delete. The API returns METADATA
  *      only (never the secret), so we render "a key exists for <service>", never
  *      a token value.
+ *
+ *      This tab is a READER of the global defaults, never their author
+ *      (ISSUES #486). It used to carry a project/global scope toggle on the add
+ *      form and a delete on every inherited row, so a credential written while
+ *      standing in ONE project silently changed EVERY project — two writers for
+ *      one fact. Inherited rows are now labelled and read-only, and both the
+ *      add form and the delete only ever touch this project. Authoring the
+ *      instance-wide defaults lives where they apply: General → Admin.
  *   2. Project — the project name (rename via the settings PATCH). The emoji
  *      control is a SEAM: there's no emoji column yet, so it renders DISABLED
  *      with a note that it ships with the rail emoji work — no invented backend.
@@ -27,11 +35,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { BootstrapConfig } from './config.ts'
-import {
-  WebProjectCredentialsClient,
-  type CredentialScope,
-  type Rec,
-} from './project-credentials-client.ts'
+import { WebProjectCredentialsClient, type Rec } from './project-credentials-client.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
 import {
   WebVoiceTranscriptionClient,
@@ -113,10 +117,10 @@ export function SettingsTab({
   const [credsLoading, setCredsLoading] = useState(true)
   const [credsError, setCredsError] = useState<string | null>(null)
 
-  // Add-credential form.
+  // Add-credential form. No scope control — this form only ever writes THIS
+  // project's credential (ISSUES #486).
   const [service, setService] = useState('')
   const [token, setToken] = useState('')
-  const [scope, setScope] = useState<CredentialScope>('project')
   const [label, setLabel] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -403,7 +407,6 @@ export function SettingsTab({
     setGlobalCreds([])
     setService('')
     setToken('')
-    setScope('project')
     setLabel('')
     setBusyKey(null)
     setNameError(null)
@@ -427,7 +430,7 @@ export function SettingsTab({
     setCredsError(null)
     const lbl = label.trim()
     void client
-      .set(projectId, { service: svc, token: tok, scope, ...(lbl.length > 0 ? { label: lbl } : {}) })
+      .set(projectId, { service: svc, token: tok, ...(lbl.length > 0 ? { label: lbl } : {}) })
       .then(() => {
         if (!mountedRef.current) return
         setSaving(false)
@@ -441,16 +444,18 @@ export function SettingsTab({
         setSaving(false)
         setCredsError(err instanceof Error ? err.message : 'failed to save credential')
       })
-  }, [client, projectId, service, token, scope, label, saving, loadCreds])
+  }, [client, projectId, service, token, label, saving, loadCreds])
 
+  // Only ever removes THIS project's credential. Inherited (global) rows have
+  // no remove control here — they are removed where they are authored.
   const removeCredential = useCallback(
     (rec: Rec): void => {
-      const key = `${rec.scope}:${rec.service}`
+      const key = `project:${rec.service}`
       if (busyKey !== null) return
       setBusyKey(key)
       setCredsError(null)
       void client
-        .remove(projectId, rec.service, rec.scope)
+        .remove(projectId, rec.service)
         .then(() => {
           if (!mountedRef.current) return
           setBusyKey(null)
@@ -562,7 +567,10 @@ export function SettingsTab({
         <h2 className="cset-h">Credentials</h2>
         <p className="cset-sub">
           API keys and tokens this project’s agent uses. Stored securely — the
-          value is never shown again after you save it.
+          value is never shown again after you save it. Anything you add here
+          applies to <strong>this project only</strong>; the keys marked{' '}
+          <em>global default</em> come from every project’s shared set and are
+          changed in <strong>General → Admin</strong>.
         </p>
 
         {credsError !== null ? <div className="cset-error">{credsError}</div> : null}
@@ -583,13 +591,7 @@ export function SettingsTab({
               />
             ))}
             {globalCreds.map((rec) => (
-              <CredentialRow
-                key={`global:${rec.service}`}
-                rec={rec}
-                inherited
-                busy={busyKey === `global:${rec.service}`}
-                onRemove={() => removeCredential(rec)}
-              />
+              <CredentialRow key={`global:${rec.service}`} rec={rec} inherited busy={false} />
             ))}
           </ul>
         )}
@@ -639,27 +641,10 @@ export function SettingsTab({
               onChange={(e) => setLabel(e.target.value)}
             />
           </div>
-          <fieldset className="cset-field cset-scope">
-            <legend className="cset-label">Scope</legend>
-            <label className="cset-radio">
-              <input
-                type="radio"
-                name="cset-scope"
-                checked={scope === 'project'}
-                onChange={() => setScope('project')}
-              />
-              This project
-            </label>
-            <label className="cset-radio">
-              <input
-                type="radio"
-                name="cset-scope"
-                checked={scope === 'global'}
-                onChange={() => setScope('global')}
-              />
-              Global default
-            </label>
-          </fieldset>
+          <div className="cset-note" data-testid="cred-scope-note">
+            Saved for this project only. To set a default every project inherits,
+            use General → Admin.
+          </div>
           <div className="cset-form-actions">
             <button
               type="submit"
@@ -1174,11 +1159,15 @@ function CredentialRow({
   onRemove,
 }: {
   rec: Rec
-  /** A `global`-scope default this project inherits (labelled + delete removes
-   *  the global default). */
+  /**
+   * A `global`-scope default this project INHERITS. Read-only here: it is
+   * labelled and shown (knowing the key exists is what makes this project's
+   * settings legible) but carries no remove control, because removing it would
+   * change every other project from a screen scoped to this one (ISSUES #486).
+   */
   inherited: boolean
   busy: boolean
-  onRemove: () => void
+  onRemove?: () => void
 }): React.JSX.Element {
   return (
     <li className="cset-cred-row">
@@ -1188,17 +1177,23 @@ function CredentialRow({
       {rec.label !== null && rec.label.length > 0 ? (
         <span className="cset-cred-label">{rec.label}</span>
       ) : null}
-      {inherited ? <span className="cset-cred-badge">global default</span> : null}
-      <button
-        type="button"
-        className="cset-btn cset-btn-icon"
-        onClick={onRemove}
-        disabled={busy}
-        title="Remove credential"
-        aria-label={`Remove ${rec.service} credential`}
-      >
-        ✕
-      </button>
+      {inherited ? (
+        <>
+          <span className="cset-cred-badge">global default</span>
+          <span className="cset-cred-managed">Change in General → Admin</span>
+        </>
+      ) : (
+        <button
+          type="button"
+          className="cset-btn cset-btn-icon"
+          onClick={onRemove}
+          disabled={busy}
+          title="Remove credential"
+          aria-label={`Remove ${rec.service} credential`}
+        >
+          ✕
+        </button>
+      )}
     </li>
   )
 }

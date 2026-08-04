@@ -8,11 +8,15 @@
  * the REAL production graph with the surface threaded through and drives the
  * full HTTP chain → surface → ProjectCredentialStore → SQLite, asserting:
  *
- *   1. POST /api/app/projects/<id>/credentials       (set, project + global scope)
+ *   1. POST /api/app/projects/<id>/credentials       (set, project scope)
  *   2. GET  /api/app/projects/<id>/credentials       (list, metadata only)
  *   3. DELETE /api/app/projects/<id>/credentials/<s> (delete + 404)
  *   4. per-project scope isolation (project A's token absent from project B)
  *   5. 401 missing_bearer when unauthenticated
+ *   6. the GLOBAL family — POST/GET/DELETE /api/app/credentials — is reachable
+ *      through the SAME rung, and is the only route that reaches global state
+ *      (ISSUES #486). A project route asking for global scope is a 400 here in
+ *      the real chain, not just in the surface unit test.
  *
  * Mirrors `gateway/__tests__/projects-production-composer.test.ts`.
  */
@@ -122,7 +126,7 @@ afterEach(async () => {
 test('POST + GET — a project-scoped credential persists and lists (metadata only)', async () => {
   const post = await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'meta_ads', token: 'tok_A', scope: 'project', label: 'prod' }),
+    body: JSON.stringify({ service: 'meta_ads', token: 'tok_A', label: 'prod' }),
   })
   expect(post.status).toBe(201)
   const created = (await post.json()) as { ok: boolean; credential: { service: string; scope: string } }
@@ -144,11 +148,12 @@ test('POST + GET — a project-scoped credential persists and lists (metadata on
   expect(JSON.stringify(listed)).not.toContain('tok_A')
 })
 
-test('global scope lands in the global list, visible from any project', async () => {
-  await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
+test('a global credential written on the GLOBAL route is inherited by any project', async () => {
+  const post = await authedFetch(h.base, '/api/app/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'google_ads', token: 'tok_G', scope: 'global' }),
+    body: JSON.stringify({ service: 'google_ads', token: 'tok_G' }),
   })
+  expect(post.status).toBe(201)
   const get = await authedFetch(h.base, '/api/app/projects/proj-b/credentials')
   const listed = (await get.json()) as {
     project: Array<{ service: string }>
@@ -158,10 +163,61 @@ test('global scope lands in the global list, visible from any project', async ()
   expect(listed.global.map((r) => r.service)).toEqual(['google_ads'])
 })
 
+test('the GLOBAL route lists + deletes what it wrote, through the real chain', async () => {
+  await authedFetch(h.base, '/api/app/credentials', {
+    method: 'POST',
+    body: JSON.stringify({ service: 'tavily', token: 'tok_T', label: 'shared' }),
+  })
+  const list = await authedFetch(h.base, '/api/app/credentials')
+  const body = (await list.json()) as { global: Array<{ service: string; scope: string }> }
+  expect(body.global.map((r) => r.service)).toEqual(['tavily'])
+  expect(body.global[0]!.scope).toBe('global')
+  // Metadata only — the secret never comes back out.
+  expect(JSON.stringify(body)).not.toContain('tok_T')
+
+  const del = await authedFetch(h.base, '/api/app/credentials/tavily', { method: 'DELETE' })
+  expect(del.status).toBe(200)
+  const after = await authedFetch(h.base, '/api/app/credentials')
+  expect(((await after.json()) as { global: unknown[] }).global).toEqual([])
+})
+
+test('a PROJECT route cannot write global state, and nothing lands when it tries', async () => {
+  const res = await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
+    method: 'POST',
+    body: JSON.stringify({ service: 'stripe', token: 'tok_S', scope: 'global' }),
+  })
+  expect(res.status).toBe(400)
+  expect(((await res.json()) as { code: string }).code).toBe('scope_not_allowed')
+  // Neither scope took the write — not the global default it asked for, and not
+  // a project row silently substituted for it.
+  const globals = await authedFetch(h.base, '/api/app/credentials')
+  expect(((await globals.json()) as { global: Array<{ service: string }> }).global
+    .map((r) => r.service)).not.toContain('stripe')
+  const proj = await authedFetch(h.base, '/api/app/projects/proj-a/credentials')
+  expect(((await proj.json()) as { project: Array<{ service: string }> }).project
+    .map((r) => r.service)).not.toContain('stripe')
+})
+
+test('a PROJECT route cannot delete a global default with ?scope=global', async () => {
+  await authedFetch(h.base, '/api/app/credentials', {
+    method: 'POST',
+    body: JSON.stringify({ service: 'shared_del', token: 'tok_X' }),
+  })
+  const res = await authedFetch(
+    h.base,
+    '/api/app/projects/proj-a/credentials/shared_del?scope=global',
+    { method: 'DELETE' },
+  )
+  expect(res.status).toBe(400)
+  const still = await authedFetch(h.base, '/api/app/credentials')
+  expect(((await still.json()) as { global: Array<{ service: string }> }).global
+    .map((r) => r.service)).toContain('shared_del')
+})
+
 test('per-project scope isolation — project A token is absent from project B', async () => {
   await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'meta_ads', token: 'A', scope: 'project' }),
+    body: JSON.stringify({ service: 'meta_ads', token: 'A' }),
   })
   const getB = await authedFetch(h.base, '/api/app/projects/proj-b/credentials')
   const listed = (await getB.json()) as { project: Array<{ service: string }> }
@@ -171,13 +227,13 @@ test('per-project scope isolation — project A token is absent from project B',
 test('DELETE removes a credential and 404s on re-delete', async () => {
   await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'apify', token: 't', scope: 'project' }),
+    body: JSON.stringify({ service: 'apify', token: 't' }),
   })
-  const del = await authedFetch(h.base, '/api/app/projects/proj-a/credentials/apify?scope=project', {
+  const del = await authedFetch(h.base, '/api/app/projects/proj-a/credentials/apify', {
     method: 'DELETE',
   })
   expect(del.status).toBe(200)
-  const del2 = await authedFetch(h.base, '/api/app/projects/proj-a/credentials/apify?scope=project', {
+  const del2 = await authedFetch(h.base, '/api/app/projects/proj-a/credentials/apify', {
     method: 'DELETE',
   })
   expect(del2.status).toBe(404)
@@ -186,7 +242,7 @@ test('DELETE removes a credential and 404s on re-delete', async () => {
 test('validation error → 400 with an envelope', async () => {
   const res = await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: '', token: 't', scope: 'project' }),
+    body: JSON.stringify({ service: '', token: 't' }),
   })
   expect(res.status).toBe(400)
   const body = (await res.json()) as { ok: boolean; code: string }

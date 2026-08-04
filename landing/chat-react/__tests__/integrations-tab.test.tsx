@@ -6,7 +6,10 @@
  *   - typing a value + Save POSTs to /api/cores/api-keys/<label> and the slot
  *     flips to "Stored";
  *   - Clear DELETEs and the slot flips back to "Not set";
- *   - a load failure surfaces the error state.
+ *   - a load failure surfaces the error state;
+ *   - SHARED CREDENTIALS (ISSUES #486) — the global-scope credential store is
+ *     authored HERE, on the global surface, and the writes it emits address the
+ *     project-less `/api/app/credentials` routes.
  *
  * ── The OAuth connect/disconnect block ─────────────────────────────────────
  * The Admin tab rendered OAuth accounts READ-ONLY: a badge and nothing to
@@ -107,6 +110,8 @@ async function mount(
   navigations: string[]
   /** Every message the tab asked the owner to confirm. */
   confirmed: string[]
+  /** Every request, with its parsed JSON body — the wire, not the DOM. */
+  requests: Array<{ method: string; url: string; body: unknown }>
 }> {
   const { createRoot } = await import('react-dom/client')
   const { act } = await import('react')
@@ -114,8 +119,23 @@ async function mount(
   const React = await import('react')
 
   const calls: string[] = []
+  const requests: Array<{ method: string; url: string; body: unknown }> = []
   const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
     calls.push(`${init?.method ?? 'GET'} ${url}`)
+    requests.push({
+      method: init?.method ?? 'GET',
+      url,
+      body:
+        typeof init?.body === 'string'
+          ? ((): unknown => {
+              try {
+                return JSON.parse(init.body as string)
+              } catch {
+                return init.body
+              }
+            })()
+          : undefined,
+    })
     const res = handler(url, init)
     if (res !== null) return await res
     return new Response(JSON.stringify({ ok: false, code: 'request_failed' }), {
@@ -159,6 +179,7 @@ async function mount(
     calls,
     navigations,
     confirmed,
+    requests,
   }
 }
 
@@ -638,6 +659,140 @@ describe('IntegrationsTab — Google connect / disconnect wiring', () => {
       await tick()
     })
     expect(navigations).toEqual([CONSENT_URL])
+    root.unmount()
+  })
+})
+
+/**
+ * ISSUES #486 — the Admin tab is where instance-wide credentials are AUTHORED.
+ * The project Settings tab lost that power; these assert it landed here rather
+ * than disappearing, and that what reaches the server is the global route (no
+ * project id anywhere in it), not a project route with a scope flag.
+ */
+describe('IntegrationsTab shared (global) credentials (happy-dom)', () => {
+  const GLOBAL_CREDS = 'https://sam.neutron.test/api/app/credentials'
+
+  const SHARED = [
+    {
+      id: 'g1',
+      owner_slug: 'sam',
+      project_id: '',
+      scope: 'global',
+      service: 'openai',
+      label: 'shared key',
+      created_at: '2026-06-20T00:00:00Z',
+      updated_at: '2026-06-20T00:00:00Z',
+      expires_at: null,
+    },
+  ]
+
+  function handler(state: { rows: unknown[] }): Handler {
+    return (url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url === GLOBAL_CREDS && (init?.method ?? 'GET') === 'GET') {
+        return json({ ok: true, global: state.rows })
+      }
+      if (url === GLOBAL_CREDS && init?.method === 'POST') {
+        state.rows = [...state.rows, { ...SHARED[0], id: 'g2', service: 'stripe', label: null }]
+        return json({ ok: true, credential: SHARED[0] }, 201)
+      }
+      if (url.startsWith(`${GLOBAL_CREDS}/`) && init?.method === 'DELETE') {
+        state.rows = []
+        return json({ ok: true, deleted: 'openai', scope: 'global' })
+      }
+      return null
+    }
+  }
+
+  function input(container: HTMLElement, label: string): HTMLInputElement {
+    const el = Array.from(container.querySelectorAll('input')).find(
+      (i) => i.getAttribute('aria-label') === label,
+    )
+    if (el === undefined) throw new Error(`no input labelled '${label}'`)
+    return el as HTMLInputElement
+  }
+
+  function setInputValue(el: HTMLInputElement, value: string): void {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+      ?.set as ((v: string) => void) | undefined
+    setter?.call(el, value)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  function textBtn(container: HTMLElement, text: string): HTMLButtonElement {
+    const found = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === text,
+    )
+    if (found === undefined) throw new Error(`no button reading '${text}'`)
+    return found as HTMLButtonElement
+  }
+
+  it('lists the instance-wide defaults from the project-less GET', async () => {
+    const { container, root, calls } = await mount(handler({ rows: SHARED }))
+    expect(container.textContent).toContain('Shared credentials')
+    expect(container.textContent).toContain('openai')
+    expect(container.textContent).toContain('shared key')
+    expect(calls).toContain(`GET ${GLOBAL_CREDS}`)
+    root.unmount()
+  })
+
+  it('adding one POSTs the GLOBAL route — no project id, no scope flag', async () => {
+    const state = { rows: [] as unknown[] }
+    const { container, root, act, requests } = await mount(handler(state))
+    expect(container.textContent).toContain('No shared credentials yet.')
+
+    await act(async () => {
+      setInputValue(input(container, 'Service'), 'stripe')
+      setInputValue(input(container, 'Shared credential value'), 'sk-live-xxx')
+      setInputValue(input(container, 'Label (optional)'), 'billing')
+      await tick()
+    })
+    await act(async () => {
+      textBtn(container, 'Add shared credential').click()
+      await tick()
+      await tick()
+    })
+
+    const posts = requests.filter((r) => r.method === 'POST' && r.url.includes('/credentials'))
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.url).toBe(GLOBAL_CREDS)
+    expect(posts[0]!.url).not.toContain('/projects/')
+    expect(posts[0]!.body).toEqual({ service: 'stripe', token: 'sk-live-xxx', label: 'billing' })
+    // The write landed AND the list re-read, so the new row is on screen.
+    expect(container.textContent).toContain('stripe')
+    root.unmount()
+  })
+
+  it('removing one DELETEs the GLOBAL route and the row goes away', async () => {
+    const state = { rows: SHARED as unknown[] }
+    const { container, root, act, requests } = await mount(handler(state))
+    await act(async () => {
+      btn(container, 'Remove shared openai credential').click()
+      await tick()
+      await tick()
+    })
+    const deletes = requests.filter((r) => r.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]!.url).toBe(`${GLOBAL_CREDS}/openai`)
+    expect(container.textContent).toContain('No shared credentials yet.')
+    root.unmount()
+  })
+
+  it('the shared-credential fetches never touch a project-scoped path', async () => {
+    const { root, act, requests, container } = await mount(handler({ rows: SHARED }))
+    await act(async () => {
+      setInputValue(input(container, 'Service'), 'stripe')
+      setInputValue(input(container, 'Shared credential value'), 'sk-live-xxx')
+      await tick()
+    })
+    await act(async () => {
+      textBtn(container, 'Add shared credential').click()
+      await tick()
+      await tick()
+    })
+    for (const r of requests.filter((x) => x.url.includes('/credentials'))) {
+      expect(r.url).not.toContain('/api/app/projects/')
+    }
     root.unmount()
   })
 })
