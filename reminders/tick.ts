@@ -19,9 +19,32 @@ import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
-import type { RitualExecutor } from './ritual-executor.ts'
+import type { RitualExecutor, RitualFireOutcome } from './ritual-executor.ts'
 
 const log = createLogger('reminder-tick')
+
+/**
+ * The one-shot half of the #319 claim revert: reopen the row, and — when the
+ * caller wants it back at a DIFFERENT instant than it was claimed from — move
+ * its `fire_at` there too.
+ *
+ * Split out as a named helper rather than an inline closure only because both
+ * one-shot claim sites need the identical two-step, and a silently divergent
+ * copy of "reopen, then reschedule" is the kind of drift that shows up as a
+ * ritual retrying immediately in one code path and on a backoff in the other.
+ */
+function reopenAt(
+  store: ReminderStore,
+  reminder: Reminder,
+): (fire_at_sec?: number) => Promise<boolean> {
+  return async (fire_at_sec = reminder.fire_at): Promise<boolean> => {
+    const reopened = await store.reopen(reminder.id)
+    if (reopened && fire_at_sec !== reminder.fire_at) {
+      await store.reschedule(reminder.id, fire_at_sec)
+    }
+    return reopened
+  }
+}
 
 /**
  * The zone a cron cadence is resolved in when the owner's own zone is not known
@@ -212,7 +235,13 @@ export class ReminderTickLoop {
         // back to pending and retries next tick, preserving the existing
         // deliver-or-retry contract. Only a true crash (no catch runs) takes
         // the at-most-once path, which is the whole point.
-        let claimRevert: (() => Promise<unknown>) | null = null
+        //
+        // `claimRevert` takes the instant (unix SECONDS) the row should become
+        // due again, defaulting to the fire_at it was claimed from — which is
+        // what the nudge deliver-or-retry contract wants (retry on the very next
+        // tick). The ritual branch passes a LATER instant instead, because
+        // "immediately, forever" is exactly the loop ISSUES #489 removed.
+        let claimRevert: ((fire_at_sec?: number) => Promise<unknown>) | null = null
         // A row recurs when EITHER cadence column is set (coarse label OR cron
         // spec) — `computeNextFire` resolves the next instant from whichever
         // one is populated. A `null` return means an uncomputable cadence (a
@@ -228,13 +257,13 @@ export class ReminderTickLoop {
             // ONLY if the row still carries the fire_at this claim wrote. A
             // compare-and-swap so a concurrent owner reschedule during the
             // dispatch await isn't clobbered by the revert (#319).
-            claimRevert = () =>
-              this.store.revertRecurrenceAdvance(reminder.id, next_fire_at_sec, reminder.fire_at)
+            claimRevert = (fire_at_sec = reminder.fire_at) =>
+              this.store.revertRecurrenceAdvance(reminder.id, next_fire_at_sec, fire_at_sec)
           } else {
             // Defensive: the row stopped being a pending recurring row between
             // listDue + now (e.g. cancelled mid-tick) — finalize as fired.
             await this.store.markFired(reminder.id)
-            claimRevert = () => this.store.reopen(reminder.id)
+            claimRevert = reopenAt(this.store, reminder)
           }
         } else {
           if (isRecurring(reminder)) {
@@ -244,7 +273,7 @@ export class ReminderTickLoop {
             })
           }
           await this.store.markFired(reminder.id)
-          claimRevert = () => this.store.reopen(reminder.id)
+          claimRevert = reopenAt(this.store, reminder)
         }
 
         // Executor-mode reminders (plan task 4). A ritual row NEVER reaches the
@@ -266,25 +295,38 @@ export class ReminderTickLoop {
         // (f)) — the tick never blocks on an up-to-45-min execution; startup is
         // milliseconds of local DB writes plus one prompt-file read.
         //
-        // But a REJECTED fire() is a STARTUP LOSS: validate/spawn/durable-row-write
-        // threw so NO run row landed for this occurrence. REVERT the #319 claim (the
-        // same claimRevert the nudge dispatcher uses) so the occurrence re-fires next
-        // tick instead of vanishing with no run + no history (the Argus r1 BLOCKER:
-        // the executor's outer catch used to swallow the throw and the tick consumed
-        // the claim regardless). The detached substrate TURN is fire-and-forget INSIDE
-        // the executor and its settlement is fail-soft, so a fire() rejection is
-        // unambiguously a startup loss, never a mid-run failure.
+        // But a STARTUP LOSS — validate/spawn/durable-row-write threw so NO run row
+        // landed for this occurrence — must not let the occurrence vanish with no
+        // run + no history (the Argus r1 BLOCKER: the executor's outer catch used to
+        // swallow the throw and the tick consumed the claim regardless). The executor
+        // now answers that case with `{claim:'retry', retry_at_ms}` and the tick
+        // re-arms the row AT THAT INSTANT using the same compare-and-swap revert the
+        // nudge dispatcher uses. The instant is the load-bearing difference from the
+        // previous shape: reverting to the row's ORIGINAL (already-due) fire_at made
+        // it due again immediately, so a cause that did not clear re-fired on every
+        // 30 s tick forever, with nothing durable to show for it (ISSUES #489). A
+        // bounded, backed-off re-arm keeps the recovery and drops the loop; when the
+        // executor has no retry left it says `consume` and has already recorded and
+        // surfaced the failure itself.
         if (reminder.ritual_id !== null) {
           if (this.ritual_executor !== null) {
+            let outcome: RitualFireOutcome = { claim: 'consume' }
             try {
-              await this.ritual_executor.fire(reminder)
-              fired++
+              outcome = await this.ritual_executor.fire(reminder)
             } catch (err) {
-              // Startup loss — revert the claim so the occurrence re-fires. A
-              // recurring row's advance is undone (compare-and-swap, so a concurrent
-              // reschedule isn't clobbered); a one-shot is reopened.
+              // The executor's whole body is guarded, so a rejection here is a bug
+              // in the executor rather than a fire outcome. Consume the claim and
+              // say so loudly: re-arming on an unknown fault is how a bug becomes an
+              // every-tick loop, which is the defect being fixed, not repeated.
+              log.error('ritual_fire_threw', {
+                reminder: reminder.id,
+                ritual_id: reminder.ritual_id,
+                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+              })
+            }
+            if (outcome.claim === 'retry') {
               try {
-                await claimRevert()
+                await claimRevert(Math.floor(outcome.retry_at_ms / 1000))
               } catch (rerr) {
                 log.error('ritual_claim_revert_failed', {
                   reminder: reminder.id,
@@ -292,11 +334,9 @@ export class ReminderTickLoop {
                   error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
                 })
               }
-              log.error('ritual_fire_threw', {
-                reminder: reminder.id,
-                ritual_id: reminder.ritual_id,
-                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-              })
+              // NOT counted as fired: the occurrence was re-armed, not consumed.
+            } else {
+              fired++
             }
           } else {
             // No executor wired (LLM-less box / test): a PERMANENT condition, not a

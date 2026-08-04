@@ -107,6 +107,38 @@ export function shouldEscalate(rowsNewestFirst: ReadonlyArray<Pick<RitualRunRow,
 }
 
 /**
+ * Collapse a newest-first run history to ONE row per OCCURRENCE (`reminder_id`),
+ * keeping the newest.
+ *
+ * The escalation rule counts consecutive FAILURES, and it was written when one
+ * occurrence produced exactly one terminal row. Bounded transient recovery
+ * (ISSUES #489) breaks that assumption: a single busy morning can now leave four
+ * `failed` rows for the SAME 7 a.m. brief. Feeding those straight in would turn
+ * one bad morning into "failed 3 consecutive runs", which is precisely the
+ * cry-wolf that teaches the owner to swipe past the notice that matters.
+ *
+ * So `consecutive` means consecutive OCCURRENCES, and the retries of one
+ * occurrence collapse to the outcome that occurrence actually reached. Rows with
+ * no `reminder_id` (a boot-reap orphan, an ad-hoc run) have no occurrence to
+ * collapse onto and are each kept as themselves.
+ */
+export function collapseAttemptsToOccurrences<
+  T extends Pick<RitualRunRow, 'status' | 'reminder_id'>,
+>(rowsNewestFirst: ReadonlyArray<T>): T[] {
+  const seen = new Set<string>()
+  const out: T[] = []
+  for (const row of rowsNewestFirst) {
+    const key = row.reminder_id
+    if (key !== null) {
+      if (seen.has(key)) continue
+      seen.add(key)
+    }
+    out.push(row)
+  }
+  return out
+}
+
+/**
  * Reap `code_ritual_runs` rows a PRIOR boot left 'running' — mark each 'crashed'
  * and post one best-effort boot-reap notice.
  *

@@ -70,7 +70,12 @@ test('remindersModule invokes the ritual_executor_factory with the graph Approva
   // Sentinel executor whose fire() records calls; the factory records the
   // approvals it was handed.
   const fireCalls: Reminder[] = []
-  const sentinel: RitualExecutor = { fire: async (r) => { fireCalls.push(r) } }
+  const sentinel: RitualExecutor = {
+    fire: async (r) => {
+      fireCalls.push(r)
+      return { claim: 'consume' }
+    },
+  }
   let seenApprovals: unknown = null
 
   const input = {

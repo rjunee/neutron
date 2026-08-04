@@ -3661,8 +3661,8 @@ ritual content in chat.
   executor. `reminders/ritual-executor.ts` runs the fail-closed validate → on a
   SKIP writes a durable `code_ritual_runs` row and returns; on a fire spawns into
   the dedicated ritual lane, inserts a `'running'` row, launches the detached
-  turn, and does terminal bookkeeping — it NEVER throws once a durable row
-  exists. `makeRitualSubstrate` (`open/wiring/substrates.ts:411`) builds an
+  turn, and does terminal bookkeeping — it NEVER throws (its body is fully
+  guarded), answering a `RitualFireOutcome` instead. `makeRitualSubstrate` (`open/wiring/substrates.ts:411`) builds an
   ephemeral `cc-ritual-*` session under `PROFILE_RITUAL` (its own trust class)
   with the shipped `ritual-agent-base.md`. `reminders/ritual-delivery.ts` posts
   the completion text through the one `deliver()` seam (a `silent` ritual skips
@@ -3670,6 +3670,33 @@ ritual content in chat.
   crashed, escalates once per 3-consecutive-failure streak, reaps prior-boot
   orphaned `'running'` rows to `'crashed'` at boot (`reapOrphanRitualRuns`), and
   prunes runs after 30 days.
+- **Bounded transient recovery (ISSUES #489).** A ritual has nobody watching it,
+  so a transient upstream failure used to end the occurrence outright: the brief
+  simply did not happen, and a transient failure during fire STARTUP (before any
+  durable row) re-fired on every 30 s tick forever, leaving zero
+  `code_ritual_runs` rows and telling the owner nothing. Both surfaces now route
+  through ONE policy in `reminders/ritual-retry.ts`. It is three-valued —
+  `transient | permanent | indeterminate`, the same shape as
+  `open/credential-usage-monitor.ts`'s `CredentialStanding` — and reads the O3
+  taxonomy (`runtime/errors.ts` `retryable` / `code`) rather than regexing message
+  prose; an error earns a retry only by carrying a class, so `indeterminate`
+  neither retries nor claims success. `agent-dispatch/substrate-turn.ts` now
+  CARRIES that class out on `DispatchTurnResult.failure` (it observed and dropped
+  it before). Recovery is capped at `RITUAL_MAX_ATTEMPTS = 4` with a pure
+  exponential backoff (2 min → 8 min → 32 min, so a 7 a.m. brief still lands in
+  the morning), and each attempt re-arms the SAME occurrence — a fire-startup
+  retry through the tick's compare-and-swap claim revert, a settled-turn retry
+  through the executor's injected `rearm` seam (the tick is long gone by then).
+  EXACTLY-ONCE delivery is enforced by two guards: a durable check for a
+  `finished` row on the occurrence and an in-process latch marked before the post
+  leaves; a run store that cannot answer "already delivered?" refuses the retry
+  rather than risk a duplicate brief. Every outcome stays answerable from
+  `code_ritual_runs` alone — the `failure_reason` prefix distinguishes `retry N/3
+  scheduled`, `retry exhausted after N attempts`, `permanent failure (not
+  retried)` and `unclassified failure (not retried)`. Retries of one occurrence
+  collapse to one occurrence for the escalation rule
+  (`collapseAttemptsToOccurrences`), so a single busy morning never counterfeits
+  "failed 3 consecutive runs".
 - **Write-containment gate — STAY GATED (overturn 1).** The T5 spike that tried
   to prove per-session `settings.json` deny fails CLOSED with the substrate
   auto-approver disabled returned an UNPROVABLE verdict (2026-07-21: with

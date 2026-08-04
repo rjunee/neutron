@@ -126,6 +126,16 @@ export interface RitualRunStore {
   /** Every row for a ritual, newest first (tests + observability). */
   listByRitual(ritual_id: string): RitualRunRow[]
   /**
+   * Every row for ONE OCCURRENCE (`reminder_id`), newest first.
+   *
+   * The occurrence — not the ritual — is the unit a bounded retry re-arms, so
+   * this is what answers the two questions the recovery path has to ask before
+   * re-attempting: has this occurrence already DELIVERED (any `finished` row),
+   * and how many attempts has it durably burned. `listByRitual` cannot answer
+   * either without the caller filtering a 30-day history in JS.
+   */
+  listByReminder(reminder_id: string): RitualRunRow[]
+  /**
    * The most recent TERMINAL rows (finished/failed/timed_out/crashed/cancelled —
    * excludes 'skipped' and 'running') for a ritual, newest first, capped at
    * `limit`. `cancelled` is included so it can act as a streak-breaker in the
@@ -238,6 +248,13 @@ export function createRitualRunStore(db: ProjectDb): RitualRunStore {
       return db.all<RitualRunRow>(
         `SELECT ${COLS} FROM code_ritual_runs WHERE ritual_id = ? ORDER BY started_at DESC`,
         [ritual_id],
+      )
+    },
+
+    listByReminder(reminder_id): RitualRunRow[] {
+      return db.all<RitualRunRow>(
+        `SELECT ${COLS} FROM code_ritual_runs WHERE reminder_id = ? ORDER BY started_at DESC`,
+        [reminder_id],
       )
     },
 

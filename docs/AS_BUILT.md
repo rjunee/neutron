@@ -2,6 +2,85 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — bounded transient recovery for the ritual background path (ISSUES #489)
+
+Branch `fix/ritual-transient-recovery`. New: `reminders/ritual-retry.ts`,
+`reminders/ritual-transient-recovery.test.ts`. Changed:
+`reminders/ritual-executor.ts`, `reminders/tick.ts`, `reminders/ritual-runs.ts`,
+`reminders/ritual-delivery.ts`, `agent-dispatch/service.ts`,
+`agent-dispatch/substrate-turn.ts`, `open/composer.ts`,
+`gateway/composition/build-core-modules.ts`,
+`gateway/composition/input/notifier-input.ts`, `reminders/AGENTS.md`,
+`docs/SYSTEM-OVERVIEW.md`, plus the existing ritual tests.
+
+**The defect, reproduced first.** An interactive turn that meets a rate-limit
+degrades visibly and the owner retries by hand. A ritual has nobody watching, and
+the two ways one could fail had OPPOSITE bugs — which is why a fix for either
+alone would have read like a fix for both.
+
+A transient failure of the SETTLED TURN ran exactly once. Driving a fired
+`morning-brief` whose turn returned an overloaded 529, then twenty more ticks:
+`substrate turn attempts: 1`, one `failed` row, one failure notice, no brief, and
+the recurring row already advanced to tomorrow. A transient failure during fire
+STARTUP did the reverse. With the run store throwing `SQLITE_BUSY` on every
+write, twenty-five ticks produced `startup attempts: 25`, `code_ritual_runs rows:
+0`, `posts to the owner: 0` — the executor re-threw, the tick reverted the claim
+to the row's original (already-due) `fire_at`, and it re-fired every 30 seconds
+indefinitely with nothing written and nothing said.
+
+**One policy behind both** (`reminders/ritual-retry.ts`). The decision is
+three-valued, deliberately the same shape as `open/credential-usage-monitor.ts`'s
+`CredentialStanding`: `transient` backs off and re-attempts, `permanent` fails
+loudly and records why, `indeterminate` neither retries nor claims success. The
+classification is read off the O3 taxonomy (`runtime/errors.ts` — a
+`NeutronError`'s `code` and `retryable`), never from message prose, so an error
+earns a retry only by carrying a class. The practical consequence is stated in
+the module: widening recovery means stamping more producers, not loosening the
+matcher.
+
+`agent-dispatch/substrate-turn.ts` had been observing that class and dropping it
+— `drainToOutcome` builds a `SubstrateCallError` with `code`/`retryable`/
+`retry_after_ms` verbatim, and the runner returned only `{result, status}`. It
+now carries it out on the additive, optional `DispatchTurnResult.failure`, which
+is what lets the ritual executor tell an overloaded upstream from a missing
+binary.
+
+**Bounded, and re-armed forward.** `RITUAL_MAX_ATTEMPTS = 4` with a pure
+exponential backoff of 2 min → 8 min → 32 min, so the last re-attempt lands ~42
+minutes after the first failure and a 7 a.m. brief still arrives in the morning.
+The backoff function reads no clock — it returns a delay and the caller adds it to
+its own injected `now`, so nothing here can regrow a wall-clock timing assertion
+(the ISSUES #438 gate). `fire()` no longer signals through rejection: it returns a
+`RitualFireOutcome`, and `{claim:'retry', retry_at_ms}` is what makes the tick
+re-arm at a LATER instant instead of the already-due one. That single change is
+the difference between recovery and the loop.
+
+**Exactly-once delivery, guarded twice.** A retry is refused outright if anything
+has already been delivered for the occurrence: durably, by a `finished` row on the
+occurrence (new `RitualRunStore.listByReminder`), and in-process by a latch marked
+BEFORE the post leaves rather than after. A run store that cannot answer "already
+delivered?" answers `true` — a missed retry costs one late ritual, a wrong retry
+costs a duplicate morning brief, and only one of those is acceptable.
+
+**Nothing ends in silence.** Success, retry-scheduled, retry-exhausted, permanent
+failure and unclassified failure are each distinguishable from `code_ritual_runs`
+alone via the `failure_reason` prefix — which matters because every marker in the
+tick is error-level, so a clean run emits no log line at all. Retried attempts of
+one occurrence collapse to one occurrence for the escalation rule
+(`collapseAttemptsToOccurrences`), so a single busy morning cannot counterfeit
+"failed 3 consecutive runs".
+
+**Five mutations, each red on the intended test.** Removing the classification
+reds 10 tests including both regressions; removing the idempotency guard reds
+only the two exactly-once tests; removing the attempt cap reds only the runaway
+test; making the tick re-arm at the ORIGINAL `fire_at` reds the three tests that
+pin the backoff instant; and treating an unclassified failure as transient reds
+the five that pin the middle value — including the startup regression, which is
+the test that proves `indeterminate` is doing work rather than decorating a
+boolean.
+
+No feature flag, no dual path: recovery is the default behaviour.
+
 ## 2026-08-04 — a lint so wall-clock timing assertions cannot regrow (ISSUES #438)
 
 Branch `test/wall-clock-bound-gate`. New: `scripts/ci/wall-clock-bound-check.mjs`,

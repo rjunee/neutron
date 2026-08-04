@@ -1,6 +1,7 @@
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { ReminderDispatcher } from '@neutronai/reminders/tick.ts'
 import type { RitualExecutor } from '@neutronai/reminders/ritual-executor.ts'
+import type { ReminderStore } from '@neutronai/reminders/store.ts'
 import type { ApprovalManager, ApprovalNotifier } from '@neutronai/tools/approval.ts'
 import type {
   HeartbeatTracker,
@@ -24,8 +25,17 @@ export interface NotifierCompositionInput {
    * (subagent registry, `cc-ritual-*` substrate turn, run store, model, scope).
    * Omitted on an LLM-less box → no ritual surface (ritual rows are consumed +
    * logged by the tick, never dispatched as nudges).
+   *
+   * `reminders` is the SAME `ReminderStore` the tick loop drives. The executor
+   * needs it for exactly one thing: re-arming an occurrence after a transient
+   * failure of the DETACHED turn (ISSUES #489). By the time a 45-minute run
+   * settles, the tick that claimed the occurrence has long returned, so the
+   * executor cannot hand the re-arm back to it the way a fire-startup retry does.
    */
-  ritual_executor_factory?: (deps: { approvals: ApprovalManager }) => RitualExecutor
+  ritual_executor_factory?: (deps: {
+    approvals: ApprovalManager
+    reminders: ReminderStore
+  }) => RitualExecutor
   /** Heartbeat tracker — typically a small in-process pulse counter. */
   heartbeat_tracker: HeartbeatTracker
   /** Optional pid-liveness probe override (used by tests). */

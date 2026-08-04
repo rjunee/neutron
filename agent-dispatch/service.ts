@@ -51,6 +51,7 @@ import {
   type ControlState,
   registerCanceller,
 } from '@neutronai/runtime/subagent/control.ts'
+import type { SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import type { AgentKind, SubagentRecord, SubagentStatus } from '@neutronai/runtime/subagent/registry.ts'
 import type { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { spawnSubagent, type DelegationVerifier, type SpawnInput } from '@neutronai/runtime/subagent/spawn.ts'
@@ -134,9 +135,32 @@ export interface DispatchTurnInput {
   signal?: AbortSignal
 }
 
+/**
+ * The O3 class of a turn's terminal failure, lifted off the substrate's own
+ * `error` event (`runtime/errors.ts` → `SubstrateCallError`).
+ *
+ * It exists because a terminal STATUS says a turn failed but not whether the
+ * cause can recover, and a background caller has to know the difference: an
+ * overloaded upstream deserves a re-attempt, a missing binary deserves a loud
+ * failure. Before this, `buildCancellableDispatchTurn` observed the stamped
+ * class and then discarded it, so every consumer downstream saw an
+ * indistinguishable `'failed'`.
+ */
+export interface DispatchTurnFailure {
+  code: SubstrateErrorClass | 'unknown'
+  retryable: boolean
+  retry_after_ms?: number
+}
+
 export interface DispatchTurnResult {
   result: string
   status: 'completed' | 'failed' | 'cancelled' | 'timed_out'
+  /**
+   * Present on a non-`completed` status when the substrate stamped a class.
+   * OPTIONAL and additive: a stub turn, or an adapter that never stamped, leaves
+   * it absent — which consumers must read as "unclassified", never as "fine".
+   */
+  failure?: DispatchTurnFailure
 }
 
 export interface DispatchTurn {
