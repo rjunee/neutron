@@ -19,8 +19,19 @@
  * so the Metro bundle carries no dependency on the browser package — the same
  * rule every other app client follows (`admin-personality-client.ts`,
  * `tabs-client.ts`). The duplication is held honest mechanically by
- * `__tests__/voice-transcription-mirror-parity.test.ts`, which diffs the two
- * type declarations, exactly as `tab-descriptor-mirror-parity.test.ts` does.
+ * `__tests__/voice-transcription-mirror-parity.test.ts`, which pins the two
+ * declarations to each other with the same assertions
+ * `tab-descriptor-mirror-parity.test.ts` uses on its mirrors: a field or union
+ * member that appears on one side only stops `tsc` compiling. That guard runs
+ * in the TYPECHECK job (`scripts/ci/typecheck-all.sh`), not the test job — a
+ * type-only drift is invisible to `bun test` by construction — so the same file
+ * also drives BOTH clients over the same server payloads, which is what catches
+ * drift between the two copies of `normalizeStatus` below.
+ *
+ * The guard is two-sided, not three: `buildStatus()` in
+ * `gateway/http/voice-transcription-surface.ts:104` is declared
+ * `Promise<object>`, so the server has no type for the shape it sends and there
+ * is nothing to pin these two against.
  *
  * The POST returns straight away and the download runs SERVER-SIDE, which is
  * what makes this workable from a phone at all: the job is not tied to the

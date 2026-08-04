@@ -64,6 +64,87 @@ CLI's stable, correct report about a changed world, and a fast retry loop would
 then spawn a probe child four times an hour forever with no path to resolution.
 Nothing is broken meanwhile — the id was never adopted.
 
+## 2026-08-04 — the voice-transcription parity guard the docblock promised now exists (ISSUES #498)
+
+Branch `fix/voice-transcription-mirror-parity-498`. New:
+`app/__tests__/voice-transcription-mirror-parity.test.ts`. Changed:
+`app/lib/voice-transcription-client.ts`,
+`landing/chat-react/voice-transcription-client.ts` (docblocks only).
+
+**The problem.** `app/lib/voice-transcription-client.ts:21-23` told every reader
+the duplicated web/app wire types were "held honest mechanically by
+`__tests__/voice-transcription-mirror-parity.test.ts`, which diffs the two type
+declarations, exactly as `tab-descriptor-mirror-parity.test.ts` does." The
+sibling it cited is real. The file it cited was not — `ls app/__tests__/` had no
+such entry. So the shapes behind `/api/app/voice-transcription` were declared
+twice, by hand, with nothing comparing them.
+
+This is worse than an ordinary stale comment, and the difference is worth naming
+because the same sentence pattern will recur. A docblock that says *this works*
+invites a reader to check it. A docblock that says *this is checked* tells the
+reader the checking is already done, so nobody checks. Naming a real precedent
+and a plausible filename is what made it credible. The fix is to make the
+sentence true, not to soften it: deleting it would have removed the claim and
+left the drift risk exactly where it was.
+
+**What was built.** The named test, using the mechanism the cited precedent
+already uses rather than a second idiom — `tsc` is the guard, `bun test` is the
+backstop:
+
+- Bidirectional structural assignment through values typed as one side and
+  assigned to the other and back (`tab-descriptor-mirror-parity.test.ts:67-68`).
+- `never`-guarded difference assertions in the vocabulary of
+  `agent-engagement-mode-mirror-parity.test.ts:73`, generalised to key sets:
+  `Drift<A, B> = Exclude<A, B> | Exclude<B, A>` is `never` exactly when the two
+  sides agree, and a `never` parameter cannot receive a live member. This is not
+  ornamental. Bidirectional assignment ALONE does not catch an OPTIONAL field
+  added on one side — width subtyping accepts an extra property on a non-fresh
+  value in both directions — and mutation M2 below confirms the `Drift`
+  assertion is the only thing that reds on it.
+- Two fully-populated samples, each annotated with its own side's type so each
+  is excess-property-checked against its own declaration, asserted deep-equal
+  including a recursive key-tree comparison.
+- Both clients driven over the same server payloads (current, pre-backend-choice,
+  empty) with their outputs asserted equal. `normalizeStatus` — the old-server
+  defaulting logic — is copied verbatim into both files, and that copy is
+  invisible to the type check.
+
+**Were they already drifted?** No. Diffing the two type blocks
+(`app/lib/voice-transcription-client.ts:30-106` against
+`landing/chat-react/voice-transcription-client.ts:26-104`, semicolons
+normalised) leaves only two doc-comment wordings on `binary_downloadable` and
+`binary_present`. Nine wire types, structurally identical. The test
+characterizes that agreement rather than repairing a break.
+
+**Mutation results.** Six mutations of the web declaration, each reverted:
+M1 required field added → typecheck RED (TS2322 on the `never` guard + TS2741 on
+the sample). M2 OPTIONAL field added → typecheck RED, and ONLY on the `never`
+guard. M3 `installed_bytes` retyped `number`→`string` → RED. M4
+`whisper_version` renamed → RED. M5 a member added to `WhisperInstallPhase` →
+RED. M6 `normalizeStatus` default changed `null`→`'local'` → typecheck GREEN,
+`bun test` RED on the pre-backend-choice case. So the type layer and the
+behaviour layer each catch what only they can see.
+
+M1-M5 red the typecheck job, not the test job. That is structural, not a gap:
+`bun test` does not typecheck, so no runtime assertion can observe a type-only
+edit. `scripts/ci/typecheck-all.sh` runs `tsc -p app/tsconfig.json`, whose
+`include` is `**/*.ts` and therefore covers `app/__tests__/`. Both docblocks now
+say so explicitly rather than leaving a reader to assume the test job is the
+guard.
+
+**Other corrections to the docblock.** The claim of parity with
+`tab-descriptor-mirror-parity.test.ts` was imprecise in one way worth fixing:
+that test pins its two mirrors against a THIRD leg, the engine's own
+`tabs/registry.ts` declaration. There is no third leg here. `buildStatus()` at
+`gateway/http/voice-transcription-surface.ts:104` is declared `Promise<object>`,
+so the server carries no type at all for the shape it sends; the two clients are
+the only declarations that exist. Both docblocks now state that the guard is
+two-sided and why. The route table, the one-way key claim, the server-side
+download claim and the no-browser-dependency claim were each checked against the
+code and all hold (`gateway/http/voice-transcription-surface.ts:178-275`;
+`OpenAiKeyStatus` carries presence and provenance only; no file under `app/`
+outside `__tests__/` imports `@neutronai/landing`).
+
 ## 2026-08-04 — an expired Google grant now says so, in chat
 
 Branch `feat/oauth-reconnect-chat-notice`. New:

@@ -18,6 +18,12 @@
  * re-declared here rather than imported across the workspace boundary, so the
  * browser bundle stays free of a gateway dependency — same as its siblings.
  *
+ * `app/lib/voice-transcription-client.ts` hand-declares the SAME shapes for the
+ * mobile client. The two are held in lockstep by
+ * `app/__tests__/voice-transcription-mirror-parity.test.ts` — edit a wire type
+ * here and the typecheck job reds until the app side matches. That includes
+ * `normalizeStatus` below, which exists in both files.
+ *
  * The API key travels ONE WAY. It goes up in a PUT body and is never returned:
  * the status object reports only that a key exists, where it came from, and when
  * it was saved.
