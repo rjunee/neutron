@@ -346,6 +346,20 @@ describe('a real warm', () => {
     setForegroundBusy(true);
     await warming;
     const elapsed = Date.now() - started;
+    // KEPT DELIBERATELY — this is the only guard, and unlike the bounds removed
+    // elsewhere for ISSUES #438 it is nowhere near its threshold. Without the
+    // foreground-gate subscription the warm resolves on the open deadline
+    // (WARM_OPEN_TIMEOUT_MS, 6 s); with it, it resolves on the gate. Both
+    // outcomes RESOLVE, so the test timeout cannot tell them apart and no
+    // deterministic signal distinguishes them either — `warmScopeTranscript`
+    // returns void and both paths run the same `finish()`.
+    //
+    // The margin is measured, not hoped for: 8-9 ms unloaded, and 8/8/8/8 ms
+    // across four runs under 2x CPU oversubscription (16 spinners on 8 cores,
+    // load average 70), against a 3000 ms budget — 0.3% of it. The abandon is a
+    // subscription callback rather than CPU-bound work, which is why contention
+    // barely moves it. Compare the anchor-walker bound this rule came from,
+    // which sat at 94% of its budget under the same load and was removed.
     expect(elapsed).toBeLessThan(WARM_OPEN_TIMEOUT_MS / 2);
     expect(sessionRefCount(`app:${OWNER_ID}:some-project`)).toBe(0);
   });

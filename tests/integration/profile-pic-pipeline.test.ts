@@ -11,7 +11,8 @@
  *        - 2 candidates land in <owner_home>/persona/profile-pic-candidates/
  *        - user calls pick(candidate_id)
  *        - canonical copy at <owner_home>/persona/profile-pic.png exists
- *        - total wall-clock < 60 s
+ *        - the run does not hang (bounded by the per-test timeout, not by a
+ *          wall-clock assertion — see the note at the end of the test)
  *
  * MOCKS: GeminiImagenClient (deterministic success/failure sequence);
  *        fs writer (real — temp dir scoped per test).
@@ -49,8 +50,7 @@ function dummyPng(byte: number): Buffer {
   return Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, byte])
 }
 
-test('2-of-3 mocked-success Gemini run lands 2 candidates + canonical pick (< 60s wall-clock)', async () => {
-  const startWall = Date.now()
+test('2-of-3 mocked-success Gemini run lands 2 candidates + canonical pick', async () => {
   // Simulate "2 of 3 succeed" by making the first 2 calls succeed
   // (each returning 1 candidate) and the 3rd throw. Pipeline should
   // exit on the 1st successful call (≥ 1 candidate landed → ready).
@@ -123,7 +123,12 @@ test('2-of-3 mocked-success Gemini run lands 2 candidates + canonical pick (< 60
   const after = await pipeline.status(job_id)
   expect(after!.candidates.find((c) => c.id === pickedId)!.picked_at).not.toBeNull()
 
-  // Total wall-clock under 60s.
-  const elapsedMs = Date.now() - startWall
-  expect(elapsedMs).toBeLessThan(60_000)
+  // THE WALL-CLOCK BUDGET IS THE TEST TIMEOUT, and it was already strictly
+  // tighter than the assertion that used to be here. This test declares no
+  // per-test timeout, so it runs under CI's default of 15 s
+  // (NEUTRON_TEST_TIMEOUT, scripts/run-tests.sh:77) — a run that took the
+  // 60_000 ms this bound allowed would have been killed at 15 s and reported as
+  // a timeout long before reaching the assertion. It could therefore never fail:
+  // it was unreachable dead weight that still carried the flake class's name.
+  // ISSUES #438.
 })
