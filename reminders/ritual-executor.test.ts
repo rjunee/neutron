@@ -131,8 +131,16 @@ async function waitFor(pred: () => boolean, ms = 2000): Promise<void> {
 
 const approver = (value: boolean): RitualApprovalCheck => ({ isApproved: () => value })
 
-/** A no-op delivery seam for the pre-task-5 assertions that don't inspect posts. */
-const passThroughOutbound: ReminderOutbound = { post: async () => true }
+/** A no-op delivery seam for the pre-task-5 assertions that don't inspect posts.
+ *  It RECORDS into `passThroughPosts` so the few assertions that do care whether
+ *  anything reached the owner can read it without a second seam. */
+const passThroughPosts: ReminderOutboundInput[] = []
+const passThroughOutbound: ReminderOutbound = {
+  post: async (input) => {
+    passThroughPosts.push(input)
+    return true
+  },
+}
 const resolveTopic = (): string => 'app:owner-topic'
 
 /** A recording delivery seam — captures every post for task-5 delivery assertions. */
@@ -154,6 +162,7 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
     const registry = createRitualRegistry({ rituals_dir: ritualsDir }) // empty
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -181,6 +190,7 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
   test('unapproved (checker returns false) → skipped/unapproved row', async () => {
     const registry = registryWith(def())
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -205,6 +215,7 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
   test('unapproved (checker THROWS → fail-closed) → skipped/unapproved row', async () => {
     const registry = registryWith(def())
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -237,6 +248,7 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
     const registry = registryWith(def({ scope: 'project' }))
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -274,6 +286,7 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
     const registry = registryWith(def({ tool_surface: ['Read', 'Bash'] }))
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -290,7 +303,7 @@ describe('createRitualExecutor.fire — skip verdicts', () => {
     })
 
     // fire() RESOLVES — a durable skip landed, so the tick does not claimRevert.
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
 
     const row = runs.get('attempt-gated')!
     expect(row.status).toBe('skipped')
@@ -314,6 +327,7 @@ describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
       return { result: 'brief done', status: 'completed' }
     }
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -396,6 +410,7 @@ describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
       const registry = registryWith(def())
       const turn: RitualTurn = async () => ({ result: 'partial', status: turnStatus })
       const exec = createRitualExecutor({
+      rearm: async () => false,
         registry,
         approvals: new ApprovalManager(db, noopNotifier),
         project_slug: 'owner',
@@ -423,6 +438,7 @@ describe('createRitualExecutor.fire — approved spawn + turn wiring', () => {
       throw new Error('substrate exploded')
     }
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -464,6 +480,7 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     const registry = registryWith(def())
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -507,6 +524,7 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     let n = 0
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: 'never runs', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -522,7 +540,7 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
       mint_run_id: () => `sub-${n++}`,
     })
 
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
 
     // The registry record spawned as 'sub-0' is now TERMINAL, so the spawn_key is
     // freed — a future fire is NOT refused as a duplicate.
@@ -540,10 +558,14 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     expect(turn).not.toHaveBeenCalled()
   })
 
-  test('fire() REJECTS when a startup run-store write throws (no durable row → tick reverts claim)', async () => {
+  test('an UNCLASSIFIED startup run-store throw is recorded + surfaced, never silently consumed', async () => {
     // Argus r1 BLOCKER: the outer catch used to log-and-RESOLVE any startup throw,
     // so a scheduled occurrence with NO durable code_ritual_runs row was silently
-    // consumed by the tick. It must now REJECT so the tick reverts the #319 claim.
+    // consumed by the tick. It then over-corrected into an unconditional re-throw,
+    // which the tick turned into an every-tick re-fire forever (ISSUES #489).
+    // The settled contract: classify. A plain `Error` carries no O3 stamp, so it is
+    // `indeterminate` — it does NOT retry, and it does not vanish either: the
+    // occurrence is consumed and the owner gets the failure notice.
     const registry = registryWith(def())
     const brokenRuns: RitualRunStore = {
       ...runs,
@@ -552,6 +574,7 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
       },
     }
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -566,13 +589,20 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
       build_approval_check: () => approver(false), // → insertSkipped throws
       mint_run_id: () => 'attempt-x',
     })
-    await expect(exec.fire(await ritualRow('morning-brief'))).rejects.toThrow('db down')
+    const posted: string[] = []
+    passThroughPosts.length = 0
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
+    posted.push(...passThroughPosts.map((p) => p.body))
+    expect(posted).toHaveLength(1)
+    expect(posted[0]).toContain('morning-brief')
   })
 
-  test('fire() REJECTS when insertRunning AND insertFailed both throw (total run-store outage)', async () => {
+  test('a TOTAL run-store outage still surfaces the failure and frees the spawn key', async () => {
     // The insertRunning-failure path frees the spawn key, then best-effort writes a
-    // durable failed row. If THAT also throws, NO durable row exists — reject so the
-    // tick reverts the claim (the spawn key was already freed → clean re-fire).
+    // durable failed row. If THAT also throws, NO durable row can exist for this
+    // occurrence — so the NOTICE is the only record left, and it must still go out
+    // (ISSUES #489: the previous behaviour re-threw, and the tick then re-fired
+    // this every 30 s forever with nothing written and nothing said).
     const registry = registryWith(def())
     const brokenRuns: RitualRunStore = {
       ...runs,
@@ -586,6 +616,7 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
     let n = 0
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: 'never runs', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -601,7 +632,9 @@ describe('createRitualExecutor.fire — spawn refusal + robustness', () => {
       mint_run_id: () => `sub-${n++}`,
     })
 
-    await expect(exec.fire(await ritualRow('morning-brief'))).rejects.toThrow('running-row write blew up')
+    passThroughPosts.length = 0
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
+    expect(passThroughPosts.map((p) => p.body).join('\n')).toContain('morning-brief')
     // The spawn key was freed BEFORE the reject, so a re-fire is not wedged as a duplicate.
     expect(subagents.liveByKey('ritual:morning-brief', 'owner')).toBeUndefined()
     // The substrate turn never launched (startup failed).
@@ -623,6 +656,7 @@ describe('createRitualExecutor.fire — sync launch-construction failure (task 6
     let n = 0
     const turn = mock(async (): Promise<RitualTurnResult> => ({ result: 'ok', status: 'completed' }))
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -643,7 +677,7 @@ describe('createRitualExecutor.fire — sync launch-construction failure (task 6
     })
 
     // The sync throw during launch construction is caught → settleCrashed → resolve.
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
 
     // Exactly one registry record, terminal 'crashed' → the spawn key is freed.
     expect(subagents.snapshot()).toHaveLength(1)
@@ -683,6 +717,7 @@ describe('createRitualExecutor.fire — sync launch-construction failure (task 6
       throw new Error('sync turn boom')
     })
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry,
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -698,7 +733,7 @@ describe('createRitualExecutor.fire — sync launch-construction failure (task 6
       mint_run_id: () => `sub-${n++}`,
     })
 
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
 
     expect(subagents.snapshot()).toHaveLength(1)
     const crashedRunId = subagents.snapshot()[0]!.run_id
@@ -726,6 +761,7 @@ describe('createRitualExecutor.fire — completion delivery (task 5)', () => {
     const rec = recordingOutbound()
     let n = 0
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry: opts.registry ?? registryWith(def()),
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -866,6 +902,7 @@ describe('createRitualExecutor.fire — escalation (task 5)', () => {
     const turnResult: { status: RitualTurnResult['status'] } = { status: 'failed' }
     const turn: RitualTurn = async () => ({ result: '', status: turnResult.status })
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry: registryWith(def()),
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -922,6 +959,7 @@ describe('createRitualExecutor.fire — delivery resilience (task 5)', () => {
     }
     const turn: RitualTurn = async () => ({ result: 'done', status: 'completed' })
     const exec = createRitualExecutor({
+      rearm: async () => false,
       registry: registryWith(def()),
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -936,7 +974,7 @@ describe('createRitualExecutor.fire — delivery resilience (task 5)', () => {
       build_approval_check: () => approver(true),
       mint_run_id: () => 'sub-resil',
     })
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
     const settled = await waitTerminal('sub-resil')
     expect(settled!.status).toBe('finished')
   })
@@ -960,6 +998,7 @@ describe('createRitualExecutor.fire — postNotice retry + truncation (task 5R)'
 
   function buildExec(turn: RitualTurn, outbound: ReminderOutbound, mint: string): ReturnType<typeof createRitualExecutor> {
     return createRitualExecutor({
+      rearm: async () => false,
       registry: registryWith(def()),
       approvals: new ApprovalManager(db, noopNotifier),
       project_slug: 'owner',
@@ -981,7 +1020,7 @@ describe('createRitualExecutor.fire — postNotice retry + truncation (task 5R)'
     const turn: RitualTurn = async () => ({ result: 'boom', status: 'failed' })
     const exec = buildExec(turn, { post }, 'sub-pf')
     // A single failure → one failure notice (no escalation) → post retried once.
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
     await waitFor(() => post.mock.calls.length >= 2)
     await new Promise((r) => setTimeout(r, 10))
     expect(post).toHaveBeenCalledTimes(2)
@@ -991,7 +1030,7 @@ describe('createRitualExecutor.fire — postNotice retry + truncation (task 5R)'
     const { post } = scriptedOutbound([false, true])
     const turn: RitualTurn = async () => ({ result: 'boom', status: 'failed' })
     const exec = buildExec(turn, { post }, 'sub-pft')
-    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toBeUndefined()
+    await expect(exec.fire(await ritualRow('morning-brief'))).resolves.toEqual({ claim: 'consume' })
     await waitFor(() => post.mock.calls.length >= 2)
     await new Promise((r) => setTimeout(r, 10))
     expect(post).toHaveBeenCalledTimes(2)

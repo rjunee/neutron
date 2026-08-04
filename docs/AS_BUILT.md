@@ -2,6 +2,163 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — a second Google account no longer overwrites the first (ISSUES #494)
+
+Branch `fix/oauth-identity-scope-494`. Changed:
+`gateway/http/cores-oauth-surface.ts`, `gateway/cores/oauth-token-manager.ts`,
+`docs/SYSTEM-OVERVIEW.md`. New:
+`gateway/__tests__/cores-oauth-identity-scope.test.ts`. Also
+`gateway/cores/__tests__/google-multi-account.test.ts` (one added case).
+
+**The bug was one missing scope, not a missing feature.** Per-account grant
+labels (`<service>#<account_key>`) already existed and were already read through
+by every path. The key is minted from the address `exchangeAndPersist` resolves
+at Google's userinfo endpoint — but `runOAuthStart` built the authorize URL's
+`scope` param as the union of the Cores' MANIFEST-declared scopes, and a sweep of
+every declared scope in the tree yields only `calendar`, `gmail.*`, `drive`,
+`documents`, `spreadsheets`. No `openid`, no `userinfo.email`. So userinfo could
+never answer, every grant was anonymous, every grant for a service landed on the
+bare `<service>` label, and the second account replaced the first. The whole
+multi-account scheme was inert on a scope nobody had asked for.
+
+**Which identity scope, and why that one.** Chosen from the endpoint actually
+being called rather than from convention. `GOOGLE_USERINFO_URL` is
+`.../oauth2/v3/userinfo`, the alias of the `userinfo_endpoint` in Google's OpenID
+discovery document (`https://openidconnect.googleapis.com/v1/userinfo`) — the
+OIDC UserInfo endpoint, which serves only tokens issued with `openid`. `openid`
+alone returns just `sub`, so the `email` claim needs the email scope too
+(Google's own OpenID Connect guide gives the request as
+`scope=openid profile email`). Both are requested; `profile` is not — the address
+is the entire requirement and name/picture would widen the consent screen for
+data nothing reads. Seeded into the scope set in `runOAuthStart`, so it applies
+to every grant this gateway starts, not only to newly-added Cores.
+
+`prompt` became `select_account consent`. Without `select_account` a second
+account is unreachable for an owner with one signed-in Google session: Google
+resolves the consent against that session, so "add another account" silently
+re-grants the one already connected — correct labels, still one account.
+
+**The migration was decided, not defaulted.** `retireLegacyRowFor` already
+retired a bare row on an EXACT address match and left a differently-addressed one
+alone. It also returned early on a bare row with NO address, which is exactly the
+#494 population — and leaving those is not neutral: `listGrants` adopts an
+un-keyed row as an account, so after re-consent the install would carry the keyed
+grant AND a phantom anonymous one, reading the same mailbox twice, forever. It
+can never resolve itself either, because that row's access token was minted
+without `openid`, so re-querying userinfo with it returns nothing and no future
+exchange can ever match it. An anonymous bare row is now retired unconditionally
+once a keyed grant has been written for the service. Safe by construction: a bare
+label is one row per service, so it holds the LAST account to consent and no
+other — any earlier account's tokens were already overwritten, which is the bug
+itself. Identified bare rows keep the exact-match rule untouched.
+
+**Both shapes read during the transition.** Nothing is rewritten at boot, so the
+grant an install holds today keeps working until its owner re-consents.
+Confirmed against the code, not assumed: `listGrants` adopts the un-keyed row
+(and skips the Core-install echo, which has no `:refresh`/`:meta` companion);
+`CoreCredentialResolver.accountsFor` maps it to `account_id: 'default'` with a
+working accessor; `getServiceAccessToken`, `getStatus`, `handleStatus`,
+`buildIntegrationsStatus` and install's `resolveServiceGrantLabel` all resolve
+through it. A resolver-level case for the ANONYMOUS shape (the owner's actual
+rows — the pre-existing case covered only an identified one) was added.
+
+**The tests run the causal chain, not its shape**: real `/start` → the real
+authorize URL → a fake Google that honours the scope it was asked for → real
+`/ingest` → how many grants exist. Nine mutations were run and all nine red:
+emptying the identity scopes, dropping either scope alone, not seeding the set,
+dropping `select_account`, reverting the retire guard, making retire
+unconditional, making the account key non-deterministic, and making a null email
+fatal. **Three of those did not red on the first attempt** — the fake Google
+computed its identity requirement from `GOOGLE_IDENTITY_SCOPES`, so emptying the
+constant made `every()` vacuously true and the test agreed with the source by
+construction. Google's rule is now spelled out literally in the fake.
+
+**One pre-existing defect observed and NOT fixed here** (out of scope, no bearing
+on the anonymous rows this migrates): on every ingest the Core install lifecycle
+echoes the token it was handed back under the bare MANIFEST label
+(`cores/runtime/lifecycle.ts` persistOrRotate), which for a legacy IDENTIFIED
+un-keyed grant is that grant's own access row — so it transiently holds the
+just-connected account's token until that token expires and the row's own
+refresh_token takes over. Worth an ISSUES entry.
+## 2026-08-04 — bounded transient recovery for the ritual background path (ISSUES #489)
+
+Branch `fix/ritual-transient-recovery`. New: `reminders/ritual-retry.ts`,
+`reminders/ritual-transient-recovery.test.ts`. Changed:
+`reminders/ritual-executor.ts`, `reminders/tick.ts`, `reminders/ritual-runs.ts`,
+`reminders/ritual-delivery.ts`, `agent-dispatch/service.ts`,
+`agent-dispatch/substrate-turn.ts`, `open/composer.ts`,
+`gateway/composition/build-core-modules.ts`,
+`gateway/composition/input/notifier-input.ts`, `reminders/AGENTS.md`,
+`docs/SYSTEM-OVERVIEW.md`, plus the existing ritual tests.
+
+**The defect, reproduced first.** An interactive turn that meets a rate-limit
+degrades visibly and the owner retries by hand. A ritual has nobody watching, and
+the two ways one could fail had OPPOSITE bugs — which is why a fix for either
+alone would have read like a fix for both.
+
+A transient failure of the SETTLED TURN ran exactly once. Driving a fired
+`morning-brief` whose turn returned an overloaded 529, then twenty more ticks:
+`substrate turn attempts: 1`, one `failed` row, one failure notice, no brief, and
+the recurring row already advanced to tomorrow. A transient failure during fire
+STARTUP did the reverse. With the run store throwing `SQLITE_BUSY` on every
+write, twenty-five ticks produced `startup attempts: 25`, `code_ritual_runs rows:
+0`, `posts to the owner: 0` — the executor re-threw, the tick reverted the claim
+to the row's original (already-due) `fire_at`, and it re-fired every 30 seconds
+indefinitely with nothing written and nothing said.
+
+**One policy behind both** (`reminders/ritual-retry.ts`). The decision is
+three-valued, deliberately the same shape as `open/credential-usage-monitor.ts`'s
+`CredentialStanding`: `transient` backs off and re-attempts, `permanent` fails
+loudly and records why, `indeterminate` neither retries nor claims success. The
+classification is read off the O3 taxonomy (`runtime/errors.ts` — a
+`NeutronError`'s `code` and `retryable`), never from message prose, so an error
+earns a retry only by carrying a class. The practical consequence is stated in
+the module: widening recovery means stamping more producers, not loosening the
+matcher.
+
+`agent-dispatch/substrate-turn.ts` had been observing that class and dropping it
+— `drainToOutcome` builds a `SubstrateCallError` with `code`/`retryable`/
+`retry_after_ms` verbatim, and the runner returned only `{result, status}`. It
+now carries it out on the additive, optional `DispatchTurnResult.failure`, which
+is what lets the ritual executor tell an overloaded upstream from a missing
+binary.
+
+**Bounded, and re-armed forward.** `RITUAL_MAX_ATTEMPTS = 4` with a pure
+exponential backoff of 2 min → 8 min → 32 min, so the last re-attempt lands ~42
+minutes after the first failure and a 7 a.m. brief still arrives in the morning.
+The backoff function reads no clock — it returns a delay and the caller adds it to
+its own injected `now`, so nothing here can regrow a wall-clock timing assertion
+(the ISSUES #438 gate). `fire()` no longer signals through rejection: it returns a
+`RitualFireOutcome`, and `{claim:'retry', retry_at_ms}` is what makes the tick
+re-arm at a LATER instant instead of the already-due one. That single change is
+the difference between recovery and the loop.
+
+**Exactly-once delivery, guarded twice.** A retry is refused outright if anything
+has already been delivered for the occurrence: durably, by a `finished` row on the
+occurrence (new `RitualRunStore.listByReminder`), and in-process by a latch marked
+BEFORE the post leaves rather than after. A run store that cannot answer "already
+delivered?" answers `true` — a missed retry costs one late ritual, a wrong retry
+costs a duplicate morning brief, and only one of those is acceptable.
+
+**Nothing ends in silence.** Success, retry-scheduled, retry-exhausted, permanent
+failure and unclassified failure are each distinguishable from `code_ritual_runs`
+alone via the `failure_reason` prefix — which matters because every marker in the
+tick is error-level, so a clean run emits no log line at all. Retried attempts of
+one occurrence collapse to one occurrence for the escalation rule
+(`collapseAttemptsToOccurrences`), so a single busy morning cannot counterfeit
+"failed 3 consecutive runs".
+
+**Five mutations, each red on the intended test.** Removing the classification
+reds 10 tests including both regressions; removing the idempotency guard reds
+only the two exactly-once tests; removing the attempt cap reds only the runaway
+test; making the tick re-arm at the ORIGINAL `fire_at` reds the three tests that
+pin the backoff instant; and treating an unclassified failure as transient reds
+the five that pin the middle value — including the startup regression, which is
+the test that proves `indeterminate` is doing work rather than decorating a
+boolean.
+
+No feature flag, no dual path: recovery is the default behaviour.
+
 ## 2026-08-04 — a lint so wall-clock timing assertions cannot regrow (ISSUES #438)
 
 Branch `test/wall-clock-bound-gate`. New: `scripts/ci/wall-clock-bound-check.mjs`,

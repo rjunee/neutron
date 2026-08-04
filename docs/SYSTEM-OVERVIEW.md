@@ -509,6 +509,62 @@ Both configurations are pinned against the real composer output in
 `tests/integration/cores-oauth-remote-broker.open.test.ts`; the origin guard is
 `tests/integration/cores-oauth-base-url-guard.open.test.ts`.
 
+### One grant per ACCOUNT — the identity scope that makes it work (ISSUES #494)
+
+A grant is stored under `<service>#<account_key>`, so an owner who runs several
+Google accounts gets one independent grant per account instead of one that
+clobbers the last. `account_key` is a truncated SHA-256 of the account address
+(`accountKeyFromEmail`), and the address comes from ONE place: a userinfo call
+`OAuthTokenManager.exchangeAndPersist` makes right after the code exchange.
+
+That means **the authorize URL must ask for identity, or the whole scheme is
+inert.** It didn't, until #494. `runOAuthStart` built the `scope` param as the
+union of the Cores' manifest-declared scopes, and no manifest declares an
+identity scope (nor should one — identity is a property of the grant store, not
+of any Core's API surface). With no identity scope userinfo cannot answer, every
+grant is anonymous, every grant for a service lands on the bare `<service>`
+label, and connecting a second account silently REPLACES the first.
+
+The fix seeds the scope set with `GOOGLE_IDENTITY_SCOPES`
+(`gateway/http/cores-oauth-surface.ts`) on every grant this gateway starts:
+
+- **`openid`** — `GOOGLE_USERINFO_URL` is `.../oauth2/v3/userinfo`, the alias of
+  the `userinfo_endpoint` Google publishes in its OpenID discovery document
+  (`https://openidconnect.googleapis.com/v1/userinfo`). That is the OIDC
+  UserInfo endpoint, which serves only tokens issued with `openid`.
+- **`https://www.googleapis.com/auth/userinfo.email`** — `openid` alone returns
+  just the `sub` claim; the `email` claim needs the email scope. `profile` is
+  deliberately NOT requested: the address is the whole requirement.
+
+`prompt` is also now `select_account consent`. `consent` still forces a
+refresh_token on repeat grants; `select_account` is what makes a second account
+reachable at all — with `consent` alone and a single signed-in Google session,
+Google resolves the consent against that session, so "add another account" would
+silently re-grant the one already connected.
+
+**Migration of an existing anonymous grant.** Nothing is rewritten at boot; the
+grant an install already holds keeps working untouched, because `listGrants`
+adopts an un-keyed row as an account with `account_key: null` and every read path
+(`CoreCredentialResolver.accountsFor`, `getServiceAccessToken`, `handleStatus`,
+`buildIntegrationsStatus`, and install's `resolveServiceGrantLabel`) resolves
+through it. The row converts on the next consent, via `retireLegacyRowFor`:
+
+- a bare row naming the SAME address is retired (it is now the keyed grant);
+- a bare row naming a DIFFERENT address is a real second account and is left
+  completely alone — it migrates when THAT address is next granted;
+- a bare row naming NO address — the #494 population — is retired
+  unconditionally. Its access token was minted without `openid`, so re-querying
+  userinfo with it returns nothing and no future exchange can ever match it: it
+  can never migrate, and leaving it would have `listGrants` adopt it forever
+  ALONGSIDE the keyed grant, reading the same mailbox twice.
+
+End-to-end coverage — real `/start` → the real authorize URL → a fake Google that
+honours the scope it was asked for (401 from userinfo for a token issued without
+`openid`, exactly as the OIDC endpoint does) → real `/ingest` — is
+`gateway/__tests__/cores-oauth-identity-scope.test.ts`. The fake spells out
+Google's rule literally rather than importing `GOOGLE_IDENTITY_SCOPES`, so
+emptying the constant reds the test instead of passing vacuously.
+
 ## Native-MCP tool transport (P0-1) — how the spawned agent invokes tools
 
 The live chat agent is a spawned interactive `claude` REPL driven over the
@@ -3681,8 +3737,8 @@ ritual content in chat.
   executor. `reminders/ritual-executor.ts` runs the fail-closed validate → on a
   SKIP writes a durable `code_ritual_runs` row and returns; on a fire spawns into
   the dedicated ritual lane, inserts a `'running'` row, launches the detached
-  turn, and does terminal bookkeeping — it NEVER throws once a durable row
-  exists. `makeRitualSubstrate` (`open/wiring/substrates.ts:411`) builds an
+  turn, and does terminal bookkeeping — it NEVER throws (its body is fully
+  guarded), answering a `RitualFireOutcome` instead. `makeRitualSubstrate` (`open/wiring/substrates.ts:411`) builds an
   ephemeral `cc-ritual-*` session under `PROFILE_RITUAL` (its own trust class)
   with the shipped `ritual-agent-base.md`. `reminders/ritual-delivery.ts` posts
   the completion text through the one `deliver()` seam (a `silent` ritual skips
@@ -3690,6 +3746,33 @@ ritual content in chat.
   crashed, escalates once per 3-consecutive-failure streak, reaps prior-boot
   orphaned `'running'` rows to `'crashed'` at boot (`reapOrphanRitualRuns`), and
   prunes runs after 30 days.
+- **Bounded transient recovery (ISSUES #489).** A ritual has nobody watching it,
+  so a transient upstream failure used to end the occurrence outright: the brief
+  simply did not happen, and a transient failure during fire STARTUP (before any
+  durable row) re-fired on every 30 s tick forever, leaving zero
+  `code_ritual_runs` rows and telling the owner nothing. Both surfaces now route
+  through ONE policy in `reminders/ritual-retry.ts`. It is three-valued —
+  `transient | permanent | indeterminate`, the same shape as
+  `open/credential-usage-monitor.ts`'s `CredentialStanding` — and reads the O3
+  taxonomy (`runtime/errors.ts` `retryable` / `code`) rather than regexing message
+  prose; an error earns a retry only by carrying a class, so `indeterminate`
+  neither retries nor claims success. `agent-dispatch/substrate-turn.ts` now
+  CARRIES that class out on `DispatchTurnResult.failure` (it observed and dropped
+  it before). Recovery is capped at `RITUAL_MAX_ATTEMPTS = 4` with a pure
+  exponential backoff (2 min → 8 min → 32 min, so a 7 a.m. brief still lands in
+  the morning), and each attempt re-arms the SAME occurrence — a fire-startup
+  retry through the tick's compare-and-swap claim revert, a settled-turn retry
+  through the executor's injected `rearm` seam (the tick is long gone by then).
+  EXACTLY-ONCE delivery is enforced by two guards: a durable check for a
+  `finished` row on the occurrence and an in-process latch marked before the post
+  leaves; a run store that cannot answer "already delivered?" refuses the retry
+  rather than risk a duplicate brief. Every outcome stays answerable from
+  `code_ritual_runs` alone — the `failure_reason` prefix distinguishes `retry N/3
+  scheduled`, `retry exhausted after N attempts`, `permanent failure (not
+  retried)` and `unclassified failure (not retried)`. Retries of one occurrence
+  collapse to one occurrence for the escalation rule
+  (`collapseAttemptsToOccurrences`), so a single busy morning never counterfeits
+  "failed 3 consecutive runs".
 - **Write-containment gate — STAY GATED (overturn 1).** The T5 spike that tried
   to prove per-session `settings.json` deny fails CLOSED with the substrate
   auto-approver disabled returned an UNPROVABLE verdict (2026-07-21: with

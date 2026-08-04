@@ -15,7 +15,10 @@ fire-time text is composed at fire time, never pre-rendered.
 - `tick.ts` — a single-flight `setInterval` that CLAIMS each due row before
   dispatch (crash-safe at-most-once), advances it via `computeNextFire`, and
   routes a `ritual_id` row to `ritual_executor.fire()` (awaited inside the tick
-  quiescence boundary).
+  quiescence boundary). `fire()` answers a `RitualFireOutcome`: `consume` keeps
+  the claim, `retry` makes the tick re-arm the occurrence at a BACKED-OFF instant
+  (ISSUES #489 — the old shape reverted to the row's original, already-due
+  `fire_at`, so a startup failure re-fired every 30 s forever).
 - `dispatcher.ts` + `message-shape.ts` — the three fire-time message shapes
   (literal / smart-wrap `[smart]` / pattern-template `PATTERN:`), composed on a
   Haiku-class turn with live context, degrading to a literal fallback so a
@@ -31,8 +34,17 @@ fire-time text is composed at fire time, never pre-rendered.
   (re-verifies the hash from LIVE file bytes on every fire; an owner edit or a
   surface/cadence widening drops approval by design).
 - `ritual-executor.ts` — claim → validate → durable `code_ritual_runs` row →
-  ritual-lane spawn (detached turn) → terminal bookkeeping. Never throws once a
-  durable row exists.
+  ritual-lane spawn (detached turn) → terminal bookkeeping → bounded transient
+  recovery. Never throws (its body is fully guarded; a rejection is a bug, and the
+  tick treats it as one).
+- `ritual-retry.ts` — the ONE recovery policy behind both failure surfaces (a fire
+  -startup throw and a settled turn): a three-valued `transient | permanent |
+  indeterminate` classification read off the O3 error taxonomy
+  (`runtime/errors.ts`), a 4-attempt cap, and a pure exponential backoff
+  (2m/8m/32m). Only `transient` retries; `indeterminate` neither retries nor
+  claims success. A retry re-arms the SAME occurrence and is refused outright if
+  anything was already DELIVERED for it, so recovery can never produce a second
+  morning brief.
 - `ritual-delivery.ts` — completion delivery, one-line failure notices,
   3-consecutive-failure escalation, boot-reap of orphaned `running` rows, 30d
   prune.

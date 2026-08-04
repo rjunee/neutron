@@ -2422,7 +2422,7 @@ export function buildOpenGraphComposer(
     // a later owner edit drops approval by design.
     const ritual_executor_factory: CompositionInput['ritual_executor_factory'] =
       llmPool !== null
-        ? ({ approvals }) => {
+        ? ({ approvals, reminders }) => {
             const rituals_dir = joinPath(owner_home, 'rituals')
             const registry = createRitualRegistry({ rituals_dir })
             seedBundledRituals({
@@ -2568,6 +2568,17 @@ export function buildOpenGraphComposer(
               // permission over-grant). The task-7 bundled defs are both
               // scope:'instance', so no project-scoped ritual can fire yet — this
               // is defensive against a future project-scoped registration.
+              // ISSUES #489 — re-arm an occurrence for a bounded retry after a
+              // TRANSIENT failure of the detached turn. Reopen first (a one-shot
+              // ritual row is 'fired' by then; a recurring one is still 'pending'
+              // and reopen is a no-op returning false), then move `fire_at` to the
+              // backoff instant. Guarded so a re-arm can never reject the settle
+              // chain — the executor reads `false` as "the occurrence moved on"
+              // and surfaces the failure normally.
+              rearm: async (reminder, fire_at_sec) => {
+                await reminders.reopen(reminder.id)
+                return reminders.reschedule(reminder.id, fire_at_sec)
+              },
               scope_cwd: (scope) => {
                 if (scope !== 'instance') {
                   throw new Error(

@@ -403,6 +403,11 @@ export function buildCoreModules(
       if (input.ritual_executor_factory !== undefined) {
         loopOpts.ritual_executor = input.ritual_executor_factory({
           approvals: ctx.graph.get<ApprovalManager>('approval'),
+          // The SAME store the loop above drives — the executor re-arms an
+          // occurrence through it after a transient failure of the detached turn
+          // (ISSUES #489). A second store over the same db would work, but one
+          // instance keeps "who may move a reminder's fire_at" a single answer.
+          reminders: store,
         })
       }
       const loop = new ReminderTickLoop(loopOpts)

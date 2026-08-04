@@ -20,16 +20,31 @@
  *      crashed) with ended_at + a truncated output_summary and the registry record
  *      terminal.
  *
- * `fire()` REJECTS on a STARTUP failure and NEVER awaits the launched turn. A
- * startup failure = validate/spawn/durable-row-write threw so NO `code_ritual_runs`
- * row landed for this occurrence; propagating it lets the tick REVERT its #319
- * claim (`reminders/tick.ts`) so the occurrence re-fires next tick instead of being
+ * `fire()` RETURNS a {@link RitualFireOutcome} and NEVER awaits the launched turn.
+ * A startup failure = validate/spawn/durable-row-write threw so NO
+ * `code_ritual_runs` row landed for this occurrence; the outer catch classifies it
+ * and answers `{claim:'retry', retry_at_ms}` when — and only when — the cause is
+ * stamped TRANSIENT and the occurrence has attempts left, which makes the tick
+ * re-arm the row on a backoff (`reminders/tick.ts`) instead of the occurrence being
  * silently consumed with no run + no history (the Argus data-loss class — a claimed
- * occurrence must never vanish without a durable record). A startup that DID land a
- * durable row (skipped / failed / running) resolves normally — the claim is
+ * occurrence must never vanish without a durable record). Anything else terminates
+ * the occurrence with a recorded, VISIBLE failure. A startup that DID land a durable
+ * row (skipped / failed / running) answers `{claim:'consume'}` — the claim is
  * legitimately consumed. The detached substrate TURN (step (f)) is fire-and-forget
- * and its settlement is fail-soft (guarded so it can never reject out of `fire()`),
- * so a rejection from `fire()` is UNAMBIGUOUSLY a startup loss.
+ * and its settlement is fail-soft (guarded so it can never reject out of `fire()`).
+ *
+ * BOUNDED TRANSIENT RECOVERY (ISSUES #489). Both failure surfaces — a startup throw
+ * and a settled turn — route through ONE policy in `./ritual-retry.ts`: a
+ * three-valued classification (transient / permanent / indeterminate) read off the
+ * O3 error taxonomy, an attempt cap, and a pure exponential backoff. Only
+ * `transient` retries. The re-attempt re-arms the SAME occurrence (so the retry
+ * carries the same `reminder_id` and the run history for that morning reads as one
+ * occurrence with N attempts), and it is refused outright if anything has already
+ * been DELIVERED for that occurrence — the owner must never receive two morning
+ * briefs. Success, retry-exhausted, permanent failure and unclassified failure are
+ * each distinguishable from `code_ritual_runs` alone via the `failure_reason`
+ * prefix, because a background failure has to be answerable without logs (a clean
+ * run emits no log line at all).
  *
  * COMPLETION DELIVERY + FAILURE SURFACING (plan task 5): after the durable
  * `code_ritual_runs` row is written FIRST, the settle chain posts through the ONE
@@ -80,11 +95,22 @@ import type { RitualRunStore, RitualRunTerminalStatus } from './ritual-runs.ts'
 import type { ReminderOutbound } from './dispatcher.ts'
 import {
   RITUAL_ESCALATION_CONSECUTIVE_FAILURES,
+  collapseAttemptsToOccurrences,
   formatRitualCompletionFallback,
   formatRitualEscalationNotice,
   formatRitualFailureNotice,
   shouldEscalate,
 } from './ritual-delivery.ts'
+import {
+  RITUAL_MAX_ATTEMPTS,
+  RitualAttemptLedger,
+  RitualDeliveryLatch,
+  classifyRitualFailure,
+  classifyRitualTurnFailure,
+  ritualRetryDelayMs,
+  type RitualFailureDisposition,
+  type RitualTurnFailureClass,
+} from './ritual-retry.ts'
 
 const log = createLogger('ritual-executor')
 
@@ -112,6 +138,14 @@ export interface RitualTurnInput {
 export interface RitualTurnResult {
   result: string
   status: 'completed' | 'failed' | 'cancelled' | 'timed_out'
+  /**
+   * The O3 failure class the substrate stamped, when it stamped one. STRUCTURAL
+   * match to `agent-dispatch`'s `DispatchTurnFailure` (same reason as the input
+   * type above — the same closure is handed to both, without an import between
+   * the modules). Absent means UNCLASSIFIED, which the recovery policy treats as
+   * `indeterminate`, never as retryable.
+   */
+  failure?: RitualTurnFailureClass
 }
 
 export interface RitualTurn {
@@ -148,6 +182,19 @@ export interface RitualExecutorDeps {
   resolve_model: () => string
   /** Resolve the cwd + write-containment root for a ritual scope. */
   scope_cwd: (scope: RitualScope) => string
+  /**
+   * Re-arm a spent occurrence to fire again at `fire_at_sec` (unix SECONDS, the
+   * `reminders` epoch). Production: the composer's `ReminderStore`
+   * reopen-then-reschedule pair.
+   *
+   * Needed ONLY by the detached-turn path. A fire-STARTUP retry is re-armed by
+   * the tick, which still holds the compare-and-swap anchor its #319 revert
+   * depends on; by the time a 45-minute turn settles that tick is long gone, so
+   * the executor has to re-arm the row itself. Returns `false` when the row was
+   * not re-armed (cancelled, rescheduled by the owner, already gone) — the
+   * caller treats that as "the occurrence moved on" and does not retry.
+   */
+  rearm: (reminder: Reminder, fire_at_sec: number) => Promise<boolean>
   /** Approval-checker factory seam (tests). Defaults to `createRitualApprovalCheck`. */
   build_approval_check?: (cadence: string) => RitualApprovalCheck
   /** run_id factory (test seam) — minted per fire attempt AND per subagent record. */
@@ -157,15 +204,46 @@ export interface RitualExecutorDeps {
 }
 
 /**
- * The executor seam the tick loop consumes. `fire(reminder)` REJECTS on a
- * STARTUP failure ONLY (validate/spawn/durable-row-write threw so NO
- * `code_ritual_runs` row landed — see the module header + throw sites below);
- * the tick's sole caller (`reminders/tick.ts`) MUST catch that rejection and
- * REVERT its occurrence claim so the fire re-arms. It never rejects once a
- * durable row exists, and never awaits the detached substrate turn.
+ * What the tick should do with the occurrence claim it took before calling
+ * `fire()`.
+ *
+ * This used to be signalled by REJECTING — a resolved `fire()` meant "consume",
+ * a rejection meant "revert and re-fire next tick". That encoding could only say
+ * two things, and it said the second one forever: a fire-startup failure that
+ * did not fix itself reverted the claim on every 30 s tick, indefinitely, with
+ * no `code_ritual_runs` row to show for any of it (ISSUES #489). A returned
+ * verdict can carry WHEN to re-attempt and WHICH attempt this is, which is what
+ * makes the recovery bounded and inspectable instead of a loop.
+ */
+export type RitualFireOutcome =
+  /**
+   * The occurrence is finished with — a durable row landed (running / skipped /
+   * failed), or the fire was legitimately a no-op. The tick keeps its claim.
+   */
+  | { claim: 'consume' }
+  /**
+   * A TRANSIENT failure the executor wants re-attempted. The tick re-arms the
+   * occurrence at `retry_at_ms` (instead of reverting it to its original,
+   * already-due `fire_at`, which is what made the old revert an every-tick
+   * loop). `attempt` is 1-based and always < {@link RITUAL_MAX_ATTEMPTS}.
+   */
+  | {
+      claim: 'retry'
+      retry_at_ms: number
+      attempt: number
+      disposition: RitualFailureDisposition
+    }
+
+/**
+ * The executor seam the tick loop consumes.
+ *
+ * `fire(reminder)` RESOLVES with a {@link RitualFireOutcome} and does not use
+ * rejection as control flow — its whole body is guarded, so a rejection now
+ * means a bug in the executor itself and the tick treats it as such (log loudly,
+ * consume, do not spin). It still never awaits the detached substrate turn.
  */
 export interface RitualExecutor {
-  fire(reminder: Reminder): Promise<void>
+  fire(reminder: Reminder): Promise<RitualFireOutcome>
 }
 
 function mintId(mint: (() => string) | undefined): string {
@@ -182,6 +260,77 @@ function mintId(mint: (() => string) | undefined): string {
  */
 export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
   const now = deps.now ?? Date.now
+  /** Failures per OCCURRENCE (`reminder_id`) — the attempt bound. */
+  const attempts = new RitualAttemptLedger()
+  /** Occurrences whose ritual OUTPUT has already reached the owner. */
+  const delivered = new RitualDeliveryLatch()
+
+  /**
+   * Has this occurrence already put its output in front of the owner?
+   *
+   * Two guards, in the order of how much they can be trusted. The DURABLE one is
+   * a `finished` run row for the occurrence: it is the record, and it survives a
+   * restart. The in-memory latch closes the one window the row cannot — a turn
+   * that completed and posted but whose row write failed.
+   *
+   * A THROWING read answers `true`. That is deliberate and asymmetric: if the
+   * run store cannot tell us whether the brief was already sent, the safe answer
+   * is to not send it again. A missed retry costs one late ritual; a wrong retry
+   * costs the owner a duplicate morning brief, which is the single outcome this
+   * whole recovery path must never produce.
+   */
+  function alreadyDelivered(reminder: Reminder): boolean {
+    if (delivered.has(reminder.id)) return true
+    try {
+      return deps.runs.listByReminder(reminder.id).some((r) => r.status === 'finished')
+    } catch (err) {
+      log.warn('ritual_delivery_check_failed', {
+        reminder_id: reminder.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return true
+    }
+  }
+
+  /**
+   * The ONE recovery decision, shared by the fire-startup path and the settled-
+   * turn path so the two can never drift into different policies.
+   *
+   * Returns the re-attempt instant when — and only when — the failure is
+   * classified `transient`, the occurrence has attempts left, and nothing has
+   * been delivered for it. `null` means terminal: the caller records a visible
+   * failure and stops.
+   */
+  function planRetry(
+    reminder: Reminder,
+    disposition: RitualFailureDisposition,
+  ): { retry_at_ms: number; attempt: number } | null {
+    const attempt = attempts.bump(reminder.id)
+    if (disposition !== 'transient') return null
+    if (attempt >= RITUAL_MAX_ATTEMPTS) return null
+    if (alreadyDelivered(reminder)) return null
+    return { retry_at_ms: now() + ritualRetryDelayMs(attempt), attempt }
+  }
+
+  /**
+   * The `failure_reason` written on a terminal row, prefixed so the three
+   * dispositions are distinguishable from `code_ritual_runs` ALONE — the point
+   * of the whole exercise being that a background failure must be answerable
+   * afterwards without grepping logs (a clean run emits no log line at all).
+   */
+  function terminalReason(
+    disposition: RitualFailureDisposition,
+    attempt: number,
+    detail: string,
+  ): string {
+    const prefix =
+      disposition === 'transient'
+        ? `retry exhausted after ${attempt} attempts`
+        : disposition === 'permanent'
+          ? 'permanent failure (not retried)'
+          : 'unclassified failure (not retried)'
+    return `${prefix}: ${detail}`
+  }
 
   /** Best-effort post of one notice body. NEVER throws (the record is the row).
    *  A post()==false (spec §267: the durable reply write was swallowed —
@@ -229,14 +378,20 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         reminder.id,
         formatRitualFailureNotice({ ritual_id, status, run_id, failure_reason: failure_reason ?? null }),
       )
-      // Read the last N+1 terminal rows AFTER this failure's row is written — the
-      // escalation rule is pure over that snapshot (no new state). The window is
-      // derived from the streak constant (the 3 newest to check + 1 older to gate
-      // re-arm), not a hardcoded literal (Argus r1 nit).
-      const recent = deps.runs.listRecentTerminal({
-        ritual_id,
-        limit: RITUAL_ESCALATION_CONSECUTIVE_FAILURES + 1,
-      })
+      // Read the last N+1 terminal OCCURRENCES after this failure's row is
+      // written — the escalation rule is pure over that snapshot (no new state).
+      // The window is derived from the streak constant (the 3 newest to check + 1
+      // older to gate re-arm), not a hardcoded literal (Argus r1 nit), and is
+      // then multiplied by the attempt cap because bounded recovery can leave up
+      // to `RITUAL_MAX_ATTEMPTS` rows per occurrence: without the wider read a
+      // single retried morning would fill the whole window and the older
+      // streak-breaker that re-arms the notice would fall off the end.
+      const recent = collapseAttemptsToOccurrences(
+        deps.runs.listRecentTerminal({
+          ritual_id,
+          limit: (RITUAL_ESCALATION_CONSECUTIVE_FAILURES + 1) * RITUAL_MAX_ATTEMPTS,
+        }),
+      ).slice(0, RITUAL_ESCALATION_CONSECUTIVE_FAILURES + 1)
       if (shouldEscalate(recent)) {
         await postNotice(topic, owner, reminder.id, formatRitualEscalationNotice({ ritual_id, run_id }))
       }
@@ -268,6 +423,32 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
             : 'failed'
     const registryStatus =
       r.status === 'completed' ? 'finished' : r.status === 'cancelled' ? 'cancelled' : 'crashed'
+    // DECIDE RECOVERY BEFORE the durable write, so the row this attempt leaves
+    // behind says which of the three verdicts it got. `planRetry` bumps the
+    // attempt ledger and must therefore be called EXACTLY ONCE per settled
+    // failure — hence here, not inside the branch below.
+    const settledDetail = r.result.trim().length > 0 ? r.result.trim() : null
+    // A settled turn maps onto exactly four run statuses (`crashed` belongs to
+    // `settleCrashed`, where the turn REJECTED rather than settled), so the
+    // failure set here is the two below.
+    const disposition: RitualFailureDisposition | null =
+      runStatus === 'failed' || runStatus === 'timed_out'
+        ? classifyRitualTurnFailure({ status: runStatus, failure: r.failure })
+        : null
+    const retry = disposition === null ? null : planRetry(reminder, disposition)
+    // The reason recorded on THIS attempt's row. A scheduled re-attempt says so
+    // (so a later reader can tell a retried attempt from the one that gave up);
+    // a terminal failure carries the disposition prefix.
+    const failureReason: string | undefined =
+      disposition === null
+        ? undefined
+        : retry !== null
+          ? `transient, retry ${retry.attempt}/${RITUAL_MAX_ATTEMPTS - 1} scheduled: ${settledDetail ?? runStatus}`
+          : terminalReason(
+              disposition,
+              attempts.peek(reminder.id),
+              settledDetail ?? runStatus,
+            )
     // Durable row FIRST — the record of the run, before any post. GUARDED: an
     // unguarded throw here previously jumped to settleCrashed, which retried the
     // SAME (still-failing) run store and therefore NEVER reached the registry
@@ -280,6 +461,7 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         status: runStatus,
         ended_at_ms: now(),
         output_summary: r.result,
+        ...(failureReason !== undefined ? { failure_reason: failureReason } : {}),
       })
     } catch (err) {
       log.error('ritual_run_terminal_persist_failed', {
@@ -301,6 +483,14 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
     }
     // DELIVERY — after the durable row is written.
     if (runStatus === 'finished') {
+      // LATCH BEFORE POSTING, not after. The latch is what stops a later failure
+      // for this occurrence from re-attempting into a second morning brief, and
+      // the moment the output leaves this process it may already be in front of
+      // the owner — a post that succeeds and then fails to return (or a settle
+      // that is interleaved with another) must not leave the latch unset. Marking
+      // first can only ever suppress a retry that was already unsafe.
+      delivered.mark(reminder.id)
+      attempts.forget(reminder.id)
       if (!def.silent) {
         const text = r.result.trim()
         const body = text.length > 0 ? text : formatRitualCompletionFallback({ ritual_id, run_id: runRunId })
@@ -309,17 +499,72 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
       // silent → no success post.
     } else if (runStatus === 'cancelled') {
       // Operator/shutdown abort — a durable 'cancelled' row is the record. NOT a
-      // merit failure: no scary failure notice, and it never feeds the
-      // consecutive-failure escalation (Argus r1 minor).
+      // merit failure: no scary failure notice, it never feeds the
+      // consecutive-failure escalation (Argus r1 minor), and it is not retried
+      // (the operator asked for it to stop; re-arming would be an argument).
+      attempts.forget(reminder.id)
+    } else if (retry !== null) {
+      // TRANSIENT, with attempts left and nothing delivered — re-arm the SAME
+      // occurrence and stay quiet. No failure notice: the ritual has not failed
+      // yet, and telling the owner about an attempt that is about to be repeated
+      // is the alarm-fatigue this recovery path is supposed to prevent. The
+      // durable row above already records the attempt and says a retry is
+      // scheduled, so the silence here is not an absence of record.
+      const rearmed = await rearmOrSurface(reminder, ritual_id, runRunId, runStatus, retry, settledDetail)
+      if (!rearmed) return
     } else {
-      // failed / timed_out. A turn-settled failure carries the turn's own text as
-      // the reason only when non-empty; otherwise no reason.
-      // `formatRitualFailureNotice` (ritual-delivery.ts) owns whitespace-collapse
-      // THEN the MAX_REASON_CHARS cap — a pre-slice here would truncate BEFORE
-      // collapse and could under-fill the notice, so pass the full trimmed text.
-      const settledReason = r.result.trim().length > 0 ? r.result.trim() : null
-      await surfaceFailure(reminder, ritual_id, runRunId, runStatus, settledReason)
+      // failed / timed_out / crashed with no re-attempt: permanent, unclassified,
+      // or out of attempts. `formatRitualFailureNotice` (ritual-delivery.ts) owns
+      // whitespace-collapse THEN the MAX_REASON_CHARS cap — a pre-slice here
+      // would truncate BEFORE collapse and could under-fill the notice, so pass
+      // the full trimmed text.
+      attempts.forget(reminder.id)
+      await surfaceFailure(reminder, ritual_id, runRunId, runStatus, settledDetail)
     }
+  }
+
+  /**
+   * Re-arm the occurrence for a planned re-attempt. Returns `true` when the row
+   * was re-armed; on a failure to re-arm it falls back to surfacing the failure
+   * so the occurrence never ends in silence, and returns `false`.
+   *
+   * The fallback is the whole reason this is a function rather than two lines
+   * inline: a retry that cannot actually be scheduled is indistinguishable, from
+   * the owner's side, from the original bug — the work vanishes and nothing says
+   * so. So a `rearm` that returns false (the row was cancelled or rescheduled
+   * under us) or throws degrades to the ordinary visible failure notice.
+   */
+  async function rearmOrSurface(
+    reminder: Reminder,
+    ritual_id: string,
+    runRunId: string,
+    runStatus: RitualRunTerminalStatus,
+    retry: { retry_at_ms: number; attempt: number },
+    detail: string | null,
+  ): Promise<boolean> {
+    let ok = false
+    try {
+      ok = await deps.rearm(reminder, Math.floor(retry.retry_at_ms / 1000))
+    } catch (err) {
+      log.error('ritual_retry_rearm_failed', {
+        reminder_id: reminder.id,
+        ritual_id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    if (ok) {
+      log.info('ritual_retry_scheduled', {
+        reminder_id: reminder.id,
+        ritual_id,
+        run_id: runRunId,
+        attempt: retry.attempt,
+        retry_at_ms: retry.retry_at_ms,
+      })
+      return true
+    }
+    attempts.forget(reminder.id)
+    await surfaceFailure(reminder, ritual_id, runRunId, runStatus, detail)
+    return false
   }
 
   /** The turn rejected outright — record a crash on both surfaces, then notice. */
@@ -332,6 +577,13 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
   ): Promise<void> {
     const message = err instanceof Error ? (err.stack ?? err.message) : String(err)
     log.error('ritual_turn_crashed', { subagent_run_id: subagentRunId, error: message })
+    // Same three-valued decision as the settled path, so a crash that IS stamped
+    // transient recovers and one that is not says so on its row. A turn that
+    // rejects outright is usually an unstamped fault, i.e. `indeterminate` — which
+    // means this ordinarily terminates, and does so with a reason that admits it
+    // was never classified rather than one that implies it was.
+    const disposition = classifyRitualFailure(err)
+    const retry = planRetry(reminder, disposition)
     // GUARDED (Argus r2 minor): the run-store write must not skip the registry
     // key-free below — the `ritual:<id>` spawn key is freed by updateTerminal, and
     // a persistent run-store error must never leave it live (refusing all future
@@ -341,7 +593,10 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         run_id: runRunId,
         status: 'crashed',
         ended_at_ms: now(),
-        failure_reason: message.slice(0, 4000),
+        failure_reason: (retry !== null
+          ? `transient, retry ${retry.attempt}/${RITUAL_MAX_ATTEMPTS - 1} scheduled: ${message}`
+          : terminalReason(disposition, attempts.peek(reminder.id), message)
+        ).slice(0, 4000),
       })
     } catch (rerr) {
       log.error('ritual_run_terminal_persist_failed', {
@@ -358,21 +613,28 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
         error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
       })
     }
+    if (retry !== null) {
+      if (await rearmOrSurface(reminder, ritual_id, runRunId, 'crashed', retry, message)) return
+      return
+    }
+    attempts.forget(reminder.id)
     await surfaceFailure(reminder, ritual_id, runRunId, 'crashed', message)
   }
 
   return {
-    async fire(reminder: Reminder): Promise<void> {
-      // fire() re-throws a STARTUP failure ONLY (no durable row landed) so the
-      // tick can revert its occurrence claim and re-fire; the detached turn is
-      // fail-soft and can never reject out of here (see the outer catch + module
-      // header). It never rejects once a durable row exists.
+    async fire(reminder: Reminder): Promise<RitualFireOutcome> {
+      // fire() RESOLVES with a verdict. A STARTUP failure (no durable row landed)
+      // is classified by the outer catch and turned into `{claim:'retry'}` — but
+      // only when the cause is a KNOWN-transient one and the occurrence has
+      // attempts left; otherwise it is recorded as a visible terminal failure and
+      // the claim is consumed. The detached turn is fail-soft and can never reject
+      // out of here (see the outer catch + module header).
       try {
         const ritual_id = reminder.ritual_id
         if (ritual_id === null) {
           // Defensive: the tick only routes non-null ritual_id rows here.
           log.error('ritual_fire_null_id', { reminder: reminder.id })
-          return
+          return { claim: 'consume' }
         }
         const cadence = ritualCadenceString(reminder)
         const checker =
@@ -394,7 +656,10 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
             skip_reason: verdict.reason,
             now_ms: now(),
           })
-          return
+          // A fail-CLOSED skip is a settled verdict, not a fault — the occurrence
+          // is done and any earlier attempt count for it is spent.
+          attempts.forget(reminder.id)
+          return { claim: 'consume' }
         }
 
         const def = verdict.def
@@ -420,7 +685,8 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
             skip_reason: 'unsupported_scope',
             now_ms: now(),
           })
-          return
+          attempts.forget(reminder.id)
+          return { claim: 'consume' }
         }
         // (c) the content hash the fire is bound to (recorded on the 'running' row).
         const content_hash = computeRitualContentHash({
@@ -467,7 +733,8 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
           // A spawn refusal is a durable 'failed' row → surface it like any other
           // failure terminal (counts toward the consecutive-failure escalation).
           await surfaceFailure(reminder, ritual_id, refusedRunId, 'failed', message)
-          return
+          attempts.forget(reminder.id)
+          return { claim: 'consume' }
         }
 
         // (e) the live 'running' history row (subagent_run_id + content_hash) is
@@ -508,7 +775,8 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
             await surfaceFailure(reminder, ritual_id, failedRunId, 'failed', reason)
             // A durable 'failed' row landed → the occurrence is legitimately
             // consumed; resolve (no revert).
-            return
+            attempts.forget(reminder.id)
+            return { claim: 'consume' }
           } catch (surfaceErr) {
             // The run store is fully down (insertRunning AND insertFailed both
             // threw): NO durable row exists for this occurrence. Reject so the tick
@@ -580,27 +848,82 @@ export function createRitualExecutor(deps: RitualExecutorDeps): RitualExecutor {
           )
         } catch (launchErr) {
           await settleCrashed(reminder, ritual_id, runRunId, subagentRunId, launchErr)
-          return
+          return { claim: 'consume' }
         }
+        return { claim: 'consume' }
       } catch (err) {
         // STARTUP failure — validate / spawn / durable-row-write threw so NO
-        // `code_ritual_runs` row landed for this occurrence. RE-THROW so the tick
-        // reverts its #319 claim and the occurrence re-fires next tick, instead of
-        // being silently consumed with no run + no history (the Argus data-loss
-        // blocker: the outer catch used to log-and-resolve, dropping the run). The
-        // paths that DID land a durable row (insertSkipped/insertFailed success,
+        // `code_ritual_runs` row landed for this occurrence. The paths that DID
+        // land a durable row (insertSkipped/insertFailed success,
         // insertRunning-then-durable-failed, AND a sync launch-construction failure
         // in step (f) — resolve_model()/turn() throwing after the 'running' row +
-        // live spawn key exist, which settleCrashed-settles then `return`s) never
+        // live spawn key exist, which settleCrashed-settles then returns) never
         // reach here; the detached turn (step (f)) is fire-and-forget and cannot
         // reject through this catch — so reaching here is unambiguously a startup
         // loss.
+        //
+        // This used to RE-THROW unconditionally, which made the tick revert its
+        // #319 claim and re-fire on the very next tick — correct for a blip,
+        // catastrophic for anything else. A cause that did not clear re-fired
+        // every 30 seconds indefinitely, and because no durable row can be written
+        // when the run store is the thing that broke, it did so leaving ZERO
+        // evidence and telling the owner nothing (ISSUES #489 REPRO B: 25 ticks,
+        // 25 attempts, 0 rows, 0 notices).
+        //
+        // Now the throw is CLASSIFIED. Only a stamped-transient cause with
+        // attempts left earns a re-arm, and it is re-armed on a backoff rather
+        // than immediately. Everything else terminates the occurrence with the
+        // loudest record still available: a durable `code_ritual_runs` row when
+        // the store is reachable, and — either way — the one-line notice, which is
+        // what the owner actually sees. Best-effort on both, because the store may
+        // be exactly what failed; between them the occurrence can no longer end in
+        // total silence.
+        const ritual_id = reminder.ritual_id
+        const disposition = classifyRitualFailure(err)
+        const detail = err instanceof Error ? err.message : String(err)
+        const plan = planRetry(reminder, disposition)
+        if (plan !== null && ritual_id !== null) {
+          log.warn('ritual_fire_startup_retry', {
+            reminder: reminder.id,
+            ritual_id,
+            attempt: plan.attempt,
+            retry_at_ms: plan.retry_at_ms,
+            disposition,
+            error: detail,
+          })
+          return { claim: 'retry', retry_at_ms: plan.retry_at_ms, attempt: plan.attempt, disposition }
+        }
+        const spent = attempts.peek(reminder.id)
+        attempts.forget(reminder.id)
         log.error('ritual_fire_unexpected', {
           reminder: reminder.id,
-          ritual_id: reminder.ritual_id,
+          ritual_id,
+          disposition,
+          attempts: spent,
           error: err instanceof Error ? (err.stack ?? err.message) : String(err),
         })
-        throw err
+        if (ritual_id !== null) {
+          const reason = terminalReason(disposition, spent, detail)
+          const failedRunId = mintId(deps.mint_run_id)
+          try {
+            await deps.runs.insertFailed({
+              run_id: failedRunId,
+              ritual_id,
+              reminder_id: reminder.id,
+              project_slug: deps.project_slug,
+              failure_reason: reason,
+              now_ms: now(),
+            })
+          } catch (rowErr) {
+            log.error('ritual_startup_terminal_row_failed', {
+              reminder: reminder.id,
+              ritual_id,
+              error: rowErr instanceof Error ? rowErr.message : String(rowErr),
+            })
+          }
+          await surfaceFailure(reminder, ritual_id, failedRunId, 'failed', reason)
+        }
+        return { claim: 'consume' }
       }
     },
   }
