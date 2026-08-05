@@ -5,10 +5,14 @@ Running log of what shipped, newest first. One entry per merged change.
 ## 2026-08-05 — mobile chat opens at the bottom, and only anchors a message top when it is unread
 
 Branch `fix/issue-505-chat-initial-anchor` (ISSUES #505). Changed:
-`/Users/ryan/repos/neutron-open/app/lib/chat-core/chat-initial-anchor.ts` (new),
-`/Users/ryan/repos/neutron-open/app/components/ChatSyncSurface.tsx`,
-`/Users/ryan/repos/neutron-open/app/__tests__/support/stubs/flash-list.tsx`,
-`/Users/ryan/repos/neutron-open/app/__tests__/chat-opens-at-the-bottom.test.tsx` (new).
+`app/lib/chat-core/chat-initial-anchor.ts` (new),
+`app/components/ChatSyncSurface.tsx`,
+`app/__tests__/support/stubs/flash-list.tsx`,
+`app/__tests__/chat-opens-at-the-bottom.test.tsx` (new).
+
+(Paths are repo-relative, as every entry in this file is. A FILESYSTEM-absolute
+path would carry the owner's home directory into a permanently public tree, and
+the leak gate rejects it — it caught these four lines on the first CI run.)
 
 **Reported:** switching to a project opened it at the TOP of the last message
 instead of the bottom of the transcript — only visible when that message is
