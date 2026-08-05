@@ -48,14 +48,18 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 import {
   VoiceTranscriptionClient,
+  VoiceTranscriptionClientError as AppVoiceTranscriptionClientError,
   type NoTranscriberReason as AppNoTranscriberReason,
   type OpenAiKeySource as AppOpenAiKeySource,
   type OpenAiKeyStatus as AppOpenAiKeyStatus,
   type TranscriptionBackend as AppTranscriptionBackend,
   type TranscriptionBackendChoice as AppTranscriptionBackendChoice,
+  type VoiceTranscriptionClientOptions as AppVoiceTranscriptionClientOptions,
   type VoiceTranscriptionStatus as AppVoiceTranscriptionStatus,
   type WhisperInstallPhase as AppWhisperInstallPhase,
   type WhisperJob as AppWhisperJob,
@@ -64,11 +68,13 @@ import {
 
 import {
   WebVoiceTranscriptionClient,
+  VoiceTranscriptionClientError as WebVoiceTranscriptionClientError,
   type NoTranscriberReason as WebNoTranscriberReason,
   type OpenAiKeySource as WebOpenAiKeySource,
   type OpenAiKeyStatus as WebOpenAiKeyStatus,
   type TranscriptionBackend as WebTranscriptionBackend,
   type TranscriptionBackendChoice as WebTranscriptionBackendChoice,
+  type VoiceTranscriptionClientOptions as WebVoiceTranscriptionClientOptions,
   type VoiceTranscriptionStatus as WebVoiceTranscriptionStatus,
   type WhisperInstallPhase as WebWhisperInstallPhase,
   type WhisperJob as WebWhisperJob,
@@ -107,6 +113,13 @@ const _driftStatusKeys = (
   k: Drift<keyof AppVoiceTranscriptionStatus, keyof WebVoiceTranscriptionStatus>,
 ): never => k
 
+// Construction options — this is what pins the web client's REQUEST TIMEOUT.
+// It had none while the app had 15s (ISSUES #503), so a `timeoutMs` dropped
+// from either side reds here.
+const _driftOptionsKeys = (
+  k: Drift<keyof AppVoiceTranscriptionClientOptions, keyof WebVoiceTranscriptionClientOptions>,
+): never => k
+
 /**
  * The guarantee above is entirely compile-time — a `never` parameter has no
  * value to pass, so these cannot be called. Collected so they are not dead
@@ -123,6 +136,57 @@ const DRIFT_GUARDS = [
   _driftJobKeys,
   _driftKeyStatusKeys,
   _driftStatusKeys,
+  _driftOptionsKeys,
+] as const
+
+// ── Constructor-shape drift guards (ISSUES #503) ────────────────────────
+//
+// The guards above pin the shapes that go over the WIRE. A constructor is not
+// one of them, so `VoiceTranscriptionClientError` was free to take
+// `(status, code, message)` on the app side and `(code, message, status)` on
+// the web side — two near-identical files, each internally consistent, each
+// reading plausibly. Nothing red. A construction copied from one file to the
+// other produced a silently wrong error object: a status where a code belongs.
+//
+// `ConstructorParameters<typeof C>` is the parameter list as a TUPLE, and tuple
+// assignment is ELEMENT-WISE and POSITIONAL. Asserting it both ways pins the
+// parameter types AND their order. These are ordinary (callable) functions
+// rather than `never`-parameter ones because the guarantee here is the
+// ASSIGNMENT in the return position, not an uninhabited parameter.
+type AppErrCtorArgs = ConstructorParameters<typeof AppVoiceTranscriptionClientError>
+type WebErrCtorArgs = ConstructorParameters<typeof WebVoiceTranscriptionClientError>
+
+const _driftErrCtorAppToWeb = (a: AppErrCtorArgs): WebErrCtorArgs => a
+const _driftErrCtorWebToApp = (w: WebErrCtorArgs): AppErrCtorArgs => w
+
+// The FIELDS the constructor populates, pinned separately: a side that renamed
+// `code`, or retyped `status` to a string, would keep an assignable parameter
+// tuple while changing what a `catch` block reads. `name` is deliberately
+// excluded — the app declares it as a literal type and the web as `string`, a
+// difference with no consequence for a caller, asserted at runtime below.
+type AppErrFields = Pick<AppVoiceTranscriptionClientError, 'code' | 'status' | 'message'>
+type WebErrFields = Pick<WebVoiceTranscriptionClientError, 'code' | 'status' | 'message'>
+
+const _driftErrFieldsAppToWeb = (a: AppErrFields): WebErrFields => a
+const _driftErrFieldsWebToApp = (w: WebErrFields): AppErrFields => w
+
+/**
+ * Collected for the same reason as `DRIFT_GUARDS`: so they are not dead code,
+ * and so the count can be pinned against silent deletion.
+ *
+ * These CANNOT close the case on their own, and the runtime tests below are not
+ * belt-and-braces. Two blind spots, both real:
+ *   1. `tsc` compares parameter TYPES, never parameter NAMES. A future
+ *      `(code, message)` vs `(message, code)` swap — both `string` — produces
+ *      identical tuples and passes here. The source-text guard covers that.
+ *   2. `bun test` does not typecheck at all, so on the test job these are inert
+ *      and only the behavioural assertions run.
+ */
+const CONSTRUCTOR_SHAPE_GUARDS = [
+  _driftErrCtorAppToWeb,
+  _driftErrCtorWebToApp,
+  _driftErrFieldsAppToWeb,
+  _driftErrFieldsWebToApp,
 ] as const
 
 // ── Exhaustive runtime enumerations ─────────────────────────────────────
@@ -264,8 +328,10 @@ describe('VoiceTranscriptionStatus — app ↔ web mirror', () => {
     // the guard: the guard is `tsc -p app/tsconfig.json`, run by
     // `scripts/ci/typecheck-all.sh`. Deleting a guard silently disarms this
     // file, so the count is pinned.
-    expect(DRIFT_GUARDS).toHaveLength(9)
+    expect(DRIFT_GUARDS).toHaveLength(10)
     for (const g of DRIFT_GUARDS) expect(typeof g).toBe('function')
+    expect(CONSTRUCTOR_SHAPE_GUARDS).toHaveLength(4)
+    for (const g of CONSTRUCTOR_SHAPE_GUARDS) expect(typeof g).toBe('function')
   })
 
   test('bidirectional structural assignment compiles + round-trips at runtime', () => {
@@ -470,5 +536,255 @@ describe('both clients normalize the same server payload identically', () => {
       expect(webStub.calls[0]!.url).toBe(`${BASE_URL}${suffix}`)
       expect(appStub.calls[0]!.init?.method).toBe(webStub.calls[0]!.init?.method as string)
     }
+  })
+})
+
+// ── VoiceTranscriptionClientError — constructor shape (ISSUES #503) ──────
+
+const REPO_ROOT = join(__dirname, '..', '..')
+const APP_ROOT = join(__dirname, '..')
+
+function read(...parts: string[]): string {
+  return readFileSync(join(...parts), 'utf8')
+}
+
+/**
+ * The constructor's parameter list, IN ORDER, read out of the source text.
+ *
+ * This is the one guard that sees parameter NAMES. `tsc` does not compare them,
+ * so a same-typed transposition — `(code, message)` against `(message, code)` —
+ * is invisible to every type-level assertion in this file. Reading the text is
+ * the tightest mechanism that can express it.
+ *
+ * Parameter-property modifiers are stripped: the app side declares its fields
+ * as `readonly` constructor parameters and the web side assigns them in the
+ * body, which is a style difference with no effect on a caller.
+ */
+function ctorParams(src: string, className: string): string[] {
+  const cls = src.indexOf(`export class ${className} extends Error {`)
+  expect(cls).toBeGreaterThanOrEqual(0)
+  const open = src.indexOf('constructor(', cls)
+  expect(open).toBeGreaterThanOrEqual(0)
+  const close = src.indexOf(')', open)
+  expect(close).toBeGreaterThan(open)
+  return src
+    .slice(open + 'constructor('.length, close)
+    .replace(/\b(readonly|public|private|protected)\b/g, '')
+    .split(',')
+    .map((p) => p.trim().replace(/\s+/g, ' '))
+    .filter((p) => p.length > 0)
+}
+
+/** What a `catch` block actually reads off one of these. */
+function errShape(e: unknown): Record<string, unknown> {
+  const err = e as { name: string; code: string; status: number; message: string }
+  return { name: err.name, code: err.code, status: err.status, message: err.message }
+}
+
+describe('VoiceTranscriptionClientError — app ↔ web constructor shape', () => {
+  const webSrc = read(REPO_ROOT, 'landing', 'chat-react', 'voice-transcription-client.ts')
+  const appSrc = read(APP_ROOT, 'lib', 'voice-transcription-client.ts')
+
+  test('both constructors take the same parameters, in the same order', () => {
+    const app = ctorParams(appSrc, 'VoiceTranscriptionClientError')
+    const web = ctorParams(webSrc, 'VoiceTranscriptionClientError')
+    expect(app).toEqual(web)
+    // Guard the guard. Pinned to the LITERAL signature, so an extractor that
+    // silently returned `[]` — or dropped a parameter — cannot pass vacuously
+    // by agreeing with itself on both sides. `(code, message, status)` is the
+    // order all 23 of this repo's other client-error classes take.
+    expect(app).toEqual(['code: string', 'message: string', 'status: number'])
+  })
+
+  test('the same three arguments land on the same three fields on both sides', () => {
+    const app = new AppVoiceTranscriptionClientError('install_running', 'wait for it', 409)
+    const web = new WebVoiceTranscriptionClientError('install_running', 'wait for it', 409)
+    // Each field asserted against the argument it came from, so a transposed
+    // constructor reds HERE with the wrong value rather than merely differing.
+    for (const e of [app, web]) {
+      expect(e.code).toBe('install_running')
+      expect(e.status).toBe(409)
+      expect(e.message).toBe('install_running: wait for it')
+      expect(e.name).toBe('VoiceTranscriptionClientError')
+    }
+    expect(errShape(web)).toEqual(errShape(app))
+  })
+
+  test('a non-2xx from the same server body throws the same error on both', async () => {
+    const body = { ok: false, code: 'install_running', message: 'wait for it to finish first' }
+    const appErr = await new VoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: stubFetch(body, 409).impl,
+    })
+      .status()
+      .catch((e: unknown) => e)
+    const webErr = await new WebVoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: stubFetch(body, 409).impl,
+    })
+      .status()
+      .catch((e: unknown) => e)
+
+    expect(appErr).toBeInstanceOf(AppVoiceTranscriptionClientError)
+    expect(webErr).toBeInstanceOf(WebVoiceTranscriptionClientError)
+    // This is the end-to-end pin: it catches a transposition at the CALL SITES
+    // inside either client, not just in the constructor declaration.
+    expect(errShape(webErr)).toEqual(errShape(appErr))
+    expect(errShape(appErr)).toEqual({
+      name: 'VoiceTranscriptionClientError',
+      code: 'install_running',
+      status: 409,
+      message: 'install_running: wait for it to finish first',
+    })
+  })
+
+  test('a non-JSON body throws the same error on both, status preserved', async () => {
+    const nonJson = (): Promise<Response> =>
+      Promise.resolve(new Response('Not Found', { status: 404 }))
+    const appErr = await new VoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: nonJson,
+    })
+      .status()
+      .catch((e: unknown) => e)
+    const webErr = await new WebVoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: nonJson,
+    })
+      .status()
+      .catch((e: unknown) => e)
+
+    expect(errShape(webErr)).toEqual(errShape(appErr))
+    // The STATUS is the load-bearing field here: the screen turns 404 into
+    // "your server is too old" rather than a raw parse error.
+    expect(errShape(appErr)).toEqual({
+      name: 'VoiceTranscriptionClientError',
+      code: 'bad_response',
+      status: 404,
+      message: 'bad_response: HTTP 404',
+    })
+  })
+})
+
+describe('a server that never answers — both clients give up identically', () => {
+  // The web client had NO timeout while the app had 15s (ISSUES #503). `fetch`
+  // has no default one on either runtime, so a connection that is accepted and
+  // then goes nowhere left the web card loading forever.
+
+  /** Accepts the request and never answers — settles only on abort. */
+  const hang = (_input: string, init?: RequestInit): Promise<Response> =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('Aborted')))
+    })
+
+  /**
+   * Resolve to the client's outcome, or to the sentinel if it never settles.
+   *
+   * A client with no timeout does not REJECT — it hangs. Without this race the
+   * removal of a timeout would show up as a suite-level stall rather than a
+   * named failure, which is a bad way for a guard to red. The sentinel timer is
+   * ~17x the injected 30 ms client timeout and is not an assertion about how
+   * fast anything ran, so it is not a wall-clock bound (ISSUES #438).
+   */
+  const NEVER_SETTLED = 'NEVER_SETTLED'
+  async function outcome(p: Promise<unknown>): Promise<unknown> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        p.then(() => 'RESOLVED').catch((e: unknown) => e),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(NEVER_SETTLED), 500)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  test('both time out with the same code, status and wording', async () => {
+    const appErr = await outcome(
+      new VoiceTranscriptionClient({
+        base_url: BASE_URL,
+        token: TOKEN,
+        fetchImpl: hang,
+        timeoutMs: 30,
+      }).status(),
+    )
+    const webErr = await outcome(
+      new WebVoiceTranscriptionClient({
+        base_url: BASE_URL,
+        token: TOKEN,
+        fetchImpl: hang,
+        timeoutMs: 30,
+      }).status(),
+    )
+
+    expect(appErr).not.toBe(NEVER_SETTLED)
+    expect(webErr).not.toBe(NEVER_SETTLED)
+    expect(appErr).toBeInstanceOf(AppVoiceTranscriptionClientError)
+    expect(webErr).toBeInstanceOf(WebVoiceTranscriptionClientError)
+    // Equality across the two is what pins the wording; the literals below pin
+    // the two fields a caller branches on. (The injected 30 ms rounds to "0s"
+    // in the text, which is why the message is asserted by shape, not literal.)
+    expect(errShape(webErr)).toEqual(errShape(appErr))
+    expect((appErr as AppVoiceTranscriptionClientError).code).toBe('timeout')
+    expect((appErr as AppVoiceTranscriptionClientError).status).toBe(0)
+    expect((appErr as AppVoiceTranscriptionClientError).message).toContain(
+      'the server did not answer within',
+    )
+  })
+
+  test('the default timeout is the same constant on both sides', () => {
+    // The behavioural test above injects `timeoutMs`, so it would still pass if
+    // one side defaulted to 15s and the other to an hour. Pin the default.
+    const constant = (src: string): string | undefined =>
+      /const REQUEST_TIMEOUT_MS = ([\w_]+)/.exec(src)?.[1]
+    const appSrc = read(APP_ROOT, 'lib', 'voice-transcription-client.ts')
+    const webSrc = read(REPO_ROOT, 'landing', 'chat-react', 'voice-transcription-client.ts')
+    expect(constant(appSrc)).toBe('15_000')
+    expect(constant(webSrc)).toBe(constant(appSrc))
+  })
+
+  test('a successful request is untouched by the timeout on both clients', async () => {
+    // The regression arm: an abort timer that fires on a request that already
+    // finished, or a `finally` that failed to clear it, would show up here.
+    const appStub = stubFetch(APP_SAMPLE)
+    const webStub = stubFetch(APP_SAMPLE)
+    const app = await new VoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: appStub.impl,
+      timeoutMs: 30,
+    }).status()
+    const web = await new WebVoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: webStub.impl,
+      timeoutMs: 30,
+    }).status()
+    expect(app).toEqual(web)
+    expect(app).toEqual(APP_SAMPLE)
+  })
+
+  test('both clients pass an abort signal to fetch', async () => {
+    // A timeout that never reaches `fetch` is a timer that fires into nothing.
+    const appStub = stubFetch(APP_SAMPLE)
+    const webStub = stubFetch(APP_SAMPLE)
+    await new VoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: appStub.impl,
+    }).status()
+    await new WebVoiceTranscriptionClient({
+      base_url: BASE_URL,
+      token: TOKEN,
+      fetchImpl: webStub.impl,
+    }).status()
+    expect(appStub.calls[0]!.init?.signal).toBeInstanceOf(AbortSignal)
+    expect(webStub.calls[0]!.init?.signal).toBeInstanceOf(AbortSignal)
   })
 })
