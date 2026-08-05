@@ -129,7 +129,7 @@ export const VOICE_TRANSCRIPTION_PATH = '/api/app/voice-transcription';
  * `(code, message, status)` — the order every other client error in this repo
  * takes: `tabs-client.ts:50`, `cores-client.ts:125`, `reminders-client.ts:188`,
  * `devices-client.ts:130`, and the web mirror of THIS file at
- * `landing/chat-react/voice-transcription-client.ts:121`, 23 classes in all.
+ * `landing/chat-react/voice-transcription-client.ts`, 23 classes in all.
  *
  * It used to take `(status, code, message)`, which made it the odd one out and
  * — worse — put it in direct disagreement with its own near-identical mirror.

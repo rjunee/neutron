@@ -125,7 +125,7 @@ interface ErrorBody {
 /**
  * `(code, message, status)` — the order every other client error in this repo
  * takes, and the order the app mirror at
- * `app/lib/voice-transcription-client.ts:121` now takes too. It did not: that
+ * `app/lib/voice-transcription-client.ts` now takes too. It did not: that
  * side read `(status, code, message)`, so the two near-identical files
  * disagreed and a construction copied between them produced a silently wrong
  * error object. Pinned by `app/__tests__/voice-transcription-mirror-parity.test.ts`.
