@@ -92,6 +92,15 @@ const assistantOtherToolCall = (name: string): Entry => ({
   message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name, input: {} }] },
 })
 
+/** A reply() tool call carrying a specific body — what the promise gate reads. */
+const assistantReplyText = (text: string, id = 'toolu_r'): Entry => ({
+  type: 'assistant',
+  message: {
+    role: 'assistant',
+    content: [{ type: 'tool_use', id, name: 'mcp__neutron-abcd1234__reply', input: { text } }],
+  },
+})
+
 describe('enforce-reply Stop hook', () => {
   it('BLOCKS when channel turn ended without reply()', () => {
     const path = writeTranscript('no-reply', [channelUser('do a thing'), assistantText('Here is a draft: ...')])
@@ -301,5 +310,142 @@ describe('mechanism #9 (stuck-typing) — enforce-reply obviates the pane-scrape
     const out = runHook({ transcript_path: path, session_id: 'test-9-replied' })
     expect(out.decision).toBeUndefined()
     expect(out.stdout).toBe('')
+  })
+})
+
+/**
+ * The continuation-promise gate (ISSUES #492).
+ *
+ * A turn that ends on a PROMISE of work — "re-running now", "I'll report back" —
+ * strands the owner: a channel turn is asynchronous, so nothing re-invokes the
+ * session and they get silence until they ask for a status.
+ *
+ * Most of these tests pin FALSE-POSITIVE handling rather than detection. That is
+ * deliberate. A promise gate that fires on innocent prose gets in the way and
+ * then gets switched off, which is worse than not having one — so the mitigations
+ * are the load-bearing part, and each is pinned individually so a refactor that
+ * drops one reds here rather than in production.
+ */
+describe('enforce-reply — continuation-promise gate', () => {
+  it('BLOCKS a turn whose delivered reply promises work it never did', () => {
+    const path = writeTranscript('promise-bare', [
+      channelUser('the suite is red', 'user="sam"'),
+      assistantReplyText("Re-running the suite now — I'll report back with the result."),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-1' })
+    expect(out.decision).toBe('block')
+    expect((out.reason ?? '').toLowerCase()).toContain('silence')
+  })
+
+  it('BLOCKS the bare present-participle shape with no modal at all', () => {
+    // "fixing and re-running" — no "I'll", no "going to". The most common form of
+    // the bug, so it has to match on its own rather than only after a modal.
+    const path = writeTranscript('promise-participle', [
+      channelUser('tests fail', 'user="sam"'),
+      assistantReplyText('Fixing and re-running.'),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-2' })
+    expect(out.decision).toBe('block')
+  })
+
+  // --- FALSE-POSITIVE MITIGATIONS ------------------------------------------
+
+  it('ALLOWS a reply reporting COMPLETED work in past tense (regression arm)', () => {
+    // The likeliest thing to get wrong. A turn that did the work and reports the
+    // real result must sail through — the gate is about FUTURE intent only.
+    const path = writeTranscript('promise-past-tense', [
+      channelUser('the suite is red', 'user="sam"'),
+      assistantOtherToolCall('Bash'),
+      assistantReplyText('Re-ran the full suite and repaired the flake — all 40 tests pass.'),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-3' })
+    expect(out.decision).toBeUndefined()
+    expect(out.stdout).toBe('')
+  })
+
+  it('ALLOWS a reply that QUOTES the promise phrasings (meta-discussion)', () => {
+    // A reply explaining the gate, or citing what not to say, is not a live
+    // promise. Observed for real: the turn first reporting this gate tripped it.
+    const path = writeTranscript('promise-quoted', [
+      channelUser('why did my session stall?', 'user="sam"'),
+      assistantReplyText(
+        'The gate catches phrasings like "re-running now" and "I\'ll report back" — ' +
+          'your session ended on one of those, which is why nothing followed.',
+      ),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-4' })
+    expect(out.decision).toBeUndefined()
+    expect(out.stdout).toBe('')
+  })
+
+  it('ALLOWS ordinary prose where the verbs are NOUNS after an article', () => {
+    // "the fix", "a check" — these words are everyday nouns, and the modal can sit
+    // up to 50 chars away, so an unguarded alternation fires on innocent text.
+    const path = writeTranscript('promise-noun-usage', [
+      channelUser('what happened?', 'user="sam"'),
+      assistantReplyText("I'll explain why the fix landed the way it did, and what a check costs."),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-5' })
+    expect(out.decision).toBeUndefined()
+    expect(out.stdout).toBe('')
+  })
+
+  // --- ESCAPE HATCHES (this runtime's REAL re-invocation seams) -------------
+
+  it('ALLOWS a promise when the turn armed a reminder to bring the owner back', () => {
+    // reminders_create is the one seam that genuinely re-enters this session: the
+    // tick fires it and the dispatcher starts a turn on the SAME warm pooled
+    // session, so the promise is honest — something really will follow.
+    const path = writeTranscript('promise-reminder', [
+      channelUser('watch the deploy', 'user="sam"'),
+      assistantOtherToolCall('mcp__neutron__reminders_create'),
+      assistantReplyText("I'll report back once the deploy finishes."),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-6' })
+    expect(out.decision).toBeUndefined()
+  })
+
+  it('still BLOCKS a promise backed only by dispatch_agent, which never reports back', () => {
+    // Looks like a continuation mechanism and is not one. dispatch_agent runs on a
+    // separate ephemeral substrate and its completion reporter here is a bare log
+    // line (open/composer.ts:999-1004) — nothing re-enters the session and nothing
+    // reaches the owner. Accepting it would wave through the exact stranding this
+    // gate exists to catch, so it is pinned as a BLOCK.
+    const path = writeTranscript('promise-dispatch', [
+      channelUser('research the options', 'user="sam"'),
+      assistantOtherToolCall('mcp__neutron__dispatch_agent'),
+      assistantReplyText("Digging into it — I'll follow up with what I find."),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-7' })
+    expect(out.decision).toBe('block')
+  })
+
+  // --- DELIVERY SEMANTICS ---------------------------------------------------
+
+  it('evaluates the FIRST reply — the only one the substrate actually delivers', () => {
+    // The substrate settles a turn on the first correlated reply and closes the
+    // channel (repl-session.ts:280-290), rejecting every later one (:269). So a
+    // "promise, then deliver in a second reply" turn does NOT reach the owner with
+    // the result — they are left on the promise. Reading the LAST reply (Nova's
+    // rule, correct for its streaming delivery) would clear this turn and hide the
+    // exact bug the gate exists to catch.
+    const path = writeTranscript('promise-first-wins', [
+      channelUser('the suite is red', 'user="sam"'),
+      assistantReplyText('Re-running the suite now, one sec.', 'toolu_r1'),
+      assistantOtherToolCall('Bash'),
+      assistantReplyText('Done — all 40 pass.', 'toolu_r2'),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-8' })
+    expect(out.decision).toBe('block')
+  })
+
+  it('does not regress the no-reply-at-all gate', () => {
+    const path = writeTranscript('promise-no-reply-still-blocks', [
+      channelUser('do a thing', 'user="sam"'),
+      assistantText('Re-running the suite now.'),
+    ])
+    const out = runHook({ transcript_path: path, session_id: 'promise-9' })
+    expect(out.decision).toBe('block')
+    expect((out.reason ?? '').toLowerCase()).toContain('invisible')
   })
 })
