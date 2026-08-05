@@ -2,6 +2,85 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-05 — mobile chat opens at the bottom, and only anchors a message top when it is unread
+
+Branch `fix/issue-505-chat-initial-anchor` (ISSUES #505). Changed:
+`app/lib/chat-core/chat-initial-anchor.ts` (new),
+`app/components/ChatSyncSurface.tsx`,
+`app/__tests__/support/stubs/flash-list.tsx`,
+`app/__tests__/chat-opens-at-the-bottom.test.tsx` (new).
+
+(Paths are repo-relative, as every entry in this file is. A FILESYSTEM-absolute
+path would carry the owner's home directory into a permanently public tree, and
+the leak gate rejects it — it caught these four lines on the first CI run.)
+
+**Reported:** switching to a project opened it at the TOP of the last message
+instead of the bottom of the transcript — only visible when that message is
+taller than the screen, which most agent replies are, so it read as "the app
+opened half-way up a wall of text".
+
+**It was not an unread anchor firing unconditionally; there was no unread anchor
+at all.** The surface passed FlashList
+`maintainVisibleContentPosition.startRenderingFromBottom: true`, and on a
+transcript taller than the screen that prop's only positioning effect is
+`initialScrollIndex = dataLength - 1`
+(`@shopify/flash-list/src/recyclerview/RecyclerViewManager.ts:332-339`), which
+scrolls to `getLayout(lastIndex).y` — the last item's TOP edge
+(`recyclerview/hooks/useRecyclerViewController.tsx:596-600`). Its own docblock
+scopes it to "chat-like interfaces when there are only few messages"
+(`FlashListProps.ts:406-408`). The bug was height-dependent for the same reason
+the fix works: the last item's top edge is only a reachable offset when that item
+is taller than the viewport, and otherwise the native scroll view clamps it back
+to the content bottom — which is why a short final message always looked right.
+That clamp is verified in RN's source, not assumed
+(`RCTScrollView.m:571-593` Paper, `RCTScrollViewComponentView.mm:858-876` Fabric;
+neither sets `scrollToOverflowEnabled`).
+
+**Read state already existed and was reused, not reinvented.** `ChatMessage.read_by`
+is the server-assigned set of device ids that have read a message
+(`chat-core/types.ts:164-170`), merged by set-union (`chat-core/store.ts:114`),
+patched from `receipt_update` (`chat-core/sync-engine.ts:125`) and persisted in the
+mobile SQLite store (`app/lib/chat-core/sqlite-store.ts:85,405,444`), so it
+survives the cold open a project switch performs. The new module only reads it;
+no schema change, no second vocabulary.
+
+**The rule, in one pure function.** `chatInitialAnchor(rows, selfDeviceId)` returns
+the top of the first unread inbound row when unread exist, else the transcript
+bottom. `anchorScrollProps` turns that into FlashList's
+`initialScrollIndex` / `initialScrollIndexParams`. The bottom case is expressed as
+a deliberate overscroll past the last row's top edge, fed through FlashList's OWN
+`viewOffset` rather than corrected afterwards — `applyInitialScrollIndex` re-applies
+its offset on a `setTimeout(…, 0)`
+(`useRecyclerViewController.tsx:596-613`), so a `scrollToEnd` issued from a layout
+effect would be undone a macrotask later. Changing the offset the library targets
+means both of its applications land on the content bottom: one mechanism, no
+correction after paint, no visible jump, and no animation (the initial position is
+a starting point, not a transition). `startRenderingFromBottom` stays for its other
+job — the top margin that pushes a transcript shorter than the screen down to hug
+the composer (`RecyclerView.tsx:597-608`).
+
+**Two failure directions closed deliberately.** The anchor is FROZEN per project on
+the first snapshot carrying both a row and a device id, because
+`onViewableItemsChanged` starts marking rows read the instant the surface paints —
+a live recomputation would erase the unread anchor before FlashList applied it. And
+the anchor degrades to `bottom` whenever the read signal cannot be trusted (no
+device id yet, or not one row read by this device), because `read_by` is optional
+and additive: a history synced before receipts existed presents as entirely unread,
+and anchoring on that would open a long transcript at its very first message —
+worse than the bug. The receipt-eligibility predicate is now shared between the
+anchor and the marker so the two sets cannot drift; a row the anchor counted but
+the marker never reported would stay unread forever.
+
+**Mutation-tested, four ways.** Stripping the bottom overscroll (the original bug)
+reds 3; collapsing the rule to "always bottom" (the naive fix) reds 3, including
+the unread regression arm; making the overscroll conditional on row count reds the
+short-last-message arm; and unwiring `{...anchorProps}` from the FlashList reds
+exactly the two wiring tests while the pure arms stay green. The FlashList test
+stub now records its props, because that stub does not virtualise and has no scroll
+offset — the honest assertion at this level is which position the surface ASKS for,
+and the step from that ask to a pixel stays a device claim. No feature flag; the
+behaviour ships on as the default.
+
 ## 2026-08-04 — the two voice-transcription clients now fail the same way
 
 Branch `fix/voice-client-error-shape-parity` (ISSUES #503). Changed:
