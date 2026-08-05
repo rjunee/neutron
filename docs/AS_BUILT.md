@@ -7519,3 +7519,70 @@ fallback reds "shared is used" (3 tests); inverting the precedence reds
 status/resolve agreement suite (4 tests); dropping the blank-key guard reds the
 fall-through and missing-key tests (4 tests). The `openai_key_missing` path is
 covered directly and is unchanged.
+
+## 2026-08-04 — a turn can no longer end on a promise it never keeps (ISSUES #492)
+
+`runtime/adapters/claude-code/persistent/hooks/enforce-reply.ts` already blocked a
+`<channel>` turn that ended without calling `reply()`. It did not catch the other
+half of the same failure: a turn that ends on a PROMISE of work — "re-running
+now", "I'll fix and report back", "one sec". Because a channel turn is
+asynchronous, nothing re-invokes an idle session, so the owner sits in silence
+until they ask for a status. The session looks broken while being perfectly
+healthy. That gate now exists, ported from the upstream harness.
+
+**What actually ported was the false-positive handling, not the regex.** The
+extra logic upstream is almost entirely scar tissue, and a version carrying only
+the pattern would fire on innocent prose, get in the way, and be switched off —
+strictly worse than no gate. Three mitigations came across and each is pinned by
+its own test: double-quoted spans are stripped before matching, so a reply that
+QUOTES the banned phrasings (explaining the gate, citing what not to say) is read
+as meta-discussion rather than a live promise; a negative lookbehind rejects the
+verb-as-noun case, so "the fix", "a check", "your build" do not trip an
+alternation whose modal may sit 50 characters away; and only the reply the owner
+actually receives is evaluated, so a past-tense report of completed work sails
+through.
+
+**Two findings corrected the port rather than following it.** First, the
+delivered-reply rule is INVERTED against upstream. Upstream streams a turn as
+several replies and evaluates the LAST, because that is the message the owner is
+left staring at. This runtime delivers exactly one: `reply` has no
+streaming/append parameter (`dev-channel-impl.ts:129-137`) and the substrate
+settles the turn on the FIRST correlated reply — pushing the completion, closing
+the channel, marking it settled (`repl-session.ts:280-290`) — after which every
+later reply is rejected (`repl-session.ts:269`). Porting "last reply" literally
+would have read a follow-up the substrate already threw away and cleared a turn
+that really did strand the owner: a false NEGATIVE hiding the exact bug. The
+rationale ports; the index does not.
+
+Second, the escape hatches are this tree's real seams, established from the code
+rather than assumed from upstream's names. There is exactly ONE: `reminders_create`
+(`cores/free/reminders/src/tools.ts:104`) is auto-approved
+(`gateway/cores/install-bundled.ts:1098`), picked up by a 30 s tick
+(`reminders/tick.ts:162`), and dispatched onto the SAME warm pooled session
+(`reminders/dispatcher.ts:139-145` → `open/composer.ts:2433-2434` → `pool.ts:490`
+→ `spawn.ts:884`) — a genuine re-entry that can even re-arm itself.
+`dispatch_agent` looks like a continuation mechanism and is NOT one: it runs on a
+separate ephemeral substrate and its completion reporter here is a bare log line
+(`open/composer.ts:999-1004`), so nothing reaches the owner and nothing re-enters
+the session. Accepting it would have waved through the precise stranding the gate
+exists to catch, so it is pinned as a BLOCK. `rituals_*` are approval-gated onto a
+different substrate; cron, idle-nudge and morning-brief are server-side timers
+with no tool surface at all.
+
+A known limit, recorded rather than papered over: because the substrate settles
+the turn on the delivered reply, a block fires AFTER that reply has already
+reached the owner. The gate therefore forces the promised work to actually happen
+in-turn and pushes the agent toward arming a real follow-up, but it cannot
+retroactively deliver a result on a turn whose channel is already closed. The
+durable fix for the delivery half is to not send the promise in the first place,
+which is what the block reason instructs.
+
+**Tests + mutation results.** `runtime/adapters/claude-code/persistent/__tests__/enforce-reply.test.ts`
+grows from 17 to 27 tests. Seven mutations, each red: disabling the promise check
+reds 3; adding a past-tense form to the pattern reds the completed-work regression
+arm; dropping the quote-strip reds the meta-discussion arm; dropping the lookbehind
+reds the verb-as-noun arm; flipping delivered-reply from first to last reds the
+delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; and
+short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
+no-reply gate is untouched. No feature flag — the gate ships on as default
+behaviour.
