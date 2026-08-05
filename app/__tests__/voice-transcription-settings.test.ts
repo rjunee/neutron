@@ -222,13 +222,13 @@ describe('a server that never answers', () => {
 
 describe('describeStatusFailure — the reason, not just the failure', () => {
   it('404 is an out-of-date server, not an error', () => {
-    const failure = describeStatusFailure(new VoiceTranscriptionClientError(404, 'x', 'nope'));
+    const failure = describeStatusFailure(new VoiceTranscriptionClientError('x', 'nope', 404));
     expect(failure.kind).toBe('unsupported');
     expect(failure.message).toContain('Update the server');
   });
 
   it('401 points at the session', () => {
-    expect(describeStatusFailure(new VoiceTranscriptionClientError(401, 'unauthorized', 'bad')).kind).toBe(
+    expect(describeStatusFailure(new VoiceTranscriptionClientError('unauthorized', 'bad', 401)).kind).toBe(
       'unauthorized',
     );
   });
@@ -519,7 +519,15 @@ describe('MIRROR PARITY — the app re-declares the web client wire types', () =
       .sort();
   }
 
-  for (const name of ['VoiceTranscriptionStatus', 'WhisperJob', 'WhisperModelOption']) {
+  // `VoiceTranscriptionClientOptions` is here because the web client had no
+  // request timeout while the app had 15s (ISSUES #503) — the option that
+  // carries it is now part of what has to match.
+  for (const name of [
+    'VoiceTranscriptionStatus',
+    'WhisperJob',
+    'WhisperModelOption',
+    'VoiceTranscriptionClientOptions',
+  ]) {
     it(`${name} is identical on both surfaces`, () => {
       expect(fields(app, name)).toEqual(fields(web, name));
     });

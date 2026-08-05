@@ -24,6 +24,13 @@
  * here and the typecheck job reds until the app side matches. That includes
  * `normalizeStatus` below, which exists in both files.
  *
+ * That guard originally covered the wire TYPES only, and two things sat outside
+ * it and drifted (ISSUES #503): this client had no request timeout while the
+ * app had 15s, and `VoiceTranscriptionClientError` took its arguments in the
+ * opposite order on each side. Both are closed here, and the parity test now
+ * also pins the CONSTRUCTOR SHAPE and drives both clients through a timeout and
+ * an error response to assert they fail identically.
+ *
  * The API key travels ONE WAY. It goes up in a PUT body and is never returned:
  * the status object reports only that a key exists, where it came from, and when
  * it was saved.
@@ -115,6 +122,15 @@ interface ErrorBody {
   message?: string
 }
 
+/**
+ * `(code, message, status)` — the order every other client error in this repo
+ * takes, and the order the app mirror at
+ * `app/lib/voice-transcription-client.ts` now takes too. It did not: that
+ * side read `(status, code, message)`, so the two near-identical files
+ * disagreed and a construction copied between them produced a silently wrong
+ * error object. Pinned by `app/__tests__/voice-transcription-mirror-parity.test.ts`.
+ * ISSUES #503.
+ */
 export class VoiceTranscriptionClientError extends Error {
   readonly code: string
   readonly status: number
@@ -128,22 +144,46 @@ export class VoiceTranscriptionClientError extends Error {
 
 type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>
 
+/**
+ * How long to wait for the server before calling it unreachable.
+ *
+ * `fetch` has NO default timeout in the browser either. A tab left open across
+ * a laptop suspend, a server restarted underneath it, or a reverse proxy that
+ * accepts the connection and then goes nowhere all produce a request that
+ * neither resolves nor rejects — and this card would sit on its loading line
+ * forever, the spinner-that-means-nothing this feature exists to avoid.
+ *
+ * Same 15s as the app mirror, deliberately: these two clients call the same
+ * routes, which do no work beyond a stat of the install directory, and the
+ * point of the pair is that they FAIL THE SAME WAY. A browser is on a better
+ * link than a phone, so a shorter web timeout would be defensible — but then
+ * the same dead server would read as "did not answer" on one surface and hang
+ * on the other, which is the divergence being closed here, not a new one worth
+ * opening.
+ */
+const REQUEST_TIMEOUT_MS = 15_000
+
 export interface VoiceTranscriptionClientOptions {
   base_url: string
   token: string
+  /** Injected in tests. Defaults to the global `fetch`. */
   fetchImpl?: FetchImpl
+  /** Injected in tests. Defaults to `REQUEST_TIMEOUT_MS`. */
+  timeoutMs?: number
 }
 
 export class WebVoiceTranscriptionClient {
   private readonly base_url: string
   private readonly token: string
   private readonly fetchImpl: FetchImpl
+  private readonly timeoutMs: number
   private readonly path = '/api/app/voice-transcription'
 
   constructor(opts: VoiceTranscriptionClientOptions) {
     this.base_url = opts.base_url.replace(/\/+$/, '')
     this.token = opts.token
     this.fetchImpl = opts.fetchImpl ?? ((input, init) => fetch(input, init))
+    this.timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS
   }
 
   private async call(
@@ -151,14 +191,35 @@ export class WebVoiceTranscriptionClient {
     body?: object,
     suffix = '',
   ): Promise<VoiceTranscriptionStatus> {
-    const res = await this.fetchImpl(`${this.base_url}${this.path}${suffix}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    let res: Response
+    try {
+      res = await this.fetchImpl(`${this.base_url}${this.path}${suffix}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        signal: controller.signal,
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      })
+    } catch (err) {
+      // An abort is indistinguishable from a network error to the caller unless
+      // it is named — and "the server did not answer" is the more useful of the
+      // two things a stalled connection can mean. Same code, same status, same
+      // wording as the app mirror, so both surfaces report it identically.
+      if (controller.signal.aborted) {
+        throw new VoiceTranscriptionClientError(
+          'timeout',
+          `the server did not answer within ${Math.round(this.timeoutMs / 1000)}s`,
+          0,
+        )
+      }
+      throw err
+    } finally {
+      clearTimeout(timer)
+    }
     let json: unknown
     try {
       json = await res.json()

@@ -28,6 +28,13 @@
  * also drives BOTH clients over the same server payloads, which is what catches
  * drift between the two copies of `normalizeStatus` below.
  *
+ * That guard covered the wire TYPES only. Two things sat outside it and drifted
+ * (ISSUES #503): the web client had no request timeout while this one had 15s,
+ * and `VoiceTranscriptionClientError` took its arguments in the opposite order
+ * on each side. Both are closed; the parity test now also pins the CONSTRUCTOR
+ * SHAPE — types AND parameter names, in order — and drives both clients through
+ * a timeout and an error response to assert they fail identically.
+ *
  * The guard is two-sided, not three: `buildStatus()` in
  * `gateway/http/voice-transcription-surface.ts:104` is declared
  * `Promise<object>`, so the server has no type for the shape it sends and there
@@ -118,12 +125,29 @@ export interface VoiceTranscriptionStatus {
 
 export const VOICE_TRANSCRIPTION_PATH = '/api/app/voice-transcription';
 
+/**
+ * `(code, message, status)` — the order every other client error in this repo
+ * takes: `tabs-client.ts:50`, `cores-client.ts:125`, `reminders-client.ts:188`,
+ * `devices-client.ts:130`, and the web mirror of THIS file at
+ * `landing/chat-react/voice-transcription-client.ts`, 23 classes in all.
+ *
+ * It used to take `(status, code, message)`, which made it the odd one out and
+ * — worse — put it in direct disagreement with its own near-identical mirror.
+ * Both orders read plausibly, so a construction copied between the two files
+ * yielded a silently wrong error: a status where a code belongs, a message
+ * where a status belongs. Nothing caught it, because the wire-type parity guard
+ * pins the shapes that go over the wire and a constructor is not one of them.
+ *
+ * `__tests__/voice-transcription-mirror-parity.test.ts` now pins the two
+ * signatures to each other — parameter types AND parameter names, in order.
+ * ISSUES #503.
+ */
 export class VoiceTranscriptionClientError extends Error {
   override readonly name = 'VoiceTranscriptionClientError';
   constructor(
-    readonly status: number,
     readonly code: string,
     message: string,
+    readonly status: number,
   ) {
     super(`${code}: ${message}`);
   }
@@ -224,9 +248,9 @@ export class VoiceTranscriptionClient {
       // two things a stalled phone connection can mean.
       if (controller.signal.aborted) {
         throw new VoiceTranscriptionClientError(
-          0,
           'timeout',
           `the server did not answer within ${Math.round(this.timeoutMs / 1000)}s`,
+          0,
         );
       }
       throw err;
@@ -240,14 +264,14 @@ export class VoiceTranscriptionClient {
       // A server that predates this surface answers the unmatched path with a
       // non-JSON 404 body. Keep the STATUS — the screen turns 404 into "your
       // server is too old" rather than a raw parse error.
-      throw new VoiceTranscriptionClientError(res.status, 'bad_response', `HTTP ${res.status}`);
+      throw new VoiceTranscriptionClientError('bad_response', `HTTP ${res.status}`, res.status);
     }
     if (!res.ok) {
       const err = json as { code?: unknown; message?: unknown };
       throw new VoiceTranscriptionClientError(
-        res.status,
         typeof err.code === 'string' ? err.code : `http_${res.status}`,
         typeof err.message === 'string' ? err.message : `HTTP ${res.status}`,
+        res.status,
       );
     }
     return normalizeStatus(json);

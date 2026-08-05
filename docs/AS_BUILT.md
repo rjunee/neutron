@@ -2,6 +2,87 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-04 — the two voice-transcription clients now fail the same way
+
+Branch `fix/voice-client-error-shape-parity` (ISSUES #503). Changed:
+`app/lib/voice-transcription-client.ts`,
+`landing/chat-react/voice-transcription-client.ts`,
+`app/__tests__/voice-transcription-mirror-parity.test.ts`,
+`app/__tests__/voice-transcription-settings.test.ts`.
+
+**Two divergences, both outside the guard that was supposed to cover them.** The
+app and web voice-transcription clients hand-declare the same wire shapes on
+purpose (no browser package in the Metro bundle), and the mirror-parity guard
+added alongside them pins those shapes. It pins what goes over the WIRE. Two
+things that are not wire shapes drifted underneath it.
+
+**One: the web client had no request timeout.** The app client aborts at 15s and
+throws `timeout`; the web client had nothing, and `fetch` has no default on
+either runtime. A connection that is accepted and then goes nowhere — a server
+restarted under an open tab, a proxy that stops answering — left the web card on
+its loading line forever. The web client now runs the app's mechanism verbatim:
+an `AbortController` passed to `fetch`, a `timeoutMs` option defaulting to the
+same `REQUEST_TIMEOUT_MS = 15_000`, cleared in a `finally`, and on abort the same
+`VoiceTranscriptionClientError` with code `timeout`, status `0`, and the same
+wording. The point of the pair is that the two surfaces fail identically; a
+shorter web timeout would have been defensible on link quality alone but would
+have made the same dead server read differently on each surface, which is the
+divergence being closed rather than a new one worth opening.
+
+**Two: `VoiceTranscriptionClientError` took its arguments in opposite orders.**
+`(status, code, message)` on the app side, `(code, message, status)` on the web
+side. Both files are near-mirrors, both orders read plausibly, and each file was
+internally consistent — so nothing was red. A construction copied between them
+produced a silently wrong error object: a status where a code belongs.
+
+**Converged on `(code, message, status)`, which meant moving the app side.** The
+naive read is that the app side should win, because in these two files it has
+more construction sites (5 to 2). Across the repo it is the other way round:
+`(code, message, status)` is what 23 client-error classes take, including every
+one of this file's siblings in both trees (`app/lib/tabs-client.ts:50`,
+`cores-client.ts:125`, `reminders-client.ts:188`,
+`landing/chat-react/tabs-client.ts:58`, and the rest). Converging on the app's
+order would have made voice-transcription the odd one out among 25 and relocated
+the same copy-between-files hazard to a much larger blast radius. Five call sites
+moved: three in `app/lib/voice-transcription-client.ts` (the timeout, the
+non-JSON `bad_response`, and the non-2xx server body) and two in
+`app/__tests__/voice-transcription-settings.test.ts`. No `catch` block moved —
+every consumer reads `.code` / `.status` by name (`voice-transcription-view.ts:194`).
+
+**The guard now covers constructor shape.** Three layers, because no single one
+of them is sufficient:
+
+  - COMPILE-TIME. `ConstructorParameters<typeof C>` is the parameter list as a
+    tuple, and tuple assignment is element-wise and positional; asserted both
+    ways it pins parameter types AND order. The fields the constructor populates
+    (`code` / `status` / `message`) are pinned separately, so a rename or a
+    retype cannot pass by keeping the tuple assignable.
+  - SOURCE TEXT. `tsc` never compares parameter NAMES, so a future same-typed
+    swap — `(code, message)` against `(message, code)` — produces identical
+    tuples and passes every type-level assertion. The constructor's parameter
+    list is read out of both files and compared in order, and pinned to its
+    literal value so a broken extractor cannot pass vacuously by returning an
+    empty list on both sides.
+  - BEHAVIOUR. `bun test` does not typecheck, so on the test job the above is
+    inert. Both clients are driven over the same 409 body, the same non-JSON
+    404, and the same hanging connection, and the thrown errors are asserted
+    field-identical. This is the layer that catches a transposition at a CALL
+    SITE inside either client rather than in the declaration.
+
+`VoiceTranscriptionClientOptions` also joined both the type-level drift guards
+and the existing source-text interface comparison, which is what mechanically
+requires the web client to keep carrying a `timeoutMs`.
+
+**Mutation-tested.** Reverting the app side to `(status, code, message)` reds the
+source-text guard, the behavioural guard, and the typecheck job. Deleting the
+web timeout reds the timeout parity test in ~500 ms via a sentinel race rather
+than hanging the suite, and reds the options-parity and default-constant tests.
+A successful request is unaffected by either change.
+
+**Still an outlier.** `app/lib/admin-personality-client.ts:75` is the one
+remaining `(status, code, message)` client error in the repo. It has no mirror,
+so it is not this defect, but it is the same shape and worth a follow-up.
+
 ## 2026-08-04 — the model watchdog adopts only what is demonstrably newer
 
 Branch `fix/issue-491-model-watchdog-newer-only`. Changed:
