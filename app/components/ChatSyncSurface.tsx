@@ -46,6 +46,12 @@ import {
   type RenderRow,
 } from '../lib/chat-core/chat-render-model';
 import { dispatchUnseenDeepLinks } from '../lib/chat-core/deep-link-dispatch';
+import {
+  anchorScrollProps,
+  chatInitialAnchor,
+  receiptEligibleMessageId,
+  type ChatInitialAnchor,
+} from '../lib/chat-core/chat-initial-anchor';
 import { useMobileChat } from '../lib/chat-core/use-mobile-chat';
 import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { useAuthSession } from '../lib/session';
@@ -462,19 +468,18 @@ export function ChatSyncSurface({
     [rows, lastUserRowKey, selfDeviceId, attachmentAuth, chosenByPrompt, onToggleReaction, editMessage, deleteMessage, onChoose, retry, onDocRef],
   );
 
+  // ISSUES #505 — the eligibility rule is IMPORTED, not inlined here. The set of
+  // rows this reports as read has to be the same set `chatInitialAnchor` can call
+  // unread; a row that the anchor counts but the marker never reports would stay
+  // unread forever and pin every future open to the same place.
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: ViewableItemsChange): void => {
       const ids: string[] = [];
       for (const v of viewableItems) {
         const item = v.item;
-        if (
-          item !== undefined &&
-          item.kind === 'message' &&
-          item.message.role === 'agent' &&
-          item.message.message_id !== null
-        ) {
-          ids.push(item.message.message_id);
-        }
+        if (item === undefined) continue;
+        const id = receiptEligibleMessageId(item);
+        if (id !== null) ids.push(id);
       }
       if (ids.length > 0) markRead(ids);
     },
@@ -503,6 +508,40 @@ export function ChatSyncSurface({
     keyboardInset,
     safeAreaBottom: safeArea.bottom,
   });
+  // ISSUES #505 — WHERE THIS TRANSCRIPT OPENS, decided ONCE per project.
+  //
+  // Frozen deliberately. `read_by` starts moving the instant the surface paints:
+  // `onViewableItemsChanged` reports the visible rows as read and the server fans
+  // the receipts straight back, so an anchor recomputed from live rows would flip
+  // from `unread` to `bottom` while FlashList is still waiting to apply it — it
+  // defers the initial scroll until the data is long enough
+  // (`useRecyclerViewController.tsx:582-588`), which on a cold open is several
+  // commits after the first render. Freezing on the first snapshot that has both a
+  // row and a device id is what lets "show me the unread run" survive its own
+  // side effect.
+  //
+  // COMPUTED DURING RENDER, not in an effect, and that is not a style choice.
+  // FlashList applies its initial scroll ONCE and latches
+  // `isInitialScrollComplete` (`useRecyclerViewController.tsx:585-591`), on the
+  // first commit where the data is long enough. An effect would run after that
+  // commit had already been handed the fallback `bottom` anchor, so the unread
+  // anchor would arrive after the only moment it could be honoured. Writing the
+  // ref here is safe because it is idempotent: the same rows always freeze the
+  // same anchor, so a discarded or replayed render cannot change the outcome.
+  const anchorRef = useRef<{ scope: string; anchor: ChatInitialAnchor } | null>(null);
+  if (anchorRef.current !== null && anchorRef.current.scope !== projectId) anchorRef.current = null;
+  if (anchorRef.current === null && rows.length > 0 && selfDeviceId.length > 0) {
+    anchorRef.current = { scope: projectId, anchor: chatInitialAnchor(rows, selfDeviceId) };
+  }
+  // The ROW COUNT is read LIVE even though the decision is frozen. `bottom` means
+  // the last row plus the overscroll, and the resume replay appends rows after the
+  // snapshot the decision was frozen on — a frozen index would strand the open
+  // part-way up the transcript, which is the defect wearing different clothes.
+  const anchorProps = anchorScrollProps(
+    anchorRef.current?.anchor ?? { kind: 'bottom' },
+    rows.length,
+  );
+
   const listRef = useRef<FlashListRef<RenderRow> | null>(null);
   // Rising keyboard → stay on the newest message. `maintainVisibleContentPosition`
   // holds position through content changes, which is NOT the same as following
@@ -590,6 +629,15 @@ export function ChatSyncSurface({
           renderItem={renderItem}
           keyExtractor={keyForRow}
           contentContainerStyle={styles.listContent}
+          // ISSUES #505 — the opening position, spread from the frozen anchor.
+          // These OUTRANK `startRenderingFromBottom`'s implicit `dataLength - 1`
+          // (`RecyclerViewManager.ts:332-339` takes `initialScrollIndex ?? …`),
+          // which is the whole fix: that implicit index resolves to the last
+          // item's TOP EDGE and so opened a tall final message half-way up.
+          // `startRenderingFromBottom` STAYS for its other job — the top margin
+          // that pushes a transcript shorter than the screen down to hug the
+          // composer (`RecyclerView.tsx:597-608`).
+          {...anchorProps}
           maintainVisibleContentPosition={{
             startRenderingFromBottom: true,
             autoscrollToBottomThreshold: 0.2,

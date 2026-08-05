@@ -21,7 +21,34 @@ export interface FlashListProps<T> {
   ListFooterComponent?: ReactNode;
   [key: string]: unknown;
 }
-export function FlashList<T>({ data, renderItem, keyExtractor, ListEmptyComponent, ListFooterComponent }: FlashListProps<T>) {
+/**
+ * The props of the most recent render, RECORDED (ISSUES #505).
+ *
+ * This stub deliberately does not virtualise and has no scroll offset, so where a
+ * transcript OPENS cannot be observed here as a pixel — the only honest assertion
+ * at this level is which position the surface ASKED the list for. Recording the
+ * props makes that an assertion instead of a hope; that the ask is then honoured
+ * is FlashList's own behaviour, cited from its source in
+ * `lib/chat-core/chat-initial-anchor.ts`, and remains a device claim.
+ *
+ * Read it through {@link lastFlashListProps}, and reset it in `beforeEach` — Bun
+ * shares one process across test files.
+ */
+let recordedProps: Record<string, unknown> | null = null;
+
+/** The props FlashList was last rendered with. `null` before any render. */
+export function lastFlashListProps(): Record<string, unknown> | null {
+  return recordedProps;
+}
+
+/** Forget the recorded render. Call in `beforeEach`. */
+export function resetFlashListRecorder(): void {
+  recordedProps = null;
+}
+
+export function FlashList<T>(props: FlashListProps<T>) {
+  recordedProps = props as Record<string, unknown>;
+  const { data, renderItem, keyExtractor, ListEmptyComponent, ListFooterComponent } = props;
   const rows = data ?? [];
   if (rows.length === 0) {
     return createElement(View, null, ListEmptyComponent as ReactNode, ListFooterComponent as ReactNode);
