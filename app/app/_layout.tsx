@@ -5,6 +5,7 @@ import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
 import { DiagnosticsErrorBoundary } from '../components/DiagnosticsErrorBoundary';
 import { DiagnosticsSync } from '../components/DiagnosticsSync';
+import { PushRegistrationSync } from '../components/PushRegistrationSync';
 import {
   getServerConfigEpoch,
   hydrateServerConfig,
@@ -214,6 +215,7 @@ export default function RootLayout() {
           at the old host (Argus r2 MAJOR). */}
       <AuthSessionProvider key={`server-${serverEpoch}`}>
         <DiagnosticsSync />
+        <PushRegistrationSync />
         <Stack screenOptions={{ headerShown: false }}>
           <Stack.Screen name="login" />
           <Stack.Screen name="index" />

@@ -9,15 +9,23 @@
  * The expo-notifications integration in `push.ts` calls `registerToken`
  * once on login and `unregisterToken` from the sign-out flow.
  *
- * REGISTRATION IS LOGIN-ONLY, and this comment used to claim otherwise
- * ("and again on app foreground when the Expo token rotates"). It never
- * was: `enablePushForUser` has exactly two call sites, both inside
- * `app/app/login.tsx` (`tryEnablePush` at `:228` and `:352`), and nothing
- * subscribes to AppState to re-register. So when the OS rotates the
- * token, the app is reinstalled, or Expo invalidates it, the stored row goes
- * stale and push stops — silently, until the owner happens to sign in again.
- * ISSUES #487 makes that failure VISIBLE (see `push-observability.ts`); it
- * does not yet make it self-healing. Recorded as a residual, not fixed here.
+ * REGISTRATION IS NO LONGER LOGIN-ONLY (ISSUES #487, closed 2026-08-06).
+ * History worth keeping, because this comment has been wrong in BOTH
+ * directions: it originally claimed registration re-ran "on app foreground
+ * when the Expo token rotates" when no foreground caller had ever existed,
+ * and was then corrected to say login-only plus "not fixed here". Both
+ * statements are now stale. `app/components/PushRegistrationSync.tsx`,
+ * mounted in `app/app/_layout.tsx`, calls `enablePushForUser` on
+ * authenticated launch AND on every background→active transition, so a
+ * missing row, a rotated Expo token, and a permission granted later in the
+ * OS Settings app all self-heal. The login call sites remain and are
+ * harmless — register upserts.
+ *
+ * What made this urgent rather than theoretical: on the live instance
+ * `device_push_tokens` was found EMPTY with zero register requests in 14
+ * days, so every proactive message reached the app and nothing reached the
+ * phone. `push-observability.ts` (the first half of #487) makes a failure
+ * visible; the sync component is what makes it recover.
  *
  * Per SPEC.md § Phases→Steps / P5.6 and
  * docs/engineering-plan.md § B.P5.
