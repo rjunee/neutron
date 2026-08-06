@@ -5,17 +5,19 @@
  * The bug this pins closed: `open/composer.ts` resolved the HOST's zone
  * (`resolveLocalTimezone` → `process.env.TZ` → the runtime zone) and passed it
  * as `tasks.proactive.timezone`, which `build-core-modules` handed to the
- * morning brief as `briefDeps.tz` and to the idle-nudge sweep as `sweepDeps.tz`.
- * That was the right answer when Neutron ran on the owner's own laptop — the
- * host WAS their machine — and the wrong answer the moment the same code was
- * hosted: a hosted box runs `Etc/UTC` while the owner lives in Pacific, so
- * `morning-brief.ts` `ownerLocalHour(now, tz) < brief_hour` was evaluated in UTC
- * (a 7am brief fired at midnight Pacific) and `resolveOwnerDay(now, tz)` keyed
- * the day — and the sweep's `readTodayPick` lookup — on the wrong date for the
- * ~7-8h the offset spans.
+ * idle-nudge sweep as `sweepDeps.tz`. That was the right answer when Neutron ran on
+ * the owner's own laptop — the host WAS their machine — and the wrong answer the
+ * moment the same code was hosted: a hosted box runs `Etc/UTC` while the owner
+ * lives in Pacific, so `resolveOwnerDay(now, tz)` keyed the sweep's `readTodayPick`
+ * lookup on the wrong date for the ~7-8h the offset spans.
  *
- * The fix layers the seam the P6 nudge cron already uses (ISSUES #40) onto both
- * proactive crons: a PER-TICK `resolveTimezone(owner_slug)` reading
+ * (The morning-brief arm of this regression went with the second morning brief —
+ * ISSUES #504 deleted `gateway/proactive/morning-brief.ts`. The RITUAL that replaced
+ * it resolves the owner's zone through the reminders tick's own per-fire
+ * `resolve_time_zone`, pinned by `reminders/owner-timezone-tick.test.ts`.)
+ *
+ * The fix layers the seam the P6 nudge cron already uses (ISSUES #40) onto the
+ * proactive sweep: a PER-TICK `resolveTimezone(owner_slug)` reading
  * `instance_metadata.timezone`, which WINS over the static host-derived `tz`.
  * Per-tick matters — a fresh install has no `instance_metadata` row until the
  * first client reports its zone, so a composition-time read would freeze the
@@ -39,10 +41,7 @@ import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { buildCoreModules } from '../composition/build-core-modules.ts'
 import type { CompositionInput } from '../composition.ts'
 import type { ModuleContext } from '../module-graph.ts'
-import {
-  IDLE_NUDGE_SWEEP_HANDLER_NAME,
-  MORNING_BRIEF_HANDLER_NAME,
-} from '../proactive/cron.ts'
+import { IDLE_NUDGE_SWEEP_HANDLER_NAME } from '../proactive/cron.ts'
 import type { OutgoingMessage } from '../proactive/sink.ts'
 import { writeOwnerTimezone } from '../storage/owner-metadata.ts'
 
@@ -206,108 +205,6 @@ function withFrozenNow<T>(nowMs: number, fn: () => Promise<T>): Promise<T> {
     Date.now = realNow
   })
 }
-
-describe('the composed morning brief runs on the OWNER timezone, not the host', () => {
-  let h: Harness
-
-  beforeEach(() => {
-    h = openHarness()
-  })
-  afterEach(() => {
-    h.close()
-  })
-
-  test('stored owner zone WINS over the host zone for the hour gate + day key', async () => {
-    const OWNER = 'owner-la'
-    await writeOwnerTimezone(h.db, OWNER, OWNER_TZ)
-
-    const result = await withFrozenNow(BRIEF_NOW_UTC, () =>
-      fireComposedProactive({
-        h,
-        project_slug: OWNER,
-        handler_name: MORNING_BRIEF_HANDLER_NAME,
-        host_tz: HOST_TZ_TOKYO,
-        now_ms: BRIEF_NOW_UTC,
-      }),
-    )
-
-    // 08:30 in LA clears the 7am gate. If the host zone (Tokyo, 00:30 the NEXT
-    // day) were used the brief would be `too_early` and the day would be the
-    // Tokyo day — so both assertions below discriminate the zone.
-    expect(result.status).toBe('ok')
-    expect(result.detail).toContain('status=posted')
-    expect(result.detail).toContain(`day=${BRIEF_LA_DAY}`)
-    expect(result.detail).not.toContain(`day=${BRIEF_TOKYO_DAY}`)
-    expect(h.sent).toHaveLength(1)
-  })
-
-  test('the live production shape: a UTC host does NOT fire the 7am brief at midnight Pacific', async () => {
-    const OWNER = 'owner-la-midnight'
-    await writeOwnerTimezone(h.db, OWNER, OWNER_TZ)
-
-    const result = await withFrozenNow(MIDNIGHT_PACIFIC_UTC, () =>
-      fireComposedProactive({
-        h,
-        project_slug: OWNER,
-        handler_name: MORNING_BRIEF_HANDLER_NAME,
-        host_tz: HOST_TZ_UTC,
-        now_ms: MIDNIGHT_PACIFIC_UTC,
-      }),
-    )
-
-    // 07:30 UTC is 00:30 Pacific. On the host's clock the gate opens; on the
-    // owner's it does not. Nothing may be sent.
-    expect(result.status).toBe('skipped')
-    expect(result.detail).toContain('status=too_early')
-    expect(h.sent).toHaveLength(0)
-  })
-
-  test('the zone is resolved PER TICK — a row written after boot is honoured without a restart', async () => {
-    // A fresh install has no `instance_metadata` row until the first client
-    // reports its zone. A composition-time read would freeze the host zone
-    // forever; this proves the read happens at fire time.
-    const OWNER = 'owner-late-row'
-
-    const result = await withFrozenNow(MIDNIGHT_PACIFIC_UTC, () =>
-      fireComposedProactive({
-        h,
-        project_slug: OWNER,
-        handler_name: MORNING_BRIEF_HANDLER_NAME,
-        host_tz: HOST_TZ_UTC,
-        now_ms: MIDNIGHT_PACIFIC_UTC,
-        // Written AFTER `tasksModule.init` has already built the deps.
-        beforeFire: async () => {
-          await writeOwnerTimezone(h.db, OWNER, OWNER_TZ)
-        },
-      }),
-    )
-
-    expect(result.detail).toContain('status=too_early')
-    expect(h.sent).toHaveLength(0)
-  })
-
-  test('no stored row → falls back to the host zone (a self-hosted laptop is still right)', async () => {
-    // `resolveLocalTimezone` must NOT be deleted: on a self-hosted install the
-    // host IS the owner's machine. With no `instance_metadata` row the static
-    // host zone is what the brief uses.
-    const OWNER = 'owner-no-row'
-
-    const result = await withFrozenNow(MIDNIGHT_PACIFIC_UTC, () =>
-      fireComposedProactive({
-        h,
-        project_slug: OWNER,
-        handler_name: MORNING_BRIEF_HANDLER_NAME,
-        host_tz: HOST_TZ_UTC,
-        now_ms: MIDNIGHT_PACIFIC_UTC,
-      }),
-    )
-
-    // 07:30 on the host clock clears the 7am gate.
-    expect(result.status).toBe('ok')
-    expect(result.detail).toContain('status=posted')
-    expect(result.detail).toContain('day=2026-05-24')
-  })
-})
 
 describe('the composed idle-nudge sweep keys its day on the OWNER timezone', () => {
   let h: Harness

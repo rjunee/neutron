@@ -4,22 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
-import { ApprovalManager } from '@neutronai/tools/approval.ts'
 import { ReminderStore, type Reminder } from './store.ts'
 import {
   ReminderTickLoop,
   type ReminderDispatcher,
   type ReminderFiredHook,
 } from './tick.ts'
-import {
-  createRitualExecutor,
-  type RitualExecutor,
-  type RitualFireOutcome,
-  type RitualTurnResult,
-} from './ritual-executor.ts'
-import { createRitualRegistry, type RitualDef } from './rituals.ts'
-import { createRitualRunStore } from './ritual-runs.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -55,7 +45,7 @@ describe('ReminderTickLoop.runOnce', () => {
 
     const result = await loop.runOnce()
     expect(result.fired).toBe(2)
-    expect(dispatcher.fired.map((r) => r.message)).toEqual(['a', 'b'])
+    expect(dispatcher.fired.map((r: Reminder) => r.message)).toEqual(['a', 'b'])
     expect(store.listPending('t1').map((r) => r.message)).toEqual(['future'])
   })
 
@@ -541,283 +531,125 @@ describe('ReminderTickLoop.runOnce', () => {
 })
 
 /**
- * Executor-mode reminders (plan task 4) — the ritual dispatch branch. A due row
- * with a non-null `ritual_id` routes to `ritual_executor.fire`, NEVER the nudge
- * `dispatcher` + `on_fired`. A SUCCESSFUL fire()-startup consumes the #319 claim
- * (the durable run row is the record); a REJECTED fire() is a startup loss and
- * REVERTS the claim so the occurrence re-fires (Argus r1 BLOCKER).
+ * ISSUES #504 — THE TICK HAS NO RITUAL BRANCH.
+ *
+ * This block replaces a suite that pinned the OPPOSITE invariant ("a due row with
+ * a non-null `ritual_id` routes to `ritual_executor.fire`, NEVER the nudge
+ * dispatcher"). That routing WAS the defect: it sent every ritual to an ephemeral
+ * REPL with no tool bridge, so the morning brief could not reach a Core. The
+ * invariant now is that there is exactly ONE dispatch target for every due row,
+ * and a ritual row reaches it exactly like any other.
  */
-describe('ReminderTickLoop — ritual executor branch', () => {
-  /** Tag an already-created reminder row as a ritual (task-8 write path not yet live). */
+describe('ReminderTickLoop — one dispatch path for every row', () => {
+  /** Tag an already-created reminder row as a ritual. */
   function tagRitual(id: string, ritual_id: string): void {
     db.raw().run('UPDATE reminders SET ritual_id = ? WHERE id = ?', [ritual_id, id])
   }
 
-  test('a ritual row fires the executor, NOT the dispatcher or on_fired', async () => {
+  test('a RITUAL row goes to the ONE dispatcher, carrying its ritual_id', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
-    const ritualRow = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'brief' })
-    tagRitual(ritualRow.id, 'morning-brief')
-
-    const dispatcher = recordingDispatcher()
-    const onFiredCalls: Reminder[] = []
-    const on_fired: ReminderFiredHook = { onFired: async (r) => { onFiredCalls.push(r) } }
-    const fire = mock(async (_r: Reminder): Promise<RitualFireOutcome> => ({ claim: 'consume' }))
-    const ritual_executor: RitualExecutor = { fire }
-
-    const loop = new ReminderTickLoop({ store, dispatcher, on_fired, ritual_executor, now: () => now })
-    const res = await loop.runOnce()
-
-    expect(res.fired).toBe(1)
-    expect(fire).toHaveBeenCalled()
-    // The executor saw the row snapshot (with the ritual_id set).
-    expect(fire.mock.calls[0]![0].id).toBe(ritualRow.id)
-    expect(fire.mock.calls[0]![0].ritual_id).toBe('morning-brief')
-    // The nudge dispatcher + push hook were NEVER touched for a ritual row.
-    expect(dispatcher.fired).toHaveLength(0)
-    expect(onFiredCalls).toHaveLength(0)
-    // The row was claimed (one-shot → fired), not left pending.
-    expect(store.get(ritualRow.id)!.status).toBe('fired')
-  })
-
-  test('a nudge row in the SAME tick still goes through the dispatcher + on_fired (contract untouched)', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    const nudge = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'nudge' })
-    const ritualRow = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 90, message: 'ritual' })
-    tagRitual(ritualRow.id, 'evening-wrap')
-
-    const dispatcher = recordingDispatcher()
-    const onFiredCalls: Reminder[] = []
-    const on_fired: ReminderFiredHook = { onFired: async (r) => { onFiredCalls.push(r) } }
-    const fire = mock(async (_r: Reminder): Promise<RitualFireOutcome> => ({ claim: 'consume' }))
-    const loop = new ReminderTickLoop({ store, dispatcher, on_fired, ritual_executor: { fire }, now: () => now })
-
-    const res = await loop.runOnce()
-    expect(res.fired).toBe(2)
-    // The nudge went through the dispatcher + push; the ritual did not.
-    expect(dispatcher.fired.map((r) => r.message)).toEqual(['nudge'])
-    expect(onFiredCalls.map((r) => r.message)).toEqual(['nudge'])
-    expect(fire).toHaveBeenCalledTimes(1)
-    expect(fire.mock.calls[0]![0].id).toBe(ritualRow.id)
-  })
-
-  test('a recurring ritual RE-ARMS its advance at the executor\'s retry instant (ISSUES #489)', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    const row = await store.createRecurring({
+    const row = await store.create({
       owner_slug: 't1',
       topic_id: null,
       fire_at: now / 1000 - 100,
-      message: 'daily ritual',
-      recurrence: 'weekly',
+      message: 'morning brief',
     })
-    tagRitual(row.id, 'kaizen')
-    const originalFireAt = row.fire_at
-
-    // A STARTUP loss the executor classified as retryable: no durable
-    // `code_ritual_runs` row landed, so the tick must REVERT the #319 claim rather
-    // than let the occurrence vanish with no run + no history (Argus r1 BLOCKER) —
-    // but it re-arms at the executor's BACKED-OFF instant, not at the row's
-    // original (already-due) fire_at, which is what made the old revert re-fire on
-    // every tick forever (ISSUES #489).
-    const retry_at_ms = now + 120_000
-    const fire = mock(
-      async (_r: Reminder): Promise<RitualFireOutcome> => ({
-        claim: 'retry',
-        retry_at_ms,
-        attempt: 1,
-        disposition: 'transient',
-      }),
-    )
-    const dispatcher = recordingDispatcher()
-    const loop = new ReminderTickLoop({ store, dispatcher, ritual_executor: { fire }, now: () => now })
-
-    const res = await loop.runOnce()
-    // Not counted as fired — the claim was re-armed, nothing was consumed.
-    expect(res.fired).toBe(0)
-    expect(fire).toHaveBeenCalledTimes(1)
-    // Still pending, and due at the RETRY instant — NOT at the original fire_at.
-    const after = store.get(row.id)!
-    expect(after.status).toBe('pending')
-    expect(after.fire_at).toBe(retry_at_ms / 1000)
-    expect(after.fire_at).not.toBe(originalFireAt)
-    // A second tick at the SAME `now` does NOT re-fire it: the backoff has not
-    // elapsed, which is the whole point of re-arming forward.
-    const res2 = await loop.runOnce()
-    expect(fire).toHaveBeenCalledTimes(1)
-    expect(res2.fired).toBe(0)
-    // Never fell back to the nudge dispatcher.
-    expect(dispatcher.fired).toHaveLength(0)
-  })
-
-  test('a THROWN fire() is a bug, not a retry — the claim is consumed, never re-armed', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    const row = await store.createRecurring({
-      owner_slug: 't1',
-      topic_id: null,
-      fire_at: now / 1000 - 100,
-      message: 'daily ritual',
-      recurrence: 'weekly',
-    })
-    tagRitual(row.id, 'kaizen-throw')
-    const originalFireAt = row.fire_at
-
-    // The executor's body is fully guarded, so a rejection is a fault in the
-    // executor itself. Re-arming on an unknown fault is how a bug becomes an
-    // every-tick loop — the exact defect ISSUES #489 removed.
-    const fire = mock(async (_r: Reminder): Promise<RitualFireOutcome> => {
-      throw new Error('executor bug')
-    })
-    const dispatcher = recordingDispatcher()
-    const loop = new ReminderTickLoop({ store, dispatcher, ritual_executor: { fire }, now: () => now })
-
-    const res = await loop.runOnce()
-    expect(res.fired).toBe(1)
-    const after = store.get(row.id)!
-    // The claim STANDS: advanced to the next occurrence, not back at the old one.
-    expect(after.fire_at).not.toBe(originalFireAt)
-    // A second tick does not re-fire it.
-    await loop.runOnce()
-    expect(fire).toHaveBeenCalledTimes(1)
-    expect(dispatcher.fired).toHaveLength(0)
-  })
-
-  test('a one-shot ritual REOPENS at the retry instant when the executor asks for one', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    const row = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'one-shot ritual' })
-    tagRitual(row.id, 'oneshot-loss')
-
-    const retry_at_ms = now + 120_000
-    const fire = mock(
-      async (_r: Reminder): Promise<RitualFireOutcome> => ({
-        claim: 'retry',
-        retry_at_ms,
-        attempt: 1,
-        disposition: 'transient',
-      }),
-    )
-    const dispatcher = recordingDispatcher()
-    const loop = new ReminderTickLoop({ store, dispatcher, ritual_executor: { fire }, now: () => now })
-
-    const res = await loop.runOnce()
-    expect(res.fired).toBe(0)
-    // A one-shot retry is reopened → back to pending (not consumed as 'fired') AND
-    // moved forward to the backoff instant.
-    const after = store.get(row.id)!
-    expect(after.status).toBe('pending')
-    expect(after.fire_at).toBe(retry_at_ms / 1000)
-    // Not due yet at the same `now`, so the next tick leaves it alone.
-    const res2 = await loop.runOnce()
-    expect(fire).toHaveBeenCalledTimes(1)
-    expect(res2.fired).toBe(0)
-    expect(dispatcher.fired).toHaveLength(0)
-  })
-
-  test('a ritual row with NO executor wired is consumed + logged, never dispatched as a nudge', async () => {
-    const store = new ReminderStore(db)
-    const now = 10_000_000
-    const row = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'orphan ritual' })
-    tagRitual(row.id, 'unwired')
+    tagRitual(row.id, 'morning-brief')
 
     const dispatcher = recordingDispatcher()
-    // No ritual_executor supplied.
     const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
     const res = await loop.runOnce()
 
     expect(res.fired).toBe(1)
-    // Consumed (claimed → fired), and NEVER handed to the nudge dispatcher.
-    expect(store.get(row.id)!.status).toBe('fired')
-    expect(dispatcher.fired).toHaveLength(0)
+    // THE ASSERTION THAT MATTERS: the ritual reached the normal dispatcher — the
+    // one wired to the owner's warm, tool-bridged session — and the dispatcher can
+    // see it is a ritual so its fire plan can resolve the approved prompt.
+    expect(dispatcher.fired).toHaveLength(1)
+    expect(dispatcher.fired[0]!.id).toBe(row.id)
+    expect(dispatcher.fired[0]!.ritual_id).toBe('morning-brief')
   })
 
-  test('runOnce AWAITS fire() startup (quiescence boundary)', async () => {
+  test('a ritual and a plain reminder go to the SAME dispatcher in one tick', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
-    const row = await store.create({ owner_slug: 't1', topic_id: null, fire_at: now / 1000 - 100, message: 'slow ritual' })
-    tagRitual(row.id, 'slow')
-
-    // fire()'s STARTUP (validate → spawn → durable 'running' row) is awaited by
-    // the tick: it must complete BEFORE runOnce resolves. Only the launched turn
-    // is detached (inside the executor). The pre-fix code detached the whole
-    // startup, so `startupDone` was still false when runOnce resolved.
-    let startupDone = false
-    const fire = mock(async (_r: Reminder): Promise<RitualFireOutcome> => {
-      await new Promise((r) => setTimeout(r, 5))
-      startupDone = true
-      return { claim: 'consume' }
+    const plain = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: now / 1000 - 200,
+      message: 'take a walk',
     })
+    const ritual = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: now / 1000 - 100,
+      message: 'morning brief',
+    })
+    tagRitual(ritual.id, 'morning-brief')
+
     const dispatcher = recordingDispatcher()
-    const loop = new ReminderTickLoop({ store, dispatcher, ritual_executor: { fire }, now: () => now })
-
+    const loop = new ReminderTickLoop({ store, dispatcher, now: () => now })
     const res = await loop.runOnce()
-    expect(res.fired).toBe(1)
-    // The awaited startup finished inside the tick body (would be false pre-fix).
-    expect(startupDone).toBe(true)
-    expect(fire).toHaveBeenCalled()
+
+    expect(res.fired).toBe(2)
+    // No second target exists: both rows landed on the same dispatcher.
+    expect(dispatcher.fired.map((r: Reminder) => r.id).sort()).toEqual([plain.id, ritual.id].sort())
   })
 
-  test('a claimed ritual occurrence + immediate stop() leaves a durable running row — never zero rows', async () => {
-    // The Argus r3 data-loss regression. REAL executor end-to-end: an un-awaited
-    // runOnce() + immediate `await stop()` must leave exactly the durable
-    // 'running' `code_ritual_runs` row inside the quiescence boundary. On the
-    // pre-fix code (fireAndForget around fire()) this is deterministically null:
-    // the tick detached at fireAndForget, stop() resolved with fire()'s first
-    // await still queued, so the run row did not yet exist.
+  test('a ritual row fires the on_fired push hook — it is not a privileged kind', async () => {
     const store = new ReminderStore(db)
     const now = 10_000_000
-
-    const ritualsDir = mkdtempSync(join(tmpdir(), 'neutron-tick-rituals-'))
-    const rdef: RitualDef = {
-      id: 'quiesce-brief',
-      description: 'quiesce regression fixture',
-      scope: 'instance',
-      tool_surface: ['Read'],
-      egress: 'none',
-      silent: true,
-    }
-    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
-    registry.register(rdef)
-    writeFileSync(join(ritualsDir, `${rdef.id}.md`), 'Do the quiesce brief.', 'utf8')
-
-    const runs = createRitualRunStore(db)
-    const ritual_executor = createRitualExecutor({
-      rearm: async () => false,
-      registry,
-      approvals: new ApprovalManager(db, { notify: async () => {} }),
-      project_slug: 'owner',
-      instance_key: 'owner',
-      subagents: new SubagentRegistry(),
-      // The turn NEVER settles — the run stays live at 'running' for the assertion.
-      turn: () => new Promise<RitualTurnResult>(() => {}),
-      runs,
-      outbound: { post: async () => true },
-      resolve_topic: () => 'app:t',
-      resolve_model: () => 'm',
-      scope_cwd: () => tmp,
-      build_approval_check: () => ({ isApproved: () => true }),
-      mint_run_id: () => 'quiesce-run-0',
+    const row = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: now / 1000 - 100,
+      message: 'morning brief',
     })
+    tagRitual(row.id, 'morning-brief')
 
-    const row = await store.create({ owner_slug: 'owner', topic_id: null, fire_at: now / 1000 - 100, message: 'quiesce ritual' })
-    tagRitual(row.id, 'quiesce-brief')
+    const onFiredCalls: Reminder[] = []
+    const on_fired: ReminderFiredHook = {
+      onFired: async (r) => {
+        onFiredCalls.push(r)
+      },
+    }
+    const loop = new ReminderTickLoop({
+      store,
+      dispatcher: recordingDispatcher(),
+      on_fired,
+      now: () => now,
+    })
+    await loop.runOnce()
 
-    const loop = new ReminderTickLoop({ store, dispatcher: recordingDispatcher(), ritual_executor, now: () => now })
-    // Do NOT await the tick; stop() (SupervisedLoop) awaits the in-flight tick.
-    const inflight = loop.runOnce()
-    await loop.stop()
+    expect(onFiredCalls.map((r) => r.id)).toEqual([row.id])
+  })
 
-    // Assert in the stop() continuation — determinism depends on NOT sleeping.
-    expect(store.get(row.id)!.status).toBe('fired') // #319 claim consumed
-    const runRow = runs.get('quiesce-run-0')
-    expect(runRow).not.toBeNull()
-    expect(runRow!.status).toBe('running')
-    expect(runRow!.reminder_id).toBe(row.id)
-    expect(runRow!.content_hash).toBeTruthy()
+  test('a dispatch THROW reverts the claim for a ritual row, exactly as for a nudge', async () => {
+    const store = new ReminderStore(db)
+    const now = 10_000_000
+    const row = await store.create({
+      owner_slug: 't1',
+      topic_id: null,
+      fire_at: now / 1000 - 100,
+      message: 'morning brief',
+    })
+    tagRitual(row.id, 'morning-brief')
 
-    await inflight
-    rmSync(ritualsDir, { recursive: true, force: true })
+    const loop = new ReminderTickLoop({
+      store,
+      dispatcher: {
+        dispatch: async () => {
+          throw new Error('post rejected')
+        },
+      },
+      now: () => now,
+    })
+    const res = await loop.runOnce()
+
+    expect(res.fired).toBe(0)
+    // Reverted to pending at its original fire_at -> retried next tick.
+    const after = store.get(row.id)
+    expect(after!.status).toBe('pending')
+    expect(after!.fire_at).toBe(row.fire_at)
   })
 })

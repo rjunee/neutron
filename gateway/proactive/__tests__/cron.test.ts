@@ -1,8 +1,12 @@
 /**
- * Proactive cron-registration tests. Asserts the morning-brief + idle-nudge
- * sweep register on the shared cron registries (reusing existing cron infra,
- * not a new scheduler), with the expected job names + interval schedules, and
- * that the wrapped handlers run and report a structured status.
+ * Proactive cron-registration tests. Asserts the idle-nudge sweep registers on the
+ * shared cron registries (reusing existing cron infra, not a new scheduler), with
+ * the expected job name + interval schedule, and that the wrapped handler runs and
+ * reports a structured status.
+ *
+ * The morning-brief half of this file went with `gateway/proactive/morning-brief.ts`
+ * (ISSUES #504) — that was the SECOND morning brief, whose context providers no
+ * production composer ever supplied.
  *
  * Spec: gap-audit P0-5 (WAVE 2 Track A).
  */
@@ -18,15 +22,11 @@ import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import type { OutgoingMessage } from '../sink.ts'
 import { ProactiveStateStore } from '../state-store.ts'
-import { DEFAULT_BRIEF_INTERVAL_MS } from '../morning-brief.ts'
 import { DEFAULT_SWEEP_INTERVAL_MS } from '../idle-nudge-sweep.ts'
 import {
   IDLE_NUDGE_SWEEP_HANDLER_NAME,
-  MORNING_BRIEF_HANDLER_NAME,
   buildIdleNudgeSweepHandler,
-  buildMorningBriefHandler,
   registerIdleNudgeSweepCron,
-  registerMorningBriefCron,
 } from '../cron.ts'
 
 const TZ = 'America/Los_Angeles'
@@ -71,76 +71,6 @@ afterEach(() => {
 })
 
 const ctx = (job_name: string) => ({ job_name, owner_slug: 'demo', fired_at: NOON_LA_MS })
-
-describe('registerMorningBriefCron', () => {
-  it('registers the job + handler and the handler posts on tick', async () => {
-    const jobs = new CronJobRegistry()
-    const handlers = new CronHandlerRegistry()
-    const handler = buildMorningBriefHandler({
-      store: h.store,
-      sources: { focusQueue: async () => [{ title: 'Do the thing' }] },
-      sink: h.sink,
-      general_topic_id: '-100:7',
-      tz: TZ,
-      now: () => NOON_LA_MS,
-    })
-    const { job_name } = registerMorningBriefCron({ project_slug: 'demo', jobs, handlers, handler })
-    expect(job_name).toBe('proactive-brief-demo')
-    const job = jobs.get(job_name)!
-    expect(job.handler).toBe(MORNING_BRIEF_HANDLER_NAME)
-    expect(job.schedule).toEqual({ kind: 'interval_ms', interval_ms: DEFAULT_BRIEF_INTERVAL_MS })
-    expect(handlers.get(MORNING_BRIEF_HANDLER_NAME)).toBeDefined()
-
-    const result = await handlers.get(MORNING_BRIEF_HANDLER_NAME)!(ctx(job_name))
-    expect(result.status).toBe('ok')
-    expect(h.sent).toHaveLength(1)
-    expect(h.sent[0]!.text).toContain('Do the thing')
-  })
-
-  // #320 — a delivery outage must surface as an ERROR in cron telemetry, not
-  // be folded into the benign `skipped` bucket where outages go unnoticed.
-  it('#320 maps a delivery failure to error (not skipped)', async () => {
-    const jobs = new CronJobRegistry()
-    const handlers = new CronHandlerRegistry()
-    const handler = buildMorningBriefHandler({
-      store: h.store,
-      sources: { focusQueue: async () => [{ title: 'Do the thing' }] },
-      sink: {
-        async send(): Promise<string> {
-          throw new Error('telegram 500')
-        },
-      },
-      general_topic_id: '-100:7',
-      tz: TZ,
-      now: () => NOON_LA_MS,
-    })
-    const { job_name } = registerMorningBriefCron({ project_slug: 'demo', jobs, handlers, handler })
-    const result = await handlers.get(MORNING_BRIEF_HANDLER_NAME)!(ctx(job_name))
-    expect(result.status).toBe('error')
-    expect(result.detail).toContain('deliver_failed')
-    // The day was NOT recorded, so the next tick retries.
-    expect(h.store.hasBriefForDay('2026-06-20')).toBe(false)
-  })
-
-  it('honors an interval override and is idempotent on the handler registration', () => {
-    const jobs = new CronJobRegistry()
-    const handlers = new CronHandlerRegistry()
-    const handler = buildMorningBriefHandler({
-      store: h.store,
-      sources: {},
-      sink: h.sink,
-      general_topic_id: '-100:7',
-      tz: TZ,
-      now: () => NOON_LA_MS,
-    })
-    registerMorningBriefCron({ project_slug: 'a', jobs, handlers, handler, interval_ms: 90_000 })
-    // A second instance registers its own job but piggy-backs the shared handler.
-    registerMorningBriefCron({ project_slug: 'b', jobs, handlers, handler })
-    expect(jobs.get('proactive-brief-a')!.schedule).toEqual({ kind: 'interval_ms', interval_ms: 90_000 })
-    expect(jobs.get('proactive-brief-b')).toBeDefined()
-    expect(handlers.list().filter((n) => n === MORNING_BRIEF_HANDLER_NAME)).toHaveLength(1)
-  })
-})
 
 describe('registerIdleNudgeSweepCron', () => {
   it('registers the job + handler and the handler runs on tick', async () => {

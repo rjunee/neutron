@@ -392,6 +392,13 @@ export interface RitualRegistrationService {
    * schedulable — `propose` refuses a bundled id as `exists_on_disk`/`duplicate_id`.
    */
   enable(input: RitualEnableInput): Promise<RitualProposalResult>
+  /**
+   * Re-request approval for an ALREADY-enabled ritual whose live content hash has
+   * no grant (an owner prompt edit, or a hashed-constant change). Reuses the
+   * persisted schedule and never rewrites `<id>.def.json`. Without this, anything
+   * that legitimately drops approval makes the ritual go permanently silent.
+   */
+  reapprove(id: string): Promise<RitualProposalResult>
   handleOwnerButtonAnswer(input: RitualOwnerAnswerInput): Promise<{ body: string } | null>
   status(): RitualStatusRow[]
 }
@@ -424,6 +431,43 @@ export function createRitualRegistrationService(
     } catch {
       return null
     }
+  }
+
+  /**
+   * Read `<owner_home>/rituals/<id>.md` and re-run the SAME content guards
+   * `propose()` applies. Shared by `enable()` and `reapprove()` so the bytes that
+   * get hashed, rendered in the approval prompt, and re-verified at every fire are
+   * validated by ONE rule set — a seeded template can be owner-edited afterwards,
+   * so the on-disk bytes are never trusted blindly.
+   */
+  function readAndValidateLivePrompt(def: RitualDef): string {
+    const mdPath = registry.promptPathFor(def.id)
+    let normalized: string
+    try {
+      normalized = readFileSync(mdPath, 'utf8').normalize('NFC')
+    } catch (err) {
+      throw new RitualProposalError(
+        'missing_prompt',
+        `ritual ${JSON.stringify(def.id)} has no prompt file on disk (${mdPath}) — its bundled template failed to seed; reinstall or re-propose it: ${(err as Error).message}`,
+      )
+    }
+    if (RITUAL_PROPOSAL_BANNED_CHARS_RE.test(normalized)) {
+      throw new RitualProposalError(
+        'banned_characters',
+        `prompt file ${mdPath} contains disallowed control characters (bidi override / zero-width / C0 control) — fix it before enabling`,
+      )
+    }
+    if (normalized.trim().length === 0) {
+      throw new RitualProposalError('empty_prompt', `prompt file ${mdPath} is empty or whitespace-only`)
+    }
+    const promptBytes = Buffer.byteLength(normalized, 'utf8')
+    if (promptBytes > RITUAL_PROPOSAL_MAX_PROMPT_BYTES) {
+      throw new RitualProposalError(
+        'prompt_too_large',
+        `prompt file ${mdPath} is ${promptBytes} bytes (> RITUAL_PROPOSAL_MAX_PROMPT_BYTES ${RITUAL_PROPOSAL_MAX_PROMPT_BYTES}) — shorten it before enabling`,
+      )
+    }
+    return normalized
   }
 
   function cadenceFor(schedule: RitualProposalSchedule): string {
@@ -591,35 +635,7 @@ export function createRitualRegistrationService(
 
     // ── (d) the seeded/owner prompt must be on disk — its LIVE bytes are what
     // get hashed, rendered in the approval prompt, and re-verified at every fire.
-    const mdPath = registry.promptPathFor(def.id)
-    let normalized: string
-    try {
-      normalized = readFileSync(mdPath, 'utf8').normalize('NFC')
-    } catch (err) {
-      throw new RitualProposalError(
-        'missing_prompt',
-        `ritual ${JSON.stringify(def.id)} has no prompt file on disk (${mdPath}) — its bundled template failed to seed; reinstall or re-propose it: ${(err as Error).message}`,
-      )
-    }
-
-    // ── (e) a bundled template can be owner-edited after seeding, so re-run the
-    // SAME content guards propose() applies — never trust the on-disk bytes blindly.
-    if (RITUAL_PROPOSAL_BANNED_CHARS_RE.test(normalized)) {
-      throw new RitualProposalError(
-        'banned_characters',
-        `prompt file ${mdPath} contains disallowed control characters (bidi override / zero-width / C0 control) — fix it before enabling`,
-      )
-    }
-    if (normalized.trim().length === 0) {
-      throw new RitualProposalError('empty_prompt', `prompt file ${mdPath} is empty or whitespace-only`)
-    }
-    const promptBytes = Buffer.byteLength(normalized, 'utf8')
-    if (promptBytes > RITUAL_PROPOSAL_MAX_PROMPT_BYTES) {
-      throw new RitualProposalError(
-        'prompt_too_large',
-        `prompt file ${mdPath} is ${promptBytes} bytes (> RITUAL_PROPOSAL_MAX_PROMPT_BYTES ${RITUAL_PROPOSAL_MAX_PROMPT_BYTES}) — shorten it before enabling`,
-      )
-    }
+    const normalized = readAndValidateLivePrompt(def)
 
     // ── (f) never-clobber: a `<id>.def.json` means the ritual is already enabled
     // (approval pending or scheduled). Enabling is idempotency-guarded by the
@@ -676,6 +692,56 @@ export function createRitualRegistrationService(
    *   - enable():  `register:false` (a bundled/persisted def is ALREADY registered
    *     — never unregister it); `cleanup` rm's ONLY the `.def.json`, never the .md.
    */
+  /**
+   * RE-REQUEST the owner's approval for an already-enabled ritual whose LIVE
+   * content hash no longer has a grant.
+   *
+   * WHY THIS EXISTS (ISSUES #504). The approval grant is bound to a content hash
+   * over the prompt bytes, tool surface, scope, cadence, model tier and timeout.
+   * Anything that moves that hash correctly DROPS approval — but until now nothing
+   * ever asked for it again, so the ritual just went quiet: `enable()` refuses once
+   * `<id>.def.json` exists, and the boot sweep treated that same file as "done".
+   * The owner saw no prompt, got no brief, and the only trace was a durable
+   * 'skipped'/'unapproved' row nobody reads. Two ways in:
+   *   - the owner EDITS `<owner_home>/rituals/<id>.md` (pre-existing, silent); and
+   *   - #504 changed `RITUAL_TIMEOUT_MS`, which is hashed, so EVERY existing grant
+   *     is stale exactly once, on the deploy that lands the new execution model.
+   * The second one is deliberate — the runtime a ritual executes in changed from a
+   * read-only sandbox to the owner's own fully-capable session, and an approval
+   * granted under the old description must NOT silently carry over. That makes a
+   * re-prompt path a requirement, not a nicety.
+   *
+   * Distinct from `enable()` in exactly one way: it does NOT write (or refuse on)
+   * `<id>.def.json`, because the ritual is already enabled and its SCHEDULE is
+   * unchanged — the file is read, not rewritten. On a failed emit the rollback
+   * cancels the fresh grants and leaves the existing def.json alone, so a failure
+   * costs a retry on the next boot rather than the ritual's schedule.
+   */
+  async function reapprove(id: string): Promise<RitualProposalResult> {
+    const def = registry.get(id)
+    if (def === undefined) {
+      throw new RitualProposalError('unknown_ritual', `ritual ${JSON.stringify(id)} is not registered`)
+    }
+    const schedule = readSchedule(id)
+    if (schedule === null) {
+      throw new RitualProposalError(
+        'invalid_schedule',
+        `ritual ${JSON.stringify(id)} has no persisted schedule to re-approve against`,
+      )
+    }
+    const normalized = readAndValidateLivePrompt(def)
+    return await requestApprovalAndEmit({
+      def,
+      normalized,
+      schedule,
+      register: false,
+      // The def.json predates this call and its schedule is untouched, so a failed
+      // emit must NOT delete it — that would un-enable a ritual as a side effect of
+      // a transient post failure.
+      cleanup: () => undefined,
+    })
+  }
+
   async function requestApprovalAndEmit(args: {
     def: RitualDef
     normalized: string
@@ -1010,7 +1076,7 @@ export function createRitualRegistrationService(
     return rows
   }
 
-  return { propose, enable, handleOwnerButtonAnswer, status }
+  return { propose, enable, reapprove, handleOwnerButtonAnswer, status }
 }
 
 // ── Schedule validation ──────────────────────────────────────────────────────

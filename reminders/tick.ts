@@ -4,14 +4,27 @@
  * Runs every `tick_interval_ms`
  * (default 30 s — matches Nova's reminder loop), pulls due reminders via
  * `ReminderStore.listDue`, and dispatches each through the configured
- * `ReminderDispatcher`. The dispatcher is the seam to the substrate
- * dispatcher + channel adapter — at fire time the gateway spawns a
- * Haiku-class agent with `prompts/reminder-agent-base.md` and the stored
- * `message` body; that's the dispatcher's responsibility, not this module's.
+ * `ReminderDispatcher`. Composition — which prompt a row fires with, which model,
+ * where it posts — is entirely the dispatcher's responsibility, not this
+ * module's.
+ *
+ * ONE DISPATCH PATH, NO EXCEPTIONS (ISSUES #504, SPEC Decisions Log 2026-08-05).
+ * EVERY due row goes through `dispatcher.dispatch`. This loop does not know what
+ * a ritual is, and there is deliberately no branch here on `ritual_id` — the
+ * branch that used to live at this exact spot routed ritual rows to a separate
+ * executor that spawned an ephemeral REPL with no tool bridge, which is why the
+ * morning brief could not read the owner's calendar. A ritual is a reminder; it
+ * fires down the same path, onto the owner's own warm session, and inherits
+ * everything that session has. If you are about to reintroduce a per-kind branch
+ * here, the thing you want belongs in the dispatcher's fire plan
+ * (`reminders/ritual-fire.ts`), which composes and delivers through the same code
+ * a nudge does.
  *
  * The loop is single-flight: one tick at a time. Long dispatches don't
  * stack; if a tick is still running when the interval fires, the next tick
- * is skipped (logged). This matches Nova's reminder-tick behavior.
+ * is skipped (logged). This matches Nova's reminder-tick behavior. Because a
+ * dispatch is AWAITED here, a dispatcher's per-turn budget is also the longest one
+ * row can stall the others — see `RITUAL_COMPOSE_TIMEOUT_MS`.
  */
 
 import { nextCronFire, parseCron } from '@neutronai/cron'
@@ -19,7 +32,6 @@ import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop, type LoopDescriptor } from '@neutronai/loop'
 
 import { isRecurring, type Reminder, type ReminderRecurrence, type ReminderStore } from './store.ts'
-import type { RitualExecutor, RitualFireOutcome } from './ritual-executor.ts'
 
 const log = createLogger('reminder-tick')
 
@@ -30,8 +42,8 @@ const log = createLogger('reminder-tick')
  *
  * Split out as a named helper rather than an inline closure only because both
  * one-shot claim sites need the identical two-step, and a silently divergent
- * copy of "reopen, then reschedule" is the kind of drift that shows up as a
- * ritual retrying immediately in one code path and on a backoff in the other.
+ * copy of "reopen, then reschedule" is the kind of drift that shows up as a row
+ * retrying immediately in one code path and on a backoff in the other.
  */
 function reopenAt(
   store: ReminderStore,
@@ -127,20 +139,6 @@ export interface ReminderTickOptions {
    * that don't care about the push path.
    */
   on_fired?: ReminderFiredHook
-  /**
-   * Executor-mode reminders (plan task 4) — the RITUAL executor. A due row with a
-   * non-null `ritual_id` routes to `ritual_executor.fire(reminder)` INSTEAD of the
-   * nudge `dispatcher` + `on_fired` push. fire()'s STARTUP (validate → ritual-lane
-   * spawn → durable `code_ritual_runs` row) is AWAITED inside the tick so it lands
-   * within stop()'s quiescence boundary — a claimed occurrence can never be
-   * consumed without its durable run row (the Argus task-5 data-loss blocker); only
-   * the long-running substrate TURN is fire-and-forget, detached INSIDE the executor
-   * (see `reminders/ritual-executor.ts` step (f)). Omitted in tests / on an LLM-less
-   * box that has no ritual surface; a ritual row that fires with NO executor wired is
-   * consumed (claimed) and logged (never falls back to the nudge dispatcher — a
-   * ritual is not a nudge). Structural so the composition can pass any `{ fire }`.
-   */
-  ritual_executor?: RitualExecutor
 }
 
 export class ReminderTickLoop {
@@ -151,7 +149,6 @@ export class ReminderTickLoop {
   private readonly now: () => number
   private readonly resolve_time_zone: (owner_slug: string) => string | null | undefined
   private readonly on_fired: ReminderFiredHook | null
-  private readonly ritual_executor: RitualExecutor | null
   /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
   private readonly loop: SupervisedLoop
   private firedCount = 0
@@ -164,7 +161,6 @@ export class ReminderTickLoop {
     this.now = options.now ?? Date.now
     this.resolve_time_zone = options.resolve_time_zone ?? (() => null)
     this.on_fired = options.on_fired ?? null
-    this.ritual_executor = options.ritual_executor ?? null
     this.loop = new SupervisedLoop({
       name: 'reminders',
       intervalMs: this.interval_ms,
@@ -238,9 +234,7 @@ export class ReminderTickLoop {
         //
         // `claimRevert` takes the instant (unix SECONDS) the row should become
         // due again, defaulting to the fire_at it was claimed from — which is
-        // what the nudge deliver-or-retry contract wants (retry on the very next
-        // tick). The ritual branch passes a LATER instant instead, because
-        // "immediately, forever" is exactly the loop ISSUES #489 removed.
+        // what the deliver-or-retry contract wants (retry on the very next tick).
         let claimRevert: ((fire_at_sec?: number) => Promise<unknown>) | null = null
         // A row recurs when EITHER cadence column is set (coarse label OR cron
         // spec) — `computeNextFire` resolves the next instant from whichever
@@ -274,81 +268,6 @@ export class ReminderTickLoop {
           }
           await this.store.markFired(reminder.id)
           claimRevert = reopenAt(this.store, reminder)
-        }
-
-        // Executor-mode reminders (plan task 4). A ritual row NEVER reaches the
-        // nudge dispatcher and NEVER fires the `on_fired` push (a 45-min executor
-        // run would push-notify up to 45 min BEFORE any output, even for a silent
-        // ritual — task 5 owns ritual delivery). The #319 claim above already
-        // ran (advanceRecurrence for a recurring ritual / markFired for a one-shot).
-        // On a SUCCESSFUL fire()-startup the claim is CONSUMED (no revert): the
-        // durable `code_ritual_runs` history row IS the record, and a recurring row
-        // has already advanced to its next cadence, so re-firing the same attempt
-        // every 30 s (the nudge deliver-or-retry contract) is wrong here.
-        // fire()'s STARTUP — fail-closed validate → ritual-lane spawn → durable
-        // `code_ritual_runs` 'running' (or skipped/failed) row — is AWAITED so it
-        // completes INSIDE the tick body, i.e. inside SupervisedLoop's stop()
-        // quiescence await (tick.ts:135-137). stop() can therefore never resolve
-        // between a consumed #319 claim and its durable run row (the Argus task-5
-        // data-loss blocker). Only the long-running substrate TURN is detached,
-        // INSIDE the executor (fireAndForget('ritual-run'), ritual-executor.ts step
-        // (f)) — the tick never blocks on an up-to-45-min execution; startup is
-        // milliseconds of local DB writes plus one prompt-file read.
-        //
-        // But a STARTUP LOSS — validate/spawn/durable-row-write threw so NO run row
-        // landed for this occurrence — must not let the occurrence vanish with no
-        // run + no history (the Argus r1 BLOCKER: the executor's outer catch used to
-        // swallow the throw and the tick consumed the claim regardless). The executor
-        // now answers that case with `{claim:'retry', retry_at_ms}` and the tick
-        // re-arms the row AT THAT INSTANT using the same compare-and-swap revert the
-        // nudge dispatcher uses. The instant is the load-bearing difference from the
-        // previous shape: reverting to the row's ORIGINAL (already-due) fire_at made
-        // it due again immediately, so a cause that did not clear re-fired on every
-        // 30 s tick forever, with nothing durable to show for it (ISSUES #489). A
-        // bounded, backed-off re-arm keeps the recovery and drops the loop; when the
-        // executor has no retry left it says `consume` and has already recorded and
-        // surfaced the failure itself.
-        if (reminder.ritual_id !== null) {
-          if (this.ritual_executor !== null) {
-            let outcome: RitualFireOutcome = { claim: 'consume' }
-            try {
-              outcome = await this.ritual_executor.fire(reminder)
-            } catch (err) {
-              // The executor's whole body is guarded, so a rejection here is a bug
-              // in the executor rather than a fire outcome. Consume the claim and
-              // say so loudly: re-arming on an unknown fault is how a bug becomes an
-              // every-tick loop, which is the defect being fixed, not repeated.
-              log.error('ritual_fire_threw', {
-                reminder: reminder.id,
-                ritual_id: reminder.ritual_id,
-                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-              })
-            }
-            if (outcome.claim === 'retry') {
-              try {
-                await claimRevert(Math.floor(outcome.retry_at_ms / 1000))
-              } catch (rerr) {
-                log.error('ritual_claim_revert_failed', {
-                  reminder: reminder.id,
-                  ritual_id: reminder.ritual_id,
-                  error: rerr instanceof Error ? (rerr.stack ?? rerr.message) : String(rerr),
-                })
-              }
-              // NOT counted as fired: the occurrence was re-armed, not consumed.
-            } else {
-              fired++
-            }
-          } else {
-            // No executor wired (LLM-less box / test): a PERMANENT condition, not a
-            // transient loss — reverting would re-fire it every tick forever. Consume
-            // the claim and log. NEVER fall back to the nudge dispatcher.
-            log.error('ritual_executor_unwired', {
-              reminder: reminder.id,
-              ritual_id: reminder.ritual_id,
-            })
-            fired++
-          }
-          continue
         }
 
         try {

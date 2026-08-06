@@ -3824,49 +3824,60 @@ ritual content in chat.
   editing the ritual file, or an agent widening its surface/cadence, changes the
   hash and silently DROPS approval by design — a widened ritual must be
   re-approved.
-- **Fire path — inside the tick quiescence boundary.** The tick AWAITS
-  `ritual_executor.fire(reminder)` (`reminders/tick.ts:250`) so the
-  claim→validate→durable-insert sequence completes before the tick advances;
-  only the long-running substrate TURN is detached (fire-and-forget) inside the
-  executor. `reminders/ritual-executor.ts` runs the fail-closed validate → on a
-  SKIP writes a durable `code_ritual_runs` row and returns; on a fire spawns into
-  the dedicated ritual lane, inserts a `'running'` row, launches the detached
-  turn, and does terminal bookkeeping — it NEVER throws (its body is fully
-  guarded), answering a `RitualFireOutcome` instead. `makeRitualSubstrate` (`open/wiring/substrates.ts:411`) builds an
-  ephemeral `cc-ritual-*` session under `PROFILE_RITUAL` (its own trust class)
-  with the shipped `ritual-agent-base.md`. `reminders/ritual-delivery.ts` posts
-  the completion text through the one `deliver()` seam (a `silent` ritual skips
-  the success post), surfaces a one-line failure notice on failed/timed-out/
-  crashed, escalates once per 3-consecutive-failure streak, reaps prior-boot
-  orphaned `'running'` rows to `'crashed'` at boot (`reapOrphanRitualRuns`), and
-  prunes runs after 30 days.
-- **Bounded transient recovery (ISSUES #489).** A ritual has nobody watching it,
-  so a transient upstream failure used to end the occurrence outright: the brief
-  simply did not happen, and a transient failure during fire STARTUP (before any
-  durable row) re-fired on every 30 s tick forever, leaving zero
-  `code_ritual_runs` rows and telling the owner nothing. Both surfaces now route
-  through ONE policy in `reminders/ritual-retry.ts`. It is three-valued —
-  `transient | permanent | indeterminate`, the same shape as
-  `open/credential-usage-monitor.ts`'s `CredentialStanding` — and reads the O3
-  taxonomy (`runtime/errors.ts` `retryable` / `code`) rather than regexing message
-  prose; an error earns a retry only by carrying a class, so `indeterminate`
-  neither retries nor claims success. `agent-dispatch/substrate-turn.ts` now
-  CARRIES that class out on `DispatchTurnResult.failure` (it observed and dropped
-  it before). Recovery is capped at `RITUAL_MAX_ATTEMPTS = 4` with a pure
-  exponential backoff (2 min → 8 min → 32 min, so a 7 a.m. brief still lands in
-  the morning), and each attempt re-arms the SAME occurrence — a fire-startup
-  retry through the tick's compare-and-swap claim revert, a settled-turn retry
-  through the executor's injected `rearm` seam (the tick is long gone by then).
-  EXACTLY-ONCE delivery is enforced by two guards: a durable check for a
-  `finished` row on the occurrence and an in-process latch marked before the post
-  leaves; a run store that cannot answer "already delivered?" refuses the retry
-  rather than risk a duplicate brief. Every outcome stays answerable from
-  `code_ritual_runs` alone — the `failure_reason` prefix distinguishes `retry N/3
-  scheduled`, `retry exhausted after N attempts`, `permanent failure (not
-  retried)` and `unclassified failure (not retried)`. Retries of one occurrence
-  collapse to one occurrence for the escalation rule
-  (`collapseAttemptsToOccurrences`), so a single busy morning never counterfeits
-  "failed 3 consecutive runs".
+- **Fire path — ONE path, the same one a plain reminder takes (ISSUES #504, SPEC
+  Decisions Log 2026-08-05).** There is no ritual branch in the tick and no ritual
+  executor. `reminders/tick.ts` hands EVERY due row to `dispatcher.dispatch`, and
+  `reminders/dispatcher.ts` asks the ritual fire PLANNER
+  (`reminders/ritual-fire.ts`) one question — what does this row compose from, and
+  what must be recorded about it? A `nudge` answer composes the row's stored
+  message; a `skipped` answer (the fail-closed verdict) writes a durable
+  `code_ritual_runs` 'skipped' row and posts NOTHING; a `fire` answer writes a
+  durable `'running'` row and composes the APPROVED PROMPT — on the owner's own
+  warm `cc-agent-*` session, through the same `llm.compose` call and the same
+  `deliver()` outbound a nudge uses — then settles the ledger `finished`/`failed`.
+  A `silent` ritual skips the success post; a failure posts one one-line notice and
+  escalates once per 3-consecutive-failure streak. `reapOrphanRitualRuns` still
+  reaps prior-boot orphaned `'running'` rows to `'crashed'` at boot and prunes runs
+  after 30 days.
+- **WHY the lane was deleted, and what replaced its security.** A ritual used to
+  spawn a fresh ephemeral `cc-ritual-*` REPL that wired NO tool bridge — so the
+  morning brief could not read the owner's calendar: granting
+  `mcp__neutron__calendar_list` validated and then failed, because that MCP server
+  did not exist inside the sandbox. The lane built to make rituals SAFE was the lane
+  that made them USELESS. The owner rejected it outright (*"Rituals shouldn't be a
+  special case in a private REPL… The morning brief should just be a regular
+  reminder in the general chat, with access to everything general has access to"*).
+  Deleted with it: `reminders/ritual-executor.ts`, `reminders/ritual-retry.ts`,
+  `reminders/ritual-agent-base.md` + `prompt-path.ts`, `makeRitualSubstrate`,
+  `PROFILE_RITUAL`, and the separate `agent_kind:'ritual'` concurrency lane
+  (`MAX_CONCURRENT_RITUALS`). SURVIVING and now carrying the whole model: the
+  APPROVAL GATE, the content-hash binding re-checked at every fire, fail-closed
+  `validateRitualFire`, `RITUAL_ID_RE`, the non-empty-`tool_surface` pin (#361), and
+  the `code_ritual_runs` ledger.
+- **⚠️ `tool_surface` IS AN APPROVAL DECLARATION, NOT A RUNTIME GRANT** — a
+  mechanical consequence, not a preference. A ritual composes on the owner's warm
+  pooled session, whose `--tools` allow-list is fixed at SPAWN; the persistent-REPL
+  reuse guard EVICTS AND RESPAWNS a warm child whose requested surface differs
+  (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). Passing a per-ritual
+  surface would not restrict the ritual — it would destroy the owner's live chat
+  REPL on every fire. So fired reminders present the LIVE-CHAT surface
+  (`LIVE_AGENT_TOOL_NAMES`, threaded by the composer as `tool_names`), and the
+  accepted consequence — signed off with the decision — is that **a ritual firing
+  into the warm session can do anything that session can, including `Bash`. The
+  approval gate is the only boundary.** The bundled defs' `description` strings were
+  rewritten accordingly: they no longer promise "no shell, no writes, no network",
+  because that string is rendered verbatim into the approval prompt and would have
+  been the gate lying to the owner at the moment he decides.
+- **Re-approval when the hash moves.** Anything that changes the content hash
+  correctly drops approval — but nothing used to ask for it again, so the ritual went
+  silent (`enable()` refuses once `<id>.def.json` exists, and the boot sweep treated
+  that file as "done"). `bundled-ritual-enable.ts` now consults `status()` and calls
+  the new `service.reapprove(id)` when the live hash has NO grant, leaving `pending`
+  alone and `denied` denied. This closes a pre-existing silent death (an owner
+  editing `<id>.md`) and is required by #504 itself, which changed the hashed
+  `RITUAL_TIMEOUT_MS` from 45 min to 10 min — a ritual is now one AWAITED turn inside
+  a SINGLE-FLIGHT tick, so its budget is also the longest it can stall every other
+  due reminder.
 - **Write-containment gate — STAY GATED (overturn 1).** The T5 spike that tried
   to prove per-session `settings.json` deny fails CLOSED with the substrate
   auto-approver disabled returned an UNPROVABLE verdict (2026-07-21: with
@@ -3911,7 +3922,7 @@ ritual content in chat.
   copy-if-absent into `<owner_home>/rituals/` (`seedBundledRituals`,
   `reminders/bundled-rituals.ts` — an owner-edited file is never clobbered),
   and register UNAPPROVED on boot (`registerBundledRituals`) inside the composer's
-  `ritual_executor_factory` (`open/composer.ts:2182`). A bundled ritual has a
+  `init_ritual_planner` install hook. A bundled ritual has a
   seeded `<id>.md` but NO `<id>.def.json`, so it starts with no schedule and no
   approval — it does nothing until the owner ENABLES it. `rituals_propose` cannot
   enable a bundled id (its `<id>.md` already exists → `exists_on_disk`); the owner
@@ -3955,23 +3966,29 @@ ritual content in chat.
     globbing `rituals/*.md` but not whether they ran; and live session transcripts
     are SQLite-only, so it reasons from the corrections log and diary instead.
 
-## Proactive messaging — daily brief + idle-nudge sweep (`gateway/proactive/`)
+## Proactive messaging — idle-nudge sweep (`gateway/proactive/`)
 
-The owner-facing proactive layer (the legacy harness parity). Both halves were built + tested
-early but stayed DEAD until P1-4 because they register only when
-`tasks.proactive` is set — and the Open composer never set it. Both halves now
-ship ON (no feature flag); `open/composer.ts` wires `tasks.proactive`, including
-`listIdleTopics` since 2026-07-30.
+The owner-facing proactive layer (the legacy harness parity). It was built + tested
+early but stayed DEAD until P1-4 because it registers only when `tasks.proactive`
+is set — and the Open composer never set it. It now ships ON (no feature flag);
+`open/composer.ts` wires `tasks.proactive`, including `listIdleTopics` since
+2026-07-30.
 
-- **Daily morning brief** (`morning-brief.ts`) — **ACTIVE.** Once per owner-local
-  day at/after `brief_hour`, composes from live context (focus/task queue,
-  optional calendar / entity / project sources — each gathered behind its own
-  try/catch) and posts to the owner's General topic. **LLM composition (the legacy harness
-  parity):** `buildLlmBriefComposer` routes the resolved `BriefContext` through
-  the warm `cc-llm` substrate (grounded in exactly the resolved evidence, no
-  fabrication); the pure `composeMorningBrief` template is the deterministic
-  fallback when the LLM throws/empties, so the brief is never lost. Same-day
-  idempotency lives in `proactive_brief_log`.
+- **THERE IS NO SECOND MORNING BRIEF HERE ANY MORE (ISSUES #504).**
+  `gateway/proactive/morning-brief.ts` was DELETED, along with its cron
+  (`proactive.morning_brief`), its `tasks.proactive` config keys (`sources`,
+  `composeBrief`, `brief_hour`, `brief_interval_ms`) and its test. It was a
+  provider-driven composer whose `calendarToday`, `entityDeltas` and `projectStatus`
+  slots were supplied by **nothing in production** — only by its own test — which is
+  the persona-gen shape and is exactly why the brief it posted had to say "I couldn't
+  check your calendar". **The morning brief is the `morning-brief` RITUAL**, fired as
+  an ordinary reminder onto the owner's own session (see the rituals section above),
+  which is the only version that can actually reach the calendar Core. The
+  `proactive_brief_log` table and `ProactiveStateStore.hasBriefForDay` /
+  `recordBriefForDay` remain in place unused rather than being migrated away.
+  (Unrelated, despite the shared filename: `onboarding/overnight/morning-brief.ts`
+  is the OVERNIGHT-WORK reporter — it reports Trident runs that finished overnight,
+  is fully wired, and is untouched.)
 - **Durable web sink** (`button-store-sink.ts`). Open's topics are `app_socket`
   and proactive posts fire from a timer, so they route through
   `buildButtonStoreProactiveSink` — an `OutboundSink` that persists an INERT,

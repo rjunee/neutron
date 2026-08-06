@@ -1,7 +1,5 @@
 import type { CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { ReminderDispatcher } from '@neutronai/reminders/tick.ts'
-import type { RitualExecutor } from '@neutronai/reminders/ritual-executor.ts'
-import type { ReminderStore } from '@neutronai/reminders/store.ts'
 import type { ApprovalManager, ApprovalNotifier } from '@neutronai/tools/approval.ts'
 import type {
   HeartbeatTracker,
@@ -17,25 +15,24 @@ export interface NotifierCompositionInput {
   /** Reminder dispatcher — substrate-spawn for production, stub for dev. */
   reminder_dispatcher: ReminderDispatcher
   /**
-   * Executor-mode reminders (plan task 4) — a FACTORY that builds the ritual
-   * executor from the graph's `ApprovalManager` (the approval checker source).
-   * `build-core-modules`' `remindersModule` invokes it (when present) with the
-   * composed `approval` module and wires the result as the tick loop's
-   * `ritual_executor`. The composer owns the rest of the executor's wiring
-   * (subagent registry, `cc-ritual-*` substrate turn, run store, model, scope).
-   * Omitted on an LLM-less box → no ritual surface (ritual rows are consumed +
-   * logged by the tick, never dispatched as nudges).
+   * Install the ritual fire PLANNER (ISSUES #504), called ONCE by
+   * `remindersModule` as soon as the graph's `ApprovalManager` — the content-hash
+   * approval checker source — exists.
    *
-   * `reminders` is the SAME `ReminderStore` the tick loop drives. The executor
-   * needs it for exactly one thing: re-arming an occurrence after a transient
-   * failure of the DETACHED turn (ISSUES #489). By the time a 45-minute run
-   * settles, the tick that claimed the occurrence has long returned, so the
-   * executor cannot hand the re-arm back to it the way a fire-startup retry does.
+   * WHY AN INSTALL HOOK RATHER THAN A VALUE. The planner needs the graph's
+   * `ApprovalManager`, which does not exist when the composer builds
+   * `reminder_dispatcher`; and the planner has to reach THAT dispatcher, because a
+   * ritual composes and delivers through the SAME dispatcher a nudge does — that
+   * sameness is the whole of #504. So the composer passes a late-bound planner
+   * seam into the dispatcher at construction and installs the real planner here,
+   * the same late-binding shape it already uses for the ritual registration
+   * service. Returns void: the composer owns the wiring, this only says "now".
+   *
+   * Omitted on an LLM-less box → every row composes as an ordinary nudge from its
+   * own stored `message`. That is fail-closed: with no planner installed nothing
+   * reads, validates, or composes a ritual's approved PROMPT.
    */
-  ritual_executor_factory?: (deps: {
-    approvals: ApprovalManager
-    reminders: ReminderStore
-  }) => RitualExecutor
+  init_ritual_planner?: (deps: { approvals: ApprovalManager }) => void
   /** Heartbeat tracker — typically a small in-process pulse counter. */
   heartbeat_tracker: HeartbeatTracker
   /** Optional pid-liveness probe override (used by tests). */

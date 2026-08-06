@@ -2,11 +2,14 @@
  * @neutronai/reminders — the ritual REGISTRY + fail-CLOSED fire-time validation.
  *
  * Spec of record: `docs/plans/executor-mode-reminders-2026-07-20.md` — design
- * doc §2a + the deepened header block (plan task 2). A ritual is an
- * executor-mode reminder: at fire time the tick loop (plan task 4) spawns a
- * scoped sub-agent REPL instead of composing a one-shot nudge. This module is the
- * PURE, storage-free half — the registry of known ritual definitions and the
- * fail-CLOSED fire-time verdict.
+ * doc §2a + the deepened header block (plan task 2), AS AMENDED BY ISSUES #504 /
+ * SPEC Decisions Log 2026-08-05, which deleted the separate ritual execution lane.
+ * A ritual is a REMINDER: at fire time the ONE `ReminderDispatcher` composes its
+ * approved prompt on the owner's normal warm session (`reminders/ritual-fire.ts`).
+ * Nothing spawns a scoped sub-agent REPL any more. This module is the PURE,
+ * storage-free half — the registry of known ritual definitions and the fail-CLOSED
+ * fire-time verdict, both of which survive unchanged and now carry the whole
+ * security model together with the approval gate.
  *
  * Ryan overturns folded in (SPEC Decisions Log 2026-07-20, neutron-managed):
  *  - Overturn 1 — Bash is a PORTABLE surface: security rides the APPROVAL gate
@@ -28,8 +31,9 @@
  *    no tools is a silent no-op that looks like it ran).
  *  - {@link validateRitualFire} returns a SKIP verdict for unknown id / missing
  *    prompt / unapproved (including an approval store that THROWS — fail CLOSED).
- *    A failed verdict means log + SKIP the spawn — NEVER degrade to the nudge
- *    composer, and NEVER spawn with `tools: []`.
+ *    A failed verdict means log + compose NOTHING: the dispatcher posts nothing and
+ *    records a durable 'skipped' row. It NEVER degrades to composing the row as an
+ *    ordinary nudge, so an unapproved ritual prompt is never sent to a model.
  *
  * There is DELIBERATELY (deepened header §142-150) no `requires_approval`, no
  * `prompt_path` (derived from `rituals/<id>.md`), and no `model`/`timeout` field
@@ -41,11 +45,34 @@ import { join } from 'node:path'
 import { createLogger } from '@neutronai/logger'
 
 /**
- * Ritual spawn timeout — 45 min, parity with the legacy harness's
- * `REMINDER_EXECUTOR_TIMEOUT_SEC=2700`. A ritual REPL that has not reached a
- * terminal event by this deadline is reaped `timed_out` (task 5).
+ * Wall-clock budget for one ritual turn — 10 min.
+ *
+ * WAS 45 min, for parity with the legacy harness's
+ * `REMINDER_EXECUTOR_TIMEOUT_SEC=2700`, when a ritual was a DETACHED background
+ * REPL that the tick launched and forgot. ISSUES #504 deleted that lane: a ritual
+ * is now ONE turn on the owner's warm session, AWAITED inside the tick body
+ * exactly like a nudge, and the tick is SINGLE-FLIGHT. So this number is no longer
+ * just a ceiling on the ritual — it is the longest one ritual can stall every
+ * other due reminder. 45 minutes of that was defensible for a detached run and is
+ * not defensible in-band. Ten minutes is a wide margin over what reading a handful
+ * of STATUS.md files and a calendar takes, and keeps the worst case bounded.
+ *
+ * ⚠️ THERE IS EXACTLY ONE OF THESE, AND THAT IS LOAD-BEARING. This constant is
+ * hashed into the approval grant by BOTH the request side and the fire-time check
+ * side ({@link computeRitualContentHash}, `reminders/ritual-approval.ts`). Two
+ * timeout constants — one for the hash, one for the actual budget — would make
+ * every approved ritual compute a different hash at fire time than at approval
+ * time, so every fire would refuse as `unapproved` and every ritual would go
+ * silent with a durable row nobody reads. If you need a different budget, change
+ * THIS value; do not add a second one.
+ *
+ * ⚠️ CHANGING IT INVALIDATES EVERY EXISTING APPROVAL, by design — the grant is
+ * bound to the run's description, and the description changed. That is the gate
+ * working, not a bug to route around; `reminders/bundled-ritual-enable.ts`
+ * re-requests approval when a live content hash is no longer approved, so the owner
+ * gets a fresh prompt rather than silence.
  */
-export const RITUAL_TIMEOUT_MS = 45 * 60_000
+export const RITUAL_TIMEOUT_MS = 10 * 60_000
 
 /**
  * Model TIER (not a raw model id) — the executor default is the smart tier
@@ -91,18 +118,31 @@ const WEB_TOOLS = new Set(['WebSearch', 'WebFetch'])
  * When the OS-sandbox sprint lands the sandboxed writing-ritual factory, this gate
  * is lifted (the factory becomes the containment) — see the plan-doc verdict.
  *
- * ⚠️ LOCKSTEP-MAINTENANCE (Argus r2 minor — denylist, not allowlist): this is an
- * ENUMERATED set of built-in write/exec tool names, so a WRITE-CAPABLE tool NOT in
- * this set slips the gate. Two open lanes to keep in lockstep when either surface
- * grows: (a) a new built-in write/exec tool must be ADDED here the same PR it
- * becomes grantable; (b) an MCP bridge tool name (`mcp__server__tool`, admitted by
- * {@link TOOL_TOKEN_RE}) is write-capable yet unlisted, so it would PASS this gate.
- * Not reachable today — the ritual substrate wires NO tool bridge (no
- * `enableToolBridge` on the ritual variant) and the shipped rituals are read-only
- * with an explicit Read/Glob/Grep allow-list, so no `mcp__*` grant can execute a
- * write. Revisit at task 8/9 (ritual registration) or when the OS-sandbox sprint
- * lifts this gate: prefer flipping the gate to an ALLOW-LIST of read-only tools so
- * the default is fail-closed for any unknown/bridge name, not enumerated-deny.
+ * ⚠️ WHAT THIS GATE ACTUALLY DOES SINCE ISSUES #504 — READ BEFORE TRUSTING IT.
+ * It bounds what a ritual may DECLARE and be approved for. It is NOT containment,
+ * and it never was after the ritual lane was deleted. A ritual composes on the
+ * owner's WARM chat session, which is spawned with `Bash`, `Write` and `Edit` in its
+ * `--tools` surface; a ritual's own `tool_surface` cannot be applied per fire,
+ * because the persistent-REPL reuse guard would evict and respawn that session
+ * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). So a ritual whose
+ * declared surface is `['Read','Glob','Grep']` still executes somewhere Bash exists.
+ *
+ * It is KEPT anyway, deliberately: it stops a ritual being registered and approved
+ * with an explicit write/exec grant, which keeps the approval prompt's rendered
+ * capability lines conservative, and removing a fail-closed check was not part of
+ * the #504 decision. But do not reason about ritual safety FROM this set — the
+ * boundary is the APPROVAL GATE plus the ritual's own prompt text.
+ *
+ * The stated reason it could not be bypassed via an `mcp__*` bridge name — "the
+ * ritual substrate wires NO tool bridge" — is NO LONGER TRUE: the session a ritual
+ * runs in is the one substrate that DOES wire the native-MCP bridge. That is the
+ * intended behaviour now (it is how the morning brief reaches a Core at all), which
+ * is precisely why this set must not be read as a containment boundary.
+ *
+ * LOCKSTEP-MAINTENANCE (Argus r2 minor — denylist, not allowlist): this is an
+ * ENUMERATED set, so a write-capable name NOT listed slips it. If it is ever made
+ * load-bearing again, flip it to an ALLOW-LIST of read-only tools so an unknown or
+ * bridge name fails closed instead of passing.
  */
 export const GATED_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'Bash',

@@ -41,8 +41,15 @@ const CLAUDE_BIN =
 const HERE = import.meta.dir
 const PERSIST = join(HERE, '..')
 const DEV_CHANNEL = join(PERSIST, 'dev-channel.ts')
-// A WRITING ritual runs under the executor persona, not the chat agent.
-const RITUAL_PROMPT_FILE = join(PERSIST, '..', '..', '..', '..', 'reminders', 'ritual-agent-base.md')
+// The shipped agent base prompt. This used to point at
+// `reminders/ritual-agent-base.md`, a dedicated unattended-executor persona for the
+// ritual REPL; ISSUES #504 deleted both that file and the REPL, because a ritual now
+// composes on the owner's own warm session (a system prompt is a SPAWN-time property
+// and a warm session is already spawned). What this spike still exercises is the
+// GENERIC substrate knobs — `permissions` deny rules and `disableToolUseAutoApprove`
+// — which are unchanged and still reachable by any caller; only the persona file
+// backing the harness moved.
+const RITUAL_PROMPT_FILE = join(PERSIST, 'repl-agent-base.md')
 
 /** Normalize ANSI + whitespace so Ink-shredded prompt text is matchable. */
 function normalize(buf: Buffer): string {

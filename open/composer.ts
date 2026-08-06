@@ -50,7 +50,10 @@ import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { resolveLandingStaticDir } from '@neutronai/gateway/wiring/build-landing-stack.ts'
 import { DEFAULT_LISTEN_PORT } from '@neutronai/gateway/boot-listener-registry.ts'
-import { buildLiveAgentTurn } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import {
+  buildLiveAgentTurn,
+  LIVE_AGENT_TOOL_NAMES,
+} from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import type { LiveAgentOnboardingSeam } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { buildProjectDocComposer } from '@neutronai/gateway/wiring/build-project-doc-composer.ts'
 import { buildProjectKickoffComposer } from '@neutronai/gateway/wiring/build-project-kickoff-composer.ts'
@@ -164,11 +167,11 @@ import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summar
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
-import { buildLlmBriefComposer } from '@neutronai/gateway/proactive/morning-brief.ts'
-// NAME COLLISION, on purpose flagged: the import ABOVE is the daily PROACTIVE
-// brief (`gateway/proactive/morning-brief.ts`); the type below belongs to the
-// OVERNIGHT-WORK report (`onboarding/overnight/morning-brief.ts`). Two different
-// subsystems that happen to share a filename.
+// The OVERNIGHT-WORK report (`onboarding/overnight/morning-brief.ts`). It used to
+// share this repo with a second, unrelated `morning-brief.ts` under
+// `gateway/proactive/`; ISSUES #504 deleted that one, so the name is no longer a
+// collision. This is the overnight Trident reporter, NOT the daily brief — the
+// daily brief is the `morning-brief` RITUAL, fired as an ordinary reminder.
 import type { MorningBriefDeliverInput } from '@neutronai/onboarding/overnight/morning-brief.ts'
 
 /**
@@ -266,7 +269,7 @@ import {
   buildSubstrateReminderLlm,
   buildStatusMdContextSource,
   createRitualRegistry,
-  createRitualExecutor,
+  buildRitualFirePlanner,
   createRitualRunStore,
   createRitualRegistrationService,
   enableBundledRitualsAtBoot,
@@ -278,7 +281,7 @@ import {
   REMINDER_FALLBACK_TIME_ZONE,
   RITUAL_RUN_RETENTION_MS,
 } from '@neutronai/reminders/index.ts'
-import type { RitualRegistrationService } from '@neutronai/reminders/index.ts'
+import type { RitualFirePlanner, RitualRegistrationService } from '@neutronai/reminders/index.ts'
 // L3 (2026-07) — the reminder delivery impl moved UP into the gateway
 // composition band (it reaches the WebChatSenderRegistry + landing protocol).
 import { buildButtonStoreReminderOutbound } from '@neutronai/gateway/proactive/reminder-outbound.ts'
@@ -948,7 +951,6 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate,
       makeComposeSubstrate,
       makeEphemeralSubstrate,
-      makeRitualSubstrate,
       makeWarmFireSubstrate,
       prewarmReady,
       prewarmSettledRef,
@@ -1521,13 +1523,21 @@ export function buildOpenGraphComposer(
     const coresSubstrate =
       llmPool !== null ? makeEphemeralSubstrate('cc-cores')(owner_home) : null
     // Plan task 8 — the agent-callable ritual registration service. Assigned LATE
-    // inside `ritual_executor_factory` (the one closure holding the graph's
+    // inside `init_ritual_planner` (the one closure holding the graph's
     // ApprovalManager), so every reader — the reminders-Core `rituals_*` tools
     // (via mountOpenCores) and the live-agent approval capture — derefs this
     // mutable binding through a late-bound getter. `null` until the factory runs
     // (LLM-less box ⇒ never runs ⇒ tools throw unavailable / capture no-ops —
     // fail closed, no flags).
     let ritualRegistration: RitualRegistrationService | null = null
+    // ISSUES #504 — the ritual fire PLANNER, late-bound for the same reason
+    // `ritualRegistration` is: it needs the graph's ApprovalManager, which does not
+    // exist when the reminder DISPATCHER is built below. The dispatcher is handed a
+    // stable seam that DEREFS this binding per fire, so a ritual and a nudge share
+    // one dispatcher rather than one dispatcher plus one executor. `null` until
+    // `init_ritual_planner` runs (LLM-less box ⇒ never runs ⇒ every row composes as
+    // an ordinary nudge, which is fail-closed: nothing reads a ritual's prompt).
+    let ritualPlanner: RitualFirePlanner | null = null
     // ── THE canonical TaskStore — ONE instance for the whole box ────────────
     // Every task surface must be the SAME object, not merely the same table.
     // A `TaskStore` carries the mutation-subscriber list that `tasksModule.init`
@@ -2435,6 +2445,27 @@ export function buildOpenGraphComposer(
         : {}),
       context: buildStatusMdContextSource({ owner_home }),
       resolveTopicId: ({ explicit_topic }): string => resolveAppWsReminderTopic(explicit_topic),
+      // ⚠️ THE LIVE-CHAT TOOL SURFACE, VERBATIM — and this is load-bearing, not
+      // tidiness. A fired reminder composes on `liveAgentSubstrate`, the owner's
+      // WARM chat REPL, and the persistent pool's reuse guard EVICTS AND RESPAWNS a
+      // warm child whose requested `--tools` surface differs from the one it was
+      // spawned with (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`).
+      // The dispatcher's own default is the narrower ['Read','Glob','Grep'], so
+      // leaving it unset meant every fired reminder tore down the owner's live chat
+      // REPL and his next chat turn tore it down again. Passing the same surface is
+      // what makes "a reminder fires into the normal session" literally true.
+      tool_names: LIVE_AGENT_TOOL_NAMES,
+      // ISSUES #504 — the ritual fire planner, DEREFERENCED PER FIRE so the
+      // late-bound `ritualPlanner` (installed once the graph's ApprovalManager
+      // exists) reaches the dispatcher that was built before it. Null planner ⇒
+      // 'nudge' ⇒ the row composes from its own stored message.
+      ritual_planner: {
+        plan: async (reminder) =>
+          ritualPlanner !== null ? ritualPlanner.plan(reminder) : { kind: 'nudge' as const },
+      },
+      // The ritual TIER resolved live (`RITUAL_MODEL_TIER` is 'best'), so a ritual
+      // tracks the chat agent's model instead of pinning a stale id.
+      resolve_ritual_model: getBestModel,
     })
 
     // Executor-mode reminders (plan task 4) — the ritual executor FACTORY. Gated
@@ -2460,9 +2491,9 @@ export function buildOpenGraphComposer(
     // from the first seed on it is OWNER data (the ritual CONTENT stays user data),
     // and the content-hash approval check re-verifies the LIVE bytes every fire, so
     // a later owner edit drops approval by design.
-    const ritual_executor_factory: CompositionInput['ritual_executor_factory'] =
+    const init_ritual_planner: CompositionInput['init_ritual_planner'] =
       llmPool !== null
-        ? ({ approvals, reminders }) => {
+        ? ({ approvals }) => {
             const rituals_dir = joinPath(owner_home, 'rituals')
             const registry = createRitualRegistry({ rituals_dir })
             seedBundledRituals({
@@ -2579,54 +2610,21 @@ export function buildOpenGraphComposer(
                 })
               },
             )
-            return createRitualExecutor({
+            // ISSUES #504 — INSTALL the ritual fire planner into the ONE
+            // dispatcher built above. No executor, no `cc-ritual-*` substrate, no
+            // subagent spawn: the planner only says what an approved ritual row
+            // composes from and what must be written to `code_ritual_runs`, and
+            // `buildReminderDispatcher` composes it on `liveAgentSubstrate` — the
+            // owner's warm chat session, the ONE substrate carrying the native-MCP
+            // tool bridge — then posts it through the same `reminderOutbound` a
+            // nudge posts through. That is what lets the morning brief reach a
+            // Core, which the old sandbox could not.
+            ritualPlanner = buildRitualFirePlanner({
               registry,
               approvals,
               project_slug,
-              instance_key: owner_handle,
-              subagents: subagentRegistry,
-              turn: buildCancellableDispatchTurn({ build_substrate: makeRitualSubstrate }),
-              // SAME shared runs store the boot reap writes to (task 5).
+              // SAME shared runs store the boot reap writes to.
               runs: ritualRuns,
-              resolve_model: getBestModel,
-              // Task 5 delivery deps: post ritual terminal events through the SAME
-              // `deliver` seam (via `reminderOutbound`) the nudge dispatcher uses,
-              // to the owner's bare `app:<user>` topic.
-              outbound: reminderOutbound,
-              resolve_topic: (reminder) => resolveAppWsReminderTopic(reminder.topic_id),
-              // Design doc §Layer 4: 'instance' rituals root at owner_home (the
-              // read-only cross-project surface, e.g. morning-brief); 'project'
-              // rituals root at their project dir. v1 wires ONLY the 'instance'
-              // root — per-project rooting is coupled to WRITE-CONTAINMENT, and
-              // the task-6 T5 containment spike returned UNPROVABLE (a per-session
-              // settings.json deny does not fail-closed on the shipping CC
-              // version; see docs/plans/executor-mode-reminders-2026-07-20.md → T5
-              // verdict). Containment therefore moves to its own OS-sandbox
-              // prerequisite sprint; until it lands a 'project'-scoped ritual
-              // FAILS CLOSED (the executor lands a durable 'skipped' row) rather
-              // than silently over-granting the owner-wide dir (Argus r1 MAJOR —
-              // permission over-grant). The task-7 bundled defs are both
-              // scope:'instance', so no project-scoped ritual can fire yet — this
-              // is defensive against a future project-scoped registration.
-              // ISSUES #489 — re-arm an occurrence for a bounded retry after a
-              // TRANSIENT failure of the detached turn. Reopen first (a one-shot
-              // ritual row is 'fired' by then; a recurring one is still 'pending'
-              // and reopen is a no-op returning false), then move `fire_at` to the
-              // backoff instant. Guarded so a re-arm can never reject the settle
-              // chain — the executor reads `false` as "the occurrence moved on"
-              // and surfaces the failure normally.
-              rearm: async (reminder, fire_at_sec) => {
-                await reminders.reopen(reminder.id)
-                return reminders.reschedule(reminder.id, fire_at_sec)
-              },
-              scope_cwd: (scope) => {
-                if (scope !== 'instance') {
-                  throw new Error(
-                    `ritual scope '${scope}' not yet supported: per-project rooting + write-containment deferred to the OS-sandbox sprint (T5 containment verdict: UNPROVABLE)`,
-                  )
-                }
-                return owner_home
-              },
             })
           }
         : undefined
@@ -2833,9 +2831,9 @@ export function buildOpenGraphComposer(
         }),
         ...(proactiveLlm !== null
           ? {
-              // LLM brief over real sources (the legacy harness parity) + the dual-rating
-              // ≥7 nudge quality gate (ready for the sweep). Degrade safely.
-              composeBrief: buildLlmBriefComposer(proactiveLlm),
+              // The dual-rating ≥7 nudge quality gate for the idle sweep. Degrades
+              // safely. (`composeBrief` was here too, for the deleted second morning
+              // brief — ISSUES #504.)
               rateNudge: buildLlmNudgeRater(proactiveLlm),
             }
           : {}),
@@ -4536,7 +4534,7 @@ export function buildOpenGraphComposer(
             reflection,
             ...(onboardingSeam !== undefined ? { onboarding: onboardingSeam } : {}),
             // Plan task 8 — deterministic ritual-approval capture. Late-bound deref
-            // of `ritualRegistration` (assigned in `ritual_executor_factory`, which
+            // of `ritualRegistration` (assigned in `init_ritual_planner`, which
             // runs after this construction): the owner's tap of an `rap:` approval
             // token resolves the approval + schedules on approve, and the LLM turn is
             // NEVER dispatched for that act. `null` ⇒ no-op (LLM-less box), returning
@@ -5244,7 +5242,7 @@ export function buildOpenGraphComposer(
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.
-      ...(ritual_executor_factory !== undefined ? { ritual_executor_factory } : {}),
+      ...(init_ritual_planner !== undefined ? { init_ritual_planner } : {}),
       // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
       tasks: tasksConfig,
       // F4 — real heartbeat source (pulsed by the gateway tick via

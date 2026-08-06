@@ -24,19 +24,17 @@ export type {
   ReminderTickOptions,
 } from './tick.ts'
 
-// Executor-mode reminders — the ritual EXECUTOR + its durable run-history writer
-// (plan task 4). The tick dispatch branch routes ritual rows to `fire()`; the
-// composer builds the executor + passes the shared subagent registry / substrate
-// turn / approval manager.
-export { createRitualExecutor } from './ritual-executor.ts'
+// Executor-mode reminders — the ritual FIRE PLAN + its durable run-history
+// writer. A ritual is a REMINDER: the tick has no ritual branch, and the planner
+// only tells the ONE dispatcher what to compose from and what to record
+// (ISSUES #504). There is no executor, no ritual substrate, and no spawn.
+export { buildRitualFirePlanner, RITUAL_MAX_TOKENS } from './ritual-fire.ts'
 export type {
-  RitualExecutor,
-  RitualExecutorDeps,
-  RitualTurn,
-  RitualTurnInput,
-  RitualTurnResult,
-} from './ritual-executor.ts'
-export { RITUAL_AGENT_BASE_PROMPT } from './prompt-path.ts'
+  RitualFirePlanner,
+  RitualFirePlannerDeps,
+  RitualFirePlan,
+  RitualFireDecision,
+} from './ritual-fire.ts'
 export {
   createRitualRunStore,
   MAX_RITUAL_OUTPUT_SUMMARY_CHARS,

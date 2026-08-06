@@ -168,8 +168,9 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
     provides: 'wiring teardown callbacks the boot shell runs on shutdown',
   },
   {
-    field: 'ritual_executor_factory',
-    provides: 'the ritual surface — unset, ritual rows are consumed and nothing executes them',
+    field: 'init_ritual_planner',
+    provides:
+      'the ritual surface — unset, a ritual row composes as an ordinary nudge and its approved prompt is never read',
   },
   {
     field: 'skill_forge',

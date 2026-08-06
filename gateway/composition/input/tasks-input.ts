@@ -1,7 +1,6 @@
 import type { TaskStore } from '@neutronai/tasks/store.ts'
 import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import type { PersonaPromptLoader } from '../../wiring/persona-loader.ts'
-import type { BriefComposer, ProactiveContextSources } from '../../proactive/morning-brief.ts'
 import type { NudgeRater, ProactiveTopicCandidate } from '../../proactive/idle-nudge-sweep.ts'
 import type { OutboundSink } from '../../proactive/sink.ts'
 
@@ -144,34 +143,26 @@ export interface TasksCompositionInput {
        * the brief for this instance (e.g. onboarding not yet complete).
        */
       resolveGeneralTopic?: () => string | null
-      /**
-       * Extra brief context providers (calendar / entity deltas / project
-       * STATUS). Each is optional + gathered behind its own try/catch. The
-       * focus-queue source defaults to the canonical TaskStore when this
-       * omits `focusQueue`.
-       */
-      sources?: ProactiveContextSources
+      // NOTE (ISSUES #504): `sources` (calendar / entity-delta / project-STATUS
+      // brief providers), `composeBrief`, `brief_hour` and `brief_interval_ms` used
+      // to configure a SECOND morning brief from here. All four are gone with it.
+      // No production composer ever set `sources`, so the brief's calendar provider
+      // was supplied by nothing but its own test and the digest had to admit it had
+      // not checked the calendar. The morning brief is now the RITUAL, scheduled as
+      // an ordinary reminder onto the owner's own session.
       /**
        * Enumerate the active project-bound topics + their last-activity
        * watermark for the idle sweep. Required to enable the sweep.
        */
       listIdleTopics?: () => ProactiveTopicCandidate[] | Promise<ProactiveTopicCandidate[]>
       /**
-       * Override the outbound sink the brief + sweep post through. Absent →
+       * Override the outbound sink the idle sweep posts through. Absent →
        * the core `ChannelRouter` (Telegram instances). Open supplies a DURABLE
        * web sink (`buildButtonStoreProactiveSink`) because its `app_socket`
        * topics fire from a timer with no guaranteed live socket — a router
        * post via the live-only `AppWsAdapter` would silently drop the message.
        */
       sink?: OutboundSink
-      /**
-       * Optional LLM brief composer (the legacy harness parity). When supplied, the brief
-       * body is written by the warm LLM over the resolved context; on failure
-       * the deterministic template is used. Production wires
-       * `buildLlmBriefComposer` over the same warm substrate the nudge engine
-       * uses. Absent → the pure template (unchanged default).
-       */
-      composeBrief?: BriefComposer
       /**
        * Optional dual-rating ≥7 quality gate for the idle-nudge sweep (the legacy harness
        * parity). When supplied, a candidate that clears idle/dedupe is also
@@ -182,10 +173,6 @@ export interface TasksCompositionInput {
       rateNudge?: NudgeRater
       /** Owner IANA timezone (defaults to America/Los_Angeles). */
       timezone?: string
-      /** Owner-local hour at/after which the brief may post (default 7). */
-      brief_hour?: number
-      /** Override the morning-brief tick cadence (testing seam). */
-      brief_interval_ms?: number
       /** Override the idle threshold (default 4h). */
       idle_threshold_ms?: number
       /** Override the sweep cadence (default hourly). */
