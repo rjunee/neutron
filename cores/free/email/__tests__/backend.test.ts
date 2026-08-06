@@ -1029,3 +1029,44 @@ describe('sendMessage — Gmail send (gap-audit P0)', () => {
     expect(calls).toBe(0)
   })
 })
+
+describe('buildGoogleGmailClient — a project-scoped list must not 400 (live, 2026-08-06)', () => {
+  // The live failure this pins, seen on EVERY daily triage against real Gmail:
+  //   400 Invalid label: Neutron/quintessential-ventures-studio
+  // `labelIds` takes label IDs. A system label's id equals its name (INBOX), a
+  // USER label's does not (Label_7), so passing the project label NAME as a
+  // labelId made Gmail reject the whole request. `search` in the same file
+  // already did this correctly via `q`; the list path did not.
+  test('the project label rides in `q`, never as a second labelIds', async () => {
+    const seenUrls: string[] = []
+    const client = buildGoogleGmailClient({
+      accessToken: async () => 'ya29.test',
+      fetchImpl: async (input) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        seenUrls.push(url)
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 })
+      },
+    })
+    await client.listMessages({ label: 'INBOX', project_id: 'demo-project' })
+    const url = new URL(seenUrls[0] ?? '', 'https://example.test')
+    // Exactly ONE labelIds — the system label, whose id is its name.
+    expect(url.searchParams.getAll('labelIds')).toEqual(['INBOX'])
+    expect(url.searchParams.get('q')).toBe('label:"Neutron/demo-project"')
+  })
+
+  test('an unscoped list sends no `q` at all', async () => {
+    const seenUrls: string[] = []
+    const client = buildGoogleGmailClient({
+      accessToken: async () => 'ya29.test',
+      fetchImpl: async (input) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        seenUrls.push(url)
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 })
+      },
+    })
+    await client.listMessages({ label: 'INBOX' })
+    const url = new URL(seenUrls[0] ?? '', 'https://example.test')
+    expect(url.searchParams.getAll('labelIds')).toEqual(['INBOX'])
+    expect(url.searchParams.has('q')).toBe(false)
+  })
+})

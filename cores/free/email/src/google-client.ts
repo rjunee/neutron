@@ -181,11 +181,29 @@ export function buildGoogleGmailClient(
       const label = input.label ?? DEFAULT_LABEL
       const params = new URLSearchParams()
       params.append('labelIds', label)
-      // Gmail accepts multiple `labelIds` query parameters and AND-s
-      // them server-side. Adding the per-project label intersects the
-      // inbox label with the project label.
+      // The project scope rides in the `q` QUERY, not a second `labelIds`.
+      //
+      // `labelIds` takes label IDs. A system label's id happens to equal its
+      // name (`INBOX`), which is why the `label` above works — but a USER label
+      // gets an opaque id (`Label_7`), so passing the NAME `Neutron/<project>`
+      // made Gmail reject the whole request:
+      //
+      //   400 Invalid label: Neutron/quintessential-ventures-studio
+      //
+      // Not an edge case — it fired on every single daily triage against the
+      // live instance and the digest never once succeeded. This file already
+      // knew better in two places: the draft/send paths resolve the name through
+      // `ensureLabelImpl` because "threads.modify wants a label_id, NOT a
+      // label_name" (:338), and `search` below AND-s `label:<name>` into `q`.
+      // Query syntax matches on NAMES, so the fix is to do here what `search`
+      // already does — one consistent mechanism for both read paths.
+      //
+      // It also fails SOFT: an unknown label in `q` yields an empty result set
+      // rather than a 400, which is the honest answer for a project whose label
+      // no mail carries yet. The old form turned "nothing matches" into "the
+      // request is invalid", and a caller cannot tell those apart.
       if (input.project_id !== undefined) {
-        params.append('labelIds', projectLabelName(input.project_id))
+        params.set('q', `label:"${projectLabelName(input.project_id)}"`)
       }
       params.set('maxResults', String(limit))
       if (input.page_token !== undefined) {

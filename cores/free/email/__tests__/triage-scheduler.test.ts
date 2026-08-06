@@ -296,3 +296,85 @@ describe('restart idempotency (ISSUES #103)', () => {
     }
   })
 })
+
+describe('TriageScheduler — the digest reads the WHOLE inbox (live 400, 2026-08-06)', () => {
+  // WHY THESE EXIST. The suite above passed with the tick scoping its inbox read
+  // to `Neutron/<project_id>` and it passed after that scoping was removed —
+  // 46 tests, identical result either way. They only ever counted whether the
+  // scheduler FIRED. So a digest that fired daily and read the wrong mailbox
+  // (or, against real Gmail, 400-ed every time) was indistinguishable from a
+  // working one. These assert what the digest SAW.
+  test('the inbox read carries NO project scope', async () => {
+    const { home, close } = tmp()
+    try {
+      const resolver = new EmailProjectCacheResolver({ owner_home: home })
+      const inner = buildSeededInMemoryGmailClient()
+      inner.seed({ subject: 'from a human', from: 'a@x.com', label_ids: ['INBOX'] })
+      const seen: Array<Record<string, unknown>> = []
+      const client = {
+        ...inner,
+        listMessages: async (input: Record<string, unknown>) => {
+          seen.push(input)
+          return inner.listMessages(input as Parameters<typeof inner.listMessages>[0])
+        },
+      } as typeof inner
+      const s = buildTriageScheduler({
+        cacheFor: (id) => resolver.resolve(id),
+        client,
+        targetProjectId: async () => 'demo',
+        fire: async () => ({ chat_message_id: 'cm-1' }),
+        llm: async () => {
+          throw new Error('use fallback')
+        },
+        model: 'haiku',
+        userTz: 'America/Los_Angeles',
+      })
+      await s.start()
+      await s.tick(new Date('2026-05-20T15:00:00Z'))
+      await s.stop()
+      expect(seen.length).toBe(1)
+      expect(seen[0]?.['label']).toBe('INBOX')
+      // The scope that broke it. `project_id` selects the POST target, never the
+      // read filter — the label is applied only to mail Neutron itself wrote, so
+      // scoping the read pointed the morning digest at its own outbound threads.
+      expect(seen[0]?.['project_id']).toBeUndefined()
+      resolver.closeAll()
+    } finally {
+      close()
+    }
+  })
+
+  test('the digest actually SEES ordinary inbox mail, not just "it fired"', async () => {
+    const { home, close } = tmp()
+    try {
+      const resolver = new EmailProjectCacheResolver({ owner_home: home })
+      const client = buildSeededInMemoryGmailClient()
+      // Seeded the way real mail arrives: INBOX, and NO project label. Under the
+      // old project-scoped read the in-memory client filtered this out and the
+      // triage composed over an empty inbox — while still reporting a fire.
+      client.seed({ subject: 'from a human', from: 'a@x.com', label_ids: ['INBOX'] })
+      const inboxes: number[] = []
+      const s = buildTriageScheduler({
+        cacheFor: (id) => resolver.resolve(id),
+        client,
+        targetProjectId: async () => 'demo',
+        fire: async (input) => {
+          inboxes.push(input.inbox.length)
+          return { chat_message_id: 'cm-1' }
+        },
+        llm: async () => {
+          throw new Error('use fallback')
+        },
+        model: 'haiku',
+        userTz: 'America/Los_Angeles',
+      })
+      await s.start()
+      await s.tick(new Date('2026-05-20T15:00:00Z'))
+      await s.stop()
+      expect(inboxes).toEqual([1])
+      resolver.closeAll()
+    } finally {
+      close()
+    }
+  })
+})
