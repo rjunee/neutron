@@ -534,7 +534,7 @@ describe('ReminderTickLoop.runOnce', () => {
  * ISSUES #504 — THE TICK HAS NO RITUAL BRANCH.
  *
  * This block replaces a suite that pinned the OPPOSITE invariant ("a due row with
- * a non-null `ritual_id` routes to `ritual_executor.fire`, NEVER the nudge
+ * a non-null `ritual_id` routes to a separate ritual executor, NEVER the nudge
  * dispatcher"). That routing WAS the defect: it sent every ritual to an ephemeral
  * REPL with no tool bridge, so the morning brief could not reach a Core. The
  * invariant now is that there is exactly ONE dispatch target for every due row,

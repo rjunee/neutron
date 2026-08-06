@@ -365,7 +365,7 @@ export interface ReminderStoreBackendOptions {
   /**
    * Plan task 8 — LATE-BOUND getter for the engine's ritual registration
    * service. Deref'd PER-CALL (not captured) so the adapter picks up the service
-   * the composer assigns AFTER cores mount (inside `ritual_executor_factory`). A
+   * the composer assigns AFTER cores mount (inside `init_ritual_planner`). A
    * getter returning `null`/absent ⇒ `proposeRitual`/`ritualsStatus` throw
    * {@link RitualsUnavailableError} (fail closed, no flags).
    */

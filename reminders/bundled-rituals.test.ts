@@ -77,18 +77,6 @@ let runs: RitualRunStore
 let subagents: SubagentRegistry
 let ritualsDir: string
 
-/** Poll until `pred` holds (or throw) — the ritual settle+post chain is detached
- *  from `fire()`. Mirrors the helper in `ritual-executor.test.ts`. */
-async function waitFor(pred: () => boolean, ms = 2000): Promise<void> {
-  const start = Date.now()
-  while (Date.now() - start < ms) {
-    if (pred()) return
-    // eslint-disable-next-line no-await-in-loop
-    await new Promise((r) => setTimeout(r, 2))
-  }
-  throw new Error('condition not met within timeout')
-}
-
 const noopNotifier: ApprovalNotifier = { notify: async () => {} }
 const passThroughOutbound: ReminderOutbound = { post: async () => true }
 const resolveTopic = (): string => 'app:owner-topic'

@@ -452,7 +452,8 @@ export interface BuildLlmCallSubstrateInput {
    * is load-bearing rather than auto-approved past (incl. Bash). Set ONLY by a
    * WRITING/Bash-ritual factory; forwarded onto
    * `ClaudeCodeSubstrateOptions.disableToolUseAutoApprove`. NOT routed through
-   * `SubstrateProfile` — the profile equivalence net freezes `PROFILE_RITUAL`, so
+   * `SubstrateProfile` — the profile equivalence net froze `PROFILE_RITUAL` (deleted
+   * with the ritual lane, ISSUES #504), so
    * these active knobs are direct call-args a future writing-ritual factory sets
    * without touching the shared profile constant. Absent ⇒ approver ON. */
   disableToolUseAutoApprove?: boolean
@@ -769,7 +770,7 @@ export function buildLlmCallSubstrate(
         }
         // Task 6 (T5 write-containment) — forward the ritual write-containment
         // knobs as DIRECT call-args (never through SubstrateProfile, whose
-        // equivalence net freezes PROFILE_RITUAL). A writing/Bash-ritual factory
+        // equivalence net froze PROFILE_RITUAL, deleted by #504). A writing-agent factory
         // sets these so the deny rule fails closed instead of being auto-approved.
         if (input.disableToolUseAutoApprove !== undefined) {
           opts.disableToolUseAutoApprove = input.disableToolUseAutoApprove

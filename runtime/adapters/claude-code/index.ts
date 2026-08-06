@@ -288,7 +288,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // Task 6 (T5 write-containment) — thread the ritual write-containment knobs so a
   // future writing/Bash-ritual factory can (a) disable the tool-use auto-approver
   // and (b) install a per-session `permissions` deny block. NOT baked into
-  // PROFILE_RITUAL (the substrate-profiles equivalence net freezes it) — direct
+  // a ritual-style trust class (ISSUES #504 deleted PROFILE_RITUAL) — direct
   // call-args, active only when a caller sets them.
   if (options.disableToolUseAutoApprove !== undefined) {
     p.disableToolUseAutoApprove = options.disableToolUseAutoApprove

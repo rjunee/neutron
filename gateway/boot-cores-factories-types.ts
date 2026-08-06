@@ -188,7 +188,7 @@ export interface CoresBackendFactoriesOptions {
    * service. The `reminders_core` factory threads it into
    * `buildReminderStoreBackend({ rituals })` so the `rituals_propose` /
    * `rituals_status` tools deref the service the composer assigns AFTER cores
-   * mount (inside `ritual_executor_factory`). Returns `null` on an LLM-less box
+   * mount (inside `init_ritual_planner`). Returns `null` on an LLM-less box
    * ⇒ the tools throw `RitualsUnavailableError` (fail closed, no flags).
    */
   ritualRegistration?: () =>
