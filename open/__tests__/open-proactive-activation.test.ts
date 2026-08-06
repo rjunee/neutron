@@ -89,9 +89,8 @@ describe('Open proactive activation wiring', () => {
     // timer-fired post survives a disconnected socket.
     expect(typeof proactive!.sink?.send).toBe('function')
 
-    // The LLM brief composer + the ≥7 nudge quality gate are present on a
-    // credentialed boot.
-    expect(typeof proactive!.composeBrief).toBe('function')
+    // The ≥7 nudge quality gate is present on a credentialed boot. (`composeBrief`
+    // was asserted here too, for the second morning brief ISSUES #504 deleted.)
     expect(typeof proactive!.rateNudge).toBe('function')
 
     // The idle-nudge SWEEP is ON (2026-07-30). It was withheld while its
@@ -151,12 +150,10 @@ describe('Open proactive activation wiring', () => {
 
     const proactive = composition.tasks?.proactive
     expect(proactive).toBeDefined()
-    // No feature flag — the brief topic + durable sink are wired regardless.
+    // No feature flag — the general topic + durable sink are wired regardless.
     expect(proactive!.resolveGeneralTopic?.()).toBe(appWsTopicId(OWNER_USER_ID))
     expect(typeof proactive!.sink?.send).toBe('function')
-    // LLM seams degrade to absent (the modules fall back to the pure template /
-    // no quality gate) rather than crashing the boot.
-    expect(proactive!.composeBrief).toBeUndefined()
+    // LLM seams degrade to absent (no quality gate) rather than crashing the boot.
     expect(proactive!.rateNudge).toBeUndefined()
 
     for (const cleanup of composition.realmode_cleanups ?? []) {

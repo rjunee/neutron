@@ -62,13 +62,27 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const BUNDLED_RITUAL_TEMPLATES_DIR: string = join(HERE, 'rituals')
 
 /**
- * The three ENGINE-shipped read-only ritual defs. Every surface is READ-ONLY —
- * zero intersection with `GATED_WRITE_TOOLS`, so the fire-time
- * `gated_tool_surface` refusal never trips and Layer 1 (`--tools` default-deny)
- * contains them. Scope is 'instance' for all three (rooted at owner_home —
- * morning-brief legitimately reads across every project, and a read-only surface
- * grants no write authority at the wider root). `silent: false` — all post their
- * digest, so none of them can land in a log and stop there.
+ * The three ENGINE-shipped bundled ritual defs.
+ *
+ * ⚠️ THE `description` STRINGS NO LONGER PROMISE A SANDBOX, and that correction is
+ * the point (ISSUES #504). They used to end "Read-only: no shell, no writes, no
+ * network", which was true when a ritual ran in an ephemeral REPL restricted to its
+ * own `tool_surface`. A ritual now composes on the OWNER'S OWN warm session, whose
+ * `--tools` surface includes `Bash`, `Write` and `Edit`, and whose surface cannot be
+ * narrowed per fire without evicting the session
+ * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). The `description` is
+ * rendered verbatim into the approval prompt, and that prompt is now the ONLY
+ * security boundary — so a description promising containment the runtime does not
+ * provide is not a stale comment, it is the gate lying to the owner at the exact
+ * moment he decides. Each one now says where it runs instead.
+ *
+ * `tool_surface` is still declared, still hashed into the approval grant, and still
+ * non-empty (#361) — it is what the owner approves, not a runtime restriction.
+ * Every surface remains WRITE-FREE (zero intersection with `GATED_WRITE_TOOLS`) so
+ * the fire-time `gated_tool_surface` refusal never trips. Scope is 'instance' for
+ * all three (rooted at owner_home — morning-brief legitimately reads across every
+ * project). `silent: false` — all post their digest, so none of them can land in a
+ * log and stop there.
  *
  * Surfaces differ in exactly one axis: `kaizen` additionally grants `WebSearch`
  * and therefore declares `egress: 'web'` (the registry enforces that consistency,
@@ -78,11 +92,12 @@ export const BUNDLED_RITUAL_TEMPLATES_DIR: string = join(HERE, 'rituals')
  * shape, so the template forbids putting anything read on disk into a query and
  * the owner grants egress as its own decision.
  *
- * NOTE (kaizen has NO write authority): the legacy ritual auto-filed its top
- * actions into an issues file. `GATED_WRITE_TOOLS` refuses Write/Edit at fire
- * time (`rituals.ts:107`, enforced at `rituals.ts:396`), so that half does not
- * port — kaizen PROPOSES in its delivered report and the owner acts. Do not
- * "fix" this by widening the surface; the gate is the containment.
+ * NOTE (kaizen DECLARES no write authority): the legacy ritual auto-filed its top
+ * actions into an issues file. `GATED_WRITE_TOOLS` still refuses a declared
+ * Write/Edit surface at fire time, so kaizen PROPOSES in its delivered report and
+ * the owner acts. Be honest about what that gate does now, though: it bounds what a
+ * ritual may DECLARE and be approved for, not what the session it runs in can do.
+ * Its template is what keeps kaizen read-only in practice.
  *
  * Frozen so a caller cannot mutate a def before/after registration.
  */
@@ -90,7 +105,7 @@ export const BUNDLED_RITUAL_DEFS: readonly RitualDef[] = Object.freeze([
   Object.freeze({
     id: 'morning-brief',
     description:
-      "Reads every project's STATUS.md and docs in this instance and posts a short start-of-day brief of priorities and blockers. Read-only: no shell, no writes, no network.",
+      "Reads every project's STATUS.md and docs in this instance and posts a short start-of-day brief of priorities and blockers. Runs in your own agent session, so it can reach anything that session can.",
     scope: 'instance',
     tool_surface: Object.freeze(['Read', 'Glob', 'Grep']),
     egress: 'none',
@@ -99,7 +114,7 @@ export const BUNDLED_RITUAL_DEFS: readonly RitualDef[] = Object.freeze([
   Object.freeze({
     id: 'evening-wrap',
     description:
-      "Reads every project's STATUS.md and docs and posts a short end-of-day wrap: state, in-flight work, tomorrow's first move. Read-only: no shell, no writes, no network.",
+      "Reads every project's STATUS.md and docs and posts a short end-of-day wrap: state, in-flight work, tomorrow's first move. Runs in your own agent session, so it can reach anything that session can.",
     scope: 'instance',
     tool_surface: Object.freeze(['Read', 'Glob', 'Grep']),
     egress: 'none',
@@ -108,7 +123,7 @@ export const BUNDLED_RITUAL_DEFS: readonly RitualDef[] = Object.freeze([
   Object.freeze({
     id: 'kaizen',
     description:
-      'Weekly improvement pass: reads the corrections log, diary, standing rules and project status, finds what the owner keeps correcting, and proposes system fixes. Read-only, no writes; searches the web.',
+      'Weekly improvement pass: reads the corrections log, diary, standing rules and project status, finds what you keep correcting, and proposes fixes. Runs in your own agent session; searches the web.',
     scope: 'instance',
     tool_surface: Object.freeze(['Read', 'Glob', 'Grep', 'WebSearch']),
     egress: 'web',

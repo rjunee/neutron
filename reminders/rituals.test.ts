@@ -290,7 +290,7 @@ describe('validateRitualFire — fail-CLOSED verdicts', () => {
 
 describe('module constants', () => {
   test('timeout is 45min; model tier is the smart default', () => {
-    expect(RITUAL_TIMEOUT_MS).toBe(2_700_000)
+    expect(RITUAL_TIMEOUT_MS).toBe(600_000)
     expect(RITUAL_MODEL_TIER).toBe('best')
   })
 })

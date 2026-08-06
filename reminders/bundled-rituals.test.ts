@@ -34,18 +34,35 @@ import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approval.ts'
 
 import { ReminderStore, type Reminder } from './store.ts'
-import {
-  createRitualRegistry,
-  GATED_WRITE_TOOLS,
-  RITUAL_TIMEOUT_MS,
-} from './rituals.ts'
+import { createRitualRegistry, GATED_WRITE_TOOLS, RITUAL_TIMEOUT_MS } from './rituals.ts'
 import { createRitualRunStore, type RitualRunStore } from './ritual-runs.ts'
+import { buildRitualFirePlanner } from './ritual-fire.ts'
 import {
-  createRitualExecutor,
-  type RitualTurnInput,
-  type RitualTurnResult,
-} from './ritual-executor.ts'
-import type { ReminderOutbound } from './dispatcher.ts'
+  buildReminderDispatcher,
+  type ReminderLlm,
+  type ReminderOutbound,
+} from './dispatcher.ts'
+import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+
+/**
+ * The owner's live-chat `--tools` surface, as a LOCAL literal.
+ *
+ * Deliberately NOT imported from `@neutronai/gateway` — `reminders` sits BELOW the
+ * gateway and the barrel refuses that edge on purpose (`reminders/index.ts`). So
+ * this layer proves only that the surface it is HANDED reaches the composition
+ * spec; that production hands it the real live-chat constant is pinned one layer
+ * up, in `open/__tests__/open-reminder-dispatch-wiring.test.ts`.
+ */
+const OWNER_CHAT_TOOL_SURFACE = [
+  'Read',
+  'Glob',
+  'Grep',
+  'Write',
+  'Edit',
+  'Bash',
+  'Skill',
+  'Workflow',
+] as const
 import {
   BUNDLED_RITUAL_DEFS,
   bundledTemplatePathFor,
@@ -59,18 +76,6 @@ let store: ReminderStore
 let runs: RitualRunStore
 let subagents: SubagentRegistry
 let ritualsDir: string
-
-/** Poll until `pred` holds (or throw) — the ritual settle+post chain is detached
- *  from `fire()`. Mirrors the helper in `ritual-executor.test.ts`. */
-async function waitFor(pred: () => boolean, ms = 2000): Promise<void> {
-  const start = Date.now()
-  while (Date.now() - start < ms) {
-    if (pred()) return
-    // eslint-disable-next-line no-await-in-loop
-    await new Promise((r) => setTimeout(r, 2))
-  }
-  throw new Error('condition not met within timeout')
-}
 
 const noopNotifier: ApprovalNotifier = { notify: async () => {} }
 const passThroughOutbound: ReminderOutbound = { post: async () => true }
@@ -286,187 +291,213 @@ describe('registerBundledRituals', () => {
   })
 })
 
-// ── T7e — UNAPPROVED-BY-DEFAULT FIRE (registers but stays unapproved) ─────────
+// ── T7e/T7f — a bundled ritual fires down the ONE reminder path (ISSUES #504) ──
+//
+// These two blocks replaced suites that drove `createRitualExecutor` and asserted
+// a spawn onto the ephemeral `cc-ritual-*` REPL. That lane is deleted: a ritual is
+// a reminder, so the subject under test is now the ONE `ReminderDispatcher` with a
+// ritual fire planner installed, and what gets asserted is the thing the old lane
+// got wrong — that the ritual's turn goes to the SAME composition seam (and
+// therefore the same tool-bridged warm session) a plain nudge's does.
+
+/** Build the ONE dispatcher with a real planner over the real ApprovalManager. */
+function buildFireStack(opts: {
+  registry: ReturnType<typeof createRitualRegistry>
+  approved: boolean
+  mint: string
+  outbound?: ReminderOutbound
+  compose?: (spec: AgentSpec) => Promise<string>
+}): {
+  dispatch: (r: Reminder) => Promise<void>
+  specs: AgentSpec[]
+  timeouts: (number | undefined)[]
+  composeCalls: () => number
+} {
+  const specs: AgentSpec[] = []
+  const timeouts: (number | undefined)[] = []
+  const llm: ReminderLlm = {
+    compose: async (spec, o) => {
+      specs.push(spec)
+      timeouts.push(o?.timeout_ms)
+      return opts.compose !== undefined ? await opts.compose(spec) : 'composed body'
+    },
+  }
+  const planner = buildRitualFirePlanner({
+    registry: opts.registry,
+    // REAL approval path unless the test explicitly forces approval: zero
+    // approval rows means UNAPPROVED, which must fail closed.
+    approvals: new ApprovalManager(db, noopNotifier),
+    project_slug: 'owner',
+    runs,
+    ...(opts.approved ? { build_approval_check: () => ({ isApproved: () => true }) } : {}),
+    mint_run_id: () => opts.mint,
+  })
+  const dispatcher = buildReminderDispatcher({
+    outbound: opts.outbound ?? passThroughOutbound,
+    llm,
+    resolveTopicId: resolveTopic,
+    // The owner's live-chat surface, as production threads it.
+    tool_names: OWNER_CHAT_TOOL_SURFACE,
+    ritual_planner: planner,
+    resolve_ritual_model: () => 'model-best',
+  })
+  return {
+    dispatch: (r) => dispatcher.dispatch(r),
+    specs,
+    timeouts,
+    composeCalls: () => specs.length,
+  }
+}
+
 describe('bundled ritual fires UNAPPROVED by default (REAL ApprovalManager path)', () => {
-  test('morning-brief with zero approval rows → durable skipped/unapproved, no turn, no spawn', async () => {
-    seedBundledRituals({ rituals_dir: ritualsDir })
-    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
-    registerBundledRituals(registry)
+  test.each(['morning-brief', 'kaizen'])(
+    '%s with zero approval rows → durable skipped/unapproved, NO turn, NO post',
+    async (id) => {
+      seedBundledRituals({ rituals_dir: ritualsDir })
+      const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+      registerBundledRituals(registry)
 
-    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
-    const exec = createRitualExecutor({
-      rearm: async () => false,
-      registry,
-      // REAL approval path — zero approval rows means unapproved. OMIT
-      // build_approval_check so the production createRitualApprovalCheck runs.
-      approvals: new ApprovalManager(db, noopNotifier),
-      project_slug: 'owner',
-      instance_key: 'owner',
-      subagents,
-      outbound: passThroughOutbound,
-      resolve_topic: resolveTopic,
-      turn,
-      runs,
-      resolve_model: () => 'model-best',
-      scope_cwd: (s) => {
-        if (s !== 'instance') throw new Error('unsupported')
-        return tmp
-      },
-      mint_run_id: () => 'run-1',
-    })
+      const posted: string[] = []
+      const stack = buildFireStack({
+        registry,
+        approved: false,
+        mint: 'run-skip',
+        outbound: {
+          post: async (m) => {
+            posted.push(m.body)
+            return true
+          },
+        },
+      })
 
-    await exec.fire(await ritualRow('morning-brief'))
+      await stack.dispatch(await ritualRow(id))
 
-    const row = runs.get('run-1')!
-    expect(row.status).toBe('skipped')
-    expect(row.skip_reason).toBe('unapproved')
-    expect(row.subagent_run_id).toBeNull()
-    expect(turn).toHaveBeenCalledTimes(0)
-    // Spawned NOTHING.
-    expect(subagents.snapshot()).toHaveLength(0)
-  })
-
-  test('kaizen with zero approval rows → durable skipped/unapproved, no turn, no spawn', async () => {
-    seedBundledRituals({ rituals_dir: ritualsDir })
-    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
-    registerBundledRituals(registry)
-
-    const turn = mock(async (): Promise<RitualTurnResult> => ({ result: '', status: 'completed' }))
-    const exec = createRitualExecutor({
-      rearm: async () => false,
-      registry,
-      approvals: new ApprovalManager(db, noopNotifier),
-      project_slug: 'owner',
-      instance_key: 'owner',
-      subagents,
-      outbound: passThroughOutbound,
-      resolve_topic: resolveTopic,
-      turn,
-      runs,
-      resolve_model: () => 'model-best',
-      scope_cwd: (s) => {
-        if (s !== 'instance') throw new Error('unsupported')
-        return tmp
-      },
-      mint_run_id: () => 'run-kz',
-    })
-
-    await exec.fire(await ritualRow('kaizen'))
-
-    const row = runs.get('run-kz')!
-    expect(row.status).toBe('skipped')
-    expect(row.skip_reason).toBe('unapproved')
-    expect(row.subagent_run_id).toBeNull()
-    expect(turn).toHaveBeenCalledTimes(0)
-    expect(subagents.snapshot()).toHaveLength(0)
-  })
+      const row = runs.get('run-skip')!
+      expect(row.status).toBe('skipped')
+      expect(row.skip_reason).toBe('unapproved')
+      expect(row.subagent_run_id).toBeNull()
+      // The prompt was never composed and nothing reached the owner.
+      expect(stack.composeCalls()).toBe(0)
+      expect(posted).toHaveLength(0)
+      // And nothing was spawned — there is no spawn path left at all.
+      expect(subagents.snapshot()).toHaveLength(0)
+    },
+  )
 })
 
-// ── T7f — approved spec-shape (the T1 pin task 8 unlocks) ─────────────────────
-describe('bundled ritual approved fire — spec shape', () => {
-  test('morning-brief approved → turn once with exact tools/prompt/cwd/timeout/model', async () => {
+describe('bundled ritual approved fire — composes on the shared session and posts', () => {
+  test('morning-brief approved → ONE turn on the shared seam with the approved prompt', async () => {
     seedBundledRituals({ rituals_dir: ritualsDir })
     const registry = createRitualRegistry({ rituals_dir: ritualsDir })
     registerBundledRituals(registry)
     const seededBytes = readFileSync(join(ritualsDir, 'morning-brief.md'), 'utf8')
 
-    const turnCalls: RitualTurnInput[] = []
-    const turn = mock(async (input: RitualTurnInput): Promise<RitualTurnResult> => {
-      turnCalls.push(input)
-      return { result: 'brief done', status: 'completed' }
-    })
-    const exec = createRitualExecutor({
-      rearm: async () => false,
+    const posted: { topic_id: string; body: string }[] = []
+    const stack = buildFireStack({
       registry,
-      approvals: new ApprovalManager(db, noopNotifier),
-      project_slug: 'owner',
-      instance_key: 'owner',
-      subagents,
-      outbound: passThroughOutbound,
-      resolve_topic: resolveTopic,
-      turn,
-      runs,
-      resolve_model: () => 'model-best',
-      scope_cwd: (s) => {
-        if (s !== 'instance') throw new Error('unsupported')
-        return tmp
+      approved: true,
+      mint: 'run-ok',
+      outbound: {
+        post: async (m) => {
+          posted.push({ topic_id: m.topic_id, body: m.body })
+          return true
+        },
       },
-      build_approval_check: () => ({ isApproved: () => true }),
-      mint_run_id: () => 'run-2',
+      compose: async () => 'brief done',
     })
 
-    await exec.fire(await ritualRow('morning-brief'))
+    await stack.dispatch(await ritualRow('morning-brief'))
 
-    expect(turn).toHaveBeenCalledTimes(1)
-    const ti = turnCalls[0]!
-    expect([...ti.tools!]).toEqual(['Read', 'Glob', 'Grep'])
-    expect(ti.user_message).toBe(seededBytes)
-    expect(ti.repo_path).toBe(tmp)
-    expect(ti.timeout_ms).toBe(RITUAL_TIMEOUT_MS)
-    expect(ti.model).toBe('model-best')
+    // ONE composition turn, carrying the APPROVED prompt bytes verbatim.
+    expect(stack.composeCalls()).toBe(1)
+    const spec = stack.specs[0]!
+    expect(spec.prompt).toBe(seededBytes)
+    expect(spec.model_preference).toEqual(['model-best'])
+    expect(stack.timeouts[0]).toBe(RITUAL_TIMEOUT_MS)
+
+    // ⚠️ THE LOAD-BEARING ASSERTION. The turn presents the OWNER'S LIVE-CHAT tool
+    // surface — NOT the ritual def's narrower ['Read','Glob','Grep']. That is the
+    // #504 fix, not a leak: the ritual composes on the owner's WARM session, and
+    // the persistent pool evicts+respawns a warm child whose requested surface
+    // differs from the spawned one (spawn.ts:824,837). Presenting the ritual's own
+    // surface would tear the owner's chat REPL down on every fire AND still not
+    // restrict the ritual. `tool_surface` is now the APPROVAL declaration; the
+    // session is the runtime.
+    expect([...spec.tools.map((t) => t.name)]).toEqual([...OWNER_CHAT_TOOL_SURFACE])
+    expect(spec.tools.map((t) => t.name)).toContain('Bash')
+
+    // The ledger recorded the whole chain, and the body reached the owner.
+    const row = runs.get('run-ok')!
+    expect(row.status).toBe('finished')
+    expect(row.content_hash).toBeTruthy()
+    expect(row.ended_at).not.toBeNull()
+    expect(row.output_summary).toBe('brief done')
+    expect(posted).toEqual([{ topic_id: 'app:owner-topic', body: 'brief done' }])
   })
 
-  // The two things a bundled kaizen can silently get wrong, proven by OUTCOME:
-  //  1. the widened surface never reaches the spawn (a kaizen with no WebSearch
-  //     is granted the tools of a memory-diff and cannot do half its job); and
-  //  2. the report goes nowhere. Skill Forge shipped for months persisting
-  //     proposals into a log.info and telling nobody (#51). A weekly report that
-  //     lands in a run row and never posts is the same defect wearing a hat, so
-  //     this asserts the POST, not `silent === false`.
-  test('kaizen approved → WebSearch reaches the spawn AND the report is posted', async () => {
+  // The thing a bundled kaizen can silently get wrong: the report goes nowhere.
+  // Skill Forge shipped for months persisting proposals into a log.info and telling
+  // nobody (#51). A weekly report that lands in a run row and never posts is the
+  // same defect wearing a hat, so this asserts the POST, not `silent === false`.
+  test('kaizen approved → the report is POSTED, not just recorded', async () => {
     seedBundledRituals({ rituals_dir: ritualsDir })
     const registry = createRitualRegistry({ rituals_dir: ritualsDir })
     registerBundledRituals(registry)
     const seededBytes = readFileSync(join(ritualsDir, 'kaizen.md'), 'utf8')
 
     const posted: { topic_id: string; body: string }[] = []
-    const capturingOutbound: ReminderOutbound = {
-      post: async (m) => {
-        posted.push({ topic_id: m.topic_id, body: m.body })
-        return true
-      },
-    }
-
-    const turnCalls: RitualTurnInput[] = []
-    const turn = mock(async (input: RitualTurnInput): Promise<RitualTurnResult> => {
-      turnCalls.push(input)
-      return { result: 'SYSTEMIC: the same correction landed 4 times.', status: 'completed' }
-    })
-    const exec = createRitualExecutor({
-      rearm: async () => false,
+    const stack = buildFireStack({
       registry,
-      approvals: new ApprovalManager(db, noopNotifier),
-      project_slug: 'owner',
-      instance_key: 'owner',
-      subagents,
-      outbound: capturingOutbound,
-      resolve_topic: resolveTopic,
-      turn,
-      runs,
-      resolve_model: () => 'model-best',
-      scope_cwd: (s) => {
-        if (s !== 'instance') throw new Error('unsupported')
-        return tmp
+      approved: true,
+      mint: 'run-kz-ok',
+      outbound: {
+        post: async (m) => {
+          posted.push({ topic_id: m.topic_id, body: m.body })
+          return true
+        },
       },
-      build_approval_check: () => ({ isApproved: () => true }),
-      mint_run_id: () => 'run-kz-ok',
+      compose: async () => 'SYSTEMIC: the same correction landed 4 times.',
     })
 
-    await exec.fire(await ritualRow('kaizen'))
+    await stack.dispatch(await ritualRow('kaizen'))
 
-    expect(turn).toHaveBeenCalledTimes(1)
-    const ti = turnCalls[0]!
-    expect([...ti.tools!]).toEqual(['Read', 'Glob', 'Grep', 'WebSearch'])
-    expect(ti.user_message).toBe(seededBytes)
-
-    // The settle+post chain is DETACHED from fire() (ritual-executor.ts) — poll it
-    // rather than asserting straight after fire, or this passes for the wrong
-    // reason on a slow machine and fails for the wrong reason on a fast one.
-    await waitFor(() => posted.length >= 1)
-
-    // It REACHED him: one post, on the owner's topic, carrying the report text.
+    expect(stack.composeCalls()).toBe(1)
+    expect(stack.specs[0]!.prompt).toBe(seededBytes)
+    // It REACHED him — synchronously, because the fire is no longer detached.
     expect(posted).toHaveLength(1)
     expect(posted[0]!.topic_id).toBe('app:owner-topic')
     expect(posted[0]!.body).toBe('SYSTEMIC: the same correction landed 4 times.')
+    expect(runs.get('run-kz-ok')!.status).toBe('finished')
+  })
+
+  test('an approved ritual whose turn yields nothing is a RECORDED, NOTICED failure', async () => {
+    seedBundledRituals({ rituals_dir: ritualsDir })
+    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+    registerBundledRituals(registry)
+
+    const posted: string[] = []
+    const stack = buildFireStack({
+      registry,
+      approved: true,
+      mint: 'run-empty',
+      outbound: {
+        post: async (m) => {
+          posted.push(m.body)
+          return true
+        },
+      },
+      // Empty output — the nudge path would degrade to a literal body; a ritual
+      // has none, so it must record a failure rather than post a placeholder.
+      compose: async () => '   ',
+    })
+
+    await stack.dispatch(await ritualRow('morning-brief'))
+
+    const row = runs.get('run-empty')!
+    expect(row.status).toBe('failed')
+    expect(row.failure_reason).toContain('returned an empty body')
+    // Exactly one owner-visible notice — a dead ritual is never silent.
+    expect(posted).toHaveLength(1)
+    expect(posted[0]).toContain('morning-brief')
   })
 })

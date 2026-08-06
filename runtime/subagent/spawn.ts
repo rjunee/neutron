@@ -18,11 +18,11 @@
  *      steps 3-4 so a coalescing retry (which adds no child + reuses the live
  *      slot) is never blocked by the child or concurrency caps.
  *   3. live children of `parent_run_id` < MAX_CHILDREN_PER_AGENT (new children only)
- *   4. concurrency lane cap. A `ritual` spawn counts ONLY live ritual rows against
- *      MAX_CONCURRENT_RITUALS; every other kind counts ONLY live non-ritual rows
- *      against MAX_CONCURRENT_SUBAGENTS. The two lanes are isolated in BOTH
- *      directions — a ritual pile-up can't starve interactive `/dispatch` + Trident
- *      (they never share a counter), and rituals cap at their own small ceiling.
+ *   4. concurrency cap — live rows < MAX_CONCURRENT_SUBAGENTS. There is ONE lane.
+ *      A second, isolated `ritual` lane used to live here; ISSUES #504 deleted the
+ *      ritual spawn path (a ritual is now a reminder composed on the owner's own
+ *      warm session, and spawns nothing), so nothing could ever enter that lane
+ *      again and it went with it.
  *
  * Returns the freshly-created `SubagentRecord` (status=`pending`). The caller
  * is responsible for kicking off the actual substrate dispatch and calling
@@ -41,7 +41,6 @@
 
 import {
   MAX_CHILDREN_PER_AGENT,
-  MAX_CONCURRENT_RITUALS,
   MAX_CONCURRENT_SUBAGENTS,
   MAX_SPAWN_DEPTH,
   type AgentKind,
@@ -197,27 +196,15 @@ export async function spawnSubagent(
     }
   }
 
-  // Concurrency LANE cap (step 4). Rituals and interactive dispatch occupy
-  // ISOLATED lanes so neither can starve the other: a ritual counts only live
-  // ritual rows against MAX_CONCURRENT_RITUALS; every other kind counts only
-  // live NON-ritual rows against MAX_CONCURRENT_SUBAGENTS. Counting the two
-  // populations separately (rather than one shared `live().length`) is what
-  // makes the isolation bidirectional.
+  // Concurrency cap (step 4) — ONE lane over every live row. The separate ritual
+  // lane this used to maintain is gone with the ritual spawn path (ISSUES #504):
+  // a ritual composes on the owner's warm session and never reaches this function,
+  // so a second counter had no population to count.
   const live = deps.registry.live()
-  if (input.agent_kind === 'ritual') {
-    const liveRituals = live.filter((r) => r.agent_kind === 'ritual').length
-    if (liveRituals >= MAX_CONCURRENT_RITUALS) {
-      throw new Error(
-        `subagent spawn: ritual lane cap hit (${liveRituals}/${MAX_CONCURRENT_RITUALS}); refusing new spawn`,
-      )
-    }
-  } else {
-    const liveNonRitual = live.filter((r) => r.agent_kind !== 'ritual').length
-    if (liveNonRitual >= MAX_CONCURRENT_SUBAGENTS) {
-      throw new Error(
-        `subagent spawn: global concurrency cap hit (${liveNonRitual}/${MAX_CONCURRENT_SUBAGENTS}); refusing new spawn`,
-      )
-    }
+  if (live.length >= MAX_CONCURRENT_SUBAGENTS) {
+    throw new Error(
+      `subagent spawn: global concurrency cap hit (${live.length}/${MAX_CONCURRENT_SUBAGENTS}); refusing new spawn`,
+    )
   }
 
   const run_id = (deps.mint_run_id ?? defaultMintRunId)()

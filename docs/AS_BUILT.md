@@ -2,6 +2,124 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-05 — the ritual lane is deleted; a ritual is a reminder that fires into the owner's own session
+
+Branch `fix/issue-504-delete-ritual-lane`. ISSUES #504 + #506; decision of record:
+neutron-managed `SPEC.md` § Decisions Log 2026-08-05, which OVERTURNS the
+sandboxed-ritual-substrate design of 2026-07-20.
+
+**The problem, in one branch.** `reminders/tick.ts` routed a due row with a
+non-null `ritual_id` to `ritual_executor.fire(reminder)` INSTEAD of the nudge
+dispatcher. Downstream of that single fork a normal reminder composed on the
+project's warm pooled session and inherited everything it has — Cores, the
+native-MCP tool bridge, calendar, Drive, memory — while a ritual spawned a fresh
+ephemeral `cc-ritual-*` REPL that wired NO tool bridge. So the morning brief could
+not read the owner's calendar: granting `mcp__neutron__calendar_list` in its
+`tool_surface` validated and then failed, because the MCP server it named did not
+exist inside the sandbox. **The lane built to make rituals SAFE was the lane that
+made them USELESS.** All three bundled rituals (`morning-brief`, `evening-wrap`,
+`kaizen`) were affected through that one line; there was no fourth.
+
+**The fix is a deletion, not a flag.** `reminders/tick.ts` now hands EVERY due row
+to `dispatcher.dispatch` and has no `ritual_id` branch, no `ritual_executor`
+option, and no knowledge of rituals. `reminders/dispatcher.ts` became the ONE
+fire-time path: it asks a ritual fire PLANNER (new `reminders/ritual-fire.ts`) what
+the row composes from and what must be recorded, then composes and posts through
+the same `llm.compose` call and the same outbound for both kinds. A `nudge` answer
+composes the stored message; a `skipped` answer writes a durable
+`code_ritual_runs` 'skipped' row and posts nothing; a `fire` answer writes a
+`'running'` row, composes the APPROVED PROMPT on the owner's warm `cc-agent-*`
+session, posts, and settles the ledger.
+
+**Deleted** (with their tests, not orphaned): `reminders/ritual-executor.ts`,
+`reminders/ritual-retry.ts`, `reminders/prompt-path.ts`,
+`reminders/ritual-agent-base.md`, `makeRitualSubstrate` (`open/wiring/substrates.ts`),
+`PROFILE_RITUAL` (`gateway/wiring/substrate-profiles.ts`) and its
+equivalence-net entry, the separate `agent_kind:'ritual'` concurrency lane +
+`MAX_CONCURRENT_RITUALS` (`runtime/subagent/spawn.ts`, `registry.ts` — one lane
+now), `CompositionInput.ritual_executor_factory` (replaced by the
+`init_ritual_planner` install hook), and the orphaned
+`collapseAttemptsToOccurrences`. The `AgentKind` union member `'ritual'` and
+migration 0106's CHECK are RETAINED for historical rows, documented as legacy —
+dropping a value from a SQLite CHECK means a table rebuild.
+
+**The security moved to the approval gate, which is now the only boundary.** Kept
+and exercised on every fire: fail-closed `validateRitualFire`, the content-hash
+binding recomputed from LIVE bytes, `RITUAL_ID_RE`, the non-empty-`tool_surface`
+pin (#361), the approval records, and the `code_ritual_runs` ledger.
+
+**⚠️ `tool_surface` is now an APPROVAL DECLARATION, not a runtime grant — a
+mechanical consequence.** A ritual composes on the owner's warm pooled session,
+whose `--tools` allow-list is fixed at SPAWN, and the persistent-REPL reuse guard
+EVICTS AND RESPAWNS a warm child whose requested surface differs
+(`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). Passing a per-ritual
+surface would not restrict the ritual — it would destroy the owner's live chat REPL
+on every fire and his next chat turn would destroy it again. This also exposed a
+PRE-EXISTING defect: `reminders/dispatcher.ts` had its own narrower
+`['Read','Glob','Grep']` default, so **every fired reminder was already evicting
+the owner's warm chat session.** `LIVE_AGENT_TOOL_NAMES` is now exported from
+`gateway/wiring/build-live-agent-turn.ts` and threaded by the composer as
+`tool_names`. The bundled defs' `description` strings were rewritten to stop
+promising "no shell, no writes, no network" — that string is rendered verbatim into
+the approval prompt, so under the new runtime it was the gate lying to the owner at
+the moment he decides.
+
+**`RITUAL_TIMEOUT_MS` 45 min → 10 min, ONE constant.** A ritual is now one AWAITED
+turn inside a SINGLE-FLIGHT tick, so its budget is also the longest it can stall
+every other due reminder. The constant is hashed into the approval grant by BOTH
+the request and check sides; a second constant for the real budget would have made
+every approved ritual compute a different hash at fire time and refuse as
+`unapproved` forever (caught before merge). Changing it invalidates existing
+approvals BY DESIGN — the runtime changed from a read-only sandbox to the owner's
+fully-capable session, so an old grant must not silently carry over.
+
+**New `service.reapprove(id)` + a hash-aware boot sweep, because otherwise that
+invalidation is a silent death.** `enable()` refuses once `<id>.def.json` exists and
+the sweep treated that file as "done", so a ritual whose live hash lost its grant
+had no prompt and no fire — only durable 'unapproved' rows nobody reads.
+`bundled-ritual-enable.ts` now consults `status()` and re-requests when the live
+hash has NO grant, leaving `pending` alone and `denied` denied. This also closes a
+pre-existing silent death: an owner editing `<owner_home>/rituals/<id>.md`.
+
+**Collapsed to ONE morning brief.** `gateway/proactive/morning-brief.ts` DELETED
+with its cron (`proactive.morning_brief`), its `tasks.proactive` config keys
+(`sources`, `composeBrief`, `brief_hour`, `brief_interval_ms`) and its test. It
+declared `calendarToday`/`entityDeltas`/`projectStatus` providers that **nothing in
+production ever supplied** — only its own test — the persona-gen shape, and the
+reason its brief had to say "I couldn't check your calendar". The RITUAL survives
+because it is the one that can reach a Core. `proactive_brief_log` +
+`ProactiveStateStore.hasBriefForDay`/`recordBriefForDay` are left in place unused
+rather than migrated away. (`onboarding/overnight/morning-brief.ts` shares the
+filename but is the OVERNIGHT-WORK reporter — wired, working, untouched.)
+
+**ISSUES #506 — a failed ritual is now diagnosable.** The old lane recorded
+`failure_reason: "retry exhausted after 1 attempts: failed"` (inner cause: the
+literal word `failed`) and logged nothing that named the ritual, so a real
+`evening-wrap` failure had no trace on either surface. `composeTurn` now returns the
+CAUSE rather than a bare null, the ritual path writes that verbatim into the ledger
+(capped by `MAX_RITUAL_FAILURE_REASON_CHARS`), and the failure is logged at ERROR
+with ritual_id + run_id. The `1 attempts` puzzle is also explained: the deleted
+`alreadyDelivered` guard keyed on `reminder_id`, which a RECURRING ritual reuses
+across occurrences, so one past `finished` row suppressed every future retry — moot
+now that the retry machinery is gone.
+
+**Tests.** New: `reminders/ritual-fire.ts` coverage via a rewritten
+`reminders/bundled-rituals.test.ts` (fail-closed unapproved → durable row + NO turn
++ NO post; approved → ONE turn carrying the approved prompt bytes and the LIVE-CHAT
+surface incl. `Bash`, ledger running→finished, body posted; empty turn → recorded +
+noticed failure), `gateway/wiring/__tests__/reminder-compose-tool-surface-parity.test.ts`
+(cross-layer: `reminders` cannot import the gateway constant, so nothing else can
+see both halves), `open/__tests__/open-reminder-dispatch-tool-surface.test.ts`
+(walks the REAL composer, captures the AgentSpec that reaches the substrate).
+Rewritten: `reminders/tick.test.ts` (the OLD suite pinned "a ritual routes to
+`ritual_executor.fire`, NEVER the dispatcher" — the exact defect; it now pins one
+dispatch target for every row), `gateway/composition/build-core-modules-ritual-planner.test.ts`,
+`runtime/subagent/spawn-lane.test.ts`. Six mutations applied and ALL SIX killed:
+reintroduce the second lane (5 fail), fail-open validation (2), skip the ledger
+write (3), break the nudge post path (14), restore #506's tautological reason (1),
+drop the composer's `tool_names` (1). Suites green: `reminders/` 377 pass / 3 skip,
+plus the affected gateway/open/runtime files; `bunx tsc -p tsconfig.json` and
+`bash scripts/ci/typecheck-all.sh` clean.
 ## 2026-08-05 — mobile chat opens at the bottom, and only anchors a message top when it is unread
 
 Branch `fix/issue-505-chat-initial-anchor` (ISSUES #505). Changed:

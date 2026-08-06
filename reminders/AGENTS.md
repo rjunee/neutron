@@ -13,41 +13,40 @@ fire-time text is composed at fire time, never pre-rendered.
   `recurrence_spec` 5-field cron (mutually exclusive; `isRecurring()` is the
   single predicate). Optional `ritual_id` write/read path (charset-guarded).
 - `tick.ts` — a single-flight `setInterval` that CLAIMS each due row before
-  dispatch (crash-safe at-most-once), advances it via `computeNextFire`, and
-  routes a `ritual_id` row to `ritual_executor.fire()` (awaited inside the tick
-  quiescence boundary). `fire()` answers a `RitualFireOutcome`: `consume` keeps
-  the claim, `retry` makes the tick re-arm the occurrence at a BACKED-OFF instant
-  (ISSUES #489 — the old shape reverted to the row's original, already-due
-  `fire_at`, so a startup failure re-fired every 30 s forever).
-- `dispatcher.ts` + `message-shape.ts` — the three fire-time message shapes
-  (literal / smart-wrap `[smart]` / pattern-template `PATTERN:`), composed on a
-  Haiku-class turn with live context, degrading to a literal fallback so a
-  reminder ALWAYS delivers.
-- `context.ts`, `prompt.ts`, `prompt-path.ts`, `reminder-agent-base.md` — the
-  fire-time agent's context sources + base prompt.
+  dispatch (crash-safe at-most-once), advances it via `computeNextFire`, and hands
+  EVERY due row to `dispatcher.dispatch`. **There is no `ritual_id` branch here and
+  must never be one again** (ISSUES #504): the branch that used to live at that spot
+  routed rituals to a separate executor on an ephemeral REPL with no tool bridge,
+  which is why the morning brief could not read the owner's calendar.
+- `dispatcher.ts` + `message-shape.ts` — the ONE fire-time path. For a nudge: the
+  three message shapes (literal / smart-wrap `[smart]` / pattern-template
+  `PATTERN:`) composed with live context, degrading to a literal fallback so a
+  reminder ALWAYS delivers. For a ritual: the approved prompt from the fire plan,
+  a wider budget, no literal fallback (a failure is recorded + noticed instead).
+  BOTH compose through the SAME `llm.compose` call on the owner's warm chat
+  substrate and post through the SAME outbound, which is the whole point.
+- `ritual-fire.ts` — the ritual FIRE PLAN: given a due row, "what does this compose
+  from and what must be recorded?" as data plus a settle hook. Owns no substrate,
+  spawns nothing, never posts.
+- `context.ts`, `prompt.ts`, `reminder-agent-base.md` — the fire-time context
+  sources + base prompt.
 
-**Ritual executor:**
+**Rituals** (a ritual is a REMINDER — see `ritual-fire.ts` above):
 - `rituals.ts` — `RitualDef`, `createRitualRegistry`, the fail-closed async
   `validateRitualFire`, and `GATED_WRITE_TOOLS` (Bash/Write/Edit/MultiEdit/
   NotebookEdit stay fire-time-gated).
 - `ritual-approval.ts` — `computeRitualContentHash` + `createRitualApprovalCheck`
   (re-verifies the hash from LIVE file bytes on every fire; an owner edit or a
   surface/cadence widening drops approval by design).
-- `ritual-executor.ts` — claim → validate → durable `code_ritual_runs` row →
-  ritual-lane spawn (detached turn) → terminal bookkeeping → bounded transient
-  recovery. Never throws (its body is fully guarded; a rejection is a bug, and the
-  tick treats it as one).
-- `ritual-retry.ts` — the ONE recovery policy behind both failure surfaces (a fire
-  -startup throw and a settled turn): a three-valued `transient | permanent |
-  indeterminate` classification read off the O3 error taxonomy
-  (`runtime/errors.ts`), a 4-attempt cap, and a pure exponential backoff
-  (2m/8m/32m). Only `transient` retries; `indeterminate` neither retries nor
-  claims success. A retry re-arms the SAME occurrence and is refused outright if
-  anything was already DELIVERED for it, so recovery can never produce a second
-  morning brief.
-- `ritual-delivery.ts` — completion delivery, one-line failure notices,
-  3-consecutive-failure escalation, boot-reap of orphaned `running` rows, 30d
-  prune.
+  ⚠️ `GATED_WRITE_TOOLS` bounds what a ritual may DECLARE and be approved for; it
+  is NOT containment. A ritual composes on the owner's warm session, which has
+  `Bash`/`Write`/`Edit`, and a per-fire surface cannot be applied without evicting
+  that session. Read its docblock before reasoning about ritual safety from it.
+- `ritual-delivery.ts` — the notice FORMATTERS (one-line failure notice,
+  3-consecutive-failure escalation rule), boot-reap of orphaned `running` rows, 30d
+  prune. `ritual-executor.ts` and `ritual-retry.ts` are GONE (ISSUES #504): with the
+  fire synchronous inside the tick and failures degrading rather than looping, there
+  is no detached turn to re-arm and no in-occurrence retry budget to police.
 - `ritual-runs.ts` — the `code_ritual_runs` writer.
 - `ritual-registration.ts` — the agent-callable propose/enable/approve/capture
   service. `propose` creates a BRAND-NEW ritual; `enable(id, schedule)` gives an
@@ -63,7 +62,11 @@ fire-time text is composed at fire time, never pre-rendered.
   `kaizen`) — seeded copy-if-absent into `<owner_home>/rituals/`, registered
   UNAPPROVED on boot with NO `.def.json` (no schedule). They become usable ONLY
   via `rituals_enable` (the sole approval + scheduling path for a bundled id).
-  `ritual-agent-base.md` — the ritual substrate base prompt.
+- `bundled-ritual-enable.ts` — the boot sweep that drives `enable()` once per
+  never-enabled bundled ritual, and `reapprove()` when an already-enabled ritual's
+  LIVE content hash has no grant (an owner prompt edit, or a change to a hashed
+  constant). Without that second arm such a ritual goes permanently silent: a
+  `def.json` makes the sweep skip it while every fire refuses `unapproved`.
 - `index.ts` — the barrel export.
 
 ## What this module must NOT do

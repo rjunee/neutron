@@ -134,6 +134,7 @@ const EXPECTED_COMPOSITION_KEYS = [
   'heartbeat_tracker',
   'import_resume_handler',
   'import_upload_handler',
+  'init_ritual_planner',
   'landing_server',
   // §F2 — the shared loop inventory the Open composer threads through so the
   // gateway boot line inventories the sweeper + lifecycle watchdog it starts.
@@ -168,7 +169,6 @@ const EXPECTED_COMPOSITION_KEYS = [
   'reminder_dispatcher',
   // Executor-mode reminders (plan task 4) — ritual executor factory, set when
   // a credential resolves (llmPool !== null), like `agent_dispatch`/`trident`.
-  'ritual_executor_factory',
   'skill_forge',
   'tasks',
   'topic_handler',

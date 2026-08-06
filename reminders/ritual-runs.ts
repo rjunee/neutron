@@ -71,6 +71,17 @@ export interface RitualRunRow {
 export const MAX_RITUAL_OUTPUT_SUMMARY_CHARS = 4000
 
 /**
+ * Max stored chars of a run's `failure_reason`.
+ *
+ * Generous on purpose: the reason now carries the REAL cause (often an error stack
+ * from the composition turn), and a failure that cannot be diagnosed from this
+ * column is a failure with no trace at all — see ISSUES #506, where a real
+ * `evening-wrap` failure recorded the single word `failed` and matched zero log
+ * lines in its whole window.
+ */
+export const MAX_RITUAL_FAILURE_REASON_CHARS = 4000
+
+/**
  * `code_ritual_runs` retention window (30 days). This is the run-history table's
  * OWN retention — it is NEVER pruned by the subagent liveness prune (which reaps
  * the live `code_subagent_registry`), because the whole point of the history row
@@ -94,13 +105,22 @@ export interface RitualRunStore {
     skip_reason: RitualFireSkipReason
     now_ms: number
   }): Promise<void>
-  /** A spawn SUCCEEDED — the run is live (carries subagent_run_id + content_hash). */
+  /**
+   * The run is LIVE — written before the ritual's turn starts, carrying the
+   * content_hash the fire is bound to.
+   *
+   * `subagent_run_id` is OPTIONAL and, since ISSUES #504 deleted the ritual lane,
+   * production always OMITS it: a ritual composes on the owner's normal warm
+   * session, so there is no subagent record to cross-reference. The column stays
+   * NULLABLE rather than being dropped because historical rows written by the old
+   * executor still carry a real id and remain readable.
+   */
   insertRunning(input: {
     run_id: string
     ritual_id: string
     reminder_id: string | null
     project_slug: string | null
-    subagent_run_id: string
+    subagent_run_id?: string
     content_hash: string
     now_ms: number
   }): Promise<void>
@@ -193,7 +213,7 @@ export function createRitualRunStore(db: ProjectDb): RitualRunStore {
           input.ritual_id,
           input.reminder_id,
           input.project_slug,
-          input.subagent_run_id,
+          input.subagent_run_id ?? null,
           input.content_hash,
           input.now_ms,
         ],

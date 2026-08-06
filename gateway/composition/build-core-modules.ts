@@ -86,19 +86,12 @@ import { isValidIanaTimezone, readOwnerTimezone } from '../storage/owner-metadat
 import { ProactiveStateStore } from '../proactive/state-store.ts'
 import {
   buildIdleNudgeSweepHandler,
-  buildMorningBriefHandler,
   registerIdleNudgeSweepCron,
-  registerMorningBriefCron,
 } from '../proactive/cron.ts'
 import type {
   IdleNudgeSweepDeps,
   ProactiveTopicCandidate,
 } from '../proactive/idle-nudge-sweep.ts'
-import type {
-  BriefFocusItem,
-  MorningBriefDeps,
-  ProactiveContextSources,
-} from '../proactive/morning-brief.ts'
 import { attachReminderLinkSubscriber } from '@neutronai/tasks/reminder-link.ts'
 import {
   buildProjectionWriter,
@@ -396,18 +389,16 @@ export function buildCoreModules(
       if (input.push_dispatcher !== undefined) {
         loopOpts.on_fired = input.push_dispatcher
       }
-      // Executor-mode reminders (plan task 4) — when the composer supplies a
-      // ritual-executor factory, build the executor with the graph's
-      // ApprovalManager and wire it as the tick's ritual dispatch branch. Absent
-      // → ritual rows are consumed + logged (never dispatched as nudges).
-      if (input.ritual_executor_factory !== undefined) {
-        loopOpts.ritual_executor = input.ritual_executor_factory({
+      // Rituals (ISSUES #504) — install the ritual fire PLANNER now that the
+      // graph's ApprovalManager exists. NOTE what is NOT here: the tick loop gets
+      // no ritual option, because a ritual is not a special kind of fire. The
+      // planner installs into the ONE `reminder_dispatcher` the composer already
+      // built, which composes a ritual and a nudge through the same substrate call
+      // and posts both through the same delivery seam. Absent (LLM-less box) →
+      // every row composes as an ordinary nudge, which is fail-closed.
+      if (input.init_ritual_planner !== undefined) {
+        input.init_ritual_planner({
           approvals: ctx.graph.get<ApprovalManager>('approval'),
-          // The SAME store the loop above drives — the executor re-arms an
-          // occurrence through it after a transient failure of the detached turn
-          // (ISSUES #489). A second store over the same db would work, but one
-          // instance keeps "who may move a reminder's fire_at" a single answer.
-          reminders: store,
         })
       }
       const loop = new ReminderTickLoop(loopOpts)
@@ -1079,63 +1070,12 @@ export function buildCoreModules(
         const proactiveSink = proactiveCfg.sink ?? channelRouter
         const proactiveStore = new ProactiveStateStore(input.db)
 
-        // Morning brief — gated on a resolvable General topic.
-        const generalTopic = proactiveCfg.resolveGeneralTopic?.() ?? null
-        if (generalTopic !== null && generalTopic.length > 0) {
-          // Default the focus-queue source to the canonical TaskStore (top
-          // open tasks by focus score) so the brief is useful out of the box;
-          // any caller-supplied source wins per-key.
-          const defaultSources: ProactiveContextSources = {
-            focusQueue: async (): Promise<BriefFocusItem[]> =>
-              store
-                .list({
-                  project_slug: input.project_slug,
-                  status: 'open',
-                  order: 'focus_score',
-                  limit: 5,
-                })
-                .map((t) => ({
-                  title: t.title,
-                  due: t.due_date !== null ? `due ${t.due_date.slice(0, 10)}` : null,
-                })),
-          }
-          const sources: ProactiveContextSources = {
-            ...defaultSources,
-            ...(proactiveCfg.sources ?? {}),
-          }
-          const briefDeps: MorningBriefDeps = {
-            store: proactiveStore,
-            sources,
-            sink: proactiveSink,
-            general_topic_id: generalTopic,
-            now: () => Date.now(),
-          }
-          // The static `tz` is the FALLBACK (the host's zone — right on a
-          // self-hosted laptop, wrong on a hosted box). The owner's stored zone
-          // wins, resolved PER TICK off the dispatched `owner_slug` — never at
-          // composition time, because a fresh install has no `instance_metadata`
-          // row until the first client reports its zone, and a boot-time read
-          // would freeze the host's zone forever. Same seam the P6 nudge cron
-          // uses above (ISSUES #40), now applied to the whole daily rhythm.
-          if (proactiveCfg.timezone !== undefined) briefDeps.tz = proactiveCfg.timezone
-          briefDeps.resolveTimezone = (owner_slug: string): string | undefined =>
-            readOwnerTimezone(input.db, owner_slug) ?? undefined
-          if (proactiveCfg.brief_hour !== undefined) briefDeps.brief_hour = proactiveCfg.brief_hour
-          if (proactiveCfg.composeBrief !== undefined) {
-            briefDeps.composeWithLlm = proactiveCfg.composeBrief
-          }
-          const briefHandler = buildMorningBriefHandler(briefDeps)
-          const briefRegister: Parameters<typeof registerMorningBriefCron>[0] = {
-            project_slug: input.project_slug,
-            jobs: cronDeps.jobs,
-            handlers: cronDeps.handlers,
-            handler: briefHandler,
-          }
-          if (proactiveCfg.brief_interval_ms !== undefined) {
-            briefRegister.interval_ms = proactiveCfg.brief_interval_ms
-          }
-          registerMorningBriefCron(briefRegister)
-        }
+        // NOTE (ISSUES #504): the second morning brief used to be composed and
+        // cron-registered HERE. It is gone — its provider slots (calendarToday,
+        // entityDeltas, projectStatus) were never wired in production, so the brief
+        // it posted could only apologise for not having checked the calendar. The
+        // morning brief is now the RITUAL, fired as an ordinary reminder onto the
+        // owner's own session by the reminders tick.
 
         // Idle-topic nudge sweep — gated on an idle-topic enumeration.
         if (proactiveCfg.listIdleTopics !== undefined) {

@@ -97,8 +97,17 @@ export const BUNDLED_RITUAL_DEFAULT_CRONS: Readonly<Record<string, string>> = Ob
 export interface EnableBundledRitualsResult {
   /** Ids newly enabled — a def.json was written and an approval prompt emitted. */
   enabled: string[]
-  /** Ids that already had a `<id>.def.json` — NOT re-prompted. */
+  /**
+   * Ids already enabled AND still holding a usable approval state (approved,
+   * pending, or deliberately denied) — NOT re-prompted.
+   */
   already_enabled: string[]
+  /**
+   * Ids already enabled whose LIVE content hash had NO grant, so a fresh approval
+   * prompt was emitted (ISSUES #504). This is the state that used to be silent: a
+   * def.json made the sweep skip the ritual while every fire refused 'unapproved'.
+   */
+  reapproved: string[]
   /** Ids whose enable failed (logged, rolled back by `enable()`, retried next boot). */
   failed: string[]
   /**
@@ -111,7 +120,7 @@ export interface EnableBundledRitualsResult {
 
 export interface EnableBundledRitualsInput {
   /** The registration service built over the graph's ApprovalManager. */
-  service: Pick<RitualRegistrationService, 'enable'>
+  service: Pick<RitualRegistrationService, 'enable' | 'reapprove' | 'status'>
   /** The registry the bundled defs were registered into. */
   registry: RitualRegistry
   /** `<owner_home>/rituals` — where `<id>.def.json` lives. */
@@ -144,6 +153,7 @@ export async function enableBundledRitualsAtBoot(
   const result: EnableBundledRitualsResult = {
     enabled: [],
     already_enabled: [],
+    reapproved: [],
     failed: [],
     deferred_onboarding: false,
   }
@@ -177,11 +187,32 @@ export async function enableBundledRitualsAtBoot(
       }
 
       // THE IDEMPOTENCY GUARD. `<id>.def.json` means the ritual has already been
-      // enabled once: its approval prompt was emitted and is pending, approved,
-      // or declined. Re-prompting on every restart is exactly the noise this
-      // must never produce, so an existing def.json ends the work for this id.
+      // enabled once. Re-prompting on every restart is exactly the noise this must
+      // never produce — but "already enabled" is NOT the same as "still approvable",
+      // and conflating them made rituals die silently (ISSUES #504).
+      //
+      // The approval grant is bound to a CONTENT HASH (prompt bytes ‖ tool surface ‖
+      // scope ‖ cadence ‖ tier ‖ timeout). Anything that moves that hash correctly
+      // drops approval — an owner editing `<id>.md`, or a change to a hashed
+      // constant. Before this, such a ritual had a def.json (so the sweep skipped
+      // it) and no valid grant (so every fire refused 'unapproved'): no prompt, no
+      // brief, and nothing the owner could see. `status()` recomputes approval
+      // against the LIVE bytes, so it distinguishes the four states, and only
+      // 'none' — no grant for the live hash, nothing pending, nothing denied —
+      // earns a fresh prompt.
+      //
+      // 'pending' is left alone (the prompt is already in front of him) and
+      // 'denied' STAYS denied (re-asking a ritual the owner declined would be the
+      // sweep arguing with him).
       if (existsSync(join(rituals_dir, `${def.id}.def.json`))) {
-        result.already_enabled.push(def.id)
+        const approval = service.status().find((r) => r.ritual_id === def.id)?.approval ?? 'none'
+        if (approval !== 'none') {
+          result.already_enabled.push(def.id)
+          continue
+        }
+        await service.reapprove(def.id)
+        result.reapproved.push(def.id)
+        log(`enableBundledRituals: ${def.id} approval is stale — re-requested`)
         continue
       }
 

@@ -330,7 +330,27 @@ const ATTACHMENT_TRANSCRIPT_MAX_CHARS = 4000
  * a turn whose `--tools` surface differs from the warm REPL's, so a varying
  * surface would thrash the pool).
  */
-const DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash', 'Skill', 'Workflow'] as const
+export const LIVE_AGENT_TOOL_NAMES = [
+  'Read',
+  'Glob',
+  'Grep',
+  'Write',
+  'Edit',
+  'Bash',
+  'Skill',
+  'Workflow',
+] as const
+
+/**
+ * EXPORTED (ISSUES #504) because the warm REPL's `--tools` surface is a
+ * PROPERTY OF THE SESSION, not of this one caller, and every other turn that
+ * composes on the same warm session must present the identical surface or the
+ * reuse guard evicts and respawns the child
+ * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). The fired-reminder
+ * dispatcher composes on this very substrate, so the composer threads this
+ * constant into it rather than letting it default to a narrower list.
+ */
+const DEFAULT_TOOL_NAMES = LIVE_AGENT_TOOL_NAMES
 
 /**
  * Fallback persona when the owner's persona files are missing (persona-gen

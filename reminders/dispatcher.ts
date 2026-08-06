@@ -30,6 +30,13 @@ import { classifyReminderMessage, literalFallback, type ReminderShape } from './
 import { buildReminderPrompt } from './prompt.ts'
 import type { Reminder } from './store.ts'
 import type { ReminderDispatcher } from './tick.ts'
+import { RITUAL_TIMEOUT_MS } from './rituals.ts'
+import {
+  RITUAL_MAX_TOKENS,
+  type RitualFireDecision,
+  type RitualFirePlan,
+  type RitualFirePlanner,
+} from './ritual-fire.ts'
 import { createLogger } from '@neutronai/logger'
 
 const dispatcherLog = createLogger('reminder-dispatcher')
@@ -112,12 +119,34 @@ export interface ReminderTopicResolver {
  * The fire-time composition seam. Production wraps the warm CC substrate via
  * `buildSubstrateReminderLlm`; tests inject a deterministic fake. `null`/absent
  * → the dispatcher composes nothing and posts the literal degrade body.
+ *
+ * `timeout_ms` overrides the seam's construction default for THIS turn. A ritual
+ * needs a far wider budget than a nudge (`RITUAL_TIMEOUT_MS`), and
+ * both compose through this one seam, so the budget travels with the call rather
+ * than forcing a second seam instance.
  */
 export interface ReminderLlm {
-  compose(spec: AgentSpec): Promise<string>
+  compose(spec: AgentSpec, opts?: { timeout_ms?: number }): Promise<string>
 }
 
-/** Read-only tool surface for the composition turn (recall workspace files). */
+/**
+ * Tool surface for a fire-time composition turn.
+ *
+ * ⚠️ THIS MUST MATCH THE OWNER'S LIVE-CHAT SURFACE, and matching it is not a
+ * style choice — it is what makes a fired reminder land ON the owner's warm
+ * session instead of destroying it. The persistent-REPL reuse guard compares the
+ * requested `--tools` surface against the one the warm child was spawned with and,
+ * on a mismatch, EVICTS the child and respawns it
+ * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). This dispatcher
+ * composes on `liveAgentSubstrate` — the SAME substrate the live chat uses, and
+ * the only one carrying the native-MCP tool bridge — so a narrower surface here
+ * would tear down the owner's chat REPL on every fire, and his next chat turn
+ * would tear it down again.
+ *
+ * So the production composition passes the live-agent surface explicitly (the
+ * composer threads `tool_names`), and this default exists only for callers with
+ * no live-chat substrate at all, where there is no warm child to thrash.
+ */
 const DEFAULT_TOOL_NAMES = ['Read', 'Glob', 'Grep'] as const
 
 /** Per-composition wall-clock budget before the substrate handle is cancelled. */
@@ -135,9 +164,10 @@ export function buildSubstrateReminderLlm(
   substrate: Substrate,
   opts: { timeout_ms?: number } = {},
 ): ReminderLlm {
-  const timeout_ms = opts.timeout_ms ?? DEFAULT_TIMEOUT_MS
+  const default_timeout_ms = opts.timeout_ms ?? DEFAULT_TIMEOUT_MS
   return {
-    async compose(spec: AgentSpec): Promise<string> {
+    async compose(spec: AgentSpec, callOpts?: { timeout_ms?: number }): Promise<string> {
+      const timeout_ms = callOpts?.timeout_ms ?? default_timeout_ms
       const handle = substrate.start(spec)
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), timeout_ms)
@@ -168,8 +198,28 @@ export interface BuildReminderDispatcherInput {
   max_tokens?: number
   /** Topic id used when no resolver is wired and a reminder has no destination. */
   general_topic_id?: string
-  /** Override the read-only tool allow-list (tests). */
+  /**
+   * The composition tool allow-list. Production MUST pass the owner's live-chat
+   * surface — see {@link DEFAULT_TOOL_NAMES} for why a mismatch evicts the warm
+   * session rather than restricting the turn.
+   */
   tool_names?: ReadonlyArray<string>
+  /**
+   * Ritual fire planner (ISSUES #504). Answers "what should this due row compose
+   * from, and what must be recorded about it?" — see
+   * `reminders/ritual-fire.ts`. Absent → every row composes as an ordinary nudge
+   * from its own stored `message`, which is what an LLM-less box or a test wants
+   * and is fail-closed (a ritual's approved PROMPT is never composed without a
+   * planner to validate its approval).
+   */
+  ritual_planner?: RitualFirePlanner
+  /**
+   * Resolve the concrete model id for a ritual turn. A THUNK, not a value, so the
+   * ritual tracks the live best model the way the chat agent does instead of
+   * pinning whatever id was current at composition (`RITUAL_MODEL_TIER` is the
+   * TIER; this resolves it). Defaults to the nudge `model` when unwired.
+   */
+  resolve_ritual_model?: () => string
   now?: () => number
   log?: (msg: string) => void
 }
@@ -186,6 +236,8 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
   const now = input.now ?? ((): number => Date.now())
   const log = input.log ?? ((msg: string): void => dispatcherLog.debug(msg))
   const toolNames = input.tool_names ?? DEFAULT_TOOL_NAMES
+  const ritual_planner = input.ritual_planner
+  const resolveRitualModel = input.resolve_ritual_model ?? ((): string => model)
 
   // The REPL `--tools` allow-list only consumes `t.name`; the rest is contract
   // filler for the locked AgentSpec interface (mirrors build-live-agent-turn).
@@ -197,6 +249,70 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
     capability_required: 'fs:project_data',
   }))
 
+  /**
+   * Run ONE composition turn. This is the SINGLE place a fired reminder — nudge
+   * or ritual — reaches the substrate, so both inherit the same session, the same
+   * tool surface, and therefore the same access to Cores. That sameness is the
+   * whole point of ISSUES #504; a second `llm.compose` call site would be the
+   * beginning of a second execution path.
+   *
+   * Returns the trimmed text on success, or a REASON on failure.
+   *
+   * ⚠️ THE REASON IS THE POINT, not a nicety (ISSUES #506). A caller that only
+   * learns "it didn't work" can only write "it didn't work" — which is precisely
+   * how a real `evening-wrap` failure came to be recorded as
+   * `"retry exhausted after 1 attempts: failed"`, a `failure_reason` whose inner
+   * cause was the literal word `failed`, with empty `output_summary`, and no log
+   * line naming the ritual anywhere in the window. So this returns the actual
+   * cause — the thrown error, or the fact that the turn came back empty, or that
+   * no composition seam is wired — and the ritual path writes THAT into the ledger.
+   * Returning a bare `null` here would rebuild the same undiagnosable failure.
+   *
+   * The CALLER decides what a failure MEANS, because that is the one place the two
+   * kinds legitimately differ: a nudge degrades to its literal body, a ritual
+   * records the cause and tells the owner.
+   */
+  type ComposeOutcome = { ok: true; text: string } | { ok: false; reason: string }
+
+  async function composeTurn(args: {
+    reminder: Reminder
+    prompt: string
+    project_id: string
+    model_preference: string[]
+    max_tokens: number
+    timeout_ms?: number
+  }): Promise<ComposeOutcome> {
+    if (llm === null) {
+      return { ok: false, reason: 'no LLM composition seam is wired on this instance' }
+    }
+    try {
+      const spec: AgentSpec = {
+        prompt: args.prompt,
+        tools,
+        model_preference: args.model_preference,
+        max_tokens: args.max_tokens,
+        // Meter the compose turn to the DESTINATION project, not the instance
+        // slug — see `deriveReminderProjectId`. Without this every project
+        // reminder is metered/session-keyed to the owner.
+        metering_context: { project_id: args.project_id },
+      }
+      const text = await llm.compose(
+        spec,
+        args.timeout_ms !== undefined ? { timeout_ms: args.timeout_ms } : undefined,
+      )
+      const trimmed = text.trim()
+      if (trimmed.length > 0) return { ok: true, text: trimmed }
+      return {
+        ok: false,
+        reason: `the composition turn returned an empty body (model ${args.model_preference[0] ?? 'unknown'})`,
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? (err.stack ?? err.message) : String(err)
+      log(`reminder ${args.reminder.id} compose failed: ${reason}`)
+      return { ok: false, reason }
+    }
+  }
+
   async function compose(
     reminder: Reminder,
     shape: ReminderShape,
@@ -205,7 +321,7 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
     if (llm === null) {
       return literalFallback(shape)
     }
-    try {
+    {
       let context = ''
       if (input.context !== undefined) {
         try {
@@ -219,32 +335,126 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
         context,
         now_iso: new Date(now()).toISOString(),
       })
-      const spec: AgentSpec = {
+      const outcome = await composeTurn({
+        reminder,
         prompt,
-        tools,
+        project_id,
         model_preference: [model],
         max_tokens,
-        // Meter the compose turn to the DESTINATION project, not the instance
-        // slug — see `deriveReminderProjectId`. Without this every project
-        // reminder is metered/session-keyed to the owner.
-        metering_context: { project_id },
-      }
-      const text = await llm.compose(spec)
-      if (text.trim().length === 0) {
-        log(`reminder ${reminder.id} composed empty — using literal fallback`)
+      })
+      if (!outcome.ok) {
+        log(`reminder ${reminder.id} composed nothing (${outcome.reason}) — using literal fallback`)
         return literalFallback(shape)
       }
-      return text.trim()
-    } catch (err) {
-      log(`reminder ${reminder.id} compose failed (${String(err)}) — using literal fallback`)
-      return literalFallback(shape)
+      return outcome.text
     }
   }
 
   const resolveTopicId = input.resolveTopicId
 
+  /** The destination topic for a fired row — identical for a nudge and a ritual. */
+  function topicFor(reminder: Reminder, explicit_topic: string | null): string {
+    return resolveTopicId !== undefined
+      ? resolveTopicId({ reminder, explicit_topic })
+      : (explicit_topic ?? general_topic_id)
+  }
+
+  async function post(reminder: Reminder, topic_id: string, body: string): Promise<boolean> {
+    const accepted = await input.outbound.post({
+      topic_id,
+      owner_slug: reminder.owner_slug,
+      body,
+      reminder_id: reminder.id,
+    })
+    return accepted !== false
+  }
+
+  /**
+   * Fire an approved ritual: ONE turn on the owner's normal session, posted
+   * through the ONE delivery seam, then the ledger closed.
+   *
+   * Everything here except "which prompt" and "write it down" is the nudge path
+   * verbatim — same `composeTurn`, same `post`, same topic resolution. What
+   * differs is the failure posture, and only because the two genuinely differ: a
+   * nudge has a literal body to degrade to, a ritual has none, so a ritual that
+   * composes nothing is a recorded FAILURE with a one-line notice rather than a
+   * silently-degraded post.
+   */
+  async function fireRitual(
+    reminder: Reminder,
+    plan: RitualFirePlan,
+    topic_id: string,
+    project_id: string,
+  ): Promise<void> {
+    const outcome = await composeTurn({
+      reminder,
+      prompt: plan.prompt,
+      project_id,
+      model_preference: [resolveRitualModel()],
+      max_tokens: RITUAL_MAX_TOKENS,
+      timeout_ms: RITUAL_TIMEOUT_MS,
+    })
+    if (!outcome.ok) {
+      // FAILED. Record the ACTUAL CAUSE and say so out loud (ISSUES #506): the
+      // previous lane logged a ritual failure at debug (so journalctl never named
+      // the ritual in the whole window) and wrote a tautological reason (so the
+      // ledger did not name the cause either) — leaving a failed morning brief with
+      // literally no diagnosable trace on either surface. An unattended failure has
+      // to be answerable from the logs OR the ledger; here it is both.
+      dispatcherLog.error('ritual_fire_failed', {
+        reminder: reminder.id,
+        ritual_id: plan.ritual_id,
+        run_id: plan.run_id,
+        reason: outcome.reason,
+      })
+      const notices = await plan.settle({ status: 'failed', detail: outcome.reason })
+      for (const notice of notices) await post(reminder, topic_id, notice)
+      return
+    }
+    const body = outcome.text
+    // A `silent` ritual suppresses SUCCESS output only — its failure notices
+    // above still post. Settle FIRST either way: the durable row is the record,
+    // and it must exist before the output can reach the owner.
+    const notices = await plan.settle({ status: 'finished', body })
+    for (const notice of notices) await post(reminder, topic_id, notice)
+    if (plan.silent) return
+    const posted = await post(reminder, topic_id, body)
+    if (!posted) {
+      throw new Error(
+        `ritual ${plan.ritual_id} outbound post rejected for topic ${topic_id} — left pending for retry`,
+      )
+    }
+  }
+
   return {
     async dispatch(reminder: Reminder): Promise<void> {
+      // ONE question per due row, asked before anything else: what does this row
+      // compose from? There is no `ritual_id` branch in `reminders/tick.ts` and no
+      // second executor — a ritual and a nudge reach the substrate and the owner
+      // through the code below, together (ISSUES #504).
+      const decision: RitualFireDecision =
+        ritual_planner !== undefined ? await ritual_planner.plan(reminder) : { kind: 'nudge' }
+
+      if (decision.kind === 'skipped') {
+        // Fail-closed refusal (unknown / unapproved / edited prompt / missing
+        // file). A durable `code_ritual_runs` 'skipped' row already landed inside
+        // the planner. Post NOTHING and return normally so the tick keeps its
+        // claim — an unapproved ritual must not retry every 30 s forever.
+        log(`reminder ${reminder.id} ritual ${decision.ritual_id} skipped: ${decision.reason}`)
+        return
+      }
+
+      if (decision.kind === 'fire') {
+        const explicit_topic = reminder.topic_id ?? null
+        await fireRitual(
+          reminder,
+          decision.plan,
+          topicFor(reminder, explicit_topic),
+          deriveReminderProjectId(reminder),
+        )
+        return
+      }
+
       const shape = classifyReminderMessage(reminder.message)
       // A reminder whose stored `message` is empty/whitespace (the Reminders
       // Core create path, unlike the app surface, has no non-empty guard) has
@@ -257,17 +467,9 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       }
       const explicit_topic = reminder.topic_id ?? shape.routing_topic ?? null
       const destination_project_id = deriveReminderProjectId(reminder)
-      const topic_id =
-        resolveTopicId !== undefined
-          ? resolveTopicId({ reminder, explicit_topic })
-          : (explicit_topic ?? general_topic_id)
+      const topic_id = topicFor(reminder, explicit_topic)
       const body = await compose(reminder, shape, destination_project_id)
-      const accepted = await input.outbound.post({
-        topic_id,
-        owner_slug: reminder.owner_slug,
-        body,
-        reminder_id: reminder.id,
-      })
+      const accepted = await post(reminder, topic_id, body)
       // A rejected durable post (e.g. the chat history write failed) MUST NOT
       // let the row stay claimed/fired — that would silently consume a reminder
       // that never reached the user. Throw so the tick loop reverts the

@@ -21,9 +21,17 @@
  * mechanics EXACTLY (real Bun PTY spawn, dev-channel MCP sink for
  * /channel-ready //channel-bound //reply, disclaimer dismiss in onData,
  * MCP_CONNECTION_NONBLOCKING:'false'). Deltas from the sibling: cwd + addDir = a
- * mkdtemp FIXTURE owner_home; appendSystemPromptFile = RITUAL_AGENT_BASE_PROMPT;
- * tools = the def's `tool_surface`; skipPermissions:true; the injected message is
- * the LIVE shipped template bytes (that is what T7 certifies).
+ * mkdtemp FIXTURE owner_home; skipPermissions:true; the injected message is the
+ * LIVE shipped template bytes (that is what T7 certifies).
+ *
+ * ISSUES #504 UPDATE — the harness now spawns with `DEFAULT_AGENT_BASE_PROMPT`
+ * (the ordinary chat persona) rather than a dedicated ritual persona, because that
+ * is what production does: a ritual composes on the owner's normal warm session.
+ * The deleted `ritual-agent-base.md` had no delivery mechanism left — a system
+ * prompt is a SPAWN-time property and a warm session is already spawned. What this
+ * test certifies is unchanged: each shipped template, given a tool surface and a
+ * fixture instance, produces output that cites PLANTED state, which is impossible
+ * without actually reading the files.
  *
  * OPT-IN: needs a real `claude` binary + working credentials, so it is skipped
  * unless `NEUTRON_PTY_E2E=1`. CI (no creds) skips.
@@ -41,7 +49,7 @@ import { buildSettings } from '@neutronai/runtime/adapters/claude-code/persisten
 import { BunTerminalHost } from '@neutronai/runtime/adapters/claude-code/persistent/bun-terminal-host.ts'
 import { ensureClaudeTrust } from '@neutronai/runtime/adapters/claude-code/persistent/ensure-claude-trust.ts'
 
-import { RITUAL_AGENT_BASE_PROMPT } from './prompt-path.ts'
+import { DEFAULT_AGENT_BASE_PROMPT } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import { BUNDLED_RITUAL_DEFS, bundledTemplatePathFor } from './bundled-rituals.ts'
 
 const OPT_IN = process.env['NEUTRON_PTY_E2E'] === '1'
@@ -194,7 +202,7 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
     channelName,
     mcpConfigPath,
     settingsPath,
-    appendSystemPromptFile: RITUAL_AGENT_BASE_PROMPT,
+    appendSystemPromptFile: DEFAULT_AGENT_BASE_PROMPT,
     model: 'claude-opus-4-8',
     addDir: fixtureHome,
     tools,
