@@ -18,7 +18,7 @@ AppState. A session survives launches for weeks, so a device that signed in once
 never called the endpoint again.
 
 **Measured, not inferred.** On the live instance 2026-08-06,
-`device_push_tokens` held **0 rows** and the tenant journal showed **zero**
+`device_push_tokens` held **0 rows** and the server journal showed **zero**
 `devices/register` requests in 14 days. Every proactive surface — morning brief,
 evening wrap, idle nudges, and a ritual re-approval request — was therefore
 visible only when the owner happened to open a client. That is not a theoretical

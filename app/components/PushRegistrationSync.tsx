@@ -9,7 +9,7 @@
  * is dead until the owner happens to sign out and back in.
  *
  * That is not hypothetical. Measured on the live instance 2026-08-06:
- * `device_push_tokens` held **0 rows**, and the tenant log showed **zero**
+ * `device_push_tokens` held **0 rows**, and the server journal showed **zero**
  * `devices/register` requests in 14 days. Consequence: every proactive surface
  * — the morning brief, the evening wrap, idle nudges, and a ritual re-approval
  * request — was visible ONLY when the owner happened to open a client. A
