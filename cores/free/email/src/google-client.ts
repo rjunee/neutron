@@ -188,7 +188,7 @@ export function buildGoogleGmailClient(
       // gets an opaque id (`Label_7`), so passing the NAME `Neutron/<project>`
       // made Gmail reject the whole request:
       //
-      //   400 Invalid label: Neutron/quintessential-ventures-studio
+      //   400 Invalid label: Neutron/<project_id>
       //
       // Not an edge case — it fired on every single daily triage against the
       // live instance and the digest never once succeeded. This file already

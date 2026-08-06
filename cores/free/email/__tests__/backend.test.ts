@@ -1032,7 +1032,7 @@ describe('sendMessage — Gmail send (gap-audit P0)', () => {
 
 describe('buildGoogleGmailClient — a project-scoped list must not 400 (live, 2026-08-06)', () => {
   // The live failure this pins, seen on EVERY daily triage against real Gmail:
-  //   400 Invalid label: Neutron/quintessential-ventures-studio
+  //   400 Invalid label: Neutron/<project_id>
   // `labelIds` takes label IDs. A system label's id equals its name (INBOX), a
   // USER label's does not (Label_7), so passing the project label NAME as a
   // labelId made Gmail reject the whole request. `search` in the same file
