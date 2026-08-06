@@ -17,6 +17,53 @@ All work lands in **Neutron Open** (`~/repos/neutron-open`). Managed consumes it
 
 ---
 
+## 0. OWNER DECISIONS — 2026-08-06 (AUTHORITATIVE; supersedes any conflicting recommendation below)
+
+These were settled by the owner after the first draft. Where §§ 3, 4, 6 or 7 disagree with
+this section, **this section wins** and those sections are wrong.
+
+**D1 — THE BRIEF ARRIVES BY EMAIL. That IS the feature.** The draft recommended deleting
+email delivery in favour of chat + push. That recommendation misread the product. Owner:
+*"Of course the brief needs to arrive by email. That's the whole fucking feature. I don't
+want a chat message listing dozens of emails that came in every 12 hours. Chat messages are
+for important escalations only."*
+⇒ `brief/template.ts` + `brief/email-sender.ts` (~507 LOC) are **KEEP**, not DELETE. The
+delivery split is now explicit and load-bearing: **the twice-daily brief is an EMAIL; chat +
+push carry ESCALATIONS ONLY.** A digest must never be posted to chat. Q1 in § 7 is closed.
+
+**D2 — SENDER RULES ARE USER DATA AND THE CORE MUST BE GENERALIZABLE. This was never a
+question.** Owner: *"sender addresses is VERY OBVIOUSLY user data. Why is this even a
+question? When architecting the core, it needs to be generalizable so anyone can set up
+their own sender rules."* The `sender-map.json` finding is not a discovery to be weighed —
+owner-specific sender data in code is simply a defect. **No owner data in the tree, ever;
+every classification rule is per-owner instance data.** The Core ships the MECHANISM and
+zero rules.
+
+**D3 — CORE SETUP BUILDS THE INITIAL RULES BY SURVEY + INTERVIEW (new requirement).** Owner:
+*"when setting up this core we need the LLM to go through the user's inbox and then interview
+the user to ask about different classes of emails to create the initial classification
+rules."* So installing the Email Core runs an onboarding pass: sample the real inbox, cluster
+what is actually there, then ASK the owner about each class it found and write the resulting
+rules as per-owner data. This replaces the idea of an importer that seeds one owner's
+hand-built map — **that importer was a migration shortcut for a single user; the interview is
+the product.** It also means a brand-new self-hoster gets working classification on day one
+with no hand-authored rules at all. Needs a phase of its own (see § 6, Phase 2.5).
+
+**D4 — THE RETURN-TO-INBOX FEEDBACK + LEARNING LOOP IS KEPT.** The draft proposed deleting
+it as "not serving (1) or (2)". That is wrong on the merits, and the loop is **live and
+closed**, verified in code: feedback writes `inbox_learning_patterns`, and the poller reads
+them at `pipeline/poller.ts:82` (`getLearningPatterns`, `hit_count >= 2`) and feeds them into
+the classifier via `engine.setLearningPatterns`. Classification quality is exactly what brief
+usefulness and escalation accuracy rest on, so the learning loop serves (1) and (2) more
+directly than most of what the draft proposed keeping. **KEEP**, and it composes naturally
+with D3 — the interview seeds the rules, the feedback loop refines them.
+
+**D5 — unsubscribe machinery: NOT broken, decision deferred.** Verified: it is reachable at
+`POST /api/admin/run-unsubscribes` (`index.ts:194` → `handleRunUnsubscribes:1204`) plus
+`scripts/run-unsubscribes.ts`, and it is **manually triggered — it is on no cron** (the three
+Worker crons are poll / brief / cleanup). So "propose delete" was a scope judgement, never a
+claim that it fails. Carry it as its own decision rather than folding it into this refactor.
+
 ## 1. Verdict
 
 This is a **selective port wrapped in a large deletion**, not a rewrite and not a full port.
@@ -417,20 +464,47 @@ the scheduler's deletion) and PR #114 (push self-heal).
 - Acceptance: two consecutive real days produce both briefs at owner-local times and at
   least one real escalation, on the owner's live instance, with the Worker's crons off.
 
+### Phase 2.5 — classification setup by survey + interview (D3)
+
+**Scope.** Installing the Email Core runs an onboarding pass instead of shipping rules: sample
+a bounded window of the owner's real inbox, cluster it by sender and by shape, then ask the
+owner about each class it actually found ("mail from these 6 senders looks like order
+receipts — brief them, escalate them, or ignore them?") and write the answers as per-owner
+rules. Ships zero rules in the tree (D2). Reuses the existing approval/question surface
+rather than inventing a wizard.
+
+**Composition seam.** The Core's install lifecycle (`cores/free/email/src/` install hook) plus
+the substrate one-shot LLM already wired at `gateway/cores/mount-open-cores.ts:412-417`.
+
+**Acceptance (observable, end-to-end).** On a fresh instance with a connected mailbox and NO
+hand-authored rules, completing setup produces a populated per-owner rule set, and the next
+brief is organised by classes the owner actually confirmed. A self-hoster who has never seen
+this repo gets working classification on day one.
+
+**Tests + the mutation each catches.** Assert the interview's proposed classes are DERIVED
+from the sampled inbox, not from a built-in list — a mutation that returns a hardcoded
+taxonomy regardless of the sample must red. Assert an owner "ignore" answer is persisted and
+then HONOURED by the next classification pass (write-only persistence is the failure mode
+here, exactly as with the learning loop). Assert zero rules ship in the tree: a fixture-free
+instance classifies nothing until setup runs.
+
+**Out of scope.** Re-running the interview on drift, and multi-mailbox rule merging.
+
+
 ## 7. Risks + open questions for the owner
 
-**Open questions (genuine decisions):**
+**Open questions: NONE REMAIN — all closed by § 0.** Kept here with their answers because
+the reasoning matters:
 
-1. **Does the brief still ALSO arrive as an email, or is chat + push the only surface?**
-   Today it is an HTML email to your inbox (`brief/email-sender.ts`); this plan's default
-   deletes that (template + MIME sender, ~510 LOC) and delivers to chat + push only. If
-   you want the email copy too, it is cheap to keep — one `email_send`-tool call with a
-   plain HTML render — but it is the largest single KEEP-vs-DELETE swing in § 4 and it
-   changes your daily reading habit. Recommendation: chat + push only; revisit after a
-   week of dogfood.
-2. **Confirm the PROPOSE DELETEs**: unsubscribe machinery (214 LOC), return-to-inbox
-   feedback + learning patterns (the brief-web buttons + 2 tables), and the HTML email
-   template per Q1. Each is reversible later; none feeds (1) or (2).
+1. ~~Does the brief also arrive as an email?~~ **CLOSED — D1: yes, by email. That is the
+   feature.** The recommendation this section originally carried (chat + push only) was
+   wrong, and wrong in a way worth recording: it optimised for deleting ~507 LOC and in
+   doing so proposed deleting the product. A twice-daily digest of dozens of messages is
+   an email; chat is for the escalation that needs you NOW. The LOC count was allowed to
+   argue with the requirement.
+2. ~~Confirm the PROPOSE DELETEs.~~ **CLOSED — D4: the learning loop is KEPT** (it is live
+   and closed at `poller.ts:82`, and it is what makes classification improve). **D5:
+   unsubscribe is not broken and is decided separately.** The HTML template is KEPT per D1.
 
 **Facts and risks (not decisions):**
 
