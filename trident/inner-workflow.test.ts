@@ -283,54 +283,120 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
   })
 
   test('a deterministic never-silent-downgrade guard forces REQUEST_CHANGES on deferred+APPROVE', () => {
-    expect(SRC).toContain('function enforceCodexGate(')
-    expect(SRC).toContain("codexStatus === 'deferred' && synthesis && synthesis.verdict === 'APPROVE'")
-    expect(SRC).toContain('return enforceCodexGate(synthesisRaw, codexStatus)')
+    expect(SRC).toContain('function enforceCrossModelGate(')
+    expect(SRC).toContain('function deferredCrossModelPeers(')
+    expect(SRC).toContain('enforceCrossModelGate(synthesisRaw, deferredCrossModelPeers(')
   })
 })
 
-// Execute the EXACT enforceCodexGate logic the script uses (kept in lockstep with
-// the .mjs) so the never-silent-downgrade rule is verified BEHAVIORALLY.
-describe('inner-workflow.mjs — enforceCodexGate behavior (never-silent-downgrade)', () => {
-  function enforceCodexGate(
-    synthesis: { verdict: string; findings: unknown[] } | null,
-    codexStatus: string,
-  ): { verdict: string; findings: unknown[] } | null {
-    if (codexStatus === 'deferred' && synthesis && synthesis.verdict === 'APPROVE') {
-      return {
-        verdict: 'REQUEST_CHANGES',
-        findings: [
-          {
-            severity: 'blocker',
-            title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
-            evidence: 'codex was configured but the review call failed/timed out',
-          },
-          ...((synthesis && synthesis.findings) || []),
-        ],
+// The never-silent-downgrade gate, verified BEHAVIORALLY against the REAL
+// function — extracted from the .mjs source and evaluated, not re-implemented
+// here.
+//
+// It USED to be a hand-copied TypeScript duplicate with a comment asking future
+// editors to keep it "in lockstep with the .mjs". That is a test that cannot fail
+// for the reason it claims to check: the copy would keep passing while the real
+// gate was broken or deleted. The workflow script genuinely cannot be imported
+// (it has no module resolution and its top-level `return` is the Workflow
+// runtime's result API), so the gate is lifted out of the source text and run.
+function loadRealGate(): {
+  enforceCrossModelGate: (s: unknown, peers: unknown[]) => { verdict: string; findings: unknown[] } | null
+  deferredCrossModelPeers: (statuses: unknown) => Array<{ name: string; evidence: string }>
+} {
+  const grab = (name: string): string => {
+    const at = SRC.indexOf(`function ${name}(`)
+    if (at === -1) throw new Error(`${name} is missing from inner-workflow.mjs`)
+    // Brace-match to the end of the function so the extraction survives edits
+    // inside the body rather than depending on a fixed line count.
+    let depth = 0
+    let started = false
+    for (let i = at; i < SRC.length; i += 1) {
+      const c = SRC[i]
+      if (c === '{') {
+        depth += 1
+        started = true
+      } else if (c === '}') {
+        depth -= 1
+        if (started && depth === 0) return SRC.slice(at, i + 1)
       }
     }
-    return synthesis
+    throw new Error(`could not brace-match ${name}`)
   }
+  const factory = new Function(
+    `${grab('enforceCrossModelGate')}\n${grab('deferredCrossModelPeers')}\nreturn { enforceCrossModelGate, deferredCrossModelPeers }`,
+  ) as () => ReturnType<typeof loadRealGate>
+  return factory()
+}
+
+describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgrade)', () => {
+  // LOADED INSIDE THE TESTS, NOT IN THE DESCRIBE BODY. Calling loadRealGate() at
+  // describe-evaluation time made a load failure DELETE these tests instead of
+  // failing them: a mutation that broke the extraction produced "0 fail" with
+  // seven tests silently absent, which is the same guard-cannot-fail shape this
+  // whole file exists to prevent. A throw inside a test is a red test.
+  const gate = (): ReturnType<typeof loadRealGate> => loadRealGate()
+
+  test('the gate is actually extractable from the .mjs (guards the extraction itself)', () => {
+    const g = gate()
+    expect(typeof g.enforceCrossModelGate).toBe('function')
+    expect(typeof g.deferredCrossModelPeers).toBe('function')
+  })
 
   test('deferred codex + APPROVE synthesis → forced REQUEST_CHANGES with a blocker prepended', () => {
-    const out = enforceCodexGate({ verdict: 'APPROVE', findings: [] }, 'deferred')
+    const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
+    const deferredCodex = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
+    const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, deferredCodex)
     expect(out?.verdict).toBe('REQUEST_CHANGES')
     expect(out?.findings.length).toBe(1)
   })
 
   test('deferred codex + REQUEST_CHANGES synthesis → passes through unchanged (already blocked)', () => {
+    const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
+    const deferredCodex = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
     const s = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major' }] }
-    expect(enforceCodexGate(s, 'deferred')).toBe(s)
+    expect(enforceCrossModelGate(s, deferredCodex)).toBe(s)
   })
 
-  test('connected codex + APPROVE → NOT downgraded (codex ran fine)', () => {
+  test('connected peers + APPROVE → NOT downgraded (both ran fine)', () => {
+    const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
+    const noneDeferred = deferredCrossModelPeers({ codex: 'connected', kimi: 'connected' })
     const s = { verdict: 'APPROVE', findings: [] }
-    expect(enforceCodexGate(s, 'connected')).toBe(s)
+    expect(enforceCrossModelGate(s, noneDeferred)).toBe(s)
   })
 
-  test('not_connected codex + APPROVE → NOT downgraded (graceful Claude-only)', () => {
+  test('not_connected peers + APPROVE → NOT downgraded (graceful Claude-only)', () => {
+    const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
     const s = { verdict: 'APPROVE', findings: [] }
-    expect(enforceCodexGate(s, 'not_connected')).toBe(s)
+    expect(
+      enforceCrossModelGate(s, deferredCrossModelPeers({ codex: 'not_connected', kimi: 'not_connected' })),
+    ).toBe(s)
+  })
+
+  test('a deferred KIMI alone blocks an APPROVE — the second peer is really gated', () => {
+    // The point of generalising one gate instead of adding a second: a new peer
+    // is enforced by construction, not by remembering to write a parallel guard.
+    const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
+    const peers = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' })
+    expect(peers).toHaveLength(1)
+    const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
+    expect(out?.verdict).toBe('REQUEST_CHANGES')
+    expect(JSON.stringify(out?.findings)).toContain('Kimi K3')
+  })
+
+  test('BOTH peers deferred → both blockers surface, so the operator knows which is down', () => {
+    const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
+    const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' })
+    const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
+    expect(out?.verdict).toBe('REQUEST_CHANGES')
+    expect(out?.findings.length).toBe(2)
+  })
+
+  test("the kimi blocker states there is NO Claude-family fallback", () => {
+    // A fallback would restore the single-family panel while still reporting that
+    // a cross-model review happened, so the refusal is part of the contract.
+    const { deferredCrossModelPeers } = gate()
+    const peers = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' })
+    expect(peers[0]!.evidence).toContain('NO fallback to a Claude-family')
   })
 })
 

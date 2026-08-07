@@ -123,6 +123,13 @@ export interface MiscCompositionInput {
       run: import('@neutronai/trident/store.ts').TridentRun,
     ) => string | null
     /**
+     * Is a Kimi K3 key configured? Called PER LAUNCH (not captured at boot) so a
+     * key added later is honoured on the next run rather than the next restart.
+     * Absent → the Kimi cross-model panelist never runs, which is graceful and
+     * never blocks a merge.
+     */
+    resolve_kimi_configured?: () => boolean
+    /**
      * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
      * launching run. The composer wires this to the SAME `reflection` instance the
      * live-agent chat turn reads (`reflection.loadContext()`), so owner corrections

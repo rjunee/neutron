@@ -5504,6 +5504,17 @@ export function buildOpenGraphComposer(
               resolve_codex_home: (run) =>
                 codexCredentialService.resolveActiveCodexHome(asOwnerHandle(run.project_slug)),
               codex_home: codexHome,
+              // KIMI K3 — the cross-model panelist from a DIFFERENT model family.
+              // Read from the environment PER LAUNCH, not captured here: a key added
+              // after boot must take effect on the next run rather than the next
+              // restart (Decisions Log 2026-08-07). Only a BOOLEAN crosses into the
+              // workflow — the key is read by `trident/kimi-review-cli.ts` in its own
+              // process, so it never enters prompt text. Unset → the panelist is
+              // skipped and the review notes it, never blocks.
+              resolve_kimi_configured: (): boolean => {
+                const key = env['KIMI_API_KEY']
+                return typeof key === 'string' && key.length > 0
+              },
               // RB2 (b) — thread the owner's structured CORRECTIONS into the inner
               // workflow so the FORGE BUILDER (forge:build + fix rounds) re-grounds on
               // them — NOT the independent argus review gate (trust boundary — verified

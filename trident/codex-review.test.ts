@@ -13,7 +13,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -33,7 +33,13 @@ interface RunOpts {
   env?: Record<string, string>
 }
 
-function run(opts: RunOpts = {}): { status: number | null; stderr: string; stdout: string } {
+function run(opts: RunOpts = {}): {
+  status: number | null
+  stderr: string
+  stdout: string
+  /** argv the mock `codex` received on its review invocation ('' if never run). */
+  codexArgv: string
+} {
   const dir = mkdtempSync(join(tmpdir(), 'trident-codex-'))
   const codexHome = join(dir, 'codexhome')
   mkdirSync(codexHome, { recursive: true })
@@ -46,9 +52,11 @@ function run(opts: RunOpts = {}): { status: number | null; stderr: string; stdou
   if (opts.codexLoginExit !== null && opts.codexLoginExit !== undefined) {
     // Mock codex: `login status` → the given exit; anything else → exit 0.
     const mock = join(bin, 'codex')
+    // Records the argv of the non-login invocation so the review MODEL flag is
+    // observable — an unpinned review is otherwise invisible from the exit code.
     writeFileSync(
       mock,
-      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nexit 0\n`,
+      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\nexit 0\n`,
     )
     chmodSync(mock, 0o755)
   }
@@ -66,7 +74,13 @@ function run(opts: RunOpts = {}): { status: number | null; stderr: string; stdou
   // Run inside a git repo so `git diff` doesn't error — the temp dir is fine (no
   // repo → empty diff, which the script tolerates).
   const res = spawnSync('bash', [SCRIPT, 'main'], { cwd: dir, encoding: 'utf8', env })
-  return { status: res.status, stderr: res.stderr ?? '', stdout: res.stdout ?? '' }
+  let codexArgv = ''
+  try {
+    codexArgv = readFileSync(join(dir, 'codex-argv.txt'), 'utf8')
+  } catch {
+    codexArgv = ''
+  }
+  return { status: res.status, stderr: res.stderr ?? '', stdout: res.stdout ?? '', codexArgv }
 }
 
 describe('trident/codex-review.sh — exit-code contract', () => {
@@ -148,5 +162,48 @@ describe('trident/codex-review.sh — exit-code contract', () => {
     expect(status).toBe(5)
     expect(stderr).toContain('CODEX_REVIEW_CALL_FAILED')
     expect(stderr).toContain('DEFERRED')
+  })
+})
+
+describe('trident/codex-review.sh — the review MODEL is pinned', () => {
+  test('pins gpt-5.6-sol by default', () => {
+    // UNPINNED, `codex exec` takes the CLI default, and OpenAI moved auto-review to
+    // the cheapest 5.6 tier — so the "independent GPT-5 second opinion" would
+    // quietly be served by the weakest model available while every exit code and
+    // every other test stayed green. Only the argv shows it.
+    const { status, codexArgv } = run({ authed: true, codexLoginExit: 0, diffFileContent: 'diff --git a b\n' })
+    expect(status).toBe(0)
+    expect(codexArgv).toContain('--model')
+    expect(codexArgv).toContain('gpt-5.6-sol')
+  })
+
+  test('CODEX_REVIEW_MODEL overrides the pin', () => {
+    const { codexArgv } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: 'diff --git a b\n',
+      env: { CODEX_REVIEW_MODEL: 'gpt-5.6-thinking' },
+    })
+    expect(codexArgv).toContain('gpt-5.6-thinking')
+    expect(codexArgv).not.toContain('gpt-5.6-sol')
+  })
+
+  test('an EXPLICITLY EMPTY CODEX_REVIEW_MODEL falls back to the CLI default', () => {
+    // `${VAR-default}` substitutes only when UNSET, so an operator can opt out of
+    // pinning entirely. If this used `:-` instead, empty would silently re-pin.
+    const { codexArgv } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: 'diff --git a b\n',
+      env: { CODEX_REVIEW_MODEL: '' },
+    })
+    expect(codexArgv).not.toContain('--model')
+  })
+
+  test('the prompt still reaches codex on STDIN, not argv', () => {
+    // The pin adds argv entries; the diff must still go via stdin or a near-cap
+    // diff blows ARG_MAX and fails before codex runs (a false DEFERRED).
+    const { codexArgv } = run({ authed: true, codexLoginExit: 0, diffFileContent: 'diff --git a b\n' })
+    expect(codexArgv.trim().split('\n')).toEqual(['exec', '--model', 'gpt-5.6-sol', '-'])
   })
 })

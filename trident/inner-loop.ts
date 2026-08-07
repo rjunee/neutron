@@ -72,6 +72,14 @@ export interface InnerLoopInput {
    *  codex reviewer runs `trident/codex-review.sh` with this CODEX_HOME; null → the
    *  review runs Claude-only + a "codex not connected" note (never a blocker). */
   codex_home?: string | null
+  /**
+   * Is a Kimi K3 API key configured for this deployment? A BOOLEAN — the key
+   * itself must never transit the workflow args, because those are serialised
+   * into a launcher PROMPT (see the transit note below). Absent → the Kimi
+   * panelist is skipped and the review notes it, exactly like an unconfigured
+   * codex.
+   */
+  kimi_configured?: boolean
   /** RB2 (b) — the owner's recent reflection corrections/diary, ALREADY formatted
    *  as the `<learned_corrections>`/`<recent_diary>` block by the reflection layer
    *  (or null when nothing has been learned). Threaded into the workflow args so the
@@ -223,6 +231,11 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
     codexHome: input.codex_home ?? null,
+    // Whether the KIMI K3 cross-model panelist runs. A BOOLEAN, never the key:
+    // these args are JSON-serialised into the launcher prompt below, so a secret
+    // here would land in prompt text and any transcript of it. The CLI reads
+    // KIMI_API_KEY from its own process environment instead.
+    kimiConfigured: input.kimi_configured === true,
     // RB2 (b) — the owner-corrections GUIDANCE, DERIVED HERE (testable TS) from the
     // owner's recent reflection corrections/diary block and threaded READY as a
     // framed, `<owner_reflection>`-delimited advisory SUFFIX. Among the BUILD/REVIEW

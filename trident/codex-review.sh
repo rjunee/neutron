@@ -125,7 +125,23 @@ fi
 # Pipe the prompt via STDIN (`codex exec -`), NOT as an argv entry: a near-cap
 # diff (up to DIFF_LINE_LIMIT lines) in a single argument can exceed the OS
 # ARG_MAX and fail before codex runs → a false DEFERRED (Codex review [P2]).
-if printf '%s' "$PROMPT" | codex exec -; then
+# PIN THE REVIEW MODEL. Unpinned, `codex exec` takes the CLI's default, and OpenAI
+# moved auto-review to the cheapest 5.6 tier — so the "independent GPT-5 second
+# opinion" this panelist exists to provide was quietly being served by the weakest
+# available model. gpt-5.6-sol is the flagship tier with the strongest capability
+# for this kind of judgement work.
+#
+# Overridable via CODEX_REVIEW_MODEL for a deployment that wants a different tier;
+# set it to the EMPTY string to fall back to the CLI default (the `-` in `${VAR-x}`
+# is deliberate — it substitutes only when UNSET, so an explicit empty value is
+# respected rather than replaced).
+REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
+if [ -n "$REVIEW_MODEL" ]; then
+  set -- --model "$REVIEW_MODEL"
+else
+  set --
+fi
+if printf '%s' "$PROMPT" | codex exec "$@" -; then
   exit 0
 fi
 echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — do NOT treat as an approval." >&2
