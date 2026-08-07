@@ -15,7 +15,7 @@
  * confirm "the mic is live" without looking.
  */
 
-import { describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,15 +27,31 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const selectionAsync = mock(async () => undefined);
 const impactAsync = mock(async (_style?: unknown) => undefined);
 
-mock.module('expo-haptics', () => ({
-  selectionAsync,
-  impactAsync,
-  ImpactFeedbackStyle: { Light: 'light', Medium: 'medium', Heavy: 'heavy' },
-}));
+// NOT `mock.module`: bun's module mocks are process-wide and persist, and this
+// module is imported by the rail and the recorder — mocking the specifier leaked
+// into unrelated chat suites sharing the CI shard and failed them while passing in
+// isolation. The explicit seam is scoped to this file.
+import {
+  __setHapticsModuleForTests,
+  hapticProjectSwitch,
+  hapticRecordingStarted,
+  hapticRecordingStopped,
+} from '../lib/haptics';
 
-const { hapticProjectSwitch, hapticRecordingStarted, hapticRecordingStopped } = await import(
-  '../lib/haptics'
-);
+beforeEach(() => {
+  selectionAsync.mockClear();
+  impactAsync.mockClear();
+  __setHapticsModuleForTests({
+    selectionAsync,
+    impactAsync,
+    ImpactFeedbackStyle: { Light: 'light' },
+  });
+});
+
+afterEach(() => {
+  // Restore the real module so nothing downstream inherits the stub.
+  __setHapticsModuleForTests(undefined);
+});
 
 describe('the haptic vocabulary', () => {
   it('a project switch uses the SELECTION tick, not an impact', () => {

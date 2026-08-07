@@ -53,7 +53,25 @@ interface HapticsModule {
   ImpactFeedbackStyle: { Light: unknown };
 }
 
+/**
+ * Test override. Set to a stub to assert the mapping, `null` to simulate a platform
+ * with no haptics, `undefined` to restore the real module.
+ *
+ * WHY A SEAM RATHER THAN `mock.module`. Bun's module mocks are PROCESS-WIDE and
+ * persist for the rest of the run, and this file is imported by the rail and the
+ * recorder — so mocking the specifier leaked into unrelated chat suites sharing the
+ * shard and failed them (CI shard 2, passing in isolation, which is the signature).
+ * An explicit override is scoped to the test that sets it and matches the
+ * `__…ForTests` convention already used for the server config and mobile store.
+ */
+let override: HapticsModule | null | undefined;
+
+export function __setHapticsModuleForTests(m: HapticsModule | null | undefined): void {
+  override = m;
+}
+
 function load(): HapticsModule | null {
+  if (override !== undefined) return override;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('expo-haptics') as HapticsModule;
