@@ -220,3 +220,76 @@ describe('the selected row is carried by hue, not another neutral step', () => {
     screen.unmount();
   });
 });
+
+/**
+ * react-native-web compiles styles to ATOMIC classes, so `numberOfLines` is not
+ * readable as a prop or as a computed style — it shows up as a class trio. The
+ * discriminator, confirmed by rendering both cases in one tree:
+ *
+ *   multi-line (numberOfLines > 1) → `r-WebkitBoxOrient-*`, and NO nowrap class
+ *   single-line (numberOfLines = 1) → `r-whiteSpace-*` (nowrap), and NO box-orient
+ *
+ * The rail's own create label is `numberOfLines={1}`, so it is an IN-TREE CONTROL:
+ * it proves these assertions can tell the two cases apart, which is the thing a
+ * class-name assertion most needs to prove about itself.
+ */
+const classesOf = (el: HTMLElement): string => el.className;
+const isMultiline = (c: string): boolean =>
+  c.includes('r-WebkitBoxOrient-') && !c.includes('r-whiteSpace-');
+const isSingleLine = (c: string): boolean =>
+  c.includes('r-whiteSpace-') && !c.includes('r-WebkitBoxOrient-');
+
+/** The leaf element rendering exactly this text. */
+function labelWithText(host: HTMLElement, text: string): HTMLElement {
+  const el = Array.from(host.querySelectorAll('*')).find(
+    (x) => (x.textContent ?? '') === text && x.children.length === 0,
+  ) as HTMLElement | undefined;
+  if (el === undefined) throw new Error(`no leaf element rendering "${text}"`);
+  return el;
+}
+
+describe('project names wrap instead of truncating', () => {
+  it('the name is MULTI-line, while the create label beside it stays single', async () => {
+    // Owner, on device: "Make project names in the rail wrap instead of truncate.
+    // They are not readable when they truncate." The rail is 72pt wide, so at caption
+    // size one line held roughly eight characters — an ellipsis and a guess for most
+    // real names.
+    const screen = await mountRail([project('a', 'Infrastructure Planning')], 'a');
+    const name = classesOf(labelWithText(screen.host, 'Infrastructure Planning'));
+    expect(isMultiline(name)).toBe(true);
+
+    // THE CONTROL. Same tree, same render, a label that is deliberately still one
+    // line. Without this the assertion above could be passing on a class list that
+    // happens to contain the substring for unrelated reasons.
+    const create = classesOf(labelWithText(screen.host, 'New'));
+    expect(isSingleLine(create)).toBe(true);
+    expect(isMultiline(create)).toBe(false);
+
+    screen.unmount();
+  });
+
+  it('reserves both lines on a SHORT name too, so rows keep a uniform height', async () => {
+    // Without reserved height the rail is a ragged column whose row heights depend on
+    // name length — and a RENAME would change a row's height, moving every target
+    // beneath it.
+    const short = await mountRail([project('a', 'Ops')], 'a');
+    const long = await mountRail([project('a', 'Infrastructure Planning')], 'a');
+    const minHeightClass = (host: HTMLElement, text: string): string => {
+      const c = classesOf(labelWithText(host, text));
+      const m = /r-minHeight-\S+/.exec(c);
+      return m === null ? '' : m[0];
+    };
+    const a = minHeightClass(short.host, 'Ops');
+    const b = minHeightClass(long.host, 'Infrastructure Planning');
+    // A reserved height at all…
+    expect(a).not.toBe('');
+    // …and the SAME one regardless of name length, which is the property that keeps
+    // the column uniform.
+    expect(a).toBe(b);
+    // The control again: the create label reserves no such height, so the class above
+    // is genuinely coming from the name style and not from something every label has.
+    expect(minHeightClass(short.host, 'New')).toBe('');
+    short.unmount();
+    long.unmount();
+  });
+});
