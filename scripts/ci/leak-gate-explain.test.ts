@@ -51,6 +51,23 @@ function fixtureTree(files: Record<string, string>): string {
   return dir
 }
 
+/**
+ * The env every spawn here needs. ONE place, because getting it partly right is
+ * silent: the script's IN_CI reads `GITHUB_ACTIONS` OR `GITHUB_RUN_ID` OR
+ * `GITHUB_EVENT_NAME`, and leaving any of them set makes the diagnostic REFUSE,
+ * which fails content assertions while an exit-code-only assertion still passes.
+ */
+function localEnv(extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    ...(process.env as Record<string, string>),
+    GITHUB_ACTIONS: '',
+    GITHUB_RUN_ID: '',
+    GITHUB_EVENT_NAME: '',
+    GITHUB_REPOSITORY: '',
+    ...extra,
+  }
+}
+
 function explain(
   tree: string,
   denylist: string,
@@ -60,14 +77,7 @@ function explain(
   writeFileSync(dl, denylist)
   const res = spawnSync('bash', [SCRIPT, '--explain-denylist', tree], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      LEAK_GATE_PII_DENYLIST_FILE: dl,
-      // Never let the ambient CI vars of a real run leak into the fixture.
-      GITHUB_ACTIONS: '',
-      GITHUB_REPOSITORY: '',
-      ...extraEnv,
-    },
+    env: localEnv({ LEAK_GATE_PII_DENYLIST_FILE: dl, ...extraEnv }),
   })
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
 }
@@ -75,9 +85,13 @@ function explain(
 describe('--explain-denylist cannot be mistaken for a gate run', () => {
   test('exits 2 even when nothing matches at all', () => {
     const tree = fixtureTree({ 'a.md': 'nothing interesting here\n' })
-    const { status } = explain(tree, 'zqx-absent-term\n')
+    const { status, stdout } = explain(tree, 'zqx-absent-term\n')
     // NOT 0. A clean-looking exit 0 is precisely how this would become a skip.
     expect(status).toBe(2)
+    // AND it must have actually produced the report. Exit 2 alone is ambiguous:
+    // the CI refusal path also exits 2, so asserting only the code let this test
+    // pass inside real CI while the diagnostic never ran at all.
+    expect(stdout).toContain('MATCHES')
   })
 
   test('is REFUSED inside GitHub Actions', () => {
@@ -167,7 +181,7 @@ describe('--explain-denylist identifies the over-broad entry', () => {
     const tree = fixtureTree({ 'a.md': 'x\n' })
     const res = spawnSync('bash', [SCRIPT, '--explain-denylist', tree], {
       encoding: 'utf8',
-      env: { ...process.env, LEAK_GATE_PII_DENYLIST_FILE: '/nonexistent/denylist', GITHUB_ACTIONS: '' },
+      env: localEnv({ LEAK_GATE_PII_DENYLIST_FILE: '/nonexistent/denylist' }),
     })
     expect(res.status).toBe(2)
     expect(res.stderr).toContain('no denylist resolved')
