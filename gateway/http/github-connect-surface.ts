@@ -183,23 +183,25 @@ export function createGitHubConnectSurface(
 
       // Background completion. The request has already answered by then; the token
       // (or the failure) lands in the store, which is what every later read uses.
+      // The RAW promise plus an `onError`, not a pre-swallowed one: a `.catch` before
+      // the wrapper would hide the rejection from the counter that exists to make
+      // exactly this kind of detached work observable.
       fireAndForget(
         'github_device_flow',
-        flow
-          .then((result) => {
-            pending.delete(owner)
-            log(
-              result.connected ? 'github_connected' : 'github_connect_failed',
-              result.connected ? {} : { reason: result.reason },
-            )
+        flow.then((result) => {
+          pending.delete(owner)
+          log(
+            result.connected ? 'github_connected' : 'github_connect_failed',
+            result.connected ? {} : { reason: result.reason },
+          )
+        }),
+        (err: unknown) => {
+          pending.delete(owner)
+          // A presenter or storage fault, not a device-flow outcome. Never a token.
+          log('github_connect_error', {
+            error: err instanceof Error ? err.message : String(err),
           })
-          .catch((err: unknown) => {
-            pending.delete(owner)
-            // A presenter or storage fault, not a device-flow outcome. Never a token.
-            log('github_connect_error', {
-              error: err instanceof Error ? err.message : String(err),
-            })
-          }),
+        },
       )
 
       // If the very first call to GitHub fails, `present` never runs and `shown`
