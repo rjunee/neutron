@@ -208,10 +208,19 @@ export function buildTriageScheduler(opts: TriageSchedulerOpts): TriageScheduler
       const key = `${project_id}::${ymdKey(now, opts.userTz)}`
       if (lastFired.get(key) !== undefined) return
       const cache = await opts.cacheFor(project_id)
+      // READS THE WHOLE INBOX. `project_id` decides where the digest is POSTED;
+      // it must not decide which mail counts.
+      //
+      // This used to pass `project_id`, scoping the read to the
+      // `Neutron/<project_id>` Gmail label — and that label is only ever applied
+      // by the draft and send paths, to mail Neutron itself wrote. So the daily
+      // digest was scoped to Neutron's own outbound threads: even with the
+      // label-id bug in `google-client.listMessages` fixed, a working version of
+      // this call would have shown him his own sent mail and called it a triage
+      // of his morning inbox. The 400 masked a second, quieter defect.
       const { results: inbox } = await opts.client.listMessages({
         label: 'INBOX',
         max_results: lookback,
-        project_id,
       })
       const triage = await composeTriage({
         inbox,

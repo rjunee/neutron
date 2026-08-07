@@ -2,6 +2,53 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-06 — the daily email digest reads the inbox; it had never once succeeded
+
+Branch `fix/email-digest-project-label`.
+
+**Found by reading the live journal while answering "does the email core cover
+what my email app does", not from a bug report.** The Email Core's triage
+scheduler was composed, wired, started, and firing on time — 15:00 UTC = 08:00
+owner-local, every day. Every fire died on both connected mailboxes:
+
+```
+[open-cores] event=email_account_read_failed operation=listMessages
+  error="Gmail API 400: Invalid label: Neutron/<project_id>"
+```
+
+**Two defects, stacked, and the loud one hid the quiet one.**
+
+1. *Mechanical.* `cores/free/email/src/google-client.ts` appended the project
+   label NAME as a second `labelIds` value. Gmail's `labelIds` takes label IDs;
+   a system label's id equals its name (`INBOX`), a user label's does not
+   (`Label_7`), so the request was invalid by construction. The same file knew
+   better in two places — the draft and send paths resolve the name through
+   `ensureLabelImpl` because "threads.modify wants a label_id, NOT a label_name"
+   (`:338`), and `search` AND-s `label:<name>` into `q`. The list path now does
+   what `search` does. It also fails SOFT: an unknown label in `q` returns an
+   empty set instead of a 400, so "nothing matches yet" stops being reported as
+   "your request is invalid".
+
+2. *Semantic, and worse.* `triage-scheduler.ts` scoped the inbox read to
+   `Neutron/<project_id>` at all. That label is applied only by the draft/send
+   paths, to mail Neutron itself wrote — so a FIXED version of the old call would
+   have composed the owner's morning digest from his own outbound threads. The
+   tick now reads the whole `INBOX`; `project_id` selects where the digest is
+   POSTED, never which mail counts.
+
+**Why it survived a 46-test suite: the tests only ever counted whether the
+scheduler FIRED.** They passed identically before and after the scoping was
+removed, and passed with the in-memory client filtering the seeded message out —
+a digest composed over an empty inbox is indistinguishable from a working one if
+nothing asserts what it saw. This is the forbidden pattern in CLAUDE.md
+("integration tests that only assert bookkeeping"), caught in the wild.
+
+**Tests + mutation results.** Four new tests. `triage-scheduler.test.ts` gains
+"the inbox read carries NO project scope" and "the digest actually SEES ordinary
+inbox mail" — restoring `project_id` to the tick reds BOTH. `backend.test.ts`
+gains a `q`-vs-`labelIds` pair; putting the label name back into `labelIds` reds
+one. 70 tests green across the four related suites. No feature flag.
+
 ## 2026-08-05 — the ritual lane is deleted; a ritual is a reminder that fires into the owner's own session
 
 Branch `fix/issue-504-delete-ritual-lane`. ISSUES #504 + #506; decision of record:
