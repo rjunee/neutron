@@ -66,9 +66,15 @@ describe('syncPushRegistration', () => {
 
   it('refuses to open a SECOND registration while one is in flight', async () => {
     let started = 0;
-    let release: (() => void) | null = null;
+    // A deferred, held in an object rather than a `let`. TypeScript's
+    // control-flow analysis cannot see an assignment made inside a Promise
+    // executor callback, so a `let release: (() => void) | null` is still typed
+    // `null` at the call site below and `release()` fails to compile. The object
+    // field carries a real callable from the start, so no definite-assignment
+    // assertion is needed to paper over it.
+    const gate_release = { fire: (): void => {} };
     const gate = new Promise<void>((resolve) => {
-      release = resolve;
+      gate_release.fire = resolve;
     });
     const in_flight = { current: false };
     const enable = async (): Promise<void> => {
@@ -91,7 +97,7 @@ describe('syncPushRegistration', () => {
 
     expect(second).toBe(false);
     expect(started).toBe(1);
-    release?.();
+    gate_release.fire();
     expect(await first).toBe(true);
   });
 
