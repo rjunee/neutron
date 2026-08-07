@@ -80,6 +80,11 @@ export interface PushDispatcherOptions {
 
 export interface PushDispatcherLogger {
   warn(message: string, meta?: Record<string, unknown>): void
+  /**
+   * OPTIONAL so existing recording loggers in tests keep compiling. The default
+   * logger below always supplies it, so production always emits the tally.
+   */
+  info?(message: string, meta?: Record<string, unknown>): void
 }
 
 export interface PushDispatcher {
@@ -140,6 +145,9 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
     warn(message, meta) {
       moduleLog.warn(message, coerceLogFields(meta))
     },
+    info(message, meta) {
+      moduleLog.info(message, coerceLogFields(meta))
+    },
   }
 
   async function dispatch(
@@ -178,6 +186,22 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
         // silently end push for that device until the next sign-in.
         await pruneUnregistered(project_slug, messages, result.tickets)
       }
+      // THE TALLY. Emitted on EVERY completed send, including a fully successful
+      // one, because this path used to log only on failure — and silence then
+      // carried two opposite meanings: "delivered fine" and "never ran at all".
+      // Diagnosing a live push failure meant asking the owner whether his phone
+      // buzzed, since nothing in the journal could distinguish the two. One line
+      // per send removes that ambiguity.
+      //
+      // Counts only — never a token, never a fingerprint of one. The recipient is
+      // identified by `project_slug` because that is the granularity the store
+      // queries at, and a token in a log is a credential in a log.
+      logger.info?.('expo push sent', {
+        project_slug,
+        attempted: messages.length,
+        delivered: messages.length - errored.length,
+        errored: errored.length,
+      })
       return {
         attempted: messages.length,
         delivered: messages.length - errored.length,

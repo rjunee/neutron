@@ -96,13 +96,27 @@ function makeReminder(overrides: Partial<Reminder> = {}): Reminder {
   }
 }
 
-function recordingLogger(): { logger: PushDispatcherLogger; entries: Array<{ message: string; meta?: Record<string, unknown> }> } {
-  const entries: Array<{ message: string; meta?: Record<string, unknown> }> = []
+type LogEntry = { message: string; meta?: Record<string, unknown> }
+
+// `infos` is a SEPARATE array from `entries` on purpose: every existing test
+// asserts on `entries` (warnings), and folding the new success tally into the
+// same list would change those counts and red them for the wrong reason.
+function recordingLogger(): {
+  logger: PushDispatcherLogger
+  entries: LogEntry[]
+  infos: LogEntry[]
+} {
+  const entries: LogEntry[] = []
+  const infos: LogEntry[] = []
   return {
     entries,
+    infos,
     logger: {
       warn(message, meta) {
         entries.push({ message, ...(meta !== undefined ? { meta } : {}) })
+      },
+      info(message, meta) {
+        infos.push({ message, ...(meta !== undefined ? { meta } : {}) })
       },
     },
   }
@@ -502,5 +516,98 @@ describe('PushDispatcher.pushUser', () => {
     expect(client.calls.length).toBe(1)
     expect(client.calls[0]?.length).toBe(1)
     expect(client.calls[0]?.[0]?.to).toBe('tok-A')
+  })
+})
+
+
+describe('PushDispatcher — the success tally (push observability)', () => {
+  // WHY: this path logged ONLY on failure, so silence carried two opposite
+  // meanings — "delivered fine" and "never ran at all". Diagnosing a live push
+  // failure came down to asking the owner whether his phone buzzed, because
+  // nothing in the journal could tell those apart. These pin the line that
+  // removes the ambiguity.
+  test('a fully successful send emits a tally with counts', async () => {
+    await store.register({
+      project_slug: 't1',
+      user_id: 'u1',
+      device_token: 'ExponentPushToken[android]',
+      platform: 'android',
+    })
+    const client = fakeClient([{ status: 'ok', id: 't-1' }])
+    const { logger, entries, infos } = recordingLogger()
+    const dispatcher = createPushDispatcher({ store, client, logger })
+
+    const result = await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+
+    expect(result.delivered).toBe(1)
+    // The point of the change: a SUCCESS is now visible, not inferred from the
+    // absence of a warning.
+    expect(infos.length).toBe(1)
+    expect(infos[0]?.message).toBe('expo push sent')
+    expect(infos[0]?.meta).toMatchObject({ attempted: 1, delivered: 1, errored: 0 })
+    expect(entries.length).toBe(0)
+  })
+
+  test('the tally NEVER carries token material', async () => {
+    // A token in a log is a credential in a log. The recipient is identified by
+    // project_slug, which is the granularity the store queries at anyway.
+    const token = 'ExponentPushToken[secret-value-here]'
+    await store.register({
+      project_slug: 't1',
+      user_id: 'u1',
+      device_token: token,
+      platform: 'android',
+    })
+    const client = fakeClient([{ status: 'ok', id: 't-1' }])
+    const { logger, infos } = recordingLogger()
+    const dispatcher = createPushDispatcher({ store, client, logger })
+
+    await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+
+    const serialised = JSON.stringify(infos)
+    expect(serialised).not.toContain(token)
+    expect(serialised).not.toContain('secret-value-here')
+  })
+
+  test('a PARTIAL failure still emits the tally, alongside the warning', async () => {
+    // The mixed case is the one worth seeing: without a tally, two tokens where
+    // one failed looks identical in the journal to two where both did.
+    await store.register({
+      project_slug: 't1',
+      user_id: 'u1',
+      device_token: 'ExponentPushToken[aaa]',
+      platform: 'android',
+    })
+    await store.register({
+      project_slug: 't1',
+      user_id: 'u1',
+      device_token: 'ExponentPushToken[bbb]',
+      platform: 'android',
+    })
+    const client = fakeClient([
+      { status: 'ok', id: 't-1' },
+      { status: 'error', message: 'too big', details: { error: 'MessageTooBig' } },
+    ])
+    const { logger, entries, infos } = recordingLogger()
+    const dispatcher = createPushDispatcher({ store, client, logger })
+
+    await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+
+    expect(infos[0]?.meta).toMatchObject({ attempted: 2, delivered: 1, errored: 1 })
+    expect(entries.some((e) => e.message === 'expo push ticket error')).toBe(true)
+  })
+
+  test('zero tokens emits NO tally — there was no send to report', async () => {
+    // A fresh install has no devices; a tally there would claim a send happened
+    // when the dispatcher deliberately makes no HTTP call at all.
+    const client = fakeClient([])
+    const { logger, infos } = recordingLogger()
+    const dispatcher = createPushDispatcher({ store, client, logger })
+
+    const result = await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+
+    expect(result.attempted).toBe(0)
+    expect(infos.length).toBe(0)
+    expect(client.calls.length).toBe(0)
   })
 })
