@@ -125,12 +125,15 @@ PROSE_AWK="$HERE/extract-comment-prose.awk"
 
 SCAN_ROOT="."
 MESSAGES_ONLY=0
+# --explain-denylist: a DIAGNOSTIC, never a gate run. See the refusal below.
+EXPLAIN_DENYLIST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --tree)
       [ $# -ge 2 ] || { echo "leak-gate: --tree requires a directory argument" >&2; exit 2; }
       SCAN_ROOT="$2"; shift 2 ;;
     --messages-only) MESSAGES_ONLY=1; shift ;;
+    --explain-denylist) EXPLAIN_DENYLIST=1; shift ;;
     # Print the leading comment block. Derived, not a hardcoded line range: the
     # old `sed -n '2,74p'` silently truncated the moment the header grew.
     -h|--help)
@@ -183,6 +186,15 @@ fi
 if [ "$MESSAGES_ONLY" = "1" ] && [ "$IN_CI" = "1" ]; then
   echo "leak-gate: --messages-only is a pre-push mode and is REFUSED inside GitHub" >&2
   echo "           Actions. CI must run the full tree scan." >&2
+  exit 2
+fi
+
+# `--explain-denylist` is a DIAGNOSTIC and is refused in CI for the same reason:
+# it reports per-entry match counts instead of a verdict, so a workflow that
+# invoked it would print a plausible-looking report and gate nothing.
+if [ "$EXPLAIN_DENYLIST" = "1" ] && [ "$IN_CI" = "1" ]; then
+  echo "leak-gate: --explain-denylist is a local diagnostic and is REFUSED inside" >&2
+  echo "           GitHub Actions. CI must run the full tree scan." >&2
   exit 2
 fi
 
@@ -495,6 +507,78 @@ if [ -z "$PII_RAW" ] && [ "$IN_CI" = "0" ]; then
 fi
 PII_SUB_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist sub)"
 PII_WORD_ALT="$(printf '%s\n' "$PII_RAW" | compile_denylist word)"
+
+# ── --explain-denylist ────────────────────────────────────────────────────────
+# WHY THIS EXISTS (ISSUES #507). The denylist is a repository SECRET, so the local
+# mirror at $HOME/.config/neutron/leak-gate-pii-denylist is maintained by hand and
+# had drifted BROADER than the CI list: entries that CI carries as `word:` were
+# plain substrings locally, so a surname entry matched inside the GitHub org/repo
+# slug in the README and a whole-tree local run reported ~160 findings on files
+# that are GREEN in CI. (Deliberately described, not quoted — a denylist term
+# written into this tree is the very leak class the gate exists to stop, and this
+# comment's first draft did exactly that. Its own --explain-denylist run caught
+# it.)
+#
+# A gate that always fails is indistinguishable from a gate that found something,
+# so the author learns to ignore it — and the one time it is right, it looks the
+# same as the 160 times it was not. That is the permanently-red-check failure the
+# CI-green rule exists to prevent, and it made the one pre-push signal for the one
+# unredactable leak class (a commit message, mirrored to GHArchive within the hour)
+# useless in practice.
+#
+# The fix is NOT to loosen matching — that would weaken a PII gate to reduce noise.
+# It is to make the over-broad ENTRY identifiable, so "160 findings, ignore it"
+# becomes "this one term produced 158 of them; prefix it with `word:`".
+#
+# Reuses the SAME resolved $PII_RAW and the SAME compile_denylist as the real
+# rules, deliberately: the script's own contract is that there is no second
+# matching implementation to drift.
+if [ "$EXPLAIN_DENYLIST" = "1" ]; then
+  if [ -z "$PII_RAW" ]; then
+    echo "leak-gate --explain-denylist: no denylist resolved (source: ${PII_SOURCE})." >&2
+    echo "  Put one at ${XDG_CONFIG_HOME:-$HOME/.config}/neutron/leak-gate-pii-denylist" >&2
+    exit 2
+  fi
+  echo "leak-gate --explain-denylist  (source: ${PII_SOURCE}, tree: ${SCAN_ROOT})"
+  echo "Per-entry match counts over the TRACKED tree (${TOTAL_FILES} files). A large"
+  echo "count on a short or common term means that entry is over-broad as a substring"
+  echo "— carry it as \`word:<term>\` so it only matches on token boundaries."
+  echo ""
+  printf '%8s  %-6s  %s\n' "MATCHES" "KIND" "ENTRY"
+  # NOTE: prints the ENTRY, which is by definition owner PII. Correct here — this
+  # mode is local-only (refused in CI above) and the operator already holds the
+  # list. It must never be wired into a CI step.
+  printf '%s\n' "$PII_RAW" | while IFS= read -r entry; do
+    case "$entry" in ''|'#'*) continue ;; esac
+    kind=sub; term="$entry"
+    case "$entry" in word:*) kind=word; term="${entry#word:}" ;; esac
+    esc="$(printf '%s' "$term" | sed 's/[][\\.^$*+?{}|()/]/\\\\&/g')"
+    if [ "$kind" = word ]; then
+      pat="(^|[^A-Za-z0-9_])${esc}([^A-Za-z0-9_]|$)"
+    else
+      pat="$esc"
+    fi
+    # MIRROR THE REAL RULES' CASE SEMANTICS. `pii-denylist` runs `ci`
+    # (case-insensitive) and `pii-denylist-word` runs `cs` (case-SENSITIVE) — see
+    # the grep_rule calls above. A diagnostic that folded case for both would
+    # over-report word entries and send the operator chasing matches the gate
+    # never makes, which is the same class of misleading signal this mode exists
+    # to remove.
+    if [ "$kind" = word ]; then ci_flag=""; else ci_flag="-i"; fi
+    # Same traversal idiom as grep_rule: NUL-delimited, from the scan root.
+    n=$( (cd "$SCAN_ROOT" && tr '\n' '\0' < "$FILELIST" | xargs -0 grep -a -c $ci_flag -E -e "$pat" 2>/dev/null) \
+         | awk -F: '{ t += $NF } END { print t+0 }' )
+    flag=""
+    if [ "$kind" = sub ] && [ "${n:-0}" -gt 5 ]; then
+      flag="   <-- over-broad as a substring? try  word:${term}"
+    fi
+    printf '%8s  %-6s  %s%s\n' "${n:-0}" "$kind" "$term" "$flag"
+  done
+  echo ""
+  echo "This is a DIAGNOSTIC, not a gate run — it reports counts and never a verdict."
+  echo "Exiting 2 on purpose so it can never be mistaken for a clean gate."
+  exit 2
+fi
 if [ -n "$PII_SUB_ALT" ] || [ -n "$PII_WORD_ALT" ]; then
   echo "  denylist loaded from ${PII_SOURCE} (substring entries: $([ -n "$PII_SUB_ALT" ] && echo yes || echo no); word entries: $([ -n "$PII_WORD_ALT" ] && echo yes || echo no))"
   if [ "$MESSAGES_ONLY" = "0" ]; then
