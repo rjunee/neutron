@@ -222,6 +222,12 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
     serves: 'Connect Codex, globally and per project',
   },
   {
+    rung: 'app-github-connect',
+    composition: 'app_github_connect_surface',
+    serves:
+      'starting and observing the GitHub device flow — the only way the stored token ever comes to exist',
+  },
+  {
     rung: 'app-projects',
     composition: 'app_projects_surface',
     serves: 'the project list and per-project settings drawer',

@@ -40,6 +40,7 @@ import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { connectGitHub, type PresentableGrant } from '@neutronai/github/connect.ts'
 import { readGitHubToken } from '@neutronai/github/credential.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { jsonError, jsonOk, resolveBearer } from './surface-kit.ts'
 
 const GITHUB_AUTH_PATH = '/api/app/github-auth'
@@ -182,21 +183,24 @@ export function createGitHubConnectSurface(
 
       // Background completion. The request has already answered by then; the token
       // (or the failure) lands in the store, which is what every later read uses.
-      void flow
-        .then((result) => {
-          pending.delete(owner)
-          log(
-            result.connected ? 'github_connected' : 'github_connect_failed',
-            result.connected ? {} : { reason: result.reason },
-          )
-        })
-        .catch((err: unknown) => {
-          pending.delete(owner)
-          // A presenter or storage fault, not a device-flow outcome. Never a token.
-          log('github_connect_error', {
-            error: err instanceof Error ? err.message : String(err),
+      fireAndForget(
+        'github_device_flow',
+        flow
+          .then((result) => {
+            pending.delete(owner)
+            log(
+              result.connected ? 'github_connected' : 'github_connect_failed',
+              result.connected ? {} : { reason: result.reason },
+            )
           })
-        })
+          .catch((err: unknown) => {
+            pending.delete(owner)
+            // A presenter or storage fault, not a device-flow outcome. Never a token.
+            log('github_connect_error', {
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }),
+      )
 
       // If the very first call to GitHub fails, `present` never runs and `shown`
       // never settles — so race it against the flow's own rejection rather than
