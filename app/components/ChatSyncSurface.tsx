@@ -73,6 +73,10 @@ import { useUploadState } from '../lib/use-upload-state';
 import { classifyUploadKind } from '../lib/upload-client';
 import { selectDropFiles, shouldGateUpload } from '../lib/upload-gate';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  shouldShowJumpToBottom,
+  type ScrollGeometry,
+} from '../lib/chat-core/jump-to-bottom';
 
 import {
   AGENT_BUBBLE_TONE,
@@ -543,6 +547,34 @@ export function ChatSyncSurface({
   );
 
   const listRef = useRef<FlashListRef<RenderRow> | null>(null);
+
+  // The owner's jump-to-bottom affordance. Driven off scroll GEOMETRY rather than
+  // viewability of the last row: a single agent reply is routinely taller than the
+  // screen, so the last row can be "viewable" while most of it is still below the
+  // fold — which is exactly when he wants the shortcut.
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const onListScroll = useCallback(
+    (e: { nativeEvent: { contentOffset: { y: number }; contentSize: { height: number }; layoutMeasurement: { height: number } } }): void => {
+      const n = e.nativeEvent;
+      const g: ScrollGeometry = {
+        contentHeight: n.contentSize.height,
+        offsetY: n.contentOffset.y,
+        viewportHeight: n.layoutMeasurement.height,
+      };
+      const next = shouldShowJumpToBottom(g);
+      // Set only on CHANGE. onScroll fires on every frame of a fling, and an
+      // unconditional setState there re-renders the whole transcript ~60×/second.
+      setShowJumpToBottom((prev) => (prev === next ? prev : next));
+    },
+    [],
+  );
+  const jumpToBottom = useCallback((): void => {
+    listRef.current?.scrollToEnd?.({ animated: true });
+    // Hide immediately rather than waiting for the scroll to settle: the button is
+    // under the thumb that just tapped it, and leaving it visible through a 300ms
+    // animation invites a second tap on a control that has already done its job.
+    setShowJumpToBottom(false);
+  }, []);
   // Rising keyboard → stay on the newest message. `maintainVisibleContentPosition`
   // holds position through content changes, which is NOT the same as following
   // the bottom when the viewport itself shrinks.
@@ -643,6 +675,11 @@ export function ChatSyncSurface({
             autoscrollToBottomThreshold: 0.2,
           }}
           onViewableItemsChanged={onViewableItemsChanged}
+          onScroll={onListScroll}
+          // 16ms ≈ one frame. The handler itself is cheap and only setStates on a
+          // boundary crossing, so throttling exists to bound the bridge traffic,
+          // not the React work.
+          scrollEventThrottle={16}
           ListFooterComponent={<TranscriptFooter typing={typing} notice={systemNotice} />}
           // ISSUES #402 — only claim emptiness once history has SETTLED.
           // `ready` flips when the session object is constructed, before the
@@ -651,6 +688,18 @@ export function ChatSyncSurface({
           ListEmptyComponent={hydrated ? <EmptyState /> : <HydratingState />}
         />
       )}
+      {showJumpToBottom ? (
+        <Pressable
+          onPress={jumpToBottom}
+          accessibilityRole="button"
+          accessibilityLabel="Jump to latest message"
+          testID="chat-jump-to-bottom"
+          style={styles.jumpToBottom}
+          hitSlop={8}
+        >
+          <Text style={styles.jumpToBottomGlyph}>↓</Text>
+        </Pressable>
+      ) : null}
       <DropZoneOverlay
         visible={dragging && uploadAffordance !== null}
         {...(uploadAffordance !== null ? { source_label: sourceLabel(uploadAffordance.source) } : {})}
@@ -1211,6 +1260,35 @@ const styles = StyleSheet.create({
   trayAgent: { justifyContent: 'flex-start' },
   trayEmojiBtn: { paddingHorizontal: SPACING.xs, paddingVertical: 2 },
   trayEmoji: { ...TYPOGRAPHY.h3 },
+  // The jump-to-bottom affordance. `position: absolute` inside the surface, so it
+  // floats over the transcript and does NOT participate in the list's layout —
+  // adding height to the list would change `contentSize` and therefore the very
+  // geometry that decides whether to show it.
+  //
+  // `bottom` clears the composer rather than the screen edge: the owner asked for
+  // bottom-right, and bottom-right of the TRANSCRIPT is above the input, not behind
+  // it.
+  jumpToBottom: {
+    position: 'absolute',
+    right: SPACING.md,
+    bottom: 84,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: THEME.surface_raised,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: THEME.hairline,
+    // Keep it above the transcript but below the modals/overlays that follow it in
+    // the tree, so an upload sheet is never obscured by a scroll button.
+    zIndex: 2,
+  },
+  jumpToBottomGlyph: {
+    color: THEME.text_primary,
+    fontSize: 18,
+    lineHeight: 20,
+  },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
