@@ -235,6 +235,34 @@
     display: flex; align-items: flex-end; flex: 0 0 auto; gap: 2px;
     padding: 8px 10px 0; background: var(--surface);
   }
+  /* THE TOP-RIGHT MENU — the web twin of the mobile header's ☰ (owner ask: settings
+     must live in ONE place across both clients). `margin-left:auto` pins it to the
+     trailing edge without a spacer element, so it survives the mobile stacking rule
+     below (`.car-topbar` becomes a column at <1024px and the button simply ends up
+     trailing the band instead of beside it). */
+  .car-hmenu-wrap { position: relative; flex: 0 0 auto; margin-left: auto; align-self: center; }
+  .car-hmenu-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 34px; height: 30px; padding: 0;
+    background: transparent; color: var(--fg-muted);
+    border: 1px solid transparent; border-radius: 8px;
+    font-size: 16px; line-height: 1; cursor: pointer;
+  }
+  .car-hmenu-btn:hover { color: var(--fg); background: var(--surface-raised); }
+  .car-hmenu-btn[aria-expanded="true"] { color: var(--fg); background: var(--surface-raised); border-color: var(--border); }
+  /* Above the tab band and the stage, below the mobile job drawer (z-index 60). */
+  .car-hmenu {
+    position: absolute; top: calc(100% + 4px); right: 0; z-index: 45;
+    min-width: 180px; padding: 4px;
+    background: var(--surface-raised); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    display: flex; flex-direction: column;
+  }
+  .car-hmenu-row {
+    text-align: left; padding: 8px 10px; border: 0; border-radius: 6px;
+    background: transparent; color: var(--fg); font: inherit; cursor: pointer;
+  }
+  .car-hmenu-row:hover { background: var(--surface); }
   /* ── USAGE METER — the line between the tab band and the chat stage ─────────
      This IS the divider, not a widget near it. Two 1px rules stacked: the
      5-hour SESSION window on top, the 7-day WEEKLY window below. Each fills from

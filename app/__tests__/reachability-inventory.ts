@@ -267,8 +267,14 @@ export const OWNER_AFFORDANCES: readonly OwnerAffordance[] = [
   {
     id: 'project-settings',
     can: 'Open a project’s settings',
-    broken: 'You cannot open project settings — the header’s settings control opens nothing.',
+    broken: 'You cannot open project settings — the header’s menu does not reach it.',
+    // TWO PRESSES SINCE 2026-08-07: the two header hamburgers consolidated into one
+    // top-right menu (owner ask), so both settings scopes are now menu rows rather
+    // than top-level controls. The probe follows the owner's real path — open the
+    // menu, then choose — because "can he still get there" is the question, and the
+    // number of taps it takes is an implementation detail of the header.
     exercise: async (p) => {
+      await p.press('Open menu');
       await p.press('Open project settings');
     },
     landed: (p) => p.byTestId('project-drawer-panel') !== null,
@@ -277,8 +283,9 @@ export const OWNER_AFFORDANCES: readonly OwnerAffordance[] = [
     id: 'app-settings',
     can: 'Reach app settings, Admin and sign-out',
     broken:
-      'You cannot reach app settings — the header’s app entry navigates nowhere, and it is the only door to the server editor, Admin and sign out (#385).',
+      'You cannot reach app settings — the header’s menu does not reach it, and it is the only door to the server editor, Admin and sign out (#385).',
     exercise: async (p) => {
+      await p.press('Open menu');
       await p.press('Open app settings');
     },
     landed: (p) => p.path() === '/settings',

@@ -40,6 +40,7 @@ import {
 // Defined in the PURE view module so unit tests can assert it (ISSUES #403);
 // re-exported here so existing importers are unaffected.
 import { GENERAL_PROJECT_ID } from '../lib/project-rail-view';
+import { orderRailProjects, railBadgeLabel } from '../lib/rail-order';
 export { GENERAL_PROJECT_ID };
 
 /** The live rail overlay for one project — `activity` drives the dot. */
@@ -147,7 +148,8 @@ function RailItem({
 }) {
   const isGeneral = project.id === GENERAL_PROJECT_ID;
   const dot = railDotKind(overlay?.activity, isGeneral);
-  const hasUnread = project.unread_count > 0;
+  const badge = railBadgeLabel(project.unread_count);
+  const hasUnread = badge !== null;
   return (
     <Pressable
       accessibilityRole="button"
@@ -177,6 +179,20 @@ function RailItem({
         <Text style={styles.emoji} numberOfLines={1}>
           {project.emoji}
         </Text>
+        {/* THE UNREAD COUNT. Owner: "have some kind of notification dot with unread
+            message count (or at least an indicator if no count)" — the count exists
+            on the view already, so the weaker fallback is not needed. Deliberately
+            the TRAILING-TOP corner, diagonally opposite the activity dot: they are
+            different facts (something to READ vs something RUNNING) and stacking
+            them in one corner would make two unrelated signals look like one
+            compound state. */}
+        {badge !== null ? (
+          <View style={styles.badge} testID={`rail-unread-${project.id}`}>
+            <Text style={styles.badgeText} numberOfLines={1}>
+              {badge}
+            </Text>
+          </View>
+        ) : null}
         {/* CLICKABLE ACTIVITY DOT — the Activity Inspector's entry point (SPEC §
             WAVE 3.5; Ryan-locked: no new icon, the EXISTING dot becomes the
             affordance) — but ONLY on the row the owner is already standing in.
@@ -306,7 +322,7 @@ export function ProjectRail({
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.railContent}
       >
-        {projects.map((project) => (
+        {orderRailProjects(projects, activeProjectId).map((project) => (
           <RailItem
             key={`${project.origin_instance}:${project.id}`}
             project={project}
@@ -366,9 +382,18 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.xs,
     borderRadius: SPACING.md,
     gap: 2,
+    // Reserved on EVERY row, transparent when unselected: a border that appears only
+    // on the active row would grow it by 3px and nudge every row below it on each
+    // switch. Layout must not depend on selection.
+    borderWidth: 1.5,
+    borderColor: 'transparent',
   },
   itemActive: {
-    backgroundColor: THEME.surface_raised,
+    // Selection carried by HUE, not elevation — see THEME.rail_selected. The border
+    // is inset via a matching transparent border on the base `item` so selecting a
+    // row does not change its size and shift the column.
+    backgroundColor: THEME.rail_selected,
+    borderColor: THEME.rail_selected_edge,
   },
   pressed: { opacity: 0.7 },
   glyphWrap: {
@@ -438,6 +463,29 @@ const styles = StyleSheet.create({
   nameUnread: {
     fontWeight: '700',
     color: THEME.text_secondary,
+  },
+  /**
+   * The unread pill. `minWidth` with symmetric padding so "1" is a circle and "99+"
+   * grows sideways into a lozenge rather than being clipped — the badge must never
+   * truncate the very number it exists to show.
+   */
+  badge: {
+    position: 'absolute',
+    top: -2,
+    right: -4,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: THEME.user_bubble,
+  },
+  badgeText: {
+    color: THEME.user_ink,
+    fontSize: 10,
+    lineHeight: 16,
+    fontWeight: '700',
   },
   /**
    * The rule that ends the project list. Short of the rail's full width so it

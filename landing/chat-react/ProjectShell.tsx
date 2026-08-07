@@ -52,6 +52,7 @@ import { PaneErrorBoundary } from './PaneErrorBoundary.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
+import { HeaderMenu } from './HeaderMenu.tsx'
 import { useTabOverflow, OverflowMenu } from './tab-overflow.tsx'
 import { useWorkActivity, JobStartDrawer } from './work-activity.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
@@ -595,6 +596,23 @@ export function ProjectShell({
   // to the OUTGOING scope, so clamp the active tab to the always-in-scope Chat
   // until the new set resolves — belt-and-braces with the disabled non-Chat
   // buttons so no wrong-scope `TabContent` can mount mid-switch (Codex P2).
+  /**
+   * THE THINGS YOU ADJUST LEAVE THE BAND (owner ask — settings must live in ONE
+   * place across web and mobile). Settings and Admin move into the top-right menu;
+   * the band keeps the places you WORK. They stay in `visibleTabs`, so choosing one
+   * from the menu still resolves and still renders its panel — only the affordance
+   * moved, which is why no descriptor, registry or renderer changes.
+   *
+   * Filtering on `mount.target` and not on the descriptor's label: a Core could
+   * legitimately ship a tab whose title contains "settings", and it belongs in the
+   * band with the other work surfaces.
+   */
+  const MENU_TARGETS: ReadonlySet<string> = new Set(['settings', 'admin'])
+  const bandTabs = visibleTabs.filter((t) => !MENU_TARGETS.has(t.mount.target))
+  const menuItems = visibleTabs
+    .filter((t) => MENU_TARGETS.has(t.mount.target))
+    .map((t) => ({ key: t.key, label: t.label }))
+
   const resolving = tabsScope === null
   const hasActive = visibleTabs.some((t) => t.key === activeKey)
   const resolvedActiveKey = resolving || !hasActive ? CHAT_KEY : activeKey
@@ -716,7 +734,7 @@ export function ProjectShell({
         <div className="car-topbar">
           <WorkspaceSeat emoji={seatEmoji} name={seatName} />
           <TabBar
-            tabs={visibleTabs}
+            tabs={bandTabs}
             activeKey={resolvedActiveKey}
             onSelect={setActiveKey}
             resolving={resolving}
@@ -724,6 +742,7 @@ export function ProjectShell({
             mobile={!isDesktop}
           />
           {isDesktop ? <ThemeToggle /> : null}
+          <HeaderMenu items={menuItems} onSelect={setActiveKey} />
         </div>
         {/* The seam between the band and the stage. It is the usage meter — two
             1px lines, session over weekly — or, when there is nothing measured,

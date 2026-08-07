@@ -467,22 +467,33 @@ describe('ProjectShell render (happy-dom)', () => {
 
     // General now surfaces a Work tab (parity with named projects): the shell
     // injects the `work_board` descriptor into the global set, so at narrow width
-    // (default in these tests) General renders Chat + Work + Admin. The desktop
+    // (default in these tests) General renders Chat + Work. ADMIN LEFT THE BAND on
+    // 2026-08-07: settings-shaped views moved into the top-right ☰ so web and mobile
+    // agree about what settings IS (owner ask). This lock-test caught the move and
+    // is updated to assert the DESTINATION as well as the absence — dropping
+    // 'Admin' alone would also pass if Admin had vanished entirely. The desktop
     // ≥1024px case turns Work into the slide-out pane (dedicated test below). The
     // per-project resolver is never hit, and the persistent rail renders.
     const tabButtons = () =>
       Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
-    expect(tabButtons()).toEqual(['Chat', 'Work', 'Admin'])
+    expect(tabButtons()).toEqual(['Chat', 'Work'])
+    // …and it is IN THE MENU. This is the half that makes the line above a move.
+    expect(
+      container.querySelector('[data-testid="header-menu-button"]'),
+    ).not.toBeNull()
     expect(projectResolverHits).toBe(0)
     expect(container.querySelector('.car-rail')).not.toBeNull()
     expect(container.textContent).toContain('Send')
 
-    // Admin tab switches to the integrations surface (Chat panel hidden).
-    const adminBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
-      (b) => b.textContent === 'Admin',
-    ) as HTMLButtonElement
+    // Admin still switches to the integrations surface (Chat panel hidden) — now
+    // reached through the menu. The PANEL behaviour is unchanged, which is the point:
+    // only the affordance moved, so no descriptor or renderer changed.
     await act(async () => {
-      adminBtn.click()
+      (container.querySelector('[data-testid="header-menu-button"]') as HTMLButtonElement).click()
+      await tick()
+    })
+    await act(async () => {
+      (container.querySelector('[data-testid="header-menu-item-admin"]') as HTMLButtonElement).click()
       await tick()
     })
     expect((container.querySelector('.car-tabpanel') as HTMLElement).hasAttribute('hidden')).toBe(true)
@@ -856,11 +867,13 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     })
 
     // Desktop General: Work becomes the slide-out pane, so the tab bar keeps only
-    // Chat + Admin (Work stripped), and the pane + its edge-handle mount.
+    // Chat (Work stripped to the pane, Admin moved to the ☰ menu), and the pane +
+    // its edge-handle mount.
     const tabButtons = Array.from(container.querySelectorAll('button[role="tab"]')).map(
       (b) => b.textContent ?? '',
     )
-    expect(tabButtons).toEqual(['Chat', 'Admin'])
+    expect(tabButtons).toEqual(['Chat'])
+    expect(container.querySelector('[data-testid="header-menu-button"]')).not.toBeNull()
     expect(container.querySelector('.car-plans')).not.toBeNull()
     const handle = container.querySelector('.car-plans-handle') as HTMLButtonElement
     expect(handle).not.toBeNull()

@@ -30,6 +30,11 @@ describe('THEME', () => {
       link: '#5fb6ff',
       user_bubble: '#0a84ff',
       user_ink: '#ffffff',
+      // SELECTED RAIL ROW 2026-08-07 on owner feedback ("it's VERY hard to see what
+      // project is selected"). Selection moved from elevation to HUE, so these are
+      // deliberately NOT another neutral step — see the note in theme.ts.
+      rail_selected: '#1b3557',
+      rail_selected_edge: '#0a84ff',
       // M1 UX REDESIGN PR-6 — rail work-activity dot tokens (mirror web).
       work: '#66ccff',
       attention: '#ffd27d',
