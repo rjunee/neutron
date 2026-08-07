@@ -35,6 +35,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { hapticRecordingStarted, hapticRecordingStopped } from './haptics';
 import {
   getRecordingPermissionsAsync,
   requestRecordingPermissionsAsync,
@@ -253,6 +255,9 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
       }
       started_at.current = Date.now();
       setPhase('recording');
+      // The mic is now live. Placed AFTER the unmounted check above, so a start
+      // that was abandoned mid-flight never buzzes for a recording nobody has.
+      hapticRecordingStarted();
       stopTick();
       tick.current = setInterval(() => {
         const began = started_at.current;
@@ -376,6 +381,10 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
     }
     setPreviewUri(uri);
     setPhase('review');
+    // Only on a clip that SURVIVED. The early returns above cover an unmounted
+    // host and a too-short/failed capture, and buzzing "stopped" for a recording
+    // that was silently discarded would be a lie the owner can feel.
+    hapticRecordingStopped();
   }, [stopCapture, toIdle]);
 
   const send = useCallback(async (): Promise<void> => {

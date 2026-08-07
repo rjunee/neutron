@@ -28,6 +28,7 @@ import {
 
 import { SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { PHASE } from '../lib/theme';
+import { hapticProjectSwitch } from '../lib/haptics';
 import {
   railDotKind,
   type ProjectActivity,
@@ -154,6 +155,10 @@ function RailItem({
       accessibilityLabel={`Open ${project.name}${hasUnread ? ', unread' : ''}`}
       testID={`rail-item-${project.id}`}
       onPress={() => {
+        // A tap the owner made always gets the tick, including on the already-active
+        // entry: he pressed something and the device should acknowledge it. Fired
+        // BEFORE `onSelect`, because the selection may navigate and unmount this row.
+        hapticProjectSwitch();
         // ISSUES #401 — ALWAYS notify, even when this entry is already active.
         // Suppressing the call made the FIRST rail entry unopenable: it is the
         // active selection on mount, so its tap was a no-op and the only way to
