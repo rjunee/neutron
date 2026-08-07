@@ -209,6 +209,34 @@ export function makeCredentialedHostRunner(
 }
 
 /**
+ * The same thing, but resolving the environment PER COMMAND instead of once.
+ *
+ * WHY THIS EXISTS AND WHY THE EAGER VARIANT CANNOT BE USED AT THE COMPOSER SEAM.
+ * The credential is read out of the `SecretsStore`, which is async, and the owner
+ * connects GitHub from chat at some arbitrary point AFTER the gateway booted.
+ * Composing `makeCredentialedHostRunner(githubProcessEnv(await readGitHubToken(…)))`
+ * at boot therefore bakes in whatever was stored at boot — which on a fresh
+ * install is `null`, i.e. an empty env — and the runner then stays uncredentialed
+ * for the entire life of the process. The owner would connect, see a success
+ * message, and every push would still fail until the next restart. Rotating or
+ * re-connecting has the same problem in reverse: the stale token outlives it.
+ *
+ * Resolving per command makes the connection take effect on the next host
+ * command with no restart, which is the behaviour the chat surface promises.
+ * This mirrors how the composer already resolves `CODEX_HOME` per run rather
+ * than at boot, and for exactly the same reason.
+ *
+ * A throwing `loadEnv` is NOT swallowed. A secrets store that cannot be read is
+ * a real fault, and degrading to an empty env would turn it into a confusing
+ * authentication failure several steps later instead of the actual error.
+ */
+export function makeLazyCredentialedHostRunner(
+  loadEnv: () => Promise<Record<string, string>>,
+): (cmd: string[], cwd?: string) => Promise<HostCommandResult> {
+  return async (cmd, cwd) => spawnCapture(cmd, cwd, await loadEnv())
+}
+
+/**
  * PR-3 seam — post-merge cleanup, branching on the run's `merge_mode`.
  * Both modes get a stub now so the state machine's `done` transition has a
  * concrete call site; PR-3 fills in the bodies:

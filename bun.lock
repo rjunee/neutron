@@ -10,6 +10,7 @@
         "@neutronai/cores-runtime": "workspace:*",
         "@neutronai/cron": "workspace:*",
         "@neutronai/gateway": "workspace:*",
+        "@neutronai/github": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/onboarding": "workspace:*",
@@ -362,6 +363,9 @@
         "gbrain": "github:garrytan/gbrain#8058144",
       },
     },
+    "github": {
+      "name": "@neutronai/github",
+    },
     "jwt-validator": {
       "name": "@neutronai/jwt-validator",
       "version": "0.1.0",
@@ -456,6 +460,7 @@
         "@neutronai/cron": "workspace:*",
         "@neutronai/doc-search": "workspace:*",
         "@neutronai/gateway": "workspace:*",
+        "@neutronai/github": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
         "@neutronai/landing": "workspace:*",
         "@neutronai/logger": "workspace:*",
@@ -1088,6 +1093,8 @@
     "@neutronai/gateway": ["@neutronai/gateway@workspace:gateway"],
 
     "@neutronai/gbrain-memory": ["@neutronai/gbrain-memory@workspace:gbrain-memory"],
+
+    "@neutronai/github": ["@neutronai/github@workspace:github"],
 
     "@neutronai/google-workspace-core": ["@neutronai/google-workspace-core@workspace:cores/free/google-workspace"],
 

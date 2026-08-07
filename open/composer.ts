@@ -429,6 +429,8 @@ import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-cred
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
+import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
 import {
@@ -5459,6 +5461,23 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: tridentOnRunTerminal,
+              // EVERY host command a build makes carries the instance's GitHub
+              // credential, resolved PER COMMAND. Without this line the whole
+              // github/ module is code nothing calls: `build-core-modules.ts`
+              // falls back to bare `spawnCapture`, and a build can read a public
+              // repo but cannot clone a private one, push a branch, or open a PR.
+              //
+              // Lazy, not baked in at boot. The owner connects GitHub from chat
+              // long after the gateway started, so an eagerly-read token would be
+              // `null` for the life of the process and every push would keep
+              // failing after a success message. Same reasoning as the per-run
+              // CODEX_HOME resolution below.
+              //
+              // Not connected → `githubProcessEnv(null)` is `{}` → byte-for-byte
+              // today's behaviour, so an instance that never connects is unchanged.
+              run_host: makeLazyCredentialedHostRunner(async () =>
+                githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
+              ),
               // M1 UX REDESIGN — the LIVE-PROGRESS fan. Fired by the tick loop for
               // every run whose observable progress advanced (a checkpoint crossing
               // building→reviewing→fixing→merging, a launch, or a terminal
