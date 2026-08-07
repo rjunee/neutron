@@ -110,6 +110,10 @@ describe('jump-to-bottom is wired into the chat surface', () => {
     expect(typeof props?.['onScroll']).toBe('function');
     // Throttled, so a fling does not cross the bridge on every pixel.
     expect(props?.['scrollEventThrottle']).toBe(16);
+    // And the recycling classes — without this every row shares one pool and a
+    // recycled view is re-measured from a one-line bubble into a tall reply,
+    // which is the churn behind the jumpy scroll track.
+    expect(typeof props?.['getItemType']).toBe('function');
     void screen;
   });
 

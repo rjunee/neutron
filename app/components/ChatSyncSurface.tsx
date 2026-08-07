@@ -40,6 +40,7 @@ import { spentChoiceValue } from '@neutronai/chat-core';
 import type { ChatMessage, ChatMessageDocRef } from '@neutronai/chat-core';
 
 import {
+  chatItemType,
   deliveryGlyph,
   deliveryState,
   groupReactions,
@@ -675,6 +676,10 @@ export function ChatSyncSurface({
             autoscrollToBottomThreshold: 0.2,
           }}
           onViewableItemsChanged={onViewableItemsChanged}
+          // Same-shaped recycling pools, so a recycled view is not re-measured from a
+          // one-line user bubble into a full-screen agent reply — the churn behind
+          // the owner's "the scrollbar jumps around, changes size".
+          getItemType={chatItemType}
           onScroll={onListScroll}
           // 16ms ≈ one frame. The handler itself is cheap and only setStates on a
           // boundary crossing, so throttling exists to bound the bridge traffic,

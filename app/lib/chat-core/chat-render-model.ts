@@ -237,6 +237,32 @@ export type RenderRow =
   | { kind: 'streaming'; key: string; message_id: string; body: string };
 
 /**
+ * FlashList recycling class for a transcript row.
+ *
+ * WHY THIS EXISTS. The owner reported the scroll track "jumps around, changes
+ * size … not consistent". FlashList v2 measures rows rather than taking an
+ * `estimatedItemSize`, and with no `getItemType` every row shares ONE recycling
+ * pool — so a recycled view whose previous tenant was a one-line user bubble is
+ * re-measured as a tall agent markdown block, `contentSize` is revised, and the
+ * scroll track resizes under the thumb. Same-shaped pools make each measurement a
+ * much smaller correction.
+ *
+ * Keyed on SPEAKER, because that is the dominant structural difference: a user
+ * bubble is short, right-aligned and rarely wraps; an agent row is full-width
+ * markdown and routinely taller than the screen. A streaming row is its own class
+ * again — it grows token by token, so recycling it as either settled kind
+ * guarantees a re-measure on every chunk.
+ *
+ * Deliberately NOT keyed on the run-grouping inputs (`gapTop`, `hasTail`): those
+ * shift a row's height by a few points, and splitting the pools that finely would
+ * trade measurement churn for recycling misses.
+ */
+export function chatItemType(row: RenderRow): string {
+  if (row.kind === 'streaming') return 'streaming'
+  return row.message.role === 'user' ? 'user' : 'agent'
+}
+
+/**
  * Merge the durable transcript (already ordered by the engine) with the live
  * streaming buffers. A streaming buffer whose final `agent_message` has
  * already landed in `messages` is dropped (the durable row wins). Remaining
