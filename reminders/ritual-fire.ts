@@ -315,6 +315,24 @@ export function buildRitualFirePlanner(deps: RitualFirePlannerDeps): RitualFireP
             // rule over the recent terminal rows (no new state). Guarded: the
             // durable row above is the record, and a read failure here must not
             // cost the notice.
+            // ISSUES #506, SECOND HALF. The ledger reason is no longer a tautology
+            // and the owner now gets a notice — but a failed ritual STILL produced
+            // no log line naming itself, which is the other half of what made the
+            // 2026-08-05 `evening-wrap` failure undiagnosable: `journalctl` over the
+            // whole window matched ZERO lines for `ritual|evening|error|fail`, while
+            // a control grep proved 84 lines existed, so the service was talking and
+            // the failure simply said nothing. The four pre-existing log calls in
+            // this file cover persist failures and SKIPS — never the failure itself.
+            //
+            // An operator diagnosing "my brief didn't arrive" reaches for the
+            // journal before the ledger, so the cause belongs in both. `detail` is a
+            // composition-turn error string, not owner content, and it is capped to
+            // the same budget the ledger column gets.
+            log.warn('ritual_run_failed', {
+              run_id,
+              ritual_id,
+              reason: outcome.detail.slice(0, MAX_RITUAL_FAILURE_REASON_CHARS),
+            })
             const notices = [
               formatRitualFailureNotice({
                 ritual_id,

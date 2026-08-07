@@ -501,3 +501,75 @@ describe('bundled ritual approved fire — composes on the shared session and po
     expect(posted[0]).toContain('morning-brief')
   })
 })
+
+// ── ISSUES #506 (second half) — a FAILED ritual names itself in the LOGS ──────
+//
+// The 2026-08-05 `evening-wrap` failure was undiagnosable for TWO independent
+// reasons. #504's rewrite fixed the first: the ledger's `failure_reason` is now the
+// real cause from the composition turn, not the tautological
+// `"retry exhausted after 1 attempts: failed"`. The second survived it — a failed
+// ritual still emitted NO log line naming itself, so `journalctl` over the whole
+// window matched zero lines for `ritual|evening|error|fail` while a control grep
+// proved 84 lines existed. An operator diagnosing "my brief didn't arrive" reaches
+// for the journal before the ledger.
+//
+// Driven through the REAL dispatcher → planner → settle path with a composition
+// seam that throws, and asserted on `console.warn`, which is where the logger
+// routes `warn` by default. Asserting on the ledger row instead would pass on the
+// half that was ALREADY fixed and say nothing about the half this covers.
+describe('a failed ritual is diagnosable from the logs (#506)', () => {
+  test('logs ritual_run_failed with the real cause, not just a ledger row', async () => {
+    seedBundledRituals({ rituals_dir: ritualsDir })
+    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+    registerBundledRituals(registry)
+
+    const warned: string[] = []
+    const realWarn = console.warn
+    console.warn = (...args: unknown[]): void => {
+      warned.push(args.map((a) => String(a)).join(' '))
+    }
+    try {
+      const stack = buildFireStack({
+        registry,
+        approved: true,
+        mint: 'r-506-fail',
+        compose: async () => {
+          throw new Error('substrate refused: no credential')
+        },
+      })
+      await stack.dispatch(await ritualRow('morning-brief'))
+    } finally {
+      console.warn = realWarn
+    }
+
+    const line = warned.find((l) => l.includes('ritual_run_failed'))
+    expect(line).toBeDefined()
+    // The RITUAL and the RUN, so a journal grep for either finds it.
+    expect(line).toContain('morning-brief')
+    expect(line).toContain('r-506-fail')
+    // And the actual cause — the whole point. A line that says only "failed"
+    // rebuilds the defect.
+    expect(line).toContain('substrate refused')
+  })
+
+  test('a SUCCEEDING ritual logs no failure line', async () => {
+    // Otherwise the grep an operator runs would match every healthy run too, which
+    // is the same "signal you learn to ignore" failure as a gate that always fires.
+    seedBundledRituals({ rituals_dir: ritualsDir })
+    const registry = createRitualRegistry({ rituals_dir: ritualsDir })
+    registerBundledRituals(registry)
+
+    const warned: string[] = []
+    const realWarn = console.warn
+    console.warn = (...args: unknown[]): void => {
+      warned.push(args.map((a) => String(a)).join(' '))
+    }
+    try {
+      const stack = buildFireStack({ registry, approved: true, mint: 'r-506-ok' })
+      await stack.dispatch(await ritualRow('morning-brief'))
+    } finally {
+      console.warn = realWarn
+    }
+    expect(warned.filter((l) => l.includes('ritual_run_failed'))).toEqual([])
+  })
+})
