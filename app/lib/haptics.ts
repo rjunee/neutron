@@ -47,6 +47,8 @@
  * haptics for a process that merely loaded this file early, and the resolution is
  * cheap after the first one.
  */
+import { Platform } from 'react-native';
+
 interface HapticsModule {
   selectionAsync(): Promise<void>;
   impactAsync(style?: unknown): Promise<void>;
@@ -72,6 +74,12 @@ export function __setHapticsModuleForTests(m: HapticsModule | null | undefined):
 
 function load(): HapticsModule | null {
   if (override !== undefined) return override;
+  // Haptics do not exist on web, and the test harness IS react-native-web — so this
+  // is both the honest platform check and the reason CI shard 2 went red: pressing
+  // the rail inside a mounted test reached `require('expo-haptics')`, whose entry
+  // pulls react-native internals that the harness cannot parse. Checking the
+  // platform first means the specifier is never resolved anywhere it cannot work.
+  if (Platform.OS === 'web') return null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('expo-haptics') as HapticsModule;
