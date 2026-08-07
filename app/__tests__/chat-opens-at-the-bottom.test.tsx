@@ -236,6 +236,50 @@ describe('ISSUES #505 — the opening anchor is a function of read state', () =>
     });
   });
 
+  it('a RECEIPT GAP in old history does NOT drag the anchor back to it (ISSUES #511)', () => {
+    // RYAN, 2026-08-07: "switching to general on mobile sometimes jumps WAY far
+    // back, to the very beginning of the chat. messages that were read weeks ago".
+    //
+    // `read_by` is optional and additive, so a message whose receipt never
+    // round-tripped to this device is indistinguishable from an unread one. The
+    // original rule took the FIRST unread anywhere in the transcript, so ONE such
+    // gap in old history pinned the anchor there permanently — while a newer read
+    // message satisfied the "do receipts arrive here" guard, so the bottom fallback
+    // never engaged. That is the bug, and it is not the rule reaching too far: he
+    // confirmed the unread-anchor behaviour is what he wants.
+    //
+    // The unread run is the TRAILING one. Anything older than the newest message
+    // this device has read is read by implication.
+    const rows = [
+      agentRow('old1', [THIS_DEVICE]),
+      agentRow('old2', null), // ← the gap: a receipt that never landed, weeks ago
+      agentRow('old3', [THIS_DEVICE]),
+      agentRow('recent', [THIS_DEVICE]), // ← the watermark
+      agentRow('new1', null), // ← the real unread run starts here
+      agentRow('new2', null),
+    ];
+    expect(chatInitialAnchor(rows, THIS_DEVICE)).toEqual({ kind: 'unread', index: 4 });
+  });
+
+  it('a receipt gap with NOTHING newer unread → the bottom, not the gap', () => {
+    // The same gap, but everything after it is read. Opening at the gap would be
+    // the reported bug with no unread run to justify it at all.
+    const rows = [
+      agentRow('old1', [THIS_DEVICE]),
+      agentRow('old2', null), // ← gap
+      agentRow('old3', [THIS_DEVICE]),
+      agentRow('recent', [THIS_DEVICE]),
+    ];
+    expect(chatInitialAnchor(rows, THIS_DEVICE)).toEqual({ kind: 'bottom' });
+  });
+
+  it('a gap IMMEDIATELY before the watermark is still read-by-implication', () => {
+    // Boundary: the newest read row is the last row, so the trailing unread run is
+    // empty even though an earlier row looks unread.
+    const rows = [agentRow('a1', null), agentRow('a2', [THIS_DEVICE])];
+    expect(chatInitialAnchor(rows, THIS_DEVICE)).toEqual({ kind: 'bottom' });
+  });
+
   it('a read by ANOTHER device does not count as read by THIS one', () => {
     const rows = [agentRow('a1', [THIS_DEVICE]), agentRow('a2', [OTHER_DEVICE])];
     expect(chatInitialAnchor(rows, THIS_DEVICE)).toEqual({ kind: 'unread', index: 1 });

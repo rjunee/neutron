@@ -137,9 +137,23 @@ export function chatInitialAnchor(
   if (rows.length === 0) return { kind: 'bottom' };
   if (selfDeviceId.length === 0) return { kind: 'bottom' };
 
-  let firstUnread = -1;
-  let sawReadBySelf = false;
-  for (let i = 0; i < rows.length; i++) {
+  // THE UNREAD RUN IS THE TRAILING ONE (ISSUES #511). Walk BACKWARDS to the newest
+  // row this device has read — the watermark — and take the unread run after it.
+  //
+  // The first version scanned FORWARDS and took the first unread anywhere, which is
+  // the reported bug: `read_by` is optional and additive, so a message whose
+  // receipt never round-tripped is indistinguishable from an unread one, and ONE
+  // such gap in old history pinned the anchor there permanently. The
+  // `sawReadBySelf` guard did not save it — a newer read message satisfied that
+  // check, so the bottom fallback never engaged and the transcript opened weeks
+  // back on "messages that were read weeks ago".
+  //
+  // Reading backwards makes anything OLDER than the watermark read by implication,
+  // which is the honest reading of an additive receipt set: the owner demonstrably
+  // read past it, so whatever the receipts do or do not say about the rows behind
+  // it, he is done with them.
+  let watermark = -1;
+  for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i];
     if (row === undefined) continue;
     if (receiptEligibleMessageId(row) === null) continue;
@@ -147,15 +161,23 @@ export function chatInitialAnchor(
     // a function boundary, so re-check the discriminant.
     if (row.kind !== 'message') continue;
     if (isReadBySelf(row.message.read_by, selfDeviceId)) {
-      sawReadBySelf = true;
-      continue;
+      watermark = i;
+      break;
     }
-    if (firstUnread === -1) firstUnread = i;
   }
 
-  if (!sawReadBySelf) return { kind: 'bottom' };
-  if (firstUnread === -1) return { kind: 'bottom' };
-  return { kind: 'unread', index: firstUnread };
+  // Reason (3) in the docblock: no evidence receipts reach this device at all, so
+  // the read signal cannot be trusted and `bottom` is the owner's default.
+  if (watermark === -1) return { kind: 'bottom' };
+
+  for (let i = watermark + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (row === undefined) continue;
+    if (receiptEligibleMessageId(row) === null) continue;
+    if (row.kind !== 'message') continue;
+    if (!isReadBySelf(row.message.read_by, selfDeviceId)) return { kind: 'unread', index: i };
+  }
+  return { kind: 'bottom' };
 }
 
 /**
