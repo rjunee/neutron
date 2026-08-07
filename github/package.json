@@ -1,0 +1,6 @@
+{
+  "name": "@neutronai/github",
+  "type": "module",
+  "main": "./device-flow.ts",
+  "private": true
+}
