@@ -14,7 +14,11 @@
 
 import { describe, expect, it } from 'bun:test'
 
-import { makeCredentialedHostRunner, spawnCapture } from '../git-mode.ts'
+import {
+  makeCredentialedHostRunner,
+  makeLazyCredentialedHostRunner,
+  spawnCapture,
+} from '../git-mode.ts'
 
 describe('spawnCapture — extra environment', () => {
   it('delivers the extra env to the CHILD process', async () => {
@@ -105,5 +109,59 @@ describe('makeCredentialedHostRunner', () => {
     const run = makeCredentialedHostRunner({})
     const res = await run(['sh', '-c', 'echo "${HOME:-MISSING}"'])
     expect(res.stdout).not.toBe('MISSING')
+  })
+})
+
+describe('makeLazyCredentialedHostRunner — resolved per command', () => {
+  it('re-reads the env on EVERY command, so a connect made after boot takes effect', async () => {
+    // THE DEFECT THIS EXISTS TO PREVENT. The composer builds `run_host` once at
+    // boot. The owner connects GitHub from chat minutes or days later. With the
+    // eager runner the token read at boot is `null` forever, so the owner sees a
+    // success message and every push still fails until the process restarts.
+    let token: string | null = null
+    const run = makeLazyCredentialedHostRunner(async () =>
+      token === null ? {} : { NEUTRON_TEST_MARKER: token },
+    )
+
+    // Before the connect: nothing to carry.
+    expect((await run(['sh', '-c', 'echo "${NEUTRON_TEST_MARKER:-unset}"'])).stdout).toBe('unset')
+
+    // The owner connects. No restart, no re-composition.
+    token = 'connected-after-boot'
+
+    expect((await run(['printenv', 'NEUTRON_TEST_MARKER'])).stdout).toBe('connected-after-boot')
+
+    // And a rotation is picked up too — the stale token must not outlive it.
+    token = 'rotated'
+    expect((await run(['printenv', 'NEUTRON_TEST_MARKER'])).stdout).toBe('rotated')
+  })
+
+  it('calls loadEnv once per command, not once per runner', async () => {
+    let calls = 0
+    const run = makeLazyCredentialedHostRunner(async () => {
+      calls += 1
+      return { NEUTRON_TEST_MARKER: String(calls) }
+    })
+    await run(['printenv', 'NEUTRON_TEST_MARKER'])
+    await run(['printenv', 'NEUTRON_TEST_MARKER'])
+    await run(['printenv', 'NEUTRON_TEST_MARKER'])
+    expect(calls).toBe(3)
+  })
+
+  it('still merges over the inherited env', async () => {
+    process.env['NEUTRON_PARENT_ONLY_LAZY'] = 'inherited'
+    const run = makeLazyCredentialedHostRunner(async () => ({ NEUTRON_TEST_MARKER: 'x' }))
+    const res = await run(['sh', '-c', 'echo "${HOME:-MISSING}"'])
+    expect(res.stdout).not.toBe('MISSING')
+  })
+
+  it('does NOT swallow a failing loadEnv', async () => {
+    // Degrading to an empty env would turn "the secrets store is broken" into a
+    // git authentication failure several steps later, which is a much worse
+    // error to debug than the real one.
+    const run = makeLazyCredentialedHostRunner(async () => {
+      throw new Error('secrets store unavailable')
+    })
+    await expect(run(['printenv', 'PATH'])).rejects.toThrow('secrets store unavailable')
   })
 })
