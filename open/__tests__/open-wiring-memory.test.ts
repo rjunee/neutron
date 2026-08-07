@@ -19,7 +19,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -29,6 +29,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
+import { FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { wireMemory } from '../wiring/memory.ts'
 import { SUPERSEDE_GUIDANCE } from '@neutronai/scribe/extract.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
@@ -283,4 +284,109 @@ describe('wireMemory', () => {
       await runCleanups(w.cleanups)
     }
   }, 15_000)
+})
+
+/**
+ * ISSUES #493 — the fast-model pin must reach ALL THREE memory-lane call sites.
+ *
+ * Three modules make one-shot LLM calls for the memory lane, and all three have the
+ * IDENTICAL fallback `deps.model_preference ?? [getBestModel()]`:
+ * `scribe/extract.ts`, `reflection/detector.ts`, and
+ * `scribe/reflect/reflect-pass.ts`. `wireMemory` pinned only the first, so the
+ * correction judge (one call per completed turn) and the consolidation pass
+ * (batched over the whole correction/diary history) silently ran on the FLAGSHIP
+ * model. Cost-only, which is exactly why nothing failed and nobody noticed.
+ *
+ * These assert on the AgentSpec the REAL substrate receives at spawn, not on the
+ * source text of memory.ts — a source assertion would still pass if the option
+ * were renamed or dropped downstream.
+ */
+describe('wireMemory — the fast-model pin reaches every memory-lane call site (#493)', () => {
+  /** Records `model_preference` per substrate instance id, as spawned. */
+  function recordingCtx(): {
+    seen: Map<string, readonly string[]>
+    factory: (opts: ClaudeCodeSubstrateOptions) => Substrate
+  } {
+    const seen = new Map<string, readonly string[]>()
+    const factory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
+      start: (spec?: { model_preference?: readonly string[] }) => {
+        if (spec?.model_preference !== undefined) {
+          seen.set(opts.substrate_instance_id, spec.model_preference)
+        }
+        return correctionHandle(opts.substrate_instance_id)
+      },
+    })
+    return { seen, factory }
+  }
+
+  test('the correction judge spawns on FAST_MODEL, not the flagship', async () => {
+    const { seen, factory } = recordingCtx()
+    const w = wireMemory(makeCtx({ substrateFactory: factory }))
+    try {
+      w.reflection.onTurnComplete({
+        user_text: 'no, use tabs not spaces',
+        agent_text: 'I indented with spaces.',
+        scope: 'general',
+      })
+      let pref: readonly string[] | undefined
+      for (let i = 0; i < 200; i++) {
+        pref = [...seen.entries()].find(([id]) => id.startsWith('cc-reflection-'))?.[1]
+        if (pref !== undefined) break
+        await new Promise((res) => setTimeout(res, 5))
+      }
+      // If this is the flagship, the judge is billing top-tier to classify one turn.
+      expect(pref).toEqual([FAST_MODEL])
+    } finally {
+      await runCleanups(w.cleanups)
+    }
+  }, 15_000)
+
+  test('ALL THREE pins are present in the wiring — scribe included', () => {
+    // THE SCRIBE PIN HAD NO COVERAGE AT ALL until this test, which a mutation run
+    // exposed: deleting `model_preference: [FAST_MODEL]` from the scribe block left
+    // the whole suite GREEN. It is the pin that predates #493, and it was unguarded
+    // precisely because the behavioural route to it does not work in-test (scribe
+    // resolves a gbrain-backed store before any LLM call, and that store is absent
+    // here — no existing test in this file asserts a scribe spawn either).
+    //
+    // So: three source-scoped assertions, one per block, each naming its block so a
+    // pin cannot be counted twice. Weaker than the behavioural judge test above, and
+    // labelled as such — but a weak guard on a real regression beats none, which is
+    // what the mutation run found.
+    const src = readFileSync(join(import.meta.dir, '..', 'wiring', 'memory.ts'), 'utf8')
+    const between = (from: string, to: string): string =>
+      src.slice(src.indexOf(from), src.indexOf(to))
+    const PIN = 'model_preference: [FAST_MODEL]'
+    // scribe extraction
+    expect(between('const scribe', 'const reflectionSubstrate')).toContain(PIN)
+    // correction judge
+    expect(between('const reflection: Reflection', '// Production-shape hook')).toContain(PIN)
+    // consolidation pass
+    expect(between('const reflectDeps', 'const reflectLoop')).toContain(PIN)
+  })
+
+  test('the consolidation pass is pinned too — asserted on SOURCE, and here is why', () => {
+    // WEAKER THAN THE TEST ABOVE, DELIBERATELY, AND SAID SO. The reflect pass runs
+    // off `reflectLoop`, a SupervisedLoop with only start()/stop() and an interval
+    // measured in hours — there is no manual tick, so it cannot be driven to a real
+    // spawn inside a test the way `onTurnComplete` can. Two other routes were
+    // considered and rejected: starting the loop (waits out the interval) and
+    // asserting a scribe spawn (scribe resolves a gbrain-backed store first, which
+    // is absent in-test, so it never reaches an LLM call — which is why no existing
+    // test in this file asserts a scribe spawn either).
+    //
+    // So this pins the wiring textually and names the limitation, rather than
+    // dressing a source check up as behavioural coverage. The DOWNSTREAM default it
+    // guards against is verified where it lives: `scribe/reflect/reflect-pass.ts`
+    // falls back to `[getBestModel()]` when the option is absent.
+    const src = readFileSync(join(import.meta.dir, '..', 'wiring', 'memory.ts'), 'utf8')
+    const reflectDepsBlock = src.slice(src.indexOf('const reflectDeps'), src.indexOf('const reflectLoop'))
+    expect(reflectDepsBlock).toContain('model_preference: [FAST_MODEL]')
+  })
+
+  test('FAST_MODEL is not accidentally the same id as the flagship', () => {
+    // Otherwise both assertions above would pass while pinning nothing — the
+    // "test cannot fail for the reason it claims" shape, applied to a constant.
+    expect(FAST_MODEL).not.toBe(getBestModel())
+  })
 })

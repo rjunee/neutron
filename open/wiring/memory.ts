@@ -307,6 +307,13 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
   const reflection: Reflection = createReflection({
     ownerDataDir: owner_home,
     ...(reflectionSubstrate !== null ? { substrate: reflectionSubstrate } : {}),
+    // ISSUES #493 — the SAME fast-model pin scribe's extraction gets above.
+    // `reflection/detector.ts` defaults to `[getBestModel()]` when this is
+    // omitted, so leaving it off silently ran the correction judge on the
+    // FLAGSHIP model: one LLM call per completed turn, on the most expensive tier,
+    // to decide whether a turn contained a correction. Cost-only — a judge is a
+    // small classification, which is exactly what the fast tier is for.
+    model_preference: [FAST_MODEL],
     // Fire-and-forget: file the correction under the CANONICAL project nexus
     // scope. `scope` is `turn.project_id ?? 'general'`; run it through
     // `workBoardScopeKey` (owner boundary = `project_slug`) so it matches the key
@@ -414,6 +421,11 @@ export function wireMemory(ctx: OpenWiringContext): WiredMemory {
     readCorrections: () =>
       readRecentCorrections({ ownerDataDir: owner_home, limit: DEFAULT_CORRECTION_SCAN_LIMIT }),
     ...(reflectSubstrate !== null ? { substrate: reflectSubstrate } : {}),
+    // ISSUES #493 — third and last of the trio. `scribe/reflect/reflect-pass.ts`
+    // has the identical `?? [getBestModel()]` fallback, and its calls are BATCHED
+    // over the whole correction/diary history, so it was the most expensive of the
+    // three to leave unpinned.
+    model_preference: [FAST_MODEL],
   }
   const reflectLoop: SupervisedLoop = new SupervisedLoop({
     name: 'reflect-consolidation',
