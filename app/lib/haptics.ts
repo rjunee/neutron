@@ -47,8 +47,6 @@
  * haptics for a process that merely loaded this file early, and the resolution is
  * cheap after the first one.
  */
-import { Platform } from 'react-native';
-
 interface HapticsModule {
   selectionAsync(): Promise<void>;
   impactAsync(style?: unknown): Promise<void>;
@@ -74,13 +72,22 @@ export function __setHapticsModuleForTests(m: HapticsModule | null | undefined):
 
 function load(): HapticsModule | null {
   if (override !== undefined) return override;
-  // Haptics do not exist on web, and the test harness IS react-native-web — so this
-  // is both the honest platform check and the reason CI shard 2 went red: pressing
-  // the rail inside a mounted test reached `require('expo-haptics')`, whose entry
-  // pulls react-native internals that the harness cannot parse. Checking the
-  // platform first means the specifier is never resolved anywhere it cannot work.
-  if (Platform.OS === 'web') return null;
   try {
+    // Haptics do not exist on web, and the mobile test harness IS react-native-web,
+    // so the platform check is both honest and the reason the specifier below is
+    // never resolved where it cannot work.
+    //
+    // `require`, NOT a top-level `import { Platform } from 'react-native'`. A static
+    // ESM import of that specifier from this file broke the device-harness lane with
+    // `TypeError: Requested module is already fetched` — thrown not here but inside
+    // `last-tab-storage.ts:226`, which has ALWAYS resolved react-native by `require`.
+    // The harness aliases the specifier for the whole process; once an ESM import has
+    // fetched it, bun refuses the later synchronous require. So the rule is per-file
+    // consistency with the rest of the app's lazy react-native access, and the cost of
+    // breaking it lands in a DIFFERENT module, which is why it took three tries.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { Platform } = require('react-native') as { Platform: { OS: string } };
+    if (Platform.OS === 'web') return null;
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('expo-haptics') as HapticsModule;
   } catch {
