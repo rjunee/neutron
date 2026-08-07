@@ -33,7 +33,16 @@ module.exports = () => ({
       ...expo.android,
       // EAS supplies an absolute path; a local build falls back to the
       // gitignored file beside this config. One expression, no branching.
-      googleServicesFile: process.env.GOOGLE_SERVICES_JSON ?? './google-services.json',
+      //
+      // `||`, NOT `??` — and this is load-bearing rather than style. `??` falls
+      // back only on null/undefined, so an EAS variable that EXISTS but is EMPTY
+      // (cleared, or created with no value) resolves `googleServicesFile: ''`.
+      // That is not a loud failure: it produces a build with no Firebase config,
+      // which is precisely the instant `FirebaseInitProvider` crash this file
+      // exists to prevent — flash and close, no JS, no error to read. An empty
+      // string must take the fallback like any other missing value. Guarded by
+      // `__tests__/android-fcm-config.test.ts`; do not "modernise" this to `??`.
+      googleServicesFile: process.env.GOOGLE_SERVICES_JSON || './google-services.json',
     },
   },
 })
