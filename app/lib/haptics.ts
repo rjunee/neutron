@@ -32,7 +32,35 @@
  *     as an event rather than a twitch.
  */
 
-import * as Haptics from 'expo-haptics';
+/**
+ * RESOLVED LAZILY, and this is not a style preference.
+ *
+ * `expo-haptics` is a NATIVE module with no web/test implementation, so a top-level
+ * import puts it in the module graph of everything that imports this file — the
+ * project rail and the voice recorder. That broke every test which transitively
+ * loads either of them (four CI shards, in chat-session suites that have nothing to
+ * do with haptics), because the import itself throws before any test body runs.
+ *
+ * Requiring it inside the call keeps the graph clean at import time and folds
+ * "module unavailable on this platform" into the same swallow that already handles
+ * "device has no actuator". Not cached: a cached null would permanently disable
+ * haptics for a process that merely loaded this file early, and the resolution is
+ * cheap after the first one.
+ */
+interface HapticsModule {
+  selectionAsync(): Promise<void>;
+  impactAsync(style?: unknown): Promise<void>;
+  ImpactFeedbackStyle: { Light: unknown };
+}
+
+function load(): HapticsModule | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('expo-haptics') as HapticsModule;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Run a haptic without ever letting it affect the caller.
@@ -42,9 +70,11 @@ import * as Haptics from 'expo-haptics';
  * that forgot the `await` would produce an unhandled rejection on exactly the
  * devices where haptics are unavailable.
  */
-function fire(run: () => Promise<void>): void {
+function fire(run: (h: HapticsModule) => Promise<void>): void {
+  const h = load();
+  if (h === null) return;
   try {
-    void run().catch(() => undefined);
+    void run(h).catch(() => undefined);
   } catch {
     // A synchronous throw (module unavailable on this platform) is as ignorable
     // as a rejection. Nothing about this feature is worth an error path.
@@ -53,15 +83,15 @@ function fire(run: () => Promise<void>): void {
 
 /** Switching projects in the rail. The lightest tick either platform offers. */
 export function hapticProjectSwitch(): void {
-  fire(() => Haptics.selectionAsync());
+  fire((h) => h.selectionAsync());
 }
 
 /** A voice recording just went live — the mic is hot. */
 export function hapticRecordingStarted(): void {
-  fire(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light));
+  fire((h) => h.impactAsync(h.ImpactFeedbackStyle.Light));
 }
 
 /** A voice recording just stopped — the clip is held for review. */
 export function hapticRecordingStopped(): void {
-  fire(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light));
+  fire((h) => h.impactAsync(h.ImpactFeedbackStyle.Light));
 }
