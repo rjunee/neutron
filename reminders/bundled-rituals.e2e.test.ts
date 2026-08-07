@@ -249,7 +249,17 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
     })
     expect(r.status).toBe(200)
     // Rituals are multi-step (glob + read several files + compose): poll longer.
-    for (let i = 0; i < 120 && reply === undefined; i++) await Bun.sleep(500)
+    //
+    // THIS CEILING USED TO BE 60s AND MADE THE KAIZEN CASE UNPASSABLE. The test
+    // budget is 180s (now 300s) but the reply poll gave up after 120×500ms, so the
+    // heaviest ritual — kaizen globs the corrections log, diary, every project's
+    // ACTIONS/STATUS, the sibling ritual prompts AND the skills dir, then reasons
+    // about repeats — returned `undefined` at 62.8s on the first run this file has
+    // ever had. That reads as "the ritual produced nothing", which is a very
+    // different bug report from "our poll was shorter than the work". A wait that
+    // expires before the test it serves is a test that cannot pass for the reason
+    // it claims to check. Keep this comfortably UNDER the per-test timeout.
+    for (let i = 0; i < 480 && reply === undefined; i++) await Bun.sleep(500)
     return reply
   } finally {
     child?.kill('SIGTERM')
@@ -266,7 +276,7 @@ describe.skipIf(!OPT_IN)('bundled rituals cite planted fixture state (T7 accepta
       // A marker that is not composable without actually reading the STATUS.md files.
       expect(reply).toMatch(/RELAY-4471|CERT-ROTATE-9|HARBOR-812/)
     },
-    180_000,
+    300_000,
   )
 
   it(
@@ -276,7 +286,7 @@ describe.skipIf(!OPT_IN)('bundled rituals cite planted fixture state (T7 accepta
       expect(reply).toBeDefined()
       expect(reply).toMatch(/RELAY-4471|CERT-ROTATE-9|HARBOR-812/)
     },
-    180_000,
+    300_000,
   )
 
   it(
@@ -293,6 +303,6 @@ describe.skipIf(!OPT_IN)('bundled rituals cite planted fixture state (T7 accepta
       // Proposed a change to the rules file, which is where a missing rule lives.
       expect(reply).toMatch(/SOUL\.md/)
     },
-    180_000,
+    300_000,
   )
 })
