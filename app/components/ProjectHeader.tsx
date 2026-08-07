@@ -4,9 +4,28 @@
  * Sticky header sitting above `<ProjectTabBar>` and the tab content
  * area. Three children, row-aligned:
  *
- *   - Left: APP-settings button (48×48 hit target). Tap → onOpenAppSettings().
- *   - Center: PROJECT overline + project name (one-line, truncating).
- *   - Right: project settings gear (48×48 hit target). Tap → onOpenSettings().
+ *   - Left: the project name (one-line, truncating).
+ *   - Right: ONE menu button (48×48 hit target) → project settings + app settings.
+ *
+ * ── TWO OWNER ASKS, ONE HEADER ───────────────────────────────────────────────
+ *
+ * *"Remove the word 'project' from the top of the screen. Just display the name of
+ * the project. And use this to recover some vertical space."* The overline said
+ * PROJECT above every project name, which is the one thing the owner already knows
+ * — he tapped the project to get here. It cost a full line of a header that sits
+ * above every screen, on the axis a phone has least of.
+ *
+ * *"Why are there two hamburger menus, top left and top right? We need to
+ * consolidate, and keep only top-right."* Both slots rendered the SAME ☰ glyph for
+ * DIFFERENT scopes — left was app-level, right was this project — so the icon
+ * carried no information and the only way to learn which was which was to tap one.
+ * Now there is one control and the scopes are named in a menu, which is where a
+ * distinction belongs: in words, not in two identical glyphs at opposite ends.
+ *
+ * The app-settings entry MOVED INTO THE MENU rather than being dropped. It is the
+ * only signed-in path to the server editor, sign-out and Admin (ISSUES #385,
+ * guarded by `__tests__/server-editor-reachability.test.ts`), and a consolidation
+ * that quietly stranded it would recreate that exact defect.
  *
  * THE LEFT SLOT USED TO BE A BACK ARROW TO THE PROJECTS LIST. That list screen
  * is deleted (SPEC § Decisions Log 2026-07-27 — the app opens straight into chat
@@ -22,6 +41,7 @@
  * (admin project detail) when those land.
  */
 
+import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
@@ -29,8 +49,6 @@ import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 export interface ProjectHeaderProps {
   /** Display name rendered as the header title. */
   name: string;
-  /** Optional overline text — defaults to "PROJECT". */
-  overline?: string;
   /**
    * App-settings handler (left slot). Required so the layout can wire
    * `router.push('/settings')` — the only signed-in server editor + sign-out +
@@ -49,27 +67,19 @@ export interface ProjectHeaderProps {
 
 export function ProjectHeader({
   name,
-  overline = 'PROJECT',
   onOpenAppSettings,
   onOpenSettings,
   onInvite,
 }: ProjectHeaderProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  /** Close first, THEN act: the menu must not survive the navigation it triggered. */
+  const choose = (run: () => void) => () => {
+    setMenuOpen(false);
+    run();
+  };
   return (
     <View style={styles.header}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Open app settings"
-        testID="project-header-app-settings"
-        onPress={onOpenAppSettings}
-        style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
-        hitSlop={SPACING.sm}
-      >
-        <Text style={styles.iconGlyph}>☰</Text>
-      </Pressable>
       <View style={styles.center}>
-        <Text style={styles.overline} numberOfLines={1}>
-          {overline}
-        </Text>
         <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
           {name}
         </Text>
@@ -88,14 +98,52 @@ export function ProjectHeader({
       ) : null}
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Open project settings"
-        testID="project-header-settings"
-        onPress={onOpenSettings}
+        accessibilityLabel="Open menu"
+        accessibilityState={{ expanded: menuOpen }}
+        testID="project-header-menu"
+        onPress={() => setMenuOpen((open) => !open)}
         style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
         hitSlop={SPACING.sm}
       >
         <Text style={styles.iconGlyph}>☰</Text>
       </Pressable>
+      {menuOpen ? (
+        <>
+          {/* A tap anywhere else dismisses. Rendered BEFORE the sheet so the sheet
+              sits above it, and covering the whole screen because a menu that can
+              only be closed by re-tapping its own button is a trap on a phone. */}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close menu"
+            testID="project-header-menu-scrim"
+            onPress={() => setMenuOpen(false)}
+            style={styles.scrim}
+          />
+          <View style={styles.menu} testID="project-header-menu-sheet">
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open project settings"
+              testID="project-header-settings"
+              onPress={choose(onOpenSettings)}
+              style={({ pressed }) => [styles.menuRow, pressed && styles.pressed]}
+            >
+              <Text style={styles.menuLabel}>Project settings</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            {/* ISSUES #385 — the ONLY signed-in route to the server editor,
+                sign-out and Admin. It moved here; it was never dropped. */}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open app settings"
+              testID="project-header-app-settings"
+              onPress={choose(onOpenAppSettings)}
+              style={({ pressed }) => [styles.menuRow, pressed && styles.pressed]}
+            >
+              <Text style={styles.menuLabel}>App settings</Text>
+            </Pressable>
+          </View>
+        </>
+      ) : null}
     </View>
   );
 }
@@ -108,7 +156,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: SPACING.sm,
-    paddingBottom: SPACING.md,
+    // Recovered vertical space, half of the owner's ask. The other half was the
+    // overline's whole line, now gone.
+    paddingBottom: SPACING.xs,
     gap: SPACING.sm,
     borderBottomWidth: 1,
     borderBottomColor: THEME.hairline,
@@ -147,19 +197,40 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   center: { flex: 1, paddingHorizontal: SPACING.xs },
-  overline: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 1,
+  /** Full-screen dismiss target. Behind the sheet, above everything else. */
+  scrim: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: -2000,
   },
+  menu: {
+    position: 'absolute',
+    top: ICON_BTN_SIZE + SPACING.xs,
+    right: SPACING.sm,
+    minWidth: 180,
+    borderRadius: DENSITY.composer_radius,
+    backgroundColor: THEME.surface_raised,
+    borderWidth: 1,
+    borderColor: THEME.hairline,
+    overflow: 'hidden',
+  },
+  menuRow: {
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+  },
+  menuLabel: {
+    color: THEME.text_primary,
+    fontSize: TYPOGRAPHY.body.fontSize,
+    lineHeight: TYPOGRAPHY.body.lineHeight,
+  },
+  menuDivider: { height: 1, backgroundColor: THEME.hairline },
   title: {
     color: THEME.text_primary,
     fontSize: TYPOGRAPHY.h3.fontSize,
     lineHeight: TYPOGRAPHY.h3.lineHeight,
     fontWeight: TYPOGRAPHY.h3.fontWeight,
-    marginTop: 1,
   },
   pressed: { opacity: 0.7 },
 });
