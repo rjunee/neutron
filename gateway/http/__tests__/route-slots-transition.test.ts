@@ -91,6 +91,9 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   ['app-system-notice', 'appSystemNotice', 'app_system_notice_surface', true],
   ['app-project-credentials', 'appProjectCredentials', 'app_project_credentials_surface', true],
   ['app-codex-credential', 'appCodexCredential', 'app_codex_credential_surface', true],
+  // Connect GitHub — added 2026-08-07. This snapshot caught the new slot and forced
+  // the addition to be deliberate, which is what it is for.
+  ['app-github-connect', 'appGitHubConnect', 'app_github_connect_surface', true],
   ['app-projects', 'appProjects', 'app_projects_surface', true],
   ['app-connect-auth', 'appConnectAuth', 'app_connect_auth_surface', true],
   ['app-focus-current', 'appFocusCurrent', 'app_focus_current_surface', true],
@@ -193,6 +196,7 @@ const DISCLAIMING_ORDER = [
   'app-work-board',
   'app-project-credentials',
   'app-codex-credential',
+  'app-github-connect',
   'app-projects',
   'app-connect-auth',
   'app-focus-current',
@@ -283,6 +287,7 @@ function fullyWiredInput(calls: string[]): ComposeHttpHandlerInput {
     appWorkBoard: disclaim('app-work-board'),
     appProjectCredentials: disclaim('app-project-credentials'),
     appCodexCredential: disclaim('app-codex-credential'),
+    appGitHubConnect: disclaim('app-github-connect'),
     appProjects: disclaim('app-projects'),
     appConnectAuth: disclaim('app-connect-auth'),
     appFocusCurrent: disclaim('app-focus-current'),
@@ -477,6 +482,7 @@ function fullComposition(): RouteSlotComposition {
     app_system_notice_surface: { handler: h() },
     app_project_credentials_surface: { handler: h() },
     app_codex_credential_surface: { handler: h() },
+    app_github_connect_surface: { handler: h() },
     app_backups_surface: { handler: h() },
     cores_surface: { handler: h() },
     cores_oauth_broker_surface: { handler: h() },
@@ -530,6 +536,9 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_system_notice_surface',
   'app_project_credentials_surface',
   'app_codex_credential_surface',
+  // Connect GitHub — added 2026-08-07 (ratchet extension). Gated like every other
+  // owner-scoped surface: it starts a device flow and reads the secrets store.
+  'app_github_connect_surface',
   'app_backups_surface',
   'cores_surface',
   'cores_oauth_broker_surface',

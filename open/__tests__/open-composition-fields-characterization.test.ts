@@ -72,6 +72,11 @@ const EXPECTED_COMPOSITION_KEYS = [
   // O5 — read-only diagnostics surface (`GET /api/app/admin/diagnostics`).
   'app_diagnostics_surface',
   'app_docs_surface',
+  // The owner's GitHub device-flow connect surface (`/api/app/github-auth`). The
+  // token storage, the github.com-scoped git helper and the credentialed host
+  // runner all shipped before this key existed, and none of them could be STARTED
+  // without it — the same done-means-served proof as the keys around it.
+  'app_github_connect_surface',
   // The Apps launcher backend (`/api/app/projects/<id>/launcher[*]`). Same
   // done-means-served proof as the keys around it: the Apps tab is a shipped
   // builtin and this key is what stops tapping it from reaching four 404s, as it

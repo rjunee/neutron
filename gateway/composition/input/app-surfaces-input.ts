@@ -364,6 +364,20 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * The owner's GitHub connect surface. Owns `/api/app/github-auth` — GET reports
+   * connected / awaiting-owner (with the short `user_code` to show him) /
+   * not-connected, POST starts the device flow and keeps polling in the background
+   * until he approves.
+   *
+   * Device flow is the one OAuth shape that cannot complete inside a request: the
+   * server gets a code, the OWNER types it into a browser, and only then does
+   * polling succeed. Hence start/status rather than one blocking call. Surface
+   * factory: `gateway/http/github-connect-surface.ts:createGitHubConnectSurface`.
+   */
+  app_github_connect_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P7.4 restore UI — optional project-backups + snapshot-restore surface.
    * Owns `/api/app/projects/<id>/backups[...]` and NOTHING outside that prefix
    * — the snapshot restore is `POST .../backups/restore`. It is deliberately

@@ -426,6 +426,7 @@ import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-class
 import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
+import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-connect-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
@@ -3860,6 +3861,16 @@ export function buildOpenGraphComposer(
       service: codexCredentialService,
       auth: appOwnerAuth,
     })
+    // The owner's GitHub connect surface. `NEUTRON_GITHUB_CLIENT_ID` is a client id,
+    // not a secret (it appears in every authorize URL), so it rides plain config —
+    // and device flow uses no client secret at all. Absent → the surface answers a
+    // named 503 rather than failing obscurely.
+    const githubConnectSurface = createGitHubConnectSurface({
+      secrets: secretsStore,
+      auth: appOwnerAuth,
+      client_id: env['NEUTRON_GITHUB_CLIENT_ID'] ?? null,
+      log: (event, detail) => log.info(event, detail as never),
+    })
 
     // ── Onboarding-as-CC-session → Path 1 (2026-06-27): ONE live-session path ─
     // Onboarding is NOT a separate engine/socket and NO LONGER a per-turn phase
@@ -5639,6 +5650,7 @@ export function buildOpenGraphComposer(
       app_project_credentials_surface: { handler: projectCredentialsSurface.handler },
       // Part B — admin-panel Connect Codex (subscription auth → per-project CODEX_HOME).
       app_codex_credential_surface: { handler: codexCredentialSurface.handler },
+      app_github_connect_surface: { handler: githubConnectSurface.handler },
       // Part B — agent-native parity for the connect/status flow.
       codex_credential: { service: codexCredentialService },
       // P1b — Tasks tab backend + chat attachment upload, so every visible React
