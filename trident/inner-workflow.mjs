@@ -98,6 +98,11 @@ const {
   // blocker. PRESENT → the codex reviewer runs `trident/codex-review.sh` with this
   // CODEX_HOME; an auth/call failure there is DEFERRED (never a silent APPROVE).
   codexHome = null,
+  // Is a Kimi API key configured for this deployment? A BOOLEAN, deliberately not
+  // the key: the key is read by `trident/kimi-review-cli.ts` in its own process, so
+  // it never enters a prompt, a log line, or a chat message. Absent → the Kimi
+  // panelist is skipped entirely (no wasted agent) and the panel notes it.
+  kimiConfigured: kimiConfiguredArg = false,
   // Checkpoint-writer script path (refactor P10). The sqlite UPDATEs behind
   // checkpoint()/writeTerminalResult() live in the checked-in
   // trident/checkpoint.sh (PRAGMA busy_timeout=5000 on the same connection, so
@@ -131,6 +136,7 @@ const {
 // Is a per-project codex credential configured for this run? Absent → skip the
 // codex panelist entirely (no wasted agent) and synthesise Claude-only.
 const codexConfigured = typeof codexHome === 'string' && codexHome.length > 0
+const kimiConfigured = kimiConfiguredArg === true
 
 // Resolved checkpoint-writer path (P10). Only ever used when dbPath && runId
 // are threaded (checkpoint()/writeTerminalResult() no-op otherwise), and the
@@ -282,6 +288,19 @@ const CODEX_VERDICT_SCHEMA = {
     verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
     findings: VERDICT_SCHEMA.properties.findings,
     codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
+  },
+}
+
+// Same shape as the codex peer's, with its own status field so the two can never
+// be confused for one another (see the positional-indexing note in the panel).
+const KIMI_VERDICT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdict', 'findings', 'kimiStatus'],
+  properties: {
+    verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
+    findings: VERDICT_SCHEMA.properties.findings,
+    kimiStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
   },
 }
 
@@ -534,22 +553,50 @@ function normalizeVerdict(v) {
 // 'not_connected' (never set up) and 'connected' (ran fine) pass through — only a
 // configured-but-failed codex blocks. Pure + side-effect-free so it can be
 // unit-tested behaviorally (see inner-workflow.test.ts).
-function enforceCodexGate(synthesis, codexStatus) {
-  if (codexStatus === 'deferred' && synthesis && synthesis.verdict === 'APPROVE') {
-    return {
-      verdict: 'REQUEST_CHANGES',
-      findings: [
-        {
-          severity: 'blocker',
-          title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
-          evidence:
-            'codex was configured (CODEX_HOME set) but the review call failed/timed out; per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Re-run once codex auth is restored.',
-        },
-        ...((synthesis && synthesis.findings) || []),
-      ],
-    }
+// GENERALISED over every cross-model peer (codex, kimi, …). It used to take a
+// single `codexStatus`; adding a second peer with its own near-identical gate is
+// how one of the two quietly stops being enforced, so there is ONE gate and peers
+// are data. Every deferred peer contributes its own blocker finding, because
+// "which cross-model reviewer is down" is the actionable part.
+//
+// `peers` is `[{ name, evidence }]` — only the DEFERRED ones. 'not_connected'
+// (never set up) and 'connected' (ran fine) do not reach here.
+function enforceCrossModelGate(synthesis, deferredPeers) {
+  if (deferredPeers.length === 0 || !synthesis || synthesis.verdict !== 'APPROVE') {
+    return synthesis
   }
-  return synthesis
+  return {
+    verdict: 'REQUEST_CHANGES',
+    findings: [
+      ...deferredPeers.map((p) => ({
+        severity: 'blocker',
+        title: `${p.name} cross-model review DEFERRED — refusing to silently APPROVE`,
+        evidence: p.evidence,
+      })),
+      ...((synthesis && synthesis.findings) || []),
+    ],
+  }
+}
+
+// Which cross-model peers were configured but failed. Kept separate from the gate
+// so the mapping status → blocker text is readable and testable on its own.
+function deferredCrossModelPeers(statuses) {
+  const out = []
+  if (statuses.codex === 'deferred') {
+    out.push({
+      name: 'Codex',
+      evidence:
+        'codex was configured (CODEX_HOME set) but the review call failed/timed out; per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Re-run once codex auth is restored.',
+    })
+  }
+  if (statuses.kimi === 'deferred') {
+    out.push({
+      name: 'Kimi K3',
+      evidence:
+        'a Kimi API key was configured but the review call failed, timed out, or returned no answer text (the thinking-budget case). A deferred cross-model review cannot be treated as an approval, and there is deliberately NO fallback to a Claude-family reviewer — that would restore the single-family panel this peer exists to break.',
+    })
+  }
+  return out
 }
 
 // The codex cross-model reviewer prompt. It shells out to the wrapper
@@ -578,6 +625,27 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile}
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.
 - EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
+}
+
+// The Kimi K3 cross-model reviewer prompt. Mirrors the codex bridge: shell out
+// SYNCHRONOUSLY to a CLI, map its EXIT CODE to a schema result. The CLI reads
+// KIMI_API_KEY from its OWN environment, so the credential never appears here.
+function kimiReviewerPrompt(diffFile) {
+  const uniq = runId || slug
+  const outFile = `/tmp/trident-kimi-${uniq}.out`
+  const errFile = `/tmp/trident-kimi-${uniq}.err`
+  const cli = `${repoPath}/trident/kimi-review-cli.ts`
+  // Reviews the SAME diff FILE Forge wrote, for the same reason codex does:
+  // repoPath is still on the base branch, so a `git diff` there would be empty
+  // and the reviewer could approve without having reviewed the change.
+  return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
+  bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
+Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
+- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
+- EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
+- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, or returned no answer text). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Kimi review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred reviewer, and NEVER substitute your own review for it.
+Return via the schema. NEVER exit silently — if the command itself could not run, return kimiStatus='deferred' with the reason.`
 }
 
 // Parallel adversarial review + asymmetric-gated synthesis. Returns the
@@ -617,6 +685,8 @@ TASK: ${task}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
   ]
+  let codexSlot = null
+  let kimiSlot = null
   if (codexConfigured) {
     // argus:codex runs on the CODEX runtime (an independent GPT-5 peer), not a
     // Claude model — the thin claude agent just shells out to codex-review.sh, so
@@ -629,6 +699,7 @@ TASK: ${task}`,
     // must never carry the untrusted reflection block (see the trust-boundary note
     // above the reviewers array).
     log('trident.agent label=argus:codex model=codex-runtime effort=n/a')
+    codexSlot = reviewers.length
     reviewers.push(() =>
       agent(codexReviewerPrompt(diffFile), {
         label: 'argus:codex',
@@ -637,15 +708,45 @@ TASK: ${task}`,
       }),
     )
   }
+  // argus:kimi runs on the KIMI K3 runtime — a DIFFERENT MODEL FAMILY, which is
+  // the entire point: two Claude reviewers plus codex still leaves two of three
+  // sharing a family, so K3's DISAGREEMENTS are what this panelist is for. The
+  // thin claude agent only shells out to the CLI, so it keeps the launcher-default
+  // model; log it as `model=kimi-runtime` for the per-run tally.
+  // RB2 (b) — DELIBERATELY no `reflectionGuidance`, for both reasons that exclude
+  // argus:codex: K3 sees only the diff file (never this prompt text), so injecting
+  // owner corrections would be inert; and this is part of the independent MERGE
+  // GATE, which must never carry the untrusted reflection block.
+  if (kimiConfigured) {
+    log('trident.agent label=argus:kimi model=kimi-runtime effort=n/a')
+    kimiSlot = reviewers.length
+    reviewers.push(() =>
+      agent(kimiReviewerPrompt(diffFile), {
+        label: 'argus:kimi',
+        phase: 'Review',
+        schema: KIMI_VERDICT_SCHEMA,
+      }),
+    )
+  }
   const verdicts = await parallel(reviewers)
-  // Codex verdict: the real result when configured, else a synthetic
-  // not_connected marker (so the synthesis prompt is uniform + the never-silent
-  // gate has a status to act on).
+  // POSITIONAL INDEXING WAS A LATENT BUG. This read `verdicts[2]` for codex,
+  // which held only while codex was the sole CONDITIONAL panelist. With a second
+  // optional peer, a run with kimi configured and codex NOT would have read the
+  // kimi verdict as the codex one — and since the shapes differ only by a status
+  // field name, `codexStatus` would come back undefined and default to
+  // 'not_connected', silently disarming the gate for a DEFERRED reviewer. So the
+  // panel now records the slot each optional peer occupies as it is pushed.
+  const claudeVerdicts = [verdicts[0], verdicts[1]]
   const codexReview =
-    codexConfigured && verdicts[2]
-      ? verdicts[2]
+    codexSlot !== null && verdicts[codexSlot]
+      ? verdicts[codexSlot]
       : { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected' }
   const codexStatus = codexReview.codexStatus || 'not_connected'
+  const kimiReview =
+    kimiSlot !== null && verdicts[kimiSlot]
+      ? verdicts[kimiSlot]
+      : { verdict: 'COMMENT', findings: [], kimiStatus: 'not_connected' }
+  const kimiStatus = kimiReview.kimiStatus || 'not_connected'
 
   // ASYMMETRIC GATING (minority-veto): findings BOTH reviewers confirm → confirmed;
   // ONE credible evidence-backed BLOCKER vetoes APPROVE; a single-reviewer
@@ -662,6 +763,12 @@ TASK: ${task}`,
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
   // how the panel's verdicts are merged (see the trust-boundary note above).
+  const kimiPanelLine =
+    kimiStatus === 'connected'
+      ? `Verdict D (kimi K3 cross-model, a DIFFERENT model family): ${JSON.stringify(kimiReview)} — treat as a full panelist. Its DISAGREEMENTS with the Claude reviewers are the most informative signal on this panel, because it does not share their blind spots; an evidence-backed kimi blocker VETOES APPROVE.`
+      : kimiStatus === 'deferred'
+        ? `Verdict D (kimi K3 cross-model): DEFERRED — a key was configured but the review call FAILED/timed out/returned no answer. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
+        : `Verdict D (kimi K3 cross-model): NOT CONNECTED — no Kimi key for this instance. Note it and proceed on the other verdicts (do NOT block on kimi).`
   const synthesisRaw = await agent(
     `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
@@ -670,12 +777,13 @@ TASK: ${task}`,
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
 Verdict A (Claude rubric): ${JSON.stringify(verdicts[0])}
 Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}
-${codexPanelLine}`,
+${codexPanelLine}
+${kimiPanelLine}`,
     withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
   )
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
   // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
-  return enforceCodexGate(synthesisRaw, codexStatus)
+  return enforceCrossModelGate(synthesisRaw, deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus }))
 }
 
 // ── Inner loop ────────────────────────────────────────────────────────────────

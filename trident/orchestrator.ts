@@ -128,6 +128,12 @@ export interface BuildTridentOrchestratorOptions {
    * resolver degrades to no context and never fails the launch (see `launch()`).
    */
   resolve_reflection_context?: (run: TridentRun) => string | null
+  /**
+   * Is a Kimi K3 key configured? Called PER LAUNCH so a key added after boot is
+   * honoured without a restart. Absent → the Kimi panelist never runs, which is
+   * the graceful (never-blocking) path.
+   */
+  resolve_kimi_configured?: () => boolean
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /**
@@ -386,6 +392,12 @@ export function buildTridentOrchestrator(
       codex_home: opts.resolve_codex_home
         ? opts.resolve_codex_home(launchRun)
         : (opts.codex_home ?? null),
+      // Whether the KIMI K3 cross-model panelist runs this launch. Resolved PER
+      // LAUNCH (not captured at composition) for the same reason the codex home
+      // is: a key added after boot must take effect on the next run, not the next
+      // restart (Decisions Log 2026-08-07). Default false → the panelist is
+      // skipped and the review notes it, never blocks.
+      kimi_configured: opts.resolve_kimi_configured ? opts.resolve_kimi_configured() : false,
       // RB2 (b) — the owner's recent reflection corrections/diary block (resolved
       // best-effort above), threaded into the inner workflow so the FORGE BUILDER
       // (not the argus review gate) re-grounds on owner corrections. Null when no

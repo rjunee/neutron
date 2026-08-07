@@ -531,6 +531,10 @@ export function buildCoreModules(
         if (tridentWiring.resolve_codex_home !== undefined) {
           orchestratorOpts.resolve_codex_home = tridentWiring.resolve_codex_home
         }
+        // The KIMI K3 cross-model panelist. Absent → never runs (graceful).
+        if (tridentWiring.resolve_kimi_configured !== undefined) {
+          orchestratorOpts.resolve_kimi_configured = tridentWiring.resolve_kimi_configured
+        }
         // RB2 (b) — thread the owner's reflection corrections/diary resolver so the
         // inner workflow re-grounds the FORGE BUILDER (not the argus review gate) on
         // owner corrections on its first turn (reflection was chat-only before RB2).
