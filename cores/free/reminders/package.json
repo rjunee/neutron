@@ -40,7 +40,7 @@
           "properties": {
             "message": {
               "type": "string",
-              "description": "Reminder body — composed verbatim or wrapped by the fire-time agent."
+              "description": "Reminder body \u2014 composed verbatim or wrapped by the fire-time agent."
             },
             "fire_at": {
               "type": "number",
@@ -57,11 +57,11 @@
                 "monthly",
                 "occasional"
               ],
-              "description": "Optional COARSE cadence — omit for a one-shot. weekly = every 7 days from fire_at, monthly ≈ every 30 days, occasional ≈ every 14 days. For exact wall-clock cadences (daily at 9am, weekdays, annually) use `recurrence_spec` instead. Mutually exclusive with recurrence_spec."
+              "description": "Optional COARSE cadence \u2014 omit for a one-shot. weekly = every 7 days from fire_at, monthly \u2248 every 30 days, occasional \u2248 every 14 days. For exact wall-clock cadences (daily at 9am, weekdays, annually) use `recurrence_spec` instead. Mutually exclusive with recurrence_spec."
             },
             "recurrence_spec": {
               "type": "string",
-              "description": "Optional FAITHFUL cron cadence — a standard 5-field cron expression (minute hour day-of-month month day-of-week). Examples: '0 9 * * *' = daily 09:00, '0 9 * * 1-5' = weekdays 09:00, '0 9 7 2 *' = annually on Feb 7, '0 */6 * * *' = every 6 hours. Wall-clock and DST-correct. Mutually exclusive with recurrence."
+              "description": "Optional FAITHFUL cron cadence \u2014 a standard 5-field cron expression (minute hour day-of-month month day-of-week). Examples: '0 9 * * *' = daily 09:00, '0 9 * * 1-5' = weekdays 09:00, '0 9 7 2 *' = annually on Feb 7, '0 */6 * * *' = every 6 hours. Wall-clock and DST-correct. Mutually exclusive with recurrence."
             }
           },
           "required": [
@@ -88,7 +88,7 @@
       },
       {
         "name": "reminders_list",
-        "description": "List pending reminders for this owner, sorted by fire_at ASCENDING (soonest-firing first). Optional project_id narrows to a single project. v1 only lists pending reminders — fired/cancelled history is not yet exposed; the status field is reserved for forward-compat and may only be set to 'pending'.",
+        "description": "List pending reminders for this owner, sorted by fire_at ASCENDING (soonest-firing first). Optional project_id narrows to a single project. v1 only lists pending reminders \u2014 fired/cancelled history is not yet exposed; the status field is reserved for forward-compat and may only be set to 'pending'.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -197,7 +197,7 @@
       },
       {
         "name": "reminders_cancel",
-        "description": "Cancel a pending reminder. Returns ok=true when a pending row was cancelled, ok=false when the row was already fired/cancelled or never existed. Returns ok=false for both unknown ids and reminders owned by another owner (info-hiding is intentional — the caller is never told a foreign id exists).",
+        "description": "Cancel a pending reminder. Returns ok=true when a pending row was cancelled, ok=false when the row was already fired/cancelled or never existed. Returns ok=false for both unknown ids and reminders owned by another owner (info-hiding is intentional \u2014 the caller is never told a foreign id exists).",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -320,7 +320,7 @@
       },
       {
         "name": "rituals_propose",
-        "description": "PROPOSE a ritual: a recurring, UNATTENDED sub-agent that runs a fixed prompt on a schedule (e.g. a morning brief that reads your STATUS.md + calendar). IMPORTANT: proposing does NOT schedule or run anything — the ritual only ever fires after the OWNER explicitly APPROVES it in chat (a code-rendered approval message with Approve/Deny buttons is shown; approval is content-hash-bound, so any later edit to the prompt/surface/cadence requires re-approval). Returns an opaque proposal_id and status 'pending_approval'. Read-only tool surfaces (Read/Glob/Grep) and web (WebSearch/WebFetch, which also needs a separate egress approval) are supported; write/exec tools (Bash/Write/Edit) are currently blocked at fire time.",
+        "description": "PROPOSE a ritual: a recurring, UNATTENDED sub-agent that runs a fixed prompt on a schedule (e.g. a morning brief that reads your STATUS.md + calendar). IMPORTANT: proposing does NOT schedule or run anything \u2014 the ritual only ever fires after the OWNER explicitly APPROVES it in chat (a code-rendered approval message with Approve/Deny buttons is shown; approval is content-hash-bound, so any later edit to the prompt/surface/cadence requires re-approval). Returns an opaque proposal_id and status 'pending_approval'. Read-only tool surfaces (Read/Glob/Grep) and web (WebSearch/WebFetch, which also needs a separate egress approval) are supported; write/exec tools (Bash/Write/Edit) are currently blocked at fire time.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -334,13 +334,18 @@
             },
             "tool_surface": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Built-in tool names the ritual may use at fire time (e.g. ['Read','Glob','Grep'] or ['Read','WebSearch']). Never empty. Web tools require egress:'web'. Write/exec tools are refused at fire time until OS sandboxing ships."
             },
             "egress": {
               "type": "string",
-              "enum": ["none", "web"],
-              "description": "'none' = no internet; 'web' = the ritual may reach the public internet (WebSearch/WebFetch) — a SEPARATE owner approval is required for this."
+              "enum": [
+                "none",
+                "web"
+              ],
+              "description": "'none' = no internet; 'web' = the ritual may reach the public internet (WebSearch/WebFetch) \u2014 a SEPARATE owner approval is required for this."
             },
             "silent": {
               "type": "boolean",
@@ -361,7 +366,11 @@
                 },
                 "recurrence": {
                   "type": "string",
-                  "enum": ["weekly", "monthly", "occasional"],
+                  "enum": [
+                    "weekly",
+                    "monthly",
+                    "occasional"
+                  ],
                   "description": "Optional coarse cadence. Mutually exclusive with recurrence_spec."
                 },
                 "recurrence_spec": {
@@ -369,10 +378,19 @@
                   "description": "Optional 5-field cron cadence (e.g. '0 9 * * *'). Mutually exclusive with recurrence."
                 }
               },
-              "required": ["fire_at"]
+              "required": [
+                "fire_at"
+              ]
             }
           },
-          "required": ["id", "description", "tool_surface", "egress", "prompt", "schedule"]
+          "required": [
+            "id",
+            "description",
+            "tool_surface",
+            "egress",
+            "prompt",
+            "schedule"
+          ]
         },
         "output_schema": {
           "type": "object",
@@ -386,26 +404,31 @@
             },
             "status": {
               "type": "string",
-              "description": "Always 'pending_approval' — the ritual will not fire until the owner approves it."
+              "description": "Always 'pending_approval' \u2014 the ritual will not fire until the owner approves it."
             },
             "requires_egress_approval": {
               "type": "boolean",
-              "description": "True for egress:'web' defs — a SECOND owner approval (network egress) is required before scheduling."
+              "description": "True for egress:'web' defs \u2014 a SECOND owner approval (network egress) is required before scheduling."
             }
           },
-          "required": ["proposal_id", "ritual_id", "status", "requires_egress_approval"]
+          "required": [
+            "proposal_id",
+            "ritual_id",
+            "status",
+            "requires_egress_approval"
+          ]
         },
         "capability_required": "write:reminders_core.db"
       },
       {
         "name": "rituals_enable",
-        "description": "ENABLE an already-registered ritual by giving it a schedule. Use this for the BUNDLED example rituals (morning-brief, evening-wrap, kaizen) and any previously-registered ritual — rituals_propose refuses their ids because their prompt already exists on disk. You supply ONLY the id + schedule; the prompt, tool surface and scope are owned by the registered def (see rituals_status for the ids). IMPORTANT: enabling does NOT run anything — like rituals_propose, the ritual only fires after the OWNER explicitly APPROVES it in chat (a code-rendered Approve/Deny prompt is shown; approval is content-hash-bound to the on-disk prompt bytes). Returns an opaque proposal_id and status 'pending_approval'.",
+        "description": "ENABLE an already-registered ritual by giving it a schedule. Use this for the BUNDLED example rituals (morning-brief, evening-wrap, kaizen) and any previously-registered ritual \u2014 rituals_propose refuses their ids because their prompt already exists on disk. You supply ONLY the id + schedule; the prompt, tool surface and scope are owned by the registered def (see rituals_status for the ids). IMPORTANT: enabling does NOT run anything \u2014 like rituals_propose, the ritual only fires after the OWNER explicitly APPROVES it in chat (a code-rendered Approve/Deny prompt is shown; approval is content-hash-bound to the on-disk prompt bytes). Returns an opaque proposal_id and status 'pending_approval'.",
         "input_schema": {
           "type": "object",
           "properties": {
             "id": {
               "type": "string",
-              "description": "The id of an already-registered ritual (from rituals_status) — e.g. 'morning-brief'. Must NOT already be enabled."
+              "description": "The id of an already-registered ritual (from rituals_status) \u2014 e.g. 'morning-brief'. Must NOT already be enabled."
             },
             "schedule": {
               "type": "object",
@@ -417,7 +440,11 @@
                 },
                 "recurrence": {
                   "type": "string",
-                  "enum": ["weekly", "monthly", "occasional"],
+                  "enum": [
+                    "weekly",
+                    "monthly",
+                    "occasional"
+                  ],
                   "description": "Optional coarse cadence. Mutually exclusive with recurrence_spec."
                 },
                 "recurrence_spec": {
@@ -425,10 +452,15 @@
                   "description": "Optional 5-field cron cadence (e.g. '0 9 * * *'). Mutually exclusive with recurrence."
                 }
               },
-              "required": ["fire_at"]
+              "required": [
+                "fire_at"
+              ]
             }
           },
-          "required": ["id", "schedule"]
+          "required": [
+            "id",
+            "schedule"
+          ]
         },
         "output_schema": {
           "type": "object",
@@ -437,17 +469,67 @@
               "type": "string",
               "description": "Opaque handle for the pending proposal."
             },
-            "ritual_id": { "type": "string" },
+            "ritual_id": {
+              "type": "string"
+            },
             "status": {
               "type": "string",
-              "description": "Always 'pending_approval' — the ritual will not fire until the owner approves it."
+              "description": "Always 'pending_approval' \u2014 the ritual will not fire until the owner approves it."
             },
             "requires_egress_approval": {
               "type": "boolean",
-              "description": "True for egress:'web' defs — a SECOND owner approval (network egress) is required before scheduling."
+              "description": "True for egress:'web' defs \u2014 a SECOND owner approval (network egress) is required before scheduling."
             }
           },
-          "required": ["proposal_id", "ritual_id", "status", "requires_egress_approval"]
+          "required": [
+            "proposal_id",
+            "ritual_id",
+            "status",
+            "requires_egress_approval"
+          ]
+        },
+        "capability_required": "write:reminders_core.db"
+      },
+      {
+        "name": "rituals_reapprove",
+        "description": "RE-RAISE the owner's Approve/Deny prompt for an already-enabled ritual, as a FRESH tappable message. Use this when rituals_status shows a ritual as 'pending' or 'none' and the owner cannot act on it \u2014 the original prompt was posted once and scrolls out of view, so a pending approval that the owner never answered becomes permanently invisible and the ritual silently never fires. Also use it after the prompt bytes changed (approval is content-hash-bound, so any edit correctly drops the grant). Requires the ritual to be already enabled with a persisted schedule; it never changes the schedule or the prompt. Returns status 'pending_approval' \u2014 re-raising does NOT approve anything, the owner still decides.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The id of an already-enabled ritual (from rituals_status) \u2014 e.g. 'kaizen'."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "proposal_id": {
+              "type": "string",
+              "description": "Opaque handle for the pending proposal."
+            },
+            "ritual_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "Always 'pending_approval' \u2014 the ritual will not fire until the owner approves it."
+            },
+            "requires_egress_approval": {
+              "type": "boolean",
+              "description": "True for egress:'web' defs \u2014 a SECOND owner approval (network egress) is required before scheduling."
+            }
+          },
+          "required": [
+            "proposal_id",
+            "ritual_id",
+            "status",
+            "requires_egress_approval"
+          ]
         },
         "capability_required": "write:reminders_core.db"
       },
@@ -466,16 +548,30 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "ritual_id": { "type": "string" },
-                  "description": { "type": "string" },
-                  "scope": { "type": "string" },
+                  "ritual_id": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  },
                   "tool_surface": {
                     "type": "array",
-                    "items": { "type": "string" }
+                    "items": {
+                      "type": "string"
+                    }
                   },
-                  "egress": { "type": "string" },
-                  "approval": { "type": "string" },
-                  "scheduled": { "type": "boolean" }
+                  "egress": {
+                    "type": "string"
+                  },
+                  "approval": {
+                    "type": "string"
+                  },
+                  "scheduled": {
+                    "type": "boolean"
+                  }
                 },
                 "required": [
                   "ritual_id",
@@ -489,7 +585,9 @@
               }
             }
           },
-          "required": ["results"]
+          "required": [
+            "results"
+          ]
         },
         "capability_required": "read:reminders_core.db"
       }
@@ -517,7 +615,7 @@
             },
             "emoji": {
               "type": "string",
-              "const": "⏰"
+              "const": "\u23f0"
             },
             "order": {
               "type": "integer",

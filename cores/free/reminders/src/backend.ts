@@ -266,6 +266,8 @@ export interface RitualStatusRowResult {
 export interface RemindersRitualService {
   propose(input: RitualProposeInput): Promise<RitualProposeResult>
   enable(input: RitualEnableInput): Promise<RitualProposeResult>
+  /** #510 — re-raise the Approve/Deny prompt for an already-enabled ritual. */
+  reapprove(id: string): Promise<RitualProposeResult>
   status(): RitualStatusRowResult[]
 }
 
@@ -297,6 +299,9 @@ export interface RemindersBackend {
    * kaizen) becomes approvable + schedulable; `proposeRitual` refuses their
    * ids. OPTIONAL, same gating as `proposeRitual`. */
   enableRitual?(input: RitualEnableInput): Promise<RitualProposeResult>
+  /** #510 — re-raise the owner's Approve/Deny prompt for an already-enabled
+   *  ritual. OPTIONAL, same gating as `proposeRitual`. */
+  reapproveRitual?(input: { id: string }): Promise<RitualProposeResult>
   /** Plan task 8 — the ritual approval/schedule status snapshot. OPTIONAL. */
   ritualsStatus?(): Promise<RitualStatusRowResult[]>
   /**
@@ -657,6 +662,16 @@ export function buildReminderStoreBackend(
         )
       }
       return svc.enable(input)
+    },
+
+    async reapproveRitual(input: { id: string }): Promise<RitualProposeResult> {
+      const svc = opts.rituals?.()
+      if (svc === undefined || svc === null) {
+        throw new RitualsUnavailableError(
+          'rituals_reapprove: no ritual registration service wired (LLM-less box / no credential)',
+        )
+      }
+      return svc.reapprove(input.id)
     },
 
     async ritualsStatus(): Promise<RitualStatusRowResult[]> {

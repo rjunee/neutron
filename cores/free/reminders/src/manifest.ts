@@ -54,6 +54,12 @@ export const TOOL_NAMES = [
   // Argus r2 BLOCKER fix — enable a bundled/registered ritual (fires only after
   // the owner's in-chat approval). Bundled examples can be proposed only via this.
   'rituals_enable',
+  // #510 — RE-RAISE a pending/stale approval prompt as a fresh tappable message.
+  // The boot sweep deliberately leaves a 'pending' grant alone ("the prompt is
+  // already in front of him"), which stops being true the moment it scrolls: a
+  // pending approval the owner never answered went permanently invisible and its
+  // ritual silently never fired. This is the way back to it.
+  'rituals_reapprove',
   'rituals_status',
 ] as const
 export type RemindersToolName = typeof TOOL_NAMES[number]

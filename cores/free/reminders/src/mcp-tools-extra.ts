@@ -41,6 +41,11 @@ export interface ExtraToolDeps {
   backend: RemindersBackend
 }
 
+/** Input for `rituals_reapprove` — just the ritual id; schedule + prompt are untouched. */
+export interface RitualReapproveInput {
+  id: string
+}
+
 /** Result envelope for `rituals_status` (an array wrapped for the MCP object shape). */
 export interface RitualsStatusOutput {
   results: RitualStatusRowResult[]
@@ -53,6 +58,8 @@ export interface BuiltExtraTools {
   /** Argus r2 BLOCKER fix — ENABLE a bundled/registered ritual (owner approval to fire). */
   rituals_enable: (input: RitualEnableInput) => Promise<RitualProposeResult>
   /** Plan task 8 — the ritual approval/schedule status snapshot. */
+  /** #510 — RE-RAISE a pending/stale approval prompt as a fresh tappable message. */
+  rituals_reapprove: (input: RitualReapproveInput) => Promise<RitualProposeResult>
   rituals_status: (input: Record<string, never>) => Promise<RitualsStatusOutput>
 }
 
@@ -120,6 +127,25 @@ export function buildExtraTools(deps: ExtraToolDeps): BuiltExtraTools {
     },
   })
 
+  // #510 — the way BACK to a pending approval. The boot sweep deliberately leaves a
+  // 'pending' grant alone on the stated ground that "the prompt is already in front
+  // of him" — true for about as long as it takes the chat to scroll. A pending
+  // approval the owner never answered then has no surface at all: `rituals_status`
+  // can SAY it is pending, but the only tappable buttons are in a message from days
+  // ago. `kaizen` sat pending from 2026-08-03 and never once fired.
+  //
+  // WRITE capability, not read: this mints fresh grant rows and posts a message.
+  const rituals_reapprove = guard.wrapToolHandler<RitualReapproveInput, RitualProposeResult>({
+    tool_name: 'rituals_reapprove',
+    capability_required: WRITE_CAPABILITY,
+    fn: async (input): Promise<RitualProposeResult> => {
+      if (deps.backend.reapproveRitual === undefined) {
+        throw new RitualsUnavailableError('rituals_reapprove: backend has no reapproveRitual wired')
+      }
+      return deps.backend.reapproveRitual(input)
+    },
+  })
+
   const rituals_status = guard.wrapToolHandler<Record<string, never>, RitualsStatusOutput>({
     tool_name: 'rituals_status',
     capability_required: READ_CAPABILITY,
@@ -134,5 +160,5 @@ export function buildExtraTools(deps: ExtraToolDeps): BuiltExtraTools {
     },
   })
 
-  return { reminders_update, rituals_propose, rituals_enable, rituals_status }
+  return { reminders_update, rituals_propose, rituals_enable, rituals_reapprove, rituals_status }
 }

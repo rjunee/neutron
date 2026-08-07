@@ -375,7 +375,7 @@ describe('loadManifest pulls the package.json shipped on disk', () => {
     expect(() => loadManifest()).not.toThrow()
   })
 
-  test('declares 9 tools (5 legacy + reminders_update + rituals_propose/rituals_enable/rituals_status) and 2 ui_components (launcher_icon + app_tab)', () => {
+  test('declares 10 tools (5 legacy + reminders_update + rituals_propose/rituals_enable/rituals_reapprove/rituals_status) and 2 ui_components (launcher_icon + app_tab)', () => {
     const m = loadManifest()
     const toolNames = m.tools.map((t) => t.name).sort()
     expect(toolNames).toEqual(
@@ -390,6 +390,8 @@ describe('loadManifest pulls the package.json shipped on disk', () => {
         'rituals_propose',
         // Argus r2 BLOCKER fix — enable a bundled/registered ritual.
         'rituals_enable',
+        // #510 — re-raise a pending/stale approval prompt as fresh tappable buttons.
+        'rituals_reapprove',
         'rituals_status',
       ].sort(),
     )
