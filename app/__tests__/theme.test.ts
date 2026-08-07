@@ -14,17 +14,22 @@ import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 describe('THEME', () => {
   it('exports the locked P5.0 dark palette plus the P5.1 warning + link + PR-6 rail tokens', () => {
     expect(THEME).toEqual({
-      background: '#0a0a0a',
-      surface: '#121212',
-      surface_raised: '#1a1a1a',
-      text_primary: '#ffffff',
-      text_secondary: '#cfcfcf',
-      text_muted: '#8a8a8a',
+      // LIFTED + BLUE-TINTED 2026-08-07 on owner feedback ("colors are too dark …
+      // more variation between the chat bubbles and the background"). This lock
+      // test is what forced the change to be deliberate — it did its job.
+      background: '#101419',
+      surface: '#171d25',
+      surface_raised: '#222834',
+      text_primary: '#eceff4',
+      text_secondary: '#b6becb',
+      text_muted: '#7c848f',
       accent: '#e0e0e0',
-      hairline: '#1f1f1f',
+      hairline: '#2b3240',
       danger: '#ff5c5c',
       warning: '#ffae42',
       link: '#5fb6ff',
+      user_bubble: '#0a84ff',
+      user_ink: '#ffffff',
       // M1 UX REDESIGN PR-6 — rail work-activity dot tokens (mirror web).
       work: '#66ccff',
       attention: '#ffd27d',
@@ -86,5 +91,64 @@ describe('DENSITY', () => {
     expect(DENSITY.bubble_max_width).toBe('85%');
     expect(DENSITY.composer_radius).toBe(12);
     expect(DENSITY.chip_radius).toBe(999);
+  });
+});
+
+/**
+ * The palette's INTENT, not just its literals.
+ *
+ * The lock test above pins exact hex values, which is right — it forces any change
+ * to be deliberate. But it would pass just as happily on a palette that had drifted
+ * back to flat near-black greys with the same shape. These encode the two things the
+ * owner actually asked for, so a future edit that satisfies the letter and loses the
+ * point fails here instead.
+ */
+describe('THEME — the properties the owner asked for', () => {
+  /** Perceived lightness, 0–255, weighted for how the eye reads each channel. */
+  function luma(hex: string): number {
+    const n = parseInt(hex.slice(1), 16);
+    const r = (n >> 16) & 0xff;
+    const g = (n >> 8) & 0xff;
+    const b = n & 0xff;
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  /** How far a colour is from being a pure grey — its blue-vs-red spread. */
+  function tint(hex: string): number {
+    const n = parseInt(hex.slice(1), 16);
+    return (n & 0xff) - ((n >> 16) & 0xff);
+  }
+
+  it('an agent bubble is CLEARLY lighter than the ground it sits on', () => {
+    // "some more variation between the chat bubbles and the background". The old
+    // palette had a step of ~16/255 and read as one flat sheet.
+    const step = luma(THEME.surface_raised) - luma(THEME.background);
+    expect(step).toBeGreaterThan(14);
+  });
+
+  it('the ramp lifts EVENLY — raised reads as raised at every level', () => {
+    const a = luma(THEME.surface) - luma(THEME.background);
+    const b = luma(THEME.surface_raised) - luma(THEME.surface);
+    expect(a).toBeGreaterThan(4);
+    expect(b).toBeGreaterThan(4);
+  });
+
+  it('nothing is near-black any more', () => {
+    // "our colors are too dark, can you make it a little bit lighter".
+    expect(luma(THEME.background)).toBeGreaterThan(14);
+  });
+
+  it('the neutrals are TINTED toward the product blue, not pure grey', () => {
+    // A pure grey has tint 0. A dark UI built from pure greys looks switched-off
+    // rather than composed, which is the difference he was seeing against Telegram.
+    expect(tint(THEME.background)).toBeGreaterThan(4);
+    expect(tint(THEME.surface_raised)).toBeGreaterThan(4);
+  });
+
+  it('the owner\'s bubble is BLUE and distinct from accent', () => {
+    // It used to BE `accent` — a near-white capsule. Reusing accent again would
+    // silently undo the fix while every hex assertion above still passed.
+    expect(THEME.user_bubble).not.toBe(THEME.accent);
+    expect(tint(THEME.user_bubble)).toBeGreaterThan(60);
+    expect(luma(THEME.user_bubble)).toBeLessThan(luma(THEME.user_ink));
   });
 });

@@ -190,10 +190,23 @@ export interface BubbleTone {
   ink: string;
 }
 
-/** The owner's own bubble: a filled accent capsule with dark content. */
+/**
+ * The owner's own bubble: a filled BLUE capsule with white content.
+ *
+ * It was `accent` on `background` — a near-white capsule with near-black text,
+ * which is what the owner was looking at when he said *"make messages from me in
+ * our signature blue color not white/grey"*. The web chat has painted his bubbles
+ * `--user-bubble: #0a84ff` since it shipped; this was a mobile-only divergence, so
+ * the fix is to stop diverging rather than to invent a colour.
+ *
+ * It also does the heavy lifting on his other request. His own messages are the
+ * one place in the transcript that SHOULD be loud — everything else is the agent
+ * talking — so a saturated fill here is the accent earning its keep by being rare,
+ * and it gives the eye an instant anchor for "where did I last speak".
+ */
 export const USER_BUBBLE_TONE: BubbleTone = Object.freeze({
-  ground: THEME.accent,
-  ink: THEME.background,
+  ground: THEME.user_bubble,
+  ink: THEME.user_ink,
 });
 
 /** The agent's bubble: a raised dark surface with light content. */
