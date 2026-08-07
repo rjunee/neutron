@@ -151,12 +151,28 @@ export function defaultRalphModeProbe(
  * composer doesn't inject its own. Never throws — a spawn failure resolves
  * to `{ ok:false, exit_code:-1 }`.
  */
-export async function spawnCapture(cmd: string[], cwd?: string): Promise<HostCommandResult> {
+export async function spawnCapture(
+  cmd: string[],
+  cwd?: string,
+  /**
+   * Extra environment MERGED over the inherited one. Optional so every existing
+   * caller is untouched; `makeCredentialedHostRunner` below is what production
+   * uses to carry the GitHub credential into `git push` / `gh pr create`.
+   */
+  extraEnv?: Record<string, string>,
+): Promise<HostCommandResult> {
   try {
     const proc = Bun.spawn(cmd, {
       // Only set `cwd` when provided — under exactOptionalPropertyTypes an
       // explicit `cwd: undefined` is not assignable to SpawnOptions.
       ...(cwd !== undefined ? { cwd } : {}),
+      // MERGE over the inherited environment, never replace it. Passing a bare
+      // `{ ...extraEnv }` would drop PATH, HOME and the Claude credential dir,
+      // so `git` itself would stop resolving. Omit `env` entirely when there is
+      // nothing to add, so the unconnected path is byte-identical to before.
+      ...(extraEnv !== undefined && Object.keys(extraEnv).length > 0
+        ? { env: { ...process.env, ...extraEnv } }
+        : {}),
       stdout: 'pipe',
       stderr: 'pipe',
     })
@@ -169,6 +185,27 @@ export async function spawnCapture(cmd: string[], cwd?: string): Promise<HostCom
   } catch (err) {
     return { ok: false, stdout: '', stderr: String(err), exit_code: -1 }
   }
+}
+
+/**
+ * A `RunHostCommand` with an environment baked in.
+ *
+ * WHY A FACTORY RATHER THAN AN EXTRA PARAMETER ON `RunHostCommand`. That type is
+ * `(cmd, cwd?) => Promise<HostCommandResult>` and is implemented by a dozen test
+ * doubles and threaded through the orchestrator, merge, and probe paths. Adding a
+ * third parameter would ripple through all of them and — worse — would make
+ * carrying the credential the CALLER's job at every single call site, which is
+ * exactly how one of them ends up forgetting. Baking it in at the composition
+ * seam means every host command a run makes is credentialed by construction, and
+ * the type nobody else has to change.
+ *
+ * With an empty env this is `spawnCapture` verbatim, so an instance with no
+ * GitHub connection behaves precisely as it does today.
+ */
+export function makeCredentialedHostRunner(
+  extraEnv: Record<string, string>,
+): (cmd: string[], cwd?: string) => Promise<HostCommandResult> {
+  return (cmd, cwd) => spawnCapture(cmd, cwd, extraEnv)
 }
 
 /**
