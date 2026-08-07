@@ -311,6 +311,69 @@ Each carries an acceptance criterion; all in `neutron-open`.
       only; a crash before the JS bundle runs produces nothing. Acceptance: a native process-start crash on
       the owner's device is diagnosable without a USB cable.
 
+### Email Core consolidation — absorb the standalone email system (owner-directed 2026-08-07)
+
+Fold the separately-hosted email system into the Email Core so it runs on the
+instance's own box instead of a third-party edge platform, and retire that
+service. **The full design, with the corrections that changed it, is
+`docs/plans/2026-08-06-email-core-consolidation-plan.md`; the owner's five
+decisions are recorded in the governed Decisions Log (neutron-managed SPEC.md,
+2026-08-06/07). These steps are the BUILD QUEUE for this repo** — the work is
+entirely Open's (`cores/free/email/`), so it is queued here rather than only in
+the governance tracker, which is also what makes it Ralph-buildable from a clone.
+
+Shape: a selective port wrapped in a large deletion — roughly 1,700 of ~7,600
+source+config lines survive; ~8,000+ go along with an entire hosted service, its
+six secrets, three worker crons and 9 of 13 tables. Feasible because the source
+system POLLS Gmail and mutates labels: no MX record, no SMTP receiver, so it is
+host-agnostic. Classification runs on the substrate one-shot LLM
+(`gateway/cores/mount-open-cores.ts:412-417`), NOT a separate provider key.
+
+**The two capabilities that must survive** are the owner's twice-daily briefs and
+escalated important-email notifications. Everything else must justify itself
+against one of those or be deleted.
+
+- [ ] **P1 — pipeline store + poller + classification + escalation.** The
+      escalation half end to end. _Acceptance: an important message arriving in the
+      real mailbox produces an escalation in chat within a poll interval. Names the
+      composition seam it wires; a bookkeeping assertion does NOT satisfy this._
+- [ ] **P2 — the twice-daily brief, DELIVERED AS EMAIL, + the digest on/off
+      setting.** **The brief is an EMAIL; chat and push carry escalations ONLY and a
+      digest is never posted to chat.** The on/off is a user-facing PRODUCT SETTING
+      (`instance_metadata.email_digest_enabled`), not a feature flag — do not strip
+      it citing the no-flags rule. _Acceptance: two real briefs land in the owner's
+      inbox on his own schedule in his own timezone (never hardcoded UTC — DST), and
+      toggling the setting off stops them. **Plus the pre-cutover rehearsal: with
+      label-mutation and archive HELD BACK, the poller runs against the real mailbox
+      alongside the existing service and emails its brief, so the two can be compared
+      side by side for days before any switch.** Reads do not conflict; only the
+      writes collide, which is why a rehearsal is possible at all._
+- [ ] **P2.5 — classification setup by inbox SURVEY + owner INTERVIEW.** The Core
+      ships the mechanism and **ZERO rules**; installing it samples the real inbox,
+      clusters what is there, then asks the owner about each class it found and
+      writes the answers as per-owner instance data. Owner sender data in this tree
+      is a defect, never config. _Acceptance: a fresh instance with a connected
+      mailbox and no hand-authored rules reaches working classification through setup
+      alone, and the proposed classes are DERIVED from the sampled inbox — a
+      hardcoded taxonomy fails the test._
+- [ ] **P3 — retire the Core's dead scheduled digest; the scribe fan-out rides the
+      new poller.** The existing `triage-scheduler.ts` has never been deliverable
+      (`pushDispatcher: null` hardcoded at
+      `gateway/cores/mount-cores-scribe-fan-out.ts:302`; no `emailLlm` passed from
+      `open/wiring/memory.ts:354-358`, so it falls to a throwing stub; delivery gated
+      at `gateway/cores/email-managed-wiring.ts:149`). Its ONLY live output is the
+      scribe email→memory fan-out + watermark, **which the poller must take over or
+      ambient email→memory goes dark.** The on-demand `email_triage` tool is a
+      different thing and stays. _Acceptance: the old scheduler is deleted AND
+      email→memory extraction is still observably happening afterwards._
+- [ ] **P4 — owner cutover.** Hard switch on the WRITES, no parallel mutation:
+      both systems label the same mail. Old service's crons off → verified interval →
+      service deleted. Its database is NOT imported — the mail all still lives in
+      Gmail, so a clean start is correct. The return-to-inbox learning loop is KEPT
+      (live and closed: `pipeline/poller.ts:82` reads patterns into the classifier).
+      _Acceptance: the standalone service no longer exists and the owner has had no
+      gap in briefs or escalations across the switch._
+
 ## Open Questions
 
 When one is answered, move it to the Decisions Log (newest-first) and delete it
