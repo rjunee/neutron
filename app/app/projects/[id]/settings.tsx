@@ -44,6 +44,7 @@ import {
   ProjectCredentialsClient,
   type ProjectCredentialRecord,
   type ProjectCredentialsList,
+  type ServiceAccountSelection,
 } from '../../../lib/project-credentials-client';
 import { ProjectsClient, type ProjectMember } from '../../../lib/projects-client';
 import { useAuthSession } from '../../../lib/session';
@@ -109,6 +110,64 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
       });
   }, [credClient, projectId]);
 
+  // ── Connected accounts for THIS project (ISSUES #501) ──────────────────────
+  //
+  // The web Settings tab has had this since #500; mobile had no UI bound to it at
+  // all, so the owner could see the enforcement but never the control.
+  //
+  // ⚠️ `enabled` COMES FROM THE SERVER AND IS NEVER COMPUTED HERE. The store is a
+  // DISABLE list — a project with no rows reads EVERY connected account
+  // (`migrations/0115`, SPEC Decisions Log 2026-08-04). Treating "no rows" as
+  // "nothing selected", or writing an ENABLE list, inverts the design. Both writes
+  // and reads therefore render straight from the server's computed view.
+  const [acctServices, setAcctServices] = useState<ServiceAccountSelection[]>([]);
+  const [acctLoading, setAcctLoading] = useState(true);
+  const [acctError, setAcctError] = useState<string | null>(null);
+  const [acctBusyKey, setAcctBusyKey] = useState<string | null>(null);
+  const acctSeq = useRef(0);
+
+  const refreshAccounts = useCallback((): void => {
+    const mine = (acctSeq.current += 1);
+    setAcctLoading(true);
+    setAcctError(null);
+    credClient
+      .listAccounts(projectId)
+      .then((services) => {
+        if (mine !== acctSeq.current) return;
+        setAcctServices(services);
+        setAcctLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (mine !== acctSeq.current) return;
+        setAcctServices([]);
+        setAcctLoading(false);
+        setAcctError(err instanceof Error ? err.message : 'failed to load accounts');
+      });
+  }, [credClient, projectId]);
+
+  const toggleAccount = useCallback(
+    (service: string, account_id: string, enabled: boolean): void => {
+      const key = `${service}:${account_id}`;
+      setAcctBusyKey(key);
+      setAcctError(null);
+      const mine = (acctSeq.current += 1);
+      credClient
+        .setAccountEnabled(projectId, { service, account_id, enabled })
+        .then((services) => {
+          setAcctBusyKey(null);
+          // Bump-and-compare like the list path: a toggle that resolves after a
+          // newer refresh must not overwrite it with a staler view.
+          if (mine !== acctSeq.current) return;
+          setAcctServices(services);
+        })
+        .catch((err: unknown) => {
+          setAcctBusyKey(null);
+          setAcctError(err instanceof Error ? err.message : 'failed to update account');
+        });
+    },
+    [credClient, projectId],
+  );
+
   const addCredential = useCallback((): void => {
     const service = addService.trim();
     const secret = addToken.trim();
@@ -134,6 +193,10 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
         setCredActionError(err instanceof Error ? err.message : 'failed to save credential');
       });
   }, [credClient, projectId, addService, addToken, addLabel, adding, refreshCreds]);
+
+  useEffect((): void => {
+    refreshAccounts();
+  }, [refreshAccounts]);
 
   // Removes THIS PROJECT's credential only. An inherited global default has no
   // delete control here — removing it would change every other project.
@@ -332,6 +395,77 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
         </Pressable>
       </View>
 
+      {/* ── Connected accounts (ISSUES #501) ──────────────────────────────── */}
+      <Text style={[styles.sectionTitle, styles.sectionSpacer]}>Connected accounts</Text>
+      <Text style={styles.sectionHint}>
+        Which connected accounts this project reads. Connecting an account is global; this only
+        narrows where it is used. All on by default.
+      </Text>
+
+      {acctLoading ? (
+        <View style={styles.sectionLoading} testID="settings-accounts-loading">
+          <ActivityIndicator color={THEME.text_secondary} />
+        </View>
+      ) : acctError !== null ? (
+        <Text style={styles.error} testID="settings-accounts-error">
+          {acctError}
+        </Text>
+      ) : acctServices.length === 0 ? (
+        <Text style={styles.empty} testID="settings-accounts-empty">
+          No connected accounts yet.
+        </Text>
+      ) : (
+        <View testID="settings-accounts-list">
+          {acctServices.map((svc) => (
+            <View key={svc.service} style={styles.acctService}>
+              <Text style={styles.acctServiceName}>{svc.service}</Text>
+              {/* Mirrors the web tab's warning. All-off is reachable and legal, but
+                  it silently starves the Core of every account, so it is named
+                  rather than left to look like a rendering bug. */}
+              {svc.accounts.length > 0 && svc.accounts.every((a) => !a.enabled) ? (
+                <Text style={styles.acctAllOff} testID={`settings-accounts-alloff-${svc.service}`}>
+                  Every account is off, so this project reads none of them.
+                </Text>
+              ) : null}
+              {svc.accounts.map((acct) => {
+                const key = `${svc.service}:${acct.account_id}`;
+                return (
+                  <Pressable
+                    key={key}
+                    onPress={() => toggleAccount(svc.service, acct.account_id, !acct.enabled)}
+                    disabled={acctBusyKey === key}
+                    accessibilityRole="switch"
+                    accessibilityState={{ checked: acct.enabled, disabled: acctBusyKey === key }}
+                    accessibilityLabel={`${acct.label} for ${svc.service}`}
+                    testID={`settings-account-${key}`}
+                    style={({ pressed }) => [
+                      styles.acctRow,
+                      pressed && styles.pressed,
+                      acctBusyKey === key && styles.btnDisabled,
+                    ]}
+                  >
+                    <View style={styles.acctRowText}>
+                      <Text style={styles.acctLabel}>{acct.label}</Text>
+                      {acct.account_email !== null ? (
+                        <Text style={styles.acctEmail}>{acct.account_email}</Text>
+                      ) : null}
+                    </View>
+                    {/* The state is the SERVER's `enabled`, rendered — never a local
+                        derivation. See the note on the state block above. */}
+                    <Text
+                      style={acct.enabled ? styles.acctOn : styles.acctOff}
+                      testID={`settings-account-state-${key}`}
+                    >
+                      {acct.enabled ? 'On' : 'Off'}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ))}
+        </View>
+      )}
+
       {/* ── Project ───────────────────────────────────────────────────────── */}
       <Text style={[styles.sectionTitle, styles.sectionSpacer]}>Project</Text>
       {projectLoading ? (
@@ -494,6 +628,28 @@ const styles = StyleSheet.create({
     lineHeight: TYPOGRAPHY.h3.lineHeight,
     fontWeight: TYPOGRAPHY.h3.fontWeight,
   },
+  acctService: { marginTop: SPACING.sm },
+  acctServiceName: {
+    color: THEME.text_secondary,
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 4,
+  },
+  acctAllOff: { color: THEME.warning, fontSize: 12, marginBottom: 4 },
+  acctRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: THEME.hairline,
+  },
+  acctRowText: { flex: 1, minWidth: 0, paddingRight: SPACING.sm },
+  acctLabel: { color: THEME.text_primary, fontSize: 15 },
+  acctEmail: { color: THEME.text_muted, fontSize: 12, marginTop: 1 },
+  acctOn: { color: THEME.accent, fontSize: 13, fontWeight: '600' },
+  acctOff: { color: THEME.text_muted, fontSize: 13 },
   sectionSpacer: { marginTop: SPACING.xl },
   sectionHint: {
     color: THEME.text_muted,
