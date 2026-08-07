@@ -224,9 +224,26 @@ function RailItem({
           </View>
         )}
       </View>
+      {/* TWO LINES, NOT ONE. Owner, on device: "Make project names in the rail wrap
+          instead of truncate. They are not readable when they truncate." The rail is
+          72pt wide, so at caption size a single line held roughly eight characters —
+          enough to render most real project names as an ellipsis and a guess.
+          
+          BOUNDED AT TWO rather than unbounded: the rail is the app's primary
+          navigation and its rows are ~44pt tap targets, so a five-line name would
+          push everything below it off the fold and move targets the owner has learned
+          the position of. Two lines roughly doubles the readable length, which covers
+          the overwhelming majority of names, and anything longer still truncates —
+          just far later.
+          
+          `ellipsizeMode="tail"` stays for that residual case: the truncation moves to
+          the end of the SECOND line rather than being removed, because a name that
+          genuinely does not fit has to end somewhere and the front of it is the part
+          that identifies the project. */}
       <Text
         style={[styles.name, isActive && styles.nameActive, hasUnread && styles.nameUnread]}
-        numberOfLines={1}
+        numberOfLines={2}
+        ellipsizeMode="tail"
       >
         {project.name}
       </Text>
@@ -456,6 +473,15 @@ const styles = StyleSheet.create({
     color: THEME.text_muted,
     textAlign: 'center',
     maxWidth: RAIL_WIDTH - SPACING.xs,
+    /**
+     * BOTH LINES' HEIGHT IS RESERVED ON EVERY ROW, whether the name uses one line
+     * or two. Without it the rail becomes a ragged column whose row heights depend
+     * on name length — and worse, a row would CHANGE HEIGHT when a project is
+     * renamed, moving every target beneath it. The rail's own glyph box is already
+     * a fixed 44pt grid; this keeps the label on the same footing, at the cost of
+     * one blank line under short names.
+     */
+    minHeight: TYPOGRAPHY.caption.lineHeight * 2,
   },
   nameActive: {
     color: THEME.text_primary,
