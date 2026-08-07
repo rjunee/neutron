@@ -561,6 +561,19 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_codex_credential_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0h1e. Connect GitHub — `/api/app/github-auth` (GET status / POST start the
+  //        device flow). A flat, project-less path: the token is the OWNER's, not a
+  //        project's, because a build in any project pushes as the same account.
+  //        Ordered here beside Connect Codex purely for readability — it shares no
+  //        prefix with any sibling, so it cannot claim a path another slot wants.
+  slot({
+    key: 'appGitHubConnect',
+    rung: 'app-github-connect',
+    composition: 'app_github_connect_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_github_connect_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0h2. Project settings + list — P5.2 + ISSUES #9. AFTER every per-project
   //      child so it never claims paths a sibling already routed.
   slot({
