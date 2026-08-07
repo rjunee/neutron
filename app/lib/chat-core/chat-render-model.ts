@@ -242,7 +242,7 @@ export type RenderRow =
  * WHY THIS EXISTS. The owner reported the scroll track "jumps around, changes
  * size … not consistent". FlashList v2 measures rows rather than taking an
  * `estimatedItemSize`, and with no `getItemType` every row shares ONE recycling
- * pool — so a recycled view whose previous tenant was a one-line user bubble is
+ * pool — so a recycled view that last held a one-line user bubble is
  * re-measured as a tall agent markdown block, `contentSize` is revised, and the
  * scroll track resizes under the thumb. Same-shaped pools make each measurement a
  * much smaller correction.

@@ -4,7 +4,7 @@
  * The owner reported the scroll track "jumps around, changes size … not
  * consistent". FlashList v2 measures rows instead of taking an
  * `estimatedItemSize`, and with no `getItemType` every row shares ONE recycling
- * pool — so a view whose previous tenant was a one-line user bubble gets
+ * pool — so a view that last held a one-line user bubble gets
  * re-measured as a tall agent markdown block, `contentSize` is revised, and the
  * track resizes under the thumb.
  *
