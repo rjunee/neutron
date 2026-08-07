@@ -254,8 +254,8 @@ describe('project names wrap instead of truncating', () => {
     // They are not readable when they truncate." The rail is 72pt wide, so at caption
     // size one line held roughly eight characters — an ellipsis and a guess for most
     // real names.
-    const screen = await mountRail([project('a', 'Quintessential Ventures')], 'a');
-    const name = classesOf(labelWithText(screen.host, 'Quintessential Ventures'));
+    const screen = await mountRail([project('a', 'Infrastructure Planning')], 'a');
+    const name = classesOf(labelWithText(screen.host, 'Infrastructure Planning'));
     expect(isMultiline(name)).toBe(true);
 
     // THE CONTROL. Same tree, same render, a label that is deliberately still one
@@ -273,14 +273,14 @@ describe('project names wrap instead of truncating', () => {
     // name length — and a RENAME would change a row's height, moving every target
     // beneath it.
     const short = await mountRail([project('a', 'Ops')], 'a');
-    const long = await mountRail([project('a', 'Quintessential Ventures')], 'a');
+    const long = await mountRail([project('a', 'Infrastructure Planning')], 'a');
     const minHeightClass = (host: HTMLElement, text: string): string => {
       const c = classesOf(labelWithText(host, text));
       const m = /r-minHeight-\S+/.exec(c);
       return m === null ? '' : m[0];
     };
     const a = minHeightClass(short.host, 'Ops');
-    const b = minHeightClass(long.host, 'Quintessential Ventures');
+    const b = minHeightClass(long.host, 'Infrastructure Planning');
     // A reserved height at all…
     expect(a).not.toBe('');
     // …and the SAME one regardless of name length, which is the property that keeps
