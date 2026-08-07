@@ -40,6 +40,16 @@ export interface NeutronTheme {
   warning: string;
   /** Link color (markdown links, citation chip text). */
   link: string;
+  /**
+   * The OWNER's own chat bubble. Mirror of the web `--user-bubble` (#0a84ff).
+   *
+   * A dedicated token rather than reusing `accent`: `accent` paints spinners,
+   * active states and focus rings, and repainting all of those is a much broader
+   * decision than "my messages should be blue". Web keeps the same separation.
+   */
+  user_bubble: string;
+  /** Content drawn ON `user_bubble`. Mirror of the web `--user-fg`. */
+  user_ink: string;
   /** M1 UX REDESIGN — rail work-activity dot: a project with a live build /
    *  running turn. Mirror of the web `--work` token. */
   work: string;
@@ -54,18 +64,45 @@ export interface NeutronTheme {
   usage_critical: string;
 }
 
+/**
+ * THE DARK RAMP, LIFTED AND TINTED (owner feedback 2026-08-07).
+ *
+ * He compared the app to Telegram side by side: *"our colors are too dark, can you
+ * make it a little bit lighter and some more variation between the chat bubbles and
+ * the background?"* Both halves were true, and the second was the worse one — at
+ * `background: #0a0a0a` against `surface_raised: #1a1a1a` an agent bubble sat 16
+ * units off the ground it was drawn on, so the transcript read as one flat sheet.
+ *
+ * Two changes, not one. Every step is LIFTED (nothing is near-black any more), and
+ * every neutral is TINTED toward the product's own blue rather than being a pure
+ * grey — which is what makes a dark UI look composed instead of switched-off, and
+ * what Telegram's blue-grey ground is doing. The hue family is taken from the web
+ * chat's palette (`--bg #0b0d10`, `--agent-bubble #1d2026`), so the two clients
+ * still look like the same product; mobile simply sits a step brighter, because a
+ * phone is read in daylight and a desktop usually is not.
+ *
+ * The steps are deliberately EVEN. background → surface → surface_raised each lift
+ * by a comparable amount, so "raised" reads as raised at every level rather than
+ * only where the delta happened to be big enough.
+ */
 export const THEME: NeutronTheme = Object.freeze({
-  background: '#0a0a0a',
-  surface: '#121212',
-  surface_raised: '#1a1a1a',
-  text_primary: '#ffffff',
-  text_secondary: '#cfcfcf',
-  text_muted: '#8a8a8a',
+  background: '#101419',
+  surface: '#171d25',
+  surface_raised: '#222834',
+  // Not pure white: #fff on a dark ground reads as heavier than it is and glares.
+  text_primary: '#eceff4',
+  text_secondary: '#b6becb',
+  text_muted: '#7c848f',
   accent: '#e0e0e0',
-  hairline: '#1f1f1f',
+  hairline: '#2b3240',
   danger: '#ff5c5c',
   warning: '#ffae42',
   link: '#5fb6ff',
+  // The signature blue. Owner: "make messages from me in our signature blue color
+  // not white/grey" — the web chat has rendered his bubbles in exactly this since
+  // it shipped; mobile was painting them with `accent`, a near-white.
+  user_bubble: '#0a84ff',
+  user_ink: '#ffffff',
   work: '#66ccff',
   attention: '#ffd27d',
   usage_nominal: '#4bbf73',

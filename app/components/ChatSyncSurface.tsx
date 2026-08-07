@@ -702,7 +702,7 @@ export function ChatSyncSurface({
           style={styles.jumpToBottom}
           hitSlop={8}
         >
-          <Text style={styles.jumpToBottomGlyph}>↓</Text>
+          <View style={styles.jumpToBottomChevron} />
         </Pressable>
       ) : null}
       <DropZoneOverlay
@@ -1276,10 +1276,14 @@ const styles = StyleSheet.create({
   jumpToBottom: {
     position: 'absolute',
     right: SPACING.md,
-    bottom: 84,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    // LOWER, on owner feedback ("put the scroll down arrow a bit lower"). It was 84,
+    // which cleared the composer by a wide margin and left it floating in the middle
+    // of the transcript. 52 keeps it clear of the input while reading as attached to
+    // the bottom of the conversation, which is where the eye looks for it.
+    bottom: 52,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: THEME.surface_raised,
@@ -1289,10 +1293,30 @@ const styles = StyleSheet.create({
     // the tree, so an upload sheet is never obscured by a scroll button.
     zIndex: 2,
   },
-  jumpToBottomGlyph: {
-    color: THEME.text_primary,
-    fontSize: 18,
-    lineHeight: 20,
+  /**
+   * The chevron, drawn rather than typed ("make the arrow look more beautiful").
+   *
+   * It was the text character "↓", which inherits the font's own weight and optical
+   * centring — so it sat slightly high in the circle and looked like a placeholder,
+   * because it was one. This is a square rotated 45° with only its bottom and right
+   * edges stroked: a true chevron with a stroke weight and corner join chosen here
+   * rather than inherited from a typeface, crisp at any density, and no new
+   * dependency to draw it.
+   *
+   * `text_secondary`, not primary: it is an affordance that appears over content, so
+   * it should read as available rather than shout. The circle already carries the
+   * contrast.
+   */
+  jumpToBottomChevron: {
+    width: 9,
+    height: 9,
+    borderRightWidth: 1.75,
+    borderBottomWidth: 1.75,
+    borderColor: THEME.text_secondary,
+    transform: [{ rotate: '45deg' }],
+    // Nudged up by the half-stroke the rotation pushes below centre, so the mark is
+    // optically centred in the circle rather than mathematically centred.
+    marginTop: -3,
   },
   chip: {
     flexDirection: 'row',
