@@ -2,6 +2,63 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-06 — push registration self-heals on foreground, so a signed-in device stops going dark
+
+Branch `fix/push-registration-self-heal`. ISSUES #487 (the residual its
+observability half deliberately left open).
+
+**The defect was not in the push path.** `push_dispatcher` is composed
+(`open/composer.ts:3001`), passed (`:5144`), attached as the reminder loop's
+`on_fired` (`gateway/composition/build-core-modules.ts:396-397`), and
+`pushReminder` reads the token table first and no-ops when it is empty — by
+design. It behaved exactly as written. The defect was that NOTHING EVER
+REGISTERED A SECOND TIME: `enablePushForUser` had two call sites, both inside
+the login flow (`app/app/login.tsx:228,352`), and nothing subscribed to
+AppState. A session survives launches for weeks, so a device that signed in once
+never called the endpoint again.
+
+**Measured, not inferred.** On the live instance 2026-08-06,
+`device_push_tokens` held **0 rows** and the server journal showed **zero**
+`devices/register` requests in 14 days. Every proactive surface — morning brief,
+evening wrap, idle nudges, and a ritual re-approval request — was therefore
+visible only when the owner happened to open a client. That is not a theoretical
+cost: the same day, both the morning brief and the evening wrap skipped for 16
+hours because a re-approval prompt sat unseen.
+
+**Shipped.** `app/components/PushRegistrationSync.tsx`, mounted inside
+`AuthSessionProvider` in `app/app/_layout.tsx` next to `DiagnosticsSync`, calls
+`enablePushForUser` on authenticated launch and on every background→active
+transition. Register upserts on `(project_slug, device_token)`
+(`gateway/push/store.ts:91-94`), so repeat calls cost one request and one
+`updated_at`; once the OS holds a permission decision,
+`requestPermissionsAsync` resolves from it without UI, so this never nags.
+Foreground rather than launch-only is load-bearing — an Expo token rotates while
+the app stays warm, and permission is granted in the OS Settings app, which
+returns through `inactive → active`.
+
+**The decisions live in `app/lib/push-registration-sync.ts`, which imports
+neither `react-native` nor `expo-notifications`,** because the app suite cannot
+load either — the same constraint that put the outcome→diagnostic mapping in
+`push-observability.ts`. Logic reachable only from inside the component would
+have been untestable, and untestable is how a self-healing mechanism quietly
+stops healing.
+
+**Tests + mutation results.** `app/__tests__/push-registration-sync.test.ts`,
+9 tests. Three mutations, each red: making `cameToForeground` ignore `prev`
+(so every `active` re-registers) reds the already-active arm; deleting
+`<PushRegistrationSync />` from the root layout reds the mount arm; and moving
+the guard clear out of `finally` into the success path reds the throwing-enable
+arm. The third mutation is the one worth naming — a leaked guard would stop
+registration healing after its first transient failure, with nothing looking
+broken. A first attempt at that mutation SURVIVED because it left the `finally`
+in place alongside the added clear: the guard was doubled, not tested. No
+feature flag; the sync ships on as default behaviour.
+
+**Not yet verifiable end-to-end.** A registered row requires the owner to open
+the app on a build carrying this change, so #487 stays open until
+`device_push_tokens` holds a row. Shipping is not the same as proving, and the
+empty table is the only evidence that counts.
+
 ## 2026-08-06 — the daily email digest reads the inbox; it had never once succeeded
 
 Branch `fix/email-digest-project-label`.
@@ -48,6 +105,7 @@ nothing asserts what it saw. This is the forbidden pattern in CLAUDE.md
 inbox mail" — restoring `project_id` to the tick reds BOTH. `backend.test.ts`
 gains a `q`-vs-`labelIds` pair; putting the label name back into `labelIds` reds
 one. 70 tests green across the four related suites. No feature flag.
+
 
 ## 2026-08-05 — the ritual lane is deleted; a ritual is a reminder that fires into the owner's own session
 
