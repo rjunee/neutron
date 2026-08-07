@@ -66,6 +66,35 @@ export interface ProjectCredentialsList {
 }
 
 /** Input to a write. No `scope` — the method you call is the scope (#486). */
+/**
+ * One connected account, as the SERVER computes its state for this project.
+ *
+ * ⚠️ `enabled` IS THE SERVER'S ANSWER — never derived on the client. The
+ * underlying store is a DISABLE list: a project with no rows reads EVERY
+ * connected account (`migrations/0115`, SPEC Decisions Log 2026-08-04). A client
+ * that treated "no rows" as "nothing selected", or that wrote an ENABLE list,
+ * would invert the whole design — so this client renders what the server says and
+ * computes nothing.
+ */
+export interface AccountSelectionEntry {
+  account_id: string;
+  label: string;
+  account_email: string | null;
+  enabled: boolean;
+}
+
+/** One selectable service and every account connected for it. */
+export interface ServiceAccountSelection {
+  service: string;
+  accounts: AccountSelectionEntry[];
+}
+
+interface AccountSelectionResponse {
+  ok: boolean;
+  project_id: string;
+  services: ServiceAccountSelection[];
+}
+
 export interface SetCredentialInput {
   service: string;
   /** The secret to store. Sent up on write; never returned on any read. */
@@ -134,6 +163,35 @@ export class ProjectCredentialsClient extends GatewayHttpClient {
   async setGlobal(input: SetCredentialInput): Promise<ProjectCredentialRecord> {
     const res = await this.req<SetResponse>('/api/app/credentials', { method: 'POST', body: input });
     return res.credential;
+  }
+
+  /**
+   * Which connected accounts THIS project reads (ISSUES #500/#501). Connecting an
+   * account stays GLOBAL; this only narrows what an already-connected account is
+   * used for. Same routes the web Settings tab uses — one server surface, two
+   * clients.
+   */
+  async listAccounts(project_id: string): Promise<ServiceAccountSelection[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/accounts`;
+    const res = await this.req<AccountSelectionResponse>(path);
+    return res.services ?? [];
+  }
+
+  /**
+   * Turn one account on or off for THIS project.
+   *
+   * Returns the WHOLE refreshed view the server computed, deliberately — the
+   * caller re-renders from the server's truth instead of patching a local copy
+   * that can drift from it. Given the store is a disable list, a locally-patched
+   * copy is exactly how a client ends up inverting the meaning of "no rows".
+   */
+  async setAccountEnabled(
+    project_id: string,
+    input: { service: string; account_id: string; enabled: boolean },
+  ): Promise<ServiceAccountSelection[]> {
+    const path = `/api/app/projects/${encodeURIComponent(project_id)}/accounts`;
+    const res = await this.req<AccountSelectionResponse>(path, { method: 'PUT', body: input });
+    return res.services ?? [];
   }
 
   /** Delete an instance-wide default. Admin screen only. */
