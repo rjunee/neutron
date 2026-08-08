@@ -37,7 +37,11 @@ test('the bundled skills dir ships the mandated + previously-unreachable native 
   // These are the packs the audit calls out: `impeccable` (CLAUDE.md-mandated
   // design path) + `agent-browser` were WHOLLY unreachable; `remind` is the
   // lifted-mechanism replacement for the hardcoded chat-commands time parser.
-  for (const pack of ['impeccable', 'agent-browser', 'remind']) {
+  // `skillify` is asserted here for a different reason: it is the pack that
+  // GOVERNS how every other pack gets made, so a bundle that silently lacks it
+  // leaves the agent hand-authoring SKILL.md files with no checklist — the exact
+  // "code that happens to work today" outcome it exists to prevent.
+  for (const pack of ['impeccable', 'agent-browser', 'remind', 'skillify']) {
     expect(existsSync(join(BUNDLED_SKILLS_DIR, pack, 'SKILL.md'))).toBe(true)
   }
 })
@@ -48,7 +52,7 @@ test('provisionAgentSkills materializes the bundled SKILL.md packs into the agen
 
   expect(result.skillsDir).toBe(skillsDir)
   // The key packs are discoverable on disk after provisioning.
-  for (const pack of ['impeccable', 'agent-browser', 'remind']) {
+  for (const pack of ['impeccable', 'agent-browser', 'remind', 'skillify']) {
     expect(result.bundled).toContain(pack)
     expect(result.present).toContain(pack)
     const skillMd = join(skillsDir, pack, 'SKILL.md')
