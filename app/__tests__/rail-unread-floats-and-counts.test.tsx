@@ -208,15 +208,21 @@ describe('the selected row is carried by hue, not another neutral step', () => {
     screen.unmount();
   });
 
-  it('reserves the selection border on EVERY row, so switching never shifts layout', async () => {
-    // A border that appears only when selected would grow the active row by 3px and
-    // nudge every row beneath it on each switch.
+  it('paints NO border — the fill carries selection alone', async () => {
+    // The owner rejected the border outright: "I did NOT ask for that ugly ass blue
+    // border on the active project. I just wanted the highlight color to be more
+    // prominent." So this asserts its ABSENCE, which also means the row's box is
+    // identical selected or not — selection cannot shift the column.
     const screen = await mountRail([project('a', 'A'), project('b', 'B')], 'a');
-    for (const id of ['a', 'b']) {
-      const row = screen.host.querySelector(`[data-testid="rail-item-${id}"]`) as HTMLElement;
-      expect(paintOf(row).borderWidth).not.toBe('');
-      expect(paintOf(row).borderWidth).not.toBe('0px');
+    const active = screen.host.querySelector('[data-testid="rail-item-a"]') as HTMLElement;
+    const inactive = screen.host.querySelector('[data-testid="rail-item-b"]') as HTMLElement;
+    for (const row of [active, inactive]) {
+      const w = paintOf(row).borderWidth;
+      expect(w === '' || w === '0px').toBe(true);
     }
+    // …and the box really is the same, which is the property the old reserved-border
+    // trick existed to protect. Now it holds for free.
+    expect(paintOf(active).borderWidth).toBe(paintOf(inactive).borderWidth);
     screen.unmount();
   });
 });

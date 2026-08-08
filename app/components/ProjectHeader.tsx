@@ -42,7 +42,7 @@
  */
 
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 
@@ -79,6 +79,21 @@ export function ProjectHeader({
   };
   return (
     <View style={styles.header}>
+      {/* THE MARK, leading the bar. Owner: "put the neutron logo in the top left
+          corner of the app, before the project name in the title rail." Deliberately
+          NOT a button — the rail's General tile is already the way home, and a
+          tappable logo would be a second, ambiguous navigation affordance in a bar
+          that just had one control removed from it for exactly that reason.
+          `accessibilityRole="image"` with a label rather than `none`, so a screen
+          reader announces the app it is in instead of skipping a silent graphic. */}
+      <Image
+        source={require('../assets/images/icon.png')}
+        style={styles.logo}
+        resizeMode="contain"
+        accessibilityRole="image"
+        accessibilityLabel="Neutron"
+        testID="project-header-logo"
+      />
       <View style={styles.center}>
         <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
           {name}
@@ -107,7 +122,39 @@ export function ProjectHeader({
       >
         <Text style={styles.iconGlyph}>☰</Text>
       </Pressable>
+      {/* RENDERED IN A MODAL, AND THIS IS A BUG FIX, NOT A STYLE CHOICE.
+          
+          The first version was an absolutely-positioned sibling inside this header,
+          opening BELOW the header's own box. On Android a child that falls outside
+          its parent's bounds is CLIPPED regardless of `overflow` — the platform has
+          no reliable equivalent of `overflow: visible` — so on device the button
+          fired, the sheet mounted, and nothing was visible. Owner: "the hamburger in
+          the top right is not tappable, it doesnt work." It was tappable; its output
+          was being clipped away, which is indistinguishable from a dead control.
+          
+          A Modal renders in its OWN window, so there is no ancestor to clip it. That
+          is the whole reason for it — not the backdrop, not the animation. Nudging
+          offsets or hoisting the sheet up a level would have made it fit THIS layout
+          and broken again on the next one.
+          
+          Note this also fixes it on iOS-in-theory: the sheet was never clipped
+          there, so a simulator would have shown it working perfectly. A test that
+          asserts on the rendered tree cannot see clipping either, which is why my
+          existing menu test passed while the feature was dead on the only platform
+          the owner uses. */}
+      {/* The Modal is MOUNTED ONLY WHEN OPEN, not merely made invisible. A Modal with
+          `visible={false}` still renders its children into the tree on web, so
+          "closed" would become "present but hidden" — and every assertion about the
+          menu being closed would pass against a menu that is actually there. Keeping
+          the mount conditional makes closed mean ABSENT, which is both the honest
+          state and the cheaper one. */}
       {menuOpen ? (
+      <Modal
+        visible
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenuOpen(false)}
+      >
         <>
           {/* A tap anywhere else dismisses. Rendered BEFORE the sheet so the sheet
               sits above it, and covering the whole screen because a menu that can
@@ -143,6 +190,7 @@ export function ProjectHeader({
             </Pressable>
           </View>
         </>
+      </Modal>
       ) : null}
     </View>
   );
@@ -150,6 +198,16 @@ export function ProjectHeader({
 
 const ICON_BTN_SIZE = 40;
 const ICON_HIT_SIZE = 48;
+/** The logo reads as a mark beside the title, not as a second tap target. */
+const LOGO_SIZE = 26;
+/**
+ * How far the header's content sits from the top of the WINDOW. The menu is now a
+ * Modal, so it anchors to the window and needs this; the header itself is laid out
+ * by the safe-area provider above it. Approximates the status-bar inset — a few
+ * pixels either way is invisible on a dropdown, and reading the real inset here
+ * would mean threading a hook through a pure presentational component.
+ */
+const HEADER_TOP_INSET = 44;
 
 const styles = StyleSheet.create({
   header: {
@@ -196,18 +254,26 @@ const styles = StyleSheet.create({
     lineHeight: TYPOGRAPHY.body_small.lineHeight,
     fontWeight: '600',
   },
+  logo: {
+    width: LOGO_SIZE,
+    height: LOGO_SIZE,
+    borderRadius: 6,
+  },
   center: { flex: 1, paddingHorizontal: SPACING.xs },
-  /** Full-screen dismiss target. Behind the sheet, above everything else. */
+  /**
+   * Full-screen dismiss target. Inside the Modal it can simply fill the window —
+   * the previous `bottom: -2000` existed only to escape the header's box, which is
+   * the hack the Modal removes.
+   */
   scrim: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: -2000,
+    ...StyleSheet.absoluteFillObject,
   },
   menu: {
     position: 'absolute',
-    top: ICON_BTN_SIZE + SPACING.xs,
+    // Anchored to the window now, not to the header, so it lands just under the
+    // control. The header's own height plus a hair — kept as a named sum rather
+    // than a magic number so it tracks the button size.
+    top: HEADER_TOP_INSET + ICON_BTN_SIZE + SPACING.xs,
     right: SPACING.sm,
     minWidth: 180,
     borderRadius: DENSITY.composer_radius,

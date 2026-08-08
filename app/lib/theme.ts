@@ -48,9 +48,8 @@ export interface NeutronTheme {
    * decision than "my messages should be blue". Web keeps the same separation.
    */
   user_bubble: string;
-  /** The rail's SELECTED row fill, and the border that makes it unmistakable. */
+  /** The rail's SELECTED row fill. Carries selection ALONE — see theme.ts note. */
   rail_selected: string;
-  rail_selected_edge: string;
   /** Content drawn ON `user_bubble`. Mirror of the web `--user-fg`. */
   user_ink: string;
   /** M1 UX REDESIGN — rail work-activity dot: a project with a live build /
@@ -106,17 +105,21 @@ export const THEME: NeutronTheme = Object.freeze({
   // it shipped; mobile was painting them with `accent`, a near-white.
   user_bubble: '#0a84ff',
   user_ink: '#ffffff',
-  // THE SELECTED RAIL ROW. Owner, on device: "Make the highlight color of the
-  // currently selected project much more obvious. it's VERY hard to see what
-  // project is selected." It was `surface_raised` — a neutral one step up from the
-  // ground, which is a correct RAISED cue and a useless SELECTED one: every other
-  // raised surface in the app uses the same value, so the row read as a panel
-  // rather than as the answer to "where am I". Selection is now carried by HUE, not
-  // elevation — a blue-tinted fill derived from `user_bubble` plus a saturated edge
-  // of the blue itself. Two cues, because on an OLED at low brightness a fill alone
-  // can wash out and an edge alone can disappear into the hairline.
-  rail_selected: '#1b3557',
-  rail_selected_edge: '#0a84ff',
+  // THE SELECTED RAIL ROW. Owner: "Make the highlight color of the currently
+  // selected project much more obvious. it's VERY hard to see what project is
+  // selected." It was `surface_raised` — a neutral one step up from the ground,
+  // which is a correct RAISED cue and a useless SELECTED one: every raised surface
+  // in the app uses that same value, so the row read as a panel rather than as the
+  // answer to "where am I". Selection is carried by HUE instead.
+  //
+  // ONE CUE, NOT TWO. The first attempt paired this fill with a saturated blue
+  // border. He rejected it on sight: "I did NOT ask for that ugly ass blue border
+  // on the active project. I just wanted the highlight color to be more prominent."
+  // Correct — a border is a different visual statement (it outlines, it frames, it
+  // reads as a control), and two cues for one fact is louder than the fact. So the
+  // border is gone and the FILL does the work, pushed considerably further up the
+  // blue than the timid first value so it does not need help.
+  rail_selected: '#1e4b87',
   work: '#66ccff',
   attention: '#ffd27d',
   usage_nominal: '#4bbf73',

@@ -62,8 +62,22 @@ async function mountHeader() {
   );
 }
 
+/**
+ * Query the whole DOCUMENT, not the mount container.
+ *
+ * The menu is a `Modal`, which renders into its own portal OUTSIDE the mounted
+ * subtree — and that is precisely the property that fixes the Android clipping bug
+ * it was introduced for. So a container-scoped query cannot see it. Same fact,
+ * two consequences: the sheet escapes the header's box on device, and it escapes
+ * `screen.host` here.
+ */
+function find(host: HTMLElement, testID: string): HTMLElement | null {
+  const doc = host.ownerDocument;
+  return doc.querySelector(`[data-testid="${testID}"]`) as HTMLElement | null;
+}
+
 function press(host: HTMLElement, testID: string): void {
-  const el = host.querySelector(`[data-testid="${testID}"]`) as HTMLElement | null;
+  const el = find(host, testID);
   if (el === null) throw new Error(`no element with testID ${testID}`);
   act(() => {
     el.dispatchEvent(new host.ownerDocument.defaultView!.MouseEvent('click', { bubbles: true }));
@@ -75,10 +89,12 @@ describe('one control, both scopes', () => {
     const screen = await mountHeader();
     // The owner's complaint, as an assertion: "Why are there two hamburger menus,
     // top left and top right?" A regression that re-adds a left ☰ fails here.
-    expect(screen.host.querySelectorAll('[data-testid="project-header-menu"]')).toHaveLength(1);
+    expect(
+      screen.host.ownerDocument.querySelectorAll('[data-testid="project-header-menu"]'),
+    ).toHaveLength(1);
     // And nothing is reachable before it is opened, so the count above is the whole
     // header's chrome.
-    expect(screen.host.querySelector('[data-testid="project-header-menu-sheet"]')).toBeNull();
+    expect(find(screen.host, 'project-header-menu-sheet')).toBeNull();
     screen.unmount();
   });
 
@@ -86,7 +102,7 @@ describe('one control, both scopes', () => {
     // THE ASSERTION THE SOURCE-STRING GUARD CANNOT MAKE.
     const screen = await mountHeader();
     press(screen.host, 'project-header-menu');
-    expect(screen.host.querySelector('[data-testid="project-header-menu-sheet"]')).not.toBeNull();
+    expect(find(screen.host, 'project-header-menu-sheet')).not.toBeNull();
     press(screen.host, 'project-header-app-settings');
     expect(appSettings).toBe(1);
     screen.unmount();
@@ -106,7 +122,7 @@ describe('one control, both scopes', () => {
     const screen = await mountHeader();
     press(screen.host, 'project-header-menu');
     press(screen.host, 'project-header-settings');
-    expect(screen.host.querySelector('[data-testid="project-header-menu-sheet"]')).toBeNull();
+    expect(find(screen.host, 'project-header-menu-sheet')).toBeNull();
     screen.unmount();
   });
 
@@ -115,7 +131,7 @@ describe('one control, both scopes', () => {
     const screen = await mountHeader();
     press(screen.host, 'project-header-menu');
     press(screen.host, 'project-header-menu-scrim');
-    expect(screen.host.querySelector('[data-testid="project-header-menu-sheet"]')).toBeNull();
+    expect(find(screen.host, 'project-header-menu-sheet')).toBeNull();
     expect(appSettings).toBe(0);
     expect(projectSettings).toBe(0);
     screen.unmount();
@@ -132,6 +148,31 @@ describe('the header no longer spends a line saying PROJECT', () => {
     // containing the word "project" (there is one — "Project settings") does not
     // make this assertion vacuous.
     expect(text).not.toContain('PROJECT');
+    screen.unmount();
+  });
+});
+
+describe('the mark leads the bar', () => {
+  it('renders the logo BEFORE the project name, and it is not a button', async () => {
+    // Owner: "put the neutron logo in the top left corner of the app, before the
+    // project name in the title rail."
+    const screen = await mountHeader();
+    const logo = find(screen.host, 'project-header-logo');
+    expect(logo).not.toBeNull();
+
+    // ORDER, not mere presence: "before the project name" is the ask, and a logo
+    // rendered after the title would satisfy a presence-only assertion.
+    const title = Array.from(screen.host.querySelectorAll('*')).find(
+      (el) => (el.textContent ?? '') === 'Willow' && el.children.length === 0,
+    ) as HTMLElement;
+    expect(title).toBeDefined();
+    // Node.DOCUMENT_POSITION_FOLLOWING (4) ⇒ the title comes after the logo.
+    expect(logo!.compareDocumentPosition(title) & 4).toBe(4);
+
+    // NOT tappable. The rail's General tile is already the way home; a tappable logo
+    // would put a second ambiguous navigation affordance in a bar that just had one
+    // control removed for exactly that reason.
+    expect(logo!.getAttribute('role')).not.toBe('button');
     screen.unmount();
   });
 });
