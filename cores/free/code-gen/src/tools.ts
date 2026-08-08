@@ -79,7 +79,9 @@ export interface ToolDeps {
   manifest: NeutronManifest
   project_slug: string
   audit: SecretAuditLog
-  orchestrator: CodegenOrchestrator
+  orchestrator: Omit<CodegenOrchestrator, 'cancel'> & {
+    cancel(input: CodegenCancelToolInput): CodegenCancelToolOutput | Promise<CodegenCancelToolOutput>
+  }
 }
 
 export interface BuiltTools {

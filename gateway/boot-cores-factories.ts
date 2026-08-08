@@ -46,6 +46,7 @@ export async function buildCoresBackendFactories(
     pickNextLlmClient,
     researchProjectBackend,
     codegenOrchestrator: codegenOrchestratorFromOpts,
+    tridentTerminator,
     credentialResolver,
   } = opts
   const googleOAuthAccessToken = opts.googleOAuthAccessToken ?? null
@@ -312,6 +313,7 @@ export async function buildCoresBackendFactories(
           orchestrator: routeCodegenCancel(
             codegenOrchestratorFromOpts,
             new TridentRunStore(projectDb),
+            ...(tridentTerminator !== undefined ? [tridentTerminator] : []),
           ),
         }
       }
@@ -343,6 +345,7 @@ export async function buildCoresBackendFactories(
         orchestrator: routeCodegenCancel(
           new mod.CodegenOrchestrator({ runner }),
           new TridentRunStore(projectDb),
+          ...(tridentTerminator !== undefined ? [tridentTerminator] : []),
         ),
       }
     },

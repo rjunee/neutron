@@ -1565,8 +1565,18 @@ export function buildOpenGraphComposer(
     // `gateway/boot-cores-factories-types.ts:31` had no implementation), so the
     // factory's write was skipped and `/task` had no deps to dispatch against.
     const tasksCoreRegistry = new InMemoryTasksCoreOwnerRegistry()
+    const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
     const coresWiring = await mountOpenCores({
       projectDb: db,
+      tridentTerminator: {
+        terminate: async (id, phase, opts) => {
+          const pending = boardTerminatorHolder.deref((terminator) =>
+            terminator.terminate(id, phase, opts),
+          )
+          if (pending === undefined) throw new Error('board terminator is not bound')
+          return pending
+        },
+      },
       canonicalTaskStore,
       tasksCoreRegistry,
       owner_home,
@@ -3442,7 +3452,6 @@ export function buildOpenGraphComposer(
     // is built later in `wireAppWs`, so the terminator is bound below once it exists
     // (mirrors the `dispatchBoardHolder` two-phase seam). Every runtime DELETE lands
     // long after composition, so the holder is always bound by request time.
-    const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
     // The run-access facade the work-board surface reads: live-progress reads +
     // the item-3 delete-cancel, now routed through the chokepoint when bound.
     const boardRunAccess = {

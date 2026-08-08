@@ -8,6 +8,7 @@ import { CodegenOrchestrator, type CodegenRunner } from '@neutronai/codegen-core
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { routeCodegenCancel, type UnifiedCancelResult } from '../codegen-cancel-router.ts'
 
 let tmp: string
@@ -50,6 +51,23 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
 
     expect(result).toMatchObject({ cancelled: true, dispatch_path: 'trident', phase: 'stopped' })
     expect(trident.get(run.id)).toMatchObject({ phase: 'stopped', failure_reason: 'cancelled via codegen_cancel' })
+  })
+
+  test('MUTATION: dropping the production terminator skips terminal observers and transition fans', async () => {
+    const run = await trident.create({
+      id: 'trident-observed', slug: 'observed', project_slug: 'p', repo_path: '/repo', task: 'build',
+    })
+    const calls: string[] = []
+    const terminator = buildTridentTerminator({
+      store: trident,
+      onTransition: { onTransition: async () => { calls.push('transition') } },
+      observer: { onTerminal: async () => { calls.push('terminal') } },
+    })
+    const router = routeCodegenCancel(legacy(), trident, terminator)
+
+    await router.cancel({ task_id: run.id })
+
+    expect(calls).toEqual(['transition', 'terminal'])
   })
 
   test('MUTATION: treating an already-terminal Trident run as unknown restores the false alarm', async () => {
