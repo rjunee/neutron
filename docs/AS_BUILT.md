@@ -7969,3 +7969,17 @@ delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; a
 short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
 no-reply gate is untouched. No feature flag — the gate ships on as default
 behaviour.
+## Mid-turn message injection (#516)
+
+The web composer keeps Send enabled while the agent is typing. A second message
+for the same topic bypasses the completed-turn chain and is posted immediately to
+the persistent REPL dev-channel as additional context for the active turn. It
+reuses the active turn id without advancing fallback reply-correlation state, so
+the running turn's eventual reply remains correlated normally. If no active turn
+exists at the injection instant, the message falls back to the existing ordered
+turn path instead of being dropped.
+
+Mutation-named tests pin all three boundaries: the gateway test fails if the
+second send is queued until completion, the persistent-REPL test asserts the
+additional `/message` reached the wire before the first reply, and the React test
+fails if the composer is disabled while streaming.

@@ -25,6 +25,7 @@ import type { Event } from '../../../../events.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
 import {
   createPersistentReplSubstrate,
+  injectPersistentReplActiveTurn,
   getReplSinkInfo,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
@@ -157,6 +158,52 @@ async function drain(handle: SessionHandle): Promise<{ text: string; events: Eve
 }
 
 describe('PersistentReplSubstrate — conformance', () => {
+  it('kills local-flag and queue-after mutations: additional input hits /message before completion', async () => {
+    const wire: Array<{ text: string; additional?: boolean }> = []
+    let replyFirst: (() => void) | undefined
+    const host: PtyHost = {
+      spawn(argv): PtyChild {
+        const sid = extractSessionId(argv)
+        const { port: sinkPort, token } = getReplSinkInfo()
+        const post = (path: string, body: unknown) => fetch(`http://127.0.0.1:${sinkPort}${path}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify(body),
+        })
+        let exited = false
+        const server = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(req) {
+          const url = new URL(req.url)
+          if (url.pathname === '/health') return Response.json({ ok: true })
+          if (url.pathname === '/message') {
+            const body = await req.json() as { text: string; turn_id: string; additional?: boolean }
+            wire.push(body)
+            if (body.additional !== true) {
+              replyFirst = () => { void post('/reply', { session_id: sid, text: 'combined', turn_id: body.turn_id }) }
+            }
+            return Response.json({ status: 'delivered' })
+          }
+          return new Response('not found', { status: 404 })
+        } })
+        void post('/channel-ready', { session_id: sid, channel_port: server.port, pid: 99123 })
+        void post('/channel-bound', { session_id: sid })
+        let exitResolve!: (code: number | null) => void
+        const exitPromise = new Promise<number | null>((resolve) => { exitResolve = resolve })
+        return { pid: 99123, write() {}, resize() {}, kill() { exited = true; server.stop(true); exitResolve(143) },
+          exited: exitPromise, hasExited: () => exited }
+      },
+    }
+    const sub = createPersistentReplSubstrate(baseOptions(host))
+    const first = drain(sub.start(spec('first')))
+    for (let i = 0; i < 100 && wire.length === 0; i += 1) await Bun.sleep(5)
+
+    expect(await injectPersistentReplActiveTurn(sub, 'second during turn')).toBe(true)
+    expect(wire).toEqual([
+      expect.objectContaining({ text: 'first', additional: false }),
+      expect.objectContaining({ text: 'second during turn', additional: true }),
+    ])
+    replyFirst?.()
+    expect((await first).text).toBe('combined')
+  })
+
   it('tool_resolution is internal and respondToTool throws', async () => {
     const { host } = makeFakeReplHost((_h, m) => `echo:${m}`)
     const sub = createPersistentReplSubstrate(baseOptions(host))

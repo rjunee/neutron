@@ -20,6 +20,17 @@ import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
 import { getOrSpawnSession, injectMessage, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
+const activeTurnInjectors = new WeakMap<Substrate, (text: string) => Promise<boolean>>()
+
+/** Inject a user message into this substrate's currently running Claude turn. */
+export async function injectPersistentReplActiveTurn(
+  substrate: Substrate,
+  text: string,
+): Promise<boolean> {
+  const inject = activeTurnInjectors.get(substrate)
+  return inject === undefined ? false : await inject(text)
+}
+
 // ---------------------------------------------------------------------------
 // Pending-respawns queue wiring (brief § 2 row #11 / § 6 acceptance #1).
 // Disk-is-source-of-truth deferred-respawn replay: a turn dropped when its REPL
@@ -296,7 +307,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
   const idleMaxMs = options.idleMaxMs ?? DEFAULT_IDLE_MAX_MS
   const keepaliveMs = options.livenessKeepaliveMs ?? REPL_LIVENESS_KEEPALIVE_MS
 
-  return {
+  const substrate: Substrate = {
     start(spec: AgentSpec): SessionHandle {
       const channel = new EventChannel()
       let cancelled = false
@@ -770,6 +781,16 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       return handle
     },
   }
+  activeTurnInjectors.set(substrate, async (text) => {
+    const pooled = pool.get(sessionKey)
+    if (pooled === undefined) return false
+    const session = await pooled
+    const turn = session.activeTurn
+    if (turn === undefined || session.channelPort === undefined || turn.settled) return false
+    await injectMessage(session.channelPort, text, turn.turnId, true)
+    return true
+  })
+  return substrate
 }
 
 // D1: `activeWatchdogs` / `activeModelWatchdogs` live in `pool-state.ts`,

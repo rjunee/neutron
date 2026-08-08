@@ -83,6 +83,7 @@ function makeRunner(over: {
   projectPersonaResolver?: (
     project_id: string,
   ) => Promise<string | null> | string | null
+  injectActiveTurn?: (text: string) => Promise<boolean>
 }) {
   const personaLoader = {
     async load(): Promise<string> {
@@ -101,6 +102,7 @@ function makeRunner(over: {
       : undefined
   return buildLiveAgentTurn({
     substrate: over.substrate,
+    ...(over.injectActiveTurn !== undefined ? { injectActiveTurn: over.injectActiveTurn } : {}),
     personaLoader,
     ...(over.projectPersonaResolver !== undefined
       ? { projectPersonaResolver: over.projectPersonaResolver }
@@ -128,6 +130,42 @@ function makeTurn(over: Partial<LiveAgentTurnRequest> & { sent: ChatOutbound[] }
 }
 
 describe('build-live-agent-turn — reply path', () => {
+  test('kills queue-after mutation: a second send hits the active session before turn one completes', async () => {
+    let release!: () => void
+    const firstCanComplete = new Promise<void>((resolve) => { release = resolve })
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            await firstCanComplete
+            yield { kind: 'token', text: 'done' } as Event
+            yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 } } as Event
+          })(),
+          tool_resolution: 'internal',
+          async respondToTool() { throw new Error('not used') },
+          async cancel() {},
+        }
+      },
+    }
+    const wire: string[] = []
+    const run = makeRunner({
+      substrate,
+      injectActiveTurn: async (text) => { wire.push(text); return true },
+    })
+    const first = run(makeTurn({ sent: [], user_text: 'first' }))
+    await Bun.sleep(0)
+    const second = await run(makeTurn({ sent: [], user_text: 'add this now' }))
+
+    expect(wire).toEqual(['add this now'])
+    expect(second).toEqual({ outcome: 'replied', reply_prompt_id: null })
+    let firstSettled = false
+    void first.then(() => { firstSettled = true })
+    await Bun.sleep(0)
+    expect(firstSettled).toBe(false)
+    release()
+    await first
+  })
+
   test('dispatches the substrate, sends ONE agent_message, persists the reply row', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []

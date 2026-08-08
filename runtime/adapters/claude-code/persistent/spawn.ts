@@ -881,13 +881,18 @@ export async function waitForReplIdle(session: ReplSession, quietMs: number, max
   }
 }
 
-export async function injectMessage(channelPort: number, text: string, turnId: string): Promise<void> {
+export async function injectMessage(
+  channelPort: number,
+  text: string,
+  turnId: string,
+  additional = false,
+): Promise<void> {
   const resp = await fetch(`http://127.0.0.1:${channelPort}/message`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Sink-Token': sink.token },
     // `turn_id` round-trips through the dev-channel onto the matching reply so
     // `onReply` can correlate the completion to this exact turn (Argus r5 fix).
-    body: JSON.stringify({ text, turn_id: turnId }),
+    body: JSON.stringify({ text, turn_id: turnId, additional }),
   })
   if (!resp.ok) {
     throw new Error(`persistent-repl: inject failed (${resp.status})`)

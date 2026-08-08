@@ -615,6 +615,8 @@ export interface BuildLiveAgentTurnInput {
    * is per-dispatch and therefore race-free across concurrent topics.
    */
   substrate: Substrate
+  /** Deliver text into the active persistent-REPL turn; false when none is live. */
+  injectActiveTurn?: (text: string) => Promise<boolean>
   /**
    * ACTIVITY INSPECTOR tee (SPEC § WAVE 3.5). When wired by the composer, EVERY
    * substrate event for this turn is handed over as it arrives — including the
@@ -945,6 +947,17 @@ export function buildLiveAgentTurn(
    */
   function runLiveAgentTurn(turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult> {
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
+    if (turnChains.has(topicKey) && input.injectActiveTurn !== undefined) {
+      return input.injectActiveTurn(turn.user_text).then((injected) =>
+        injected
+          ? { outcome: 'replied', reply_prompt_id: null }
+          : enqueueTurn(turn, topicKey),
+      )
+    }
+    return enqueueTurn(turn, topicKey)
+  }
+
+  function enqueueTurn(turn: LiveAgentTurnRequest, topicKey: string): Promise<LiveAgentTurnResult> {
     const prior = turnChains.get(topicKey) ?? Promise.resolve()
     const run = prior.then(() => runTurnBody(turn))
     const tail = run.then(

@@ -1533,6 +1533,18 @@ function Composer({
     const urls = draft.readUrls()
     if (body.length === 0 && urls.length === 0) return
     if (body.length > 0) {
+      if (controller.getViewModel().isRunning) {
+        // assistant-ui intentionally refuses `runtime.send()` while running;
+        // bypass that client-only gate because the persistent REPL supports
+        // adding context to its active turn.
+        void (async () => {
+          const ready = await draft.waitForUploads()
+          await controller.send(body, ready.length > 0 ? ready : undefined)
+          composerRuntime.setText('')
+          draft.clear()
+        })()
+        return
+      }
       // Text (optionally + attachments): route through the runtime so Enter and
       // the Send button share ONE path — `onNew` waits for in-flight uploads,
       // merges the staged URLs, clears the draft, and assistant-ui clears input.
@@ -1591,25 +1603,18 @@ function Composer({
           the owner twice for asking it to stop. Decision + full reasoning:
           SPEC.md Decisions Log 2026-08-03.
 
-          While a turn is running the send button stays PRESENT but disabled,
-          rather than unmounting, so the composer doesn't reflow on every turn.
+          Claude Code accepts additional context during a running turn, so Send
+          remains live while the typing indicator is present.
         */}
-        <ThreadPrimitive.If running={false}>
-          <button
-            type="button"
-            className="car-send"
-            aria-label="Send"
-            disabled={!canSend}
-            onClick={send}
-          >
-            Send
-          </button>
-        </ThreadPrimitive.If>
-        <ThreadPrimitive.If running>
-          <button type="button" className="car-send" aria-label="Send" disabled>
-            Send
-          </button>
-        </ThreadPrimitive.If>
+        <button
+          type="button"
+          className="car-send"
+          aria-label="Send"
+          disabled={!canSend}
+          onClick={send}
+        >
+          Send
+        </button>
       </ComposerPrimitive.Root>
     </div>
   )

@@ -57,6 +57,7 @@ describe('ChatApp render (happy-dom)', () => {
     const { ChatApp } = await import('../ChatApp.tsx')
     const React = await import('react')
 
+    const sentFrames: string[] = []
     const sockets: Array<{
       open: () => void
       deliver: (o: unknown) => void
@@ -73,7 +74,7 @@ describe('ChatApp render (happy-dom)', () => {
         onmessage: null as null | ((ev: { data: unknown }) => void),
         onclose: null as null | (() => void),
         onerror: null as null | (() => void),
-        send: () => {},
+        send: (data: string) => { sentFrames.push(data) },
         close: () => {},
         open() {
           this.onopen?.()
@@ -147,13 +148,26 @@ describe('ChatApp render (happy-dom)', () => {
       sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm1', body_delta: 'Sam', ts: 2 })
       await tick()
     })
-    // While streaming there is NO Stop control (ISSUES #450 — it was inert and
-    // was removed on the owner's instruction). The send button stays MOUNTED
-    // but disabled, so the composer does not reflow on every turn.
+    // Kills the mid-turn-disabled mutation: Claude accepts additional context
+    // while this first response is still streaming.
     expect(container.textContent).not.toContain('Stop')
     const streamingSend = container.querySelector<HTMLButtonElement>('.car-send')
     if (streamingSend === null) throw new Error('send button unmounted while streaming')
-    expect(streamingSend.disabled).toBe(true)
+    const input = container.querySelector<HTMLTextAreaElement>('.car-input')
+    if (input === null) throw new Error('composer input missing while streaming')
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input) as object, 'value')?.set
+      setter?.call(input, 'one more detail')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+    expect(streamingSend.disabled).toBe(false)
+    const beforeMidTurnSend = sentFrames.length
+    await act(async () => {
+      streamingSend.click()
+      await tick()
+    })
+    expect(sentFrames.slice(beforeMidTurnSend).some((raw) => raw.includes('one more detail'))).toBe(true)
 
     await act(async () => {
       sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'Hi Sam', ts: 3 })
