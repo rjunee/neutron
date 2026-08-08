@@ -46,8 +46,19 @@
  * break, while still reporting that a cross-model review happened.
  */
 
-/** Anthropic-compatible; Moonshot serves the same wire shape. */
-export const KIMI_BASE_URL = 'https://api.moonshot.ai/anthropic'
+/**
+ * Anthropic-compatible; Kimi serves the same wire shape.
+ *
+ * Subscription billing (Kimi For Coding), not per-token platform billing.
+ * Switched 2026-08-08 — these are two different credential classes on two
+ * different hosts, so the key and the base URL must move together: a
+ * subscription key returns 401 against the old platform endpoint
+ * (`https://api.moonshot.ai/anthropic`), and this host rejects platform keys.
+ * Overridable via KIMI_BASE_URL so a platform key can still be used
+ * deliberately rather than by accident.
+ */
+export const KIMI_BASE_URL =
+  process.env['KIMI_BASE_URL'] ?? 'https://api.kimi.com/coding'
 export const KIMI_DEFAULT_MODEL = 'kimi-k3'
 
 /**
