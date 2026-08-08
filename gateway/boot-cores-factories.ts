@@ -17,6 +17,8 @@
 import { readPatternFromPrompts } from './boot-chat-command-filters.ts'
 import type { CoreBackendFactoryMap } from './cores/install-bundled.ts'
 import type { CoresBackendFactoriesOptions } from './boot-cores-factories-types.ts'
+import { routeCodegenCancel } from './codegen-cancel-router.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
 
 // Re-export the Cores-factory type contracts through this module so
 // existing importers of `TasksCoreOwnerRegistry` / `CoresBackendFactoriesOptions`
@@ -306,7 +308,12 @@ export async function buildCoresBackendFactories(
       // fall back to a skeleton-runner orchestrator that fails
       // dispatches loudly + actionably — install_ok stays TRUE.
       if (codegenOrchestratorFromOpts !== undefined) {
-        return { orchestrator: codegenOrchestratorFromOpts }
+        return {
+          orchestrator: routeCodegenCancel(
+            codegenOrchestratorFromOpts,
+            new TridentRunStore(projectDb),
+          ),
+        }
       }
       // Trident-port close-out (2026-06-24) — the codegen_core module now ONLY
       // backs the four legacy `codegen_*` MCP tools; `/code <task>` no longer
@@ -332,7 +339,12 @@ export async function buildCoresBackendFactories(
       })
       const mod = await import('@neutronai/codegen-core')
       const runner = mod.buildSkeletonCodegenRunner()
-      return { orchestrator: new mod.CodegenOrchestrator({ runner }) }
+      return {
+        orchestrator: routeCodegenCancel(
+          new mod.CodegenOrchestrator({ runner }),
+          new TridentRunStore(projectDb),
+        ),
+      }
     },
     agent_settings: async () => {
       // Settings Core (2026-06-03) — the six "tweak later" tools.

@@ -63,7 +63,11 @@ export interface CodegenCancelToolInput {
 
 export interface CodegenCancelToolOutput {
   cancelled: boolean
-  prior_status: CodegenTaskStatus
+  prior_status: CodegenTaskStatus | 'trident_run'
+  dispatch_path?: 'legacy_codegen' | 'trident'
+  phase?: string
+  reason?: string | null
+  already_terminal?: boolean
 }
 
 /**

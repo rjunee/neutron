@@ -2,6 +2,20 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
+
+`codegen_cancel` now keeps its legacy Code-Gen tracker behavior and falls through
+to the foundational Trident run store when the id is not a legacy task. A live
+Trident run is atomically moved to `stopped` through the existing terminal-write
+chokepoint. A run that already reached `done`, `failed`, or `stopped` is returned
+truthfully with its phase and persisted failure reason; it is not mislabeled as
+an unknown run. This is a run-lifecycle control only and does not add chat-turn
+cancel or a Stop button.
+
+Three mutation-named gateway tests pin the contract: removing Trident termination
+leaves the durable row live; hiding an already-terminal row restores the false
+alarm; bypassing the legacy tracker breaks the path that already worked.
+
 ## 2026-08-06 — push registration self-heals on foreground, so a signed-in device stops going dark
 
 Branch `fix/push-registration-self-heal`. ISSUES #487 (the residual its
