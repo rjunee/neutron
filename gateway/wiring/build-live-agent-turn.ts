@@ -948,7 +948,25 @@ export function buildLiveAgentTurn(
   function runLiveAgentTurn(turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult> {
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
     if (turnChains.has(topicKey) && input.injectActiveTurn !== undefined) {
-      return input.injectActiveTurn(turn.user_text).then((injected) =>
+      // Record the newest real input before the early injection return so Retry
+      // recovers the injected message too.
+      if (turn.seed_turn !== true && turn.user_text.length > 0) {
+        lastUserText.set(topicKey, turn.user_text)
+        if (turn.attachments !== undefined && turn.attachments.length > 0) {
+          lastAttachments.set(topicKey, turn.attachments)
+        } else {
+          lastAttachments.delete(topicKey)
+        }
+      }
+      const attachmentsFragment = buildAttachmentsFragment(
+        turn.attachments,
+        input.resolveAttachment,
+        (event, meta) => moduleLog.warn(event, { project: turn.project_slug, topic: turn.topic_id, ...meta }),
+      )
+      const injectedText = attachmentsFragment === null
+        ? turn.user_text
+        : `${attachmentsFragment}\n\n${turn.user_text}`
+      return input.injectActiveTurn(injectedText).catch(() => false).then((injected) =>
         injected
           ? { outcome: 'replied', reply_prompt_id: null }
           : enqueueTurn(turn, topicKey),

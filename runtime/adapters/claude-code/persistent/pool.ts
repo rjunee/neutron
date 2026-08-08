@@ -21,6 +21,7 @@ import { getOrSpawnSession, injectMessage, spawnWithChannelWedgeRespawn, waitFor
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const activeTurnInjectors = new WeakMap<Substrate, (text: string) => Promise<boolean>>()
+const ACTIVE_TURN_ESTABLISH_TIMEOUT_MS = 2_000
 
 /** Inject a user message into this substrate's currently running Claude turn. */
 export async function injectPersistentReplActiveTurn(
@@ -782,13 +783,39 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
     },
   }
   activeTurnInjectors.set(substrate, async (text) => {
-    const pooled = pool.get(sessionKey)
-    if (pooled === undefined) return false
-    const session = await pooled
-    const turn = session.activeTurn
-    if (turn === undefined || session.channelPort === undefined || turn.settled) return false
-    await injectMessage(session.channelPort, text, turn.turnId, true)
-    return true
+    try {
+      const deadline = Date.now() + ACTIVE_TURN_ESTABLISH_TIMEOUT_MS
+      let pooled = pool.get(sessionKey)
+      // The gateway's topic chain becomes visible before the first dispatch has
+      // necessarily reached substrate.start(). Wait briefly for that cold-start
+      // handoff too; returning false here would recreate queue-after semantics.
+      while (pooled === undefined && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5))
+        pooled = pool.get(sessionKey)
+      }
+      if (pooled === undefined) return false
+      const session = await Promise.race([
+        pooled,
+        new Promise<undefined>((resolve) => {
+          const timer = setTimeout(resolve, Math.max(0, deadline - Date.now()))
+          timer.unref()
+        }),
+      ])
+      if (session === undefined) return false
+      // The pool promise resolves just before start() publishes activeTurn. Give
+      // that continuation a bounded window so an early second send is injected
+      // instead of silently becoming a queue-after turn.
+      while (session.activeTurn === undefined && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5))
+      }
+      const turn = session.activeTurn
+      if (turn === undefined || session.channelPort === undefined || turn.settled) return false
+      await injectMessage(session.channelPort, text, turn.turnId, true)
+      return true
+    } catch {
+      // Spawn/network failures degrade to the ordered normal-turn path.
+      return false
+    }
   })
   return substrate
 }

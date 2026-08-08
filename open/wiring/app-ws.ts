@@ -648,11 +648,20 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   // never land in the durable log or a `resume` replay. Best-effort: a closed
   // socket / registry miss is a silent no-op (the client clears typing on the
   // next agent_message regardless, so a lost `end` can't wedge the dots).
+  const typingDepth = new Map<string, number>()
   const emitAppWsTyping = (
     channel_topic_id: string,
     state: 'start' | 'end',
     project_id?: string,
   ): void => {
+    const typingKey = `${channel_topic_id}:${project_id ?? ''}`
+    const previousDepth = typingDepth.get(typingKey) ?? 0
+    const nextDepth = state === 'start' ? previousDepth + 1 : Math.max(0, previousDepth - 1)
+    if (nextDepth === 0) typingDepth.delete(typingKey)
+    else typingDepth.set(typingKey, nextDepth)
+    // Concurrent mid-turn sends share one visible typing lifetime. Suppress an
+    // inner start/end pair so its quick completion cannot clear turn one's dots.
+    if ((state === 'start' && previousDepth > 0) || (state === 'end' && nextDepth > 0)) return
     // M1 UX REDESIGN — track the live chat turn for the rail's `working` state.
     // `start`/`end` bracket every live-agent turn, so this is the composer-known
     // "chat turn in progress" signal `readProjectRailExtras` reads.
