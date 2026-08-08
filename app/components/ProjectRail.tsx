@@ -399,18 +399,12 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.xs,
     borderRadius: SPACING.md,
     gap: 2,
-    // Reserved on EVERY row, transparent when unselected: a border that appears only
-    // on the active row would grow it by 3px and nudge every row below it on each
-    // switch. Layout must not depend on selection.
-    borderWidth: 1.5,
-    borderColor: 'transparent',
   },
   itemActive: {
-    // Selection carried by HUE, not elevation — see THEME.rail_selected. The border
-    // is inset via a matching transparent border on the base `item` so selecting a
-    // row does not change its size and shift the column.
+    // Fill ONLY. A border was tried and rejected by the owner — see the note on
+    // THEME.rail_selected. Nothing here changes the row's box, so selecting a row
+    // cannot shift the column.
     backgroundColor: THEME.rail_selected,
-    borderColor: THEME.rail_selected_edge,
   },
   pressed: { opacity: 0.7 },
   glyphWrap: {
