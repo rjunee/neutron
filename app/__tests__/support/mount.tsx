@@ -137,7 +137,15 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       await settle();
     },
     async press(accessibilityLabel: string): Promise<void> {
-      const target = Array.from(host.querySelectorAll('*')).find(
+      // SEARCHES THE DOCUMENT, NOT JUST THE MOUNT CONTAINER. A `Modal` renders into
+      // its own portal OUTSIDE the mounted subtree — which is exactly the property
+      // that stops Android clipping it — so a container-scoped search cannot see a
+      // control inside one. This bit for real: the header menu moved into a Modal to
+      // fix a clipping bug, and the reachability probe then reported the owner could
+      // no longer reach app settings, because it was looking in the wrong tree.
+      // Scoping to the document is correct rather than lax: the probe asks "can he
+      // reach this from here", and a portal is still on his screen.
+      const target = Array.from(host.ownerDocument.querySelectorAll('*')).find(
         (el) => el.getAttribute('aria-label') === accessibilityLabel,
       ) as HTMLElement | undefined;
       if (target === undefined) {
@@ -154,7 +162,11 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       await settle();
     },
     byTestId(testId: string): HTMLElement | null {
-      return host.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+      // Document-scoped for the same reason `press` is — a portalled control is on
+      // screen even though it is not in the container.
+      return host.ownerDocument.querySelector(
+        `[data-testid="${testId}"]`,
+      ) as HTMLElement | null;
     },
     unmount(): void {
       root.unmount();
