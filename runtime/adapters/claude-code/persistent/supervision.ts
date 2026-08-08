@@ -495,7 +495,7 @@ export async function runReplWatchdogTick(
             ),
           )
         } catch (err) {
-          console.error('[repl-watchdog] child-crash sink threw', { sessionKey, err })
+          log.error('child_crash_sink_error', { sessionKey, error: String(err) })
         }
       }
       const outcome = respawnReplSession(keyOptions, sessionKey, trigger, action.verdict.detail)
