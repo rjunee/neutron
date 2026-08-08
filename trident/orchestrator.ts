@@ -680,7 +680,7 @@ export function buildTridentOrchestrator(
       //     sticks at `forge-init` forever. Treat a terminal `subagent_status`
       //     with no harvestable result as a TERMINAL FAILURE now (never merge —
       //     there is no verified result to merge on).
-      if (run.subagent_status === 'completed' || run.subagent_status === 'failed') {
+      if (run.subagent_status === 'completed' || run.subagent_status === 'failed' || run.subagent_status === 'crashed') {
         fired.delete(run.id)
         redispatched.delete(run.id)
         const reaped = failedRun(
@@ -689,6 +689,11 @@ export function buildTridentOrchestrator(
             'but wrote no parseable inner_result)',
           false,
         )
+        if (run.subagent_status === 'crashed') {
+          reaped.subagent_status = 'crashed'
+          reaped.subagent_run_id = run.subagent_run_id
+          reaped.failure_reason = run.failure_reason ?? 'inner workflow child crashed'
+        }
         return {
           run: reaped,
           changed: true,

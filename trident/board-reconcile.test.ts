@@ -60,6 +60,54 @@ describe('buildBoardReconcileObserver', () => {
 })
 
 describe('end-to-end — the tick loop reconciles the board on a terminal run', () => {
+  test('child crash is reaped on the next tick and the running count agrees with the board (#514)', async () => {
+    const item = await board.create('proj-1', {
+      title: 'build the email core with tests and wire it to the application',
+    })
+    const dispatched = await dispatchBoardBoundBuild(
+      { board_item_id: item.id, task: 'build the email core with tests' },
+      {
+        store,
+        board,
+        project_slug: 'proj-1',
+        repo_path: '/repo',
+        resolveBuildRepo: async (home) => home,
+        resolveMergeMode: async () => 'pr',
+        resolveRalph: async () => false,
+      },
+    )
+    expect(dispatched.ok).toBe(true)
+    const runId = dispatched.ok ? dispatched.run.id : ''
+    const orch = buildTridentOrchestrator({
+      fire_workflow: async () => ({ status: 'fired', run_id: 'workflow-child' }),
+      db_path: join(tmp, 'project.db'),
+      run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+    })
+    const loop = new TridentTickLoop({
+      store,
+      step: orch.step,
+      on_terminal: { onTerminal: buildBoardReconcileObserver(board)! },
+    })
+
+    await loop.runOnce()
+    expect(store.get(runId)?.subagent_status).toBe('running')
+    // Mutation killed: without the crash-watchdog store write plus the
+    // orchestrator's `crashed` terminal guard, this row remains running here.
+    await store.update(runId, {
+      subagent_status: 'crashed',
+      failure_reason: 'inner workflow child crashed: pooled child exited',
+    })
+    await loop.runOnce()
+
+    const stored = store.get(runId)!
+    expect(stored.phase).toBe('failed')
+    expect(stored.subagent_status).toBe('crashed')
+    const runningCount = db.raw().prepare("SELECT count(*) AS n FROM code_trident_runs WHERE subagent_status = 'running'").get() as { n: number }
+    expect(runningCount.n).toBe(0)
+    expect(board.get('proj-1', item.id)?.status).toBe('failed')
+    expect(board.list('proj-1').filter((candidate) => candidate.status === 'in_progress')).toHaveLength(0)
+  })
+
   test('a board-bound /code build drives to done AND completes its Plan item', async () => {
     // 1. Create a ready Plan item + a board-bound run (the dispatch chokepoint).
     const item = await board.create('proj-1', {

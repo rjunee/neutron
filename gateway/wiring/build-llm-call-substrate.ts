@@ -335,6 +335,8 @@ export interface BuildLlmCallSubstrateInput {
    * Wired ONLY on the owner's conversational substrate (`cc-agent-*`); the
    * stateless-utility / import / trident substrates leave them unset (stderr). */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
+  /** Durable-work failure sink for a pooled child exit detected by supervision. */
+  onChildCrash?: (info: { sessionKey: string; detail: string }) => void | Promise<void>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /**
@@ -753,6 +755,7 @@ export function buildLlmCallSubstrate(
         // gateway's chat surface instead of only stderr. Unset on every non-
         // conversational substrate (they keep the stderr-only default).
         if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
+        if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
         if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
         if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
         // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode: a session-

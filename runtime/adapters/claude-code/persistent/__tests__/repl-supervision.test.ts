@@ -332,6 +332,31 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     expect(spawns.length).toBe(1) // untouched
   })
 
+  it('pid-dead detection calls the durable child-crash sink before respawn (#514)', async () => {
+    const { host } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    const crashes: Array<{ sessionKey: string; detail: string }> = []
+    const opts: PersistentReplSubstrateOptions = {
+      ...baseOptions(host, registryPath),
+      onChildCrash: (info) => { crashes.push(info) },
+    }
+    registerSupervisedSubstrate(opts)
+    const sub = createPersistentReplSubstrate(opts)
+    await drain(sub.start(spec('hi')))
+    const key = onlyKey(registryPath)
+    await waitForHasSession(registryPath, key)
+    await drain(sub.start(spec('please __DIE__')))
+
+    await runReplWatchdogTick(opts, {
+      healthProbe: async () => false,
+      now: () => Date.now() + 120_000,
+    })
+
+    // Mutation killed: removing the watchdog callback leaves this empty even
+    // though the existing detector still logs and respawns the dead child.
+    expect(crashes).toEqual([{ sessionKey: key, detail: 'pooled child exited' }])
+  })
+
   it('an alive-but-wedged respawn KILLS the old child before the --resume spawn (one owner per transcript)', async () => {
     // Argus r3 BLOCKER 1: in the alive-but-wedged case the pool still holds the
     // old child handle. The respawn must terminate it AND await its exit before

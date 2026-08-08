@@ -142,6 +142,7 @@ export interface ClaudeCodeSubstrateOptions {
    *   - `onRateLimitBanner` (row #10) — a rate-limit / overload BANNER appeared;
    *     surface a notify-only alert (no keystroke, no auto-retry). */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
+  onChildCrash?: (info: { sessionKey: string; detail: string }) => void | Promise<void>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Notice-family DI seam (row #16) — fired ONCE (edge) when the model-update
@@ -268,6 +269,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // Notice-family DI seams (rows #10/#11/#13) — forward so the gateway path can
   // wire user-facing delivery instead of the stderr-only fallback (Codex PR #67).
   if (options.onDeadTurnNotice !== undefined) p.onDeadTurnNotice = options.onDeadTurnNotice
+  if (options.onChildCrash !== undefined) p.onChildCrash = options.onChildCrash
   if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
   if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
   if (options.onModelUpdate !== undefined) p.onModelUpdate = options.onModelUpdate

@@ -486,6 +486,9 @@ export async function runReplWatchdogTick(
       }
       const trigger: RespawnTrigger =
         action.verdict.reason === 'pid-dead' ? 'crash-watchdog' : 'wedge-watchdog'
+      if (trigger === 'crash-watchdog') {
+        await keyOptions.onChildCrash?.({ sessionKey, detail: action.verdict.detail })
+      }
       const outcome = respawnReplSession(keyOptions, sessionKey, trigger, action.verdict.detail)
       respawned = outcome.ok
       if (action.alert.send) {
