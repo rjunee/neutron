@@ -386,6 +386,18 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /** Mark every live workflow owned by one warm per-repo launcher as crashed. */
+  async crashRunningByRepo(repo_path: string, failure_reason: string): Promise<void> {
+    await this.db.run(
+      `UPDATE code_trident_runs
+          SET subagent_status = 'crashed', failure_reason = ?, last_advanced_at = ?
+        WHERE repo_path = ?
+          AND subagent_status = 'running'
+          AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+      [failure_reason, this.now(), repo_path],
+    )
+  }
+
   /**
    * Apply a partial update by id, re-stamping `last_advanced_at`. Only the
    * provided fields are written. Returns the reloaded row (or `null` if

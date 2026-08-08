@@ -79,7 +79,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     expect(dispatched.ok).toBe(true)
     const runId = dispatched.ok ? dispatched.run.id : ''
     const orch = buildTridentOrchestrator({
-      fire_workflow: async () => ({ status: 'fired', run_id: 'workflow-child' }),
+      fire_workflow: async () => ({ status: 'fired', run_id: 'workflow-child', error: null }),
       db_path: join(tmp, 'project.db'),
       run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
     })
@@ -93,10 +93,10 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     expect(store.get(runId)?.subagent_status).toBe('running')
     // Mutation killed: without the crash-watchdog store write plus the
     // orchestrator's `crashed` terminal guard, this row remains running here.
-    await store.update(runId, {
-      subagent_status: 'crashed',
-      failure_reason: 'inner workflow child crashed: pooled child exited',
-    })
+    await store.crashRunningByRepo(
+      '/repo',
+      'inner workflow child crashed: pooled child exited',
+    )
     await loop.runOnce()
 
     const stored = store.get(runId)!

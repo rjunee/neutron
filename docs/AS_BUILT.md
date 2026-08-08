@@ -8096,5 +8096,4 @@ left exactly as it was. Mutant: removing the translation reds three tests.
 
 # Trident child-crash reaping (#514)
 
-The persistent REPL crash watchdog now forwards its existing `pid-dead` detection to a substrate-owned durable-work callback. The Open Trident fire substrate uses that edge to mark matching live `code_trident_runs` rows `crashed`; on the next `trident/tick.ts` sweep, `trident/orchestrator.ts` persists the terminal failure and the existing terminal observer reconciles the bound Work Board item. This removes the phantom running count immediately after child death without adding another reaper or relying on loop-registry presence.
-
+The persistent REPL crash watchdog now forwards its existing `pid-dead` detection to a substrate-owned durable-work callback without delaying respawn. The Open Trident fire substrate (one pooled launcher per repository) uses one conditional store update to mark that launcher's live `code_trident_runs` rows `crashed`; on the next `trident/tick.ts` sweep, `trident/orchestrator.ts` persists the terminal failure and the existing terminal observer reconciles the bound Work Board item. This removes the phantom running count immediately after child death without adding another reaper, imposing a scan cap, or relying on loop-registry presence.

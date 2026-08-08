@@ -16,6 +16,9 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -24,6 +27,9 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { OpenWiringContext } from '../wiring/context.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { wireSubstrates } from '../wiring/substrates.ts'
 import {
   resolveOpenModelProvider,
@@ -243,6 +249,33 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     for (const o of fireOpts) {
       expect(o.enableToolBridge).not.toBe(true)
       expect(o.ephemeral).not.toBe(true)
+    }
+  })
+
+  test('pid-dead callback reaps only running rows owned by its warm per-repo launcher (#514)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-open-crash-reap-'))
+    const db = ProjectDb.open(join(dir, 'project.db'))
+    try {
+      applyMigrations(db.raw())
+      const runs = new TridentRunStore(db)
+      const dead = await runs.create({ slug: 'dead', project_slug: 'owner', repo_path: '/repo/dead', task: 'dead' })
+      const live = await runs.create({ slug: 'live', project_slug: 'owner', repo_path: '/repo/live', task: 'live' })
+      await runs.update(dead.id, { subagent_status: 'running', subagent_run_id: 'wf-dead' })
+      await runs.update(live.id, { subagent_status: 'running', subagent_run_id: 'wf-live' })
+      const { ctx, captured } = makeCtx({ db })
+      await drain(wireSubstrates(ctx).makeWarmFireSubstrate('/repo/dead'))
+      const callback = captured.find((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))?.onChildCrash
+      expect(callback).toBeDefined()
+
+      // Mutation killed: deleting the substrates.ts callback leaves the stored
+      // row running; broad repo-agnostic matching also crashes the live row.
+      callback!({ sessionKey: 'cc-trident-fire-owner\0/repo/dead', detail: 'pooled child exited' })
+      for (let i = 0; i < 20 && runs.get(dead.id)?.subagent_status === 'running'; i++) await Bun.sleep(1)
+      expect(runs.get(dead.id)?.subagent_status).toBe('crashed')
+      expect(runs.get(live.id)?.subagent_status).toBe('running')
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

@@ -487,7 +487,16 @@ export async function runReplWatchdogTick(
       const trigger: RespawnTrigger =
         action.verdict.reason === 'pid-dead' ? 'crash-watchdog' : 'wedge-watchdog'
       if (trigger === 'crash-watchdog') {
-        await keyOptions.onChildCrash?.({ sessionKey, detail: action.verdict.detail })
+        try {
+          fireAndForget(
+            `supervision.onChildCrash:${sessionKey}`,
+            Promise.resolve(
+              keyOptions.onChildCrash?.({ sessionKey, detail: action.verdict.detail }),
+            ),
+          )
+        } catch (err) {
+          console.error('[repl-watchdog] child-crash sink threw', { sessionKey, err })
+        }
       }
       const outcome = respawnReplSession(keyOptions, sessionKey, trigger, action.verdict.detail)
       respawned = outcome.ok

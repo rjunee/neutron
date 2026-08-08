@@ -426,15 +426,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // launcher's child died. Stamp every still-live workflow owned by its repo;
       // the Trident tick then performs the normal terminal transition + board
       // reconcile instead of leaving a durable `running` phantom until timeout.
-      onChildCrash: async ({ detail }) => {
-        for (const run of tridentRuns.listNonTerminal(10_000)) {
-          if (run.repo_path === cwd && run.subagent_status === 'running') {
-            await tridentRuns.update(run.id, {
-              subagent_status: 'crashed',
-              failure_reason: `inner workflow child crashed: ${detail}`,
-            })
-          }
-        }
+      onChildCrash: ({ sessionKey, detail }) => {
+        fireAndForget(
+          `trident.reapChildCrash:${sessionKey}`,
+          tridentRuns.crashRunningByRepo(
+            cwd,
+            `inner workflow child crashed: ${detail}`,
+          ),
+        )
       },
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
     })
