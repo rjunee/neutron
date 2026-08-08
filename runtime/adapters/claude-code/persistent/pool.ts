@@ -20,16 +20,47 @@ import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
 import { getOrSpawnSession, injectMessage, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
-const activeTurnInjectors = new WeakMap<Substrate, (text: string) => Promise<boolean>>()
-const ACTIVE_TURN_ESTABLISH_TIMEOUT_MS = 2_000
+const activeTurnRoutes = new Map<string, { session: ReplSession; turn: ActiveTurn }>()
+
+function activeTurnRouteKey(input: {
+  substrate_instance_id: string
+  user_id?: string
+  project_id?: string
+}): string {
+  return JSON.stringify([
+    input.substrate_instance_id,
+    input.user_id ?? '_platform',
+    input.project_id ?? 'default',
+  ])
+}
 
 /** Inject a user message into this substrate's currently running Claude turn. */
 export async function injectPersistentReplActiveTurn(
-  substrate: Substrate,
-  text: string,
+  input: {
+    substrate_instance_id: string
+    user_id?: string
+    project_id?: string
+    text: string
+  },
 ): Promise<boolean> {
-  const inject = activeTurnInjectors.get(substrate)
-  return inject === undefined ? false : await inject(text)
+  const active = activeTurnRoutes.get(activeTurnRouteKey(input))
+  if (active === undefined || active.turn.settled || active.session.channelPort === undefined) {
+    return false
+  }
+  const prior = active.turn.injectionTail ?? Promise.resolve()
+  const delivery = prior.then(async () => {
+    if (active.turn.settled || active.session.activeTurn !== active.turn) {
+      throw new Error('persistent-repl: active turn settled before injection')
+    }
+    await injectMessage(active.session.channelPort!, input.text, active.turn.turnId, true)
+  })
+  active.turn.injectionTail = delivery.catch(() => undefined)
+  try {
+    await delivery
+    return !active.turn.settled && active.session.activeTurn === active.turn
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +531,9 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // incarnation of this resumed session (different nonce), in both the
           // pre-inject-park and inject-in-flight windows (see ActiveTurn.turnId).
           await injectMessage(session.channelPort, spec.prompt, turn.turnId)
+          // A follow-up may augment this turn only after its initial prompt has
+          // reached the REPL. Publishing earlier can reorder the two messages.
+          activeTurnRoutes.set(activeTurnRouteKey(options), { session, turn })
           channel.push({ kind: 'status', message: 'working' })
           // Flush any spawn-time buffered notices (e.g. the resume-picker
           // recovered/lost notice, which fired before this turn existed) onto the
@@ -705,6 +739,9 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         if (!ephemeral && turn.diedMidTurn === true && session !== undefined) {
           enqueueDroppedInbound(options, sessionKey, session, spec.prompt, turn.turnId)
         }
+        if (activeTurnRoutes.get(activeTurnRouteKey(options))?.turn === turn) {
+          activeTurnRoutes.delete(activeTurnRouteKey(options))
+        }
         if (session.activeTurn === turn) session.activeTurn = undefined
         if (release) release()
        } finally {
@@ -782,41 +819,6 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       return handle
     },
   }
-  activeTurnInjectors.set(substrate, async (text) => {
-    try {
-      const deadline = Date.now() + ACTIVE_TURN_ESTABLISH_TIMEOUT_MS
-      let pooled = pool.get(sessionKey)
-      // The gateway's topic chain becomes visible before the first dispatch has
-      // necessarily reached substrate.start(). Wait briefly for that cold-start
-      // handoff too; returning false here would recreate queue-after semantics.
-      while (pooled === undefined && Date.now() < deadline) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 5))
-        pooled = pool.get(sessionKey)
-      }
-      if (pooled === undefined) return false
-      const session = await Promise.race([
-        pooled,
-        new Promise<undefined>((resolve) => {
-          const timer = setTimeout(resolve, Math.max(0, deadline - Date.now()))
-          timer.unref()
-        }),
-      ])
-      if (session === undefined) return false
-      // The pool promise resolves just before start() publishes activeTurn. Give
-      // that continuation a bounded window so an early second send is injected
-      // instead of silently becoming a queue-after turn.
-      while (session.activeTurn === undefined && Date.now() < deadline) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 5))
-      }
-      const turn = session.activeTurn
-      if (turn === undefined || session.channelPort === undefined || turn.settled) return false
-      await injectMessage(session.channelPort, text, turn.turnId, true)
-      return true
-    } catch {
-      // Spawn/network failures degrade to the ordered normal-turn path.
-      return false
-    }
-  })
   return substrate
 }
 
@@ -861,6 +863,7 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
   childByKey.clear()
   pendingChildKills.clear()
   supervisedBySessionKey.clear()
+  activeTurnRoutes.clear()
   wedgeAlertState.clear()
   cwdDriftRespawnState.clear()
   cwdDriftAlertState.clear()

@@ -191,11 +191,15 @@ describe('PersistentReplSubstrate — conformance', () => {
           exited: exitPromise, hasExited: () => exited }
       },
     }
-    const sub = createPersistentReplSubstrate(baseOptions(host))
+    const options = baseOptions(host)
+    const sub = createPersistentReplSubstrate(options)
     const first = drain(sub.start(spec('first')))
     for (let i = 0; i < 100 && wire.length === 0; i += 1) await Bun.sleep(5)
 
-    expect(await injectPersistentReplActiveTurn(sub, 'second during turn')).toBe(true)
+    expect(await injectPersistentReplActiveTurn({
+      substrate_instance_id: options.substrate_instance_id,
+      text: 'second during turn',
+    })).toBe(true)
     expect(wire).toEqual([
       expect.objectContaining({ text: 'first', additional: false }),
       expect.objectContaining({ text: 'second during turn', additional: true }),

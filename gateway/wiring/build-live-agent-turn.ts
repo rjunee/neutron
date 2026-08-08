@@ -616,7 +616,7 @@ export interface BuildLiveAgentTurnInput {
    */
   substrate: Substrate
   /** Deliver text into the active persistent-REPL turn; false when none is live. */
-  injectActiveTurn?: (text: string) => Promise<boolean>
+  injectActiveTurn?: (turn: LiveAgentTurnRequest, text: string) => Promise<boolean>
   /**
    * ACTIVITY INSPECTOR tee (SPEC § WAVE 3.5). When wired by the composer, EVERY
    * substrate event for this turn is handed over as it arrives — including the
@@ -947,11 +947,19 @@ export function buildLiveAgentTurn(
    */
   function runLiveAgentTurn(turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult> {
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
-    if (turnChains.has(topicKey) && input.injectActiveTurn !== undefined) {
-      // Record the newest real input before the early injection return so Retry
-      // recovers the injected message too.
-      if (turn.seed_turn !== true && turn.user_text.length > 0) {
-        lastUserText.set(topicKey, turn.user_text)
+    if (
+      turnChains.has(topicKey) &&
+      input.injectActiveTurn !== undefined &&
+      turn.seed_turn !== true &&
+      turn.user_text !== RETRY_TURN_VALUE &&
+      turn.user_text !== RECONNECT_AUTH_VALUE
+    ) {
+      const priorUserText = lastUserText.get(topicKey)
+      if (turn.user_text.length > 0) {
+        lastUserText.set(
+          topicKey,
+          priorUserText === undefined ? turn.user_text : `${priorUserText}\n\n${turn.user_text}`,
+        )
         if (turn.attachments !== undefined && turn.attachments.length > 0) {
           lastAttachments.set(topicKey, turn.attachments)
         } else {
@@ -966,11 +974,33 @@ export function buildLiveAgentTurn(
       const injectedText = attachmentsFragment === null
         ? turn.user_text
         : `${attachmentsFragment}\n\n${turn.user_text}`
-      return input.injectActiveTurn(injectedText).catch(() => false).then((injected) =>
-        injected
-          ? { outcome: 'replied', reply_prompt_id: null }
-          : enqueueTurn(turn, topicKey),
-      )
+      return input.injectActiveTurn(turn, injectedText).catch(() => false).then(async (injected) => {
+        if (!injected) {
+          if (priorUserText === undefined) lastUserText.delete(topicKey)
+          else lastUserText.set(topicKey, priorUserText)
+          return enqueueTurn(turn, topicKey)
+        }
+        try {
+          await input.buttonStore.persistInertUserTurn({
+            topic_id: turn.topic_id,
+            text: turn.user_text,
+            speaker_user_id: turn.user_id,
+            channel_kind: 'app_socket',
+          })
+        } catch (err) {
+          moduleLog.warn('injected_user_turn_persist_failed', {
+            project: turn.project_slug,
+            topic: turn.topic_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+        try {
+          input.transcript?.append({ role: 'user', body: turn.user_text, phase: 'completed' })
+        } catch {
+          /* audit-trail only */
+        }
+        return { outcome: 'replied', reply_prompt_id: null }
+      })
     }
     return enqueueTurn(turn, topicKey)
   }

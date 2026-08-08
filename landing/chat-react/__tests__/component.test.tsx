@@ -164,7 +164,7 @@ describe('ChatApp render (happy-dom)', () => {
     expect(streamingSend.disabled).toBe(false)
     const beforeMidTurnSend = sentFrames.length
     await act(async () => {
-      streamingSend.click()
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
       await tick()
     })
     expect(sentFrames.slice(beforeMidTurnSend).some((raw) => raw.includes('one more detail'))).toBe(true)

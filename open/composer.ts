@@ -4525,7 +4525,12 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
             substrate: liveAgentSubstrate,
-            injectActiveTurn: (text) => injectPersistentReplActiveTurn(liveAgentSubstrate, text),
+            injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
+              substrate_instance_id: `cc-agent-${owner_handle}`,
+              user_id: OWNER_USER_ID,
+              ...(turn.project_id !== undefined ? { project_id: turn.project_id } : {}),
+              text,
+            }),
             // ACTIVITY INSPECTOR — tee EVERY substrate event for the live chat turn
             // into the shared ring, and bracket the dispatch so the inspector can
             // tell a resting `idle` session from a `wedged` one. This is the seam

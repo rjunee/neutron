@@ -1532,19 +1532,19 @@ function Composer({
     const body = composerRuntime.getState().text.trim()
     const urls = draft.readUrls()
     if (body.length === 0 && urls.length === 0) return
+    if (controller.getViewModel().isRunning) {
+      // assistant-ui intentionally refuses `runtime.send()` while running;
+      // bypass that client-only gate because the persistent REPL supports
+      // adding context to its active turn.
+      void (async () => {
+        const ready = await draft.waitForUploads()
+        await controller.send(body, ready.length > 0 ? ready : undefined)
+        if (composerRuntime.getState().text.trim() === body) composerRuntime.setText('')
+        draft.clear()
+      })().catch(() => undefined)
+      return
+    }
     if (body.length > 0) {
-      if (controller.getViewModel().isRunning) {
-        // assistant-ui intentionally refuses `runtime.send()` while running;
-        // bypass that client-only gate because the persistent REPL supports
-        // adding context to its active turn.
-        void (async () => {
-          const ready = await draft.waitForUploads()
-          await controller.send(body, ready.length > 0 ? ready : undefined)
-          composerRuntime.setText('')
-          draft.clear()
-        })()
-        return
-      }
       // Text (optionally + attachments): route through the runtime so Enter and
       // the Send button share ONE path — `onNew` waits for in-flight uploads,
       // merges the staged URLs, clears the draft, and assistant-ui clears input.
@@ -1558,7 +1558,7 @@ function Composer({
         if (ready.length === 0) return
         await controller.send('', ready)
         draft.clear()
-      })()
+      })().catch(() => undefined)
     }
   }
 
@@ -1587,7 +1587,19 @@ function Composer({
           className="car-file-input"
           onChange={onPick}
         />
-        <ComposerPrimitive.Input className="car-input" placeholder="Message Neutron…" autoFocus rows={1} />
+        <ComposerPrimitive.Input
+          className="car-input"
+          placeholder="Message Neutron…"
+          autoFocus
+          rows={1}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              event.stopPropagation()
+              send()
+            }
+          }}
+        />
         {/*
           There is deliberately NO Stop/cancel control here. One used to render
           in this slot (`ComposerPrimitive.Cancel`) and it was permanently

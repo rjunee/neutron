@@ -83,7 +83,7 @@ function makeRunner(over: {
   projectPersonaResolver?: (
     project_id: string,
   ) => Promise<string | null> | string | null
-  injectActiveTurn?: (text: string) => Promise<boolean>
+  injectActiveTurn?: (turn: LiveAgentTurnRequest, text: string) => Promise<boolean>
 }) {
   const personaLoader = {
     async load(): Promise<string> {
@@ -148,9 +148,11 @@ describe('build-live-agent-turn — reply path', () => {
       },
     }
     const wire: string[] = []
+    const transcriptEntries: Array<Record<string, unknown>> = []
     const run = makeRunner({
       substrate,
-      injectActiveTurn: async (text) => { wire.push(text); return true },
+      transcriptEntries,
+      injectActiveTurn: async (_turn, text) => { wire.push(text); return true },
     })
     const first = run(makeTurn({ sent: [], user_text: 'first' }))
     await Bun.sleep(0)
@@ -158,6 +160,11 @@ describe('build-live-agent-turn — reply path', () => {
 
     expect(wire).toEqual(['add this now'])
     expect(second).toEqual({ outcome: 'replied', reply_prompt_id: null })
+    const history = await store.listHistoryByTopic({
+      topic_id: 'web:u-1', before: now + 1, before_prompt_id: null, limit: 10, now,
+    })
+    expect(history.turns.some((turn) => turn.resolution_text === 'add this now')).toBe(true)
+    expect(transcriptEntries).toContainEqual({ role: 'user', body: 'add this now', phase: 'completed' })
     let firstSettled = false
     void first.then(() => { firstSettled = true })
     await Bun.sleep(0)
