@@ -472,11 +472,23 @@ export async function runReplWatchdogTick(
 
     let respawned = false
     const keyOptions = supervisedBySessionKey.get(sessionKey)
-    if (verdict.wedged && verdict.reason === 'pid-dead' && keyOptions !== undefined) {
+    const crashSink = keyOptions?.onChildCrash ?? options.onChildCrash
+    if (
+      action.kind !== 'ignore' &&
+      verdict.wedged &&
+      record?.child_crash_notified_at === undefined &&
+      record?.child_generation !== undefined &&
+      crashSink !== undefined
+    ) {
       try {
-        await keyOptions.onChildCrash?.({ sessionKey, detail: verdict.detail })
+        await crashSink({ sessionKey, generationKey: record.child_generation, detail: verdict.detail })
+        patchRecord(registryPath, sessionKey, { child_crash_notified_at: now })
       } catch (err) {
         log.error('child_crash_sink_error', { sessionKey, error: String(err) })
+        // Do not repoint the registry at a new PID until the durable sink has
+        // committed. The same dead-PID edge is retried on the next tick.
+        results.push({ sessionKey, action: 'crash-sink-retry', respawned: false })
+        continue
       }
     }
     if (action.kind === 'respawn-and-alert') {

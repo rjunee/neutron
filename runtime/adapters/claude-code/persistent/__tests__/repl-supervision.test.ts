@@ -47,7 +47,7 @@ import {
   enqueuePendingRespawn,
   loadPendingRespawns,
 } from '../pending-respawns-queue.ts'
-import { getRecord, patchRecord } from '../repl-registry.ts'
+import { getRecord, patchRecord, saveRegistry } from '../repl-registry.ts'
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()
@@ -318,7 +318,11 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
   it('inside the boot-grace window the tick ignores (no premature respawn)', async () => {
     const { host, spawns } = makeFakeReplHost()
     const registryPath = tmpRegistry()
-    const opts = baseOptions(host, registryPath)
+    let crashSinkCalls = 0
+    const opts = {
+      ...baseOptions(host, registryPath),
+      onChildCrash: () => { crashSinkCalls += 1 },
+    }
     const sub = createPersistentReplSubstrate(opts)
     await drain(sub.start(spec('hi')))
     const key = onlyKey(registryPath)
@@ -330,12 +334,15 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     })
     expect(results.find((x) => x.sessionKey === key)?.action).toBe('boot-window')
     expect(spawns.length).toBe(1) // untouched
+    // Mutation killed: moving the sink above decideWedgeAction calls it even
+    // though the boot-window verdict explicitly declined crash actuation.
+    expect(crashSinkCalls).toBe(0)
   })
 
   it('pid-dead detection calls the durable child-crash sink before respawn (#514)', async () => {
     const { host } = makeFakeReplHost()
     const registryPath = tmpRegistry()
-    const crashes: Array<{ sessionKey: string; detail: string }> = []
+    const crashes: Array<{ sessionKey: string; generationKey: string; detail: string }> = []
     const opts: PersistentReplSubstrateOptions = {
       ...baseOptions(host, registryPath),
       onChildCrash: (info) => { crashes.push(info) },
@@ -354,7 +361,43 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
 
     // Mutation killed: removing the watchdog callback leaves this empty even
     // though the existing detector still logs and respawns the dead child.
-    expect(crashes).toEqual([{ sessionKey: key, detail: 'pooled child exited' }])
+    const generationKey = getReplRegistrySnapshot(registryPath)[key]?.child_generation
+    expect(generationKey).toBeDefined()
+    expect(crashes).toEqual([{ sessionKey: key, generationKey: generationKey as string, detail: 'pooled child exited' }])
+  })
+
+  it('a rejected crash sink is retried before the dead registry PID is replaced (#514)', async () => {
+    const { host } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    let attempts = 0
+    const opts: PersistentReplSubstrateOptions = {
+      ...baseOptions(host, registryPath),
+      onChildCrash: () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('sqlite busy')
+      },
+    }
+    registerSupervisedSubstrate(opts)
+    const sub = createPersistentReplSubstrate(opts)
+    await drain(sub.start(spec('hi')))
+    const key = onlyKey(registryPath)
+    await waitForHasSession(registryPath, key)
+    await drain(sub.start(spec('please __DIE__')))
+
+    const first = await runReplWatchdogTick(opts, {
+      healthProbe: async () => false,
+      now: () => Date.now() + 120_000,
+    })
+    // Mutation killed: swallowing the rejection and continuing to respawn
+    // returns respawn-and-alert and permanently loses this dead-PID edge.
+    expect(first.find((entry) => entry.sessionKey === key)?.action).toBe('crash-sink-retry')
+    expect(attempts).toBe(1)
+
+    await runReplWatchdogTick(opts, {
+      healthProbe: async () => false,
+      now: () => Date.now() + 120_001,
+    })
+    expect(attempts).toBe(2)
   })
 
   it('an alive-but-wedged respawn KILLS the old child before the --resume spawn (one owner per transcript)', async () => {
@@ -364,7 +407,11 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     // session transcript.
     const { host, spawns, children, prevExitedAtSpawn } = makeFakeReplHost()
     const registryPath = tmpRegistry()
-    const opts = baseOptions(host, registryPath)
+    const crashes: string[] = []
+    const opts = {
+      ...baseOptions(host, registryPath),
+      onChildCrash: ({ generationKey }: { generationKey: string }) => { crashes.push(generationKey) },
+    }
     registerSupervisedSubstrate(opts)
     const sub = createPersistentReplSubstrate(opts)
 
@@ -382,6 +429,11 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
       postAlert: () => {},
     })
     expect(results.find((x) => x.sessionKey === key)?.action).toBe('respawn-and-alert')
+    // Mutation killed: restricting the sink to pid-dead skips the alive-but-
+    // wedged child immediately before respawn terminates its detached workflows.
+    const generationKey = getReplRegistrySnapshot(registryPath)[key]?.child_generation
+    expect(generationKey).toBeDefined()
+    expect(crashes).toEqual([generationKey as string])
 
     // The resume spawn lands only AFTER the old child's awaited exit.
     expect(await waitForSpawnCount(spawns, 2)).toBe(true)
@@ -397,6 +449,40 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     expect(live.length).toBe(1)
     expect(live[0]).toBe(children[1] as PtyChild)
     expect(children[1]?.pid).not.toBe(oldChild?.pid)
+  })
+
+  it('a persisted dead generation uses the tick callback after its owner registration was lost on restart (#514)', async () => {
+    const { host } = makeFakeReplHost()
+    const registryPath = tmpRegistry()
+    const generationKey = 'persisted-generation'
+    const orphanKey = 'persisted-unregistered-pool-key'
+    saveRegistry(registryPath, {
+      [orphanKey]: {
+        sessionKey: orphanKey,
+        sessionId: 'persisted-session',
+        cwd: '/tmp',
+        channelName: 'persisted-channel',
+        has_session: true,
+        pid: 999_999,
+        child_generation: generationKey,
+        first_ready_at: 1,
+      },
+    })
+    const crashes: string[] = []
+    const opts = {
+      ...baseOptions(host, registryPath),
+      onChildCrash: ({ generationKey: crashed }: { generationKey: string }) => { crashes.push(crashed) },
+    }
+
+    await runReplWatchdogTick(opts, {
+      healthProbe: async () => false,
+      isPidAlive: () => false,
+      now: () => 120_000,
+    })
+
+    // Mutation killed: consulting only supervisedBySessionKey drops the durable
+    // crash edge when the gateway restarted before this repo was lazily rebuilt.
+    expect(crashes).toEqual([generationKey])
   })
 })
 

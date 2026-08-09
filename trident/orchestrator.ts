@@ -437,7 +437,9 @@ export function buildTridentOrchestrator(
       ...launchRun,
       subagent_run_id: id,
       subagent_status: 'running',
-      workflow_run_id: launchRun.workflow_run_id ?? id,
+      // The exact pooled launcher generation is the crash-ownership token. A
+      // legacy/test fire seam without one retains the old observability id.
+      workflow_run_id: outcome.launcher_session_key ?? launchRun.workflow_run_id ?? id,
       last_advanced_at: now(),
     }
     return {

@@ -291,7 +291,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       const dead = dispatched.ok ? dispatched.run : null
       expect(dead).not.toBeNull()
       const live = await runs.create({ slug: 'live', project_slug: 'owner', repo_path: '/repo/live', task: 'live' })
-      await runs.update(live.id, { subagent_status: 'running', subagent_run_id: 'wf-live' })
+      await runs.update(live.id, { subagent_status: 'running', subagent_run_id: 'wf-live', workflow_run_id: 'healthy-key' })
       const orch = buildTridentOrchestrator({
         fire_workflow: async () => ({ status: 'fired', run_id: 'wf-dead', error: null }),
         db_path: join(dir, 'project.db'),
@@ -311,6 +311,8 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       const registryPath = join(dir, 'repl-registry.json')
       const supervised = { ...wired, replRegistryPath: registryPath } as PersistentReplSubstrateOptions
       const sessionKey = poolKeyFor(supervised)
+      const generationKey = 'dead-generation'
+      await runs.update(dead!.id, { workflow_run_id: generationKey })
       saveRegistry(registryPath, {
         [sessionKey]: {
           sessionKey,
@@ -319,6 +321,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
           channelName: 'dead-channel',
           has_session: true,
           pid: 999_999,
+          child_generation: generationKey,
           first_ready_at: 1,
           capped_at: 2,
         },

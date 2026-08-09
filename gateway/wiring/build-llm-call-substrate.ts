@@ -336,7 +336,7 @@ export interface BuildLlmCallSubstrateInput {
    * stateless-utility / import / trident substrates leave them unset (stderr). */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
   /** Durable-work failure sink for a pooled child exit detected by supervision. */
-  onChildCrash?: (info: { sessionKey: string; detail: string }) => void | Promise<void>
+  onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /**

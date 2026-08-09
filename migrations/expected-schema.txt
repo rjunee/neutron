@@ -1406,6 +1406,13 @@ CREATE TABLE topics (
     updated_at REAL NOT NULL
 )
 
+[table] trident_launcher_crashes (tbl=trident_launcher_crashes)
+CREATE TABLE trident_launcher_crashes (
+    session_key TEXT PRIMARY KEY NOT NULL, -- unique child-generation token
+    failure_reason TEXT NOT NULL,
+    crashed_at TEXT NOT NULL
+) STRICT
+
 [table] upload_sessions (tbl=upload_sessions)
 CREATE TABLE upload_sessions (
     upload_id       TEXT PRIMARY KEY NOT NULL,

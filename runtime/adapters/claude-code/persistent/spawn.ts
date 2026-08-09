@@ -177,7 +177,8 @@ async function spawnSession(
 
   // Construct + register the session BEFORE spawning so a fast /channel-ready
   // POST from the dev-channel can never race ahead of the sink registration.
-  const session = new ReplSession(sessionKey, sessionId, channelName, cwd)
+  const childGeneration = randomUUID()
+  const session = new ReplSession(sessionKey, childGeneration, sessionId, channelName, cwd)
   session.toolSurface = toolSurface.join(',')
   // Stamp the active project scope this REPL serves (folded into the pool key, so
   // it is stable for the session's whole lifetime). The `/tool-call` sink reads
@@ -624,6 +625,7 @@ async function spawnSession(
           : resume !== undefined,
       model,
       pid: child.pid,
+      child_generation: childGeneration,
       first_ready_at: Date.now(),
     }
     if (session.channelPort !== undefined) record.devchannel_port = session.channelPort
@@ -633,7 +635,11 @@ async function spawnSession(
       // must not survive to block the next tick's recovery (Codex P2-3).
       withRegistry(options.replRegistryPath, (registry) => {
         const prev = registry[sessionKey]
-        const { respawn_in_flight_at: _drop, ...merged } = prev ? { ...prev, ...record } : record
+        const {
+          respawn_in_flight_at: _drop,
+          child_crash_notified_at: _oldCrashEdge,
+          ...merged
+        } = prev ? { ...prev, ...record } : record
         registry[sessionKey] = merged
         return { registry, result: undefined }
       })

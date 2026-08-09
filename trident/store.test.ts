@@ -235,10 +235,14 @@ describe('TridentRunStore', () => {
   test('crash marker beats a stale running tick, then permits the crash-to-failed save (#514)', async () => {
     const store = new TridentRunStore(db)
     const created = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
-    await store.update(created.id, { subagent_status: 'running', subagent_run_id: 'wf-1' })
+    await store.update(created.id, {
+      subagent_status: 'running',
+      subagent_run_id: 'wf-1',
+      workflow_run_id: 'launcher-a',
+    })
     const staleTickSnapshot = store.get(created.id)!
 
-    await store.crashRunningByRepo('/r', 'pooled child exited')
+    await store.crashRunningByLauncher('launcher-a', 'pooled child exited')
     // Mutation killed: removing the subagent_status guard lets this stale full
     // snapshot overwrite `crashed` back to `running`.
     expect(await store.saveIfActive(staleTickSnapshot)).toBe(false)
@@ -247,6 +251,68 @@ describe('TridentRunStore', () => {
     const crashSnapshot = store.get(created.id)!
     expect(await store.saveIfActive({ ...crashSnapshot, phase: 'failed' })).toBe(true)
     expect(store.get(created.id)?.phase).toBe('failed')
+  })
+
+  test('one stale launcher key cannot crash a healthy rotated-key run (#514)', async () => {
+    const store = new TridentRunStore(db)
+    const stale = await store.create({ slug: 'stale', project_slug: 't1', repo_path: '/same', task: 'old' })
+    const healthy = await store.create({ slug: 'healthy', project_slug: 't1', repo_path: '/same', task: 'new' })
+    await store.update(stale.id, { subagent_status: 'running', workflow_run_id: 'credential-a-key' })
+    await store.update(healthy.id, { subagent_status: 'running', workflow_run_id: 'credential-b-key' })
+
+    await store.crashRunningByLauncher('credential-a-key', 'old child exited')
+
+    // Mutation killed: replacing launcher-key ownership with repo_path marks
+    // both rows crashed and destroys the healthy rotated-key workflow.
+    expect(store.get(stale.id)?.subagent_status).toBe('crashed')
+    expect(store.get(healthy.id)?.subagent_status).toBe('running')
+  })
+
+  test('a crashed child generation does not poison the next generation in the same pool slot (#514)', async () => {
+    const store = new TridentRunStore(db)
+    await store.crashRunningByLauncher('pool-generation-1', 'old child exited')
+    const fresh = await store.create({ slug: 'fresh', project_slug: 't1', repo_path: '/same', task: 'new' })
+    const freshSnapshot = {
+      ...fresh,
+      subagent_status: 'running' as const,
+      workflow_run_id: 'pool-generation-2',
+    }
+
+    // Mutation killed: using the stable pool key for both incarnations makes
+    // this save lose forever and re-fire a new detached workflow every tick.
+    expect(await store.saveIfActive(freshSnapshot)).toBe(true)
+    expect(store.get(fresh.id)?.subagent_status).toBe('running')
+  })
+
+  test('update cannot resurrect a row after the crash sink wins (#514)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'update-race', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { subagent_status: 'running', workflow_run_id: 'generation-a' })
+    await store.crashRunningByLauncher('generation-a', 'child exited')
+
+    // Mutation killed: removing update's crashed-state predicate lets an
+    // out-of-band partial writer resurrect the phantom running row.
+    await store.update(run.id, { subagent_status: 'running' })
+    expect(store.get(run.id)?.subagent_status).toBe('crashed')
+  })
+
+  test('a crash committed before launch persistence vetoes the racing running snapshot (#514)', async () => {
+    const store = new TridentRunStore(db)
+    const created = await store.create({ slug: 'race', project_slug: 't1', repo_path: '/r', task: 't' })
+    const firedSnapshot = {
+      ...created,
+      subagent_status: 'running' as const,
+      subagent_run_id: 'wf-race',
+      workflow_run_id: 'dead-before-save',
+    }
+
+    await store.crashRunningByLauncher('dead-before-save', 'child exited before tick save')
+
+    // Mutation killed: deleting the launcher-crash NOT EXISTS predicate lets
+    // the detached workflow persist as running after its owning child died.
+    expect(await store.saveIfActive(firedSnapshot)).toBe(false)
+    expect(store.get(created.id)?.subagent_status).toBe('crashed')
+    expect(store.get(created.id)?.failure_reason).toBe('child exited before tick save')
   })
 
   describe('terminalTransition — atomic conditional terminal write (§F6a race guard)', () => {

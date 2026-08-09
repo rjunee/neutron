@@ -426,11 +426,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // launcher's child died. Stamp every still-live workflow owned by its repo;
       // the Trident tick then performs the normal terminal transition + board
       // reconcile instead of leaving a durable `running` phantom until timeout.
-      onChildCrash: async ({ detail }) => {
-        // `cwd` is the run's repo_path today: worktrees are stamped only on the
-        // terminal done path, after this launcher has finished owning the run.
-        await tridentRuns.crashRunningByRepo(
-          cwd,
+      onChildCrash: async ({ generationKey, detail }) => {
+        await tridentRuns.crashRunningByLauncher(
+          generationKey,
           `inner workflow child crashed: ${detail}`,
         )
       },

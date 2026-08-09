@@ -82,6 +82,8 @@ export type Event =
       usage: TokenUsage
       session?: { id: string; last_active_at: number }
       substrate_instance_id: string
+      /** Exact persistent-pool child that produced this completion. */
+      launcher_session_key?: string
       dollars?: number
     }
   | {
