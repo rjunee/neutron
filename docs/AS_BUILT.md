@@ -8253,3 +8253,26 @@ Three mutants, one per link, each caught by exactly one test. The UI is still mi
 this is the producer, not the pane.
 
 Detail: `docs/as-built/2026-08-09-phase-model-producer.md`.
+
+## 2026-08-09 — Codex and Kimi are connectable from a phone
+
+The gateway's Codex surface is app-scoped (`/api/app/codex-auth`) and the WEB client has
+used it since it was built. **Mobile had no client and no screen**, so an owner with only
+a phone could not connect the cross-model reviewer at all — the reference deployment
+works only because provisioning wrote the credential to disk directly.
+
+Adds a **Model providers** section to mobile Integrations (above Shared credentials, so
+the free-text form reads as the escape hatch): Codex status + paste `auth.json` +
+disconnect via a new `app/lib/codex-credential-client.ts`, and a named Kimi K3 row.
+
+The Kimi row writes through the SAME global-credential store the free-text form uses and
+DERIVES its status from that list — a named row with its own storage path would mean a
+key entered here behaved differently from one entered there. The service id is a
+repeated literal (the app bundle carries no workspace deps), which makes that string
+load-bearing: a mismatch stores the key where nothing reads it and the reviewer stays
+silent, so the test asserts it.
+
+12 tests that PRESS the real controls; four mutants each caught, including "the Connect
+button is rendered but inert" — the failure a source check cannot see.
+
+Detail: `docs/as-built/2026-08-09-mobile-model-providers.md`.
