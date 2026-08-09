@@ -19,6 +19,7 @@ import type { CoreBackendFactoryMap } from './cores/install-bundled.ts'
 import type { CoresBackendFactoriesOptions } from './boot-cores-factories-types.ts'
 import { routeCodegenCancel } from './codegen-cancel-router.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 
 // Re-export the Cores-factory type contracts through this module so
 // existing importers of `TasksCoreOwnerRegistry` / `CoresBackendFactoriesOptions`
@@ -31,6 +32,34 @@ export type {
 import { createLogger } from '@neutronai/logger'
 
 const moduleLog = createLogger('cores-factories')
+
+/**
+ * The terminator `codegen_cancel` routes a Trident run through.
+ *
+ * When a composer threaded one, use it — it carries the production observer chain
+ * (board reconcile, skill-forge, and the `projects_changed` fan) and is the whole
+ * point of the thread. When nothing threaded one, a bare terminator is the honest
+ * fallback: the phase still flips, which is better than a cancel that does
+ * nothing. But it is fabricated HERE and LOGGED, never conjured by a default
+ * parameter inside the router, because an observer-less terminator returns
+ * `cancelled: true` with half the effects missing and looks exactly like success.
+ * The `codegen_orchestrator_not_wired` warning below is the same idea and the same
+ * precedent.
+ */
+function codegenCancelTerminator(
+  projectDb: CoresBackendFactoriesOptions['projectDb'],
+  threaded: TridentTerminator | undefined,
+): TridentTerminator {
+  if (threaded !== undefined) return threaded
+  moduleLog.warn('codegen_cancel_terminator_unwired', {
+    detail:
+      'note: no composer threaded a `tridentTerminator`, so `codegen_cancel` will ' +
+      'flip a Trident run to `stopped` WITHOUT running the terminal observers — no ' +
+      'board reconcile, no skill-forge hook, no projects_changed fan. Expected in ' +
+      'tests and legacy boots; NOT expected in the Open composition.',
+  })
+  return buildTridentTerminator({ store: new TridentRunStore(projectDb) })
+}
 
 export async function buildCoresBackendFactories(
   opts: CoresBackendFactoriesOptions,
@@ -314,7 +343,7 @@ export async function buildCoresBackendFactories(
             codegenOrchestratorFromOpts,
             new TridentRunStore(projectDb),
             project_slug,
-            ...(tridentTerminator !== undefined ? [tridentTerminator] : []),
+            codegenCancelTerminator(projectDb, tridentTerminator),
           ),
         }
       }
@@ -347,7 +376,7 @@ export async function buildCoresBackendFactories(
           new mod.CodegenOrchestrator({ runner }),
           new TridentRunStore(projectDb),
           project_slug,
-          ...(tridentTerminator !== undefined ? [tridentTerminator] : []),
+          codegenCancelTerminator(projectDb, tridentTerminator),
         ),
       }
     },

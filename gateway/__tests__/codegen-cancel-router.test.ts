@@ -31,6 +31,20 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+/**
+ * The bare terminator these cases mean: phase-only, no observers.
+ *
+ * Spelled out at every call because `routeCodegenCancel` no longer defaults it.
+ * That default was the defect — it fabricated an observer-less terminator, so a
+ * cancel returned `cancelled: true` while the board never reconciled and no
+ * `projects_changed` reached the rail, and no unit test could tell (each builds
+ * its own terminator anyway). Making it explicit here is the cost of making a
+ * missing production thread a typecheck failure.
+ */
+function bare(): ReturnType<typeof buildTridentTerminator> {
+  return buildTridentTerminator({ store: trident })
+}
+
 function legacy(): CodegenOrchestrator {
   const runner: CodegenRunner = {
     run: async () => ({ pr_number: 1, branch: 'legacy', worktree: '/tmp', summary: 'done' }),
@@ -46,7 +60,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     const run = await trident.create({
       id: 'trident-live', slug: 'live', project_slug: 'p', repo_path: '/repo', task: 'build',
     })
-    const router = routeCodegenCancel(legacy(), trident, 'p')
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
     const result = await router.cancel({ task_id: run.id }) as UnifiedCancelResult
 
@@ -77,7 +91,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
       phase: 'failed',
     })
     await trident.update(run.id, { failure_reason: 'workflow crashed' })
-    const router = routeCodegenCancel(legacy(), trident, 'p')
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
     const result = await router.cancel({ task_id: run.id }) as UnifiedCancelResult
 
@@ -90,7 +104,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
   test('MUTATION: bypassing the legacy tracker regresses the cancel path that already worked', async () => {
     const old = legacy()
     const { task_id } = await old.dispatch({ task: 'legacy build' })
-    const router = routeCodegenCancel(old, trident, 'p')
+    const router = routeCodegenCancel(old, trident, 'p', bare())
 
     const result = await router.cancel({ task_id }) as UnifiedCancelResult
 
@@ -102,7 +116,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     const run = await trident.create({
       id: '12345678-full-run-id', slug: 'prefix-run', project_slug: 'p', repo_path: '/repo', task: 'build',
     })
-    const router = routeCodegenCancel(legacy(), trident, 'p')
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
     const result = await router.cancel({ task_id: run.id.slice(0, 8) })
 
@@ -113,7 +127,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     const run = await trident.create({
       id: 'project-board-run', slug: 'project-run', project_slug: 'bare-project-id', repo_path: '/repo', task: 'build',
     })
-    const router = routeCodegenCancel(legacy(), trident, 'owner-handle')
+    const router = routeCodegenCancel(legacy(), trident, 'owner-handle', bare())
 
     expect(await router.status({ task_id: run.id })).toMatchObject({ run_id: run.id, phase: 'forge-init' })
     expect(await router.fetch({ task_id: run.id })).toMatchObject({ run_id: run.id, phase: 'forge-init' })
@@ -125,7 +139,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     const run = await trident.create({
       id: 'blank-reference-target', slug: 'blank-target', project_slug: 'p', repo_path: '/repo', task: 'build',
     })
-    const router = routeCodegenCancel(legacy(), trident, 'p')
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
     await expect(router.cancel({ task_id: '' })).rejects.toThrow('must be a non-empty string')
     expect(trident.get(run.id)?.phase).toBe('forge-init')
@@ -135,7 +149,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     const run = await trident.create({
       id: 'malformed-input-target', slug: 'malformed-target', project_slug: 'p', repo_path: '/repo', task: 'build',
     })
-    const router = routeCodegenCancel(legacy(), trident, 'p')
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
     await expect(router.status(null as never)).rejects.toBeInstanceOf(CodegenInputError)
     await expect(router.fetch({} as never)).rejects.toBeInstanceOf(CodegenInputError)
@@ -146,7 +160,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
   test('MUTATION: ambiguous shorthand must not select a run by recency', async () => {
     await trident.create({ id: '12345678-one', slug: 'shared', project_slug: 'one', repo_path: '/repo', task: 'one' })
     await trident.create({ id: '12345678-two', slug: 'shared', project_slug: 'two', repo_path: '/repo', task: 'two' })
-    const router = routeCodegenCancel(legacy(), trident, 'p')
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
     await expect(router.cancel({ task_id: '12345678' })).rejects.toThrow('reference is ambiguous')
     expect(trident.get('12345678-one')?.phase).toBe('forge-init')
@@ -157,7 +171,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     const run = await trident.create({
       id: 'trident-readable', slug: 'readable', project_slug: 'p', repo_path: '/repo', task: 'build widget',
     })
-    const router = routeCodegenCancel(legacy(), trident, 'p')
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
     expect(await router.status({ task_id: run.slug })).toMatchObject({
       status: 'forge-init', dispatch_path: 'trident', run_id: run.id, already_terminal: false,

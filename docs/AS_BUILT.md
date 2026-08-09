@@ -8051,3 +8051,35 @@ cancelled-but-still-running timer cannot clear an entry a newer start re-armed; 
 a lost `end` expires instead of suppressing every future typing start until
 restart. Mutants killed: removing the fail-safe fails 3, making every transition
 emit fails 2.
+
+
+## 2026-08-09 — `codegen_cancel`'s terminator is a required argument, and the composition path is covered
+
+The review's remaining blocker on the tool-initiated cancel was that the
+production observer composition had no coverage — "both the composer bind and the
+mountOpenCores path".
+
+The reason that mattered was a DEFAULT PARAMETER. `routeCodegenCancel` took
+`terminator: TridentTerminator = buildTridentTerminator({ store: trident })` — a
+terminator with no observer and no `onTransition`. If either hop broke, a cancel
+still flipped the phase and still returned `cancelled: true`, while the Work Board
+never reconciled, the skill-forge hook never ran, and no `projects_changed` reached
+the rail. No unit test could catch it, because each builds its own terminator; only
+the production composition could, and that was the untested part.
+
+The default is GONE. The parameter is required, so a missing thread is a typecheck
+failure — which it immediately was, on nine call sites. The one caller that
+legitimately has no observers to run (`boot-cores-factories.ts`, when no composer
+threaded one) now fabricates it EXPLICITLY via `codegenCancelTerminator` and logs
+`codegen_cancel_terminator_unwired`, the same precedent as the neighbouring
+`codegen_orchestrator_not_wired`. Verified firing, with a control.
+
+`open/__tests__/codegen-cancel-composition.test.ts` covers the pass-through
+behaviourally — a cancel through the MOUNTED backend must reach the terminator the
+caller supplied, and deleting the `mountOpenCores` forward reds it — plus three
+source-scoped assertions for the composer's bind, labelled weaker with the reason
+(the bind is inside the composer's closure; reaching it behaviourally needs the
+whole composition AND the Code-Gen Core installed).
+
+Also fixed: the codegen holder's unbound-deref error read "board terminator is not
+bound" — the SIBLING holder's name — which would send a reader to the wrong bind.

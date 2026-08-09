@@ -1574,7 +1574,9 @@ export function buildOpenGraphComposer(
           const pending = codegenTerminatorHolder.deref((terminator) =>
             terminator.terminate(id, phase, opts),
           )
-          if (pending === undefined) throw new Error('board terminator is not bound')
+          // Names THIS holder. It said 'board terminator' — the sibling's name —
+          // which would have sent a reader to the wrong bind entirely.
+          if (pending === undefined) throw new Error('codegen terminator is not bound')
           return pending
         },
       },

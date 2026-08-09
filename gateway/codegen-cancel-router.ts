@@ -36,13 +36,31 @@ export type UnifiedCodegenOrchestrator = Pick<CodegenOrchestrator, 'dispatch'> &
   cancel(input: { task_id: string }): Promise<UnifiedCancelResult>
 }
 
-/** Keep the legacy Code-Gen tool surface, but make its cancel operation aware of
- * the foundational Trident store that now owns `/code` dispatches. */
+/**
+ * Keep the legacy Code-Gen tool surface, but make its cancel operation aware of
+ * the foundational Trident store that now owns `/code` dispatches.
+ *
+ * `terminator` IS REQUIRED, and used to have a default —
+ * `= buildTridentTerminator({ store: trident })` — which is the exact shape of
+ * silent degrade this repo keeps getting caught by. That default fabricated a
+ * terminator with NO observer and NO `onTransition`, so a cancel still flipped the
+ * phase and returned `cancelled: true` while the board never reconciled, the
+ * skill-forge hook never ran, and no `projects_changed` reached the rail. Every
+ * unit test passed, because a unit test constructs its own terminator anyway; the
+ * only thing that could have caught it was the production composition, which was
+ * the untested part.
+ *
+ * So the caller must now SAY which terminator it means. A missing thread is a
+ * typecheck failure rather than a working-looking cancel with half the effects
+ * missing, and the one place that legitimately has no observers to run
+ * (`boot-cores-factories.ts`, when no composer threaded one) fabricates it
+ * EXPLICITLY and logs that it did.
+ */
 export function routeCodegenCancel(
   legacy: CodegenOrchestrator,
   trident: TridentRunStore,
   _ownerSlug: string,
-  terminator: TridentTerminator = buildTridentTerminator({ store: trident }),
+  terminator: TridentTerminator,
 ): UnifiedCodegenOrchestrator {
   const validate = (input: unknown, tool: string): string => {
     if (typeof input !== 'object' || input === null) {
