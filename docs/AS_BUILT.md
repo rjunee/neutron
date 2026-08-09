@@ -14,8 +14,11 @@ references are rejected without changing any run. A live
 Trident run is atomically moved to `stopped` through the existing terminal-write
 chokepoint. A run that already reached `done`, `failed`, or `stopped` is returned
 truthfully with its phase and persisted failure reason; it is not mislabeled as
-an unknown run. Tool cancel suppresses the delivery observer because the tool
-result itself is the user notification. This is a run-lifecycle control only and
+an unknown run. Malformed tool payloads retain the Code-Gen input-error contract
+instead of leaking native property-access errors. Tool cancel uses a dedicated
+terminal-observer composition: delivery is a no-op because the tool result is the
+user notification, while board reconciliation and skill-forge audit still run.
+This is a run-lifecycle control only and
 does not add chat-turn cancel or a Stop button. An already-started inner workflow
 cannot currently be killed; the durable run is stopped so its eventual output
 cannot advance or merge through the Trident loop.

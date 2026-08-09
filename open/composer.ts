@@ -1566,11 +1566,12 @@ export function buildOpenGraphComposer(
     // factory's write was skipped and `/task` had no deps to dispatch against.
     const tasksCoreRegistry = new InMemoryTasksCoreOwnerRegistry()
     const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
+    const codegenTerminatorHolder = late<TridentTerminator>('codegen_terminator')
     const coresWiring = await mountOpenCores({
       projectDb: db,
       tridentTerminator: {
         terminate: async (id, phase, opts) => {
-          const pending = boardTerminatorHolder.deref((terminator) =>
+          const pending = codegenTerminatorHolder.deref((terminator) =>
             terminator.terminate(id, phase, opts),
           )
           if (pending === undefined) throw new Error('board terminator is not bound')
@@ -4922,6 +4923,23 @@ export function buildOpenGraphComposer(
         // tick loop fires (`on_run_transition` below), so a connected rail drops
         // the cancelled run from `live_runs` immediately instead of retaining it
         // until the next unrelated event. Same two best-effort, diff-gated fans.
+        onTransition: {
+          onTransition: async (run): Promise<void> => {
+            fanWorkBoardChanged(run.project_slug)
+            emitProjectsChangedIfChanged(OWNER_USER_ID)
+          },
+        },
+      }),
+    )
+    codegenTerminatorHolder.bind(
+      buildTridentTerminator({
+        store: boardRunStore,
+        observer: composeTerminalHook(
+          { onTerminal: async (): Promise<void> => {} },
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+            (o): o is (run: TridentRun) => Promise<void> => o !== null,
+          ),
+        ),
         onTransition: {
           onTransition: async (run): Promise<void> => {
             fanWorkBoardChanged(run.project_slug)

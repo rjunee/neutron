@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 
-import { CodegenOrchestrator, type CodegenRunner } from '@neutronai/codegen-core'
+import { CodegenInputError, CodegenOrchestrator, type CodegenRunner } from '@neutronai/codegen-core'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
@@ -54,7 +54,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     expect(trident.get(run.id)).toMatchObject({ phase: 'stopped', failure_reason: 'cancelled via codegen_cancel' })
   })
 
-  test('MUTATION: tool cancel runs transition fans but suppresses duplicate delivery observers', async () => {
+  test('MUTATION: suppressing all terminal observers skips project-board reconciliation', async () => {
     const run = await trident.create({
       id: 'trident-observed', slug: 'observed', project_slug: 'p', repo_path: '/repo', task: 'build',
     })
@@ -68,7 +68,7 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
 
     await router.cancel({ task_id: run.id })
 
-    expect(calls).toEqual(['transition'])
+    expect(calls).toEqual(['transition', 'terminal'])
   })
 
   test('MUTATION: treating an already-terminal Trident run as unknown restores the false alarm', async () => {
@@ -128,6 +128,18 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     const router = routeCodegenCancel(legacy(), trident, 'p')
 
     await expect(router.cancel({ task_id: '' })).rejects.toThrow('must be a non-empty string')
+    expect(trident.get(run.id)?.phase).toBe('forge-init')
+  })
+
+  test('MUTATION: dereferencing malformed tool payloads leaks native TypeErrors', async () => {
+    const run = await trident.create({
+      id: 'malformed-input-target', slug: 'malformed-target', project_slug: 'p', repo_path: '/repo', task: 'build',
+    })
+    const router = routeCodegenCancel(legacy(), trident, 'p')
+
+    await expect(router.status(null as never)).rejects.toBeInstanceOf(CodegenInputError)
+    await expect(router.fetch({} as never)).rejects.toBeInstanceOf(CodegenInputError)
+    await expect(router.cancel({ task_id: 7 } as never)).rejects.toBeInstanceOf(CodegenInputError)
     expect(trident.get(run.id)?.phase).toBe('forge-init')
   })
 

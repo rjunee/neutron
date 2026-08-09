@@ -44,7 +44,11 @@ export function routeCodegenCancel(
   _ownerSlug: string,
   terminator: TridentTerminator = buildTridentTerminator({ store: trident }),
 ): UnifiedCodegenOrchestrator {
-  const validate = (taskId: string, tool: string): string => {
+  const validate = (input: unknown, tool: string): string => {
+    if (typeof input !== 'object' || input === null) {
+      throw new CodegenInputError(tool, 'input', 'must be an object')
+    }
+    const taskId = (input as { task_id?: unknown }).task_id
     if (typeof taskId !== 'string' || taskId.trim().length === 0) {
       throw new CodegenInputError(tool, 'task_id', 'must be a non-empty string')
     }
@@ -66,7 +70,7 @@ export function routeCodegenCancel(
     get(target, prop) {
       if (prop === 'status' || prop === 'fetch') {
         return async (input: { task_id: string }) => {
-          const taskId = validate(input.task_id, `codegen_${prop}`)
+          const taskId = validate(input, `codegen_${prop}`)
           try {
             return await target[prop]({ task_id: taskId })
           } catch (error) {
@@ -82,7 +86,7 @@ export function routeCodegenCancel(
         return typeof value === 'function' ? value.bind(target) : value
       }
       return async (input: { task_id: string }): Promise<UnifiedCancelResult> => {
-        const taskId = validate(input.task_id, 'codegen_cancel')
+        const taskId = validate(input, 'codegen_cancel')
         try {
           const result = await target.cancel({ task_id: taskId })
           return {
@@ -112,7 +116,7 @@ export function routeCodegenCancel(
         const result = await terminator.terminate(
           before.id,
           'stopped',
-          { reason: 'cancelled via codegen_cancel', runObservers: false },
+          { reason: 'cancelled via codegen_cancel' },
         )
         const current = result.run ?? trident.get(before.id)
         if (current === null) throw new CodegenTaskNotFoundError(taskId)
