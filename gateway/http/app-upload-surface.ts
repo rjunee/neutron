@@ -325,12 +325,31 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
   // IDEMPOTENT: a sidecar already on disk (a re-upload of the same bytes) is
   // never re-transcribed, so the ASR API is called at most once per distinct
   // audio. ASR must NEVER fail the upload — every path is swallowed.
+  //
+  // THE TRANSCRIPT IS ALSO RETURNED TO THE CALLER, which is what makes a spoken
+  // word findable in chat search. The client owns its own sent messages — a user
+  // message is never persisted server-side (only agent messages get a `chat_log`
+  // row) — so the upload RESPONSE is the only place the client can learn the
+  // transcript without inventing a second round trip or a new frame. It stamps it
+  // on the message it is about to send, and its local store indexes it.
+  let transcript: string | null = null
   if (sniffed.startsWith('audio/') && ctx.transcribeAudio !== undefined) {
     const sidecar = join(user_dir, `${hash}.txt`)
-    if (!existsSync(sidecar)) {
+    if (existsSync(sidecar)) {
+      // The IDEMPOTENT path: these bytes were transcribed before, so the seam is
+      // deliberately not re-invoked. Read the sidecar instead of returning null —
+      // otherwise a re-upload of the same audio would be searchable the first time
+      // and silently not the second, which is worse than never working.
+      try {
+        transcript = await readFile(sidecar, 'utf8')
+      } catch {
+        /* an unreadable sidecar is "no transcript", never an upload failure. */
+      }
+    } else {
       try {
         const text = await ctx.transcribeAudio({ bytes: buffer, content_type: sniffed, hash })
         if (text !== null && text.trim().length > 0) {
+          transcript = text
           await mkdir(user_dir, { recursive: true })
           const tmp = `${sidecar}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
           try {
@@ -350,7 +369,16 @@ async function handleUpload(req: Request, ctx: UploadContext): Promise<Response>
     }
   }
   const url = `${URL_PREFIX}/${resolved.user_id}/${hash}.${ext}`
-  return jsonOk({ url, content_type: sniffed, size_bytes: buffer.length })
+  // The key is OMITTED rather than sent as null when there is no transcript, so an
+  // image upload's response shape is untouched and a keyless box is indistinguishable
+  // from the pre-existing behaviour.
+  const trimmedTranscript = transcript !== null ? transcript.trim() : ''
+  return jsonOk({
+    url,
+    content_type: sniffed,
+    size_bytes: buffer.length,
+    ...(trimmedTranscript.length > 0 ? { transcript: trimmedTranscript } : {}),
+  })
 }
 
 interface GetContext {

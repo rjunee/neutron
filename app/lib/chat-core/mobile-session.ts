@@ -230,12 +230,19 @@ export class MobileChatSession {
    */
   async send(
     body: string,
-    opts: { client_msg_id?: string; project_id?: string; attachments?: readonly string[] } = {},
+    opts: {
+      client_msg_id?: string;
+      project_id?: string;
+      attachments?: readonly string[];
+      /** Auto-transcript of an audio attachment — indexed for search, never rendered. */
+      transcript?: string;
+    } = {},
   ): Promise<void> {
     const enqueueInput: Parameters<SendQueue['enqueue']>[0] = { topic_id: this.topic_id, body };
     if (opts.client_msg_id !== undefined) enqueueInput.client_msg_id = opts.client_msg_id;
     if (opts.project_id !== undefined) enqueueInput.project_id = opts.project_id;
     if (opts.attachments !== undefined) enqueueInput.attachments = opts.attachments;
+    if (opts.transcript !== undefined) enqueueInput.transcript = opts.transcript;
     await this.queue.enqueue(enqueueInput);
     this.emitChange();
     await this.flush();

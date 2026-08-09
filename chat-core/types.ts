@@ -154,6 +154,22 @@ export interface ChatMessage {
   created_at: number
   status: SendStatus
   /**
+   * The auto-transcript of an audio attachment on this message, when there is one.
+   *
+   * WHY IT IS A FIELD OF ITS OWN RATHER THAN PART OF `body`. The body is what the
+   * owner SEES, and a voice note's bubble is the player — appending the transcript to
+   * it would change the rendering of every existing voice note and duplicate text the
+   * agent's turn already carries separately. But the body is also the ONLY thing the
+   * search index covers, which is why a spoken word was unfindable: the audio was
+   * transcribed, the text was durable on disk, memory received it, and search could
+   * not see any of it.
+   *
+   * So: `body` stays the display text, `transcript` is indexed ALONGSIDE it, and both
+   * halves have exactly one writer. Optional + additive, so every existing
+   * construction site stays valid and a message without audio is unchanged.
+   */
+  transcript?: string | null
+  /**
    * Track B Phase 4 — device ids that have received (delivered) this message.
    * Server-tracked: the gateway records every connected device at fan-out time
    * and stamps the list on the outbound envelope. Optional + additive so every
