@@ -449,6 +449,8 @@ export interface ActiveTurn {
    *      `incarnation` nonce makes `<oldNonce>:1` ≠ `<newNonce>:1`, so a straggler
    *      from a prior incarnation can never complete a turn in the new one. */
   turnId: string
+  /** Serializes additional user messages so concurrent sends preserve wire order. */
+  injectionTail?: Promise<void>
   /** Set true by `onDeath` when the REPL process exited mid-turn — signals the
    *  driver to enqueue this turn's dropped inbound for replay-after-resume
    *  (pending-respawns queue, brief § 2 row #11 / § 6 acceptance #1). */

@@ -43,9 +43,9 @@ describe('pool.ts liveness keepalive', () => {
     // The push right after `injectMessage` means "the turn actually went in", which is
     // genuine progress and must advance the real-activity clock. Marking it synthetic
     // would make a just-injected turn look like it had done nothing.
-    const idx = src.indexOf('await injectMessage(')
+    const idx = src.indexOf('const initialDelivery = injectMessage(session.channelPort, spec.prompt, turn.turnId)')
     expect(idx).toBeGreaterThan(-1)
-    const push = /channel\.push\(\{\s*kind:\s*'status',[^}]*\}\)/.exec(src.slice(idx, idx + 400))
+    const push = /channel\.push\(\{\s*kind:\s*'status',[^}]*\}\)/.exec(src.slice(idx, idx + 800))
     expect(push).not.toBeNull()
     expect(push![0]).not.toContain('keepalive')
   })

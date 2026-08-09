@@ -84,6 +84,7 @@ import {
   PREWARM_AWAIT_CAP_MS_DEFAULT,
 } from '@neutronai/onboarding/interview/llm-timeouts.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import { injectPersistentReplActiveTurn } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
 import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
@@ -4524,6 +4525,12 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
             substrate: liveAgentSubstrate,
+            injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
+              substrate_instance_id: `cc-agent-${owner_handle}`,
+              user_id: OWNER_USER_ID,
+              project_id: turn.project_id ?? 'general',
+              text,
+            }),
             // ACTIVITY INSPECTOR — tee EVERY substrate event for the live chat turn
             // into the shared ring, and bracket the dispatch so the inspector can
             // tell a resting `idle` session from a `wedged` one. This is the seam

@@ -1517,6 +1517,7 @@ function Composer({
   const hasText = useComposer((s) => s.text.trim().length > 0)
   const composerRuntime = useComposerRuntime()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const sendInFlightRef = useRef(false)
 
   const canSend = hasText || draft.hasReady
 
@@ -1531,7 +1532,29 @@ function Composer({
     // value) so this component needn't re-render per keystroke.
     const body = composerRuntime.getState().text.trim()
     const urls = draft.readUrls()
+    if (sendInFlightRef.current) return
+    if (!canSend) return
     if (body.length === 0 && urls.length === 0) return
+    if (controller.getViewModel().isRunning) {
+      // assistant-ui intentionally refuses `runtime.send()` while running;
+      // bypass that client-only gate because the persistent REPL supports
+      // adding context to its active turn.
+      // Clear synchronously so two Enter key events cannot submit the same
+      // text while uploads/send are awaiting.
+      composerRuntime.setText('')
+      sendInFlightRef.current = true
+      void (async () => {
+        const ready = await draft.waitForUploads()
+        await controller.send(body, ready.length > 0 ? ready : undefined)
+        draft.clear()
+      })().catch(() => {
+        const newer = composerRuntime.getState().text.trim()
+        composerRuntime.setText(newer.length === 0 ? body : `${body}\n\n${newer}`)
+      }).finally(() => {
+        sendInFlightRef.current = false
+      })
+      return
+    }
     if (body.length > 0) {
       // Text (optionally + attachments): route through the runtime so Enter and
       // the Send button share ONE path — `onNew` waits for in-flight uploads,
@@ -1541,12 +1564,15 @@ function Composer({
       // Attachment-only: assistant-ui won't send an empty composer, so hand the
       // staged URLs to the controller directly. Await any still-uploading items
       // first (don't drop them), then clear the draft.
+      sendInFlightRef.current = true
       void (async () => {
         const ready = await draft.waitForUploads()
         if (ready.length === 0) return
         await controller.send('', ready)
         draft.clear()
-      })()
+      })().catch(() => undefined).finally(() => {
+        sendInFlightRef.current = false
+      })
     }
   }
 
@@ -1575,7 +1601,19 @@ function Composer({
           className="car-file-input"
           onChange={onPick}
         />
-        <ComposerPrimitive.Input className="car-input" placeholder="Message Neutron…" autoFocus rows={1} />
+        <ComposerPrimitive.Input
+          className="car-input"
+          placeholder="Message Neutron…"
+          autoFocus
+          rows={1}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && canSend) {
+              event.preventDefault()
+              event.stopPropagation()
+              send()
+            }
+          }}
+        />
         {/*
           There is deliberately NO Stop/cancel control here. One used to render
           in this slot (`ComposerPrimitive.Cancel`) and it was permanently
@@ -1591,25 +1629,18 @@ function Composer({
           the owner twice for asking it to stop. Decision + full reasoning:
           SPEC.md Decisions Log 2026-08-03.
 
-          While a turn is running the send button stays PRESENT but disabled,
-          rather than unmounting, so the composer doesn't reflow on every turn.
+          Claude Code accepts additional context during a running turn, so Send
+          remains live while the typing indicator is present.
         */}
-        <ThreadPrimitive.If running={false}>
-          <button
-            type="button"
-            className="car-send"
-            aria-label="Send"
-            disabled={!canSend}
-            onClick={send}
-          >
-            Send
-          </button>
-        </ThreadPrimitive.If>
-        <ThreadPrimitive.If running>
-          <button type="button" className="car-send" aria-label="Send" disabled>
-            Send
-          </button>
-        </ThreadPrimitive.If>
+        <button
+          type="button"
+          className="car-send"
+          aria-label="Send"
+          disabled={!canSend}
+          onClick={send}
+        >
+          Send
+        </button>
       </ComposerPrimitive.Root>
     </div>
   )

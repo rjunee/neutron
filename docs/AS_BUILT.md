@@ -7969,3 +7969,58 @@ delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; a
 short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
 no-reply gate is untouched. No feature flag — the gate ships on as default
 behaviour.
+## Mid-turn message injection (#516)
+
+The web composer keeps Send enabled while the agent is typing. A second message
+for the same topic bypasses the completed-turn chain and is posted immediately to
+the persistent REPL dev-channel as additional context for the active turn. It
+reuses the active turn id without advancing fallback reply-correlation state, so
+the running turn's eventual reply remains correlated normally. If no active turn
+exists at the injection instant, the message falls back to the existing ordered
+turn path instead of being dropped.
+
+Mutation-named tests pin all three boundaries: the gateway test fails if the
+second send is queued until completion, the persistent-REPL test asserts the
+additional `/message` reached the wire before the first reply, and the React test
+fails if the composer is disabled while streaming or IME composition Enter is
+submitted. General chat uses the same `general` route key for registration and
+lookup. A successful dev-channel delivery stays successful if the turn settles
+while its response is returning, preventing a duplicate queued turn; failed
+delivery leaves Retry text and attachment state untouched. Injection is offered
+only while exactly one turn is active: a queued turn, Retry, seed, reconnect, or
+button-prompt answer always follows the normal ordered path. Injected history is
+stamped with the inbound observation time so a racing agent reply cannot render
+before it; attachment-only sends persist their inbound reference while resolved
+local paths remain confined to the REPL payload. Active-turn routes include the
+non-secret credential identity and refuse ambiguous credential-rotation matches.
+Typing refcounts have a fail-safe beyond the turn's forty-five-minute absolute
+ceiling that clears a lost `end`, fans the matching ephemeral end frame, and
+refreshes the rail working state instead of wedging that topic until restart.
+The composer clears the
+submitted text before awaiting the send, then restores it only when delivery
+fails (ahead of any newer draft text). An in-flight send claim prevents two
+Enter presses from reusing the same staged attachment URLs before the first
+upload/send clears them.
+
+## 2026-08-09 — the typing refcount's guard is now killable by a test
+
+PR #145's last open finding was exact: *"Typing-refcount suppression guard and
+46-minute fail-safe have zero killing test coverage, and depth can leak
+permanently."* Both halves were true, and neither was reachable — the logic was a
+closure inside `wireAppWs` keyed on a real `setTimeout(…, 46 * 60_000)`. No test
+waits 46 minutes, and a test that reaches into a closure is not testing the
+production path.
+
+The decision logic moved to `open/wiring/typing-refcount.ts`, pure apart from an
+INJECTED scheduler; `open/wiring/app-ws.ts` is the only caller and passes the real
+one. `open/__tests__/typing-refcount.test.ts` fires the captured timer, so the
+46-minute path runs under test with only the caller changed.
+
+Behaviour is unchanged and now pinned: the outermost `start` and the final `end`
+are the only visible edges (an inner pair emits nothing, so a fast second turn
+cannot clear the first turn's dots); a stray `end` never drives depth negative; the
+window is re-armed on every transition that leaves the count positive; a
+cancelled-but-still-running timer cannot clear an entry a newer start re-armed; and
+a lost `end` expires instead of suppressing every future typing start until
+restart. Mutants killed: removing the fail-safe fails 3, making every transition
+emit fails 2.
