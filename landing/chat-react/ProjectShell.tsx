@@ -68,6 +68,7 @@ import type { BootstrapConfig } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import {
   CHAT_TAB,
+  GENERAL_DOCS_TAB,
   GENERAL_WORK_TAB,
   WebTabsClient,
   appRouteView,
@@ -473,7 +474,18 @@ export function ProjectShell({
           // The engine's global set is Admin-only, so General had no `workboard`
           // descriptor and thus no Work view (the gap this closes). Mirrors the
           // mobile shell's `ensureWorkTab` injection — one code path, no branch.
-          setTabs([CHAT_TAB, GENERAL_WORK_TAB, ...globalTabs.filter(canRenderTab)])
+          // chat → work → docs, then whatever the engine's global set adds (Admin).
+          // The DOCS tab is injected for the same reason as Work: the engine's
+          // global set is Admin-only, so General never received a `documents`
+          // descriptor even though its docs are backend-reachable — and without
+          // one, `pendingDoc` below waits forever and a Work card's plan link is
+          // a dead click.
+          setTabs([
+            CHAT_TAB,
+            GENERAL_WORK_TAB,
+            GENERAL_DOCS_TAB,
+            ...globalTabs.filter(canRenderTab),
+          ])
           setTabsScope('')
         })
         .catch(() => {
@@ -640,13 +652,25 @@ export function ProjectShell({
   // scroll state survive — only its visibility toggles.
   const chatHidden = resolvedActiveKey !== CHAT_KEY
 
-  // A Work card's ▸ spec-doc link opens the doc in the Documents tab. General's
-  // tab set is Chat + Work + Admin — it has NO Documents tab, so `onOpenDocLink`
-  // would set a pending doc the resolver can never satisfy (it waits for a `docs`
-  // tab), leaving a dead button (Codex P2). So we DON'T wire `onOpenDoc` into
-  // General's Work surface: `WorkBoardTab` then renders the spec-doc ref as a
-  // STATIC label instead of a clickable no-op. Named projects keep the live link.
-  const workOpenDoc = isGeneral ? undefined : onOpenDocLink
+  // A Work card's ▸ spec-doc link opens the doc in the Documents tab — in EVERY
+  // scope, General included.
+  //
+  // This used to read `isGeneral ? undefined : onOpenDocLink`. The reason was
+  // sound when written: General's tab set was Chat + Work + Admin with no
+  // Documents tab, so a doc link would set a pending doc the resolver could never
+  // satisfy — a dead button (Codex P2). Suppressing it was the right call for
+  // that tab set.
+  //
+  // General now HAS a Documents tab (`generalScopeTabs`, chat → work → docs), so
+  // the precondition is gone and the guard had inverted into the bug it was
+  // written to prevent: the owner's General work card rendered its plan link as a
+  // static label and clicking it did nothing.
+  //
+  // The lesson worth keeping: this guard encoded a fact about ANOTHER module's
+  // tab set with no mechanical link back to it, so changing that tab set could
+  // not fail here. The doc link now depends only on the resolver, which is a
+  // property of the scope's own tabs rather than a hardcoded name.
+  const workOpenDoc = onOpenDocLink
 
   // Workspace-identity seat (left of the tabs): the active scope's emoji + name.
   // General → 💬 General; a project → its emoji (server, else generic) + label.

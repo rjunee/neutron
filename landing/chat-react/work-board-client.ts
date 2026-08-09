@@ -33,6 +33,7 @@
  * a live server.
  */
 
+import { GENERAL_HTTP_ID, httpProjectSegment } from './general-scope'
 import {
   GatewayClientError,
   GatewayHttpClient,
@@ -163,11 +164,19 @@ export class WorkBoardClientError extends GatewayClientError {
  * over HTTP while every other layer keeps treating it as ''. Named ids pass
  * through untouched.
  */
-export const GENERAL_WORK_BOARD_PROJECT_ID = 'general'
+export const GENERAL_WORK_BOARD_PROJECT_ID = GENERAL_HTTP_ID
 
-/** Map the client-side scope id to its HTTP path segment ('' ⇒ General). */
+/**
+ * Map the client-side scope id to its HTTP path segment ('' ⇒ General).
+ *
+ * DELEGATES to the shared `general-scope` rule rather than re-implementing it.
+ * This normaliser used to be the only one on the web, and `docs-client.ts`
+ * interpolated a raw `''` into nine URLs — so General's Documents tab 400'd while
+ * its Work board worked. One rule, one place; a second private copy is how the
+ * two spellings drift apart again.
+ */
 export function workBoardPathSegment(project_id: string): string {
-  return project_id.length === 0 ? GENERAL_WORK_BOARD_PROJECT_ID : project_id
+  return httpProjectSegment(project_id)
 }
 
 export type WorkBoardClientOptions = GatewayHttpClientOptions

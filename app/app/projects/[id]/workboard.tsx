@@ -34,7 +34,7 @@
  * guard, then the body. All sizing flows from `theme.ts` tokens.
  */
 
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
@@ -66,7 +66,11 @@ import {
   workActivityIndicator,
   workActivityState,
 } from '../../../lib/work-board-activity';
-import { WorkBoardClient, type WorkBoardItem } from '../../../lib/work-board-client';
+import {
+  WorkBoardClient,
+  docPathFromDesignRef,
+  type WorkBoardItem,
+} from '../../../lib/work-board-client';
 import { boardErrorCopy, dragReorderTarget, splitBoard } from '../../../lib/work-board-helpers';
 import { startWorkBoardLive } from '../../../lib/work-board-live';
 
@@ -96,10 +100,27 @@ export default function WorkBoardTab() {
     );
   }
 
-  return <WorkBoardBody projectId={railIdToScope(railId)} token={user.token} />;
+  return <WorkBoardBody projectId={railIdToScope(railId)} railId={railId} token={user.token} />;
 }
 
-function WorkBoardBody({ projectId, token }: { projectId: string; token: string }) {
+/**
+ * `projectId` is the API SCOPE (General ⇒ `''`); `railId` is the ROUTE segment
+ * (General ⇒ `~general`). Both are needed and they are not interchangeable: the
+ * work-board client is scope-addressed, but a `router.push` built from the scope
+ * would produce `/projects//docs` for General — a dead route on the one board
+ * that most needed the link. `docs.tsx` builds its own self-links from the route
+ * id for the same reason.
+ */
+function WorkBoardBody({
+  projectId,
+  railId,
+  token,
+}: {
+  projectId: string;
+  railId: string;
+  token: string;
+}) {
+  const router = useRouter();
   const config = useMemo(() => loadAppConfig(), []);
   const deviceId = useMemo(() => makeDeviceId(), []);
   const client = useMemo(
@@ -264,6 +285,27 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
       });
   }, [client, projectId, newTitle, adding, refresh]);
 
+  // A card's ▸ spec-doc chip opens that doc in this project's Documents tab.
+  //
+  // RETURNS `undefined`, NOT A NO-OP HANDLER, when the card has no in-app doc.
+  // `WorkBoardRow` keys three things off `onOpenDoc === undefined` — the
+  // accessibility role (`button` vs `text`), `disabled`, and the press handler —
+  // so handing it a function that does nothing would announce a button to a
+  // screen reader and give a sighted owner a chip that swallows taps. The
+  // absence IS the signal.
+  const openDoc = useCallback(
+    (ref: string | null): (() => void) | undefined => {
+      const path = docPathFromDesignRef(ref);
+      if (path === null) return undefined;
+      return () => {
+        router.push(
+          `/projects/${encodeURIComponent(railId)}/docs?path=${encodeURIComponent(path)}`,
+        );
+      };
+    },
+    [router, railId],
+  );
+
   const { active, completed } = splitBoard(items);
   const indicator = workActivityIndicator(activityState);
 
@@ -335,6 +377,7 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
               onPlay={() =>
                 runMutation(it.id, client.start(projectId, it.id))
               }
+              onOpenDoc={openDoc(it.design_doc_ref)}
             />
           ))}
 
