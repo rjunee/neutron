@@ -362,6 +362,32 @@ function MicGlyph({ color }: { color: string }): React.ReactElement {
 const VOICE_CANCEL_SLIDE_PT = 64;
 
 /**
+ * How far outside the mic button the press stays ALIVE while the finger slides.
+ *
+ * THIS IS THE SLIDE-TO-CANCEL BUG (#521), and the arithmetic above was never the
+ * problem. `Pressable` releases a press once the touch leaves the button plus its
+ * retention offset — RN's default is a couple of dozen points, and the mic button
+ * is 44pt. The gesture requires travelling {@link VOICE_CANCEL_SLIDE_PT} = 64pt,
+ * which is comfortably outside that. So the press TERMINATED mid-slide: `onPressOut`
+ * fired while `holding.cancelling` was still false, the release resolved as 'send',
+ * and the View stopped receiving `onTouchMove` before the threshold could ever be
+ * crossed. Sliding away didn't cancel the recording — it SENT it, which is the
+ * worst possible reading of "cancel".
+ *
+ * The retention region therefore has to be larger than the gesture it is meant to
+ * survive, with room for the arc a one-handed thumb actually takes. Generous on
+ * purpose: retention costs nothing until a press is already in progress, and the
+ * failure it prevents destroys the user's intent in the least recoverable
+ * direction.
+ */
+const VOICE_PRESS_RETENTION_PT = {
+  top: VOICE_CANCEL_SLIDE_PT * 2,
+  bottom: VOICE_CANCEL_SLIDE_PT * 2,
+  left: VOICE_CANCEL_SLIDE_PT * 4,
+  right: VOICE_CANCEL_SLIDE_PT * 4,
+} as const;
+
+/**
  * How long the finger must stay down before the press counts as a HOLD.
  *
  * This is a classification delay and nothing else. It used to be the delay
@@ -806,6 +832,9 @@ export function InputComposer({
                 onLongPress={handleVoiceHoldStart}
                 onPressOut={handleVoiceRelease}
                 onTouchMove={handleVoiceTouchMove}
+                // Without this the press dies before the slide can arm — see
+                // VOICE_PRESS_RETENTION_PT.
+                pressRetentionOffset={VOICE_PRESS_RETENTION_PT}
                 delayLongPress={VOICE_LONG_PRESS_MS}
                 disabled={disabled || sending}
                 hitSlop={ACTION_HIT_SLOP_PT}
