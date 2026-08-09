@@ -8083,3 +8083,13 @@ whole composition AND the Code-Gen Core installed).
 
 Also fixed: the codegen holder's unbound-deref error read "board terminator is not
 bound" — the SIBLING holder's name — which would send a reader to the wrong bind.
+
+Also on this branch: `TridentRunReferenceAmbiguousError` no longer escapes the
+Code-Gen tool contract. `resolveReference` throws it when a short prefix matches
+more than one run; the MCP guard maps the Core's own error types to structured tool
+failures and lets anything else out as a raw internal error, so an ambiguous prefix
+produced a stack-shaped failure instead of "pass more of the id". It is translated
+at the router boundary to `CodegenInputError` on `task_id`. An existing test had
+pinned the LEAKED message (`'reference is ambiguous'`) — updated to the contract
+error, with its real guarantee (an ambiguous prefix must not select by recency)
+left exactly as it was. Mutant: removing the translation reds three tests.

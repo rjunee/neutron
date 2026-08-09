@@ -162,7 +162,12 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
     await trident.create({ id: '12345678-two', slug: 'shared', project_slug: 'two', repo_path: '/repo', task: 'two' })
     const router = routeCodegenCancel(legacy(), trident, 'p', bare())
 
-    await expect(router.cancel({ task_id: '12345678' })).rejects.toThrow('reference is ambiguous')
+    // The message moved from the STORE's wording to the Code-Gen tool contract's
+    // (see the ambiguity describe below): the raw `TridentRunReferenceAmbiguousError`
+    // used to escape the MCP boundary as an internal error. What this case actually
+    // guards is unchanged and is the two phase assertions underneath — an ambiguous
+    // prefix must not pick a run by recency.
+    await expect(router.cancel({ task_id: '12345678' })).rejects.toThrow('more of the id')
     expect(trident.get('12345678-one')?.phase).toBe('forge-init')
     expect(trident.get('12345678-two')?.phase).toBe('forge-init')
   })
@@ -206,6 +211,53 @@ describe('one codegen_cancel surface routes both dispatch paths', () => {
 
     expect(result).toMatchObject({ cancelled: true, dispatch_path: 'trident', phase: 'stopped' })
     expect(transitions).toEqual([run.id])
+    expect(trident.get(run.id)?.phase).toBe('stopped')
+  })
+})
+
+describe('an ambiguous prefix is a bad ARGUMENT, not an internal error', () => {
+  test('two runs matching one prefix → CodegenInputError, not the store class', async () => {
+    // `resolveReference` throws `TridentRunReferenceAmbiguousError`, which is
+    // foreign to the Code-Gen tool surface: the MCP guard maps the Core's own
+    // error types to structured tool failures and lets anything else escape as a
+    // raw internal error. So the owner typing an ambiguous prefix got a
+    // stack-shaped failure instead of being told to type more of the id.
+    await trident.create({
+      id: 'ambig-aaaa-1', slug: 'amb1', project_slug: 'p', repo_path: '/repo', task: 'one',
+    })
+    await trident.create({
+      id: 'ambig-aaaa-2', slug: 'amb2', project_slug: 'p', repo_path: '/repo', task: 'two',
+    })
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
+
+    await expect(router.cancel({ task_id: 'ambig-aaaa' })).rejects.toBeInstanceOf(CodegenInputError)
+  })
+
+  test('the message says what to DO about it, and names the prefix', async () => {
+    await trident.create({
+      id: 'dup-bbbb-1', slug: 'dup1', project_slug: 'p', repo_path: '/repo', task: 'one',
+    })
+    await trident.create({
+      id: 'dup-bbbb-2', slug: 'dup2', project_slug: 'p', repo_path: '/repo', task: 'two',
+    })
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
+
+    const err = await router.cancel({ task_id: 'dup-bbbb' }).catch((e: unknown) => e)
+    expect(String((err as Error).message)).toContain('more of the id')
+    expect(String((err as Error).message)).toContain('dup-bbbb')
+  })
+
+  test('an UNAMBIGUOUS prefix still resolves — the translation is not a blanket catch', async () => {
+    // Guards against "fix" by swallowing: if the try/catch caught everything, or
+    // the predicate matched too widely, a good prefix would fail too.
+    const run = await trident.create({
+      id: 'unique-cccc-1', slug: 'uniq', project_slug: 'p', repo_path: '/repo', task: 'one',
+    })
+    const router = routeCodegenCancel(legacy(), trident, 'p', bare())
+
+    expect(await router.cancel({ task_id: 'unique-cccc' })).toMatchObject({
+      cancelled: true, dispatch_path: 'trident', phase: 'stopped',
+    })
     expect(trident.get(run.id)?.phase).toBe('stopped')
   })
 })

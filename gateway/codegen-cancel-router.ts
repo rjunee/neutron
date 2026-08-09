@@ -5,7 +5,7 @@ import {
   type CodegenTaskStatus,
 } from '@neutronai/codegen-core'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
-import type { TridentRunStore } from '@neutronai/trident/store.ts'
+import { TridentRunReferenceAmbiguousError, type TridentRunStore } from '@neutronai/trident/store.ts'
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 
 export interface UnifiedCancelResult {
@@ -72,7 +72,33 @@ export function routeCodegenCancel(
     }
     return taskId.trim()
   }
-  const resolve = (taskId: string) => trident.resolveReference(taskId)
+  /**
+   * Resolve a reference, translating the STORE's error into the CODE-GEN tool
+   * contract at this boundary.
+   *
+   * `resolveReference` throws `TridentRunReferenceAmbiguousError` when a short
+   * prefix matches more than one run. That class is foreign to the Code-Gen tool
+   * surface: the MCP guard maps the Core's own error types to structured tool
+   * failures, and anything else escapes as a raw internal error — so the owner
+   * typing `codegen_cancel abc` against two matching runs got a stack-shaped
+   * failure instead of "that prefix is ambiguous, give me more of it". The
+   * ambiguity is a bad ARGUMENT, so it becomes `CodegenInputError` on `task_id`,
+   * which the guard already knows how to render.
+   */
+  const resolve = (taskId: string, tool: string) => {
+    try {
+      return trident.resolveReference(taskId)
+    } catch (error) {
+      if (error instanceof TridentRunReferenceAmbiguousError) {
+        throw new CodegenInputError(
+          tool,
+          'task_id',
+          `matches more than one run — pass more of the id (got '${taskId}')`,
+        )
+      }
+      throw error
+    }
+  }
   const state = (run: NonNullable<ReturnType<typeof resolve>>): UnifiedTridentState => ({
     status: run.phase,
     dispatch_path: 'trident',
@@ -94,7 +120,7 @@ export function routeCodegenCancel(
           } catch (error) {
             if (!(error instanceof CodegenTaskNotFoundError)) throw error
           }
-          const run = resolve(taskId)
+          const run = resolve(taskId, `codegen_${String(prop)}`)
           if (run === null) throw new CodegenTaskNotFoundError(taskId)
           return state(run)
         }
@@ -118,7 +144,7 @@ export function routeCodegenCancel(
           if (!(error instanceof CodegenTaskNotFoundError)) throw error
         }
 
-        const before = resolve(taskId)
+        const before = resolve(taskId, 'codegen_cancel')
         if (before === null) throw new CodegenTaskNotFoundError(taskId)
         if (isTerminalPhase(before.phase)) {
           return {
