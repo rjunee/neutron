@@ -713,7 +713,6 @@ function ProjectShell({ project_id }: { project_id: string }) {
             onSelect={handleTabSelect}
             tabs={displayTabs}
             badges={tabBadges}
-            usage={usage}
           />
           <View style={styles.wideContent}>{contentPane}</View>
         </View>
@@ -742,7 +741,6 @@ function ProjectShell({ project_id }: { project_id: string }) {
               onSelect={handleTabSelect}
               tabs={displayTabs}
               badges={tabBadges}
-              usage={usage}
             />
             <View style={styles.narrowContent}>{contentPane}</View>
           </View>
@@ -754,7 +752,10 @@ function ProjectShell({ project_id }: { project_id: string }) {
           row rather than covering it: no rail entry can end up underneath the
           composer, and the rail's ScrollView simply gets shorter.
           See `lib/composer-dock.tsx` for why the composer moves in the TREE. */}
-      <ComposerDock />
+      {/* The session meter rides ABOVE the input now, not at the top of the screen
+          (owner request). The shell holds the reading, and the dock is rendered
+          here, so this is the one place both facts are in scope. */}
+      <ComposerDock usage={usage} />
       <ProjectSettingsDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <CreateProjectSheet
         open={createOpen}

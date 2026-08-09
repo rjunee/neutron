@@ -52,6 +52,9 @@ import {
 } from 'react';
 import { View } from 'react-native';
 
+import { UsageMeter } from '../components/UsageMeter';
+import type { UsagePayload } from './usage-client';
+
 /** The published composer, plus the subscription the band reads it through. */
 export interface ComposerDockStore {
   subscribe: (listener: () => void) => () => void;
@@ -128,10 +131,28 @@ export function ComposerDockProvider({ children }: { children: ReactNode }): Rea
  * published composer draws its own background, border and insets, and a second
  * opinion here would fight it.
  */
-export function ComposerDock(): React.JSX.Element {
+export function ComposerDock({ usage }: { usage?: UsagePayload }): React.JSX.Element {
   const store = useComposerDockStore();
   const node = useSyncExternalStore(store.subscribe, store.read, store.read);
-  return <View testID="composer-dock">{node}</View>;
+  return (
+    <View testID="composer-dock">
+      {/* THE SESSION METER SITS HERE NOW, above the input, at the owner's request:
+          "move the hairline session status bar to instead be on the top of the
+          message input box, rather than at the top of the screen".
+
+          It is ABOVE the published node rather than inside the composer because the
+          composer is published from deep inside `<Slot/>` and does not know about
+          usage; the dock is rendered by the shell, which already holds the reading.
+          This is a structural addition, not the "second opinion" on the composer's
+          own background/border/insets that the note above forbids — the meter draws
+          two 1px lines and nothing else.
+
+          `usage` is OPTIONAL so the test harness, which mounts a bare
+          `<ComposerDock/>`, keeps composing unchanged. */}
+      {usage !== undefined ? <UsageMeter usage={usage} /> : null}
+      {node}
+    </View>
+  );
 }
 
 /**
