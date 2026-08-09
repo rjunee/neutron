@@ -98,6 +98,7 @@ const SCHEMA = [
      doc_refs          TEXT,
      deep_link         TEXT,
      chosen_value      TEXT,
+     transcript        TEXT,
      PRIMARY KEY (topic_id, identity)
    )`,
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_seq ON ${TABLE} (topic_id, seq)`,
@@ -106,30 +107,52 @@ const SCHEMA = [
   // agent messages. Without it, replaying N messages was O(N²) (full scans).
   `CREATE INDEX IF NOT EXISTS idx_${TABLE}_topic_mid ON ${TABLE} (topic_id, message_id)`,
 
+];
+
+/**
+ * FTS DDL, applied AFTER the column migrations.
+ *
+ * SPLIT OUT OF `SCHEMA` DELIBERATELY. The triggers reference `new.transcript`, and on
+ * a database written by an older build that column does not exist until
+ * `ensureColumn` has run. Creating the triggers in the same pass as the table would
+ * therefore work on a fresh install and fail on every upgrade — the asymmetry that
+ * makes a migration bug invisible in development.
+ */
+const SCHEMA_FTS = [
   // ── Full-text MESSAGE search (Track B Phase 4) ─────────────────────────
-  // `chat_fts` is an EXTERNAL-CONTENT FTS5 mirror over the message `body`.
+  // `chat_fts` is an EXTERNAL-CONTENT FTS5 mirror over the message table.
   // External content means the index stores NO copy of the text — it points
   // back at `chat_messages` by rowid, so the only write path is still the
   // message table; the triggers below keep the index in lock-step on every
   // insert / delete (and the explicit reconcile DELETE in `upsert`). This is
   // the canonical FTS5 contentless-sync pattern (same as `doc-search`).
+  //
+  // TWO indexed columns: `body` (what the owner sees) and `transcript` (the spoken
+  // words of a voice note). A voice note's body is the attachment placeholder, so
+  // indexing body alone made speech permanently unfindable even though the audio had
+  // been transcribed and the text was durable on disk.
   `CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(
      body,
+     transcript,
      content='${TABLE}',
      tokenize='unicode61 remove_diacritics 2'
    )`,
   // INSERT OR REPLACE (the store's only write) fires DELETE-then-INSERT on a
   // PK conflict, so the AI + AD triggers alone keep the mirror exact; the AU
   // trigger covers any future in-place UPDATE for completeness.
+  // A `delete` row for an external-content FTS5 table must repeat the OLD values of
+  // EVERY indexed column, or the index keeps a phantom entry. Adding a column means
+  // all three triggers change together — which is why they are dropped and recreated
+  // by the migration below rather than left to `IF NOT EXISTS`.
   `CREATE TRIGGER IF NOT EXISTS ${TABLE}_fts_ai AFTER INSERT ON ${TABLE} BEGIN
-     INSERT INTO ${FTS_TABLE}(rowid, body) VALUES (new.rowid, new.body);
+     INSERT INTO ${FTS_TABLE}(rowid, body, transcript) VALUES (new.rowid, new.body, new.transcript);
    END`,
   `CREATE TRIGGER IF NOT EXISTS ${TABLE}_fts_ad AFTER DELETE ON ${TABLE} BEGIN
-     INSERT INTO ${FTS_TABLE}(${FTS_TABLE}, rowid, body) VALUES ('delete', old.rowid, old.body);
+     INSERT INTO ${FTS_TABLE}(${FTS_TABLE}, rowid, body, transcript) VALUES ('delete', old.rowid, old.body, old.transcript);
    END`,
   `CREATE TRIGGER IF NOT EXISTS ${TABLE}_fts_au AFTER UPDATE ON ${TABLE} BEGIN
-     INSERT INTO ${FTS_TABLE}(${FTS_TABLE}, rowid, body) VALUES ('delete', old.rowid, old.body);
-     INSERT INTO ${FTS_TABLE}(rowid, body) VALUES (new.rowid, new.body);
+     INSERT INTO ${FTS_TABLE}(${FTS_TABLE}, rowid, body, transcript) VALUES ('delete', old.rowid, old.body, old.transcript);
+     INSERT INTO ${FTS_TABLE}(rowid, body, transcript) VALUES (new.rowid, new.body, new.transcript);
    END`,
 ];
 
@@ -157,6 +180,12 @@ export class SqliteChatStore implements Store {
     // index rows written after they exist. Checked before the DDL because the
     // CREATE below would otherwise make it exist unconditionally.
     const ftsPreexisted = await tableExists(db, FTS_TABLE);
+    // Is a PRE-EXISTING mirror the OLD single-column shape? An FTS5 table cannot
+    // gain a column, so the only migration is drop-and-recreate + rebuild. Detected
+    // from its stored DDL rather than by probing a query: a `SELECT ... MATCH` against
+    // a missing column throws the same way a dozen other faults do, and a rebuild
+    // triggered by the wrong error would silently discard a healthy index.
+    const ftsNeedsRebuild = ftsPreexisted && !(await ftsHasTranscriptColumn(db));
     for (const stmt of SCHEMA) {
       await db.execute(stmt);
     }
@@ -198,7 +227,23 @@ export class SqliteChatStore implements Store {
     // the moment the component unmounted and the Retry button would come back
     // live on a prompt the server already refuses to honour.
     await ensureColumn(db, TABLE, 'chosen_value');
-    if (!ftsPreexisted) {
+    // The voice-note transcript. Indexed for search alongside `body`, never rendered
+    // in place of it. MUST be added before `SCHEMA_FTS` below, whose triggers name it.
+    await ensureColumn(db, TABLE, 'transcript');
+    // Drop a stale single-column mirror AND its triggers before recreating both. The
+    // triggers must go too: they were compiled against the old column list, and an
+    // `IF NOT EXISTS` recreate would leave the old ones in place — an index that
+    // silently stops matching the schema it mirrors.
+    if (ftsNeedsRebuild) {
+      await dropFts(db);
+    }
+    for (const stmt of SCHEMA_FTS) {
+      await db.execute(stmt);
+    }
+    // Backfill when the index is NEW or was just rebuilt. The sync triggers only
+    // index rows written after they exist, so without this an upgrade would leave
+    // every existing message unsearchable — which is worse than the bug being fixed.
+    if (!ftsPreexisted || ftsNeedsRebuild) {
       await backfillFts(db);
     }
     return new SqliteChatStore(db);
@@ -328,12 +373,19 @@ export class SqliteChatStore implements Store {
     // re-sort relevance-desc with a recency tiebreak (newest first) — the
     // "recency/relevance" ordering the Store contract promises. snippet()
     // emits the `[`…`]` highlight markers, matching the JS path + doc-search.
+    //
+    // COLUMN -1, NOT 0. FTS5 reads a negative column index as "the column with the
+    // most matches". Pinned at 0 (`body`) a voice note would return a hit whose
+    // snippet is the attachment placeholder with nothing highlighted, because the
+    // query terms are in `transcript` — the search would technically work and be
+    // useless, which is the failure mode hardest to notice from a green test.
     const sql =
       `SELECT m.topic_id AS topic_id, m.client_msg_id AS client_msg_id,
               m.message_id AS message_id, m.seq AS seq, m.role AS role,
               m.body AS body, m.project_id AS project_id, m.created_at AS created_at,
+              m.transcript AS transcript,
               bm25(${FTS_TABLE}) AS bm25,
-              snippet(${FTS_TABLE}, 0, '[', ']', ' … ', 12) AS snippet
+              snippet(${FTS_TABLE}, -1, '[', ']', ' … ', 12) AS snippet
          FROM ${FTS_TABLE}
          JOIN ${TABLE} m ON m.rowid = ${FTS_TABLE}.rowid
         WHERE ${FTS_TABLE} MATCH ?${scope}
@@ -387,8 +439,8 @@ export class SqliteChatStore implements Store {
   private async write(identity: string, msg: ChatMessage): Promise<void> {
     await this.db.execute(
       `INSERT OR REPLACE INTO ${TABLE}
-         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev, edited_at, deleted, edit_rev, options, prompt_id, allow_freeform, prompt_kind, upload_affordance, image_urls, citations, doc_refs, deep_link, chosen_value)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (identity, topic_id, client_msg_id, message_id, seq, role, body, project_id, attachments, created_at, status, delivered_to, read_by, reactions, reactions_rev, edited_at, deleted, edit_rev, options, prompt_id, allow_freeform, prompt_kind, upload_affordance, image_urls, citations, doc_refs, deep_link, chosen_value, transcript)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         identity,
         msg.topic_id,
@@ -418,6 +470,7 @@ export class SqliteChatStore implements Store {
         encodeJson(msg.doc_refs),
         msg.deep_link ?? null,
         msg.chosen_value ?? null,
+        msg.transcript ?? null,
       ],
     );
   }
@@ -465,6 +518,10 @@ function rowToMessage(row: SqlRow): ChatMessage {
       row['chosen_value'] === null || row['chosen_value'] === undefined
         ? null
         : String(row['chosen_value']),
+    transcript:
+      row['transcript'] === null || row['transcript'] === undefined
+        ? null
+        : String(row['transcript']),
   };
 }
 
@@ -599,6 +656,47 @@ async function tableExists(db: SqliteExecutor, name: string): Promise<boolean> {
  * while the index is empty). Failure-isolated: if FTS5 isn't compiled in,
  * search simply returns nothing rather than failing the store open.
  */
+/**
+ * Does the existing FTS mirror already index `transcript`?
+ *
+ * Read from the stored CREATE statement in `sqlite_master`. `PRAGMA table_info` on an
+ * FTS5 virtual table reports its columns too, but the DDL is the authority on how the
+ * index was DECLARED, and that is exactly what decides whether the triggers can write
+ * to it. A false NEGATIVE here costs one rebuild; a false POSITIVE leaves the mirror
+ * permanently out of step with its triggers, so the check is written to fail toward
+ * rebuilding.
+ */
+async function ftsHasTranscriptColumn(db: SqliteExecutor): Promise<boolean> {
+  try {
+    const { rows } = await db.execute(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`,
+      [FTS_TABLE],
+    );
+    const sql = rows[0]?.['sql'];
+    if (typeof sql !== 'string') return false;
+    return /\btranscript\b/.test(sql);
+  } catch {
+    return false;
+  }
+}
+
+/** Drop the FTS mirror AND every trigger that writes to it. */
+async function dropFts(db: SqliteExecutor): Promise<void> {
+  for (const stmt of [
+    `DROP TRIGGER IF EXISTS ${TABLE}_fts_ai`,
+    `DROP TRIGGER IF EXISTS ${TABLE}_fts_ad`,
+    `DROP TRIGGER IF EXISTS ${TABLE}_fts_au`,
+    `DROP TABLE IF EXISTS ${FTS_TABLE}`,
+  ]) {
+    try {
+      await db.execute(stmt);
+    } catch {
+      // A drop that fails leaves the recreate below to fail loudly instead, which is
+      // the better place to notice. Never fail the store open over the search index.
+    }
+  }
+}
+
 async function backfillFts(db: SqliteExecutor): Promise<void> {
   try {
     const { rows } = await db.execute(`SELECT COUNT(*) AS n FROM ${TABLE}`);

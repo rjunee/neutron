@@ -8180,3 +8180,29 @@ credential-less entry is the mechanism, not a defect; rotation swaps the credent
 underneath the child. Retracted in place, with the generalisable lesson kept.
 
 Detail: `docs/as-built/2026-08-09-per-phase-model-config.md`.
+
+## 2026-08-09 — a spoken word is findable in chat search
+
+A voice note was transcribed at upload, written durably beside the audio, and delivered
+to memory — and **search could not see any of it**, because the index mirrors the
+message `body` and a voice note's body is the attachment placeholder.
+
+The transcript now rides back on the UPLOAD RESPONSE. A user's own message is never
+persisted server-side, so the client owns it, and the response is the only point at
+which the client can learn the transcript without a new frame. `transcript` is a field
+of its own rather than appended to `body`: the body is what renders, and appending would
+change how every existing voice note displays. Both search paths were updated through
+one shared `searchableText`, since two independent searches over one model is how a
+field gets indexed on one platform and not the other.
+
+Two details each of which would have produced a search that passes its tests and is
+useless in the hand: `snippet(tbl, -1, …)` (FTS5's "column with the most matches" —
+pinned at `body` a voice hit renders an unhighlighted placeholder), and reading the
+sidecar on the IDEMPOTENT re-upload path (which deliberately skips the ASR seam, so the
+same audio would be searchable once and then silently not).
+
+The FTS DDL was split out of the schema array so column migrations run before the
+triggers that name the new column — otherwise a fresh install works and every upgrade
+fails. Rebuild is detected from `sqlite_master` DDL, not by probing a query.
+
+Detail: `docs/as-built/2026-08-09-voice-transcript-searchable.md`.
