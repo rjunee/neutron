@@ -31,6 +31,7 @@ import {
   AppState,
   type AppStateStatus,
   Linking,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -41,6 +42,18 @@ import {
 
 import { appStateBecameActive } from '../lib/app-state-refetch';
 import { shouldRedirectToLogin } from '../lib/auth-helpers';
+import { CodexCredentialClient, type CodexStatus } from '../lib/codex-credential-client';
+
+/**
+ * The credential-store service id the trident review lane looks a Kimi key up
+ * under. It MUST match `trident/kimi-key.ts`'s `KIMI_CREDENTIAL_SERVICE`, and the
+ * literal is repeated rather than imported because the app bundle is deliberately
+ * free of workspace dependencies (the same convention every client here follows).
+ * A mismatch would store the key where nothing reads it — the row would look like
+ * it worked and the reviewer would stay silent, which is the worst outcome a
+ * settings control can have.
+ */
+const KIMI_SERVICE = 'kimi';
 import { loadAppConfig } from '../lib/config';
 import { useAuthSession } from '../lib/session';
 import { THEME } from '../lib/theme';
@@ -73,6 +86,11 @@ export default function IntegrationsScreen() {
     return new ProjectCredentialsClient({ base_url: config.base_url, token: user.token });
   }, [user, config.base_url]);
 
+  const codexClient = useMemo(() => {
+    if (user === null) return null;
+    return new CodexCredentialClient({ base_url: config.base_url, token: user.token });
+  }, [user, config.base_url]);
+
   const [data, setData] = useState<IntegrationsResponse | null>(null);
   // ── Shared (global-scope) credentials ──
   const [sharedCreds, setSharedCreds] = useState<ProjectCredentialRecord[]>([]);
@@ -82,6 +100,12 @@ export default function IntegrationsScreen() {
   const [credBusy, setCredBusy] = useState(false);
   const [credError, setCredError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // ── Model providers (Codex subscription + Kimi K3 key) ──
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [codexAuth, setCodexAuth] = useState('');
+  const [codexBusy, setCodexBusy] = useState(false);
+  const [codexError, setCodexError] = useState<string | null>(null);
+  const [kimiKey, setKimiKey] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,10 +145,100 @@ export default function IntegrationsScreen() {
     }
   }, [credsClient]);
 
+  // ── Codex: the cross-model reviewer's ChatGPT subscription ──
+  const fetchCodex = useCallback(async () => {
+    if (codexClient === null) return;
+    try {
+      setCodexStatus(await codexClient.status());
+    } catch {
+      // A failed status read is "not connected" for display purposes. It is NOT
+      // written anywhere and nothing is disconnected — an unreachable server must
+      // never look like a credential the owner has to re-enter.
+      setCodexStatus({ status: 'not_connected' });
+    }
+  }, [codexClient]);
+
   useEffect(() => {
     void fetchAll();
     void fetchSharedCreds();
-  }, [fetchAll, fetchSharedCreds]);
+    void fetchCodex();
+  }, [fetchAll, fetchSharedCreds, fetchCodex]);
+
+  const handleConnectCodex = useCallback(async () => {
+    if (codexClient === null) return;
+    const auth = codexAuth.trim();
+    if (auth.length === 0 || codexBusy) return;
+    setCodexBusy(true);
+    setCodexError(null);
+    try {
+      const next = await codexClient.connect(auth);
+      setCodexStatus(next);
+      // Cleared on SUCCESS only. Keeping the paste on failure means the owner can
+      // read the error and retry without going back to their terminal for the file.
+      setCodexAuth('');
+    } catch (err) {
+      // The gateway's message is shown verbatim because it is the actionable part:
+      // pasting a metered API key instead of a subscription bundle is the common
+      // mistake, and the reply says exactly that.
+      setCodexError(formatErr(err));
+    } finally {
+      setCodexBusy(false);
+    }
+  }, [codexClient, codexAuth, codexBusy]);
+
+  const handleDisconnectCodex = useCallback(() => {
+    if (codexClient === null) return;
+    Alert.alert('Disconnect Codex?', 'Cross-model review will stop until you reconnect.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Disconnect',
+        style: 'destructive',
+        onPress: () => {
+          setCodexBusy(true);
+          setCodexError(null);
+          void codexClient
+            .disconnect()
+            .then(() => fetchCodex())
+            .catch((err: unknown) => setCodexError(formatErr(err)))
+            .finally(() => setCodexBusy(false));
+        },
+      },
+    ]);
+  }, [codexClient, fetchCodex]);
+
+  // ── Kimi K3: a plain API key, stored under the service id the review lane reads ──
+  //
+  // Goes through the SAME global-credential store the free-text form below writes
+  // to, on purpose. A named row that used its own storage path would mean a key
+  // entered here and a key entered there behaved differently, which is exactly the
+  // kind of split that makes a settings screen untrustworthy. This row is a
+  // labelled affordance over one code path, not a second one.
+  const handleSaveKimi = useCallback(async () => {
+    if (credsClient === null) return;
+    const secret = kimiKey.trim();
+    if (secret.length === 0 || credBusy) return;
+    setCredBusy(true);
+    setCredError(null);
+    try {
+      await credsClient.setGlobal({ service: KIMI_SERVICE, token: secret, label: 'Kimi K3' });
+      setKimiKey('');
+      await fetchSharedCreds();
+    } catch (err) {
+      setCredError(formatErr(err));
+    } finally {
+      setCredBusy(false);
+    }
+  }, [credsClient, kimiKey, credBusy, fetchSharedCreds]);
+
+  /**
+   * Is a Kimi key stored?
+   *
+   * DERIVED from the same shared-credential list the free-text form renders, not
+   * tracked separately: a key added through either control lights up this row, and
+   * removing it through either clears it. Two sources of truth for one fact is how
+   * a settings screen starts lying about its own state.
+   */
+  const kimiConnected = sharedCreds.some((r) => r.service === KIMI_SERVICE);
 
   const handleAddSharedCred = useCallback(async () => {
     if (credsClient === null) return;
@@ -433,6 +547,145 @@ export default function IntegrationsScreen() {
           ))}
         </View>
 
+        {/* MODEL PROVIDERS — named rows for the two credentials the build and review
+            lanes actually read. They sit ABOVE "Shared credentials" so the
+            free-text form below reads as the escape hatch it is: before this, the
+            only way to connect either was to know the exact service id and type it
+            into that box, and Codex could not be connected from a phone at all. */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Model providers</Text>
+          <Text style={styles.muted}>
+            Accounts the coding agent uses to build and review. Both are account-wide.
+          </Text>
+
+          <View style={styles.row}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>Codex (ChatGPT subscription)</Text>
+              <Text style={styles.rowStatus} testID="codex-status">
+                {codexStatus === null
+                  ? 'Checking…'
+                  : codexStatus.status === 'connected'
+                    ? 'Connected — cross-model review is on'
+                    : codexStatus.status === 'expired'
+                      ? 'Expired — paste a fresh auth.json to reconnect'
+                      : 'Not connected — reviews run without a second model family'}
+              </Text>
+            </View>
+            {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Disconnect Codex"
+                testID="codex-disconnect"
+                disabled={codexBusy}
+                onPress={handleDisconnectCodex}
+                style={({ pressed }) => [
+                  styles.dangerBtn,
+                  codexBusy && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.dangerBtnText}>Disconnect</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          {codexError !== null ? (
+            <Text style={styles.bannerError} testID="codex-error">
+              {codexError}
+            </Text>
+          ) : null}
+          {codexStatus?.status !== 'connected' ? (
+            <View style={styles.keyBlock}>
+              <Text style={styles.muted}>
+                Run <Text style={styles.mono}>codex login</Text> on any machine, then paste that
+                account&apos;s <Text style={styles.mono}>~/.codex/auth.json</Text> here. A metered
+                API key will be rejected — this needs the subscription bundle.
+              </Text>
+              <TextInput
+                style={styles.keyInput}
+                testID="codex-auth-input"
+                placeholder="Paste ~/.codex/auth.json"
+                placeholderTextColor={THEME.text_muted}
+                secureTextEntry
+                multiline
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!codexBusy}
+                value={codexAuth}
+                onChangeText={setCodexAuth}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Connect Codex"
+                testID="codex-connect"
+                disabled={codexBusy || codexAuth.trim().length === 0}
+                onPress={() => void handleConnectCodex()}
+                style={({ pressed }) => [
+                  styles.primaryBtn,
+                  (codexBusy || codexAuth.trim().length === 0) && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.primaryBtnText}>{codexBusy ? 'Connecting…' : 'Connect'}</Text>
+              </Pressable>
+            </View>
+          ) : null}
+
+          <View style={styles.row}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>Kimi K3</Text>
+              <Text style={styles.rowStatus} testID="kimi-status">
+                {kimiConnected
+                  ? 'Key saved — K3 joins the review panel'
+                  : 'No key — the review panel stays one model family'}
+              </Text>
+            </View>
+            {kimiConnected ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Remove Kimi key"
+                testID="kimi-remove"
+                disabled={credBusy}
+                onPress={() => handleRemoveSharedCred(KIMI_SERVICE)}
+                style={({ pressed }) => [
+                  styles.dangerBtn,
+                  credBusy && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.dangerBtnText}>Remove</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          <View style={styles.keyControls}>
+            <TextInput
+              style={styles.keyInput}
+              testID="kimi-key-input"
+              placeholder={kimiConnected ? 'Paste a new key to replace it' : 'Paste your Kimi API key'}
+              placeholderTextColor={THEME.text_muted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!credBusy}
+              value={kimiKey}
+              onChangeText={setKimiKey}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Save Kimi key"
+              testID="kimi-save"
+              disabled={credBusy || kimiKey.trim().length === 0}
+              onPress={() => void handleSaveKimi()}
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                (credBusy || kimiKey.trim().length === 0) && styles.btnDisabled,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.primaryBtnText}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Shared credentials</Text>
           <Text style={styles.muted}>
@@ -590,6 +843,9 @@ const styles = StyleSheet.create({
   rowTitle: { color: THEME.text_primary, fontSize: 14, fontWeight: '600' },
   rowStatus: { color: THEME.text_secondary, fontSize: 12 },
   rowDetail: { color: THEME.text_muted, fontSize: 11, lineHeight: 15 },
+  // Monospace for the two inline shell/path references in the Codex guidance. A
+  // pasted path is easier to read as code, and `THEME` carries no mono token.
+  mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   requiredTag: { color: THEME.warning, fontSize: 11, fontWeight: '600' },
   keyBlock: { gap: 10 },
   keyControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
