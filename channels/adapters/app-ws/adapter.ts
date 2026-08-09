@@ -126,6 +126,20 @@ export interface AppWsAdapterOptions {
    * inert (legacy behaviour).
    */
   edit_log?: AppChatEditLog
+  /**
+   * Resolve an attachment URL to its stored auto-transcript, or null.
+   *
+   * RESOLVED SERVER-SIDE, DELIBERATELY, rather than accepted from the client. The
+   * transcript already exists on this machine — it is written to a sidecar beside
+   * the audio at upload time — so asking the client to send it back would be a
+   * round trip of data we already hold, and it would let any client write arbitrary
+   * text into a field that is indexed and read by the agent. The client gets its own
+   * copy on the upload response for its LOCAL index; this is the durable one.
+   *
+   * Absent → transcripts are not persisted, which is exactly the pre-existing
+   * behaviour, so an instance without the seam is unchanged.
+   */
+  attachment_transcript?: (url: string) => string | null
 }
 
 /**
@@ -158,6 +172,7 @@ export class AppWsAdapter implements ChannelAdapter {
   private readonly receipt_log: AppChatReceiptLog | undefined
   private readonly reaction_log: AppChatReactionLog | undefined
   private readonly edit_log: AppChatEditLog | undefined
+  private readonly attachment_transcript: ((url: string) => string | null) | undefined
 
   constructor(opts: AppWsAdapterOptions) {
     this.registry = opts.registry
@@ -168,6 +183,30 @@ export class AppWsAdapter implements ChannelAdapter {
     this.receipt_log = opts.receipt_log
     this.reaction_log = opts.reaction_log
     this.edit_log = opts.edit_log
+    this.attachment_transcript = opts.attachment_transcript
+  }
+
+  /**
+   * The combined transcript of a message's audio attachments, or null.
+   *
+   * A throw from the seam is swallowed: an unreadable sidecar means "no transcript",
+   * and it must never take down a send. Losing searchability on one message is a
+   * small harm; losing the message is not.
+   */
+  private resolveTranscript(attachments: ReadonlyArray<string> | undefined): string | null {
+    if (this.attachment_transcript === undefined) return null
+    if (attachments === undefined || attachments.length === 0) return null
+    const parts: string[] = []
+    for (const url of attachments) {
+      let text: string | null = null
+      try {
+        text = this.attachment_transcript(url)
+      } catch {
+        text = null
+      }
+      if (typeof text === 'string' && text.trim().length > 0) parts.push(text.trim())
+    }
+    return parts.length > 0 ? parts.join('\n') : null
   }
 
   /** Whether a durable message log is wired (enables seq + resume). */
@@ -385,6 +424,10 @@ export class AppWsAdapter implements ChannelAdapter {
     }
     const message_id = this.generate_message_id()
     const ts = this.now()
+    // Resolve the voice-note transcript from OUR OWN sidecar, not from the client.
+    // Joined with a newline when a message somehow carries several audio files, so
+    // the stored text is the whole of what was said rather than the first clip.
+    const transcript = this.resolveTranscript(input.attachments)
     let seq: number | null = null
     let canonical_id = message_id
     let was_new = true
@@ -397,6 +440,7 @@ export class AppWsAdapter implements ChannelAdapter {
         client_msg_id: input.client_msg_id ?? null,
         project_id: input.project_id ?? null,
         attachments: input.attachments ?? null,
+        ...(transcript !== null ? { transcript } : {}),
         created_at: ts,
       })
       seq = result.row.seq
@@ -1023,6 +1067,12 @@ export function appChatRowToEnvelope(row: AppChatRow): AppWsOutbound {
     if (row.project_id !== null) env.project_id = row.project_id
     if (row.attachments !== null && row.attachments.length > 0) {
       env.attachments = [...row.attachments]
+    }
+    // The words of a voice note. Without this the replay hands a fresh device the
+    // audio and nothing to search — the half of the fix that only worked on the
+    // phone that happened to do the upload.
+    if (row.transcript !== null && row.transcript.length > 0) {
+      env.transcript = row.transcript
     }
     return env
   }

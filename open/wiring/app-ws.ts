@@ -1072,6 +1072,13 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     receipt_log: new AppChatReceiptStore({ db }),
     reaction_log: new AppChatReactionStore({ db }),
     edit_log: new AppChatEditStore({ db }),
+    // Persist a voice note's words alongside the audio so they survive the DEVICE.
+    // The same seam the scribe path already uses, resolved here rather than trusted
+    // from the client: the sidecar is ours, and the client's copy exists only for
+    // its own local index.
+    ...(attachmentTranscript !== undefined
+      ? { attachment_transcript: attachmentTranscript }
+      : {}),
   })
   appWs.bind(appWsAdapter)
   // X5 — the ONE delivery seam. Register the durable app-ws adapter on a real

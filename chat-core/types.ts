@@ -277,6 +277,12 @@ export interface InboundChatMessage {
   client_msg_id: string | null
   project_id: string | null
   attachments: readonly string[] | null
+  /**
+   * Auto-transcript of an audio attachment, carried on the envelope so a device
+   * that rebuilds its history from the server gets the WORDS, not just the audio.
+   * Absent for everything else.
+   */
+  transcript?: string | null
   created_at: number
   /** Track B Phase 4 — receipt state carried inline on the message envelope
    *  (the server stamps the connected devices at fan-out + folds the persisted
@@ -567,6 +573,14 @@ export function normalizeInbound(raw: unknown): InboundChatMessage | null {
     if (cleaned.length > 0) attachments = cleaned
   }
 
+  // A replayed voice note carries its transcript so the rebuilding device can
+  // index it. This is the half that makes the fix survive a reinstall.
+  let transcript: string | null = null
+  const rawTranscript = e['transcript']
+  if (typeof rawTranscript === 'string' && rawTranscript.trim().length > 0) {
+    transcript = rawTranscript
+  }
+
   let created_at = 0
   const rawTs = e['ts']
   if (typeof rawTs === 'number' && Number.isFinite(rawTs)) created_at = rawTs
@@ -583,6 +597,7 @@ export function normalizeInbound(raw: unknown): InboundChatMessage | null {
     client_msg_id,
     project_id,
     attachments,
+    transcript,
     created_at,
   }
   if (delivered_to !== null) out.delivered_to = delivered_to

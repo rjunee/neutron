@@ -1,0 +1,35 @@
+-- 0117_app_chat_transcript.sql
+--
+-- Voice-note transcripts survive a device, because the durable log is what a
+-- device rebuilds from.
+--
+-- BACKGROUND. A voice note is transcribed at upload and the text is written to a
+-- content-addressed sidecar beside the audio. The owner's message row records the
+-- attachment URL and nothing else, because the message BODY is deliberately left
+-- empty — the bubble renders a player, not words.
+--
+-- The client-side fix (transcript returned on the upload response, stamped on the
+-- local message row, indexed for search) works only on the device that performed
+-- the upload. `replayAfter` refills a reconnecting or FRESH device's history from
+-- THIS table, so without a column here a new phone, a reinstall, or a cleared
+-- local database gets the voice note back with its audio and none of its words —
+-- unsearchable again, permanently, and with no signal that anything was lost.
+--
+-- WHY A COLUMN AND NOT `meta_json`. That column already exists and is already
+-- carried through append and replay, which makes it the tempting answer. It is
+-- documented as agent-message PRESENTATION metadata and as "always null for user
+-- messages", and the replay envelope's user branch does not read it at all. Making
+-- a user message's most important text ride in a field whose contract says it is
+-- never populated for user messages is the kind of quiet overload that reads as
+-- correct for a year and then produces a bug nobody can locate. The column is
+-- explicit, it mirrors the client's own `ChatMessage.transcript`, and it costs one
+-- nullable TEXT.
+--
+-- NOT BACKFILLED, deliberately. The sidecars for existing audio are still on disk,
+-- so a backfill is possible — but it would have to walk the attachment directory
+-- and re-associate by content hash, and a migration that reaches into the blob
+-- store is a much larger blast radius than one that adds a column. Existing voice
+-- notes keep working exactly as they do today; new ones are searchable everywhere.
+-- If the owner wants the history swept, that is a separate, reversible tool.
+
+ALTER TABLE app_chat_messages ADD COLUMN transcript TEXT;

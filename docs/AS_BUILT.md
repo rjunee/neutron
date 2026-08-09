@@ -8206,3 +8206,28 @@ triggers that name the new column — otherwise a fresh install works and every 
 fails. Rebuild is detected from `sqlite_master` DDL, not by probing a query.
 
 Detail: `docs/as-built/2026-08-09-voice-transcript-searchable.md`.
+
+## 2026-08-09 — a voice note's words survive the device (correcting the same day's fix)
+
+The earlier half (#158) shipped on a FALSE belief: that a user's own messages are not
+persisted server-side. They are — `app_chat_messages` holds user rows, and `replayAfter`
+is how a fresh or reconnecting device rebuilds its history. So the fix worked only on the
+phone that performed the upload; a reinstall brought voice notes back with their audio and
+none of their words.
+
+Migration 0117 adds a nullable `transcript` column; the store persists it, the replay
+envelope carries it, and the client merges it without ever regressing a known value to
+null. The SERVER resolves it from its own sidecar rather than accepting it from the
+client — the text is already ours, and trusting the client would let any client write into
+a field that is indexed and read by the agent. Deliberately not `meta_json`, whose
+contract says it is never populated for user messages.
+
+Four mutants; the first pass caught only ONE. The three that survived were: the column
+never written, the server never resolving it, and the composer never wiring the seam —
+that last being the repeat defect shape SPEC names, with every other test green while the
+feature was dead.
+
+Also lands two arbiter design docs (multi-substrate build agent; model usage dashboard),
+both awaiting owner decisions rather than implementation.
+
+Detail: `docs/as-built/2026-08-09-voice-transcript-survives-device.md`.

@@ -143,6 +143,17 @@ export interface AppWsOutboundUserMessageEcho {
   /** P5.1 — echoed attachments so the optimistic bubble can reconcile. */
   attachments?: ReadonlyArray<string>
   /**
+   * Auto-transcript of an audio attachment, carried so it survives the DEVICE.
+   *
+   * A voice note's `body` is deliberately empty — the bubble renders a player, not
+   * words — so the transcript is the only searchable text the message has. The
+   * uploading device learns it from the upload response, but a RECONNECTING or
+   * FRESH device rebuilds its history from `replayAfter`, and without this field
+   * that device receives the audio and none of the words: unsearchable again, with
+   * nothing to indicate anything is missing.
+   */
+  transcript?: string
+  /**
    * Chat-sync foundation — monotonic per-topic sequence assigned on persist.
    * The client orders by `seq` (never by clock) and advances its resume
    * cursor to `max(seq)`. Absent when the durable log isn't wired.
