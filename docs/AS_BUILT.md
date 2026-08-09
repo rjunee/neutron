@@ -2,6 +2,33 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
+
+The `codegen_status`, `codegen_fetch`, and `codegen_cancel` tools now keep their
+legacy Code-Gen tracker behavior and fall through to the foundational Trident run
+store when the reference is not a legacy task. References accept the globally
+unique full run id, or an unambiguous displayed id prefix / run slug across the
+single-owner database. This reaches General and project-board runs even though
+the Core factory context carries only the owner handle. Blank and ambiguous
+references are rejected without changing any run. A live
+Trident run is atomically moved to `stopped` through the existing terminal-write
+chokepoint. A run that already reached `done`, `failed`, or `stopped` is returned
+truthfully with its phase and persisted failure reason; it is not mislabeled as
+an unknown run. Malformed tool payloads retain the Code-Gen input-error contract
+instead of leaking native property-access errors. Tool cancel uses a dedicated
+terminal-observer composition: delivery is a no-op because the tool result is the
+user notification, while board reconciliation and skill-forge audit still run.
+This is a run-lifecycle control only and
+does not add chat-turn cancel or a Stop button. An already-started inner workflow
+cannot currently be killed; the durable run is stopped so its eventual output
+cannot advance or merge through the Trident loop.
+
+Mutation-named gateway tests pin the contract: removing Trident termination
+leaves the durable row live; hiding an already-terminal row restores the false
+alarm; bypassing the legacy tracker breaks the path that already worked; and
+removing read routing, prefix resolution, project scope, or production factory
+wiring makes the corresponding test fail.
+
 ## 2026-08-06 — push registration self-heals on foreground, so a signed-in device stops going dark
 
 Branch `fix/push-registration-self-heal`. ISSUES #487 (the residual its
@@ -8024,3 +8051,45 @@ cancelled-but-still-running timer cannot clear an entry a newer start re-armed; 
 a lost `end` expires instead of suppressing every future typing start until
 restart. Mutants killed: removing the fail-safe fails 3, making every transition
 emit fails 2.
+
+
+## 2026-08-09 — `codegen_cancel`'s terminator is a required argument, and the composition path is covered
+
+The review's remaining blocker on the tool-initiated cancel was that the
+production observer composition had no coverage — "both the composer bind and the
+mountOpenCores path".
+
+The reason that mattered was a DEFAULT PARAMETER. `routeCodegenCancel` took
+`terminator: TridentTerminator = buildTridentTerminator({ store: trident })` — a
+terminator with no observer and no `onTransition`. If either hop broke, a cancel
+still flipped the phase and still returned `cancelled: true`, while the Work Board
+never reconciled, the skill-forge hook never ran, and no `projects_changed` reached
+the rail. No unit test could catch it, because each builds its own terminator; only
+the production composition could, and that was the untested part.
+
+The default is GONE. The parameter is required, so a missing thread is a typecheck
+failure — which it immediately was, on nine call sites. The one caller that
+legitimately has no observers to run (`boot-cores-factories.ts`, when no composer
+threaded one) now fabricates it EXPLICITLY via `codegenCancelTerminator` and logs
+`codegen_cancel_terminator_unwired`, the same precedent as the neighbouring
+`codegen_orchestrator_not_wired`. Verified firing, with a control.
+
+`open/__tests__/codegen-cancel-composition.test.ts` covers the pass-through
+behaviourally — a cancel through the MOUNTED backend must reach the terminator the
+caller supplied, and deleting the `mountOpenCores` forward reds it — plus three
+source-scoped assertions for the composer's bind, labelled weaker with the reason
+(the bind is inside the composer's closure; reaching it behaviourally needs the
+whole composition AND the Code-Gen Core installed).
+
+Also fixed: the codegen holder's unbound-deref error read "board terminator is not
+bound" — the SIBLING holder's name — which would send a reader to the wrong bind.
+
+Also on this branch: `TridentRunReferenceAmbiguousError` no longer escapes the
+Code-Gen tool contract. `resolveReference` throws it when a short prefix matches
+more than one run; the MCP guard maps the Core's own error types to structured tool
+failures and lets anything else out as a raw internal error, so an ambiguous prefix
+produced a stack-shaped failure instead of "pass more of the id". It is translated
+at the router boundary to `CodegenInputError` on `task_id`. An existing test had
+pinned the LEAKED message (`'reference is ambiguous'`) — updated to the contract
+error, with its real guarantee (an ambiguous prefix must not select by recency)
+left exactly as it was. Mutant: removing the translation reds three tests.

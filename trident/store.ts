@@ -43,6 +43,13 @@ export type TridentPhase =
  */
 export type MergeMode = 'local' | 'pr'
 
+export class TridentRunReferenceAmbiguousError extends Error {
+  constructor(reference: string) {
+    super(`trident run reference is ambiguous: ${reference}`)
+    this.name = 'TridentRunReferenceAmbiguousError'
+  }
+}
+
 /**
  * Status of the currently in-flight sub-agent, persisted on the run row
  * (NOT in the disconnected generic `runtime/subagent/` registry) so a
@@ -314,6 +321,29 @@ export class TridentRunStore {
       )
       .get(project_slug, slug)
     return row === null ? null : rowToRun(row)
+  }
+
+  /** Resolve the user-facing run references emitted by `/code`: full id, id
+   * prefix, or slug. Full ids are globally unique in this single-owner DB;
+   * shorthand references resolve only when unambiguous across all projects. */
+  resolveReference(reference: string): TridentRun | null {
+    if (reference.length === 0) return null
+    const exact = this.get(reference)
+    if (exact !== null) return exact
+    const rows = this.db
+      .prepare<TridentRunDbRow, [string, string, string]>(
+        `SELECT ${COLS} FROM code_trident_runs
+          WHERE id LIKE ? ESCAPE '\\' OR slug = ?
+          ORDER BY CASE WHEN slug = ? THEN 0 ELSE 1 END, last_advanced_at DESC
+          LIMIT 2`,
+      )
+      .all(`${reference.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')}%`, reference, reference)
+      .map(rowToRun)
+    if (rows.length === 0) return null
+    const first = rows[0]
+    if (first === undefined) return null
+    if (rows.length > 1) throw new TridentRunReferenceAmbiguousError(reference)
+    return first
   }
 
   /**

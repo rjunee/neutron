@@ -1565,8 +1565,21 @@ export function buildOpenGraphComposer(
     // `gateway/boot-cores-factories-types.ts:31` had no implementation), so the
     // factory's write was skipped and `/task` had no deps to dispatch against.
     const tasksCoreRegistry = new InMemoryTasksCoreOwnerRegistry()
+    const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
+    const codegenTerminatorHolder = late<TridentTerminator>('codegen_terminator')
     const coresWiring = await mountOpenCores({
       projectDb: db,
+      tridentTerminator: {
+        terminate: async (id, phase, opts) => {
+          const pending = codegenTerminatorHolder.deref((terminator) =>
+            terminator.terminate(id, phase, opts),
+          )
+          // Names THIS holder. It said 'board terminator' — the sibling's name —
+          // which would have sent a reader to the wrong bind entirely.
+          if (pending === undefined) throw new Error('codegen terminator is not bound')
+          return pending
+        },
+      },
       canonicalTaskStore,
       tasksCoreRegistry,
       owner_home,
@@ -3442,7 +3455,6 @@ export function buildOpenGraphComposer(
     // is built later in `wireAppWs`, so the terminator is bound below once it exists
     // (mirrors the `dispatchBoardHolder` two-phase seam). Every runtime DELETE lands
     // long after composition, so the holder is always bound by request time.
-    const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
     // The run-access facade the work-board surface reads: live-progress reads +
     // the item-3 delete-cancel, now routed through the chokepoint when bound.
     const boardRunAccess = {
@@ -4913,6 +4925,23 @@ export function buildOpenGraphComposer(
         // tick loop fires (`on_run_transition` below), so a connected rail drops
         // the cancelled run from `live_runs` immediately instead of retaining it
         // until the next unrelated event. Same two best-effort, diff-gated fans.
+        onTransition: {
+          onTransition: async (run): Promise<void> => {
+            fanWorkBoardChanged(run.project_slug)
+            emitProjectsChangedIfChanged(OWNER_USER_ID)
+          },
+        },
+      }),
+    )
+    codegenTerminatorHolder.bind(
+      buildTridentTerminator({
+        store: boardRunStore,
+        observer: composeTerminalHook(
+          { onTerminal: async (): Promise<void> => {} },
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+            (o): o is (run: TridentRun) => Promise<void> => o !== null,
+          ),
+        ),
         onTransition: {
           onTransition: async (run): Promise<void> => {
             fanWorkBoardChanged(run.project_slug)

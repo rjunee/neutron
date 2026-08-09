@@ -48,14 +48,30 @@ export interface CodegenStatusToolInput {
 }
 
 export interface CodegenStatusToolOutput {
-  status: CodegenTaskStatus
+  status: CodegenTaskStatus | string
+  dispatch_path?: 'trident'
+  run_id?: string
+  phase?: string
+  reason?: string | null
+  already_terminal?: boolean
 }
 
 export interface CodegenFetchToolInput {
   task_id: string
 }
 
-export interface CodegenFetchToolOutput extends CodegenRunResult {}
+export type CodegenFetchToolOutput = CodegenRunResult | {
+  status: string
+  dispatch_path: 'trident'
+  run_id: string
+  phase: string
+  reason: string | null
+  already_terminal: boolean
+  branch?: string
+  worktree?: string
+  pr_number?: number
+  summary?: string
+}
 
 export interface CodegenCancelToolInput {
   task_id: string
@@ -63,7 +79,11 @@ export interface CodegenCancelToolInput {
 
 export interface CodegenCancelToolOutput {
   cancelled: boolean
-  prior_status: CodegenTaskStatus
+  prior_status: CodegenTaskStatus | 'trident_run'
+  dispatch_path?: 'legacy_codegen' | 'trident'
+  phase?: string
+  reason?: string | null
+  already_terminal?: boolean
 }
 
 /**
@@ -75,7 +95,11 @@ export interface ToolDeps {
   manifest: NeutronManifest
   project_slug: string
   audit: SecretAuditLog
-  orchestrator: CodegenOrchestrator
+  orchestrator: Pick<CodegenOrchestrator, 'dispatch'> & {
+    status(input: CodegenStatusToolInput): CodegenStatusToolOutput | Promise<CodegenStatusToolOutput>
+    fetch(input: CodegenFetchToolInput): CodegenFetchToolOutput | Promise<CodegenFetchToolOutput>
+    cancel(input: CodegenCancelToolInput): CodegenCancelToolOutput | Promise<CodegenCancelToolOutput>
+  }
 }
 
 export interface BuiltTools {

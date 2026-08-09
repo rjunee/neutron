@@ -92,6 +92,8 @@ export const GOOGLE_CLIENT_SECRET_ENV = 'NEUTRON_CORES_GOOGLE_CLIENT_SECRET'
 export interface MountOpenCoresInput {
   /** Per-instance ProjectDb (the same handle boot opened). */
   projectDb: ProjectDb
+  /** Late-bound production chokepoint used by `codegen_cancel` for Trident runs. */
+  tridentTerminator?: import('@neutronai/trident/terminate.ts').TridentTerminator
   /**
    * The composer's ONE canonical `TaskStore`. Threaded straight through to
    * `buildCoresBackendFactories({ canonicalTaskStore })` so the Tasks Core's
@@ -419,6 +421,9 @@ export async function mountOpenCores(
   // ── Backend-factory map (drives `installBundledCores` MCP-tool registration) ─
   const backends = await buildCoresBackendFactories({
     projectDb: input.projectDb,
+    ...(input.tridentTerminator !== undefined
+      ? { tridentTerminator: input.tridentTerminator }
+      : {}),
     // The one canonical store (see `MountOpenCoresInput.canonicalTaskStore`).
     ...(input.canonicalTaskStore !== undefined
       ? { canonicalTaskStore: input.canonicalTaskStore }
