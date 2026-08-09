@@ -9,7 +9,7 @@ Documents tab reads `Projects/general/docs` — a directory that **did not exist
 all**. Two plan docs were sitting in a folder nothing displays.
 
 `Projects/<owner-slug>/` is not a design; it is a **phantom project directory**.
-The control that proves it: real projects (`music`, `pristine`) carry the same
+The control that proves it: two REAL project directories carry the same
 `.nexus`, `calendar`, `docs` subdirectories, so those subsystems are per-project
 rather than owner-level — and the phantom is missing everything a real project has
 (`STATUS.md`, `README.md`, `.git`, `notes/`). It contains only what got written
