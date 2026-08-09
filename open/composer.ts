@@ -170,6 +170,7 @@ import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interv
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
+import { readTridentPhaseModels, writeTridentPhaseModels } from '@neutronai/gateway/storage/owner-metadata.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 // The OVERNIGHT-WORK report (`onboarding/overnight/morning-brief.ts`). It used to
@@ -234,6 +235,7 @@ export type OpenComposition = CompositionInput &
       | 'app_tasks_surface'
       | 'app_upload_surface'
       | 'app_voice_transcription_surface'
+      | 'app_trident_phase_models_surface'
     >
   >
 
@@ -391,6 +393,7 @@ import {
   freeBytesAt,
 } from '@neutronai/gateway/transcription/whisper-install.ts'
 import { createVoiceTranscriptionSurface } from '@neutronai/gateway/http/voice-transcription-surface.ts'
+import { createTridentPhaseModelsSurface } from '@neutronai/gateway/http/trident-phase-models-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
@@ -3209,6 +3212,14 @@ export function buildOpenGraphComposer(
       neutron_home: owner_home,
       free_bytes: freeBytesAt,
     })
+    // The read/write pair for the per-phase build models. Read PER REQUEST, like
+    // the transcription choice beside it: the setting is a live control, so a
+    // change must reach the next build with no restart and no cache to go stale.
+    const tridentPhaseModelsSurface = createTridentPhaseModelsSurface({
+      auth: appOwnerAuth,
+      read: (scope) => readTridentPhaseModels(db, scope),
+      write: (scope, input) => writeTridentPhaseModels(db, scope, input),
+    })
     const voiceTranscriptionSurface = createVoiceTranscriptionSurface({
       auth: appOwnerAuth,
       installer: whisperInstaller,
@@ -5603,6 +5614,21 @@ export function buildOpenGraphComposer(
                   )
                   return found?.plaintext ?? null
                 }),
+              // THE PRODUCER for the per-phase model/effort config. Read per launch
+              // from `instance_metadata` (migration 0118) so a setting changed after
+              // boot takes effect on the next run rather than the next restart, and
+              // re-validated by the reader so a row written by an older build cannot
+              // reach the workflow. Empty object → `buildWorkflowArgs` omits the
+              // argument entirely and every phase keeps its default.
+              resolve_phase_models: (): Record<string, { model?: string; effort?: string }> => {
+                try {
+                  return readTridentPhaseModels(db, owner_handle)
+                } catch {
+                  // A settings read must never take down a build launch. No config
+                  // means the defaults, which is a working run.
+                  return {}
+                }
+              },
               // RB2 (b) — thread the owner's structured CORRECTIONS into the inner
               // workflow so the FORGE BUILDER (forge:build + fix rounds) re-grounds on
               // them — NOT the independent argus review gate (trust boundary — verified
@@ -5755,6 +5781,7 @@ export function buildOpenGraphComposer(
       // Local voice transcription (`/api/app/voice-transcription`) — the
       // Settings-tab install/remove control for the keyless whisper.cpp backend.
       app_voice_transcription_surface: { handler: voiceTranscriptionSurface.handler },
+      app_trident_phase_models_surface: { handler: tridentPhaseModelsSurface.handler },
       // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
       // owner-gated. Additive; mounts no write route.
       app_diagnostics_surface: { handler: appDiagnosticsSurface.handler },

@@ -130,6 +130,14 @@ export interface MiscCompositionInput {
      */
     resolve_kimi_configured?: () => boolean
     /**
+     * The owner's per-phase model/effort overrides, resolved per launch.
+     *
+     * Absent → every phase keeps its default. This resolver is the PRODUCER the
+     * per-phase config was missing: the vocabulary, the workflow argument and the
+     * router all existed and were correct while nothing ever supplied a value.
+     */
+    resolve_phase_models?: () => Record<string, { model?: string; effort?: string }> | null
+    /**
      * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
      * launching run. The composer wires this to the SAME `reflection` instance the
      * live-agent chat turn reads (`reflection.loadContext()`), so owner corrections

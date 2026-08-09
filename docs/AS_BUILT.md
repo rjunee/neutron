@@ -8231,3 +8231,25 @@ Also lands two arbiter design docs (multi-substrate build agent; model usage das
 both awaiting owner decisions rather than implementation.
 
 Detail: `docs/as-built/2026-08-09-voice-transcript-survives-device.md`.
+
+## 2026-08-09 — the per-phase model config gets a producer
+
+The vocabulary, the workflow argument and the router were all built and correct, and
+**nothing ever supplied a value** — the orchestrator never passed one and no surface
+wrote one, so every run used the defaults regardless of configuration and nothing could
+go red. Found by an independent design review hours after the config landed.
+
+Migration 0118 adds `trident_phase_models` to `instance_metadata` (the documented home
+for instance-level settings); read/write helpers; a per-launch `resolve_phase_models`
+resolver threaded orchestrator → composition → composer; and
+`GET`/`PUT /api/app/trident/phase-models` registered across all four required places.
+
+The write fails WHOLE on any invalid entry while the read degrades quietly — the
+asymmetry is deliberate: at the settings boundary the owner can be told, deeper in
+nobody is listening. `PUT` replaces rather than merges so clearing a pin is an omission,
+but an absent `overrides` key is a 400 rather than an accidental wipe.
+
+Three mutants, one per link, each caught by exactly one test. The UI is still missing —
+this is the producer, not the pane.
+
+Detail: `docs/as-built/2026-08-09-phase-model-producer.md`.

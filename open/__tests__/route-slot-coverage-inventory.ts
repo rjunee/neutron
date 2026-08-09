@@ -159,6 +159,11 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
     serves: 'install/remove of the local whisper.cpp voice backend',
   },
   {
+    rung: 'app-trident-phase-models',
+    composition: 'app_trident_phase_models_surface',
+    serves: 'the code-gen settings — which model and effort run each build phase',
+  },
+  {
     rung: 'app-tasks',
     composition: 'app_tasks_surface',
     serves: 'the Tasks tab — list, create, complete, cancel',

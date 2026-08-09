@@ -98,6 +98,12 @@ const EXPECTED_COMPOSITION_KEYS = [
   'app_system_notice_surface',
   'app_tabs_surface',
   'app_tasks_surface',
+  // Per-phase build models (`/api/app/trident/phase-models`) — the settings
+  // control for which model and reasoning effort run each phase of a build. Its
+  // presence HERE is the done-means-served proof, and it matters more than usual:
+  // this config was built end to end with NO producer, so the composer handing the
+  // surface over is precisely the link that was missing.
+  'app_trident_phase_models_surface',
   'app_upload_surface',
   // The active-credential usage meter (`GET /api/app/usage`) that both clients
   // draw the tab-bar divider from. Same done-means-served proof as the activity

@@ -461,6 +461,16 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_voice_transcription_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0e4. Per-phase build models — `/api/app/trident/phase-models`. Which model and
+  //      reasoning effort run each phase of a build.
+  slot({
+    key: 'appTridentPhaseModels',
+    rung: 'app-trident-phase-models',
+    composition: 'app_trident_phase_models_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_trident_phase_models_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0f. Project launcher — P5.3. `/api/app/projects/<id>/launcher[*]`.
   slot({
     key: 'appLauncher',

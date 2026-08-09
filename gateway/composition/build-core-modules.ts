@@ -535,6 +535,12 @@ export function buildCoreModules(
         if (tridentWiring.resolve_kimi_configured !== undefined) {
           orchestratorOpts.resolve_kimi_configured = tridentWiring.resolve_kimi_configured
         }
+        // The owner's per-phase model/effort choices. Without this line the whole
+        // per-phase config chain is inert: it was built end to end and never given a
+        // producer, so every run used the defaults regardless of what was set.
+        if (tridentWiring.resolve_phase_models !== undefined) {
+          orchestratorOpts.resolve_phase_models = tridentWiring.resolve_phase_models
+        }
         // RB2 (b) — thread the owner's reflection corrections/diary resolver so the
         // inner workflow re-grounds the FORGE BUILDER (not the argus review gate) on
         // owner corrections on its first turn (reflection was chat-only before RB2).
