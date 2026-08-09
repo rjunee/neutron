@@ -134,6 +134,19 @@ export interface BuildTridentOrchestratorOptions {
    * the graceful (never-blocking) path.
    */
   resolve_kimi_configured?: () => boolean
+  /**
+   * The owner's per-phase model/effort overrides for THIS launch.
+   *
+   * Resolved PER LAUNCH, for the same reason as the two resolvers above: a setting
+   * changed after boot must take effect on the next run, not the next restart.
+   *
+   * THIS RESOLVER IS WHY THE FEATURE WORKS AT ALL. `phase-models.ts`, the workflow
+   * argument and the router were all built and correct, and nothing ever produced a
+   * value — the orchestrator simply did not pass one, so every run used the defaults
+   * no matter what was configured. Absent → the workflow argument is omitted and the
+   * defaults apply, which is the pre-existing behaviour exactly.
+   */
+  resolve_phase_models?: () => Record<string, { model?: string; effort?: string }> | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /**
@@ -404,6 +417,12 @@ export function buildTridentOrchestrator(
       // resolver / nothing learned / a
       // read failed.
       reflection_context,
+      // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
+      // and OMITS the argument when nothing valid is configured, so an untouched
+      // instance produces byte-identical workflow args.
+      ...(opts.resolve_phase_models
+        ? { phase_models: opts.resolve_phase_models() }
+        : {}),
     })
     const tracked = firePromise.then(
       () => undefined,

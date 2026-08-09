@@ -79,6 +79,21 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * Per-phase model/effort settings — `/api/app/trident/phase-models`.
+   *
+   * When omitted the route is unmounted and the code-gen Settings section can
+   * neither read the phase vocabulary nor save a choice. The ENGINE side still
+   * honours whatever is already stored, because the orchestrator reads the store
+   * directly — so an unmounted surface is "cannot change it", not "it stops
+   * working".
+   *
+   * Surface factory:
+   * `gateway/http/trident-phase-models-surface.ts:createTridentPhaseModelsSurface`.
+   */
+  app_trident_phase_models_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * P5.3 — Expo-app project-launcher surface. When supplied, the
    * composed HTTP chain mounts `/api/app/projects/<id>/launcher[*]`.
    * HTTP-only — no websocket multiplexing concerns. When omitted the

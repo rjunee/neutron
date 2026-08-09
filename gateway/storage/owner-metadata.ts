@@ -16,6 +16,7 @@
  * table, so a second reader can't drift from the first on what a NULL means.
  */
 
+import { parsePhaseModelConfig } from '@neutronai/trident/phase-models.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   isTranscriptionBackendChoice,
@@ -103,6 +104,70 @@ export async function writeTranscriptionBackend(
        ON CONFLICT(instance_slug) DO UPDATE SET transcription_backend = excluded.transcription_backend`,
     [project_slug, backend],
   )
+}
+
+/**
+ * Read the owner's per-phase trident model/effort overrides (migration 0118).
+ *
+ * RE-VALIDATED ON THE WAY OUT, not trusted because it is stored. A row written by
+ * an older or looser build must not reach the workflow: once a value is inside
+ * `inner-workflow.mjs` the only available response to a bad entry is to log and
+ * continue, and a log line in a detached background run is not a channel anyone
+ * reads. So the last typed layer is the last chance to drop it, and it takes it.
+ *
+ * Returns `{}` for absent / NULL / unparseable / fully-invalid — all of which mean
+ * "no overrides", which is the same thing the caller does with them. A partially
+ * valid stored object yields only its valid entries, matching the write path's own
+ * partial-acceptance shape.
+ */
+export function readTridentPhaseModels(
+  db: ProjectDb,
+  project_slug: string,
+): Readonly<Record<string, { model?: string; effort?: string }>> {
+  const row = db
+    .prepare<{ trident_phase_models: string | null }, [string]>(
+      `SELECT trident_phase_models FROM instance_metadata WHERE instance_slug = ? LIMIT 1`,
+    )
+    .get(project_slug)
+  const raw = row?.trident_phase_models
+  if (typeof raw !== 'string' || raw.trim().length === 0) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    // Corrupt JSON is "no overrides", never a thrown error on a build launch.
+    return {}
+  }
+  return parsePhaseModelConfig(parsed).config
+}
+
+/**
+ * Persist the owner's per-phase overrides.
+ *
+ * THE WRITE FAILS WHOLE when any entry is invalid — it returns the errors and
+ * stores nothing. This is the opposite of the read path above and the asymmetry is
+ * the point: at the settings boundary the owner is present and can be told, so a
+ * silent partial write is the worst outcome available (they would set `xhigh`,
+ * observe nothing, and reasonably conclude the feature is broken). Deeper in, no
+ * one is listening, so dropping the bad entry and continuing is the only safe move.
+ *
+ * An empty config clears the setting to NULL rather than storing `{}`, so "never
+ * configured" and "configured to nothing" are one state instead of two.
+ */
+export async function writeTridentPhaseModels(
+  db: ProjectDb,
+  project_slug: string,
+  input: unknown,
+): Promise<{ ok: boolean; errors: ReadonlyArray<string> }> {
+  const { config, errors } = parsePhaseModelConfig(input)
+  if (errors.length > 0) return { ok: false, errors }
+  const value = Object.keys(config).length > 0 ? JSON.stringify(config) : null
+  await db.run(
+    `INSERT INTO instance_metadata (instance_slug, trident_phase_models) VALUES (?, ?)
+       ON CONFLICT(instance_slug) DO UPDATE SET trident_phase_models = excluded.trident_phase_models`,
+    [project_slug, value],
+  )
+  return { ok: true, errors: [] }
 }
 
 /** Upper bound on an accepted IANA identifier (the longest real zone,
