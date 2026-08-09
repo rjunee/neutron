@@ -8001,3 +8001,26 @@ submitted text before awaiting the send, then restores it only when delivery
 fails (ahead of any newer draft text). An in-flight send claim prevents two
 Enter presses from reusing the same staged attachment URLs before the first
 upload/send clears them.
+
+## 2026-08-09 — the typing refcount's guard is now killable by a test
+
+PR #145's last open finding was exact: *"Typing-refcount suppression guard and
+46-minute fail-safe have zero killing test coverage, and depth can leak
+permanently."* Both halves were true, and neither was reachable — the logic was a
+closure inside `wireAppWs` keyed on a real `setTimeout(…, 46 * 60_000)`. No test
+waits 46 minutes, and a test that reaches into a closure is not testing the
+production path.
+
+The decision logic moved to `open/wiring/typing-refcount.ts`, pure apart from an
+INJECTED scheduler; `open/wiring/app-ws.ts` is the only caller and passes the real
+one. `open/__tests__/typing-refcount.test.ts` fires the captured timer, so the
+46-minute path runs under test with only the caller changed.
+
+Behaviour is unchanged and now pinned: the outermost `start` and the final `end`
+are the only visible edges (an inner pair emits nothing, so a fast second turn
+cannot clear the first turn's dots); a stray `end` never drives depth negative; the
+window is re-armed on every transition that leaves the count positive; a
+cancelled-but-still-running timer cannot clear an entry a newer start re-armed; and
+a lost `end` expires instead of suppressing every future typing start until
+restart. Mutants killed: removing the fail-safe fails 3, making every transition
+emit fails 2.

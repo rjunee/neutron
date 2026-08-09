@@ -101,6 +101,7 @@ import type {
 } from '@neutronai/gateway/http/chat-bridge.ts'
 import type { UserTurnInput } from '@neutronai/scribe/index.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
+import { createTypingRefcount } from './typing-refcount.ts'
 import type { Late } from './late.ts'
 import type { OpenWiringContext } from './context.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -648,39 +649,59 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   // never land in the durable log or a `resume` replay. Best-effort: a closed
   // socket / registry miss is a silent no-op (the client clears typing on the
   // next agent_message regardless, so a lost `end` can't wedge the dots).
-  const typingDepth = new Map<string, { depth: number; expiry: ReturnType<typeof setTimeout> }>()
+  // The refcount + its fail-safe live in `typing-refcount.ts` so the guard is
+  // REACHABLE BY A TEST. The reviewers' remaining finding on this work was exact:
+  // the suppression guard and the 46-minute fail-safe had "zero killing test
+  // coverage, and depth can leak permanently". Neither was testable here — a
+  // closure inside `wireAppWs`, keyed on a real `setTimeout(…, 46 * 60_000)`. The
+  // scheduler is a parameter there; this is the only place that passes the real one.
+  const typingRefcount = createTypingRefcount({
+    scheduler: {
+      schedule: (fn, ms) => {
+        const t = setTimeout(fn, ms)
+        ;(t as unknown as { unref?: () => void }).unref?.()
+        return t
+      },
+      cancel: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    },
+    // A lost `end` (process death, socket failure) would otherwise suppress every
+    // future typing start for this topic until restart. On expiry, emit the `end`
+    // the turn never sent and drop the rail's working state with it.
+    onExpire: (key) => {
+      const split = key.indexOf(':')
+      const channel_topic_id = key.slice(0, split)
+      const project_id = key.slice(split + 1)
+      const scoped = project_id.length > 0 ? project_id : undefined
+      activeChatProjects.delete(railChatKey(scoped))
+      const expired: AppWsOutboundAgentTyping = {
+        v: 1,
+        type: 'agent_typing',
+        state: 'end',
+        ts: Date.now(),
+      }
+      if (scoped !== undefined) expired.project_id = scoped
+      try {
+        appWsRegistry.send(channel_topic_id, expired)
+      } catch {
+        /* best-effort */
+      }
+      try {
+        emitProjectsChangedIfChanged(OWNER_USER_ID)
+      } catch {
+        /* best-effort */
+      }
+    },
+  })
   const emitAppWsTyping = (
     channel_topic_id: string,
     state: 'start' | 'end',
     project_id?: string,
   ): void => {
     const typingKey = `${channel_topic_id}:${project_id ?? ''}`
-    const priorTyping = typingDepth.get(typingKey)
-    const previousDepth = priorTyping?.depth ?? 0
-    const nextDepth = state === 'start' ? previousDepth + 1 : Math.max(0, previousDepth - 1)
-    if (priorTyping !== undefined) clearTimeout(priorTyping.expiry)
-    if (nextDepth === 0) typingDepth.delete(typingKey)
-    else {
-      // A process/socket failure can lose the matching `end`. Bound the
-      // refcount lifetime so one missing frame cannot suppress every future
-      // typing start for this topic until restart.
-      const expiry = setTimeout(() => {
-        if (typingDepth.get(typingKey)?.expiry !== expiry) return
-        typingDepth.delete(typingKey)
-        activeChatProjects.delete(railChatKey(project_id))
-        const expired: AppWsOutboundAgentTyping = {
-          v: 1, type: 'agent_typing', state: 'end', ts: Date.now(),
-        }
-        if (project_id !== undefined && project_id.length > 0) expired.project_id = project_id
-        try { appWsRegistry.send(channel_topic_id, expired) } catch { /* best-effort */ }
-        try { emitProjectsChangedIfChanged(OWNER_USER_ID) } catch { /* best-effort */ }
-      }, 46 * 60_000)
-      expiry.unref?.()
-      typingDepth.set(typingKey, { depth: nextDepth, expiry })
-    }
-    // Concurrent mid-turn sends share one visible typing lifetime. Suppress an
-    // inner start/end pair so its quick completion cannot clear turn one's dots.
-    if ((state === 'start' && previousDepth > 0) || (state === 'end' && nextDepth > 0)) return
+    // Concurrent mid-turn sends share one visible typing lifetime, so an inner
+    // start/end pair emits NOTHING — its quick completion must not clear turn
+    // one's dots.
+    if (!typingRefcount.transition(typingKey, state).emit) return
     // M1 UX REDESIGN — track the live chat turn for the rail's `working` state.
     // `start`/`end` bracket every live-agent turn, so this is the composer-known
     // "chat turn in progress" signal `readProjectRailExtras` reads.
