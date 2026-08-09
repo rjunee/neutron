@@ -9,9 +9,11 @@
  * Open's settings before cutover (SPEC Decisions Log 2026-08-07). Settings already
  * stores arbitrary per-service credentials; nothing read one for Kimi.
  *
- * ENV WINS, deliberately. An existing install that exports `KIMI_API_KEY` keeps
- * behaving exactly as before — the store is consulted only when the env var is
- * absent or empty, so this can never change which key a working deployment uses.
+ * THE STORE IS THE ONLY SOURCE (owner-directed, 2026-08-09). This module briefly
+ * read an env var first, as a migration convenience; that made the env a second
+ * resolution path, which silently beat anything the owner typed into settings. Now
+ * `KIMI_API_KEY` is only ever an OUTPUT — the channel the resolved key travels to
+ * the child on — never an input.
  *
  * THE KEY IS NEVER RETURNED INTO A PROMPT. `resolve_kimi_configured` converts it
  * to a BOOLEAN before it crosses into the workflow, and the reviewer subprocess
@@ -35,18 +37,27 @@ export interface KimiKeyLookup {
 }
 
 /**
- * Resolve the key: environment first, stored credential second, else null.
+ * Resolve the key from the credential store. THE STORE IS THE ONLY SOURCE.
  *
- * A whitespace-only or empty value counts as ABSENT at every layer — an env var
- * exported as `""` is the most common way a key is "set" and useless, and letting
- * it win would mask a perfectly good stored credential.
+ * THIS USED TO READ AN ENV VAR FIRST, and the owner removed that: *"we shouldn't be
+ * using an env var at all — that was a temporary hack, not a production-grade
+ * decision."* He is right, and the reason is structural rather than stylistic: an
+ * env var that WINS over the store is a second resolution path, so the same
+ * settings screen produces different behaviour on two boxes depending on how one
+ * of them was provisioned. Worse, it fails silently in the direction nobody checks
+ * — the owner pastes a new key, the screen says it is saved, and every review keeps
+ * using the old one with nothing anywhere reporting a conflict. That is exactly the
+ * no-dual-code-paths rule, applied to configuration.
+ *
+ * The env var is still how the CHILD receives the key (see
+ * {@link ensureKimiKeyExported}) — that indirection is load-bearing and stays. What
+ * is gone is env as a *source*: nothing reads `KIMI_API_KEY` to decide what the key
+ * IS any more, only to hand the resolved one to a subprocess.
+ *
+ * A whitespace-only stored value counts as ABSENT, so a cleared field is "not
+ * configured" rather than a key of length zero.
  */
-export function resolveKimiApiKey(
-  envValue: string | undefined | null,
-  lookup: KimiKeyLookup | null,
-): string | null {
-  const fromEnv = typeof envValue === 'string' ? envValue.trim() : ''
-  if (fromEnv.length > 0) return fromEnv
+export function resolveKimiApiKey(lookup: KimiKeyLookup | null): string | null {
   if (lookup === null) return null
   let stored: string | null
   try {
@@ -81,10 +92,17 @@ export function ensureKimiKeyExported(
   env: Record<string, string | undefined>,
   lookup: KimiKeyLookup | null,
 ): boolean {
-  const key = resolveKimiApiKey(env[KIMI_API_KEY_ENV], lookup)
-  if (key === null) return false
-  // Only write when it differs: a no-op assignment on every launch is noise, and
-  // an env var the operator set by hand should keep its exact value.
+  const key = resolveKimiApiKey(lookup)
+  if (key === null) {
+    // NOT CONFIGURED MEANS NOT CONFIGURED, so a stale env value is CLEARED rather
+    // than left standing. Without this, deleting the key in settings would leave a
+    // previously-exported value in the process environment and the reviewer would
+    // keep running on a credential the owner believes they removed — the mirror
+    // image of the bug this change exists to fix.
+    if (env[KIMI_API_KEY_ENV] !== undefined) delete env[KIMI_API_KEY_ENV]
+    return false
+  }
+  // Only write when it differs: a no-op assignment on every launch is noise.
   if (env[KIMI_API_KEY_ENV] !== key) env[KIMI_API_KEY_ENV] = key
   return true
 }

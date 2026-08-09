@@ -110,14 +110,12 @@ describe('the Kimi cross-model panelist is reachable from the production compose
     const resolve = await resolverFromComposer()
     expect(resolve()).toBe(false)
 
-    // The operator sets the key after the gateway booted. Read-at-call is what
-    // makes this take effect on the next run instead of the next restart.
-    process.env['KIMI_API_KEY'] = 'sk-kimi-set-after-boot'
+    // The owner saves the key in settings after the gateway booted. Read-at-call
+    // is what makes this take effect on the next run instead of the next restart.
+    // REWRITTEN 2026-08-09: this used to set the ENV VAR, which no longer feeds
+    // resolution at all — the store is the only source now.
+    await storeKimiKeyInSettings('sk-kimi-set-after-boot')
     expect(resolve()).toBe(true)
-
-    // And removing it turns the panelist back off, rather than latching on.
-    delete process.env['KIMI_API_KEY']
-    expect(resolve()).toBe(false)
   })
 
   test('an EMPTY key counts as not configured, not as configured-with-nothing', async () => {
@@ -149,23 +147,31 @@ describe('the Kimi cross-model panelist is reachable from the production compose
     expect(process.env['KIMI_API_KEY']).toBe('sk-kimi-must-reach-the-child')
   })
 
-  test('ENV WINS over a stored key — an existing deployment is unchanged', async () => {
-    // The compatibility guarantee. Anyone already exporting the key keeps using
-    // exactly that one, whatever is sitting in the store.
+  test('INVERTED 2026-08-09: the STORE wins over an env var — the settings screen is the truth', async () => {
+    // This used to assert the OPPOSITE ("ENV WINS — an existing deployment is
+    // unchanged"), as a compatibility guarantee. The owner removed it: an env var
+    // that beats the store is a second resolution path, and it fails in the
+    // direction nobody checks — the owner pastes a new key, settings reports it
+    // saved, and every review keeps using the shell's one with nothing reporting a
+    // conflict.
+    //
+    // Inverted rather than deleted, so the reversal stays legible in history.
     await storeKimiKeyInSettings('sk-kimi-stored')
-    process.env['KIMI_API_KEY'] = 'sk-kimi-from-env'
+    process.env['KIMI_API_KEY'] = 'sk-kimi-stale-from-env'
     const resolve = await resolverFromComposer()
     expect(resolve()).toBe(true)
-    expect(process.env['KIMI_API_KEY']).toBe('sk-kimi-from-env')
+    // The exported value is the STORED one: the env var is now purely the channel
+    // the resolved key travels to the child on, never a source.
+    expect(process.env['KIMI_API_KEY']).toBe('sk-kimi-stored')
   })
 
-  test('an EMPTY env var does not mask a good stored key', async () => {
-    // `export KIMI_API_KEY=` is the most common way a key is "set" and useless. If
-    // the empty string won, the stored key would be unreachable and the failure
-    // would look like a store bug.
-    await storeKimiKeyInSettings('sk-kimi-behind-empty-env')
-    process.env['KIMI_API_KEY'] = ''
+  test('an env var ALONE no longer configures anything', async () => {
+    // The other half. With nothing in the store, an exported key is not a
+    // configuration — and the stale value is CLEARED rather than left for the
+    // child to inherit.
+    process.env['KIMI_API_KEY'] = 'sk-kimi-env-only'
     const resolve = await resolverFromComposer()
-    expect(resolve()).toBe(true)
+    expect(resolve()).toBe(false)
+    expect(process.env['KIMI_API_KEY']).toBeUndefined()
   })
 })

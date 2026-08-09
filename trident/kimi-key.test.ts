@@ -13,47 +13,48 @@ import {
   KIMI_API_KEY_ENV,
 } from './kimi-key.ts'
 
-describe('resolveKimiApiKey — env first, store second', () => {
-  test('the env value wins whenever it is set', () => {
-    // The compatibility guarantee: an install already exporting the key must keep
-    // using exactly that one, whatever sits in the store.
-    expect(resolveKimiApiKey('sk-env', () => 'sk-store')).toBe('sk-env')
+describe('resolveKimiApiKey — the STORE is the only source', () => {
+  test('the stored key is used', () => {
+    expect(resolveKimiApiKey(() => 'sk-store')).toBe('sk-store')
   })
 
-  test('the store is used when env is absent', () => {
-    expect(resolveKimiApiKey(undefined, () => 'sk-store')).toBe('sk-store')
-    expect(resolveKimiApiKey(null, () => 'sk-store')).toBe('sk-store')
+  test('INVERTED 2026-08-09: an env value no longer wins — it is not even read', () => {
+    // This test used to assert the OPPOSITE ("the env value wins whenever it is
+    // set"), as a compatibility guarantee for installs already exporting the key.
+    // The owner removed that: an env var beating the store is a second resolution
+    // path, so the same settings screen behaves differently on two boxes depending
+    // on how one was provisioned — and it fails in the direction nobody checks,
+    // with the screen reporting a saved key that every review then ignores.
+    //
+    // Inverted rather than deleted so the reversal stays legible in history. The
+    // resolver no longer takes an env argument at all, which is the strongest form
+    // of "it is not read": there is nothing to pass.
+    const stored = resolveKimiApiKey(() => 'sk-store')
+    expect(stored).toBe('sk-store')
+    expect(resolveKimiApiKey.length).toBe(1)
   })
 
-  test('an EMPTY or whitespace env value does not mask a good stored key', () => {
-    // `export KIMI_API_KEY=` is the most common way a key is "set" and useless.
-    // Letting it win would make the stored key unreachable, and the failure would
-    // look like a bug in the store rather than in the shell.
-    expect(resolveKimiApiKey('', () => 'sk-store')).toBe('sk-store')
-    expect(resolveKimiApiKey('   ', () => 'sk-store')).toBe('sk-store')
-  })
-
-  test('a blank STORED value is absent too', () => {
-    expect(resolveKimiApiKey(undefined, () => '')).toBeNull()
-    expect(resolveKimiApiKey(undefined, () => '  ')).toBeNull()
+  test('a blank STORED value is absent', () => {
+    expect(resolveKimiApiKey(() => '')).toBeNull()
+    expect(resolveKimiApiKey(() => '  ')).toBeNull()
   })
 
   test('no lookup at all is simply "not configured"', () => {
-    expect(resolveKimiApiKey(undefined, null)).toBeNull()
+    expect(resolveKimiApiKey(null)).toBeNull()
   })
 
   test('a THROWING store read degrades to not-configured, never to a crash', () => {
     // A locked or corrupt credential row must not take down a review launch. Not
     // configured is the graceful path the panel already handles.
     expect(
-      resolveKimiApiKey(undefined, () => {
+      resolveKimiApiKey(() => {
         throw new Error('db locked')
       }),
     ).toBeNull()
   })
 
   test('the value is trimmed, so a pasted key with a trailing newline still works', () => {
-    expect(resolveKimiApiKey(undefined, () => 'sk-store\n')).toBe('sk-store')
+    expect(resolveKimiApiKey(() => 'sk-store\n')).toBe('sk-store')
   })
 })
 
@@ -69,10 +70,23 @@ describe('ensureKimiKeyExported — the subprocess has to be able to see it', ()
     expect(env[KIMI_API_KEY_ENV]).toBe('sk-store')
   })
 
-  test('an operator-set env value is left EXACTLY as they set it', () => {
-    const env: Record<string, string | undefined> = { [KIMI_API_KEY_ENV]: 'sk-env' }
+  test('INVERTED: a pre-set env value is OVERWRITTEN by the stored key', () => {
+    // This used to assert the opposite — that an operator-set value was left
+    // exactly as they set it. That was the env-as-a-source behaviour, and it is
+    // precisely the silent failure the owner removed: paste a new key in settings,
+    // see it saved, and every review keeps using the one from the shell.
+    const env: Record<string, string | undefined> = { [KIMI_API_KEY_ENV]: 'sk-stale-env' }
     expect(ensureKimiKeyExported(env, () => 'sk-store')).toBe(true)
-    expect(env[KIMI_API_KEY_ENV]).toBe('sk-env')
+    expect(env[KIMI_API_KEY_ENV]).toBe('sk-store')
+  })
+
+  test('CLEARING the key in settings clears the exported value too', () => {
+    // The mirror image, and the half that is easy to forget: without the delete, a
+    // previously-exported key would survive in the process environment and the
+    // reviewer would keep running on a credential the owner believes they removed.
+    const env: Record<string, string | undefined> = { [KIMI_API_KEY_ENV]: 'sk-previously-exported' }
+    expect(ensureKimiKeyExported(env, () => null)).toBe(false)
+    expect(KIMI_API_KEY_ENV in env).toBe(false)
   })
 
   test('no key anywhere → false, and nothing is written', () => {
@@ -82,8 +96,8 @@ describe('ensureKimiKeyExported — the subprocess has to be able to see it', ()
   })
 
   test('an empty env var is REPLACED by the stored key, not left in place', () => {
-    // The pair of the masking case above: resolving correctly is not enough if the
-    // child still inherits the empty string.
+    // Resolving correctly is not enough if the child still inherits the empty
+    // string.
     const env: Record<string, string | undefined> = { [KIMI_API_KEY_ENV]: '' }
     expect(ensureKimiKeyExported(env, () => 'sk-store')).toBe(true)
     expect(env[KIMI_API_KEY_ENV]).toBe('sk-store')
