@@ -24,8 +24,8 @@ import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } 
 import { clearRespawnInFlight, gateFor, getOrSpawnSession } from './spawn.ts'
 import { drainPendingRespawns } from './pending-respawn.ts'
 import { poolKeyFor } from './pool.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const log = createLogger('repl-watchdog')
 
@@ -471,6 +471,14 @@ export async function runReplWatchdogTick(
     })
 
     let respawned = false
+    const keyOptions = supervisedBySessionKey.get(sessionKey)
+    if (verdict.wedged && verdict.reason === 'pid-dead' && keyOptions !== undefined) {
+      try {
+        await keyOptions.onChildCrash?.({ sessionKey, detail: verdict.detail })
+      } catch (err) {
+        log.error('child_crash_sink_error', { sessionKey, error: String(err) })
+      }
+    }
     if (action.kind === 'respawn-and-alert') {
       // Respawn with the OWNING substrate's options (env / instance-id / spawn
       // opts), resolved by pool key — one registry is shared by substrates that
@@ -479,25 +487,12 @@ export async function runReplWatchdogTick(
       // own options — that would resume it under the wrong env/identity. It is
       // recovered when its owner re-registers (resume-is-always-resume on its next
       // turn, or the next tick once registered). Surface as a skip.
-      const keyOptions = supervisedBySessionKey.get(sessionKey)
       if (keyOptions === undefined) {
         results.push({ sessionKey, action: 'unregistered-skip', respawned: false })
         continue
       }
       const trigger: RespawnTrigger =
         action.verdict.reason === 'pid-dead' ? 'crash-watchdog' : 'wedge-watchdog'
-      if (trigger === 'crash-watchdog') {
-        try {
-          fireAndForget(
-            `supervision.onChildCrash:${sessionKey}`,
-            Promise.resolve(
-              keyOptions.onChildCrash?.({ sessionKey, detail: action.verdict.detail }),
-            ),
-          )
-        } catch (err) {
-          log.error('child_crash_sink_error', { sessionKey, error: String(err) })
-        }
-      }
       const outcome = respawnReplSession(keyOptions, sessionKey, trigger, action.verdict.detail)
       respawned = outcome.ok
       if (action.alert.send) {

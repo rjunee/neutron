@@ -232,6 +232,23 @@ describe('TridentRunStore', () => {
     ).rejects.toThrow()
   })
 
+  test('crash marker beats a stale running tick, then permits the crash-to-failed save (#514)', async () => {
+    const store = new TridentRunStore(db)
+    const created = await store.create({ slug: 's', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(created.id, { subagent_status: 'running', subagent_run_id: 'wf-1' })
+    const staleTickSnapshot = store.get(created.id)!
+
+    await store.crashRunningByRepo('/r', 'pooled child exited')
+    // Mutation killed: removing the subagent_status guard lets this stale full
+    // snapshot overwrite `crashed` back to `running`.
+    expect(await store.saveIfActive(staleTickSnapshot)).toBe(false)
+    expect(store.get(created.id)?.subagent_status).toBe('crashed')
+
+    const crashSnapshot = store.get(created.id)!
+    expect(await store.saveIfActive({ ...crashSnapshot, phase: 'failed' })).toBe(true)
+    expect(store.get(created.id)?.phase).toBe('failed')
+  })
+
   describe('terminalTransition — atomic conditional terminal write (§F6a race guard)', () => {
     test('wins on a non-terminal run: flips the phase + reason and reports won', async () => {
       const store = new TridentRunStore(db)

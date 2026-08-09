@@ -545,7 +545,8 @@ export class TridentRunStore {
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
                 last_advanced_at = ?
-          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND (subagent_status IS NOT 'crashed' OR ? = 'crashed')`,
         [
           run.phase,
           run.round,
@@ -563,6 +564,7 @@ export class TridentRunStore {
           run.harvested_at,
           this.now(),
           run.id,
+          run.subagent_status,
         ],
       )
       return res.changes > 0

@@ -30,6 +30,19 @@ import type { OpenWiringContext } from '../wiring/context.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
+import { dispatchBoardBoundBuild } from '@neutronai/trident/board-dispatch.ts'
+import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
+import { TridentTickLoop } from '@neutronai/trident/tick.ts'
+import {
+  registerSupervisedSubstrate,
+  runReplWatchdogTick,
+  shutdownAllPersistentRepls,
+  type PersistentReplSubstrateOptions,
+} from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
+import { poolKeyFor } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
+import { saveRegistry } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import { wireSubstrates } from '../wiring/substrates.ts'
 import {
   resolveOpenModelProvider,
@@ -252,28 +265,88 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     }
   })
 
-  test('pid-dead callback reaps only running rows owned by its warm per-repo launcher (#514)', async () => {
+  test('production watchdog wiring reaps a capped pid-dead run, then one tick aligns count and board (#514)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'neutron-open-crash-reap-'))
     const db = ProjectDb.open(join(dir, 'project.db'))
     try {
       applyMigrations(db.raw())
       const runs = new TridentRunStore(db)
-      const dead = await runs.create({ slug: 'dead', project_slug: 'owner', repo_path: '/repo/dead', task: 'dead' })
+      const board = new WorkBoardStore(db)
+      const item = await board.create('owner', {
+        title: 'build the email core with tests and wire it to the application',
+      })
+      const dispatched = await dispatchBoardBoundBuild(
+        { board_item_id: item.id, task: 'build the email core' },
+        {
+          store: runs,
+          board,
+          project_slug: 'owner',
+          repo_path: '/repo/dead',
+          resolveBuildRepo: async (home) => home,
+          resolveMergeMode: async () => 'pr',
+          resolveRalph: async () => false,
+        },
+      )
+      expect(dispatched.ok).toBe(true)
+      const dead = dispatched.ok ? dispatched.run : null
+      expect(dead).not.toBeNull()
       const live = await runs.create({ slug: 'live', project_slug: 'owner', repo_path: '/repo/live', task: 'live' })
-      await runs.update(dead.id, { subagent_status: 'running', subagent_run_id: 'wf-dead' })
       await runs.update(live.id, { subagent_status: 'running', subagent_run_id: 'wf-live' })
+      const orch = buildTridentOrchestrator({
+        fire_workflow: async () => ({ status: 'fired', run_id: 'wf-dead', error: null }),
+        db_path: join(dir, 'project.db'),
+        run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+      })
+      const loop = new TridentTickLoop({
+        store: runs,
+        step: orch.step,
+        on_terminal: { onTerminal: buildBoardReconcileObserver(board)! },
+      })
+      await loop.runOnce()
+      expect(runs.get(dead!.id)?.subagent_status).toBe('running')
+
       const { ctx, captured } = makeCtx({ db })
       await drain(wireSubstrates(ctx).makeWarmFireSubstrate('/repo/dead'))
-      const callback = captured.find((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))?.onChildCrash
-      expect(callback).toBeDefined()
+      const wired = captured.find((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))!
+      const registryPath = join(dir, 'repl-registry.json')
+      const supervised = { ...wired, replRegistryPath: registryPath } as PersistentReplSubstrateOptions
+      const sessionKey = poolKeyFor(supervised)
+      saveRegistry(registryPath, {
+        [sessionKey]: {
+          sessionKey,
+          sessionId: 'dead-session',
+          cwd: '/repo/dead',
+          channelName: 'dead-channel',
+          has_session: true,
+          pid: 999_999,
+          first_ready_at: 1,
+          capped_at: 2,
+        },
+      })
+      registerSupervisedSubstrate(supervised)
 
-      // Mutation killed: deleting the substrates.ts callback leaves the stored
-      // row running; broad repo-agnostic matching also crashes the live row.
-      callback!({ sessionKey: 'cc-trident-fire-owner\0/repo/dead', detail: 'pooled child exited' })
-      for (let i = 0; i < 20 && runs.get(dead.id)?.subagent_status === 'running'; i++) await Bun.sleep(1)
-      expect(runs.get(dead.id)?.subagent_status).toBe('crashed')
+      // Mutations killed: deleting either production callback forwarding seam,
+      // or firing only from respawn-and-alert, leaves this capped run running.
+      const watchdog = await runReplWatchdogTick(supervised, {
+        healthProbe: async () => false,
+        isPidAlive: () => false,
+        now: () => 120_000,
+      })
+      expect(watchdog.find((entry) => entry.sessionKey === sessionKey)?.action).toBe('cap-hit-alert')
+      expect(runs.get(dead!.id)?.subagent_status).toBe('crashed')
       expect(runs.get(live.id)?.subagent_status).toBe('running')
+
+      await loop.runOnce()
+      const stored = runs.get(dead!.id)!
+      expect(stored.phase).toBe('failed')
+      expect(stored.subagent_status).toBe('crashed')
+      // Mutation killed: the UI count uses this phase-based production query;
+      // counting only subagent_status would miss phase/status divergence.
+      expect(runs.listNonTerminal().filter((run) => run.id === dead!.id)).toHaveLength(0)
+      expect(board.get('owner', item.id)?.status).toBe('failed')
+      expect(board.list('owner').filter((candidate) => candidate.status === 'in_progress')).toHaveLength(0)
     } finally {
+      await shutdownAllPersistentRepls()
       db.close()
       rmSync(dir, { recursive: true, force: true })
     }

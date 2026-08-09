@@ -36,8 +36,8 @@ import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OpenWiringContext } from './context.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface WiredSubstrates {
   /** Warm onboarding phase-spec substrate (`cc-llm-*`); null when LLM-less. */
@@ -426,13 +426,12 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // launcher's child died. Stamp every still-live workflow owned by its repo;
       // the Trident tick then performs the normal terminal transition + board
       // reconcile instead of leaving a durable `running` phantom until timeout.
-      onChildCrash: ({ sessionKey, detail }) => {
-        fireAndForget(
-          `trident.reapChildCrash:${sessionKey}`,
-          tridentRuns.crashRunningByRepo(
-            cwd,
-            `inner workflow child crashed: ${detail}`,
-          ),
+      onChildCrash: async ({ detail }) => {
+        // `cwd` is the run's repo_path today: worktrees are stamped only on the
+        // terminal done path, after this launcher has finished owning the run.
+        await tridentRuns.crashRunningByRepo(
+          cwd,
+          `inner workflow child crashed: ${detail}`,
         )
       },
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
