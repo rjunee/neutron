@@ -1536,12 +1536,16 @@ function Composer({
       // assistant-ui intentionally refuses `runtime.send()` while running;
       // bypass that client-only gate because the persistent REPL supports
       // adding context to its active turn.
+      // Clear synchronously so two Enter key events cannot submit the same
+      // text while uploads/send are awaiting.
+      composerRuntime.setText('')
       void (async () => {
         const ready = await draft.waitForUploads()
         await controller.send(body, ready.length > 0 ? ready : undefined)
-        if (composerRuntime.getState().text.trim() === body) composerRuntime.setText('')
         draft.clear()
-      })().catch(() => undefined)
+      })().catch(() => {
+        if (composerRuntime.getState().text.length === 0) composerRuntime.setText(body)
+      })
       return
     }
     if (body.length > 0) {
@@ -1593,7 +1597,7 @@ function Composer({
           autoFocus
           rows={1}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault()
               event.stopPropagation()
               send()

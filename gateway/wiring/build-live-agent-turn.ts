@@ -955,6 +955,7 @@ export function buildLiveAgentTurn(
       turn.user_text !== RECONNECT_AUTH_VALUE
     ) {
       const priorUserText = lastUserText.get(topicKey)
+      const priorAttachments = lastAttachments.get(topicKey)
       if (turn.user_text.length > 0) {
         lastUserText.set(
           topicKey,
@@ -974,10 +975,12 @@ export function buildLiveAgentTurn(
       const injectedText = attachmentsFragment === null
         ? turn.user_text
         : `${attachmentsFragment}\n\n${turn.user_text}`
-      return input.injectActiveTurn(turn, injectedText).catch(() => false).then(async (injected) => {
+      return Promise.resolve().then(() => input.injectActiveTurn!(turn, injectedText)).catch(() => false).then(async (injected) => {
         if (!injected) {
           if (priorUserText === undefined) lastUserText.delete(topicKey)
           else lastUserText.set(topicKey, priorUserText)
+          if (priorAttachments === undefined) lastAttachments.delete(topicKey)
+          else lastAttachments.set(topicKey, priorAttachments)
           return enqueueTurn(turn, topicKey)
         }
         try {

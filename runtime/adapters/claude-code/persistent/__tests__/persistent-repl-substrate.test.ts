@@ -178,6 +178,10 @@ describe('PersistentReplSubstrate — conformance', () => {
             wire.push(body)
             if (body.additional !== true) {
               replyFirst = () => { void post('/reply', { session_id: sid, text: 'combined', turn_id: body.turn_id }) }
+            } else {
+              // Kills the post-delivery liveness re-check mutation: settle the
+              // turn before the successful /message response reaches the caller.
+              await post('/reply', { session_id: sid, text: 'combined', turn_id: body.turn_id })
             }
             return Response.json({ status: 'delivered' })
           }
@@ -191,13 +195,14 @@ describe('PersistentReplSubstrate — conformance', () => {
           exited: exitPromise, hasExited: () => exited }
       },
     }
-    const options = baseOptions(host)
+    const options = baseOptions(host, { project_id: 'general' })
     const sub = createPersistentReplSubstrate(options)
     const first = drain(sub.start(spec('first')))
     for (let i = 0; i < 100 && wire.length === 0; i += 1) await Bun.sleep(5)
 
     expect(await injectPersistentReplActiveTurn({
       substrate_instance_id: options.substrate_instance_id,
+      project_id: 'general',
       text: 'second during turn',
     })).toBe(true)
     expect(wire).toEqual([

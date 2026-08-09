@@ -4528,7 +4528,7 @@ export function buildOpenGraphComposer(
             injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
               substrate_instance_id: `cc-agent-${owner_handle}`,
               user_id: OWNER_USER_ID,
-              ...(turn.project_id !== undefined ? { project_id: turn.project_id } : {}),
+              project_id: turn.project_id ?? 'general',
               text,
             }),
             // ACTIVITY INSPECTOR — tee EVERY substrate event for the live chat turn

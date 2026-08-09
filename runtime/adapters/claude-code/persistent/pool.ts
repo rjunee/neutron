@@ -57,7 +57,10 @@ export async function injectPersistentReplActiveTurn(
   active.turn.injectionTail = delivery.catch(() => undefined)
   try {
     await delivery
-    return !active.turn.settled && active.session.activeTurn === active.turn
+    // Once POST /message succeeds the text was delivered. Settlement can race
+    // this continuation; reporting false here would enqueue the same text as a
+    // fresh turn and duplicate user-visible work.
+    return true
   } catch {
     return false
   }
@@ -530,10 +533,13 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // from a timed-out/cancelled prior turn (different seq) or a prior
           // incarnation of this resumed session (different nonce), in both the
           // pre-inject-park and inject-in-flight windows (see ActiveTurn.turnId).
-          await injectMessage(session.channelPort, spec.prompt, turn.turnId)
-          // A follow-up may augment this turn only after its initial prompt has
-          // reached the REPL. Publishing earlier can reorder the two messages.
+          const initialDelivery = injectMessage(session.channelPort, spec.prompt, turn.turnId)
+          // Publish immediately, but serialize follow-ups behind the initial
+          // POST. This removes the wire-observed/route-not-yet-visible race
+          // without allowing a follow-up to overtake the prompt.
+          turn.injectionTail = initialDelivery
           activeTurnRoutes.set(activeTurnRouteKey(options), { session, turn })
+          await initialDelivery
           channel.push({ kind: 'status', message: 'working' })
           // Flush any spawn-time buffered notices (e.g. the resume-picker
           // recovered/lost notice, which fired before this turn existed) onto the

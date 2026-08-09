@@ -7982,4 +7982,10 @@ turn path instead of being dropped.
 Mutation-named tests pin all three boundaries: the gateway test fails if the
 second send is queued until completion, the persistent-REPL test asserts the
 additional `/message` reached the wire before the first reply, and the React test
-fails if the composer is disabled while streaming.
+fails if the composer is disabled while streaming or IME composition Enter is
+submitted. General chat uses the same `general` route key for registration and
+lookup. A successful dev-channel delivery stays successful if the turn settles
+while its response is returning, preventing a duplicate queued turn; failed
+delivery restores both Retry text and attachment state. The composer clears the
+submitted text before awaiting the send, then restores it only when delivery
+fails and no newer input has replaced it.
