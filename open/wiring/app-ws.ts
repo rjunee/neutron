@@ -648,17 +648,36 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   // never land in the durable log or a `resume` replay. Best-effort: a closed
   // socket / registry miss is a silent no-op (the client clears typing on the
   // next agent_message regardless, so a lost `end` can't wedge the dots).
-  const typingDepth = new Map<string, number>()
+  const typingDepth = new Map<string, { depth: number; expiry: ReturnType<typeof setTimeout> }>()
   const emitAppWsTyping = (
     channel_topic_id: string,
     state: 'start' | 'end',
     project_id?: string,
   ): void => {
     const typingKey = `${channel_topic_id}:${project_id ?? ''}`
-    const previousDepth = typingDepth.get(typingKey) ?? 0
+    const priorTyping = typingDepth.get(typingKey)
+    const previousDepth = priorTyping?.depth ?? 0
     const nextDepth = state === 'start' ? previousDepth + 1 : Math.max(0, previousDepth - 1)
+    if (priorTyping !== undefined) clearTimeout(priorTyping.expiry)
     if (nextDepth === 0) typingDepth.delete(typingKey)
-    else typingDepth.set(typingKey, nextDepth)
+    else {
+      // A process/socket failure can lose the matching `end`. Bound the
+      // refcount lifetime so one missing frame cannot suppress every future
+      // typing start for this topic until restart.
+      const expiry = setTimeout(() => {
+        if (typingDepth.get(typingKey)?.expiry !== expiry) return
+        typingDepth.delete(typingKey)
+        activeChatProjects.delete(railChatKey(project_id))
+        const expired: AppWsOutboundAgentTyping = {
+          v: 1, type: 'agent_typing', state: 'end', ts: Date.now(),
+        }
+        if (project_id !== undefined && project_id.length > 0) expired.project_id = project_id
+        try { appWsRegistry.send(channel_topic_id, expired) } catch { /* best-effort */ }
+        try { emitProjectsChangedIfChanged(OWNER_USER_ID) } catch { /* best-effort */ }
+      }, 46 * 60_000)
+      expiry.unref?.()
+      typingDepth.set(typingKey, { depth: nextDepth, expiry })
+    }
     // Concurrent mid-turn sends share one visible typing lifetime. Suppress an
     // inner start/end pair so its quick completion cannot clear turn one's dots.
     if ((state === 'start' && previousDepth > 0) || (state === 'end' && nextDepth > 0)) return

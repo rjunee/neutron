@@ -22,15 +22,29 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const activeTurnRoutes = new Map<string, { session: ReplSession; turn: ActiveTurn }>()
 
+function activeTurnRoutePrefix(input: {
+  substrate_instance_id: string
+  user_id?: string
+  project_id?: string
+}): string {
+  return `${JSON.stringify([
+    input.substrate_instance_id,
+    input.user_id ?? '_platform',
+    input.project_id ?? 'default',
+  ]).slice(0, -1)},`
+}
+
 function activeTurnRouteKey(input: {
   substrate_instance_id: string
   user_id?: string
   project_id?: string
+  credential_identity?: string
 }): string {
   return JSON.stringify([
     input.substrate_instance_id,
     input.user_id ?? '_platform',
     input.project_id ?? 'default',
+    input.credential_identity ?? '_nocred',
   ])
 }
 
@@ -40,10 +54,20 @@ export async function injectPersistentReplActiveTurn(
     substrate_instance_id: string
     user_id?: string
     project_id?: string
+    credential_identity?: string
     text: string
   },
 ): Promise<boolean> {
-  const active = activeTurnRoutes.get(activeTurnRouteKey(input))
+  const routeKey = activeTurnRouteKey(input)
+  const candidates = input.credential_identity !== undefined
+    ? [activeTurnRoutes.get(routeKey)].filter((entry): entry is { session: ReplSession; turn: ActiveTurn } => entry !== undefined)
+    : [...activeTurnRoutes.entries()]
+      .filter(([key]) => key.startsWith(activeTurnRoutePrefix(input)))
+      .map(([, entry]) => entry)
+  // The gateway intentionally does not know the selected secret identity. A
+  // rotation can briefly leave two credential-scoped routes alive; queue in
+  // that ambiguous window instead of delivering to whichever registered last.
+  const active = candidates.length === 1 ? candidates[0] : undefined
   if (active === undefined || active.turn.settled || active.session.channelPort === undefined) {
     return false
   }
@@ -537,7 +561,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // Publish immediately, but serialize follow-ups behind the initial
           // POST. This removes the wire-observed/route-not-yet-visible race
           // without allowing a follow-up to overtake the prompt.
-          turn.injectionTail = initialDelivery
+          turn.injectionTail = initialDelivery.catch(() => undefined)
           activeTurnRoutes.set(activeTurnRouteKey(options), { session, turn })
           await initialDelivery
           channel.push({ kind: 'status', message: 'working' })

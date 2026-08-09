@@ -926,6 +926,8 @@ export function buildLiveAgentTurn(
    * either is pooled — that gap is what this chain closes.
    */
   const turnChains = new Map<string, Promise<void>>()
+  const activeTopics = new Set<string>()
+  const queuedTurnCount = new Map<string, number>()
 
   // The REPL `--tools` allow-list only consumes `t.name`; the rest of the
   // ToolDef shape is contract filler for the locked AgentSpec interface.
@@ -948,25 +950,14 @@ export function buildLiveAgentTurn(
   function runLiveAgentTurn(turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult> {
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
     if (
-      turnChains.has(topicKey) &&
+      activeTopics.has(topicKey) &&
+      queuedTurnCount.get(topicKey) === 1 &&
       input.injectActiveTurn !== undefined &&
       turn.seed_turn !== true &&
+      turn.button_prompt_id === undefined &&
       turn.user_text !== RETRY_TURN_VALUE &&
       turn.user_text !== RECONNECT_AUTH_VALUE
     ) {
-      const priorUserText = lastUserText.get(topicKey)
-      const priorAttachments = lastAttachments.get(topicKey)
-      if (turn.user_text.length > 0) {
-        lastUserText.set(
-          topicKey,
-          priorUserText === undefined ? turn.user_text : `${priorUserText}\n\n${turn.user_text}`,
-        )
-        if (turn.attachments !== undefined && turn.attachments.length > 0) {
-          lastAttachments.set(topicKey, turn.attachments)
-        } else {
-          lastAttachments.delete(topicKey)
-        }
-      }
       const attachmentsFragment = buildAttachmentsFragment(
         turn.attachments,
         input.resolveAttachment,
@@ -975,20 +966,20 @@ export function buildLiveAgentTurn(
       const injectedText = attachmentsFragment === null
         ? turn.user_text
         : `${attachmentsFragment}\n\n${turn.user_text}`
+      const persistedText = turn.user_text.length > 0
+        ? turn.user_text
+        : (turn.attachments ?? []).map((attachment) => `[Attachment: ${attachment}]`).join('\n')
       return Promise.resolve().then(() => input.injectActiveTurn!(turn, injectedText)).catch(() => false).then(async (injected) => {
         if (!injected) {
-          if (priorUserText === undefined) lastUserText.delete(topicKey)
-          else lastUserText.set(topicKey, priorUserText)
-          if (priorAttachments === undefined) lastAttachments.delete(topicKey)
-          else lastAttachments.set(topicKey, priorAttachments)
           return enqueueTurn(turn, topicKey)
         }
         try {
           await input.buttonStore.persistInertUserTurn({
             topic_id: turn.topic_id,
-            text: turn.user_text,
+            text: persistedText,
             speaker_user_id: turn.user_id,
             channel_kind: 'app_socket',
+            observed_at: turn.observed_at ?? now(),
           })
         } catch (err) {
           moduleLog.warn('injected_user_turn_persist_failed', {
@@ -998,7 +989,7 @@ export function buildLiveAgentTurn(
           })
         }
         try {
-          input.transcript?.append({ role: 'user', body: turn.user_text, phase: 'completed' })
+          input.transcript?.append({ role: 'user', body: persistedText, phase: 'completed' })
         } catch {
           /* audit-trail only */
         }
@@ -1010,7 +1001,19 @@ export function buildLiveAgentTurn(
 
   function enqueueTurn(turn: LiveAgentTurnRequest, topicKey: string): Promise<LiveAgentTurnResult> {
     const prior = turnChains.get(topicKey) ?? Promise.resolve()
-    const run = prior.then(() => runTurnBody(turn))
+    queuedTurnCount.set(topicKey, (queuedTurnCount.get(topicKey) ?? 0) + 1)
+    const run = prior.then(async () => {
+      const acceptsInjection = turn.seed_turn !== true &&
+        turn.button_prompt_id === undefined &&
+        turn.user_text !== RETRY_TURN_VALUE &&
+        turn.user_text !== RECONNECT_AUTH_VALUE
+      if (acceptsInjection) activeTopics.add(topicKey)
+      try {
+        return await runTurnBody(turn)
+      } finally {
+        if (acceptsInjection) activeTopics.delete(topicKey)
+      }
+    })
     const tail = run.then(
       () => undefined,
       () => undefined,
@@ -1020,6 +1023,9 @@ export function buildLiveAgentTurn(
     // the per-topic chain map — no rejection to surface (the real turn error is
     // returned to the caller via `run`). Silent neutralize, not fireAndForget.
     neutralizeAbandonedSettle(tail.then(() => {
+      const remaining = (queuedTurnCount.get(topicKey) ?? 1) - 1
+      if (remaining === 0) queuedTurnCount.delete(topicKey)
+      else queuedTurnCount.set(topicKey, remaining)
       if (turnChains.get(topicKey) === tail) turnChains.delete(topicKey)
     }))
     return run

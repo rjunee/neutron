@@ -45,7 +45,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
 
 describe('ChatApp render (happy-dom)', () => {
-  it('kills disabled-composer and IME-submit mutations while streaming', async () => {
+  it('kills disabled-composer, IME-submit, and concurrent-send mutations while streaming', async () => {
     // Dynamic imports AFTER the DOM globals exist (React reads them at import).
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
@@ -170,9 +170,10 @@ describe('ChatApp render (happy-dom)', () => {
     expect(sentFrames).toHaveLength(beforeMidTurnSend)
     await act(async () => {
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
       await tick()
     })
-    expect(sentFrames.slice(beforeMidTurnSend).some((raw) => raw.includes('one more detail'))).toBe(true)
+    expect(sentFrames.slice(beforeMidTurnSend).filter((raw) => raw.includes('one more detail'))).toHaveLength(1)
 
     await act(async () => {
       sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'Hi Sam', ts: 3 })

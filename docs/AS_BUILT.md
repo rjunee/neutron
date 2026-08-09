@@ -7986,6 +7986,18 @@ fails if the composer is disabled while streaming or IME composition Enter is
 submitted. General chat uses the same `general` route key for registration and
 lookup. A successful dev-channel delivery stays successful if the turn settles
 while its response is returning, preventing a duplicate queued turn; failed
-delivery restores both Retry text and attachment state. The composer clears the
+delivery leaves Retry text and attachment state untouched. Injection is offered
+only while exactly one turn is active: a queued turn, Retry, seed, reconnect, or
+button-prompt answer always follows the normal ordered path. Injected history is
+stamped with the inbound observation time so a racing agent reply cannot render
+before it; attachment-only sends persist their inbound reference while resolved
+local paths remain confined to the REPL payload. Active-turn routes include the
+non-secret credential identity and refuse ambiguous credential-rotation matches.
+Typing refcounts have a fail-safe beyond the turn's forty-five-minute absolute
+ceiling that clears a lost `end`, fans the matching ephemeral end frame, and
+refreshes the rail working state instead of wedging that topic until restart.
+The composer clears the
 submitted text before awaiting the send, then restores it only when delivery
-fails and no newer input has replaced it.
+fails (ahead of any newer draft text). An in-flight send claim prevents two
+Enter presses from reusing the same staged attachment URLs before the first
+upload/send clears them.
