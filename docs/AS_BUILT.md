@@ -8276,3 +8276,29 @@ silent, so the test asserts it.
 button is rendered but inert" — the failure a source check cannot see.
 
 Detail: `docs/as-built/2026-08-09-mobile-model-providers.md`.
+
+## 2026-08-09 — the Kimi key comes from the store, and only the store
+
+Owner-directed: the env var *"was a temporary hack, not a production-grade decision."*
+`resolveKimiApiKey` read `KIMI_API_KEY` first and fell back to the store, which made the
+environment a second resolution path — the same settings screen behaving differently on
+two boxes, failing in the direction nobody checks (paste a key, see it saved, every
+review keeps using the shell's).
+
+The env argument is gone from the signature. `ensureKimiKeyExported` still writes the
+resolved key into the CHILD's env — that indirection keeps the key out of prompt text and
+stays. The variable is now purely an output, never an input. Two behaviours flipped: a
+pre-set env value is now OVERWRITTEN, and clearing the key in settings CLEARS the export
+(without which a stale key survives and the reviewer runs on a credential the owner
+believes they removed).
+
+The live key was migrated into the store BEFORE shipping — the box had it only in the unit
+env and `project_credentials` was empty, so store-only would have silenced K3. Migration
+printed only lengths and outcomes, never the value.
+
+Lesson from that migration: it failed twice with an opaque "failed to open SQLite" that
+looked like permissions or locking; the cause was `{ create: false }`, an option
+production never passes. A probe that does not use the production call shape fails in a
+way that sends you debugging the wrong system.
+
+Detail: `docs/as-built/2026-08-09-kimi-store-only.md`.
