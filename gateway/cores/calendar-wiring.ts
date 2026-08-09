@@ -30,6 +30,7 @@
  * respectively; the test threads them through the same call sites.
  */
 
+import { PUSH_KIND_CALENDAR_BRIEF } from '@neutronai/wire-types/push-kind.ts'
 import { mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 
@@ -260,7 +261,7 @@ export function buildCalendarPreMeetingBriefSchedulerDeps(
               title: `Pre-meeting brief: ${event.title}`,
               body: brief.text,
               data: {
-                kind: 'calendar_pre_meeting_brief',
+                kind: PUSH_KIND_CALENDAR_BRIEF,
                 event_id: event.id,
                 project_id,
                 project_slug: input.project_slug,

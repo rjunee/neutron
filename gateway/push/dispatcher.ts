@@ -7,7 +7,7 @@
  *   * `pushReminder(reminder)` — the reminder-fired hook. Reads every
  *     device token for the reminder's instance and POSTs a single push
  *     batch with `{ title: 'Reminder', body: reminder.message, data: {
- *     kind: 'reminder', reminder_id, project_slug } }`. Web push was
+ *     kind: PUSH_KIND_REMINDER, reminder_id, project_slug } }`. Web push was
  *     removed 2026-05-22 (migration 0042) — the dispatcher trusts the
  *     CHECK constraint to keep web rows out of the table.
  *
@@ -32,6 +32,7 @@
  * being marked fired.
  */
 
+import { PUSH_KIND_REMINDER } from '@neutronai/wire-types/push-kind.ts'
 import type { Reminder } from '@neutronai/reminders/store.ts'
 import type { DevicePushTokenStore } from './store.ts'
 import {

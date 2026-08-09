@@ -26,6 +26,7 @@
  * No side effects — the factory opens no handles + schedules no timers.
  */
 
+import { PUSH_KIND_EMAIL_TRIAGE } from '@neutronai/wire-types/push-kind.ts'
 import { readFile, writeFile } from 'node:fs/promises'
 
 import type {
@@ -152,7 +153,7 @@ export function buildEmailTriageSchedulerDeps(
             title: 'Daily email triage',
             body: renderTriageText(triage),
             data: {
-              kind: 'email_daily_triage',
+              kind: PUSH_KIND_EMAIL_TRIAGE,
               project_id,
               project_slug: input.project_slug,
             },
