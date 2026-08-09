@@ -36,6 +36,7 @@
  * unit-tests without a DOM or a live server.
  */
 
+import { httpProjectSegmentEncoded } from './general-scope'
 import {
   GatewayClientError,
   GatewayHttpClient,
@@ -228,14 +229,14 @@ export class WebDocsClient extends GatewayHttpClient {
 
   /** List every doc + folder under the project's docs root. */
   async tree(project_id: string): Promise<{ tree: DocTreeNode[]; file_count: number }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/tree`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/tree`
     const res = await this.req<TreeResponse>(path)
     return { tree: res.tree, file_count: res.file_count }
   }
 
   /** Read one markdown file's content (server-authoritative `modified_at`). */
   async readFile(project_id: string, rel_path: string): Promise<DocFile> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file?path=${encodeURIComponent(rel_path)}`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/file?path=${encodeURIComponent(rel_path)}`
     const res = await this.req<FileResponse>(path)
     return res.file
   }
@@ -254,7 +255,7 @@ export class WebDocsClient extends GatewayHttpClient {
     project_id: string,
     input: { path: string; content: string; expected_modified_at?: number },
   ): Promise<WriteResult> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/file`
     const body: Record<string, unknown> = { path: input.path, content: input.content }
     if (input.expected_modified_at !== undefined) {
       body.expected_modified_at = input.expected_modified_at
@@ -278,7 +279,7 @@ export class WebDocsClient extends GatewayHttpClient {
     if (opts.include_dead === true) params.set('include_dead', 'true')
     if (opts.limit !== undefined) params.set('limit', String(opts.limit))
     if (opts.cursor !== undefined && opts.cursor.length > 0) params.set('cursor', opts.cursor)
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments?${params.toString()}`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/comments?${params.toString()}`
     try {
       const res = await this.req<CommentsListResponse>(path)
       return { threads: res.threads, next_cursor: res.next_cursor, unavailable: false }
@@ -292,7 +293,7 @@ export class WebDocsClient extends GatewayHttpClient {
 
   /** Fetch one thread's full reply tree. */
   async getThread(project_id: string, event_id: string): Promise<ThreadTree> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(event_id)}/thread`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/comments/${encodeURIComponent(event_id)}/thread`
     const res = await this.req<CommentsThreadResponse>(path)
     return res.thread
   }
@@ -304,7 +305,7 @@ export class WebDocsClient extends GatewayHttpClient {
     body: string,
     anchor: AnchorInput,
   ): Promise<{ event: CommentEvent; thread_root_id: string }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/comments`
     const res = await this.req<CommentsPostResponse>(path, {
       method: 'POST',
       body: {
@@ -327,7 +328,7 @@ export class WebDocsClient extends GatewayHttpClient {
     event_id: string,
     body: string,
   ): Promise<{ event: CommentEvent; thread_root_id: string }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(event_id)}/reply`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/comments/${encodeURIComponent(event_id)}/reply`
     const res = await this.req<CommentsPostResponse>(path, { method: 'POST', body: { body } })
     return { event: res.event, thread_root_id: res.thread_root_id }
   }
@@ -337,7 +338,7 @@ export class WebDocsClient extends GatewayHttpClient {
     project_id: string,
     thread_root_id: string,
   ): Promise<{ resolve_event_id: string; resolved_at: number }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(thread_root_id)}/resolve`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/comments/${encodeURIComponent(thread_root_id)}/resolve`
     const res = await this.req<{ ok: boolean; resolve_event_id: string; resolved_at: number }>(path, {
       method: 'POST',
       body: {},
@@ -351,7 +352,7 @@ export class WebDocsClient extends GatewayHttpClient {
     event_id: string,
     note?: string,
   ): Promise<{ escalate_event_id: string; escalated_at: number }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(event_id)}/escalate`
+    const path = `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/docs/comments/${encodeURIComponent(event_id)}/escalate`
     const body: Record<string, unknown> = {}
     if (note !== undefined && note.length > 0) body.note = note
     const res = await this.req<{ ok: boolean; escalate_event_id: string; escalated_at: number }>(path, {

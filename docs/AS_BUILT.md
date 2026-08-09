@@ -8129,3 +8129,28 @@ is BOUNDED, not instant: the tombstone lands during tick 1's fire and the phase 
 classified at the top of a tick, so the reap happens on tick 2. The test says so
 rather than asserting something the fix does not claim. Mutant: reverting the gate
 reds two of four.
+
+## 2026-08-09 — General's documents became reachable, on both surfaces
+
+The owner reported one symptom (a General work card whose plan link did nothing,
+and no documents in General) that was **four independent gaps**: the web never
+injected a `documents` tab for General; `ProjectShell` deliberately suppressed the
+doc link there *because* of that missing tab; `docs-client.ts` interpolated the
+scope id into nine URLs raw, so General (`''`) would have requested
+`/api/app/projects//docs/…`; and on mobile nothing ever passed `WorkBoardRow`'s
+long-declared `onOpenDoc`, leaving the ▸ chip inert on every phone.
+
+Fixing any ONE changes nothing observable — the shape worth remembering. None was
+a mistake when written; the web guard in particular encoded a fact about another
+module's tab set with no mechanical link back to it, so changing that tab set
+could not fail there.
+
+`landing/chat-react/general-scope.ts` is new — the one place General changes
+spelling on the web, mirroring `app/lib/general-scope.ts`. The work-board client's
+private normaliser now delegates to it instead of keeping a second copy, since
+having one client with the rule and one without is exactly why one surface worked
+and the other 400'd. Routing deliberately keeps two ids: the board client is
+scope-addressed (General ⇒ `''`), the route is rail-addressed (⇒ `~general`), and
+a push built from the scope yields the dead `/projects//docs`.
+
+Detail: `docs/as-built/2026-08-09-general-docs-reachable.md`.
