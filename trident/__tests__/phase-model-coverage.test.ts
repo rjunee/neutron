@@ -224,7 +224,14 @@ describe('validation rejects loudly rather than dropping quietly', () => {
   })
 
   it('rejects a model id with control characters or absurd length', () => {
-    expect(parsePhaseModelConfig({ build: { model: 'op us' } }).errors).toHaveLength(1)
+    // WRITTEN AS AN ESCAPE, NOT A LITERAL BYTE -- and the first version of this line
+    // was a literal NUL, which made the whole file BINARY to grep. The leak gate
+    // caught it as `binary-hidden` and was right to fail: a NUL byte does not just
+    // look odd, it makes every PII and vocabulary rule SKIP the file silently, so a
+    // single invisible character disables the scanner for everything else in it.
+    // `phase-models.ts` carries the same warning about its own regex; I wrote the
+    // warning and then made the mistake in the test one screen later.
+    expect(parsePhaseModelConfig({ build: { model: 'op\u0000us' } }).errors).toHaveLength(1)
     expect(parsePhaseModelConfig({ build: { model: 'x'.repeat(200) } }).errors).toHaveLength(1)
   })
 
