@@ -234,3 +234,93 @@ describe('AppChatStore — markPromptChosen (ISSUES #419)', () => {
     expect((await store.replayAfter(TOPIC, 0))[0]?.meta?.['chosen_value']).toBeUndefined()
   })
 })
+
+describe('AppChatStore — the voice-note transcript is DURABLE', () => {
+  // Persisting it is what makes a spoken word survive the device. The client-side
+  // half of this fix indexed the transcript locally on whichever phone did the
+  // upload; `replayAfter` is how every OTHER device rebuilds its history, so a
+  // transcript that is not in this table is a transcript that does not exist for a
+  // new install.
+
+  it('round-trips through append AND replay, not just the in-memory return', async () => {
+    // Both halves asserted deliberately: `append` returns a row it CONSTRUCTED, so
+    // checking only that would pass even if the column were never written. The
+    // replay read is the one that proves it reached SQLite.
+    const appended = await store.append({
+      topic_id: TOPIC,
+      message_id: 'm-voice',
+      role: 'user',
+      body: '',
+      attachments: ['/api/app/upload/owner/abc.m4a'],
+      transcript: 'renegotiate the warehouse lease',
+      created_at: 1,
+    })
+    expect(appended.row.transcript).toBe('renegotiate the warehouse lease')
+
+    const replayed = await store.replayAfter(TOPIC, 0)
+    expect(replayed).toHaveLength(1)
+    expect(replayed[0]!.transcript).toBe('renegotiate the warehouse lease')
+  })
+
+  it('stores null for a message with no audio', async () => {
+    await store.append({ topic_id: TOPIC, message_id: 'm1', role: 'user', body: 'typed', created_at: 1 })
+    const rows = await store.replayAfter(TOPIC, 0)
+    expect(rows[0]!.transcript).toBeNull()
+  })
+
+  it('normalises a whitespace-only transcript to null', async () => {
+    // The ASR returns an empty result for silence. Stored as '' it would be
+    // indistinguishable downstream from "transcribed to nothing"; null says it
+    // plainly.
+    await store.append({
+      topic_id: TOPIC,
+      message_id: 'm2',
+      role: 'user',
+      body: '',
+      transcript: '   \n  ',
+      created_at: 1,
+    })
+    const rows = await store.replayAfter(TOPIC, 0)
+    expect(rows[0]!.transcript).toBeNull()
+  })
+
+  it('trims the stored value', async () => {
+    await store.append({
+      topic_id: TOPIC,
+      message_id: 'm3',
+      role: 'user',
+      body: '',
+      transcript: '  hello there  ',
+      created_at: 1,
+    })
+    const rows = await store.replayAfter(TOPIC, 0)
+    expect(rows[0]!.transcript).toBe('hello there')
+  })
+
+  it('survives the idempotent re-send collapse without losing the words', async () => {
+    // A re-sent user message (offline flush, double-tap, HTTP racing the WS echo)
+    // collapses onto the existing row. The collapse returns the STORED row, so this
+    // asserts the transcript is not dropped on the way back out.
+    const first = await store.append({
+      topic_id: TOPIC,
+      message_id: 'm4',
+      role: 'user',
+      body: '',
+      client_msg_id: 'c4',
+      transcript: 'the words',
+      created_at: 1,
+    })
+    const second = await store.append({
+      topic_id: TOPIC,
+      message_id: 'm4-again',
+      role: 'user',
+      body: '',
+      client_msg_id: 'c4',
+      transcript: 'the words',
+      created_at: 2,
+    })
+    expect(second.was_new).toBe(false)
+    expect(second.row.seq).toBe(first.row.seq)
+    expect(second.row.transcript).toBe('the words')
+  })
+})
