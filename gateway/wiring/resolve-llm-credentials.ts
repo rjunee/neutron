@@ -264,17 +264,35 @@ export function resolveApiKeyEnvTier(input: {
 }
 
 /**
- * Tier 5 — ambient / Keychain `claude` login (Open single-owner ONLY; Managed
- * never allows it). Anthropic-only: ambient auth is a Claude-Code concept (the
- * macOS "Claude Code-credentials" Keychain item) and the substrate's ambient
- * path scrubs only the Anthropic/Claude env vars, so a non-anthropic provider
- * has no ambient credential to mint — return `null` (matches
- * `resolveEnvOAuthTier`'s anthropic-only guard). When `allowAmbient` and the
- * injected `probeAmbientAuth()` reports a Keychain-authed `claude`, mint an
- * `ambient`-kind pool. The pool threads NO secret (empty string): the substrate
- * passes nothing and the spawned `claude` child authenticates via its OWN macOS
- * Keychain item. The probe is injected so this module never imports the
- * Open-only probe (no gateway→open edge).
+ * Tier 5 — ambient `claude` login. Anthropic-only: ambient auth is a Claude-Code
+ * concept and the substrate's ambient path scrubs only the Anthropic/Claude env
+ * vars, so a non-anthropic provider has no ambient credential to mint — return
+ * `null` (matches `resolveEnvOAuthTier`'s anthropic-only guard). When
+ * `allowAmbient` and the injected `probeAmbientAuth()` reports an authed
+ * `claude`, mint an `ambient`-kind pool threading NO secret (empty string): the
+ * spawned child authenticates from its own ambient credential. The probe is
+ * injected so this module never imports the Open-only probe (no gateway→open
+ * edge).
+ *
+ * WHAT "AMBIENT" ACTUALLY MEANS — corrected 2026-08-09, because the previous
+ * wording here cost a whole investigation (ISSUES #517). It said "the macOS
+ * Keychain item" and "Managed never allows it". Both mislead:
+ *
+ *   - the probe (`open/ambient-claude-auth.ts`) branches on PLATFORM. macOS reads
+ *     the Keychain; **every other platform reads `$HOME/.claude/.credentials.json`**.
+ *     On a Linux deployment that file is how credentials arrive, so "Keychain" is
+ *     the wrong noun for the case that actually runs in production.
+ *   - "Managed never allows it" is true only of THIS function. The Open composer
+ *     enables the tier itself (`allowAmbient: true`), and a hosted install boots
+ *     that composer — so ambient is not only reachable there, it can be the ONLY
+ *     tier that resolves when tiers 2 and 4 are unset. That was measured on a live
+ *     hosted install, and it is why "disable ambient" is NOT a safe remedy: it would leave
+ *     such a deployment with no credential at all.
+ *
+ * KNOWN LIMITATION, recorded where it is relevant rather than in a tracker only:
+ * an ambient pool holds ONE credential-less entry, so it has NO FAILOVER. Rotation
+ * happens outside it, at the file level. When the account behind that file hits its
+ * limit the child exits and there is nothing in the pool to fall back to.
  */
 export function resolveAmbientTier(input: {
   provider: ApiKeyProvider
@@ -287,6 +305,13 @@ export function resolveAmbientTier(input: {
   return newCredentialPool({
     strategy: 'fill_first',
     credentials: [
+      // `ambient_keychain` IS A MISLEADING NAME on any non-macOS host, and it is
+      // kept deliberately: this id becomes `credential_identity`, which is folded
+      // into `poolKeyFor()` (`runtime/adapters/claude-code/persistent/pool.ts`).
+      // Renaming it therefore RE-KEYS every warm REPL — the same
+      // stranded-pool-key hazard #143's review reproduced — so it is a migration,
+      // not a rename. My own SPEC note called it "safe and separable"; that was
+      // wrong about the safe half. The docblock above carries the truth instead.
       { id: `${input.provider}:ambient_keychain`, kind: 'ambient', secret: '' },
     ],
   })

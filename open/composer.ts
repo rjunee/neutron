@@ -564,19 +564,29 @@ export interface BuildOpenGraphComposerOptions {
  *     single-entry `env_vars` list so the shared-tier gate never classifies it
  *     as a cross-instance shared key — it is the per-owner box key.
  *     (tier 4 — `resolveApiKeyEnvTier`)
- *   - else, if `claude` is already AMBIENT/Keychain-authed (the owner ran
- *     `claude` login on this Mac; creds live in the macOS "Claude Code-credentials"
- *     Keychain item, NOT in env) → `kind: 'ambient'`. The substrate spawns
- *     `claude` threading NO token (the ambient pool's secret is the empty
- *     string), so the child auths via its own Keychain. This closes the
- *     fresh-install 503: a Mac self-hoster with `claude` already logged in no
- *     longer hits a Day-1 "Authenticate Claude" wall even though `claude -p`
+ *   - else, if `claude` is already AMBIENT-authed → `kind: 'ambient'`. The
+ *     substrate spawns `claude` threading NO token (the ambient pool's secret is
+ *     the empty string), so the child auths from its own ambient credential. This
+ *     closes the fresh-install 503: a self-hoster with `claude` already logged in
+ *     no longer hits a Day-1 "Authenticate Claude" wall even though `claude -p`
  *     works headlessly. The probe is fast + cached + never-hanging
- *     (`detectAmbientClaudeAuthCached`); a timeout/failure → not-authed → the
- *     gate stays up. SINGLE-OWNER ONLY: this resolver runs only on the Open
- *     composer, where an ambient Keychain login is the box owner's own — which
- *     is why the shared table gates the ambient tier behind `allowAmbient`, set
- *     TRUE only here. (tier 5 — `resolveAmbientTier`)
+ *     (`detectAmbientClaudeAuthCached`); a timeout/failure → not-authed → the gate
+ *     stays up. (tier 5 — `resolveAmbientTier`)
+ *
+ *     WHERE THE CREDENTIAL ACTUALLY LIVES DEPENDS ON THE PLATFORM, and the previous
+ *     wording here said "the macOS Keychain item" and "the box owner's own" as
+ *     though only a Mac self-hoster could reach this. That is wrong, and being
+ *     wrong about it cost an investigation (ISSUES #517): the probe branches on
+ *     platform, and on every non-macOS host it reads
+ *     `$HOME/.claude/.credentials.json`. On a hosted Linux deployment that file is
+ *     written by the credential rotator, so this tier is a NORMAL production path
+ *     there — measured on a live hosted install as the ONLY tier that resolved, because
+ *     tiers 2 and 4 were unset. A reader who believed the old comment would
+ *     conclude the install was misconfigured and "fix" it by disabling ambient,
+ *     which would leave that deployment with no credential at all.
+ *
+ *     `allowAmbient: true` is set only here, which is a statement about which
+ *     COMPOSER enables the tier — not about which deployment runs that composer.
  *   - else `null` → the box boots LLM-less and onboarding walks its static
  *     phase prompts.
  *
