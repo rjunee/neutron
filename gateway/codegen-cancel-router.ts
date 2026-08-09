@@ -1,5 +1,6 @@
 import {
   CodegenTaskNotFoundError,
+  CodegenInputError,
   type CodegenOrchestrator,
   type CodegenTaskStatus,
 } from '@neutronai/codegen-core'
@@ -30,8 +31,8 @@ export interface UnifiedTridentState {
 }
 
 export type UnifiedCodegenOrchestrator = Pick<CodegenOrchestrator, 'dispatch'> & {
-  status(input: { task_id: string }): ReturnType<CodegenOrchestrator['status']> | UnifiedTridentState
-  fetch(input: { task_id: string }): ReturnType<CodegenOrchestrator['fetch']> | UnifiedTridentState
+  status(input: { task_id: string }): Promise<ReturnType<CodegenOrchestrator['status']> | UnifiedTridentState>
+  fetch(input: { task_id: string }): Promise<ReturnType<CodegenOrchestrator['fetch']> | UnifiedTridentState>
   cancel(input: { task_id: string }): Promise<UnifiedCancelResult>
 }
 
@@ -40,10 +41,16 @@ export type UnifiedCodegenOrchestrator = Pick<CodegenOrchestrator, 'dispatch'> &
 export function routeCodegenCancel(
   legacy: CodegenOrchestrator,
   trident: TridentRunStore,
-  projectSlug: string,
+  _ownerSlug: string,
   terminator: TridentTerminator = buildTridentTerminator({ store: trident }),
 ): UnifiedCodegenOrchestrator {
-  const resolve = (taskId: string) => trident.resolveReference(projectSlug, taskId)
+  const validate = (taskId: string, tool: string): string => {
+    if (typeof taskId !== 'string' || taskId.trim().length === 0) {
+      throw new CodegenInputError(tool, 'task_id', 'must be a non-empty string')
+    }
+    return taskId.trim()
+  }
+  const resolve = (taskId: string) => trident.resolveReference(taskId)
   const state = (run: NonNullable<ReturnType<typeof resolve>>): UnifiedTridentState => ({
     status: run.phase,
     dispatch_path: 'trident',
@@ -54,19 +61,19 @@ export function routeCodegenCancel(
     ...(run.branch !== null ? { branch: run.branch } : {}),
     ...(run.worktree !== null ? { worktree: run.worktree } : {}),
     ...(run.pr !== null ? { pr_number: run.pr } : {}),
-    ...(run.task !== '' ? { summary: run.task } : {}),
   })
   return new Proxy(legacy, {
     get(target, prop) {
       if (prop === 'status' || prop === 'fetch') {
-        return (input: { task_id: string }) => {
+        return async (input: { task_id: string }) => {
+          const taskId = validate(input.task_id, `codegen_${prop}`)
           try {
-            return target[prop](input)
+            return await target[prop]({ task_id: taskId })
           } catch (error) {
             if (!(error instanceof CodegenTaskNotFoundError)) throw error
           }
-          const run = resolve(input.task_id)
-          if (run === null) throw new CodegenTaskNotFoundError(input.task_id)
+          const run = resolve(taskId)
+          if (run === null) throw new CodegenTaskNotFoundError(taskId)
           return state(run)
         }
       }
@@ -75,12 +82,13 @@ export function routeCodegenCancel(
         return typeof value === 'function' ? value.bind(target) : value
       }
       return async (input: { task_id: string }): Promise<UnifiedCancelResult> => {
+        const taskId = validate(input.task_id, 'codegen_cancel')
         try {
-          const result = await target.cancel(input)
+          const result = await target.cancel({ task_id: taskId })
           return {
             ...result,
             dispatch_path: 'legacy_codegen',
-            phase: result.prior_status,
+            phase: result.cancelled ? 'cancelled' : result.prior_status,
             reason: null,
             already_terminal: !result.cancelled,
           }
@@ -88,8 +96,8 @@ export function routeCodegenCancel(
           if (!(error instanceof CodegenTaskNotFoundError)) throw error
         }
 
-        const before = resolve(input.task_id)
-        if (before === null) throw new CodegenTaskNotFoundError(input.task_id)
+        const before = resolve(taskId)
+        if (before === null) throw new CodegenTaskNotFoundError(taskId)
         if (isTerminalPhase(before.phase)) {
           return {
             cancelled: false,
@@ -104,17 +112,17 @@ export function routeCodegenCancel(
         const result = await terminator.terminate(
           before.id,
           'stopped',
-          { reason: 'cancelled via codegen_cancel' },
+          { reason: 'cancelled via codegen_cancel', runObservers: false },
         )
         const current = result.run ?? trident.get(before.id)
-        if (current === null) throw new CodegenTaskNotFoundError(input.task_id)
+        if (current === null) throw new CodegenTaskNotFoundError(taskId)
         return {
           cancelled: result.won,
           prior_status: 'trident_run',
           dispatch_path: 'trident',
           phase: current.phase,
           reason: current.failure_reason,
-          ...(!result.won ? { already_terminal: true } : {}),
+          ...(!result.won && isTerminalPhase(current.phase) ? { already_terminal: true } : {}),
         }
       }
     },

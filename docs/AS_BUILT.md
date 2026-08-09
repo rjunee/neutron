@@ -6,14 +6,19 @@ Running log of what shipped, newest first. One entry per merged change.
 
 The `codegen_status`, `codegen_fetch`, and `codegen_cancel` tools now keep their
 legacy Code-Gen tracker behavior and fall through to the foundational Trident run
-store when the reference is not a legacy task. References accept the full run id,
-the displayed id prefix, or the run slug, and are restricted to the calling
-project. A live
+store when the reference is not a legacy task. References accept the globally
+unique full run id, or an unambiguous displayed id prefix / run slug across the
+single-owner database. This reaches General and project-board runs even though
+the Core factory context carries only the owner handle. Blank and ambiguous
+references are rejected without changing any run. A live
 Trident run is atomically moved to `stopped` through the existing terminal-write
 chokepoint. A run that already reached `done`, `failed`, or `stopped` is returned
 truthfully with its phase and persisted failure reason; it is not mislabeled as
-an unknown run. This is a run-lifecycle control only and does not add chat-turn
-cancel or a Stop button.
+an unknown run. Tool cancel suppresses the delivery observer because the tool
+result itself is the user notification. This is a run-lifecycle control only and
+does not add chat-turn cancel or a Stop button. An already-started inner workflow
+cannot currently be killed; the durable run is stopped so its eventual output
+cannot advance or merge through the Trident loop.
 
 Mutation-named gateway tests pin the contract: removing Trident termination
 leaves the durable row live; hiding an already-terminal row restores the false

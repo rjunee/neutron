@@ -67,7 +67,8 @@
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -83,7 +84,8 @@
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -129,7 +131,8 @@
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -158,7 +161,10 @@
             "reason": { "type": ["string", "null"] },
             "already_terminal": { "type": "boolean" }
           },
-          "required": []
+          "oneOf": [
+            { "required": ["pr_number", "branch", "worktree", "summary"] },
+            { "required": ["status", "dispatch_path", "run_id", "phase", "reason", "already_terminal"] }
+          ]
         },
         "capability_required": "read:codegen_core.tasks"
       },
@@ -169,7 +175,8 @@
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [

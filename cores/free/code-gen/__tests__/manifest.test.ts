@@ -72,6 +72,15 @@ describe('Code-Gen Core — manifest', () => {
     )
   })
 
+  test('MUTATION: codegen_fetch preserves required fields for both result variants', () => {
+    const fetch = loadManifest().tools.find((tool) => tool.name === 'codegen_fetch')
+    const schema = fetch?.output_schema as { oneOf?: Array<{ required?: string[] }> }
+    expect(schema.oneOf?.map((variant) => variant.required)).toEqual([
+      ['pr_number', 'branch', 'worktree', 'summary'],
+      ['status', 'dispatch_path', 'run_id', 'phase', 'reason', 'already_terminal'],
+    ])
+  })
+
   test('UI surfaces — launcher_icon + app_tab both declared', () => {
     const m = loadManifest()
     expect(m.ui_components).toHaveLength(2)
