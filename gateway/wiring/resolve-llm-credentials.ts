@@ -283,10 +283,10 @@ export function resolveApiKeyEnvTier(input: {
  *     On a Linux deployment that file is how credentials arrive, so "Keychain" is
  *     the wrong noun for the case that actually runs in production.
  *   - "Managed never allows it" is true only of THIS function. The Open composer
- *     enables the tier itself (`allowAmbient: true`), and a Managed tenant boots
+ *     enables the tier itself (`allowAmbient: true`), and a hosted install boots
  *     that composer — so ambient is not only reachable there, it can be the ONLY
  *     tier that resolves when tiers 2 and 4 are unset. That was measured on a live
- *     tenant, and it is why "disable ambient" is NOT a safe remedy: it would leave
+ *     hosted install, and it is why "disable ambient" is NOT a safe remedy: it would leave
  *     such a deployment with no credential at all.
  *
  * KNOWN LIMITATION, recorded where it is relevant rather than in a tracker only:

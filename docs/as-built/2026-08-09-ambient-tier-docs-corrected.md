@@ -19,11 +19,11 @@ Both mislead, and believing them produces a **dangerous** conclusion:
    On a hosted Linux deployment that file is written by the credential rotator, so
    this tier is a normal production path there.
 2. "Managed never allows it" is true only of that one function. The Open composer
-   sets `allowAmbient: true` itself, and a hosted tenant boots that composer — so
-   ambient is reachable, and was **measured on a live tenant as the ONLY tier that
+   sets `allowAmbient: true` itself, and a hosted install boots that composer — so
+   ambient is reachable, and was **measured on a live hosted install as the ONLY tier that
    resolved**, because tiers 2 and 4 were unset.
 
-A reader who believed the old comments would conclude the tenant was misconfigured
+A reader who believed the old comments would conclude the install was misconfigured
 and "fix" it by disabling ambient — leaving that deployment with **no credential at
 all**. That is exactly what the #517 tracker note proposed.
 

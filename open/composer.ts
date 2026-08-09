@@ -580,9 +580,9 @@ export interface BuildOpenGraphComposerOptions {
  *     platform, and on every non-macOS host it reads
  *     `$HOME/.claude/.credentials.json`. On a hosted Linux deployment that file is
  *     written by the credential rotator, so this tier is a NORMAL production path
- *     there — measured on a live tenant as the ONLY tier that resolved, because
+ *     there — measured on a live hosted install as the ONLY tier that resolved, because
  *     tiers 2 and 4 were unset. A reader who believed the old comment would
- *     conclude the tenant was misconfigured and "fix" it by disabling ambient,
+ *     conclude the install was misconfigured and "fix" it by disabling ambient,
  *     which would leave that deployment with no credential at all.
  *
  *     `allowAmbient: true` is set only here, which is a statement about which

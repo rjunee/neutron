@@ -57,7 +57,7 @@ describe('detectAmbientClaudeAuth — platform routing', () => {
   // WHY THE LINUX BRANCH IS LOAD-BEARING, not a nicety (ISSUES #517). On a hosted
   // Linux deployment `$HOME/.claude/.credentials.json` is written by the credential
   // ROTATOR, and ambient can be the ONLY tier that resolves — measured on a live
-  // tenant with tiers 2 and 4 unset. Anyone "simplifying" this to a Keychain-only
+  // hosted install with tiers 2 and 4 unset. Anyone "simplifying" this to a Keychain-only
   // probe because the pool id says `ambient_keychain` would take that deployment's
   // LLM access to zero. These two cases are the guard against that.
   test('linux: creds file present → true', () => {
