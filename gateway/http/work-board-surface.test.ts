@@ -354,20 +354,23 @@ describe('work-board HTTP surface — ▶ start + spec create (M1)', () => {
   const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
 
   test('POST create with a substantial spec routes through create_card', async () => {
-    const calls: Array<{ title: string; spec?: string }> = []
+    const calls: Array<{ title: string; docsProjectId: string; spec?: string }> = []
     const s = createWorkBoardSurface({
       store,
       auth,
-      create_card: async (slug, input) => {
-        calls.push({ title: input.title, ...(input.spec !== undefined ? { spec: input.spec } : {}) })
-        return store.create(slug, { title: input.title, design_doc_ref: 'neutron-docs:plans/x.md' })
+      create_card: async (scope, docsProjectId, input) => {
+        calls.push({ title: input.title, docsProjectId, ...(input.spec !== undefined ? { spec: input.spec } : {}) })
+        return store.create(scope, { title: input.title, design_doc_ref: 'neutron-docs:plans/x.md' })
       },
     })
     const res = await s.handler(
       req('POST', '/api/app/projects/proj1/work-board', { title: 'big', spec: 'a\nb\nc' }),
     )
     expect(res?.status).toBe(201)
-    expect(calls).toEqual([{ title: 'big', spec: 'a\nb\nc' }])
+    // The docs project id must be the URL's project id, NOT the board scope key:
+    // handing the scope to writeDoc is what put General's plans in a phantom
+    // project directory named after the instance.
+    expect(calls).toEqual([{ title: 'big', docsProjectId: 'proj1', spec: 'a\nb\nc' }])
   })
 
   test('POST start → dispatches + returns run_id', async () => {
@@ -624,7 +627,7 @@ describe('work-board HTTP surface — #429 task 3 auto-classify task_type', () =
     const s = createWorkBoardSurface({
       store,
       auth,
-      create_card: async (slug, input) => {
+      create_card: async (slug, _docsProjectId, input) => {
         captured.push({
           title: input.title,
           ...(input.task_type !== undefined ? { task_type: input.task_type } : {}),
