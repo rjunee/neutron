@@ -644,6 +644,90 @@ function classifyBlock(synthesis, deferredPeers) {
   return codeFindings.length === 0 ? 'infra-only' : 'code'
 }
 
+/**
+ * DID THE FIX ROUND ACTUALLY LAND? (owner-visible defect, 2026-08-09.)
+ *
+ * A fix round runs with `isolation: 'worktree'` — its own throwaway git worktree.
+ * If the agent edits files and does NOT commit and push, the worktree is reclaimed
+ * and the work is GONE from every branch, while the round still reports success.
+ * The next review then reads the UNCHANGED pushed head and re-reports the SAME
+ * findings, which reads as "the fixes didn't work" rather than "the fixes were
+ * never there" — so the loop spends its whole round budget re-reviewing round 1.
+ *
+ * That is not hypothetical. PR #145's review blocked it with, verbatim: "pushed
+ * head does not contain the round-2 fix set; merging now ships rejected code …
+ * addressed only in uncommitted tree". Three rounds and four reviewers each,
+ * ~all of it spent on a head that never moved. The work was recovered from a
+ * `git stash` on the build host afterwards.
+ *
+ * THE COMPARISON HAPPENS HERE, IN CODE, NOT IN THE AGENT. The agent is asked for
+ * ONE fact — the current head sha — and this function decides. An agent asked
+ * "did your round land?" is being asked to audit itself, and the failing case is
+ * exactly the one where it believes it succeeded.
+ *
+ * A head that did not move is a LANE failure, not a code verdict: re-running the
+ * same fix agent is likely to lose the work the same way, and re-reviewing is
+ * guaranteed to reproduce the previous findings. So the caller stops.
+ */
+function roundLanded(headBefore, headAfter) {
+  const before = typeof headBefore === 'string' ? headBefore.trim() : ''
+  const after = typeof headAfter === 'string' ? headAfter.trim() : ''
+  // An unreadable/absent AFTER is NOT treated as landed — a fetch that failed
+  // must not read as progress. An unreadable BEFORE is the only permissive case:
+  // with no baseline there is nothing to compare, so don't invent a failure.
+  if (before.length === 0) return true
+  if (after.length === 0) return false
+  return after !== before
+}
+
+/** The one fact the head probe returns. Deliberately just a sha — see `roundLanded`. */
+const BRANCH_HEAD_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['head'],
+  properties: {
+    /** The 40-char sha, or '' when the command could not produce one. */
+    head: { type: 'string' },
+  },
+}
+
+/** The message the run reports when a round left no trace on the branch. */
+function roundDidNotLandFinding(round, head) {
+  return {
+    severity: 'blocker',
+    title: `PROCESS — fix round ${round} did not land on the branch`,
+    evidence:
+      `the branch head is still ${head || '(unreadable)'} after round ${round}, so the round's edits were ` +
+      'never committed and pushed — they died with its throwaway worktree. Reviewing again would ' +
+      're-report round 1\'s findings against unchanged code, and re-running the fix agent would most ' +
+      'likely lose the work the same way. Recover the round\'s work (check `git stash list` in the ' +
+      'build checkout) and push it before re-reviewing.',
+  }
+}
+
+/**
+ * Read the branch's CURRENT head, cheaply.
+ *
+ * In PR mode the authority is the REMOTE — `git ls-remote` — because "pushed" is
+ * the property that matters and a local ref can be ahead of what any reviewer or
+ * merge will ever see. In local mode there is no remote, so the local branch ref
+ * is the authority.
+ *
+ * The agent is given one command and asked for one string. It makes no judgement
+ * about whether that string is good news.
+ */
+async function readBranchHead(round) {
+  const cmd = isPr
+    ? `cd ${shSingleQuote(repoPath)} && git ls-remote origin ${shSingleQuote(`refs/heads/${forgeBranch}`)} | awk '{print $1}'`
+    : `cd ${shSingleQuote(repoPath)} && git rev-parse ${shSingleQuote(forgeBranch)}`
+  const res = await agent(
+    `Run EXACTLY this single Bash command and report the sha it prints via the schema. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.
+${cmd}`,
+    withModel({ label: `head-probe-round-${round}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
+  )
+  return (res && typeof res.head === 'string' ? res.head : '').trim()
+}
+
 // Which cross-model peers were configured but failed. Kept separate from the gate
 // so the mapping status → blocker text is readable and testable on its own.
 function deferredCrossModelPeers(statuses) {
@@ -994,6 +1078,10 @@ ${task}${reflectionGuidance}`,
   }
 
   const diffFile = forge.diffFile
+  // The baseline for the did-this-round-land check below. Round 1's own commit is
+  // the starting point; every fix round must move the branch past it.
+  let branchHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
+  let roundLostItsWork = null
 
   // First review + synthesis.
   let synthesis = await reviewAndSynthesize(diffFile, round)
@@ -1032,6 +1120,18 @@ ${task}${reflectionGuidance}`,
       ),
     )
     await checkpoint(`fix-round-${round}`, { pr })
+    // DID IT LAND? A fix round runs in a throwaway worktree, so edits that were
+    // never committed+pushed are already gone — and reviewing again would
+    // re-report the previous round's findings against unchanged code. Stop
+    // instead, and say which round lost its work.
+    const headAfter = await readBranchHead(round)
+    if (!roundLanded(branchHead, headAfter)) {
+      log(`trident-v2 fix loop: round=${round} DID NOT LAND (head still ${headAfter || 'unreadable'}) — stopping`)
+      roundLostItsWork = { round, head: headAfter || branchHead }
+      finalVerdict = 'REQUEST_CHANGES'
+      break
+    }
+    branchHead = headAfter
     synthesis = await reviewAndSynthesize(diffFile, round)
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
@@ -1061,7 +1161,19 @@ ${task}${reflectionGuidance}`,
     // nothing about the diff. Reporting that as an ordinary REQUEST_CHANGES is what
     // made 2026-08-08's summaries misleading: three runs read as code rejections
     // when at least two were lane failures.
-    blockKind: finalVerdict === 'APPROVE' ? 'none' : synthesis.blockKind || 'code',
+    // A round whose work never reached the branch is its OWN kind of block, and
+    // it must not read as a code rejection: the code was not re-judged at all.
+    blockKind:
+      roundLostItsWork !== null
+        ? 'round-lost'
+        : finalVerdict === 'APPROVE'
+          ? 'none'
+          : synthesis.blockKind || 'code',
+    // Present ONLY when a fix round left no trace on the branch, so the operator
+    // is told which round to recover rather than being handed stale findings.
+    ...(roundLostItsWork !== null
+      ? { findings: [roundDidNotLandFinding(roundLostItsWork.round, roundLostItsWork.head)] }
+      : {}),
   }
   await writeTerminalResult(terminalResult)
   return terminalResult
