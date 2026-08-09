@@ -132,6 +132,12 @@ const {
   // independent review gate (argus:*) — see the trust-boundary note below. Absent/''
   // → every prompt is byte-identical to pre-RB2.
   reflectionGuidance = '',
+  // OWNER PER-PHASE MODEL OVERRIDES — phase key → {model?, effort?}, ALREADY
+  // validated in TypeScript at the settings boundary (`trident/phase-models.ts`
+  // `parsePhaseModelConfig`). Absent/null → every phase keeps its default, so an
+  // instance that has never touched the setting behaves EXACTLY as before. See
+  // `applyPhaseOverride` for why an unusable entry logs rather than throws.
+  phaseModels = null,
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -221,29 +227,89 @@ const MODELS = {
 // ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
 const modelForTag = (tag) =>
   tag === 'mechanical'
-    ? { model: MODELS.sonnet, effort: 'medium' }
-    : { model: MODELS.opus, effort: 'high' }
+    ? { model: MODELS.sonnet, effort: 'medium', phaseKey: 'build_mechanical' }
+    : { model: MODELS.opus, effort: 'high', phaseKey: 'build' }
 
-// label → {model, effort}. forge:* is resolved dynamically (modelForTag) since
-// its model depends on the task; the rest are static. Fable orchestrates
+// label → {model, effort, phase}. forge:* is resolved dynamically (modelForTag)
+// since its model depends on the task; the rest are static. Fable orchestrates
 // (plan:fable + argus:synthesis); Opus reviews (argus:claude/adversarial); the
 // cheap sqlite/bash bookkeeping steps use the fast model.
+//
+// `phaseKey` is the OWNER-FACING key from `trident/phase-models.ts`, carried here so
+// an owner override can be looked up without a second label→phase table living in
+// this file. NOT named `phase`: `agent()` opts ALREADY carry a `phase` field, which
+// is the workflow's PROGRESS group ('Build'/'Review'/'Synthesis') and a different
+// concept entirely — two different things under one name in one file is how the
+// wrong one gets read. The mapping's completeness is enforced by
+// `trident/__tests__/phase-model-coverage.test.ts`, which walks the `label:`
+// literals in THIS file — see the head-probe note below for why that matters.
 const ROLE_MODEL = {
-  'plan:fable': { model: MODELS.fable, effort: 'max' },
-  'argus:claude': { model: MODELS.opus, effort: 'high' },
-  'argus:adversarial': { model: MODELS.opus, effort: 'high' },
-  'argus:synthesis': { model: MODELS.fable, effort: 'high' },
-  'checkpoint': { model: MODELS.fast, effort: 'low' },
-  'terminal-result': { model: MODELS.fast, effort: 'low' },
-  'cleanup:worktree': { model: MODELS.fast, effort: 'low' },
+  'plan:fable': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition' },
+  'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric' },
+  'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial' },
+  'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis' },
+  'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
+  'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
+  'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
+  // HEAD-PROBE WAS MISSING FROM THIS TABLE and therefore fell through to the Opus
+  // default at HIGH effort — for a step whose entire job is to run one `git`
+  // command and report the sha it printed, interpreting nothing. It had been that
+  // way since the step was added, and nothing could have caught it: a missing
+  // entry and a deliberate entry are indistinguishable when the fallback is
+  // silent. That is the argument for the coverage test, not just for this line.
+  'head-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
+}
+
+// OWNER PHASE OVERRIDES, threaded in as `args.phaseModels` (phase key →
+// {model?, effort?}). `model` is either a TIER name — resolved through the same
+// registry-threaded MODELS map, so it follows a model upgrade — or a literal id.
+//
+// VALIDATION ALREADY HAPPENED, in TypeScript, at the settings boundary
+// (`parsePhaseModelConfig`), where a bad entry is an error the owner SEES. Here the
+// requirement is the opposite: a malformed entry must never abort a build that is
+// otherwise fine. So anything unusable is LOGGED BY NAME and the default is used.
+// Silently ignoring it is the one thing not allowed — an owner who set xhigh and
+// saw no change would have no way to find out why.
+const threadedPhaseModels =
+  phaseModels && typeof phaseModels === 'object' && !Array.isArray(phaseModels) ? phaseModels : {}
+const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+
+function applyPhaseOverride(route, phaseKey) {
+  if (!phaseKey) return route
+  const override = threadedPhaseModels[phaseKey]
+  if (!override || typeof override !== 'object' || Array.isArray(override)) return route
+  let { model, effort } = route
+  if (typeof override.model === 'string' && override.model.trim()) {
+    const requested = override.model.trim()
+    // A tier name resolves through the registry; anything else is taken as a
+    // literal model id. Both are intentional (see phase-models.ts).
+    model = Object.prototype.hasOwnProperty.call(MODELS, requested) ? MODELS[requested] : requested
+  } else if (override.model !== undefined) {
+    log(`trident.phase-override IGNORED phase=${phaseKey} reason=model-not-a-nonempty-string`)
+  }
+  if (typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort)) {
+    effort = override.effort
+  } else if (override.effort !== undefined) {
+    log(
+      `trident.phase-override IGNORED phase=${phaseKey} reason=effort-not-in(${VALID_EFFORTS.join('|')}) got=${JSON.stringify(override.effort)}`,
+    )
+  }
+  return { ...route, model, effort }
 }
 
 // Resolve {model, effort} for a spawn keyed on its label (+ optional complexity
-// tag for forge:*). Unknown label → Opus executor (safe default; never Fable).
+// tag for forge:*), then apply the owner's override for that phase.
+// Unknown label → Opus executor (safe default; never Fable).
 function routeModel(label, tag) {
-  if (label === 'forge:build' || label.startsWith('forge:fix-round-')) return modelForTag(tag)
-  if (label.startsWith('checkpoint:')) return ROLE_MODEL['checkpoint']
-  return ROLE_MODEL[label] || { model: MODELS.opus, effort: 'high' }
+  const base =
+    label === 'forge:build' || label.startsWith('forge:fix-round-')
+      ? modelForTag(tag)
+      : label.startsWith('checkpoint:')
+        ? ROLE_MODEL['checkpoint']
+        : label.startsWith('head-probe-round-')
+          ? ROLE_MODEL['head-probe']
+          : ROLE_MODEL[label] || { model: MODELS.opus, effort: 'high', phaseKey: null }
+  return applyPhaseOverride(base, base.phaseKey)
 }
 
 // Merge the resolved {model, effort} into an agent() opts object (which carries
@@ -252,9 +318,17 @@ function routeModel(label, tag) {
 // Codex"). Use for EVERY Claude agent() so its model is both routed and observed.
 function withModel(opts, tag) {
   const route = routeModel(opts.label, tag)
+  // The PHASE KEY and whether it was OVERRIDDEN are logged alongside the model,
+  // because "did my setting take effect?" is otherwise unanswerable from a run's
+  // output — and an owner who cannot answer it will not trust the setting. Note
+  // `route.phaseKey` is the owner-facing config key; `opts.phase` is the workflow's
+  // progress group and is deliberately a different field.
+  const overridden = route.phaseKey !== null && route.phaseKey in threadedPhaseModels
   log(
-    `trident.agent label=${opts.label} model=${route.model} effort=${route.effort}${tag ? ` tag=${tag}` : ''}`,
+    `trident.agent label=${opts.label} model=${route.model} effort=${route.effort} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}${tag ? ` tag=${tag}` : ''}`,
   )
+  // Only model + effort cross into the agent opts. `phaseKey` is routing metadata
+  // and must not leak into the spawn.
   return { ...opts, model: route.model, effort: route.effort }
 }
 

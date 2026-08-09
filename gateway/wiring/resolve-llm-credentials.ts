@@ -289,10 +289,25 @@ export function resolveApiKeyEnvTier(input: {
  *     hosted install, and it is why "disable ambient" is NOT a safe remedy: it would leave
  *     such a deployment with no credential at all.
  *
- * KNOWN LIMITATION, recorded where it is relevant rather than in a tracker only:
- * an ambient pool holds ONE credential-less entry, so it has NO FAILOVER. Rotation
- * happens outside it, at the file level. When the account behind that file hits its
- * limit the child exits and there is nothing in the pool to fall back to.
+ * THE SINGLE CREDENTIAL-LESS ENTRY IS THE MECHANISM, NOT A LIMITATION. An ambient
+ * pool holds one entry with an empty secret because the child does not authenticate
+ * from the pool at all — it authenticates from the credential file, and rotation
+ * happens by SWAPPING THAT FILE underneath it. So an empty secret here means
+ * "someone else owns this credential", which is exactly true.
+ *
+ * A PREVIOUS VERSION OF THIS DOCBLOCK CALLED IT A "KNOWN LIMITATION — NO FAILOVER",
+ * AND THAT WAS WRONG. The reasoning was: one credential-less entry, therefore
+ * nothing to fall back to when the account behind the file hits its limit. The step
+ * it skipped was checking whether anything ABOVE this layer handles that — and
+ * something does, reactively and continuously, with its own success/exhaustion
+ * counters. The claim was retracted the same day the owner read it.
+ *
+ * Worth keeping because the failure mode generalises past credentials: a component
+ * that legitimately holds no state can look broken when you reason about it alone,
+ * and the fix is to find the layer that owns the state before writing down a
+ * limitation. A docblock asserting a limitation is read as design documentation, so
+ * it needs the same evidence bar as a claim about behaviour — arguably a higher one,
+ * since nothing executes it and no test can red.
  */
 export function resolveAmbientTier(input: {
   provider: ApiKeyProvider

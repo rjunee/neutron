@@ -8154,3 +8154,29 @@ scope-addressed (General ⇒ `''`), the route is rail-addressed (⇒ `~general`)
 a push built from the scope yields the dead `/projects//docs`.
 
 Detail: `docs/as-built/2026-08-09-general-docs-reachable.md`.
+
+## 2026-08-09 — which model runs which phase became configuration
+
+`trident/phase-models.ts` defines a stable owner-facing phase vocabulary (decomposition ·
+build · build-mechanical · rubric review · adversarial review · synthesis/arbitration ·
+bookkeeping) with per-phase default tier + effort and strict validation; validated
+overrides thread to the workflow as `phaseModels` and its router applies them over its own
+table. Every default is unchanged and the key is OMITTED when nothing is configured, so an
+untouched instance produces byte-identical args.
+
+The settings keys are deliberately NOT the agent labels — several labels are dynamic
+(`forge:fix-round-3`, `head-probe-round-2`), so exposing them would reshape the settings
+surface whenever the workflow's internals changed.
+
+The coverage test found a real defect on its first run: **`head-probe-round-N` had escaped
+the routing table** and was resolving to the fallback — the most expensive tier at high
+effort — for a step that runs one `git` command and reports a sha. A missing entry and a
+deliberate entry are indistinguishable when the fallback is silent, which is the argument
+for the test rather than just the fix.
+
+Also removed a FALSE docblock from `gateway/wiring/resolve-llm-credentials.ts`, which
+asserted the ambient pool had "NO FAILOVER" as a KNOWN LIMITATION. The single
+credential-less entry is the mechanism, not a defect; rotation swaps the credential file
+underneath the child. Retracted in place, with the generalisable lesson kept.
+
+Detail: `docs/as-built/2026-08-09-per-phase-model-config.md`.
