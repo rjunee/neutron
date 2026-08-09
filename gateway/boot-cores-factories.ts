@@ -301,7 +301,7 @@ export async function buildCoresBackendFactories(
         }),
       }
     },
-    codegen_core: async () => {
+    codegen_core: async ({ project_slug }) => {
       // S2 (2026-05-22) — when the production composer threads its
       // wiring-built orchestrator, reuse it so the Core's MCP tools
       // share the SAME runner + per-project sidecar resolver as the
@@ -313,6 +313,7 @@ export async function buildCoresBackendFactories(
           orchestrator: routeCodegenCancel(
             codegenOrchestratorFromOpts,
             new TridentRunStore(projectDb),
+            project_slug,
             ...(tridentTerminator !== undefined ? [tridentTerminator] : []),
           ),
         }
@@ -345,6 +346,7 @@ export async function buildCoresBackendFactories(
         orchestrator: routeCodegenCancel(
           new mod.CodegenOrchestrator({ runner }),
           new TridentRunStore(projectDb),
+          project_slug,
           ...(tridentTerminator !== undefined ? [tridentTerminator] : []),
         ),
       }

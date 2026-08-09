@@ -16,7 +16,22 @@ export interface UnifiedCancelResult {
   already_terminal?: boolean
 }
 
-export type UnifiedCodegenOrchestrator = Omit<CodegenOrchestrator, 'cancel'> & {
+export interface UnifiedTridentState {
+  status: string
+  dispatch_path: 'trident'
+  run_id: string
+  phase: string
+  reason: string | null
+  already_terminal: boolean
+  branch?: string
+  worktree?: string
+  pr_number?: number
+  summary?: string
+}
+
+export type UnifiedCodegenOrchestrator = Pick<CodegenOrchestrator, 'dispatch'> & {
+  status(input: { task_id: string }): ReturnType<CodegenOrchestrator['status']> | UnifiedTridentState
+  fetch(input: { task_id: string }): ReturnType<CodegenOrchestrator['fetch']> | UnifiedTridentState
   cancel(input: { task_id: string }): Promise<UnifiedCancelResult>
 }
 
@@ -25,20 +40,55 @@ export type UnifiedCodegenOrchestrator = Omit<CodegenOrchestrator, 'cancel'> & {
 export function routeCodegenCancel(
   legacy: CodegenOrchestrator,
   trident: TridentRunStore,
+  projectSlug: string,
   terminator: TridentTerminator = buildTridentTerminator({ store: trident }),
 ): UnifiedCodegenOrchestrator {
+  const resolve = (taskId: string) => trident.resolveReference(projectSlug, taskId)
+  const state = (run: NonNullable<ReturnType<typeof resolve>>): UnifiedTridentState => ({
+    status: run.phase,
+    dispatch_path: 'trident',
+    run_id: run.id,
+    phase: run.phase,
+    reason: run.failure_reason,
+    already_terminal: isTerminalPhase(run.phase),
+    ...(run.branch !== null ? { branch: run.branch } : {}),
+    ...(run.worktree !== null ? { worktree: run.worktree } : {}),
+    ...(run.pr !== null ? { pr_number: run.pr } : {}),
+    ...(run.task !== '' ? { summary: run.task } : {}),
+  })
   return new Proxy(legacy, {
-    get(target, prop, receiver) {
-      if (prop !== 'cancel') return Reflect.get(target, prop, receiver)
+    get(target, prop) {
+      if (prop === 'status' || prop === 'fetch') {
+        return (input: { task_id: string }) => {
+          try {
+            return target[prop](input)
+          } catch (error) {
+            if (!(error instanceof CodegenTaskNotFoundError)) throw error
+          }
+          const run = resolve(input.task_id)
+          if (run === null) throw new CodegenTaskNotFoundError(input.task_id)
+          return state(run)
+        }
+      }
+      if (prop !== 'cancel') {
+        const value = Reflect.get(target, prop, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      }
       return async (input: { task_id: string }): Promise<UnifiedCancelResult> => {
         try {
           const result = await target.cancel(input)
-          return { ...result, dispatch_path: 'legacy_codegen' }
+          return {
+            ...result,
+            dispatch_path: 'legacy_codegen',
+            phase: result.prior_status,
+            reason: null,
+            already_terminal: !result.cancelled,
+          }
         } catch (error) {
           if (!(error instanceof CodegenTaskNotFoundError)) throw error
         }
 
-        const before = trident.get(input.task_id)
+        const before = resolve(input.task_id)
         if (before === null) throw new CodegenTaskNotFoundError(input.task_id)
         if (isTerminalPhase(before.phase)) {
           return {

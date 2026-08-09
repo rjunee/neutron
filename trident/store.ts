@@ -316,6 +316,28 @@ export class TridentRunStore {
     return row === null ? null : rowToRun(row)
   }
 
+  /** Resolve the user-facing run references emitted by `/code`: full id, id
+   * prefix, or slug, always within one project. Ambiguous prefixes do not pick
+   * an arbitrary run. */
+  resolveReference(project_slug: string, reference: string): TridentRun | null {
+    const rows = this.db
+      .prepare<TridentRunDbRow, [string, string, string, string, string, string, string]>(
+        `SELECT ${COLS} FROM code_trident_runs
+          WHERE project_slug = ?
+            AND (id = ? OR substr(id, 1, length(?)) = ? OR slug = ?)
+          ORDER BY CASE WHEN id = ? THEN 0 WHEN slug = ? THEN 1 ELSE 2 END,
+                   last_advanced_at DESC
+          LIMIT 2`,
+      )
+      .all(project_slug, reference, reference, reference, reference, reference, reference)
+      .map(rowToRun)
+    if (rows.length === 0) return null
+    const first = rows[0]
+    if (first === undefined) return null
+    if (first.id === reference || first.slug === reference) return first
+    return rows.length === 1 ? first : null
+  }
+
   /**
    * The MOST-RECENTLY-advanced run for a project scope, or null when the scope
    * has never run a build. M1 UX REDESIGN: the rail's durable failure signal — a
