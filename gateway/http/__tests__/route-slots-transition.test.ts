@@ -72,6 +72,11 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   // surface" step), NOT a relaxed assertion: it sits immediately after
   // app-upload in the ladder, mirroring its slot order.
   ['app-voice-transcription', 'appVoiceTranscription', 'app_voice_transcription_surface', true],
+  // Per-phase build models. RATCHET EXTENSION (the documented "adding a surface"
+  // step), NOT a relaxed assertion: it sits immediately after voice-transcription,
+  // mirroring its slot order. Both are machine-scoped settings routes with no
+  // project segment, so neither can shadow the other or anything below.
+  ['app-trident-phase-models', 'appTridentPhaseModels', 'app_trident_phase_models_surface', true],
   ['app-launcher', 'appLauncher', 'app_launcher_surface', true],
   ['app-tasks', 'appTasks', 'app_tasks_surface', true],
   ['app-reminders', 'appReminders', 'app_reminders_surface', true],
@@ -471,6 +476,7 @@ function fullComposition(): RouteSlotComposition {
     app_focus_surface: { handler: h() },
     app_focus_current_surface: { handler: h() },
     app_diagnostics_surface: { handler: h() },
+    app_trident_phase_models_surface: { handler: h() },
     app_admin_surface: { handler: h() },
     app_persona_surface: { handler: h() },
     app_devices_surface: { handler: h() },
@@ -522,6 +528,7 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_focus_surface',
   'app_focus_current_surface',
   'app_diagnostics_surface',
+  'app_trident_phase_models_surface',
   'app_admin_surface',
   'app_persona_surface',
   'app_devices_surface',
@@ -557,7 +564,7 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
 ]
 
 describe('C4 — generated gate = pre-C4 literal gate + the documented divergence fix', () => {
-  test('gate membership is exactly the pre-C4 31-field list + O5 app_diagnostics_surface + the 4 divergence-fix fields', () => {
+  test('gate membership is exactly the pre-C4 31-field list + O5 app_diagnostics_surface + app_trident_phase_models_surface + the 4 divergence-fix fields', () => {
     expect(new Set(CHAINED_SURFACE_COMPOSITION_KEYS)).toEqual(new Set(GATE_FIELDS))
   })
 
