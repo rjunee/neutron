@@ -58,7 +58,7 @@ afterEach(() => {
 
 describe('createCardWithOptionalSpec', () => {
   test('non-trivial spec → writes a plans/ doc + sets a neutron-docs ref', async () => {
-    const item = await svc.createCardWithOptionalSpec(PROJECT, {
+    const item = await svc.createCardWithOptionalSpec(PROJECT, PROJECT, {
       title: 'Wire CSV export',
       spec: 'Add a CSV export button.\nWire it to /export.\nCover the happy path + an empty-set case with tests.',
     })
@@ -77,7 +77,7 @@ describe('createCardWithOptionalSpec', () => {
   })
 
   test('trivial one-liner → title-only, NO doc, null ref', async () => {
-    const item = await svc.createCardWithOptionalSpec(PROJECT, {
+    const item = await svc.createCardWithOptionalSpec(PROJECT, PROJECT, {
       title: 'build a meditation timer',
       spec: 'build a meditation timer',
     })
@@ -86,13 +86,13 @@ describe('createCardWithOptionalSpec', () => {
   })
 
   test('no spec → title-only, NO doc', async () => {
-    const item = await svc.createCardWithOptionalSpec(PROJECT, { title: 'quick fix' })
+    const item = await svc.createCardWithOptionalSpec(PROJECT, PROJECT, { title: 'quick fix' })
     expect(docs.writes.length).toBe(0)
     expect(item.design_doc_ref).toBeNull()
   })
 
   test('explicit design_doc_ref WINS — never overwritten by a generated doc', async () => {
-    const item = await svc.createCardWithOptionalSpec(PROJECT, {
+    const item = await svc.createCardWithOptionalSpec(PROJECT, PROJECT, {
       title: 'has a doc already',
       design_doc_ref: 'https://example.test/spec',
       spec: 'a long spec that would otherwise be persisted to a doc file on disk somewhere useful',
@@ -117,7 +117,7 @@ describe('createCardWithOptionalSpec', () => {
         order.push('ensure')
       },
     })
-    await svc2.createCardWithOptionalSpec(PROJECT, {
+    await svc2.createCardWithOptionalSpec(PROJECT, PROJECT, {
       title: 'needs a doc',
       spec: 'a substantial spec\n- with\n- structure\n- worth persisting',
     })
@@ -126,7 +126,7 @@ describe('createCardWithOptionalSpec', () => {
 
   test('doc-write failure degrades to a title-only card (no throw)', async () => {
     docs.failWrite = true
-    const item = await svc.createCardWithOptionalSpec(PROJECT, {
+    const item = await svc.createCardWithOptionalSpec(PROJECT, PROJECT, {
       title: 'important work',
       spec: 'a substantial multi-requirement spec\n- one\n- two\n- three',
     })
@@ -139,7 +139,7 @@ describe('createCardWithOptionalSpec', () => {
 
 describe('resolveTaskForItem', () => {
   test('reads the linked doc content as the task', async () => {
-    const item = await svc.createCardWithOptionalSpec(PROJECT, {
+    const item = await svc.createCardWithOptionalSpec(PROJECT, PROJECT, {
       title: 'Wire CSV export',
       spec: 'Add a CSV export button.\nWire it to the /export endpoint.\nCover the empty-set case with tests.',
     })

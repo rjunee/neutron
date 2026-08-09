@@ -28,6 +28,7 @@ import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import {
   WorkBoardValidationError,
+  GENERAL_WORK_BOARD_PROJECT_ID,
   workBoardScopeKey,
   type CreateWorkBoardItemInput,
   type ReorderTarget,
@@ -218,12 +219,25 @@ export function registerWorkBoardToolSurface(
       try {
         let item: WorkBoardItem
         if (specDoc !== undefined) {
-          item = await specDoc.createCardWithOptionalSpec(scope, {
+          // The BOARD gets the scope key; the DOC gets the project id. Passing the
+          // scope for both is what wrote General's plans into a phantom project
+          // directory named after the instance — this is the agent path, which is
+          // the one that created the card the owner could not open.
+          // `ctx.project_id` is NULL in the General scope — that is what General IS,
+          // the no-project scope. The docs root still needs a real directory name,
+          // and it must be the SAME word the wire and the Documents tab already use:
+          // `GENERAL_WORK_BOARD_PROJECT_ID`. One constant, not a literal, so the
+          // board's collapse and the docs root can never drift apart again.
+          item = await specDoc.createCardWithOptionalSpec(
+            scope,
+            ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID,
+            {
             title,
             ...(status !== undefined ? { status } : {}),
             ...(ref !== undefined ? { design_doc_ref: ref } : {}),
             ...(spec !== undefined ? { spec } : {}),
-          })
+            },
+          )
         } else {
           const createInput: CreateWorkBoardItemInput = { title }
           if (status !== undefined) createInput.status = status

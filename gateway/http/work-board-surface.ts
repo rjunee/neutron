@@ -89,7 +89,10 @@ export type WorkBoardStartResult =
  * falls back to a plain `store.create` (a supplied `spec` is then ignored).
  */
 export type WorkBoardCreateCardFn = (
-  project_slug: string,
+  /** The BOARD scope key (General collapses to the owner slug). */
+  scope: string,
+  /** The PROJECT id the spec doc belongs to — `general` for General. */
+  docs_project_id: string,
   input: {
     title: string
     status?: WorkBoardStatus
@@ -267,7 +270,10 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
 async function handleCreate(
   req: Request,
   store: WorkBoardStore,
-  project_slug: string,
+  // The BOARD SCOPE KEY, not a slug: `workBoardScopeKey(owner, project_id)`. It
+  // was named `project_slug`, which is how it ended up being passed to `writeDoc`
+  // as a project id and writing General's plans into a phantom project directory.
+  scope: string,
   project_id: string,
   createCard: WorkBoardCreateCardFn | undefined,
   classifyTaskType: ((title: string) => Promise<WorkBoardTaskType>) | undefined,
@@ -315,14 +321,14 @@ async function handleCreate(
     // else fall back to a plain title-only (+ optional ref) create.
     const item =
       createCard !== undefined
-        ? await createCard(project_slug, {
+        ? await createCard(scope, project_id, {
             title,
             ...(status !== null ? { status } : {}),
             ...(task_type !== null ? { task_type } : {}),
             ...(design_doc_ref !== null ? { design_doc_ref } : {}),
             ...(spec !== null ? { spec } : {}),
           })
-        : await store.create(project_slug, {
+        : await store.create(scope, {
             title,
             ...(status !== null ? { status } : {}),
             ...(task_type !== null ? { task_type } : {}),

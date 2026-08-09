@@ -3737,7 +3737,11 @@ export function buildOpenGraphComposer(
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
-      create_card: (slug, input) => workBoardSpecDoc.createCardWithOptionalSpec(slug, input),
+      // The board scope and the DOCS project id are separate arguments on purpose:
+      // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a
+      // phantom project directory.
+      create_card: (scope, docsProjectId, input) =>
+        workBoardSpecDoc.createCardWithOptionalSpec(scope, docsProjectId, input),
       // M1 — ▶ start/retry a build from the card's saved spec (undefined = 501).
       ...(boardStartBuild !== undefined ? { start_build: boardStartBuild } : {}),
       // #379 — ▶ start/retry a RESEARCH card via Atlas (undefined = 501).
