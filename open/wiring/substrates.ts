@@ -36,6 +36,7 @@ import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OpenWiringContext } from './context.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface WiredSubstrates {
@@ -403,6 +404,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // would be disposed on settle and abort the detached workflow). Null pool
   // leaves `composition.trident` unset → the loop's restart-safe stub no-op.
   const fireSubstrateByCwd = new Map<string, Substrate>()
+  const tridentRuns = new TridentRunStore(ctx.db)
   const makeWarmFireSubstrate = (cwd: string): Substrate => {
     const cached = fireSubstrateByCwd.get(cwd)
     if (cached !== undefined) return cached
@@ -420,6 +422,16 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
       // Trident v2 FIRE seam — WARM per-repo REPL. Security knobs live on the
       // profile — see substrate-profiles.ts.
       profile: PROFILE_WARM_FIRE,
+      // #514 — the supervision watchdog knows synchronously when this warm
+      // launcher's child died. Stamp every still-live workflow owned by its repo;
+      // the Trident tick then performs the normal terminal transition + board
+      // reconcile instead of leaving a durable `running` phantom until timeout.
+      onChildCrash: async ({ generationKey, detail }) => {
+        await tridentRuns.crashRunningByLauncher(
+          generationKey,
+          `inner workflow child crashed: ${detail}`,
+        )
+      },
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
     })
     if (built === null) throw new Error('cc-trident-fire: empty Anthropic credential pool')

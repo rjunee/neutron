@@ -121,6 +121,8 @@ export interface FireOutcome {
   status: 'fired' | 'failed'
   /** Non-null iff `failed`: a short audit reason. */
   error: string | null
+  /** Exact persistent-pool child which owns the detached workflow. */
+  launcher_session_key?: string
 }
 
 /** Input to one fire-and-settle launcher turn. */
@@ -439,7 +441,13 @@ export function buildSubstrateWorkflowFire(
         if (ev.kind === 'completion') {
           // The launching turn settled (Workflow fired + replied). The workflow
           // is now detached in the background; harvest its result from the DB.
-          return { status: 'fired', error: null }
+          return {
+            status: 'fired',
+            error: null,
+            ...(ev.launcher_session_key !== undefined
+              ? { launcher_session_key: ev.launcher_session_key }
+              : {}),
+          }
         }
         if (ev.kind === 'error') {
           fireAndForget('inner-loop.cancel', handle.cancel())

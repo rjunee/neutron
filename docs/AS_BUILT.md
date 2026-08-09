@@ -8093,3 +8093,39 @@ at the router boundary to `CodegenInputError` on `task_id`. An existing test had
 pinned the LEAKED message (`'reference is ambiguous'`) — updated to the contract
 error, with its real guarantee (an ambiguous prefix must not select by recency)
 left exactly as it was. Mutant: removing the translation reds three tests.
+
+# Trident child-crash reaping (#514)
+
+## 2026-08-09 — Trident child-crash reaping (#514)
+
+The persistent REPL watchdog now commits a retryable, edge-latched durable-work callback before replacing any dead or alive-but-wedged child. Each spawn receives a unique generation token that is persisted in the REPL registry, returned with launcher completion, and stored on its detached Trident run. The store records that generation's crash before marking only matching live rows `crashed`; a racing launcher completion cannot persist `running`, while a later child reusing the same warm pool slot has a different token and is unaffected. Tombstones older than seven days are pruned on crash writes. A gateway-restart tick can use the registry's persisted generation with the substrate-level callback even before the exact pool entry is rebuilt. The next `trident/tick.ts` sweep performs the normal terminal failure and Work Board reconciliation, so the board indicator clears within one tick interval. Transient store failures retry on the next watchdog tick before respawn, rather than losing the crash edge.
+
+## 2026-08-09 — a crash before the launch save no longer fires a build every tick
+
+A reviewer reproduced this live on the branch, with their own probe: make the
+firer record its crash tombstone BEFORE it returns `{ status: 'fired',
+launcher_session_key }` — the window `trident/store.test.ts` already covers — then
+tick. `fires=3` after three ticks, `phase='forge-init'`,
+`subagent_status='crashed'`, `subagent_run_id=null`. Three real detached builds,
+with no ceiling: one more every tick, forever, burning credentials and able to open
+duplicate PRs.
+
+The chain: `saveIfActive` is vetoed by the tombstone, so the dispatch id the firer
+returned is never written and `subagent_run_id` stays NULL. Harvest, the
+terminal-status guard, the hang watchdog and orphan recovery were ALL gated on
+`subagent_run_id !== null`, so nothing observed the `crashed` status — and control
+reached `if (run.subagent_run_id === null) return launch(run)`, which is
+unconditional.
+
+The fix is one widened gate: `subagent_status === 'crashed'` also opens the
+harvest/terminal block, because a crashed launcher is a dead run whether or not we
+ever learned its subagent id. Harvest still runs FIRST inside it, so a workflow that
+wrote its terminal result and only then lost its launcher still harvests instead of
+being reaped — a fix that reaped those would have traded an infinite loop for
+silently discarded results.
+
+`trident/crash-before-launch-save.test.ts` pins it. The guarantee is that the loop
+is BOUNDED, not instant: the tombstone lands during tick 1's fire and the phase is
+classified at the top of a tick, so the reap happens on tick 2. The test says so
+rather than asserting something the fix does not claim. Mutant: reverting the gate
+reds two of four.

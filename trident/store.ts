@@ -386,6 +386,34 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /** Durably latch one dead launcher generation and crash only its workflows. */
+  async crashRunningByLauncher(session_key: string, failure_reason: string): Promise<void> {
+    await this.db.transaction((tx) => {
+      const now = this.now()
+      tx.runSync(
+        `INSERT INTO trident_launcher_crashes (session_key, failure_reason, crashed_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_key) DO UPDATE SET failure_reason = excluded.failure_reason`,
+        [session_key, failure_reason, now],
+      )
+      // Generation keys are unique per spawn. Keep the short race window needed
+      // by an in-flight launcher completion, while bounding durable tombstones.
+      tx.runSync(
+        `DELETE FROM trident_launcher_crashes
+          WHERE datetime(crashed_at) < datetime(?, '-7 days')`,
+        [now],
+      )
+      tx.runSync(
+        `UPDATE code_trident_runs
+            SET subagent_status = 'crashed', failure_reason = ?, last_advanced_at = ?
+          WHERE workflow_run_id = ?
+            AND subagent_status = 'running'
+            AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        [failure_reason, now, session_key],
+      )
+    })
+  }
+
   /**
    * Apply a partial update by id, re-stamping `last_advanced_at`. Only the
    * provided fields are written. Returns the reloaded row (or `null` if
@@ -416,8 +444,11 @@ export class TridentRunStore {
     // Always advance the cursor timestamp.
     push('last_advanced_at', this.now())
     params.push(id)
+    const statusGuard = patch.subagent_status !== undefined && patch.subagent_status !== 'crashed'
+      ? ` AND subagent_status IS NOT 'crashed'`
+      : ''
     await this.db.run(
-      `UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id = ?`,
+      `UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id = ?${statusGuard}`,
       params,
     )
     return this.get(id)
@@ -533,7 +564,16 @@ export class TridentRunStore {
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
                 last_advanced_at = ?
-          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND (subagent_status IS NOT 'crashed' OR ? = 'crashed')
+            AND (
+              ? IS NOT 'running'
+              OR ? IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM trident_launcher_crashes
+                 WHERE session_key = ?
+              )
+            )`,
         [
           run.phase,
           run.round,
@@ -551,8 +591,26 @@ export class TridentRunStore {
           run.harvested_at,
           this.now(),
           run.id,
+          run.subagent_status,
+          run.subagent_status,
+          run.workflow_run_id,
+          run.workflow_run_id,
         ],
       )
+      if (res.changes === 0 && run.subagent_status === 'running' && run.workflow_run_id !== null) {
+        const crash = tx.get<{ failure_reason: string }>(
+          `SELECT failure_reason FROM trident_launcher_crashes WHERE session_key = ?`,
+          [run.workflow_run_id],
+        )
+        if (crash !== null) {
+          tx.runSync(
+            `UPDATE code_trident_runs
+                SET subagent_status = 'crashed', failure_reason = ?, last_advanced_at = ?
+              WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+            [crash.failure_reason, this.now(), run.id],
+          )
+        }
+      }
       return res.changes > 0
     })
   }

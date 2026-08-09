@@ -91,7 +91,7 @@ function makeFakeSession(opts: {
     hasExited: () => exited,
   }
   const key = [INSTANCE, USER, opts.project, opts.credential ?? 'cred-1'].join(SESSION_KEY_SEP)
-  const session = new ReplSession(key, opts.sessionId, 'chan', CWD)
+  const session = new ReplSession(key, 'test-generation', opts.sessionId, 'chan', CWD)
   session.attachChild(child)
   // Ancient lastDataAt so `waitForReplIdle(quiet=0)` returns immediately.
   session.lastDataAt = 0
