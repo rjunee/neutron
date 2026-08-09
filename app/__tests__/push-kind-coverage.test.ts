@@ -1,0 +1,120 @@
+/**
+ * EVERY kind the gateway sends must route somewhere (owner-reported, #520).
+ *
+ * WHAT HE SAW: *"when I tap on a push notification, it opens the app, but it
+ * doesn't open in the right project and at the unread message marker like it
+ * should."*
+ *
+ * WHY. The gateway picks a `kind` when it builds a push; the client switches on
+ * that string to decide where the tap lands. The two lists were written
+ * independently and had drifted until they were **disjoint except for one entry**:
+ *
+ *   SENT                        KNOWN TO THE RESOLVER
+ *   reminder                    reminder          ← the only overlap
+ *   calendar_pre_meeting_brief  wow_fired         ← no sender, ever
+ *   email_daily_triage          agent_message     ← no sender, ever
+ *
+ * So a pre-meeting brief or an email triage hit the resolver's "unknown kind"
+ * branch: warn, return null, nothing routes. Meanwhile two of the three kinds the
+ * client handled carefully could never arrive.
+ *
+ * NEITHER SIDE'S TESTS COULD SEE IT. The dispatcher's tests assert the payload it
+ * builds. The resolver's tests assert the payloads they hand it. Both were green,
+ * and their union was broken — the gap was in the space between two files that
+ * never met. This test is that meeting point: it walks `PUSH_KINDS`, the list the
+ * senders now import their constants from, and requires the resolver to produce a
+ * route for each. Add a kind and forget the client, and this reds.
+ */
+import { describe, expect, test } from 'bun:test';
+
+import { PUSH_KINDS, type PushKind } from '@neutronai/wire-types/push-kind.ts';
+import { resolvePushRoute, type PushPayload } from '../lib/push-deep-link-dispatch';
+
+/**
+ * A well-formed payload for each kind — the fields the gateway actually attaches.
+ * Keeping these beside the kind list means "what a sender sends" is written down
+ * once and checked, rather than implied.
+ */
+const WELL_FORMED: Record<PushKind, PushPayload> = {
+  reminder: {
+    kind: 'reminder',
+    reminder_id: 'rem-1',
+    project_id: 'acme',
+    project_slug: 'owner',
+  },
+  calendar_pre_meeting_brief: {
+    kind: 'calendar_pre_meeting_brief',
+    event_id: 'evt-1',
+    project_id: 'acme',
+    project_slug: 'owner',
+  },
+  email_daily_triage: {
+    kind: 'email_daily_triage',
+    project_id: 'acme',
+    project_slug: 'owner',
+  },
+};
+
+describe('every sent push kind resolves to a route', () => {
+  test('the fixture table covers PUSH_KINDS exactly — no kind is silently skipped', () => {
+    // Guards the guard: a kind added to the list but not to the table would
+    // otherwise be "covered" by a loop that never sees it.
+    expect(Object.keys(WELL_FORMED).sort()).toEqual([...PUSH_KINDS].sort());
+  });
+
+  for (const kind of PUSH_KINDS) {
+    test(`${kind} routes somewhere`, () => {
+      const silent = (): void => {};
+      const route = resolvePushRoute(WELL_FORMED[kind], { warn: silent });
+      expect(route).not.toBeNull();
+      expect(route).toContain('/projects/acme/');
+    });
+  }
+});
+
+describe('the two Core kinds specifically — these were the dead ones', () => {
+  test('a pre-meeting brief opens the project chat instead of nothing', () => {
+    const warned: string[] = [];
+    const route = resolvePushRoute(WELL_FORMED.calendar_pre_meeting_brief, {
+      warn: (m) => warned.push(m),
+    });
+    expect(route).toBe('/projects/acme/chat');
+    // And it must not warn — an "unknown kind" warning was the old symptom, and a
+    // route that both works and complains is a half-fix.
+    expect(warned).toEqual([]);
+  });
+
+  test('an email triage opens the project chat instead of nothing', () => {
+    const warned: string[] = [];
+    const route = resolvePushRoute(WELL_FORMED.email_daily_triage, {
+      warn: (m) => warned.push(m),
+    });
+    expect(route).toBe('/projects/acme/chat');
+    expect(warned).toEqual([]);
+  });
+
+  test('a Core push with NO project_id still warns and refuses, rather than guessing', () => {
+    // `project_slug` is the OWNER slug, not a project id. Falling back to it would
+    // route to a project that does not exist and look like a routing bug rather
+    // than a payload bug.
+    const warned: string[] = [];
+    const route = resolvePushRoute(
+      { kind: 'email_daily_triage', project_slug: 'owner' },
+      { warn: (m) => warned.push(m) },
+    );
+    expect(route).toBeNull();
+    expect(warned.length).toBe(1);
+  });
+});
+
+describe('an unrecognised kind is still handled honestly', () => {
+  test('it warns and returns null rather than routing somewhere arbitrary', () => {
+    const warned: string[] = [];
+    const route = resolvePushRoute(
+      { kind: 'something_new', project_id: 'acme' },
+      { warn: (m) => warned.push(m) },
+    );
+    expect(route).toBeNull();
+    expect(warned).toEqual(['unknown push payload kind']);
+  });
+});
