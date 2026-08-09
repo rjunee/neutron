@@ -1,0 +1,161 @@
+/**
+ * The General scope's HTTP spelling — one mapping, and the clients that USE it.
+ *
+ * THE DEFECT (owner-reported on device, 2026-08-09, one screenshot showing what
+ * looked like two unrelated bugs): in General, the Docs tab rendered the raw
+ * validator string `invalid_project_id: project_id must be 1-128 chars from
+ * [A-Za-z0-9_.-]`, and the tab bar showed the legacy Chat/Apps/Tasks/Reminders/
+ * Docs/Settings set with no Work tab and Docs in fifth place.
+ *
+ * ONE root cause. The mobile rail spells General `'~general'`, deliberately
+ * outside the gateway's project-id alphabet, and two clients sent it RAW:
+ *   - the docs client → 400, rendered as the validator string, and
+ *   - the tabs client → 400, which the layout SWALLOWS by design, so General
+ *     silently kept the pre-fetch loading default forever. The order was never
+ *     an ordering bug; it was a failed fetch.
+ *
+ * WHY THE ASSERTIONS BELOW ARE ON FETCHED URLs, NOT ON THE MAPPER. A test that
+ * only checks `httpProjectSegment('~general') === 'general'` passes with every
+ * client still sending the raw sentinel — which is exactly the state that
+ * shipped. The mapper had ALREADY existed twice (work-board, activity) while both
+ * of these were broken. So each client is driven with an injected/stubbed fetch
+ * and the URL it actually requests is asserted.
+ */
+import { afterEach, describe, expect, test } from 'bun:test'
+
+import {
+  GENERAL_HTTP_ID,
+  RAIL_GENERAL_ID,
+  httpProjectSegment,
+  httpProjectSegmentEncoded,
+} from '../lib/general-scope'
+import { GENERAL_PROJECT_ID } from '../lib/project-rail-view'
+import { GENERAL_WORK_BOARD_PROJECT_ID, workBoardPathSegment } from '../lib/work-board-client'
+import { GENERAL_ACTIVITY_SCOPE, activityScopeKey } from '../lib/activity-client'
+import { DocsClient } from '../lib/docs-client'
+import { TabsClient } from '../lib/tabs-client'
+
+describe('the one mapping', () => {
+  test('the duplicated sentinel matches the rail it stands for', () => {
+    // `general-scope.ts` is import-free ON PURPOSE (every consumer is an RN-free
+    // client that must not gain the rail-view import chain), so the constant is
+    // duplicated. This is the pin that stops the copy drifting.
+    expect(RAIL_GENERAL_ID).toBe(GENERAL_PROJECT_ID)
+  })
+
+  test('every client-side spelling of General collapses to the server id', () => {
+    expect(httpProjectSegment(RAIL_GENERAL_ID)).toBe(GENERAL_HTTP_ID)
+    expect(httpProjectSegment('')).toBe(GENERAL_HTTP_ID)
+    expect(httpProjectSegment(null)).toBe(GENERAL_HTTP_ID)
+    expect(httpProjectSegment(undefined)).toBe(GENERAL_HTTP_ID)
+  })
+
+  test('a named project passes through — including one literally named "general"', () => {
+    expect(httpProjectSegment('tabs')).toBe('tabs')
+    expect(httpProjectSegment(GENERAL_HTTP_ID)).toBe(GENERAL_HTTP_ID)
+  })
+
+  test('the match is EXACT, so a project merely starting with the sentinel survives', () => {
+    // A prefix test here would silently redirect a real project's docs at the
+    // General root — a data-visibility bug, not a 400.
+    expect(httpProjectSegment('~generalize')).toBe('~generalize')
+    expect(httpProjectSegment('~general-2')).toBe('~general-2')
+  })
+
+  test('the encoded form encodes AFTER mapping, never the sentinel', () => {
+    expect(httpProjectSegmentEncoded(RAIL_GENERAL_ID)).toBe(GENERAL_HTTP_ID)
+    expect(httpProjectSegmentEncoded('a b')).toBe('a%20b')
+  })
+
+  test('the two clients that already had their own copy still behave identically', () => {
+    // Both delegate now; these pin the public names their callers use.
+    expect(workBoardPathSegment(RAIL_GENERAL_ID)).toBe(GENERAL_WORK_BOARD_PROJECT_ID)
+    expect(workBoardPathSegment('tabs')).toBe('tabs')
+    expect(activityScopeKey(RAIL_GENERAL_ID)).toBe(GENERAL_ACTIVITY_SCOPE)
+    expect(activityScopeKey('tabs')).toBe('tabs')
+    expect(GENERAL_WORK_BOARD_PROJECT_ID).toBe(GENERAL_HTTP_ID)
+    expect(GENERAL_ACTIVITY_SCOPE).toBe(GENERAL_HTTP_ID)
+  })
+})
+
+/** Record every requested URL; answer with `body`. */
+function recordingFetch(urls: string[], body: unknown): (input: string) => Promise<Response> {
+  return async (input: string) => {
+    urls.push(input)
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+}
+
+describe('DocsClient asks for General by a name the server can spell', () => {
+  const opts = (urls: string[], body: unknown) => ({
+    base_url: 'https://example.test',
+    token: 't',
+    fetchImpl: recordingFetch(urls, body),
+  })
+
+  test('tree() on the rail sentinel requests /projects/general/docs/tree', async () => {
+    const urls: string[] = []
+    const client = new DocsClient(opts(urls, { ok: true, tree: [], file_count: 0 }))
+    await client.tree(RAIL_GENERAL_ID)
+    expect(urls[0]).toBe('https://example.test/api/app/projects/general/docs/tree')
+    // The sentinel must not survive anywhere in the URL, encoded or raw — a
+    // percent-encoded `~` would 400 just the same.
+    expect(urls[0]).not.toContain('~')
+    expect(urls[0]).not.toContain('%7E')
+  })
+
+  test('a write path maps too — the bug was not read-only', async () => {
+    const urls: string[] = []
+    const client = new DocsClient(opts(urls, { ok: true, file: { path: 'a.md', content: '' } }))
+    await client.writeFile(RAIL_GENERAL_ID, { path: 'a.md', content: 'hello' })
+    expect(urls[0]).toBe('https://example.test/api/app/projects/general/docs/file')
+  })
+
+  test('a named project is still requested under its own id', async () => {
+    const urls: string[] = []
+    const client = new DocsClient(opts(urls, { ok: true, tree: [], file_count: 0 }))
+    await client.tree('tabs')
+    expect(urls[0]).toBe('https://example.test/api/app/projects/tabs/docs/tree')
+  })
+
+  test('EVERY docs path builder goes through the mapper, not just the ones above', () => {
+    // A source-scoped assertion, and labelled weaker on purpose: there are 21
+    // path builders in the client and driving all 21 through a stub asserts the
+    // same one fact 21 times. What matters is that no builder reaches for
+    // `encodeURIComponent(project_id)` directly again — that is the mistake, and
+    // it is textual. The three behavioural cases above prove the mapper is the
+    // thing wired in.
+    const src = Bun.file(new URL('../lib/docs-client.ts', import.meta.url)).text()
+    return src.then((text) => {
+      expect(text).not.toContain('encodeURIComponent(project_id)')
+      expect(text).toContain('httpProjectSegmentEncoded')
+    })
+  })
+})
+
+describe('TabsClient asks for General by a name the server can spell', () => {
+  const realFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  test('listProjectTabs on the rail sentinel requests /projects/general/tabs', async () => {
+    const urls: string[] = []
+    // TabsClient uses the global fetch (no injection seam), so stub it.
+    globalThis.fetch = ((input: string) => {
+      urls.push(String(input))
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, scope: 'project', tabs: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }) as unknown as typeof fetch
+    const client = new TabsClient({ base_url: 'https://example.test', token: 't' })
+    await client.listProjectTabs(RAIL_GENERAL_ID)
+    expect(urls[0]).toBe('https://example.test/api/app/projects/general/tabs')
+  })
+})

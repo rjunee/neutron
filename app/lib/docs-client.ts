@@ -17,6 +17,7 @@ import {
   GatewayHttpClient,
   type GatewayHttpClientOptions,
 } from '@neutronai/client-core';
+import { httpProjectSegmentEncoded } from './general-scope';
 
 export type DocTreeKind = 'file' | 'folder' | 'binary';
 
@@ -115,6 +116,21 @@ export type DocsClientOptions = GatewayHttpClientOptions;
  *  with `gateway/storage/binary-types.ts` BINARY_EXTENSIONS so the
  *  client-side drag-drop handler can reject unsupported files before
  *  the round-trip. */
+/**
+ * The project id as an HTTP PATH SEGMENT, percent-encoded.
+ *
+ * Every path below goes through this rather than `encodeURIComponent` directly.
+ * The mobile rail spells the General scope `'~general'`, which is deliberately
+ * OUTSIDE the gateway's project-id alphabet, so sending it raw made every docs
+ * call 400 — and the Docs tab in General rendered the raw validator string
+ * `invalid_project_id: project_id must be 1-128 chars from [A-Za-z0-9_.-]` where
+ * the file tree should be. `general-scope.ts` owns the mapping (shared with the
+ * work-board / tabs / activity clients, each of which hit the same 400).
+ */
+function seg(project_id: string): string {
+  return httpProjectSegmentEncoded(project_id);
+}
+
 export const BINARY_EXTENSIONS = Object.freeze([
   '.png',
   '.jpg',
@@ -348,13 +364,13 @@ export class DocsClient extends GatewayHttpClient {
   }
 
   async tree(project_id: string): Promise<{ tree: DocTreeNode[]; file_count: number }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/tree`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/tree`;
     const res = await this.req<TreeResponse>(path);
     return { tree: res.tree, file_count: res.file_count };
   }
 
   async readFile(project_id: string, relPath: string): Promise<DocFile> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file?path=${encodeURIComponent(relPath)}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/file?path=${encodeURIComponent(relPath)}`;
     const res = await this.req<FileResponse>(path);
     return res.file;
   }
@@ -363,7 +379,7 @@ export class DocsClient extends GatewayHttpClient {
     project_id: string,
     input: { path: string; content: string; expected_modified_at?: number },
   ): Promise<WriteResult> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/file`;
     const body: Record<string, unknown> = {
       path: input.path,
       content: input.content,
@@ -380,7 +396,7 @@ export class DocsClient extends GatewayHttpClient {
     from_path: string,
     to_path: string,
   ): Promise<WriteResult> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file/move`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/file/move`;
     const res = await this.req<WriteResponse>(path, {
       method: 'POST',
       body: { from_path, to_path },
@@ -389,17 +405,17 @@ export class DocsClient extends GatewayHttpClient {
   }
 
   async deleteFile(project_id: string, relPath: string): Promise<void> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/file?path=${encodeURIComponent(relPath)}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/file?path=${encodeURIComponent(relPath)}`;
     await this.req<OkResponse>(path, { method: 'DELETE' });
   }
 
   async createFolder(project_id: string, relPath: string): Promise<void> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/folder`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/folder`;
     await this.req<OkResponse>(path, { method: 'POST', body: { path: relPath } });
   }
 
   async deleteFolder(project_id: string, relPath: string): Promise<void> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/folder?path=${encodeURIComponent(relPath)}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/folder?path=${encodeURIComponent(relPath)}`;
     await this.req<OkResponse>(path, { method: 'DELETE' });
   }
 
@@ -415,7 +431,7 @@ export class DocsClient extends GatewayHttpClient {
     if (opts.cursor !== undefined && opts.cursor.length > 0) {
       params.set('cursor', opts.cursor);
     }
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/history?${params.toString()}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/history?${params.toString()}`;
     const res = await this.req<HistoryResponse>(path);
     return { history: res.history, next_cursor: res.next_cursor };
   }
@@ -425,7 +441,7 @@ export class DocsClient extends GatewayHttpClient {
     sha: string,
     relPath: string,
   ): Promise<VersionContent> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/history/${encodeURIComponent(sha)}?path=${encodeURIComponent(relPath)}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/history/${encodeURIComponent(sha)}?path=${encodeURIComponent(relPath)}`;
     const res = await this.req<VersionResponse>(path);
     return res.version;
   }
@@ -434,7 +450,7 @@ export class DocsClient extends GatewayHttpClient {
     project_id: string,
     body: { path: string; target_sha: string; expected_modified_at?: number },
   ): Promise<{ file: WriteResult | null; deleted: boolean; target_sha: string }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/revert`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/revert`;
     const res = await this.req<RevertResponse>(path, {
       method: 'POST',
       body,
@@ -450,7 +466,7 @@ export class DocsClient extends GatewayHttpClient {
     file: File | Blob,
     filename?: string,
   ): Promise<BinaryUploadResult> {
-    const url = `${this.base_url}/api/app/projects/${encodeURIComponent(project_id)}/docs/binary?path=${encodeURIComponent(rel_path)}`;
+    const url = `${this.base_url}/api/app/projects/${seg(project_id)}/docs/binary?path=${encodeURIComponent(rel_path)}`;
     const form = new FormData();
     // FormData accepts (Blob, filename) so React Native's Blob-as-File
     // pattern (no separate File class) works too.
@@ -492,7 +508,7 @@ export class DocsClient extends GatewayHttpClient {
    * JS-land fetch first.
    */
   binaryUrl(project_id: string, rel_path: string): BinarySource {
-    const uri = `${this.base_url}/api/app/projects/${encodeURIComponent(project_id)}/docs/binary?path=${encodeURIComponent(rel_path)}`;
+    const uri = `${this.base_url}/api/app/projects/${seg(project_id)}/docs/binary?path=${encodeURIComponent(rel_path)}`;
     return {
       uri,
       headers: { authorization: `Bearer ${this.token}` },
@@ -503,7 +519,7 @@ export class DocsClient extends GatewayHttpClient {
     project_id: string,
     rel_path: string,
   ): Promise<BinaryDeleteResult> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/binary?path=${encodeURIComponent(rel_path)}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/binary?path=${encodeURIComponent(rel_path)}`;
     const res = await this.req<{ ok: boolean; deleted_path: string; still_referenced_by: string[] }>(path, {
       method: 'DELETE',
     });
@@ -525,7 +541,7 @@ export class DocsClient extends GatewayHttpClient {
     project_id: string,
     prefix: string,
   ): Promise<{ deleted_paths: string[]; still_referenced_by: string[] }> {
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/binary?path=${encodeURIComponent(prefix)}&recursive=true`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/binary?path=${encodeURIComponent(prefix)}&recursive=true`;
     const res = await this.req<{
       ok: boolean;
       deleted_paths: string[];
@@ -556,7 +572,7 @@ export class DocsClient extends GatewayHttpClient {
     if (opts.cursor !== undefined && opts.cursor.length > 0) {
       params.set('cursor', opts.cursor);
     }
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments?${params.toString()}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/comments?${params.toString()}`;
     const res = await this.req<CommentsListResponse>(path);
     return { threads: res.threads, next_cursor: res.next_cursor };
   }
@@ -565,7 +581,7 @@ export class DocsClient extends GatewayHttpClient {
     project_id: string,
     input: PostCommentInput,
   ): Promise<{ event: CommentEvent; thread_root_id: string }> {
-    const url = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments`;
+    const url = `/api/app/projects/${seg(project_id)}/docs/comments`;
     const body: Record<string, unknown> = {
       path: input.path,
       body: input.body,
@@ -609,7 +625,7 @@ export class DocsClient extends GatewayHttpClient {
     event_id: string,
     body: string,
   ): Promise<{ event: CommentEvent; thread_root_id: string }> {
-    const url = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(event_id)}/reply`;
+    const url = `/api/app/projects/${seg(project_id)}/docs/comments/${encodeURIComponent(event_id)}/reply`;
     const requestBody: Record<string, unknown> = { body };
     const res = await this.req<CommentsPostResponse>(url, {
       method: 'POST',
@@ -622,7 +638,7 @@ export class DocsClient extends GatewayHttpClient {
     project_id: string,
     event_id: string,
   ): Promise<ThreadTree> {
-    const url = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(event_id)}/thread`;
+    const url = `/api/app/projects/${seg(project_id)}/docs/comments/${encodeURIComponent(event_id)}/thread`;
     const res = await this.req<CommentsThreadResponse>(url);
     return res.thread;
   }
@@ -645,7 +661,7 @@ export class DocsClient extends GatewayHttpClient {
     event_id: string,
     note?: string,
   ): Promise<{ escalate_event_id: string; escalated_at: number }> {
-    const url = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(event_id)}/escalate`;
+    const url = `/api/app/projects/${seg(project_id)}/docs/comments/${encodeURIComponent(event_id)}/escalate`;
     const body: Record<string, unknown> = {};
     if (note !== undefined && note.length > 0) body.note = note;
     const res = await this.req<CommentsEscalateResponse>(url, {
@@ -675,7 +691,7 @@ export class DocsClient extends GatewayHttpClient {
     thread_root_id: string,
     note?: string,
   ): Promise<{ resolve_event_id: string; resolved_at: number }> {
-    const url = `/api/app/projects/${encodeURIComponent(project_id)}/docs/comments/${encodeURIComponent(thread_root_id)}/resolve`;
+    const url = `/api/app/projects/${seg(project_id)}/docs/comments/${encodeURIComponent(thread_root_id)}/resolve`;
     const body: Record<string, unknown> = {};
     if (note !== undefined && note.length > 0) body.note = note;
     const res = await this.req<CommentsResolveResponse>(url, {
@@ -698,7 +714,7 @@ export class DocsClient extends GatewayHttpClient {
     if (to_sha !== undefined && to_sha.length > 0) {
       params.set('to', to_sha);
     }
-    const path = `/api/app/projects/${encodeURIComponent(project_id)}/docs/diff?${params.toString()}`;
+    const path = `/api/app/projects/${seg(project_id)}/docs/diff?${params.toString()}`;
     const res = await this.req<DiffResponse>(path);
     return res.diff;
   }

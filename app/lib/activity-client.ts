@@ -27,6 +27,7 @@ import {
   GatewayHttpClient,
   type GatewayHttpClientOptions,
 } from '@neutronai/client-core';
+import { GENERAL_HTTP_ID, httpProjectSegment } from './general-scope';
 
 /**
  * Map an http(s) origin to its ws(s) form. Inlined (rather than imported from
@@ -113,20 +114,14 @@ const STATES: ReadonlySet<string> = new Set<ActivityState>(['idle', 'working', '
  * and `'~general'` are accepted below so a caller that forgets cannot silently
  * inspect a project literally named "~general".
  */
-export const GENERAL_ACTIVITY_SCOPE = 'general';
-
-/** The mobile rail's General id — see the note above. Duplicated (not imported)
- *  to keep this module off the `project-rail-view` import chain; the parity test
- *  pins the two together. */
-const RAIL_GENERAL_ID = '~general';
+export const GENERAL_ACTIVITY_SCOPE = GENERAL_HTTP_ID;
 
 /** Normalize any client-side General spelling (`null`, `''`, `'~general'`) to the
- *  server's scope key; anything else is a project id and passes through. */
+ *  server's scope key; anything else is a project id and passes through. The
+ *  mapping itself lives in `general-scope.ts`, shared with every other client
+ *  that talks to a project-scoped surface. */
 export function activityScopeKey(project_id: string | null | undefined): string {
-  if (project_id === null || project_id === undefined || project_id.length === 0) {
-    return GENERAL_ACTIVITY_SCOPE;
-  }
-  return project_id === RAIL_GENERAL_ID ? GENERAL_ACTIVITY_SCOPE : project_id;
+  return httpProjectSegment(project_id);
 }
 
 /** Snapshot URL path for a scope. */
