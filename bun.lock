@@ -16,8 +16,10 @@
         "@neutronai/onboarding": "workspace:*",
         "@neutronai/open": "workspace:*",
         "@neutronai/persistence": "workspace:*",
+        "@neutronai/project-credentials": "workspace:*",
         "@neutronai/runtime": "workspace:*",
         "@neutronai/tools": "workspace:*",
+        "@neutronai/trident": "workspace:*",
         "@neutronai/watchdog": "workspace:*",
       },
       "devDependencies": {

@@ -14,6 +14,16 @@
  * environment when CALLED, not when composed — a key added after boot has to take
  * effect on the next run rather than the next restart, the same rule the GitHub
  * credential follows (Decisions Log 2026-08-07).
+ *
+ * AND THE SETTINGS PATH (2026-08-09). Reading env alone meant a self-hoster could
+ * not enable the second model family AT ALL — there is no supported way to set a
+ * gateway env var from inside the product, so K3 was reachable only by whoever
+ * could edit the service unit. A key filed in settings under the `kimi` service now
+ * counts, with env still winning so an existing deployment is unchanged. The
+ * subprocess property is asserted too: the reviewer reads `KIMI_API_KEY` from ITS
+ * OWN environment, so a stored key that never reaches the environment would report
+ * configured and then defer in the child — and a deferred reviewer BLOCKS the
+ * verdict, which is strictly worse than being unconfigured.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -21,8 +31,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
+import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { KIMI_CREDENTIAL_SERVICE } from '@neutronai/trident/kimi-key.ts'
 
 const SLUG = 'owner'
 
@@ -51,6 +64,20 @@ beforeEach(() => {
 afterEach(() => {
   home.restore()
 })
+
+/** File a key under the `kimi` service exactly as the settings pane does. */
+async function storeKimiKeyInSettings(value: string): Promise<void> {
+  const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  applyMigrations(db.raw())
+  const secrets = new SecretsStore({ data_dir: process.env['NEUTRON_HOME']!, db })
+  const creds = new ProjectCredentialStore(db, { crypto: secrets })
+  await creds.set(asOwnerHandle(SLUG), {
+    service: KIMI_CREDENTIAL_SERVICE,
+    plaintext: value,
+    scope: 'global',
+  })
+  db.close()
+}
 
 async function resolverFromComposer(): Promise<() => boolean> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
@@ -100,5 +127,45 @@ describe('the Kimi cross-model panelist is reachable from the production compose
     const resolve = await resolverFromComposer()
     process.env['KIMI_API_KEY'] = ''
     expect(resolve()).toBe(false)
+  })
+
+  test('a key entered in SETTINGS turns the panelist on, with no env var at all', async () => {
+    // The whole point: a self-hoster who can reach the settings pane and nothing
+    // else can now use the K3 reviewer.
+    await storeKimiKeyInSettings('sk-kimi-from-settings')
+    const resolve = await resolverFromComposer()
+    expect(resolve()).toBe(true)
+  })
+
+  test('the stored key reaches the ENVIRONMENT, because the reviewer is a subprocess', async () => {
+    // `trident/kimi-review-cli.ts` reads KIMI_API_KEY from its own process env —
+    // that indirection is what keeps the key out of prompt text. Resolving
+    // `configured: true` without exporting it would spawn a panelist that defers,
+    // and a deferred cross-model reviewer BLOCKS the verdict: every review would
+    // come back REQUEST_CHANGES for a reason the owner cannot see.
+    await storeKimiKeyInSettings('sk-kimi-must-reach-the-child')
+    const resolve = await resolverFromComposer()
+    expect(resolve()).toBe(true)
+    expect(process.env['KIMI_API_KEY']).toBe('sk-kimi-must-reach-the-child')
+  })
+
+  test('ENV WINS over a stored key — an existing deployment is unchanged', async () => {
+    // The compatibility guarantee. Anyone already exporting the key keeps using
+    // exactly that one, whatever is sitting in the store.
+    await storeKimiKeyInSettings('sk-kimi-stored')
+    process.env['KIMI_API_KEY'] = 'sk-kimi-from-env'
+    const resolve = await resolverFromComposer()
+    expect(resolve()).toBe(true)
+    expect(process.env['KIMI_API_KEY']).toBe('sk-kimi-from-env')
+  })
+
+  test('an EMPTY env var does not mask a good stored key', async () => {
+    // `export KIMI_API_KEY=` is the most common way a key is "set" and useless. If
+    // the empty string won, the stored key would be unreachable and the failure
+    // would look like a store bug.
+    await storeKimiKeyInSettings('sk-kimi-behind-empty-env')
+    process.env['KIMI_API_KEY'] = ''
+    const resolve = await resolverFromComposer()
+    expect(resolve()).toBe(true)
   })
 })

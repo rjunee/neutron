@@ -668,7 +668,7 @@ export function SettingsTab({
             <input
               id="cset-service"
               className="cset-input"
-              placeholder="e.g. openai, github"
+              placeholder="e.g. openai, github, kimi"
               value={service}
               onChange={(e) => setService(e.target.value)}
             />

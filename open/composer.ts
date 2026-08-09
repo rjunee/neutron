@@ -160,6 +160,10 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import {
+  ensureKimiKeyExported,
+  KIMI_CREDENTIAL_SERVICE,
+} from '@neutronai/trident/kimi-key.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interview/personality-character-suggester.ts'
@@ -5558,10 +5562,33 @@ export function buildOpenGraphComposer(
               // workflow — the key is read by `trident/kimi-review-cli.ts` in its own
               // process, so it never enters prompt text. Unset → the panelist is
               // skipped and the review notes it, never blocks.
-              resolve_kimi_configured: (): boolean => {
-                const key = env['KIMI_API_KEY']
-                return typeof key === 'string' && key.length > 0
-              },
+              // A key entered in SETTINGS counts too, not only one exported into the
+              // service unit. Reading env alone meant a self-hoster could not enable
+              // the second model family at all — there is no supported way to set a
+              // gateway env var from inside the product, so K3 was reachable only by
+              // whoever could edit the unit file. Env still WINS, so a deployment that
+              // already exports the key is bit-for-bit unchanged.
+              //
+              // `ensureKimiKeyExported` also puts a stored key into the environment,
+              // and that is load-bearing rather than incidental: the reviewer runs in
+              // its own process and reads `KIMI_API_KEY` from ITS env (the indirection
+              // that keeps the key out of prompt text). Reporting `configured: true`
+              // for a key the child cannot see would be WORSE than not configured — a
+              // deferred reviewer blocks the verdict, so every review would return
+              // REQUEST_CHANGES for a reason invisible to the owner.
+              resolve_kimi_configured: (): boolean =>
+                ensureKimiKeyExported(env, () => {
+                  // Global scope: a Kimi subscription is one account for the whole
+                  // instance, not a per-project token, and this resolver is handed no
+                  // run to scope by. `resolve` with no project id consults the global
+                  // default only.
+                  const found = projectCredentialStore.resolve(
+                    asOwnerHandle(owner_handle),
+                    undefined,
+                    KIMI_CREDENTIAL_SERVICE,
+                  )
+                  return found?.plaintext ?? null
+                }),
               // RB2 (b) — thread the owner's structured CORRECTIONS into the inner
               // workflow so the FORGE BUILDER (forge:build + fix rounds) re-grounds on
               // them — NOT the independent argus review gate (trust boundary — verified
