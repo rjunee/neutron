@@ -215,7 +215,15 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
   })
 
   test('a bounded fix loop runs while REQUEST_CHANGES and round < maxRounds', () => {
-    expect(SRC).toMatch(/while \(finalVerdict === 'REQUEST_CHANGES' && round < maxRounds\)/)
+    // Asserts the two PROPERTIES rather than the literal condition text. The old
+    // regex pinned the exact string `while (finalVerdict === 'REQUEST_CHANGES' &&
+    // round < maxRounds)`, so adding a legitimate third clause broke it while the
+    // loop remained correct — a source-string test failing on a change it has no
+    // opinion about. (2026-08-09: the clause added was `blockKind !== 'infra-only'`,
+    // which stops the loop re-Forging in response to a lane that could not run;
+    // behaviour covered in lane-retry.test.ts.)
+    expect(SRC).toMatch(/while \(\s*finalVerdict === 'REQUEST_CHANGES'/)
+    expect(SRC).toMatch(/round < maxRounds/)
   })
 
   test('Codex [P1]: fix rounds RE-ENTER the existing branch/PR (no `git switch -c` collision, no duplicate PR)', () => {
@@ -285,7 +293,13 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
   test('a deterministic never-silent-downgrade guard forces REQUEST_CHANGES on deferred+APPROVE', () => {
     expect(SRC).toContain('function enforceCrossModelGate(')
     expect(SRC).toContain('function deferredCrossModelPeers(')
-    expect(SRC).toContain('enforceCrossModelGate(synthesisRaw, deferredCrossModelPeers(')
+    // Both are INVOKED and composed — asserted without pinning the inline nesting.
+    // The old form required the exact expression
+    // `enforceCrossModelGate(synthesisRaw, deferredCrossModelPeers(`, so hoisting the
+    // peer list into a named const broke it while the composition was unchanged.
+    // (2026-08-09: hoisted so `classifyBlock` can also read the deferred peers.)
+    expect(SRC).toMatch(/deferredCrossModelPeers\(\{ codex:/)
+    expect(SRC).toMatch(/enforceCrossModelGate\(synthesisRaw, \w+\)/)
   })
 })
 

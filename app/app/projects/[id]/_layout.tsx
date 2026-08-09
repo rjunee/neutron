@@ -72,6 +72,7 @@ import {
   activeTabKeyFromSegments,
   descriptorsToResolvedTabs,
   ensureWorkTab,
+  generalScopeTabs,
   lastTabValueForLeaf,
   loadingTabsForProject,
   WORK_TAB_KEY,
@@ -258,13 +259,22 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // The Work tab is not emitted by the tab registry, so the mobile shell always
   // injects it (after Chat) over BOTH the loading default and the fetched set —
   // one code path, idempotent. This is the tab the live-run badge lands on.
+  //
+  // General is then NARROWED to the three tabs a no-project scope can serve
+  // (`generalScopeTabs`: Chat / Work / Documents), so it renders Chat · Work ·
+  // Docs — the same first three, in the same order, as a named project — instead
+  // of project-only surfaces with no row behind them. The narrowing runs AFTER
+  // the Work injection so it applies to the loading default too: General's
+  // pre-fetch frames now show the right three rather than the legacy
+  // Chat/Apps/Tasks/Reminders/Docs set.
   const displayTabs = useMemo<ResolvedTab[]>(() => {
     const known = tabsByScope.get(project_id);
     const resolved =
       known === undefined
         ? loadingTabsForProject(project_id)
         : descriptorsToResolvedTabs(known, project_id);
-    return ensureWorkTab(resolved, project_id);
+    const withWork = ensureWorkTab(resolved, project_id);
+    return project_id === GENERAL_PROJECT_ID ? generalScopeTabs(withWork) : withWork;
   }, [tabsByScope, project_id]);
 
   // ── Project rail (M1 UX REDESIGN PR-6) ────────────────────────────────────
