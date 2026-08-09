@@ -37,6 +37,7 @@ import {
 } from 'react';
 
 import { loadAppConfig } from './config';
+import { RAIL_GENERAL_ID } from './general-scope';
 import { warmProjectSettings } from './project-settings-cache';
 import {
   EMPTY_PROJECT_STATE,
@@ -132,6 +133,14 @@ export function ProjectStateProvider({
   const fetchSettings = useCallback(async (): Promise<void> => {
     if (client === null) return;
     if (typeof project_id !== 'string' || project_id.length === 0) return;
+    // General is the no-project scope: there is no settings row to fetch, and its
+    // rail id is deliberately outside the gateway's project-id alphabet, so this
+    // request is a guaranteed 400 — fired on every General open, three times per
+    // mount, since the shell was written. The layout already synthesises
+    // `GENERAL_SCOPE_PROJECT` for the chrome (its comment says as much: "without
+    // this the shell 404s on getSettings('general')"), so nothing consumed the
+    // answer either way. Don't ask.
+    if (project_id === RAIL_GENERAL_ID) return;
     let cancelled = false;
     cancelRef.current?.();
     cancelRef.current = () => {
