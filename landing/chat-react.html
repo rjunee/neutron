@@ -1519,6 +1519,20 @@
   .cset-sub { font-size: 13px; color: var(--muted); margin: 0 0 12px; line-height: 1.4; }
   .cset-error { color: var(--error-fg); font-size: 12px; padding: 6px 0; }
   .cset-empty { color: var(--muted); font-size: 13px; padding: 16px 0; text-align: center; }
+  /* Code-generation settings: one chip row per phase. Chips rather than a
+     <select> because the whole option set is short and worth seeing at a glance —
+     and because the default is marked inline with a dot, which a collapsed
+     control would hide behind a click. */
+  .cset-saved { color: var(--muted); font-size: 12px; padding: 4px 0; }
+  .cset-chiprow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .cset-chiprow .cset-label { margin-right: 4px; }
+  .cset-chip {
+    padding: 3px 10px; border-radius: 999px; font-size: 12px; cursor: pointer;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  .cset-chip:hover { border-color: var(--accent); }
+  .cset-chip-on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
   .cset-cred-ul { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .cset-cred-row {
     display: flex; align-items: center; gap: 8px; min-height: 34px;
