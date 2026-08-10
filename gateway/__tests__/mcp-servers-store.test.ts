@@ -709,3 +709,95 @@ describe('THE AUDIT ROW NAMES THE DECIDER, NOT THE BOX', () => {
     expect(approved?.decided_by).toBe(SLUG)
   })
 })
+
+describe('a decision and an uninstall cannot interleave', () => {
+  /**
+   * THE ORPHANED APPROVAL. `install` and `remove` were on the write chain and
+   * `decide` was not, so an approve could read its spec, pass its hash check, and then
+   * resume AFTER an uninstall had already deleted the spec and revoked the grant —
+   * writing a fresh `approved` row for a server that no longer exists. The revoke was
+   * lost because it ran before the row it was meant to kill.
+   *
+   * The damage is not the stray row; it is that reinstalling the IDENTICAL spec
+   * produces the same grant hash, so `approvalStateFor` finds the survivor and the
+   * server comes back WIRED with no approval prompt. The owner's only gate silently
+   * fails open, which for a feature that executes arbitrary commands is the worst
+   * available outcome.
+   *
+   * Forced deterministically by parking inside `respondApproval` — the call that
+   * actually writes the decision — and running the uninstall while the approve sits
+   * there. Two clients make that ordinary: an uninstall from the tab landing
+   * mid-decision on the phone.
+   */
+  test('an uninstall landing DURING an approve never leaves an approved grant behind', async () => {
+    let release: (() => void) | undefined
+    const parked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let parkedOnce = false
+
+    // A PROXY, not a hand-listed set of delegating methods. The first draft of this
+    // enumerated the four calls `decide` makes and broke on `remove`'s
+    // `listPending` — a fake built by listing what one caller happens to use drifts
+    // from the real surface the moment a second caller reaches it, and the failure
+    // reads as a bug in the code under test. Everything delegates; exactly one call
+    // is intercepted.
+    const gated = new Proxy(approvals, {
+      get(target, prop, receiver) {
+        if (prop !== 'openApproval') {
+          const value = Reflect.get(target, prop, receiver)
+          return typeof value === 'function' ? value.bind(target) : value
+        }
+        return async (...args: unknown[]): Promise<unknown> => {
+          if (!parkedOnce) {
+            parkedOnce = true
+            await parked
+          }
+          return await (
+            target as unknown as { openApproval: (...a: unknown[]) => Promise<unknown> }
+          ).openApproval(...args)
+        }
+      },
+    })
+
+    const racy = new OwnerMcpServerStore({
+      db,
+      project_slug: SLUG,
+      credentials: new ProjectCredentialStore(db, {
+        crypto: new SecretsStore({ data_dir: tmp, db }),
+      }),
+      owner_slug: asOwnerHandle(SLUG),
+      approvals: () => gated,
+    })
+
+    await racy.install(DRAFT)
+    const hash = (await racy.list())[0]!.grant_hash
+    // DENY FIRST. Without this the approve resolves the pending row `install` already
+    // opened and never calls `openApproval` at all — and `remove` cancels pending rows,
+    // so that interleaving is already defended. The undefended window is the one where
+    // the approve MINTS A FRESH grant (the deny-then-changed-my-mind path) after the
+    // uninstall's sweep has already run and found nothing to cancel.
+    expect((await racy.decide('example-server', 'deny', hash)).ok).toBe(true)
+
+    const approving = racy.decide('example-server', 'approve', hash)
+    // Let `decide` reach the park before the uninstall is issued.
+    await new Promise((r) => setTimeout(r, 0))
+    const removing = racy.remove('example-server')
+    await new Promise((r) => setTimeout(r, 0))
+    release?.()
+    await approving
+    await removing
+
+    // The uninstall won, because it was allowed to run to completion rather than
+    // half-way. Nothing is installed and nothing is wired.
+    expect(await racy.list()).toEqual([])
+    expect(await racy.resolveApproved()).toEqual([])
+
+    // AND THE PART THAT MATTERS: reinstalling the identical spec must ask again. This
+    // is the assertion the bug fails — a surviving approved row has the same hash, so
+    // the reinstall would report `approved` and be wired without a prompt.
+    await racy.install(DRAFT)
+    expect((await racy.list())[0]!.approval).toBe('pending')
+    expect(await racy.resolveApproved()).toEqual([])
+  })
+})

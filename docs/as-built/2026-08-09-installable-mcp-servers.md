@@ -460,3 +460,51 @@ and the control run is what makes it one. Neither touches this feature's files, 
 `purity` (leak) and `typecheck` gates pass on the PR — the local leak-gate run is NOT
 comparable, because it loads a broader personal denylist and reports the same class of
 finding against unmodified `main` (README, SECURITY, `install.sh`).
+
+---
+
+## Round-3 review fix — `decide()` was not on the write chain
+
+`install()` and `remove()` both ran inside `OwnerMcpServerStore.serialize`, the
+in-process write chain. `decide()` did not, and it performs a read-modify-write over
+`tool_approvals`.
+
+**The orphaned approval.** An `approve` reads its spec and passes its grant-hash check;
+a `remove()` then deletes the spec AND revokes the grant; the approve resumes and opens
++ resolves a *fresh* `approved` row for a server that no longer exists. The revoke is
+simply lost — it ran before the row it was meant to kill existed.
+
+The stray row is not the damage. Reinstalling the **identical** spec produces the same
+grant hash, so `approvalStateFor` finds the survivor and the server comes back **WIRED
+with no approval prompt**. For a feature that executes arbitrary commands, the owner's
+only gate failing silently open is the worst available outcome. Two clients make the
+interleaving ordinary rather than exotic: an uninstall from the tab landing mid-decision
+on the phone.
+
+`decide()` now runs inside `serialize`; its body moved unchanged into a private
+`decideLocked` so the change is a lock rather than a rewrite. Nothing it calls is itself
+serialized — `list()` and `requestApproval()` are both already invoked from inside
+`install()`'s critical section — so there is no re-entrancy to deadlock on.
+
+### The regression test took two attempts, and the first one was worthless
+
+The first version parked inside `respondApproval` and **passed against the unfixed
+code**. `remove()` sweeps *pending* rows, so that interleaving was already defended: the
+approve was resolving the pending row `install()` had opened, and the sweep cancelled it.
+
+The undefended window is narrower — it is the one where the approve **mints a fresh
+grant**, i.e. the deny-then-changed-my-mind path, *after* the uninstall's sweep has
+already run and found nothing to cancel. The test now denies first, parks inside
+`openApproval`, and runs the uninstall in that gap. Mutating `decide` back off the chain
+fails it with `Expected: "pending" / Received: "approved"` — the symptom itself.
+
+📌 **A guard-fix's test is not finished when it passes; it is finished when the mutant
+fails.** This one passed both ways for a whole cycle, and had it shipped it would have
+read as coverage of a race it could not observe. The same file's header already claims
+"each is written so that removing the guard makes it fail" — that claim is only worth
+what the mutation run behind it proves.
+
+📌 **A hand-listed fake drifts from the real surface.** The gate was first written as
+four delegating methods, chosen by reading what `decide` calls; `remove()` then reached
+`listPending` and died with a `TypeError` that read like a bug in the code under test. It
+is a `Proxy` now: everything delegates, exactly one call is intercepted.
