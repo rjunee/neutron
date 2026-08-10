@@ -239,13 +239,127 @@ max-length values each passed the per-value check and then blew the credential s
 Finally, `getOrSpawnSession` now reads the pool BEFORE its first `await`. The
 installed-server resolver is async, and resolving it first meant two concurrent dispatches
 on one key could both miss the in-flight promise and spawn two `claude` children on one
-transcript. No double spawn was reproducible today (the resolver's read happens to settle
-in a microtask), but the await-free window is what the dedupe rests on, and
-`open/composer.ts` documents a real second concurrent producer.
+transcript.
+
+> **Round 3 correction — this paragraph was wrong in both halves.** It originally continued
+> "No double spawn was reproducible today (the resolver's read happens to settle in a
+> microtask)". A reviewer reproduced it on the first attempt. And moving the `pool.get`
+> above the `await` never fixed anything: the invariant is that nothing suspends BETWEEN
+> the read and the `pool.set`, which is a property of the whole cold path, not of the
+> read's position. See § What review round 3 changed.
 
 One round-2 finding is NOT addressed here, deliberately: the panel was incomplete because
 one cross-model reviewer's call failed. That is a process gap, not a code defect, and
 nothing in this diff can close it.
+
+## What review round 3 changed
+
+Three blockers, one major, three minor. Two of the three blockers were regressions this
+feature introduced into code that was correct before it, which is the more useful half of
+what round 3 found.
+
+**The spawn de-duplication window was reopened, and the comment claiming otherwise was the
+tell.** Round 2 hoisted `pool.get` above the `await options.resolveExtraMcpServers()` and
+wrote a comment saying that "restores the await-free window as an invariant of the code".
+It does not. Two concurrent dispatches on one session key collapse onto one spawn only
+because NOTHING SUSPENDS between the read and the `pool.set` at the end of the function;
+an `await` after the read is exactly as wide a window, because the second caller then
+reads a pool the first has not written yet. Both spawn. The fingerprint of ZERO installed
+servers is `''`, so this fired on every cold start for every owner, not only for one who
+had installed something — and the loser child never entered the pool, so
+`shutdownAllPersistentRepls()` could not kill it and it outlived the process holding an
+open 0600 MCP config full of plaintext secrets.
+
+The resolve now happens INSIDE the warm-reuse branch, which is the only place its value is
+used and which has already awaited `existing` — so a concurrent caller there is looking at
+the same warm session rather than at an empty pool, and the cold path is straight-line
+from read to set again. Three tests pin it: one spawn for two concurrent cold dispatches,
+nothing left in `tmpdir()` after shutdown, and exactly ONE resolver call on a cold start
+(two would mean the pre-`pool.set` await is back).
+
+This is the aspirational-docblock failure mode in its purest form. The comment was
+confidently specific, described a mode the code never entered, and was written in the same
+change that introduced the defect — so it read as design documentation for a guarantee
+that did not exist.
+
+**An undecryptable credential row took down the whole surface instead of one server.**
+`ProjectCredentialStore.resolve` decrypts INLINE, and AES-256-GCM throws on a malformed
+envelope or a failed tag check. That call sat OUTSIDE `readSecrets`' `try`, so one bad
+`mcp_env.*` row — a truncated write, a restored backup, a `secrets_key` this box no longer
+holds — threw out of `list()` and `resolveApproved()`. That is a 500 on the Settings GET,
+a rejection on every chat turn's spawn resolve, and, worst of it, no way to UNINSTALL the
+offending server, because the fault was on the read path the uninstall needs. The store's
+own header promised to fail closed on exactly this state; an unhandled throw is not a way
+to express that promise, and the same class of file already handles a malformed approval
+row by returning "no match". The decrypt is now inside the `try`, every failure lands on
+the same answer — no secrets — which `resolveApproved` already treats as fail-closed and
+already logs, and the server shows in Settings as installed with its secrets missing.
+Re-entering the value heals it with no second prompt, since the spec never changed.
+
+**Uninstall dropped the spec before revoking the grant.** Three stores, no transaction
+across them, so the order has to be the one whose every partial outcome is safe — and this
+was the inverse of the order `install` is reasoned about. A failure after the spec write
+left an APPROVED grant for a server that no longer existed, and the owner could not heal
+it: the retry re-reads the list, finds nothing, and answers `removed: false` while the live
+grant waits in the table for a byte-identical reinstall to re-match it. Now it revokes,
+then forgets the secrets, then drops the spec. Every partial outcome leaves the server
+unapproved-but-installed: not wired, still visible, and the retry has a target.
+
+**A deny that arrived after an approve reported success and stopped nothing.**
+`approvalStateFor` tests `approved` before `denied` — the safe precedence for a read — so
+recording a denial ALONGSIDE a live approved row left the server wired while `decide`
+answered 200 and the list said "denied". Two clients make this ordinary: the phone
+approves, the tab still shows the pending prompt, and the tab's Deny is the only stop
+button the owner has. Deny now revokes any approval in force for that server before it
+records the denial, and the idempotency check reads the rows AFTER the revoke — otherwise a
+repeated deny would short-circuit on its own first denied row while an approval opened in
+between stayed live. Approving after a deny still works; that is asserted separately so the
+revoke cannot be over-corrected into a permanent block.
+
+**`MCP_TIMEOUT` bounded one server while the budget covered all of them.** The round-2 note
+described 10 s as "chosen against the post-spawn assertion's 30 s `readyBudgetMs`", which
+compared two quantities that are not comparable: `MCP_TIMEOUT` bounds ONE server's
+`initialize`, `readyBudgetMs` bounds the whole spawn. If the CLI's blocking connect group
+loads serially — not verified here, so sized for the worse case — four hung servers exhaust
+the budget between them with every individual timeout honoured. The bound is now divided
+across the servers actually wired, against a stated 20 s share of the ready budget, with a
+2 s floor. One or two servers keep exactly the 10 s they had. The floor is where the
+honesty has to be explicit and the test says so out loud: past ~10 servers the division
+stops, and the serial worst case CAN exceed the budget. A timeout short enough to fit would
+fail healthy servers, trading a rare slow spawn for a permanently broken one; the real fix
+would be a concurrent load or a larger budget, neither of which a per-server bound supplies.
+
+**The approval prompt could show two different grants identically.** The denylist
+enumerated the bidi controls, the zero-widths and the C0 controls and stopped, which left a
+whole family of characters that also occupy no width. Measured in a browser against the
+prompt's own type styles, three specs differing only by a WORD JOINER rendered to the same
+pixel width — so two grants the hash correctly distinguishes were indistinguishable on
+screen. No full substitution is possible with these (an invisible can pad a string but
+cannot hide a visible character), so this is a legibility hole rather than a spoofing one,
+and it still has to close: the promise this prompt makes is that the owner can SEE what he
+is approving. Added NEL, SOFT HYPHEN, ARABIC LETTER MARK, MONGOLIAN VOWEL SEPARATOR, LINE
+and PARAGRAPH SEPARATOR, WORD JOINER and the invisible math operators, the deprecated
+format controls, the interlinear annotation marks, and the TAG block — the last needing the
+`u` flag so it can be written as a code point instead of a surrogate pair. It stays a
+denylist of invisibles rather than an allowlist of printable ASCII, because a path or an
+argument can legitimately carry non-ASCII text and refusing all of it would break working
+servers to close a rendering hole.
+
+**The audit row named the box, not the person.** `tool_approvals.decided_by` is documented
+in migration 0004 as the user_id of the decider, and the decision surface — which had
+already resolved the bearer in order to authorize the request — was discarding it and
+passing this instance's slug. Every MCP approval read as having been decided by the box.
+The bearer is now threaded through `decide`, with the slug kept only as the fallback for a
+caller with no authenticated actor, because an empty decider would be worse than a coarse
+one. The surface test's own fixture had `user_id` and `project_slug` both set to `'owner'`,
+so it could not have caught this; they are now deliberately different, which is the more
+durable half of the fix.
+
+**Two round-3 blockers are NOT addressed here, and cannot be.** Both are review-lane
+process gaps rather than code defects: the mandatory rubric lane never emitted a verdict,
+and one cross-model lane failed or timed out. Nothing in this diff can close either — they
+have to be re-run or explicitly waived before merge, and they are recorded here so their
+absence is visible rather than assumed.
 
 ## Mutation log
 
@@ -280,6 +394,24 @@ byte-identical:
 | aggregate env cap removed | the aggregate-cap validator test |
 | approved row claims "running" again | the no-label-claims-running parity test |
 | web card back on `.cset-cred-row` | the layout-contract test |
+
+Round 3 added five more, same discipline — broken, confirmed failing, restored
+byte-identical:
+
+| Mutant | Caught by |
+| --- | --- |
+| the installed-set resolve hoisted back above the warm branch | all 3 one-child-per-key tests (2 spawns, leaked tmpdir, 2 resolver calls) |
+| the decrypting `resolve` moved back outside `readSecrets`' try | all 4 unreadable-secret tests |
+| `revokeApproved` removed from the deny path | both deny-after-approve tests (the change-his-mind test correctly survives) |
+| `remove()` restored to spec-write-then-revoke | both uninstall-ordering tests, including the injected mid-sequence failure |
+| `decided_by` reverted to the project slug | the store attribution test + the surface attribution test |
+| the invisible-character ranges narrowed back to the round-2 set | the every-invisible validator test |
+
+One round-3 mutant deliberately does NOT fail a test, and that is the point: removing the
+deny-revoke leaves "approve after deny re-wires it" passing, because that test exists to
+stop the revoke being over-corrected into a permanent block. A guard test and an
+anti-over-correction test have to fail on different mutants or one of them is not doing
+anything.
 
 One mutant SURVIVED on the first attempt and is worth recording: joining only the
 `command` line with its args left the numbered per-arg lines in place, so the two specs

@@ -51,10 +51,18 @@
  * pending ones. The rows stay, recording what was approved and by whom; only the
  * grant lapses.
  *
- * ── WHY DENY DOES NOT UNINSTALL ─────────────────────────────────────────────
+ * ── WHY DENY DOES NOT UNINSTALL, BUT DOES REVOKE ────────────────────────────
  * A denied server stays in the list, unapproved. Deleting the owner's typed-in
  * command because he answered "not now" would make him retype it, and the list is
  * the only record of what he was setting up. `remove()` is the uninstall.
+ *
+ * Deny DOES revoke, though, and that took a review to see. `approvalStateFor` tests
+ * `approved` before `denied` — the safe precedence for a read — so recording a denial
+ * ALONGSIDE a live approval left the server wired while the list said "denied" and the
+ * HTTP surface answered 200. Two clients make that ordinary rather than exotic: the
+ * phone approves, the tab still shows the pending prompt, and the tab's Deny stops
+ * nothing. Deny is the only stop button the owner has, so it revokes first and records
+ * second — see {@link OwnerMcpServerStore.decide}.
  *
  * ── ONE WRITER AT A TIME ────────────────────────────────────────────────────
  * `install` and `remove` both READ the whole installed list, do async work, then
@@ -281,8 +289,8 @@ export class OwnerMcpServerStore {
   }
 
   /**
-   * Uninstall a server: drop the spec, forget its secrets, and REVOKE the grant —
-   * both the pending prompts and the approval itself.
+   * Uninstall a server: REVOKE the grant — both the pending prompts and the approval
+   * itself — forget its secrets, then drop the spec.
    *
    * Revoking the approved rows is what makes an uninstall mean something. Without it,
    * `approvalStateFor` matches on the grant hash alone, so reinstalling the identical
@@ -291,6 +299,29 @@ export class OwnerMcpServerStore {
    * IS DIFFERENT in the header. The rows survive the revoke (status 'expired', with
    * their `args_json` and decider intact), so the audit trail still records that he
    * approved that command; only the grant lapses.
+   *
+   * ── THE ORDER IS REVOKE, THEN FORGET, THEN DROP ─────────────────────────────
+   * Three stores, no transaction across them, so the order has to be the one whose
+   * every PARTIAL outcome is safe. That is the same test {@link install} is ordered
+   * by — it writes the spec first because a freshly-written spec hashes differently
+   * from any grant and is therefore unapproved, whereas secrets-first would pair NEW
+   * variables with the OLD still-approved command. Both orders answer one question:
+   * what does a crash in the middle leave RUNNING?
+   *
+   * Dropping the spec FIRST was the inverse of that and it was wrong. A failure after
+   * the spec write left an APPROVED `tool_approvals` row for a server that no longer
+   * existed, and the owner could not heal it: a retry re-reads the list, finds
+   * nothing, and answers `removed: false` — a 404 on the uninstall he already did,
+   * with the live grant still sitting in the table. Reinstalling the identical command
+   * would then re-match that surviving approval and come back WIRED with no prompt,
+   * which is precisely the hole the revoke was added to close.
+   *
+   * Revoking first inverts every partial outcome into a safe one. After the revoke,
+   * the server is unapproved, so `resolveApproved` will not wire it whatever happens
+   * next; if the forget or the spec write then fails, the spec is STILL INSTALLED, so
+   * the owner sees the row he asked to delete and pressing Uninstall again finds its
+   * target and completes. The only cost is that an interrupted uninstall shows him a
+   * server that has lost its approval — the fail-closed direction.
    */
   async remove(name: unknown): Promise<{ removed: boolean; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
@@ -298,12 +329,6 @@ export class OwnerMcpServerStore {
       const existing = this.specs()
       const target = existing.find((s) => s.name === wanted)
       if (target === undefined) return { removed: false, servers: await this.list() }
-      await writeOwnerMcpServers(
-        this.deps.db,
-        this.deps.project_slug,
-        existing.filter((s) => s.name !== wanted),
-      )
-      await this.forgetSecrets(wanted)
       const manager = this.deps.approvals()
       if (manager !== null) {
         const tool_name = mcpServerApprovalToolName(wanted)
@@ -312,6 +337,12 @@ export class OwnerMcpServerStore {
         }
         await manager.revokeApproved(this.deps.project_slug, tool_name)
       }
+      await this.forgetSecrets(wanted)
+      await writeOwnerMcpServers(
+        this.deps.db,
+        this.deps.project_slug,
+        existing.filter((s) => s.name !== wanted),
+      )
       return { removed: true, servers: await this.list() }
     })
   }
@@ -345,11 +376,22 @@ export class OwnerMcpServerStore {
    * There is no `policy: 'auto'` path here and no pre-approved server, so approval
    * can never be inferred from silence, from an unrelated action, or from the mere
    * fact that the owner typed a command into a form.
+   *
+   * ── A DENY IS A STOP, NOT A SECOND OPINION ──────────────────────────────────
+   * Deny revokes any approval in force for this server before it records the denial.
+   * See the block at the revoke: `approvalStateFor` reads `approved` first, so a
+   * denial recorded ALONGSIDE a live approval would have reported success while the
+   * server kept being wired.
+   *
+   * `decided_by` is the authenticated actor from the caller's own auth check, written
+   * to `tool_approvals.decided_by` — a column whose schema comment calls it the
+   * user_id of the decider.
    */
   async decide(
     name: unknown,
     decision: 'approve' | 'deny',
     expect_grant_hash: unknown,
+    decided_by?: string,
   ): Promise<{ ok: boolean; error: string | null; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
     const spec = this.specs().find((s) => s.name === wanted)
@@ -373,6 +415,26 @@ export class OwnerMcpServerStore {
       }
     }
     const tool_name = mcpServerApprovalToolName(wanted)
+    // A DENY REVOKES BEFORE IT RECORDS, because opening a denied row does not close an
+    // approved one. `approvalStateFor` tests `approved` FIRST — the safe precedence for
+    // reads — so a deny that merely added a `denied` row alongside a live `approved`
+    // one left the server WIRED while this method answered 200 and the settings list
+    // said "denied". Two clients make that ordinary rather than exotic: the phone
+    // approves while the tab still shows the pending prompt, and the tab's Deny then
+    // reports success without stopping anything.
+    //
+    // Revoking every approved row for this server, not just the hash-matched one, is
+    // deliberate: a deny is the owner saying this server must not run, and a row
+    // approving some OTHER spec of it is inert only for as long as the spec stays
+    // edited. `remove()` revokes with the same breadth, and for the same reason. The
+    // rows survive as 'expired' with their decider intact, so the audit trail keeps
+    // saying he once approved that command.
+    if (decision === 'deny') {
+      await manager.revokeApproved(this.deps.project_slug, tool_name)
+    }
+    // READ AFTER THE REVOKE: the idempotency checks below must see post-revoke state,
+    // or a deny arriving twice would short-circuit on its own first `denied` row while
+    // an approval opened in between stayed in force.
     const rows = manager.findByToolName(this.deps.project_slug, tool_name)
     // Already decided for THIS exact spec: report success rather than an error. A
     // double-tap, or two clients open on the same row, must not read as a failure —
@@ -394,7 +456,16 @@ export class OwnerMcpServerStore {
     await manager.respondApproval(
       id,
       decision === 'approve' ? 'approved' : 'denied',
-      this.deps.project_slug,
+      // WHO decided, not WHERE. `tool_approvals.decided_by` is documented as the
+      // user_id of the decider (`migrations/0004_gateway_core.sql`), and the HTTP
+      // surface has already resolved the bearer — so passing the instance's project
+      // slug wrote a place into a column that means a person, and every MCP decision
+      // in the audit trail read as having been made by the box. The slug remains the
+      // fallback for a caller with no authenticated actor (there is none in this
+      // build's wiring), because an empty decider would be worse than a coarse one.
+      decided_by !== undefined && decided_by.trim().length > 0
+        ? decided_by.trim()
+        : this.deps.project_slug,
     )
     return { ok: true, error: null, servers: await this.list() }
   }
@@ -507,15 +578,38 @@ export class OwnerMcpServerStore {
     return 'unapproved'
   }
 
-  /** Synchronous, like `ProjectCredentialStore.resolve` itself (prepare/get + decrypt). */
+  /**
+   * This server's stored env values, or `{}` when they cannot be read.
+   *
+   * Synchronous, like `ProjectCredentialStore.resolve` itself (prepare/get + decrypt).
+   *
+   * ── THE DECRYPT IS INSIDE THE TRY, AND THAT IS THE WHOLE POINT ──────────────
+   * `resolve` DECRYPTS INLINE (`project-credentials/store.ts` → `decryptEnvelope`),
+   * and an envelope that is malformed, truncated, or written under a key this box no
+   * longer holds THROWS from AES-GCM tag verification. It was outside the `try`, so
+   * one unreadable `mcp_env.*` row did not fail that server closed — it threw out of
+   * `readSecrets`, out of `list()` and `resolveApproved()`, and therefore out of the
+   * Settings GET (500), out of `remove()` (which lists), and out of every chat turn's
+   * spawn resolve. The owner could not even uninstall the offending server: the fault
+   * was on the read path he needed in order to delete it. A store whose header
+   * promises to "fail closed on a state that should be impossible" cannot express
+   * that promise as an unhandled throw, and this class deliberately handles a
+   * malformed approval row the same way (see `grantHashOf`).
+   *
+   * Every failure mode therefore lands on the same answer — NO SECRETS — which
+   * `resolveApproved` already treats as "declared env var missing → do not start this
+   * server", and which it already logs. Fail-closed, visible, and recoverable: the
+   * server shows in Settings as installed with its secrets missing, and re-entering
+   * them (or uninstalling) rewrites the row.
+   */
   private readSecrets(name: string): Record<string, string> {
-    const resolved = this.deps.credentials.resolve(
-      this.deps.owner_slug,
-      '',
-      mcpServerEnvService(name),
-    )
-    if (resolved === null) return {}
     try {
+      const resolved = this.deps.credentials.resolve(
+        this.deps.owner_slug,
+        '',
+        mcpServerEnvService(name),
+      )
+      if (resolved === null) return {}
       const parsed = JSON.parse(resolved.plaintext) as unknown
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
       const out: Record<string, string> = {}
@@ -524,8 +618,9 @@ export class OwnerMcpServerStore {
       }
       return out
     } catch {
-      // A corrupt blob is "no secrets", which fails the server closed. The message
-      // names the server and never the payload.
+      // An undecryptable envelope or a corrupt blob is "no secrets", which fails the
+      // server closed. The message names the server and never the payload — no
+      // ciphertext, no plaintext, no error detail that could carry either.
       log.warn('mcp_server_secret_unreadable', { server: name })
       return {}
     }

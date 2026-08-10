@@ -56,7 +56,7 @@ import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
 import { measurePostCompactSize, sessionJsonlPath, startSessionSizeWatchdog } from './session-size-watchdog.ts'
 import { dashifyCwd } from './session-validation.ts'
 import { createWedgedPromptDetector } from './interactive-prompt-deadlock-detector.ts'
-import { DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
+import { COMPACT_RESUME_FULL_RE, COMPACT_RESUME_SUMMARY_RE, DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, DEV_CHANNEL_DISCLAIMER_RE, DISCLAIMER_BOTTOM_N, RATE_LIMIT_OPTIONS_BOTTOM_N, RATE_LIMIT_OPTIONS_DEBOUNCE_MS, RATE_LIMIT_OPTIONS_RE, RATE_LIMIT_STOP_RE, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, TOOL_USE_QUESTION_RE, TOOL_USE_SELECTOR_RE, ownerMcpStartupTimeoutMs, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
 import type { PersistentReplSubstrateOptions, ResumeDirective } from './types.ts'
 import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { wireChildExit } from './child-exit-wiring.ts'
@@ -397,6 +397,33 @@ async function spawnSession(
   // UNCONDITIONALLY so a host-leaked `MCP_CONNECTION_NONBLOCKING=true` can't
   // re-introduce an async-load window.
   childEnv['MCP_CONNECTION_NONBLOCKING'] = 'false'
+  // …AND BOUND HOW LONG THAT BLOCKING LOAD MAY WAIT, once the config holds a server
+  // Neutron did not write.
+  //
+  // The blocking load above was safe when `--mcp-config` contained only our own two
+  // entries: both are `bun` scripts in this repo that hand-shake in milliseconds, so
+  // "wait for the handshake" could not wait long. An owner-installed server is a
+  // third-party program, and a program that accepts a connection and then never
+  // completes `initialize` would hold the blocking load open — inside the 30 s
+  // `readyBudgetMs` of the post-spawn assertion, on the owner's PRIMARY conversational
+  // REPL. The failure would present as `channel-wedged` and take the bounded-respawn
+  // ladder with it, all because of one badly-behaved MCP server.
+  //
+  // `MCP_TIMEOUT` is `claude`'s own MCP-startup timeout (verified present in the CLI's
+  // env-var table in 2.1.223, alongside `MCP_CONNECTION_NONBLOCKING` itself). Bounding
+  // it well under the assertion's ready budget means a hung server costs one slow
+  // spawn and is reported by `claude` as a server that failed to start, instead of
+  // taking the session down. Set ONLY when an installed server is actually wired, so
+  // the no-MCP-servers spawn keeps exactly the startup behaviour it has today.
+  //
+  // The bound is PER SERVER while the ready budget covers the whole spawn, so it is
+  // divided across the servers actually wired rather than being a flat 10 s that N
+  // hung servers could each honour while collectively blowing the budget. One or two
+  // servers still get 10 s; see `ownerMcpStartupTimeoutMs` for what the floor does not
+  // fix.
+  if (wiredExtraNames.length > 0) {
+    childEnv['MCP_TIMEOUT'] = String(ownerMcpStartupTimeoutMs(wiredExtraNames.length))
+  }
   if (options.skipTrustSeed !== true) {
     const trustInput: Parameters<typeof ensureClaudeTrust>[0] = { cwd }
     if (options.claudeConfigDir !== undefined) trustInput.configDir = options.claudeConfigDir
@@ -1416,16 +1443,33 @@ export async function getOrSpawnSession(
   // fires; it survives a future edit that varies the bridge at a finer grain).
   const requestedToolBridge =
     options.enableToolBridge === true && replToolBridgeRef.current !== undefined
-  // The installed-MCP-server surface THIS request would spawn with — same shape of
-  // problem as the two above and the same resolution. Computed with the identical
-  // double gate `spawnSession` applies, so the fingerprint the guard compares is
-  // exactly the one the spawn would stamp; a mismatch here would mean either a warm
-  // child that never picks up an install, or one evicted on every single turn.
-  const requestedMcpFingerprint = mcpSurfaceFingerprint(
-    options.enableToolBridge === true && options.resolveExtraMcpServers !== undefined
-      ? await options.resolveExtraMcpServers()
-      : [],
-  )
+  // ── THE COLD PATH MUST NOT SUSPEND, AND "READ FIRST" IS NOT ENOUGH ──────────
+  // Two concurrent dispatches on one key de-duplicate onto a single spawn only
+  // because NOTHING SUSPENDS between this read and the `pool.set` at the end of the
+  // function: the second caller's `pool.get` observes the first's in-flight promise
+  // and awaits it. That is a property of the WHOLE cold path, not of the read's
+  // position — an `await` placed after this line and before the `pool.set` reopens
+  // the window just as widely, because the second caller then reads a pool the first
+  // has not written yet and both spawn.
+  //
+  // An earlier revision of this function got that wrong. It hoisted the pool read
+  // above an unconditional `await options.resolveExtraMcpServers()` and a comment
+  // here claimed the hoist "restores the await-free window" — which was a claim about
+  // a mode the code did not enter. The resolver is awaited for the WARM-REUSE
+  // COMPARISON only, and the fingerprint of zero installed servers is `''`, so the
+  // suspension fired on every cold start for every owner: two `claude` children on
+  // one transcript (the one-owner-per-transcript violation `open/composer.ts`
+  // documents a real second concurrent producer for), one of which outlived
+  // `shutdownAllPersistentRepls()` still holding an open MCP config file.
+  //
+  // So the resolve now happens INSIDE the warm branch, where the function has
+  // already awaited `existing` and a concurrent caller is therefore looking at the
+  // same warm session rather than at an empty pool. The cold path is once again
+  // straight-line from read to set. `__tests__/owner-mcp-servers.test.ts` pins both
+  // halves: two concurrent cold dispatches spawn exactly ONE child, and a cold start
+  // calls the resolver exactly ONCE — `spawnSession`'s own read, which it has always
+  // done. A second call there would mean this await is back above the branch.
+  const existing = pool.get(sessionKey)
   // A resume-session-picker recovery (row #7) poisons the warm session AND records
   // the disk-recovered session id on it; captured below (for BOTH the alive-evict
   // and already-exited paths) so the clean respawn resumes THAT transcript (Codex
@@ -1436,7 +1480,6 @@ export async function getOrSpawnSession(
   // registry `has_session: false` instead of re-`--resume`ing the stale id into the
   // picker (Codex P2). Captured alongside `evictedResume` below.
   let evictedForceFresh = false
-  const existing = pool.get(sessionKey)
   if (existing !== undefined) {
     const session = await existing
     // Capture the resume-picker recovery's directives BEFORE the alive/exited branch
@@ -1506,6 +1549,21 @@ export async function getOrSpawnSession(
       // configuration, an unchanged set never fires it, so the pool does not
       // thrash. The respawn resumes the captured session, so the conversation
       // survives the swap.
+      //
+      // RESOLVED HERE, not at the top of the function: the resolver is async, and on
+      // the COLD path an await between the `pool.get` above and the `pool.set` below
+      // double-spawns (see the block at the `pool.get`). Inside this branch the
+      // function has already awaited `existing`, so a concurrent caller is looking at
+      // the same warm session, not at an empty pool. Computed with the identical
+      // double gate `spawnSession` applies, so the fingerprint compared here is
+      // exactly the one a spawn would stamp — a mismatch in the gating would mean
+      // either a warm child that never picks up an install, or one evicted on every
+      // single turn.
+      const requestedMcpFingerprint = mcpSurfaceFingerprint(
+        options.enableToolBridge === true && options.resolveExtraMcpServers !== undefined
+          ? await options.resolveExtraMcpServers()
+          : [],
+      )
       const freshMcpServers = session.mcpFingerprint === requestedMcpFingerprint
       // ABANDON-POISON guard (2026-06-18 warm-session hang fix): a session whose
       // prior turn was abandoned (caller timeout / substrate turn-timeout) is left

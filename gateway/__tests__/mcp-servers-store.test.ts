@@ -497,3 +497,215 @@ describe('a VALUE never leaves the encrypted store', () => {
     expect(readOwnerMcpServers(db, SLUG).map((s) => s.name)).toEqual(['example-server'])
   })
 })
+
+describe('AN UNREADABLE SECRET FAILS ONE SERVER CLOSED, NOT THE WHOLE SURFACE', () => {
+  // `ProjectCredentialStore.resolve` DECRYPTS INLINE, and AES-GCM throws on a malformed
+  // envelope or a failed tag check. That call sat OUTSIDE `readSecrets`' try/catch, so
+  // one unreadable `mcp_env.*` row did not fail its server closed — it threw out of
+  // `list()` and `resolveApproved()`, which 500s the Settings GET, breaks `remove()`
+  // (it lists), and rejects on every chat turn's spawn resolve. Worst of it: the owner
+  // could not UNINSTALL the offending server, because the fault was on the read path the
+  // uninstall needs.
+  //
+  // The row is corrupted directly, which is what the real failure looks like: a
+  // truncated write, a restored backup, or a `secrets_key` this box no longer holds.
+
+  async function corruptStoredSecret(): Promise<void> {
+    await db.run(`UPDATE project_credentials SET ciphertext = ? WHERE service = ?`, [
+      'not-a-valid-envelope',
+      'mcp_env.example-server',
+    ])
+  }
+
+  test('list() still answers, and reports the server as having no secrets', async () => {
+    await store.install(DRAFT)
+    await approve('example-server')
+    await corruptStoredSecret()
+
+    const rows = await store.list()
+    expect(rows).toHaveLength(1)
+    // Still installed, still visible, still carrying its grant — so the owner can act on
+    // it. `secrets_present` is what tells him why it is not running.
+    expect(rows[0]!.name).toBe('example-server')
+    expect(rows[0]!.secrets_present).toBe(false)
+  })
+
+  test('resolveApproved() does not throw, and does not wire the server', async () => {
+    await store.install(DRAFT)
+    await approve('example-server')
+    expect(await store.resolveApproved()).toHaveLength(1)
+
+    await corruptStoredSecret()
+    // Fail CLOSED: a declared variable with no readable value is not what the owner
+    // approved, so the program is not started with it unset.
+    expect(await store.resolveApproved()).toEqual([])
+  })
+
+  test('the owner can still UNINSTALL it — the recovery path is not the broken one', async () => {
+    await store.install(DRAFT)
+    await approve('example-server')
+    await corruptStoredSecret()
+
+    // A DELETE that finds no such server lists BEFORE it can forget anything, so this is
+    // the `remove()` path the throw actually reached: the owner asks to uninstall
+    // something and gets a 500 instead of an answer, on the very surface he needs in
+    // order to clean up.
+    expect((await store.remove('no-such-server')).removed).toBe(false)
+
+    expect((await store.remove('example-server')).removed).toBe(true)
+    expect(await store.list()).toEqual([])
+  })
+
+  test('and re-entering the value heals it, with no second approval prompt', async () => {
+    // The spec never changed, so the grant hash never changed: rewriting the secret
+    // restores a server the owner already approved rather than asking him again.
+    await store.install(DRAFT)
+    await approve('example-server')
+    await corruptStoredSecret()
+    expect(await store.resolveApproved()).toEqual([])
+
+    await store.install(DRAFT)
+    expect((await store.list())[0]!.approval).toBe('approved')
+    expect(await store.resolveApproved()).toHaveLength(1)
+  })
+})
+
+describe('A DENY IS A STOP, EVEN WHEN AN APPROVAL GOT THERE FIRST', () => {
+  // Two clients make this ordinary: the phone approves while the tab still shows the
+  // pending prompt, and the tab's Deny arrives second. `approvalStateFor` reads
+  // `approved` FIRST — the safe precedence for reads — so a deny that merely ADDED a
+  // denied row left the server WIRED while `decide` answered 200 and the settings list
+  // said "denied". The owner had pressed the only stop button there is.
+
+  test('a deny AFTER an approve of the same spec revokes it and unwires the server', async () => {
+    await store.install(DRAFT)
+    await approve('example-server')
+    expect(await store.resolveApproved()).toHaveLength(1)
+
+    const hash = await liveHash('example-server')
+    expect((await store.decide('example-server', 'deny', hash)).ok).toBe(true)
+
+    expect((await store.list())[0]!.approval).toBe('denied')
+    expect(await store.resolveApproved()).toEqual([])
+    // Asserted on the grant table too: reporting 'denied' while an approved row is still
+    // in force is exactly the shape of the bug.
+    expect(approvals.findApproved(SLUG, mcpServerApprovalToolName('example-server'))).toHaveLength(0)
+  })
+
+  test('a REPEATED deny stays denied — the idempotency check reads post-revoke state', async () => {
+    // The approval rows are read AFTER the revoke. Read before it, and a second deny
+    // would short-circuit on its own first denied row while an approval opened in
+    // between stayed live.
+    await store.install(DRAFT)
+    const hash = await liveHash('example-server')
+    expect((await store.decide('example-server', 'deny', hash)).ok).toBe(true)
+    await approve('example-server')
+    expect(await store.resolveApproved()).toHaveLength(1)
+
+    expect((await store.decide('example-server', 'deny', hash)).ok).toBe(true)
+    expect(await store.resolveApproved()).toEqual([])
+  })
+
+  test('and he can still change his mind — approve after deny re-wires it', async () => {
+    // The revoke must not make the server permanently un-approvable.
+    await store.install(DRAFT)
+    await approve('example-server')
+    await store.decide('example-server', 'deny', await liveHash('example-server'))
+    await approve('example-server')
+    expect(await store.resolveApproved()).toHaveLength(1)
+  })
+})
+
+describe('UNINSTALL REVOKES BEFORE IT DROPS, so a half-done uninstall is safe', () => {
+  // Three stores, no transaction across them, so the order is chosen for what a crash in
+  // the middle LEAVES RUNNING. Dropping the spec first left an APPROVED grant for a
+  // server that no longer existed AND no way to heal it: a retry re-reads the list, finds
+  // nothing, and answers `removed: false` while the live grant sits in the table waiting
+  // for a byte-identical reinstall to re-match it.
+
+  test('the grant is revoked BEFORE the spec is dropped', async () => {
+    await store.install(DRAFT)
+    await approve('example-server')
+    const order: string[] = []
+    const tool_name = mcpServerApprovalToolName('example-server')
+    const realRevoke = approvals.revokeApproved.bind(approvals)
+    const realRun = db.run.bind(db)
+    approvals.revokeApproved = async (slug: string, tool: string) => {
+      order.push('revoke')
+      return await realRevoke(slug, tool)
+    }
+    db.run = async (sql: string, params?: unknown[]) => {
+      if (sql.includes('instance_metadata')) order.push('spec-write')
+      return await realRun(sql, params as never)
+    }
+    try {
+      await store.remove('example-server')
+    } finally {
+      approvals.revokeApproved = realRevoke
+      db.run = realRun
+    }
+
+    expect(order).toContain('revoke')
+    expect(order).toContain('spec-write')
+    expect(order.indexOf('spec-write')).toBeGreaterThan(order.indexOf('revoke'))
+    expect(approvals.findApproved(SLUG, tool_name)).toHaveLength(0)
+  })
+
+  test('a FAILURE mid-uninstall leaves it unapproved-but-installed, and a retry heals it', async () => {
+    await store.install(DRAFT)
+    await approve('example-server')
+    const tool_name = mcpServerApprovalToolName('example-server')
+    const realRun = db.run.bind(db)
+    let explode = true
+    db.run = async (sql: string, params?: unknown[]) => {
+      if (explode && sql.includes('instance_metadata')) throw new Error('disk write refused')
+      return await realRun(sql, params as never)
+    }
+    try {
+      await expect(store.remove('example-server')).rejects.toThrow('disk write refused')
+
+      // Fail-closed: the grant is already gone, so nothing can be wired whatever happens
+      // next…
+      expect(approvals.findApproved(SLUG, tool_name)).toHaveLength(0)
+      expect(await store.resolveApproved()).toEqual([])
+      // …and the spec is STILL THERE, so the owner sees the row he asked to delete and
+      // the retry has a target. Under the old order this was `removed: false` forever,
+      // with a live approval for a server that had vanished.
+      expect((await store.list()).map((s) => s.name)).toEqual(['example-server'])
+
+      explode = false
+      expect((await store.remove('example-server')).removed).toBe(true)
+      expect(await store.list()).toEqual([])
+    } finally {
+      db.run = realRun
+    }
+  })
+})
+
+describe('THE AUDIT ROW NAMES THE DECIDER, NOT THE BOX', () => {
+  test('decided_by records the caller-supplied actor', async () => {
+    // `tool_approvals.decided_by` is documented in migration 0004 as the user_id of the
+    // decider. Passing the instance's project slug wrote a PLACE into a column that means
+    // a PERSON, so every MCP decision in the audit trail read as having been made by the
+    // box. The HTTP surface had already resolved the bearer and was discarding it.
+    await store.install(DRAFT)
+    await store.decide('example-server', 'approve', await liveHash('example-server'), 'u-owner-1')
+
+    const approved = approvals
+      .findByToolName(SLUG, mcpServerApprovalToolName('example-server'))
+      .find((r) => r.status === 'approved')
+    expect(approved?.decided_by).toBe('u-owner-1')
+  })
+
+  test('an absent actor falls back to the slug rather than writing nothing', async () => {
+    // An empty decider would be worse than a coarse one: the row would stop recording
+    // that anybody decided at all.
+    await store.install(DRAFT)
+    await store.decide('example-server', 'approve', await liveHash('example-server'), '   ')
+
+    const approved = approvals
+      .findByToolName(SLUG, mcpServerApprovalToolName('example-server'))
+      .find((r) => r.status === 'approved')
+    expect(approved?.decided_by).toBe(SLUG)
+  })
+})
