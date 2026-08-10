@@ -8302,3 +8302,28 @@ production never passes. A probe that does not use the production call shape fai
 way that sends you debugging the wrong system.
 
 Detail: `docs/as-built/2026-08-09-kimi-store-only.md`.
+
+## 2026-08-09 — the build-phase models are settable from a phone
+
+Completes the per-phase model/effort chain: vocabulary → store + resolver + endpoint →
+**a surface a human can use**. Chat header ☰ → Settings → Code generation, one row per
+phase with model and effort chips.
+
+The phase list is SERVER-SUPPLIED (a phase added to the engine appears without an app
+release, and neither client keeps its own copy of a list they must agree on). Choosing a
+value equal to the default CLEARS the override rather than pinning it — otherwise the
+owner freezes a phase against a future default change they never intended. A rejected
+save KEEPS the local edits and shows the server's message verbatim, since the server
+rejects the whole set and names every fault. Nothing auto-saves.
+
+Reachability is part of the feature: a registered route nothing pushes and a push at an
+unregistered route fail INDEPENDENTLY, so the nav row and the Stack registration each got
+their own assertion in the #385 guard.
+
+12 press-the-control tests + 2 guard tests; three mutants each caught, including "the
+effort chips are rendered but inert".
+
+DEFERRED AND NAMED: the web half (`SettingsTab.tsx`) — same endpoint, no new server work,
+but genuinely not done.
+
+Detail: `docs/as-built/2026-08-09-codegen-settings-mobile.md`.

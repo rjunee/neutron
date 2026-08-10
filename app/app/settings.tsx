@@ -371,6 +371,25 @@ export default function SettingsScreen() {
           <Text style={styles.navRowChevron}>›</Text>
         </Pressable>
 
+        {/* A registered route nothing pushes is the ISSUES #385 defect, so this row
+            is part of the feature, not decoration —
+            `__tests__/server-editor-reachability.test.ts` guards the class. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Code generation"
+          testID="settings-codegen"
+          onPress={() => router.push('/codegen')}
+          style={({ pressed }) => [styles.navRow, pressed && styles.pressed]}
+        >
+          <View style={styles.navRowText}>
+            <Text style={styles.navRowTitle}>Code generation</Text>
+            <Text style={styles.navRowSubtitle}>
+              Which model and effort run each phase of a build.
+            </Text>
+          </View>
+          <Text style={styles.navRowChevron}>›</Text>
+        </Pressable>
+
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Integrations"

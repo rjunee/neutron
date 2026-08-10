@@ -224,6 +224,7 @@ export default function RootLayout() {
           <Stack.Screen name="settings" />
           <Stack.Screen name="integrations" />
           <Stack.Screen name="admin" />
+          <Stack.Screen name="codegen" />
         </Stack>
       </AuthSessionProvider>
     </DiagnosticsErrorBoundary>
