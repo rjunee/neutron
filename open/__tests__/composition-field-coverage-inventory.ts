@@ -105,6 +105,11 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
       'inbound channel routing to the per-topic agent — unset, the legacy P1 single-topic path is all that runs',
   },
   {
+    field: 'approval_manager',
+    provides:
+      "ONE ApprovalManager shared by the graph's tool approvals and the MCP-server settings surface — unset, the graph builds its own second instance over the same `tool_approvals` table and the two disagree about which decisions are still pending, so approving an installed MCP server resolves a waiter nobody holds",
+  },
+  {
     field: 'codex_credential',
     provides: 'the Codex connect/status agent tools',
   },
