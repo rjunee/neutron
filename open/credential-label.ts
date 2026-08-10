@@ -38,8 +38,6 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { claudeCredentialsPath } from './active-credential.ts'
-
 /** Sidecar filename, beside whichever `.credentials.json` is in play. */
 const META_BASENAME = '.credentials.meta.json'
 
@@ -55,9 +53,16 @@ export function credentialFingerprint(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 12)
 }
 
-/** Where the sidecar lives for the credential this env resolves to. */
-export function credentialLabelPath(env: NodeJS.ProcessEnv): string {
-  return join(dirname(claudeCredentialsPath(env)), META_BASENAME)
+/**
+ * Where the sidecar lives, given the credentials file it describes.
+ *
+ * Takes the PATH rather than the env, so this module does not import
+ * `active-credential.ts` — which imports this one, and the layering gate correctly
+ * refused the cycle. It also reads better: the sidecar's location is defined by the
+ * credential it sits beside, not by how that credential happened to be discovered.
+ */
+export function credentialLabelPath(credentialsPath: string): string {
+  return join(dirname(credentialsPath), META_BASENAME)
 }
 
 export interface CredentialLabelDeps {
@@ -77,14 +82,14 @@ const MAX_LABEL_LENGTH = 64
  * have exactly one way to say "we don't know which account this is".
  */
 export function readCredentialLabel(
-  env: NodeJS.ProcessEnv,
+  credentialsPath: string,
   token: string,
   deps: CredentialLabelDeps = {},
 ): string | null {
   const read = deps.readFile ?? ((p: string): string => readFileSync(p, 'utf8'))
   let raw: string
   try {
-    raw = read(credentialLabelPath(env))
+    raw = read(credentialLabelPath(credentialsPath))
   } catch {
     return null
   }

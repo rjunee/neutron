@@ -66,7 +66,7 @@ export interface ActiveCredentialDeps {
    * another `readFile`, because the two files are read from different paths and a
    * test that stubs one must not silently answer for the other.
    */
-  readLabel?: (env: NodeJS.ProcessEnv, token: string) => string | null
+  readLabel?: (token: string) => string | null
 }
 
 /**
@@ -124,14 +124,15 @@ export function resolveActiveCredential(
   env: NodeJS.ProcessEnv,
   deps: ActiveCredentialDeps = {},
 ): ActiveCredential {
+  const credentialsPath = claudeCredentialsPath(env)
   // Deliberately does NOT inherit `deps.readFile`: the two files live at different
   // paths, and a stub that answered for both would let a test "pass" by feeding the
   // credentials blob to the label parser. A test that wants a label injects
   // `readLabel`; one that does not gets the real reader, which finds no sidecar.
-  const label = deps.readLabel ?? ((e, t): string | null => readCredentialLabel(e, t))
+  const label = deps.readLabel ?? ((t): string | null => readCredentialLabel(credentialsPath, t))
   const envToken = env['CLAUDE_CODE_OAUTH_TOKEN']
   if (typeof envToken === 'string' && envToken.length > 0) {
-    return { kind: 'measurable', token: envToken, account_label: label(env, envToken) }
+    return { kind: 'measurable', token: envToken, account_label: label(envToken) }
   }
   const apiKey = env['ANTHROPIC_API_KEY']
   if (typeof apiKey === 'string' && apiKey.length > 0) {
@@ -139,7 +140,7 @@ export function resolveActiveCredential(
   }
   const fileToken = readClaudeCredentialsToken(env, deps)
   if (fileToken !== undefined) {
-    return { kind: 'measurable', token: fileToken, account_label: label(env, fileToken) }
+    return { kind: 'measurable', token: fileToken, account_label: label(fileToken) }
   }
   return { kind: 'unmeasurable', reason: 'no_credential' }
 }

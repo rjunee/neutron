@@ -33,13 +33,14 @@ function sidecar(body: unknown): { readFile: () => string } {
 }
 
 describe('credentialLabelPath', () => {
-  it('sits beside the credentials file in an isolated config dir', () => {
-    const p = credentialLabelPath({ CLAUDE_CONFIG_DIR: '/var/lib/x/.claude' })
-    expect(p).toBe('/var/lib/x/.claude/.credentials.meta.json')
-  })
-
-  it('follows HOME when no config dir is set', () => {
-    expect(credentialLabelPath({ HOME: '/home/someone' })).toBe(
+  it('sits beside the credentials file it describes', () => {
+    // Takes the PATH, not the env: this module must not import
+    // `active-credential.ts`, which imports it — the layering gate refused that
+    // cycle, correctly, and the path argument is also the clearer contract.
+    expect(credentialLabelPath('/var/lib/x/.claude/.credentials.json')).toBe(
+      '/var/lib/x/.claude/.credentials.meta.json',
+    )
+    expect(credentialLabelPath('/home/someone/.claude/.credentials.json')).toBe(
       '/home/someone/.claude/.credentials.meta.json',
     )
   })
@@ -60,29 +61,29 @@ describe('credentialFingerprint', () => {
 })
 
 describe('readCredentialLabel', () => {
-  const env = { CLAUDE_CONFIG_DIR: '/x/.claude' }
+  const CREDS = '/x/.claude/.credentials.json'
 
   it('returns the label when the fingerprint matches the token in hand', () => {
     const deps = sidecar({ label: 'acct-2', fingerprint: credentialFingerprint(TOKEN) })
-    expect(readCredentialLabel(env, TOKEN, deps)).toBe('acct-2')
+    expect(readCredentialLabel(CREDS, TOKEN, deps)).toBe('acct-2')
   })
 
   it('REFUSES a label whose fingerprint describes a different token', () => {
     // The whole reason this module exists. A sidecar left by the previous swap
     // would otherwise stamp the old account's name onto the new account's reading.
     const deps = sidecar({ label: 'acct-1', fingerprint: credentialFingerprint(OTHER_TOKEN) })
-    expect(readCredentialLabel(env, TOKEN, deps)).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, deps)).toBeNull()
   })
 
   it('refuses a label with no fingerprint at all', () => {
     // A writer that omits it has not proven which token it meant, and "probably the
     // current one" is exactly the assumption that goes wrong during a swap.
-    expect(readCredentialLabel(env, TOKEN, sidecar({ label: 'acct-2' }))).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, sidecar({ label: 'acct-2' }))).toBeNull()
   })
 
   it('returns null when there is no sidecar — the ordinary case, not an error', () => {
     expect(
-      readCredentialLabel(env, TOKEN, {
+      readCredentialLabel(CREDS, TOKEN, {
         readFile: (): string => {
           throw new Error('ENOENT')
         },
@@ -92,22 +93,22 @@ describe('readCredentialLabel', () => {
 
   it('returns null on unparseable, non-object, or wrong-typed content', () => {
     const fp = credentialFingerprint(TOKEN)
-    expect(readCredentialLabel(env, TOKEN, { readFile: (): string => 'not json' })).toBeNull()
-    expect(readCredentialLabel(env, TOKEN, { readFile: (): string => 'null' })).toBeNull()
-    expect(readCredentialLabel(env, TOKEN, { readFile: (): string => '[]' })).toBeNull()
-    expect(readCredentialLabel(env, TOKEN, sidecar({ label: 7, fingerprint: fp }))).toBeNull()
-    expect(readCredentialLabel(env, TOKEN, sidecar({ label: 'a', fingerprint: 7 }))).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, { readFile: (): string => 'not json' })).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, { readFile: (): string => 'null' })).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, { readFile: (): string => '[]' })).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, sidecar({ label: 7, fingerprint: fp }))).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, sidecar({ label: 'a', fingerprint: 7 }))).toBeNull()
   })
 
   it('trims a label, and refuses an empty or absurdly long one', () => {
     const fp = credentialFingerprint(TOKEN)
-    expect(readCredentialLabel(env, TOKEN, sidecar({ label: '  acct-2  ', fingerprint: fp }))).toBe(
+    expect(readCredentialLabel(CREDS, TOKEN, sidecar({ label: '  acct-2  ', fingerprint: fp }))).toBe(
       'acct-2',
     )
-    expect(readCredentialLabel(env, TOKEN, sidecar({ label: '   ', fingerprint: fp }))).toBeNull()
+    expect(readCredentialLabel(CREDS, TOKEN, sidecar({ label: '   ', fingerprint: fp }))).toBeNull()
     // A 200-character "name" is a mistake being written into a UI, not a name.
     expect(
-      readCredentialLabel(env, TOKEN, sidecar({ label: 'x'.repeat(200), fingerprint: fp })),
+      readCredentialLabel(CREDS, TOKEN, sidecar({ label: 'x'.repeat(200), fingerprint: fp })),
     ).toBeNull()
   })
 })
@@ -116,7 +117,7 @@ describe('the label is resolved WITH the credential, never separately', () => {
   it('carries the label for the env token', () => {
     const resolved = resolveActiveCredential(
       { CLAUDE_CONFIG_DIR: '/x/.claude', CLAUDE_CODE_OAUTH_TOKEN: TOKEN },
-      { readLabel: (_e, t) => (t === TOKEN ? 'acct-2' : null) },
+      { readLabel: (t) => (t === TOKEN ? 'acct-2' : null) },
     )
     expect(resolved).toEqual({ kind: 'measurable', token: TOKEN, account_label: 'acct-2' })
   })
@@ -125,7 +126,7 @@ describe('the label is resolved WITH the credential, never separately', () => {
     const blob = JSON.stringify({ claudeAiOauth: { accessToken: TOKEN } })
     const resolved = resolveActiveCredential(
       { CLAUDE_CONFIG_DIR: '/x/.claude' },
-      { readFile: () => blob, readLabel: (_e, t) => (t === TOKEN ? 'acct-3' : null) },
+      { readFile: () => blob, readLabel: (t) => (t === TOKEN ? 'acct-3' : null) },
     )
     expect(resolved).toEqual({ kind: 'measurable', token: TOKEN, account_label: 'acct-3' })
   })
@@ -139,7 +140,7 @@ describe('the label is resolved WITH the credential, never separately', () => {
       { CLAUDE_CONFIG_DIR: '/x/.claude' },
       {
         readFile: () => blob,
-        readLabel: (_e, t) => {
+        readLabel: (t) => {
           asked.push(t)
           return null
         },
