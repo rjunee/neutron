@@ -36,10 +36,14 @@ const BASE = 'http://x/api/app/mcp-servers'
 const DECISION = `${BASE}/decision`
 const SECRET = 'sk-not-a-real-key'
 
+// `user_id` is DELIBERATELY not the `project_slug`. They were both `'owner'`, which made
+// the fixture unable to tell "the deciding user" from "this box" — the exact confusion
+// that let the decision surface write the slug into `tool_approvals.decided_by` and go
+// unnoticed. A test cannot catch a conflation its fixture also makes.
 const auth = {
   resolve: async (token: string) =>
     token === 'good'
-      ? { user_id: 'owner', project_slug: 'owner', project_id: 'p1' }
+      ? { user_id: 'u-owner-1', project_slug: 'owner', project_id: 'p1' }
       : { code: 'unauthorized', message: 'bad token' },
 } as unknown as Parameters<typeof createAppMcpServersSurface>[0]['auth']
 
@@ -328,5 +332,32 @@ describe('the ordinary refusals', () => {
     const body = await json(await surface.handler(req(BASE, 'GET')))
     expect(body['reserved_names']).toContain('neutron')
     expect(typeof body['max_servers']).toBe('number')
+  })
+
+  test('THE DECISION IS ATTRIBUTED TO THE BEARER, not to this box', async () => {
+    // This handler resolves the bearer in order to authorize the request and was then
+    // throwing the identity away, so `tool_approvals.decided_by` — documented in
+    // migration 0004 as the user_id of the decider — recorded the instance's own slug.
+    // Every MCP approval in the audit trail read as having been decided by the box.
+    await surface.handler(req(BASE, 'POST', DRAFT))
+    const listed = (await json(await surface.handler(req(BASE, 'GET'))))['servers'] as Array<
+      Record<string, unknown>
+    >
+    const res = await surface.handler(
+      req(DECISION, 'POST', {
+        name: 'example-server',
+        decision: 'approve',
+        grant_hash: listed[0]!['grant_hash'],
+      }),
+    )
+    expect(res!.status).toBe(200)
+
+    const row = db
+      .raw()
+      .prepare(
+        `SELECT decided_by FROM tool_approvals WHERE tool_name = ? AND status = 'approved'`,
+      )
+      .get('mcp-server:example-server') as { decided_by: string } | null
+    expect(row?.decided_by).toBe('u-owner-1')
   })
 })

@@ -36,15 +36,54 @@ export const DEFAULT_TOOLS_BRIDGE_PATH = join(HERE, 'tools-bridge.ts')
  *  argv permits so the agent can invoke them without a per-call approval. */
 export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
 /**
- * How long `claude` may wait for ONE MCP server to start, when the spawn's
- * `--mcp-config` carries an owner-installed server (`MCP_TIMEOUT`).
+ * How long `claude` may wait for ONE MCP server to start (`MCP_TIMEOUT`), when the
+ * spawn's `--mcp-config` carries owner-installed servers. See the `MCP_TIMEOUT` block
+ * in `spawn.ts` for why the blocking load needs a bound at all.
  *
- * 10 s, chosen against the post-spawn assertion's 30 s `readyBudgetMs`: a
- * third-party server that hangs its `initialize` must cost a slow spawn, not a
- * `channel-wedged` failure on the owner's live conversational REPL. See the
- * `MCP_TIMEOUT` block in `spawn.ts` for why the blocking load needs a bound at all.
+ * ── `MCP_TIMEOUT` IS PER SERVER; THE READY BUDGET IS FOR ALL OF THEM ────────
+ * A flat 10 s was described here as "chosen against the post-spawn assertion's 30 s
+ * `readyBudgetMs`", which quietly compared two quantities that are not comparable.
+ * `MCP_TIMEOUT` bounds ONE server's `initialize`; `readyBudgetMs` bounds the WHOLE
+ * spawn. If `claude` loads the blocking connect group serially, four hung servers
+ * exhaust the budget between them while every individual timeout is honoured — and
+ * `runtime/mcp-servers.ts`'s `MCP_SERVERS_MAX` permits far more. Whether the CLI's
+ * load is serial or concurrent is NOT verified here, so the bound is sized for the
+ * worse of the two rather than assuming the better.
+ *
+ * So the per-server bound is DIVIDED across the servers actually wired, against
+ * {@link OWNER_MCP_STARTUP_BUDGET_MS} — the share of the ready budget the MCP load may
+ * consume, held well under 30 s so the rest of startup (trust seed, PTY, channel
+ * handshake) still fits. One or two servers get the same 10 s they got before, so the
+ * ordinary case is unchanged.
+ *
+ * {@link OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS} is where the honesty has to be explicit:
+ * past ~10 servers, dividing the budget would produce a timeout so short that healthy
+ * servers fail to start, which trades a rare slow spawn for a broken one. The floor
+ * wins there, and the serial worst case CAN then exceed the ready budget. What that
+ * costs is bounded and visible — the spawn fails the assertion and takes the
+ * bounded-respawn ladder, with `claude` reporting which server did not start — not
+ * silent corruption. A genuine fix for 24 hung servers would be a concurrent load or a
+ * larger budget, neither of which this bound can supply.
  */
 export const OWNER_MCP_STARTUP_TIMEOUT_MS = 10_000
+/** The share of the 30 s `readyBudgetMs` the whole owner-MCP load may consume. */
+export const OWNER_MCP_STARTUP_BUDGET_MS = 20_000
+/** Shortest per-server timeout worth setting — below this, healthy servers fail. */
+export const OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS = 2_000
+
+/**
+ * `MCP_TIMEOUT` for a spawn wiring `serverCount` owner-installed servers: the
+ * aggregate budget divided between them, clamped to the flat per-server maximum above
+ * and the floor below. See {@link OWNER_MCP_STARTUP_TIMEOUT_MS}.
+ */
+export function ownerMcpStartupTimeoutMs(serverCount: number): number {
+  if (serverCount <= 0) return OWNER_MCP_STARTUP_TIMEOUT_MS
+  const share = Math.floor(OWNER_MCP_STARTUP_BUDGET_MS / serverCount)
+  return Math.max(
+    OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS,
+    Math.min(OWNER_MCP_STARTUP_TIMEOUT_MS, share),
+  )
+}
 // Co-located with the substrate (NOT in the P0 `prompts/` package, whose
 // KNOWN_PROMPTS registry strictly enumerates the instance-substituted gateway
 // prompts). This is a static substrate asset read by absolute path.

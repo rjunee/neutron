@@ -694,19 +694,47 @@ there is nothing underneath him.
   whether or not a pending row exists — a fresh grant is opened and resolved in the
   same call — which is what makes deny-then-approve one press instead of a 409 and an
   unexplained retry.
-- **Uninstalling REVOKES.** `remove()` cancels pending prompts and calls
-  `ApprovalManager.revokeApproved`, transitioning approved rows to `expired`.
+- **Uninstalling REVOKES, and revokes FIRST.** `remove()` cancels pending prompts and
+  calls `ApprovalManager.revokeApproved`, transitioning approved rows to `expired`.
   Otherwise the hash-match alone meant reinstalling a byte-identical command
   re-matched the old grant and the server came back wired, never shown to him a
   second time. Editing is different and deliberately leaves the old row alone: he is
   still curating it. The revoked rows survive with their `args_json` and decider, so
-  the trail still records what was approved.
+  the trail still records what was approved. The ORDER is revoke → forget the secrets →
+  drop the spec: dropping the spec first left an approved grant for a server that no
+  longer existed, which a retry could not heal (it re-reads the list, finds nothing, and
+  answers `removed: false`) while the live grant waited for a byte-identical reinstall
+  to re-match it. Revoking first makes every partial outcome unapproved-but-installed —
+  not wired, still visible, and the retry has a target.
+- **DENY revokes too.** `approvalStateFor` tests `approved` before `denied` (safe
+  precedence for a read), so recording a denial alongside a live approved row left the
+  server WIRED while the surface answered 200 and the list said "denied". With two
+  clients that is ordinary: the phone approves, the tab still shows the pending prompt,
+  and the tab's Deny is the only stop button he has. `decide` revokes any approval in
+  force before it records the denial, and reads the rows AFTER the revoke so a repeated
+  deny cannot short-circuit on its own earlier row while an approval opened in between
+  stays live. Approving after a deny still works — deny is a stop, not a permanent block.
 - **One writer at a time.** `install`/`remove` read the whole installed list, do
   async secret work, then rewrite it, so two of them interleaved (the web tab and the
   phone) lost one of the writes. Both run inside an in-process promise chain and
-  re-read the list within it. The write ORDER is spec-then-secrets, chosen for what a
-  crash in the middle leaves: an unapproved spec with no secrets (doubly not wired),
-  never the old APPROVED command paired with the new secrets.
+  re-read the list within it. `install`'s write ORDER is spec-then-secrets, chosen for
+  what a crash in the middle leaves: an unapproved spec with no secrets (doubly not
+  wired), never the old APPROVED command paired with the new secrets. `remove`'s order is
+  the mirror image of the same test, for the same reason.
+- **An unreadable secret fails ONE server closed.** `ProjectCredentialStore.resolve`
+  decrypts inline and AES-GCM throws on a malformed envelope or a failed tag check — a
+  truncated write, a restored backup, a `secrets_key` this box no longer holds. That call
+  sat outside `readSecrets`' `try`, so one bad `mcp_env.*` row threw out of `list()` and
+  `resolveApproved()`: a 500 on the Settings GET, a rejection on every chat turn's spawn
+  resolve, and no way to UNINSTALL the offending server, because the fault was on the read
+  path the uninstall needs. Every failure now lands on the same answer — no secrets — which
+  `resolveApproved` already treats as fail-closed and logs, so the row shows as installed
+  with its secrets missing and re-entering the value heals it with no second prompt.
+- **The audit row names the decider.** `tool_approvals.decided_by` is the user_id of the
+  person who pressed the button — the bearer the decision surface has already resolved in
+  order to authorize the request. It briefly recorded this instance's slug instead, so
+  every MCP decision read as having been made by the box; the slug survives only as the
+  fallback for a caller with no authenticated actor.
 - **The prompt is rendered by code** (`renderMcpServerGrant`,
   `runtime/mcp-servers.ts`) from the same fields the hash covers — the name, the
   command, every argument, the variable NAMES, never a value — and states that
@@ -719,7 +747,14 @@ there is nothing underneath him.
   `{command:'a', args:['b']}` identically — two different programs, two different
   hashes, one displayed text — so the test asserts that two specs which hash
   differently never render the same, not merely that every field appears. Neither
-  client's row summary joins argv either.
+  client's row summary joins argv either. The banned-character set is every INVISIBLE, not
+  just the bidi controls and zero-widths it originally listed: three specs differing only
+  by a WORD JOINER measured to the same pixel width in a browser, so two grants the hash
+  distinguishes were indistinguishable on screen. NEL, SOFT HYPHEN, ARABIC LETTER MARK,
+  MONGOLIAN VOWEL SEPARATOR, LINE/PARAGRAPH SEPARATOR, WORD JOINER and the invisible math
+  operators, the deprecated format controls, the interlinear annotation marks and the TAG
+  block are all refused outright. It stays a denylist of invisibles rather than an allowlist
+  of printable ASCII, because a real path or argument can carry non-ASCII text.
 - **Three stores, one join.** `instance_metadata.mcp_servers` (migration 0120)
   holds names/command/args/`env_names`; the VALUES live in the AES-256-GCM
   `project_credentials` store at global scope under `mcp_env.<name>`; the
@@ -753,9 +788,16 @@ there is nothing underneath him.
   accepting input — safe while the config held only our own two `bun` scripts, but an
   installed program that never completes `initialize` would hold that wait open inside
   the post-spawn assertion's 30 s ready budget and surface as `channel-wedged`. The
-  load stays blocking and is now bounded by `MCP_TIMEOUT`
-  (`OWNER_MCP_STARTUP_TIMEOUT_MS`, 10 s) whenever an installed server is wired; a
-  spawn with none sets nothing and behaves exactly as before.
+  load stays blocking and is now bounded by `MCP_TIMEOUT` whenever an installed server is
+  wired; a spawn with none sets nothing and behaves exactly as before. The bound is PER
+  SERVER while the budget covers the whole spawn, so `ownerMcpStartupTimeoutMs` divides a
+  stated 20 s share of the budget across the servers actually wired (one or two still get
+  the full 10 s) rather than letting N hung servers each honour 10 s and collectively blow
+  it. Whether the CLI's blocking connect group loads serially is NOT verified, so it is
+  sized for the worse case. Past ~10 servers a 2 s floor wins and the serial worst case CAN
+  exceed the budget — stated here and asserted in the test rather than glossed, because a
+  timeout short enough to fit would fail healthy servers; closing it properly needs a
+  concurrent load or a larger budget, not a smaller per-server bound.
 - **The config, secrets and all, is cleaned up on EVERY path.** The MCP config carries
   the dev-channel token and each server's env values at 0600 inside a 0700 per-spawn
   directory. A throw between writing it and having a child (the child-exit handler owns
@@ -774,7 +816,15 @@ there is nothing underneath him.
   subprocess. A resolver REJECTION propagates and fails the turn deliberately:
   treating it as "no servers" would lose his tools invisibly, and because the guard
   and the spawn resolve separately, an intermittent failure would then evict the
-  child every turn.
+  child every turn. **The resolve happens INSIDE the warm-reuse branch**, which is the only
+  place its value is used: the resolver is async, and awaiting it anywhere between
+  `getOrSpawnSession`'s `pool.get` and its `pool.set` reopens the window two concurrent
+  dispatches de-duplicate through, so every cold start spawned TWO `claude` children on one
+  transcript — and the loser never entered the pool, so `shutdownAllPersistentRepls()`
+  could not kill it and it outlived the process holding an open 0600 config full of
+  plaintext secrets. Hoisting the `pool.get` above the await does NOT fix that; the
+  invariant is that nothing suspends BETWEEN the read and the set, which is a property of
+  the whole cold path rather than of the read's position.
 - **Surfaces.** HTTP `gateway/http/app-mcp-servers-surface.ts` — machine-scoped
   `/api/app/mcp-servers` (GET the whole picture, POST install-or-replace, DELETE
   `?name=`) plus `POST …/mcp-servers/decision` (`{ name, decision, grant_hash }`). Every route

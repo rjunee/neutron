@@ -30,7 +30,13 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname } from 'node:path'
 
-import { OWNER_MCP_STARTUP_TIMEOUT_MS } from '../signatures.ts'
+import {
+  OWNER_MCP_STARTUP_BUDGET_MS,
+  OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS,
+  OWNER_MCP_STARTUP_TIMEOUT_MS,
+  ownerMcpStartupTimeoutMs,
+} from '../signatures.ts'
+import { MCP_SERVERS_MAX } from '../../../../mcp-servers.ts'
 
 import type { Event } from '../../../../events.ts'
 import type { ResolvedOwnerMcpServer } from '../../../../mcp-servers.ts'
@@ -424,6 +430,45 @@ describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
     expect(OWNER_MCP_STARTUP_TIMEOUT_MS).toBeLessThan(30_000)
   })
 
+  it('DIVIDES the bound across servers, because MCP_TIMEOUT is per-server', async () => {
+    // The bound and the budget it was "chosen against" measure different things:
+    // `MCP_TIMEOUT` gates ONE server's `initialize`, `readyBudgetMs` gates the whole
+    // spawn. A flat 10 s let each of eight hung servers honour its own timeout while
+    // collectively blowing the budget — and whether `claude` loads them serially is
+    // not something this repo has verified, so the bound is sized for the worse case.
+    setReplToolBridge(bridge())
+    const { host, envs } = makeCapturingHost()
+    const many: ResolvedOwnerMcpServer[] = Array.from({ length: 8 }, (_, i) => ({
+      ...EXAMPLE,
+      name: `example-${i}`,
+    }))
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => many }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    const perServer = Number(envs[0]!['MCP_TIMEOUT'])
+    expect(perServer).toBeLessThan(OWNER_MCP_STARTUP_TIMEOUT_MS)
+    // The SERIAL worst case fits the share of the ready budget the load may take.
+    expect(perServer * many.length).toBeLessThanOrEqual(OWNER_MCP_STARTUP_BUDGET_MS)
+  })
+
+  it('stops dividing at a floor, and does not pretend the floor closes the gap', () => {
+    // One or two servers keep exactly the bound they had, so the ordinary case is
+    // untouched by the division.
+    expect(ownerMcpStartupTimeoutMs(1)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
+    expect(ownerMcpStartupTimeoutMs(2)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
+    expect(ownerMcpStartupTimeoutMs(4)).toBe(OWNER_MCP_STARTUP_BUDGET_MS / 4)
+    // At the installed maximum the floor wins, and the honest consequence is asserted
+    // rather than papered over: the serial worst case CAN exceed the budget. A timeout
+    // short enough to fit would fail healthy servers, which trades a rare slow spawn
+    // for a permanently broken one.
+    expect(ownerMcpStartupTimeoutMs(MCP_SERVERS_MAX)).toBe(OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS)
+    expect(OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS * MCP_SERVERS_MAX).toBeGreaterThan(
+      OWNER_MCP_STARTUP_BUDGET_MS,
+    )
+  })
+
   it('leaves the no-installed-servers spawn exactly as it was', async () => {
     // The bound is a response to third-party code being in the config. With none there,
     // the startup behaviour must not change at all.
@@ -434,6 +479,91 @@ describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
 
     expect(envs[0]!['MCP_CONNECTION_NONBLOCKING']).toBe('false')
     expect(envs[0]!['MCP_TIMEOUT']).toBeUndefined()
+  })
+})
+
+describe('ONE CHILD PER SESSION KEY — resolving the installed set must not reopen the spawn window', () => {
+  // Two concurrent dispatches on one key de-duplicate onto a single spawn ONLY because
+  // nothing suspends between `getOrSpawnSession`'s `pool.get` and its `pool.set`. This
+  // feature introduced an `await` in that gap — the installed-set resolve, needed for
+  // the warm-reuse fingerprint — and hoisting the `pool.get` above it did not help: the
+  // second caller still read a pool the first had not written. Two `claude` children
+  // then owned one transcript, and the loser was never registered in the pool, so
+  // `shutdownAllPersistentRepls()` could not kill it and it outlived the process
+  // holding an open MCP config full of plaintext secrets.
+  //
+  // The fingerprint of ZERO installed servers is `''`, so this fired for every owner on
+  // every cold start, not only for one who had installed something.
+
+  it('two CONCURRENT cold dispatches spawn exactly ONE child', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        // A resolver that actually yields. The bug needed only a microtask, but a real
+        // timer makes the window unmissable rather than scheduler-dependent.
+        resolveExtraMcpServers: async () => {
+          await Bun.sleep(5)
+          return []
+        },
+      }),
+    )
+    const first = sub.start(spec('first'))
+    const second = sub.start(spec('second'))
+    await Promise.all([drain(first), drain(second)])
+
+    expect(argvs).toHaveLength(1)
+  })
+
+  it('leaves NO orphan child and NO stranded secrets after shutdown', async () => {
+    // The consequence half. A second child that never entered the pool survived
+    // `shutdownAllPersistentRepls()` with its 0600 config — holding the dev-channel
+    // token and every installed server's env VALUES — still on disk in `tmpdir()`.
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const dirsBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('neutron-repl-')))
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        resolveExtraMcpServers: async () => {
+          await Bun.sleep(5)
+          return [EXAMPLE]
+        },
+      }),
+    )
+    await Promise.all([drain(sub.start(spec('first'))), drain(sub.start(spec('second')))])
+    const spawned = argvs.length
+
+    await shutdownAllPersistentRepls()
+
+    const leaked = readdirSync(tmpdir()).filter(
+      (n) => n.startsWith('neutron-repl-') && !dirsBefore.has(n),
+    )
+    expect(leaked).toEqual([])
+    // Stated separately so a future regression cannot pass this test by spawning two
+    // children and cleaning both up: one owner per transcript is the invariant.
+    expect(spawned).toBe(1)
+  })
+
+  it('a COLD start resolves the installed set exactly once — the spawn\'s own read', async () => {
+    // The fingerprint resolve now happens inside the warm-reuse branch, which a cold
+    // start never enters, so the only read is `spawnSession`'s. Two reads here would
+    // mean the pre-`pool.set` await is back.
+    setReplToolBridge(bridge())
+    const { host } = makeCapturingHost()
+    let calls = 0
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        resolveExtraMcpServers: async () => {
+          calls += 1
+          return [EXAMPLE]
+        },
+      }),
+    )
+    await drain(sub.start(spec('hi')))
+    expect(calls).toBe(1)
   })
 })
 

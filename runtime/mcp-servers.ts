@@ -133,19 +133,43 @@ export function isReservedMcpServerName(name: string): boolean {
 /**
  * Characters refused outright — never stripped — in a command, an arg or an
  * env-var name, so a payload cannot hide from the owner reading the approval
- * prompt: bidi controls (U+202A-U+202E, U+2066-U+2069), zero-width / format
- * characters (U+200B-U+200F, U+FEFF) and C0 controls including tab, newline and
- * carriage return.
+ * prompt.
  *
  * STRICTER than the ritual prompt's equivalent
  * (`reminders/ritual-registration.ts`), which permits `\t\n\r` because it gates a
  * multi-line prose document. This gates an ARGV. A newline inside a command string
  * has no legitimate meaning and would let the rendered prompt show one thing per
  * line while the exec'd command carried another.
+ *
+ * ── THE SET IS "RENDERS AS NOTHING", NOT "IS A BIDI CONTROL" ────────────────
+ * The first draft listed the bidi controls (U+202A-U+202E, U+2066-U+2069), the
+ * zero-widths (U+200B-U+200F, U+FEFF) and the C0 controls, and stopped — which left a
+ * whole family of characters that also occupy no width. Measured in a browser against
+ * the prompt's own type styles, three specs differing only by a WORD JOINER rendered
+ * to the identical pixel width, so two grants the hash correctly distinguishes were
+ * indistinguishable on screen. No full substitution is possible with these — an
+ * invisible can pad a string but cannot hide a visible character — so this is a
+ * legibility hole rather than a spoofing hole. It still has to close: the promise this
+ * prompt makes is that the owner can SEE what he is approving, and a difference he
+ * cannot see is a difference he cannot check.
+ *
+ * Added, every one of them zero-advance or line-breaking: NEL (U+0085), SOFT HYPHEN
+ * (U+00AD), ARABIC LETTER MARK (U+061C), MONGOLIAN VOWEL SEPARATOR (U+180E), LINE and
+ * PARAGRAPH SEPARATOR (U+2028-U+2029), the whole U+2060-U+206F block (WORD JOINER, the
+ * invisible math operators, the bidi isolates already listed, and the deprecated format
+ * controls — taken as one range rather than three, so an unassigned code point in the
+ * middle of it cannot be the one gap), the interlinear annotation marks
+ * (U+FFF9-U+FFFB), and the TAG block (U+E0000-U+E007F), whose
+ * characters are invisible by design and are the tag-smuggling vector. The `u` flag is
+ * what lets that last range be written as a code point instead of a surrogate pair.
+ *
+ * Deliberately a DENYLIST of invisibles rather than an allowlist of printable ASCII: a
+ * path or an argument can legitimately carry non-ASCII text, and refusing all of it
+ * would break working servers to close a rendering hole.
  */
 // eslint-disable-next-line no-control-regex
 export const MCP_SERVER_BANNED_CHARS_RE =
-  /[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/
+  /[\u0000-\u001F\u007F\u0085\u00AD\u061C\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/u
 
 /**
  * One installed MCP server, as stored and as displayed. Never carries a secret:

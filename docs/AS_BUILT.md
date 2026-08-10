@@ -8572,4 +8572,33 @@ bounded by `MCP_TIMEOUT` so a hung third-party server cannot wedge the owner's l
 Twelve more mutants, each broken, confirmed failing, restored. One survived and was
 instructive: it mutated a line that was not the guard.
 
-Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md` § What review round 2 changed.
+Round 3 found that two of round 2's own fixes had broken working code. The
+installed-set resolve was hoisted above the pool read with a comment claiming that
+"restores the await-free window" — it does not, because the invariant is that nothing
+suspends BETWEEN the read and the `pool.set`, so every cold start spawned TWO `claude`
+children on one transcript and the loser outlived shutdown holding an open 0600 config
+full of plaintext secrets. The resolve moved into the warm-reuse branch, the only place
+its value is used. And `remove()` dropped the spec before revoking the grant, leaving an
+approved grant for a vanished server that a retry could not heal; it now revokes, forgets,
+then drops, so every partial outcome is unapproved-but-installed.
+
+Three more were holes rather than regressions. An undecryptable `mcp_env.*` row threw out
+of `list()` and `resolveApproved()` — a 500 on Settings, a rejection on every chat turn,
+and no way to uninstall the server that caused it — because the inline-decrypting
+`resolve` sat outside the try; it fails one server closed now. A deny arriving after an
+approve reported 200 and stopped nothing, since the state read tests `approved` first, so
+deny revokes before it records. And the invisible-character denylist covered the bidi and
+zero-width ranges only, so three specs differing by a WORD JOINER rendered to the same
+pixel width in the approval prompt.
+
+Two smaller ones: `MCP_TIMEOUT` bounded one server's startup while the ready budget covers
+the whole spawn, so the bound is now divided across the servers wired (with a floor whose
+residual gap the doc and the test state out loud rather than hiding); and
+`tool_approvals.decided_by` recorded this box's slug instead of the bearer the surface had
+already resolved. Six more mutants, each confirmed failing and restored.
+
+Two round-3 blockers are review-lane process gaps — a mandatory rubric lane that never
+emitted a verdict, and one cross-model lane that failed — and no code change can close
+them.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md` § What review round 3 changed.
