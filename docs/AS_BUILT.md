@@ -8856,3 +8856,19 @@ but never carried", one layer along from "built but never wired". Now covered.
 Nothing writes a sidecar yet, so every label is still null and behaviour is unchanged.
 
 Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the credential fingerprint is scrypt (CodeQL `js/insufficient-password-hash`)
+
+`credentialFingerprint` hashed the live OAuth token with a bare SHA-256; CodeQL flagged it
+and, being a required check on Open's `main`, blocked the PR. The finding is right in form
+— a bare digest of a credential is one dictionary from reversible — and while it is not
+exploitable here (long random tokens, 0600 sidecar beside the credentials file), that
+rests on three facts a later change could remove. Now `scryptSync` at `N=4096, r=8, p=1`,
+output shape unchanged at 12 hex. The salt is fixed because two processes must derive the
+same value sharing only the token; it buys domain separation and nothing more, and says so.
+
+The header's prose description of the algorithm was deleted: a cross-process contract
+spelled out in prose drifts silently, and a writer trusting the stale line would produce a
+digest the reader rejects with no symptom but missing labels. Writers import the function.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.

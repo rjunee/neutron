@@ -55,3 +55,45 @@ the sink AND lands on the row, and that mutant dies.
 Nothing writes a sidecar yet. Until something does, every label is null and the
 behaviour is exactly what shipped before — which is the point of landing the reader
 first: the writer can appear without a second deploy of this code.
+
+---
+
+## The fingerprint is scrypt, not SHA-256 — CodeQL was right
+
+`credentialFingerprint` hashed the live OAuth token with a bare SHA-256, and CodeQL's
+`js/insufficient-password-hash` failed the PR on it. Open's `main` ruleset requires that
+check, so the PR could not merge.
+
+**The finding is correct in form.** The input is a credential, and a bare digest of a
+credential is one dictionary away from being reversible. It is not exploitable *here*:
+these tokens are long and random, the sidecar is mode 0600 beside the credentials file it
+describes, and anyone who can read it can already read the token itself. But that is a
+property held up by three surrounding facts, each of which a later change could quietly
+remove — and it is a strictly worse thing to depend on than a correct primitive.
+
+Arguing it down was the alternative, and it would have left a permanently red REQUIRED
+check on a public repo. A standing red gate trains everyone to merge past it, and it hides
+whatever fails behind it — the lesson `SPEC.md` already records from the Managed
+`Typecheck` step that masked a completely dead roadmap gate for days.
+
+So: `scryptSync(token, FIXED_SALT, 6)` at `N=4096, r=8, p=1`. Output shape is unchanged
+(12 hex), so the sidecar format and every test assertion still hold.
+
+**The salt is fixed, and that is doing less than a salt usually does.** A random per-write
+salt is right when you STORE the digest and verify against it later. Here two independent
+processes must reach the SAME 12 characters from the same token sharing nothing but the
+token, so a random salt is impossible. It buys domain separation and nothing more, and the
+docblock says exactly that rather than implying per-write uniqueness.
+
+**Cost was chosen against the call pattern, not copied from a password-storage example.**
+This runs once per usage reading, a minute apart. `N=4096` is far above a bare SHA-256 per
+guess and invisible on the tick; the default `N=16384` would burn ~100 ms of CPU every
+minute forever to render a label.
+
+📌 **A cross-process contract described in prose will drift, and the drift is silent.** The
+file header spelled out "first 12 hex of sha256(token)" — a writer trusting that line would
+now produce a digest this reader rejects, and the only symptom is that labels quietly stop
+appearing. The header now points at the function as the single definition and says that
+Managed's rotator should IMPORT it through `vendor/neutron` rather than reimplement it.
+That also removes the duplicated-KDF-constants hazard the writer half would otherwise
+carry.
