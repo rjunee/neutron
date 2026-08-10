@@ -169,6 +169,17 @@ export interface ChatMessagePush {
  * DATA is only what the tap resolver needs — no owner slug, no reminder id, no
  * ritual id: an internal token in a notification payload is how `ritual:kaizen`
  * ended up on the owner's lock screen.
+ *
+ * KNOWN AND DELIBERATE: for a project-scoped message the title is the project ID,
+ * not its display NAME. The id is all that exists at this layer — `deliver` recovers
+ * the scope from the app-ws TOPIC (`chatMessagePushScope`), and resolving a name
+ * would mean a project-store read inside the notification path, which is a lookup on
+ * the fire path of a best-effort buzz. It is also unreachable today: every
+ * out-of-turn producer in the Open composer delivers to the owner's BARE `app:<user>`
+ * topic, so every notification is General-scoped and titled `General`. Worth doing
+ * properly when the first producer actually posts into a project chat — at which
+ * point the name belongs in the `ChatMessagePushInput` the caller builds, not in a
+ * lookup here.
  */
 export function buildChatMessagePush(input: ChatMessagePushInput): ChatMessagePush {
   return {
