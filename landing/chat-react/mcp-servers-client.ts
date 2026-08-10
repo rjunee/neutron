@@ -36,8 +36,16 @@ export interface McpServerRow {
   approval: McpApprovalState
   /** The verbatim, server-rendered grant text. Display as-is; never rebuild it. */
   grant_prompt: string
+  /** The digest of THIS spec. Echoed back on a decision — see {@link WebMcpServersClient.decide}. */
+  grant_hash: string
   secrets_present: boolean
-  /** Approved AND usable — i.e. this server is wired into the agent's session. */
+  /**
+   * Approved AND usable: the assistant attaches this server the next time it starts a
+   * session. NOT "a process is running right now" — the servers are attached to the
+   * Claude-backed conversational session, and a project pointed at a different model
+   * provider does not get them. The section copy says so; `serverSummary` below is
+   * careful not to claim otherwise.
+   */
   active: boolean
 }
 
@@ -58,11 +66,22 @@ export interface McpServerDraft {
 export class McpServersClientError extends Error {
   readonly code: string
   readonly status: number
-  constructor(code: string, message: string, status: number) {
+  /**
+   * The server's CURRENT list, when the failure reply carried one.
+   *
+   * A refused decision is the case that needs it: the server has already minted a
+   * prompt for the spec that is really installed, and a UI that only learned "409"
+   * would keep showing the stale one — so the owner reads a complaint about a
+   * mismatch while looking at the very text that caused it. `null` when the reply had
+   * no list (a 401, a network failure), where there is nothing to re-render from.
+   */
+  readonly servers: McpServerRow[] | null
+  constructor(code: string, message: string, status: number, servers: McpServerRow[] | null = null) {
     super(message)
     this.name = 'McpServersClientError'
     this.code = code
     this.status = status
+    this.servers = servers
   }
 }
 
@@ -100,9 +119,24 @@ export class WebMcpServersClient {
     return await this.req<McpServersPayload>('DELETE', `${PATH}?name=${encodeURIComponent(name)}`)
   }
 
-  /** Record the owner's decision on the CURRENTLY installed spec. */
-  async decide(name: string, decision: 'approve' | 'deny'): Promise<McpServersPayload> {
-    return await this.req<McpServersPayload>('POST', `${PATH}/decision`, { name, decision })
+  /**
+   * Record the owner's decision on the spec he was SHOWN.
+   *
+   * `grant_hash` comes from the row that rendered the prompt, and the server refuses
+   * the decision unless it still describes the installed spec. Without it an Approve
+   * pressed on a screen that had gone stale (the server edited from the phone, or in
+   * another tab) would have been applied to the NEW command, sight unseen.
+   */
+  async decide(
+    name: string,
+    decision: 'approve' | 'deny',
+    grant_hash: string,
+  ): Promise<McpServersPayload> {
+    return await this.req<McpServersPayload>('POST', `${PATH}/decision`, {
+      name,
+      decision,
+      grant_hash,
+    })
   }
 
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -133,7 +167,8 @@ export class WebMcpServersClient {
         typeof json?.['message'] === 'string'
           ? (json['message'] as string)
           : `request failed (${res.status})`
-      throw new McpServersClientError(code, message, res.status)
+      const servers = Array.isArray(json?.['servers']) ? (json['servers'] as McpServerRow[]) : null
+      throw new McpServersClientError(code, message, res.status, servers)
     }
     return (json ?? {}) as T
   }
@@ -148,10 +183,22 @@ export class WebMcpServersClient {
  *
  * QUOTED SEGMENTS SURVIVE AS ONE ARG. `--flag "two words"` is one argument, not two,
  * because splitting it would silently change what runs — and the approval prompt
- * would then honestly describe the wrong command. Both quote styles are honoured, a
- * quote can appear inside a segment, and an UNTERMINATED quote is kept as the rest of
- * the line rather than dropped: refusing to guess where the owner meant to close it,
- * while never discarding characters he typed.
+ * would then honestly describe the wrong command. Both quote styles are honoured, and
+ * an UNTERMINATED quote is kept as the rest of the line rather than dropped: refusing
+ * to guess where the owner meant to close it.
+ *
+ * A QUOTE ONLY QUOTES AT THE START OF A SEGMENT. Anywhere else it is an ordinary
+ * character. That is what makes `/srv/it's/server.js` survive as typed — under the
+ * earlier "a quote anywhere opens a quote" rule the apostrophe opened a quoted run and
+ * the character vanished, yielding `/srv/its/server.js`: a DIFFERENT path, accepted
+ * silently, and then faithfully described by an approval prompt for a command the
+ * owner never wrote. The prompt renders and the hash covers whatever this returns, so
+ * the failure was not a wrong grant — it was a wrong VALUE reaching a correct grant,
+ * which is worse, because nothing downstream can detect it.
+ *
+ * There is deliberately no escape syntax. A shell-style backslash would be a second
+ * quoting language to get wrong, and the one case it buys (a literal quote at the
+ * start of a path segment) does not occur in an MCP server command line.
  *
  * MUST MATCH `app/lib/mcp-servers-client.ts#splitCommandLine`.
  */
@@ -166,7 +213,7 @@ export function splitCommandLine(line: string): { command: string; args: string[
       else current += ch
       continue
     }
-    if (ch === '"' || ch === "'") {
+    if ((ch === '"' || ch === "'") && !started) {
       quote = ch
       started = true
       continue
@@ -200,6 +247,16 @@ export function splitCommandLine(line: string): { command: string; args: string[
  * running, because "approved" and "actually starting" are different facts and the
  * difference is invisible from chat.
  *
+ * THE APPROVED LABEL DOES NOT SAY "RUNNING", and that is a correction rather than a
+ * style choice. It used to read "Approved and running with your assistant", which
+ * claimed more than the code does twice over: the server is attached when the
+ * conversational session next STARTS (nothing is running while the assistant is idle),
+ * and it is attached to the Claude-backed session only — a project configured for
+ * another model provider never sees it (`gateway/wiring/build-llm-call-substrate.ts`
+ * takes its non-Claude branch before any of this wiring). Overstating a grant is the
+ * failure this whole feature was built to avoid, so the label states the fact that is
+ * actually true and the section copy carries the provider caveat.
+ *
  * MUST MATCH `app/lib/mcp-servers-client.ts#serverSummary`.
  */
 export function serverSummary(row: McpServerRow): { label: string; needs_owner: boolean } {
@@ -211,5 +268,40 @@ export function serverSummary(row: McpServerRow): { label: string; needs_owner: 
   if (!row.secrets_present) {
     return { label: 'Approved, but a stored value is missing — save it again', needs_owner: false }
   }
-  return { label: 'Approved and running with your assistant', needs_owner: false }
+  return { label: 'Approved — your assistant starts it with its next session', needs_owner: false }
+}
+
+/**
+ * Parse the environment box: one `NAME=value` per line.
+ *
+ * A value may itself contain `=` (tokens do), so only the FIRST `=` splits.
+ *
+ * A NON-EMPTY LINE WITH NO `=` IS AN ERROR, not a line to skip. Both clients used to
+ * drop it silently, which meant a mistyped `EXAMPLE_API_KEY sk-…` installed a server
+ * with NO variables — and, because the reply only lists the names that were saved, the
+ * missing one looked like a display quirk rather than the reason the server would never
+ * start. The names are the one part of the grant the owner is asked to check, so a line
+ * he intended as a variable must never disappear on the way to the prompt.
+ *
+ * Reports EVERY bad line, quoting only the part before any `=` (there is none) capped
+ * short — enough to identify the line, never enough to dump a pasted secret into a UI
+ * string that might be logged.
+ *
+ * MUST MATCH `app/lib/mcp-servers-client.ts#parseEnvLines`.
+ */
+export function parseEnvLines(text: string): { env: Record<string, string>; errors: string[] } {
+  const env: Record<string, string> = {}
+  const errors: string[] = []
+  const lines = text.split('\n')
+  for (const [i, line] of lines.entries()) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    const eq = trimmed.indexOf('=')
+    if (eq <= 0) {
+      errors.push(`line ${i + 1} is not NAME=value: "${trimmed.slice(0, 24)}"`)
+      continue
+    }
+    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1)
+  }
+  return { env, errors }
 }

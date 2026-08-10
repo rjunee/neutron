@@ -102,6 +102,29 @@ export class ApprovalManager {
     if (req.policy === 'auto') {
       return 'approved'
     }
+    const row = await this.openApproval(req)
+    return new Promise<ApprovalDecision>((resolve, reject) => {
+      this.pending.set(row.id, { resolve, reject })
+    })
+  }
+
+  /**
+   * Persist a prompt-user / prompt-admin request and surface it, WITHOUT waiting for
+   * the decision. Returns the row as inserted.
+   *
+   * The half of {@link requestApproval} that is OBSERVABLE. `requestApproval` returns
+   * a promise that resolves when the OWNER answers — minutes, or never — so a caller
+   * that must not block cannot await it, and therefore cannot know when the row
+   * exists. That matters because the read side (`findByToolName`, `listPending`) is
+   * SYNCHRONOUS `prepare().all()`, which bypasses the db mutex the INSERT goes
+   * through: a `fireAndForget(requestApproval(...))` followed by a synchronous read
+   * can legitimately miss its own row. A caller that needs the row (to mint a grant
+   * and immediately resolve it, say) awaits THIS instead.
+   *
+   * Policy is not consulted here — `auto` never persists a row, so it has nothing to
+   * open, and {@link requestApproval} still short-circuits it before calling in.
+   */
+  async openApproval(req: ApprovalRequest): Promise<ApprovalRow> {
     const id = req.id ?? crypto.randomUUID()
     const requested_at = this.now() / 1000
     const args_json = JSON.stringify(req.args ?? null)
@@ -133,9 +156,7 @@ export class ApprovalManager {
       log.error('notifier_failed', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
     })
 
-    return new Promise<ApprovalDecision>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-    })
+    return row
   }
 
   /**
@@ -289,5 +310,42 @@ export class ApprovalManager {
       waiter.resolve('expired')
     }
     return this.get(id)?.status === 'expired'
+  }
+
+  /**
+   * Revoke every still-APPROVED grant for `tool_name`: transition it to 'expired'.
+   * Returns the number of rows transitioned.
+   *
+   * For the case where the thing that was approved CEASES TO EXIST. An approval is a
+   * durable grant deliberately not re-asked while the approved content is unchanged
+   * (`grant_hash` matching, `createRitualApprovalCheck`), and that is exactly what
+   * makes a delete-then-recreate dangerous: recreating the identical content re-matches
+   * the old grant and the thing is live again having never been shown to the owner a
+   * second time. `gateway/mcp-servers/store.ts` calls this on uninstall so reinstalling
+   * a server asks again.
+   *
+   * 'expired' rather than a new status because it is TRUE and needs no migration: the
+   * grant is no longer in force. The row itself is kept — including the `args_json`
+   * recording what was approved, and `decided_at`/`decided_by` — so the audit trail
+   * still says the owner approved that command, only that the grant has since lapsed.
+   */
+  async revokeApproved(project_slug: string, tool_name: string): Promise<number> {
+    const approved = this.db
+      .prepare<{ id: string }, [string, string]>(
+        `SELECT id FROM tool_approvals
+          WHERE project_slug = ? AND tool_name = ? AND status = 'approved'`,
+      )
+      .all(project_slug, tool_name)
+    if (approved.length === 0) return 0
+    const decided_at = this.now() / 1000
+    // Async `run` (the db mutex) for the same reason `cancelPending` uses it: a revoke
+    // issued in the same tick as a not-yet-settled write must serialize after it.
+    for (const { id } of approved) {
+      await this.db.run(
+        `UPDATE tool_approvals SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'approved'`,
+        [decided_at, id],
+      )
+    }
+    return approved.length
   }
 }

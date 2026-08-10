@@ -35,6 +35,16 @@ export const DEFAULT_TOOLS_BRIDGE_PATH = join(HERE, 'tools-bridge.ts')
  *  agent as `mcp__<this>__<toolname>`. Also the `--allowedTools` namespace the
  *  argv permits so the agent can invoke them without a per-call approval. */
 export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
+/**
+ * How long `claude` may wait for ONE MCP server to start, when the spawn's
+ * `--mcp-config` carries an owner-installed server (`MCP_TIMEOUT`).
+ *
+ * 10 s, chosen against the post-spawn assertion's 30 s `readyBudgetMs`: a
+ * third-party server that hangs its `initialize` must cost a slow spawn, not a
+ * `channel-wedged` failure on the owner's live conversational REPL. See the
+ * `MCP_TIMEOUT` block in `spawn.ts` for why the blocking load needs a bound at all.
+ */
+export const OWNER_MCP_STARTUP_TIMEOUT_MS = 10_000
 // Co-located with the substrate (NOT in the P0 `prompts/` package, whose
 // KNOWN_PROMPTS registry strictly enumerates the instance-substituted gateway
 // prompts). This is a static substrate asset read by absolute path.

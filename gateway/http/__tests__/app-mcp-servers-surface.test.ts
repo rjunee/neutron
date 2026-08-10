@@ -118,13 +118,56 @@ describe('installing is not approving', () => {
   })
 
   test('the decision route is what approves, and it takes an explicit verb', async () => {
-    await surface.handler(req(BASE, 'POST', DRAFT))
+    const installed = await json(await surface.handler(req(BASE, 'POST', DRAFT)))
+    const grant_hash = (installed['servers'] as Array<Record<string, unknown>>)[0]![
+      'grant_hash'
+    ] as string
     const body = await json(
-      await surface.handler(req(DECISION, 'POST', { name: 'example-server', decision: 'approve' })),
+      await surface.handler(
+        req(DECISION, 'POST', { name: 'example-server', decision: 'approve', grant_hash }),
+      ),
     )
     const servers = body['servers'] as Array<Record<string, unknown>>
     expect(servers[0]!['approval']).toBe('approved')
     expect(servers[0]!['active']).toBe(true)
+  })
+
+  test('a decision with NO grant_hash is refused — and the refusal carries the list', async () => {
+    // The hash names WHICH SPEC the press was about. Without it the store bound the
+    // decision to whatever happened to be installed, so an Approve pressed on a screen
+    // that had gone stale approved a command the owner never read.
+    await surface.handler(req(BASE, 'POST', DRAFT))
+    const res = await surface.handler(
+      req(DECISION, 'POST', { name: 'example-server', decision: 'approve' }),
+    )
+    expect(res!.status).toBe(409)
+    const body = await json(res)
+    expect(body['code']).toBe('decision_stale')
+    // The 409 body carries the CURRENT list so the client can re-render the prompt it
+    // now has to show — a bare status code left it displaying the stale one.
+    const servers = body['servers'] as Array<Record<string, unknown>>
+    expect(servers).toHaveLength(1)
+    expect(servers[0]!['approval']).toBe('pending')
+    expect(servers[0]!['grant_hash']).toBeString()
+  })
+
+  test('a decision carrying a STALE grant_hash is refused, and approves nothing', async () => {
+    const installed = await json(await surface.handler(req(BASE, 'POST', DRAFT)))
+    const staleHash = (installed['servers'] as Array<Record<string, unknown>>)[0]![
+      'grant_hash'
+    ] as string
+    // The spec moves under him — an edit from the other client.
+    await surface.handler(
+      req(BASE, 'POST', { ...DRAFT, command: '/usr/local/bin/other-mcp' }),
+    )
+    const res = await surface.handler(
+      req(DECISION, 'POST', { name: 'example-server', decision: 'approve', grant_hash: staleHash }),
+    )
+    expect(res!.status).toBe(409)
+    const after = await json(await surface.handler(req(BASE, 'GET')))
+    const servers = after['servers'] as Array<Record<string, unknown>>
+    expect(servers[0]!['approval']).toBe('pending')
+    expect(servers[0]!['active']).toBe(false)
   })
 
   test('a MISSING or garbled decision is refused, never defaulted', async () => {
@@ -141,13 +184,37 @@ describe('installing is not approving', () => {
   })
 
   test('deny is recorded, and the server stays listed', async () => {
-    await surface.handler(req(BASE, 'POST', DRAFT))
+    const installed = await json(await surface.handler(req(BASE, 'POST', DRAFT)))
+    const grant_hash = (installed['servers'] as Array<Record<string, unknown>>)[0]![
+      'grant_hash'
+    ] as string
     const body = await json(
-      await surface.handler(req(DECISION, 'POST', { name: 'example-server', decision: 'deny' })),
+      await surface.handler(
+        req(DECISION, 'POST', { name: 'example-server', decision: 'deny', grant_hash }),
+      ),
     )
     const servers = body['servers'] as Array<Record<string, unknown>>
     expect(servers).toHaveLength(1)
     expect(servers[0]!['approval']).toBe('denied')
+  })
+
+  test('DENY then APPROVE takes one request, not two', async () => {
+    // The denied row failed the pending+hash match, so the follow-up approve used to
+    // answer 409 and need a second press the UI could not explain.
+    const installed = await json(await surface.handler(req(BASE, 'POST', DRAFT)))
+    const grant_hash = (installed['servers'] as Array<Record<string, unknown>>)[0]![
+      'grant_hash'
+    ] as string
+    await surface.handler(
+      req(DECISION, 'POST', { name: 'example-server', decision: 'deny', grant_hash }),
+    )
+    const res = await surface.handler(
+      req(DECISION, 'POST', { name: 'example-server', decision: 'approve', grant_hash }),
+    )
+    expect(res!.status).toBe(200)
+    const servers = (await json(res))['servers'] as Array<Record<string, unknown>>
+    expect(servers[0]!['approval']).toBe('approved')
+    expect(servers[0]!['active']).toBe(true)
   })
 
   test('a decision for a server that is not installed is a 409, not a 200', async () => {

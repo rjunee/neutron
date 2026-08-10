@@ -3,7 +3,7 @@
 // (D2 split).
 
 import { randomUUID, randomBytes } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mcpSurfaceFingerprint } from '../../../mcp-servers.ts'
@@ -31,7 +31,7 @@ import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
 import { measurePostCompactSize, sessionJsonlPath, startSessionSizeWatchdog } from './session-size-watchdog.ts'
 import { dashifyCwd } from './session-validation.ts'
 import { createWedgedPromptDetector } from './interactive-prompt-deadlock-detector.ts'
-import { COMPACT_RESUME_FULL_RE, COMPACT_RESUME_SUMMARY_RE, DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, DEV_CHANNEL_DISCLAIMER_RE, DISCLAIMER_BOTTOM_N, RATE_LIMIT_OPTIONS_BOTTOM_N, RATE_LIMIT_OPTIONS_DEBOUNCE_MS, RATE_LIMIT_OPTIONS_RE, RATE_LIMIT_STOP_RE, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, TOOL_USE_QUESTION_RE, TOOL_USE_SELECTOR_RE, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
+import { COMPACT_RESUME_FULL_RE, COMPACT_RESUME_SUMMARY_RE, DEFAULT_AGENT_BASE_PROMPT, DEFAULT_DEV_CHANNEL_PATH, DEFAULT_TOOLS_BRIDGE_PATH, DEV_CHANNEL_DISCLAIMER_RE, DISCLAIMER_BOTTOM_N, OWNER_MCP_STARTUP_TIMEOUT_MS, RATE_LIMIT_OPTIONS_BOTTOM_N, RATE_LIMIT_OPTIONS_DEBOUNCE_MS, RATE_LIMIT_OPTIONS_RE, RATE_LIMIT_STOP_RE, SESSION_COMPACT_IDLE_QUIESCE_MS, TOOLS_BRIDGE_SERVER_NAME, TOOL_USE_QUESTION_RE, TOOL_USE_SELECTOR_RE, resolveTranscriptProjectsDir, runOutputScan, sendKey, surfaceSizeAlert } from './signatures.ts'
 import type { PersistentReplSubstrateOptions, ResumeDirective } from './types.ts'
 import { ReplSession, authFingerprintFor, httpHealth, mergeEnv, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -77,6 +77,33 @@ async function spawnSession(
   const cfgDir = join(tmpdir(), `neutron-repl-${channelName}`)
   mkdirSync(cfgDir, { recursive: true, mode: 0o700 })
   const cfgBase = join(cfgDir, 'session')
+  /**
+   * Run `fn`, and if it THROWS, delete this spawn's config directory before the error
+   * propagates.
+   *
+   * Everything between the `mkdirSync` above and a live child is a window where the
+   * files exist but nothing owns their cleanup: `unlinkSessionConfigs` runs from the
+   * child-exit handler, which is only registered once there IS a child. A throw in
+   * that window used to strand the directory — and, since the MCP config carries the
+   * dev-channel token and every installed server's env VALUES in plaintext, stranding
+   * it means stranding secrets in `tmpdir()` for the life of the box. The 0600/0700
+   * modes keep them owner-readable, which is not the same as gone.
+   *
+   * Applied to the writers and to the spawn itself rather than by wrapping the whole
+   * function body, so the cleanup sits visibly on each thing that can fail.
+   */
+  const orUnlinkConfigs = <T>(fn: () => T): T => {
+    try {
+      return fn()
+    } catch (err) {
+      try {
+        rmSync(cfgDir, { recursive: true, force: true })
+      } catch {
+        /* best-effort: the throw we are propagating is the interesting one */
+      }
+      throw err
+    }
+  }
   const mcpConfigPath = `${cfgBase}-mcp.json`
   const settingsPath = `${cfgBase}-settings.json`
   const toolsManifestPath = `${cfgBase}-tools.json`
@@ -105,7 +132,7 @@ async function spawnSession(
   if (options.enableToolBridge === true && toolBridge !== undefined) {
     const schemas = toolBridge.listToolSchemas()
     if (schemas.length > 0) {
-      writeFileSync(toolsManifestPath, JSON.stringify(schemas, null, 2))
+      orUnlinkConfigs(() => writeFileSync(toolsManifestPath, JSON.stringify(schemas, null, 2)))
       mcpServers[TOOLS_BRIDGE_SERVER_NAME] = {
         command: 'bun',
         args: [toolsBridgePath],
@@ -165,11 +192,13 @@ async function spawnSession(
   // The config carries the dev-channel token AND (now) every installed server's
   // secrets, so the 0600 mode on this write and the 0700 mode on `cfgDir` above are
   // what keeps them owner-readable. Nothing logs the file's contents.
-  writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2), { mode: 0o600 })
+  orUnlinkConfigs(() =>
+    writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2), { mode: 0o600 }),
+  )
   // Task 6 (T5 write-containment) — forward the optional `permissions` block onto
   // the per-session settings write so a ritual write-containment REPL's deny rules
   // land in `--settings`. Absent ⇒ the Stop-hook-only write, unchanged.
-  buildSettings({
+  orUnlinkConfigs(() => buildSettings({
     settingsPath,
     // WAVE 3.5 task B — wire the TodoWrite→Work Board PostToolUse hook ONLY on the
     // owner's warm conversational REPL (the one that opts into the Neutron tool
@@ -189,7 +218,7 @@ async function spawnSession(
         }
       : {}),
     ...(options.permissions !== undefined ? { permissions: options.permissions } : {}),
-  })
+  }))
 
   // SECURITY-CRITICAL (Codex-r1-P1): thread the spec's declared tool surface into
   // the REPL spawn so the persistent path honors `tools: []` exactly like the
@@ -260,6 +289,11 @@ async function spawnSession(
   session.configPaths = toolBridgeActive
     ? [mcpConfigPath, settingsPath, toolsManifestPath]
     : [mcpConfigPath, settingsPath]
+  // The 0700 DIRECTORY those files live in, so teardown removes it too. Unlinking only
+  // the files left one empty `neutron-repl-<32 hex>` directory in `tmpdir()` per spawn,
+  // forever — invisible, unbounded, and (because the name embeds the channel name) not
+  // something a later spawn ever reuses.
+  session.configDir = cfgDir
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env)
@@ -292,10 +326,31 @@ async function spawnSession(
   // UNCONDITIONALLY so a host-leaked `MCP_CONNECTION_NONBLOCKING=true` can't
   // re-introduce an async-load window.
   childEnv['MCP_CONNECTION_NONBLOCKING'] = 'false'
+  // …AND BOUND HOW LONG THAT BLOCKING LOAD MAY WAIT, once the config holds a server
+  // Neutron did not write.
+  //
+  // The blocking load above was safe when `--mcp-config` contained only our own two
+  // entries: both are `bun` scripts in this repo that hand-shake in milliseconds, so
+  // "wait for the handshake" could not wait long. An owner-installed server is a
+  // third-party program, and a program that accepts a connection and then never
+  // completes `initialize` would hold the blocking load open — inside the 30 s
+  // `readyBudgetMs` of the post-spawn assertion, on the owner's PRIMARY conversational
+  // REPL. The failure would present as `channel-wedged` and take the bounded-respawn
+  // ladder with it, all because of one badly-behaved MCP server.
+  //
+  // `MCP_TIMEOUT` is `claude`'s own MCP-startup timeout (verified present in the CLI's
+  // env-var table in 2.1.223, alongside `MCP_CONNECTION_NONBLOCKING` itself). Bounding
+  // it well under the assertion's ready budget means a hung server costs one slow
+  // spawn and is reported by `claude` as a server that failed to start, instead of
+  // taking the session down. Set ONLY when an installed server is actually wired, so
+  // the no-MCP-servers spawn keeps exactly the startup behaviour it has today.
+  if (wiredExtraNames.length > 0) {
+    childEnv['MCP_TIMEOUT'] = String(OWNER_MCP_STARTUP_TIMEOUT_MS)
+  }
   if (options.skipTrustSeed !== true) {
     const trustInput: Parameters<typeof ensureClaudeTrust>[0] = { cwd }
     if (options.claudeConfigDir !== undefined) trustInput.configDir = options.claudeConfigDir
-    ensureClaudeTrust(trustInput)
+    orUnlinkConfigs(() => ensureClaudeTrust(trustInput))
   }
   if (options.claudeConfigDir !== undefined) {
     childEnv['CLAUDE_CONFIG_DIR'] = options.claudeConfigDir
@@ -469,7 +524,7 @@ async function spawnSession(
   // this child can never refresh a different registry or a respawned successor.
   let liveHandle: LiveProcessHandle | undefined
 
-  const child = ptyHost.spawn(argv, {
+  const child = orUnlinkConfigs(() => ptyHost.spawn(argv, {
     cwd,
     env: childEnv,
     onData: (chunk) => {
@@ -494,7 +549,7 @@ async function spawnSession(
       // retry next tick and double-send onto an approval prompt (invariant §4).
       runOutputScan(session, target, options, now)
     },
-  })
+  }))
   scanChild = child
   session.attachChild(child)
   // Synchronous handle mirror so a respawn can detect alive-but-wedged without
@@ -827,6 +882,17 @@ export async function getOrSpawnSession(
   // fires; it survives a future edit that varies the bridge at a finer grain).
   const requestedToolBridge =
     options.enableToolBridge === true && replToolBridgeRef.current !== undefined
+  // READ THE POOL BEFORE THE FIRST `await`. Two concurrent dispatches on one key
+  // de-duplicate onto a single spawn only because the read below and the `pool.set` at
+  // the end of this function are separated by no suspension point — the second caller
+  // observes the first's in-flight promise. The installed-MCP-server resolver is
+  // ASYNC, so resolving it before this read handed the second caller a `pool.get` that
+  // ran after the first had already awaited, and both would spawn. Two `claude`
+  // children on one transcript is the one-owner-per-transcript violation, and
+  // `open/composer.ts` documents a real second concurrent producer, so this is not
+  // theoretical. Keeping the read first restores the await-free window as an invariant
+  // of the code rather than an accident of what happens to be synchronous today.
+  const existing = pool.get(sessionKey)
   // The installed-MCP-server surface THIS request would spawn with — same shape of
   // problem as the two above and the same resolution. Computed with the identical
   // double gate `spawnSession` applies, so the fingerprint the guard compares is
@@ -847,7 +913,6 @@ export async function getOrSpawnSession(
   // registry `has_session: false` instead of re-`--resume`ing the stale id into the
   // picker (Codex P2). Captured alongside `evictedResume` below.
   let evictedForceFresh = false
-  const existing = pool.get(sessionKey)
   if (existing !== undefined) {
     const session = await existing
     // Capture the resume-picker recovery's directives BEFORE the alive/exited branch

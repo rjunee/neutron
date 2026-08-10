@@ -8,7 +8,8 @@
  *   - `GET    /api/app/mcp-servers`          → the whole picture
  *   - `POST   /api/app/mcp-servers`          → install or replace ({ name, command, args, env })
  *   - `DELETE /api/app/mcp-servers?name=…`   → uninstall
- *   - `POST   /api/app/mcp-servers/decision` → approve or deny ({ name, decision })
+ *   - `POST   /api/app/mcp-servers/decision` → approve or deny
+ *                                              ({ name, decision, grant_hash })
  *
  * Every route answers with the SAME `{ servers }` object, so a client never has to
  * guess what a mutation did — it re-renders from the reply. That convention comes
@@ -26,10 +27,12 @@
  *
  * ── APPROVAL IS AN AFFIRMATIVE ACT, ON A SPECIFIC COMMAND ───────────────────
  * Installing does not approve. `POST /decision` is the only thing that approves, it
- * carries an explicit `decision`, and the store resolves the grant whose hash
- * matches the CURRENTLY installed spec — so a decision can never land on a command
- * other than the one the prompt described. Approval cannot be inferred from silence,
- * from an unrelated request, or from the act of typing a command into a form.
+ * carries an explicit `decision`, AND it carries the `grant_hash` of the spec the
+ * owner was shown — which the store requires to match the installed spec. So a
+ * decision can never land on a command other than the one the prompt described, not
+ * even when the spec was edited from another device between render and press.
+ * Approval cannot be inferred from silence, from an unrelated request, or from the
+ * act of typing a command into a form.
  *
  * ── THE TWO PATHS, AND WHY THE MATCH IS EXACT ───────────────────────────────
  * `/api/app/mcp-servers` is a PREFIX of `/api/app/mcp-servers/decision`. The match
@@ -91,9 +94,19 @@ export function createAppMcpServersSurface(opts: McpServersSurfaceOptions): McpS
           // did make.
           return jsonError(400, 'invalid_decision', "decision must be 'approve' or 'deny'")
         }
-        const result = await store.decide(body?.['name'], decision)
+        // The hash of the spec the owner was LOOKING AT. Required: the store refuses
+        // a decision that does not name the spec it is deciding about, so a prompt
+        // rendered before an edit landed can never be answered as though it described
+        // the new one. See `OwnerMcpServerStore.decide`.
+        const result = await store.decide(body?.['name'], decision, body?.['grant_hash'])
         if (!result.ok) {
-          return jsonError(409, 'decision_stale', result.error ?? 'the decision could not be applied')
+          // The refusal CARRIES THE FRESH LIST. The store has already minted a prompt
+          // for the spec that is actually installed, and a client that only learned
+          // "409" would keep showing the stale one — leaving the owner pressing a
+          // button that reports a conflict he cannot see the cause of.
+          return jsonError(409, 'decision_stale', result.error ?? 'the decision could not be applied', {
+            servers: result.servers,
+          })
         }
         return jsonOk(await payload())
       }

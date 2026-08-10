@@ -16,9 +16,16 @@
  *      unaltered — the client must not summarise what a program is allowed to do.
  *   4. NO VALUE IS EVER RENDERED. The section shows variable NAMES only.
  *   5. A rejected install shows the server's full complaint list and KEEPS the draft.
+ *
+ * AND ONE THING PRESSING CANNOT PROVE. happy-dom lays nothing out, so every assertion
+ * here would pass on a card whose Approve button sits off the right edge — which is what
+ * the first version of this section did, reusing a single-line flex row for a six-block
+ * stack. The last describe block therefore checks the LAYOUT CONTRACT against the real
+ * stylesheet instead of the rendered tree.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 beforeAll(() => {
@@ -48,10 +55,15 @@ const DECISION = `${MCP}/decision`
 /** A value the section must never render. */
 const SECRET = 'sk-not-a-real-key'
 
+/** The digest a decision must echo back — see `OwnerMcpServerStore.decide`. */
+const GRANT_HASH = 'a'.repeat(64)
+
 const GRANT = [
   'Install the MCP server "example-server"?',
   '',
-  '    /usr/local/bin/example-mcp --stdio',
+  '    program  ⟦/usr/local/bin/example-mcp⟧',
+  '',
+  '    arg 1    ⟦--stdio⟧',
   '',
   'It receives these environment variables (names shown, values never):',
   '',
@@ -83,6 +95,7 @@ function row(over: Record<string, unknown> = {}): Record<string, unknown> {
     env_names: ['EXAMPLE_API_KEY'],
     approval: 'pending',
     grant_prompt: GRANT,
+    grant_hash: GRANT_HASH,
     secrets_present: true,
     active: false,
     ...over,
@@ -224,7 +237,13 @@ describe('SettingsTab — MCP servers (happy-dom)', () => {
 
     const decision = calls.find((c) => c.url.endsWith(DECISION))
     expect(decision).toBeDefined()
-    expect(decision!.body).toEqual({ name: 'example-server', decision: 'approve' })
+    // The HASH OF THE ROW HE READ rides along, so the server can refuse the press if the
+    // spec moved between render and click.
+    expect(decision!.body).toEqual({
+      name: 'example-server',
+      decision: 'approve',
+      grant_hash: GRANT_HASH,
+    })
     // The button was WIRED — the row re-rendered from the reply.
     expect(byTestId(container, 'mcp-example-server-active')).not.toBeNull()
     expect(byTestId(container, 'mcp-example-server-approve')).toBeNull()
@@ -244,6 +263,7 @@ describe('SettingsTab — MCP servers (happy-dom)', () => {
     expect(calls.find((c) => c.url.endsWith(DECISION))!.body).toEqual({
       name: 'example-server',
       decision: 'deny',
+      grant_hash: GRANT_HASH,
     })
     root.unmount()
   })
@@ -265,7 +285,12 @@ describe('SettingsTab — MCP servers (happy-dom)', () => {
     )
     expect(byTestId(container, 'mcp-example-server-approve')).toBeNull()
     expect(byTestId(container, 'mcp-example-server-grant')).toBeNull()
-    expect(byTestId(container, 'mcp-example-server-status')!.textContent).toContain('running')
+    // NOT "running": the server is attached when the assistant next starts a session, and
+    // only on its Claude sessions. Overstating the wiring is the failure this whole
+    // feature exists to avoid.
+    const status = byTestId(container, 'mcp-example-server-status')!.textContent ?? ''
+    expect(status).toContain('next session')
+    expect(status.toLowerCase()).not.toContain('running')
     root.unmount()
   })
 
@@ -327,5 +352,132 @@ describe('SettingsTab — MCP servers (happy-dom)', () => {
     expect(byTestId(container, 'mcp-error')).not.toBeNull()
     expect(byTestId(container, 'mcp-empty')).toBeNull()
     root.unmount()
+  })
+
+  it('a REFUSED decision re-renders the prompt the server says is current', async () => {
+    // The 409 carries the fresh list. Without applying it the card kept showing the stale
+    // prompt right next to a message complaining that it was stale, and the only way out
+    // was reloading the page.
+    const fresh = row({ command: '/usr/local/bin/other-mcp', grant_hash: 'b'.repeat(64) })
+    const { container, root, act } = await mount((url, init) => {
+      if (url.endsWith(DECISION) && init?.method === 'POST') {
+        return json(
+          { ok: false, code: 'decision_stale', message: 'older version', servers: [fresh] },
+          409,
+        )
+      }
+      if (url.endsWith(MCP)) return payload([row()])
+      return null
+    })
+    await act(async () => {
+      ;(byTestId(container, 'mcp-example-server-approve') as HTMLButtonElement).click()
+      await tick()
+    })
+    expect(byTestId(container, 'mcp-error')!.textContent).toContain('older version')
+    // The row now describes the command that would ACTUALLY run.
+    expect(byTestId(container, 'mcp-example-server-command')!.textContent).toBe(
+      '/usr/local/bin/other-mcp',
+    )
+    root.unmount()
+  })
+
+  it('the COMMAND and each ARG are rendered on their own line', async () => {
+    // A space-joined argv renders `{command:'a b'}` and `{command:'a',args:['b']}`
+    // identically though they run different programs. The row must not be less honest
+    // than the prompt beneath it.
+    const { container, root } = await mount((url) =>
+      url.endsWith(MCP)
+        ? payload([row({ command: '/usr/local/bin/example mcp', args: ['--flag one', '--other'] })])
+        : null,
+    )
+    expect(byTestId(container, 'mcp-example-server-command')!.textContent).toBe(
+      '/usr/local/bin/example mcp',
+    )
+    expect(byTestId(container, 'mcp-example-server-arg-0')!.textContent).toContain('--flag one')
+    expect(byTestId(container, 'mcp-example-server-arg-1')!.textContent).toContain('--other')
+    root.unmount()
+  })
+
+  it('an env line with no `=` is REFUSED, and nothing is sent', async () => {
+    const { container, root, act, calls } = await mount((url) =>
+      url.endsWith(MCP) ? payload([]) : null,
+    )
+    await act(async () => {
+      type(byTestId(container, 'mcp-form-name')!, 'example-server')
+      type(byTestId(container, 'mcp-form-command')!, '/usr/local/bin/example-mcp')
+      type(byTestId(container, 'mcp-form-env')!, 'EXAMPLE_API_KEY sk-not-a-real-key')
+      await tick()
+    })
+    calls.length = 0
+    await act(async () => {
+      ;(byTestId(container, 'mcp-form-save') as HTMLButtonElement).click()
+      await tick()
+    })
+    // Dropping the line silently would install a server with NO variables, and the reply
+    // listing only the saved names makes that read as a display quirk.
+    expect(byTestId(container, 'mcp-error')!.textContent).toContain('line 1')
+    expect(calls.filter((c) => c.method === 'POST')).toEqual([])
+    root.unmount()
+  })
+})
+
+/**
+ * THE CARD'S LAYOUT, checked against the real stylesheet.
+ *
+ * happy-dom does not lay anything out, so every test above would pass on a card whose
+ * Approve button sits off-screen — which is exactly what happened: the row reused
+ * `.cset-cred-row`, a single-line `display:flex` with no wrap, and the buttons were
+ * pushed past the right edge behind an unshrinkable <pre>. Rendered, correct, and
+ * unreachable.
+ *
+ * A DOM assertion cannot catch that. What CAN is checking the two things the fix
+ * consists of: the row does not use the single-line class, and the class it does use is
+ * declared in `chat-react.html` as a COLUMN. Every class the section emits is also
+ * checked to EXIST, because a typo'd class name is an unstyled element with no error.
+ */
+describe('the MCP card is laid out so its controls cannot be pushed off-screen', () => {
+  const css = readFileSync(new URL('../../chat-react.html', import.meta.url), 'utf8')
+
+  it('does not put a stacked card inside the single-line credential row', () => {
+    const tsx = readFileSync(new URL('../SettingsTab.tsx', import.meta.url), 'utf8')
+    const mcpBlock = tsx.slice(tsx.indexOf('mcp.servers.map'), tsx.indexOf('mcp-form'))
+    expect(mcpBlock).toContain('cset-mcp-row')
+    expect(mcpBlock).not.toContain('cset-cred-row')
+  })
+
+  it('declares .cset-mcp-row as a COLUMN — the structural fix, not a positional one', () => {
+    const rule = css.slice(css.indexOf('.cset-mcp-row {'), css.indexOf('.cset-mcp-head'))
+    expect(rule).toContain('flex-direction: column')
+    expect(rule).toContain('min-width: 0')
+  })
+
+  it('gives the argv and the grant their own overflow containers', () => {
+    // Wide content scrolls inside its own box instead of widening the card and shoving
+    // the buttons out of reach.
+    const argv = css.slice(css.indexOf('.cset-mcp-argv {'), css.indexOf('.cset-mcp-arg '))
+    expect(argv).toContain('overflow-x: auto')
+    const grant = css.slice(css.indexOf('.cset-mcp-grant {'), css.indexOf('.cset-mcp-actions'))
+    expect(grant).toContain('white-space: pre-wrap')
+    expect(grant).toContain('overflow-wrap: anywhere')
+  })
+
+  it('lets the action row WRAP, so three buttons always fit', () => {
+    const actions = css.slice(css.indexOf('.cset-mcp-actions {'))
+    expect(actions.slice(0, 120)).toContain('flex-wrap: wrap')
+  })
+
+  it('every class the section emits is actually declared', () => {
+    // A typo'd class is an unstyled element and no error anywhere.
+    for (const cls of [
+      'cset-mcp-row',
+      'cset-mcp-head',
+      'cset-mcp-name',
+      'cset-mcp-argv',
+      'cset-mcp-arg',
+      'cset-mcp-grant',
+      'cset-mcp-actions',
+    ]) {
+      expect(css).toContain(`.${cls}`)
+    }
   })
 })

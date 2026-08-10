@@ -83,6 +83,20 @@ export const MCP_SERVER_ENV_MAX = 32
 export const MCP_SERVER_ENV_NAME_MAX = 64
 /** Longest accepted env-var value. */
 export const MCP_SERVER_ENV_VALUE_MAX = 4096
+/**
+ * Longest accepted TOTAL env payload, measured on the exact JSON the store writes.
+ *
+ * The per-value cap alone is not enough: the values are persisted as ONE
+ * `JSON.stringify(env)` credential token, and `ProjectCredentialStore` refuses a
+ * token over 8192 bytes. Two max-length values each pass the per-value check and
+ * then blow that cap SERVER-SIDE, which surfaced as a 500 instead of a validation
+ * message the owner could act on. Validating the aggregate here — against the same
+ * string the store will write — is what makes the refusal a complaint rather than an
+ * error. Kept BELOW the store's cap rather than equal to it so the two limits cannot
+ * be off by one; `gateway/__tests__/mcp-servers-store.test.ts` pins the ordering so a
+ * future change to either one cannot silently re-open the gap.
+ */
+export const MCP_SERVER_ENV_TOTAL_MAX = 8000
 /** Most servers one instance may install. */
 export const MCP_SERVERS_MAX = 24
 
@@ -261,6 +275,20 @@ export function parseOwnerMcpServerInput(raw: unknown): ParsedOwnerMcpServer {
     }
   }
 
+  // The AGGREGATE, measured on the exact string the credential store will hold. Only
+  // worth checking once every individual value has passed, and only when there is
+  // something to check — see {@link MCP_SERVER_ENV_TOTAL_MAX}.
+  if (errors.length === 0 && Object.keys(env).length > 0) {
+    const serialized = JSON.stringify(env).length
+    if (serialized > MCP_SERVER_ENV_TOTAL_MAX) {
+      // Sizes only. The complaint describes the SHAPE of the problem and never
+      // echoes a value, because an error message is a log line waiting to happen.
+      errors.push(
+        `the environment variables total ${serialized} characters, over the ${MCP_SERVER_ENV_TOTAL_MAX} limit`,
+      )
+    }
+  }
+
   if (errors.length > 0) return { spec: null, env: {}, errors }
   return {
     spec: { name: rawName, command: rawCommand, args, env_names: Object.keys(env).sort() },
@@ -296,21 +324,43 @@ export function computeMcpServerGrantHash(spec: OwnerMcpServerSpec): string {
  * value appears; the line saying so is part of the promise, because "will it show my
  * API key to whoever is looking at my screen" is the first thing worth answering.
  *
+ * ── THE ARGV BOUNDARIES ARE VISIBLE, AND THAT IS THE WHOLE POINT ────────────
+ * The program and EACH argument get their own line, the arguments numbered in argv
+ * order. An earlier draft joined them with spaces, which made two DIFFERENT grants
+ * render identically: `{command:'a b', args:[]}` (run the program literally named
+ * `a b`) and `{command:'a', args:['b']}` (run `a` with argument `b`) both printed
+ * `a b`. Those hash differently — correctly — so the owner could be shown one thing
+ * and be approving another, which is precisely the class of dishonesty this prompt
+ * exists to prevent. A rendered prompt must distinguish every pair of specs the
+ * grant hash distinguishes, and `runtime/__tests__/mcp-servers.test.ts` asserts that
+ * pairing over adversarial pairs rather than over the wording.
+ *
+ * Each value is wrapped in `⟦…⟧` so leading, trailing and repeated spaces inside a
+ * single argument are visible too — a boundary the owner cannot see is a boundary he
+ * cannot check.
+ *
  * Returned as plain text and displayed verbatim by both clients, so there is no
  * second copy of this wording to drift and no client-side assembly that could show
  * a command different from the hashed one.
  */
 export function renderMcpServerGrant(spec: OwnerMcpServerSpec): string {
-  const commandLine = [spec.command, ...spec.args].join(' ')
   const lines = [
     `Install the MCP server "${spec.name}"?`,
     '',
     'Approving lets your assistant start this program on this machine, with your',
-    'permissions, and call the tools it offers. It runs the command below exactly:',
+    'permissions, and call the tools it offers. It starts exactly this program:',
     '',
-    `    ${commandLine}`,
+    `    program  ⟦${spec.command}⟧`,
     '',
   ]
+  if (spec.args.length === 0) {
+    lines.push('It is passed no arguments.')
+  } else {
+    lines.push('and passes it exactly these arguments, in this order:')
+    lines.push('')
+    for (const [i, arg] of spec.args.entries()) lines.push(`    arg ${i + 1}    ⟦${arg}⟧`)
+  }
+  lines.push('')
   if (spec.env_names.length === 0) {
     lines.push('It receives no environment variables.')
   } else {
@@ -320,7 +370,8 @@ export function renderMcpServerGrant(spec: OwnerMcpServerSpec): string {
   }
   lines.push('')
   lines.push(`Its tools become callable as mcp__${spec.name}. Changing the command, the`)
-  lines.push('arguments or the variable names asks you again.')
+  lines.push('arguments or the variable names asks you again, and removing the server')
+  lines.push('revokes this approval — reinstalling it asks you again too.')
   return lines.join('\n')
 }
 

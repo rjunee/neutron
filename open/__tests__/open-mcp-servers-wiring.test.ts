@@ -244,9 +244,14 @@ describe('the production composer wires installable MCP servers end to end', () 
       // Still nothing wired: installing is not approving.
       expect(await resolve()).toEqual([])
 
+      // The decision echoes the grant hash off the row the install returned — the server
+      // refuses a press that does not name the spec it is about.
+      const rows = ((await installed.json()) as { servers: Array<{ grant_hash: string }> }).servers
+      expect(rows).toHaveLength(1)
       const decided = await b.api('POST', '/api/app/mcp-servers/decision', {
         name: 'example-server',
         decision: 'approve',
+        grant_hash: rows[0]!.grant_hash,
       })
       expect(decided.status).toBe(200)
 

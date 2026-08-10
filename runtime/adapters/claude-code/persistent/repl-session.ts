@@ -3,7 +3,7 @@
 // helpers (D2 split).
 
 import { createHash, randomBytes } from 'node:crypto'
-import { unlinkSync } from 'node:fs'
+import { rmSync, unlinkSync } from 'node:fs'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
 import type { Api5xxWatcherHandle } from './api5xx-dead-turn-watcher.ts'
 import { OutputScanner } from './output-scan.ts'
@@ -163,6 +163,10 @@ export class ReplSession {
    *  `tmpdir()` forever, directly countering the bounding-growth goal (Argus r5
    *  IMPORTANT). Unlinked on dispose + on child exit (covers pool + crash). */
   configPaths: readonly string[] = []
+  /** The 0700 per-spawn directory {@link configPaths} live inside, removed by the same
+   *  teardown. Empty when unset (a test-constructed session), in which case teardown
+   *  unlinks the files and touches no directory. */
+  configDir = ''
   /** F4 — the watchdog live-process handle for THIS incarnation's child, set by
    *  `spawn.ts` right after it registers the PID. The dispatch site uses it to
    *  declare a turn outstanding (`markTurnStarted`) and to clear it in a
@@ -449,6 +453,17 @@ export function unlinkSessionConfigs(session: ReplSession): void {
       unlinkSync(p)
     } catch {
       /* already gone / never written */
+    }
+  }
+  // …and the 0700 directory that held them. `force` so a second call (dispose AND
+  // child-exit both run) is a no-op rather than a throw; `recursive` so a file we did
+  // not know about — a future config, or one `claude` wrote itself — goes with it
+  // instead of keeping the directory alive.
+  if (session.configDir.length > 0) {
+    try {
+      rmSync(session.configDir, { recursive: true, force: true })
+    } catch {
+      /* best-effort, exactly like the unlinks above */
     }
   }
 }

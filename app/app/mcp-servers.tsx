@@ -39,6 +39,8 @@ import {
 import { loadAppConfig } from '../lib/config';
 import {
   McpServersClient,
+  McpServersClientError,
+  parseEnvLines,
   serverSummary,
   splitCommandLine,
   type McpServerRow,
@@ -49,26 +51,6 @@ import { THEME } from '../lib/theme';
 
 function formatErr(err: unknown): string {
   return err instanceof Error ? err.message : 'something went wrong';
-}
-
-/**
- * Parse the env textarea: one `NAME=value` per line.
- *
- * A value may itself contain `=` (tokens do), so only the FIRST `=` splits. A line
- * with no `=` is dropped here and the server would reject the name anyway — but
- * dropping it silently is acceptable only because the form states the format and the
- * saved names come straight back in the response for the owner to check.
- */
-function parseEnvLines(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) continue;
-    out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1);
-  }
-  return out;
 }
 
 export default function McpServersScreen() {
@@ -119,6 +101,13 @@ export default function McpServersScreen() {
         // The draft is KEPT on failure so a rejected command can be corrected in
         // place rather than retyped.
         setError(formatErr(err));
+        // A REFUSED DECISION CARRIES THE CURRENT LIST — apply it. Otherwise the screen
+        // keeps rendering the prompt that was refused for being stale, next to a
+        // message saying it was stale, and the only way out is a manual reload.
+        if (err instanceof McpServersClientError && err.servers !== null) {
+          const servers = err.servers;
+          setPayload((prev) => (prev === null ? prev : { ...prev, servers }));
+        }
       } finally {
         setBusy(false);
       }
@@ -129,13 +118,22 @@ export default function McpServersScreen() {
   const add = useCallback(async () => {
     if (client === null) return;
     const { command, args } = splitCommandLine(commandLine);
+    const { env, errors } = parseEnvLines(envText);
+    // A LINE HE MEANT AS A VARIABLE IS NOT DROPPED. Refuse the whole save and say which
+    // line is wrong, rather than installing a server missing a variable it needs — the
+    // reply would then list only the names that saved, and the absent one reads as a
+    // display quirk instead of the reason nothing works.
+    if (errors.length > 0) {
+      setError(errors.join('; '));
+      return;
+    }
     await mutate(
       () =>
         client.install({
           name: name.trim().toLowerCase(),
           command,
           args,
-          env: parseEnvLines(envText),
+          env,
         }),
       () => {
         setName('');
@@ -175,7 +173,8 @@ export default function McpServersScreen() {
         <Text style={styles.muted}>
           Extra tools for your assistant, each one a program on this machine. Adding a
           server does not start it — you approve it here first, and the request below
-          shows exactly what it would run. One set serves every project.
+          shows exactly what it would run. One set serves every project, and an approved
+          server is attached when your assistant next starts a Claude session.
         </Text>
 
         {error !== null ? (
@@ -216,7 +215,22 @@ export default function McpServersScreen() {
                   <Text style={styles.status} testID={`mcp-${row.name}-status`}>
                     {summary.label}
                   </Text>
-                  <Text style={styles.mono}>{[row.command, ...row.args].join(' ')}</Text>
+                  {/* ONE LINE PER ARGV ENTRY. A space-joined command line renders
+                      `{command:'a b'}` and `{command:'a',args:['b']}` identically
+                      though they run different programs — see `renderMcpServerGrant`.
+                      The row summary must not be less honest than the prompt. */}
+                  <Text style={styles.mono} testID={`mcp-${row.name}-command`}>
+                    {row.command}
+                  </Text>
+                  {row.args.map((arg, i) => (
+                    <Text
+                      key={`${row.name}-arg-${String(i)}`}
+                      style={styles.monoArg}
+                      testID={`mcp-${row.name}-arg-${String(i)}`}
+                    >
+                      {`arg ${String(i + 1)}  ${arg}`}
+                    </Text>
+                  ))}
                   {row.env_names.length > 0 ? (
                     <Text style={styles.footnote}>Variables: {row.env_names.join(', ')}</Text>
                   ) : null}
@@ -236,7 +250,11 @@ export default function McpServersScreen() {
                         testID={`mcp-${row.name}-approve`}
                         disabled={busy}
                         onPress={() => {
-                          if (client !== null) void mutate(() => client.decide(row.name, 'approve'));
+                          if (client !== null) {
+                            void mutate(() =>
+                              client.decide(row.name, 'approve', row.grant_hash),
+                            );
+                          }
                         }}
                         style={({ pressed }) => [
                           styles.primaryBtn,
@@ -254,7 +272,9 @@ export default function McpServersScreen() {
                         testID={`mcp-${row.name}-deny`}
                         disabled={busy}
                         onPress={() => {
-                          if (client !== null) void mutate(() => client.decide(row.name, 'deny'));
+                          if (client !== null) {
+                            void mutate(() => client.decide(row.name, 'deny', row.grant_hash));
+                          }
                         }}
                         style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
                       >
@@ -382,6 +402,7 @@ const styles = StyleSheet.create({
   tagWarn: { color: THEME.warning, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
   status: { color: THEME.text_secondary, fontSize: 12 },
   mono: { color: THEME.text_primary, fontSize: 12, fontFamily: 'Menlo' },
+  monoArg: { color: THEME.text_secondary, fontSize: 11, fontFamily: 'Menlo', paddingLeft: 10 },
   grant: {
     color: THEME.text_secondary,
     fontSize: 11,

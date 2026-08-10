@@ -1582,6 +1582,40 @@
   }
   .cset-cred-row .cset-btn-icon { margin-left: auto; }
   .cset-cred-badge + .cset-btn-icon { margin-left: 0; }
+  /* Installed MCP servers. A DELIBERATELY SEPARATE row class from `.cset-cred-row`,
+     which is a single-line `display:flex` with no wrap: an MCP card stacks six blocks
+     (name, status, command, args, the verbatim grant prompt, three buttons), and laid
+     out as one flex line the buttons were pushed off the right edge behind an
+     unshrinkable <pre>. Rendered, correct, and unreachable — the class of defect a
+     tree-shaped test cannot see, so the fix is structural: this row is a COLUMN, and
+     nothing in it can displace anything else.
+     `min-width:0` on the row is what lets the overflow containers below actually
+     shrink inside a flex parent instead of expanding it. */
+  .cset-mcp-row {
+    display: flex; flex-direction: column; gap: 6px; min-width: 0;
+    padding: 10px 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
+  }
+  .cset-mcp-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .cset-mcp-name { font-weight: 600; font-size: 14px; color: var(--fg); word-break: break-all; }
+  /* The command and each argument, one per line — a space-joined argv hides its own
+     boundaries (see `renderMcpServerGrant`). Long paths SCROLL inside the block rather
+     than widening the card. */
+  .cset-mcp-argv {
+    margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    color: var(--fg); min-width: 0; overflow-x: auto;
+  }
+  .cset-mcp-arg { color: var(--muted); padding-left: 12px; }
+  /* The server-rendered grant, verbatim. Wraps rather than clipping, and scrolls in its
+     own box if a line still cannot wrap, so the approval text is never the thing that
+     stretches the page or hides the buttons under it. */
+  .cset-mcp-grant {
+    margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--bg);
+    border: 1px solid var(--border); color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; min-width: 0;
+    max-height: 260px; overflow-y: auto;
+  }
+  .cset-mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
   /* An inherited global default is read-only HERE — it says where it is changed
      instead of offering a control that would edit every project (ISSUES #486). */
   .cset-cred-managed { flex: 0 0 auto; font-size: 11px; color: var(--muted); white-space: nowrap; }

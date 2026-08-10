@@ -45,10 +45,15 @@ const OWNER = {
 /** A value the screen must never render. */
 const SECRET = 'sk-not-a-real-key';
 
+/** The digest a decision must echo back — see `OwnerMcpServerStore.decide`. */
+const GRANT_HASH = 'a'.repeat(64);
+
 const GRANT = [
   'Install the MCP server "example-server"?',
   '',
-  '    /usr/local/bin/example-mcp --stdio',
+  '    program  ⟦/usr/local/bin/example-mcp⟧',
+  '',
+  '    arg 1    ⟦--stdio⟧',
   '',
   'It receives these environment variables (names shown, values never):',
   '',
@@ -63,6 +68,7 @@ function row(over: Record<string, unknown> = {}): Record<string, unknown> {
     env_names: ['EXAMPLE_API_KEY'],
     approval: 'pending',
     grant_prompt: GRANT,
+    grant_hash: GRANT_HASH,
     secrets_present: true,
     active: false,
     ...over,
@@ -221,7 +227,13 @@ describe('installing is not approving', () => {
 
     const decision = sent.find((s) => s.url.includes('/decision'));
     expect(decision).toBeDefined();
-    expect(decision!.body).toEqual({ name: 'example-server', decision: 'approve' });
+    // The HASH OF THE ROW HE READ rides along, so the server can refuse the press if the
+    // spec moved between render and press.
+    expect(decision!.body).toEqual({
+      name: 'example-server',
+      decision: 'approve',
+      grant_hash: GRANT_HASH,
+    });
     // The button was WIRED — the row re-rendered from the reply.
     expect(byTestId('mcp-example-server-active')).not.toBeNull();
     expect(byTestId('mcp-example-server-approve')).toBeNull();
@@ -235,6 +247,7 @@ describe('installing is not approving', () => {
     expect(sent.find((s) => s.url.includes('/decision'))!.body).toEqual({
       name: 'example-server',
       decision: 'deny',
+      grant_hash: GRANT_HASH,
     });
   });
 
@@ -272,14 +285,63 @@ describe('what the screen shows, and what it never shows', () => {
     await mountScreenUnderTest();
     expect(byTestId('mcp-example-server-approve')).toBeNull();
     expect(byTestId('mcp-example-server-grant')).toBeNull();
-    expect(byTestId('mcp-example-server-status')!.textContent ?? '').toContain('running');
+    // NOT "running": the server is attached when the assistant next starts a session, and
+    // only on its Claude sessions. Overstating the wiring is the failure this feature
+    // exists to avoid.
+    const status = byTestId('mcp-example-server-status')!.textContent ?? '';
+    expect(status).toContain('next session');
+    expect(status.toLowerCase()).not.toContain('running');
   });
 
-  it('an approved server with a MISSING secret is not reported as running', async () => {
+  it('an approved server with a MISSING secret is not reported as usable', async () => {
     getPayload = payload([row({ approval: 'approved', secrets_present: false, active: false })]);
     await mountScreenUnderTest();
     expect(byTestId('mcp-example-server-active')).toBeNull();
     expect(byTestId('mcp-example-server-status')!.textContent ?? '').toContain('missing');
+  });
+
+  it('renders the COMMAND and each ARG on their own line', async () => {
+    // A space-joined argv renders `{command:'a b'}` and `{command:'a',args:['b']}`
+    // identically though they run different programs. The card must not be less honest
+    // than the prompt inside it.
+    getPayload = payload([
+      row({ command: '/usr/local/bin/example mcp', args: ['--flag one', '--other'] }),
+    ]);
+    await mountScreenUnderTest();
+    expect(byTestId('mcp-example-server-command')!.textContent).toBe('/usr/local/bin/example mcp');
+    expect(byTestId('mcp-example-server-arg-0')!.textContent ?? '').toContain('--flag one');
+    expect(byTestId('mcp-example-server-arg-1')!.textContent ?? '').toContain('--other');
+  });
+
+  it('a REFUSED decision re-renders the prompt the server says is current', async () => {
+    // The 409 carries the fresh list. Without applying it the card kept showing the stale
+    // prompt right beside a message complaining that it was stale.
+    getPayload = payload([row()]);
+    await mountScreenUnderTest();
+    mutationReply = {
+      status: 409,
+      body: {
+        code: 'decision_stale',
+        message: 'that request describes an older version of this server',
+        servers: [row({ command: '/usr/local/bin/other-mcp', grant_hash: 'b'.repeat(64) })],
+      },
+    };
+    await press('mcp-example-server-approve');
+    expect(byTestId('mcp-error')!.textContent ?? '').toContain('older version');
+    expect(byTestId('mcp-example-server-command')!.textContent).toBe('/usr/local/bin/other-mcp');
+  });
+
+  it('an env line with no `=` is REFUSED, and nothing is sent', async () => {
+    await mountScreenUnderTest();
+    await typeInto('mcp-form-name', 'example-server');
+    await typeInto('mcp-form-command', '/usr/local/bin/example-mcp');
+    await typeInto('mcp-form-env', `EXAMPLE_API_KEY ${SECRET}`);
+    sent.length = 0;
+    await press('mcp-form-save');
+    // Dropping the line silently would install a server with NO variables, and the reply
+    // listing only the saved names makes that read as a display quirk.
+    expect(byTestId('mcp-error')!.textContent ?? '').toContain('line 1');
+    expect(sent.filter((s) => s.method === 'POST')).toEqual([]);
   });
 });
 

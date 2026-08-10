@@ -684,6 +684,29 @@ there is nothing underneath him.
   granted is which program runs with which variables set. Recomputed every resolve,
   never cached. There is no `auto` policy and no pre-approved server, and a missing
   or garbled `decision` is a 400 rather than a default in either direction.
+- **The decision itself carries the hash it is about.** `POST …/decision` requires
+  `grant_hash`, read off the row that rendered the prompt, and a value that does not
+  match the installed spec is refused (409, with the current list attached so the
+  client re-renders the prompt he now has to read). Without it the store bound the
+  press to whatever was installed at that instant, so editing the server from the
+  other client while a prompt sat on screen turned an Approve for the command he read
+  into an Approve for one he never saw. Given a matching hash the decision applies
+  whether or not a pending row exists — a fresh grant is opened and resolved in the
+  same call — which is what makes deny-then-approve one press instead of a 409 and an
+  unexplained retry.
+- **Uninstalling REVOKES.** `remove()` cancels pending prompts and calls
+  `ApprovalManager.revokeApproved`, transitioning approved rows to `expired`.
+  Otherwise the hash-match alone meant reinstalling a byte-identical command
+  re-matched the old grant and the server came back wired, never shown to him a
+  second time. Editing is different and deliberately leaves the old row alone: he is
+  still curating it. The revoked rows survive with their `args_json` and decider, so
+  the trail still records what was approved.
+- **One writer at a time.** `install`/`remove` read the whole installed list, do
+  async secret work, then rewrite it, so two of them interleaved (the web tab and the
+  phone) lost one of the writes. Both run inside an in-process promise chain and
+  re-read the list within it. The write ORDER is spec-then-secrets, chosen for what a
+  crash in the middle leaves: an unapproved spec with no secrets (doubly not wired),
+  never the old APPROVED command paired with the new secrets.
 - **The prompt is rendered by code** (`renderMcpServerGrant`,
   `runtime/mcp-servers.ts`) from the same fields the hash covers — the name, the
   command, every argument, the variable NAMES, never a value — and states that
@@ -691,6 +714,12 @@ there is nothing underneath him.
   **verbatim**; neither assembles or summarises it, because a prompt that
   misstates what it grants is worse than no prompt (this repo shipped exactly that
   once — see the 2026-08-09 live-agent web-tools entry in `docs/AS_BUILT.md`).
+  **The program and each argument get their own line**, numbered in argv order and
+  wrapped in `⟦…⟧`. A space-joined command line rendered `{command:'a b'}` and
+  `{command:'a', args:['b']}` identically — two different programs, two different
+  hashes, one displayed text — so the test asserts that two specs which hash
+  differently never render the same, not merely that every field appears. Neither
+  client's row summary joins argv either.
 - **Three stores, one join.** `instance_metadata.mcp_servers` (migration 0120)
   holds names/command/args/`env_names`; the VALUES live in the AES-256-GCM
   `project_credentials` store at global scope under `mcp_env.<name>`; the
@@ -711,6 +740,29 @@ there is nothing underneath him.
   in `mcpServers` only makes it START, and its tools would then hit a per-call
   permission prompt no headless REPL can answer. A name colliding with a built-in
   is skipped, not merged.
+- **Only the Claude-backed session gets them, and the UI says so.**
+  `resolveExtraMcpServers` is forwarded onto the Claude REPL options; a project whose
+  provider resolves to a non-Anthropic backend takes the early branch in
+  `gateway/wiring/build-llm-call-substrate.ts`, which speaks the OpenAI-family wire
+  protocol, advertises only the in-process tool manifest, and has no MCP client to
+  hand a stdio subprocess to. So no label claims a server is "running" — an approved
+  row reads "starts it with its next session", and a parity test pins the word out of
+  both clients. Extending that path is a feature, not a wiring fix.
+- **A hung third-party handshake cannot wedge the live chat.**
+  `MCP_CONNECTION_NONBLOCKING=false` makes `claude` await the MCP handshake before
+  accepting input — safe while the config held only our own two `bun` scripts, but an
+  installed program that never completes `initialize` would hold that wait open inside
+  the post-spawn assertion's 30 s ready budget and surface as `channel-wedged`. The
+  load stays blocking and is now bounded by `MCP_TIMEOUT`
+  (`OWNER_MCP_STARTUP_TIMEOUT_MS`, 10 s) whenever an installed server is wired; a
+  spawn with none sets nothing and behaves exactly as before.
+- **The config, secrets and all, is cleaned up on EVERY path.** The MCP config carries
+  the dev-channel token and each server's env values at 0600 inside a 0700 per-spawn
+  directory. A throw between writing it and having a child (the child-exit handler owns
+  cleanup, and there is no child yet) used to strand it; each writer and the spawn now
+  remove the directory on failure. `unlinkSessionConfigs` removes the DIRECTORY as well
+  as the files, which it never did — one empty directory per session had been
+  accumulating in `tmpdir()`.
 - **A change reaches the next turn** by joining the warm-pool freshness guards.
   `claude` reads `--mcp-config` once at startup, so a warm child cannot learn about
   a later install; `mcpSurfaceFingerprint` → `ReplSession.mcpFingerprint` makes the
@@ -725,7 +777,7 @@ there is nothing underneath him.
   child every turn.
 - **Surfaces.** HTTP `gateway/http/app-mcp-servers-surface.ts` — machine-scoped
   `/api/app/mcp-servers` (GET the whole picture, POST install-or-replace, DELETE
-  `?name=`) plus `POST …/mcp-servers/decision` (`{ name, decision }`). Every route
+  `?name=`) plus `POST …/mcp-servers/decision` (`{ name, decision, grant_hash }`). Every route
   answers with the same `{ servers, reserved_names, max_servers }` object, so a
   client re-renders from the reply. The two paths are matched by string EQUALITY,
   never prefix — the collection path is a prefix of the decision path, and a prefix
@@ -733,11 +785,21 @@ there is nothing underneath him.
   that no client can detect. Clients: web
   `landing/chat-react/mcp-servers-client.ts` → `SettingsTab.tsx` § "MCP servers";
   mobile `app/lib/mcp-servers-client.ts` → `app/app/mcp-servers.tsx`, reached from
-  `app/app/settings.tsx`. `splitCommandLine` and `serverSummary` are duplicated
-  across the two bundles (no browser package in Metro) and held in sync by
+  `app/app/settings.tsx`. `splitCommandLine`, `serverSummary` and `parseEnvLines` are
+  duplicated across the two bundles (no browser package in Metro) and held in sync by
   `gateway/__tests__/mcp-servers-client-parity.test.ts` — `splitCommandLine`
   decides what argv a server is installed WITH, so two copies disagreeing would
-  build two different programs from the same pasted line.
+  build two different programs from the same pasted line. Both helpers were also
+  wrong in the same way once, which parity alone cannot catch, so the VALUES are
+  pinned too: a quote only quotes at the START of a segment (`/srv/it's/example-mcp`
+  used to lose the apostrophe and become a different path), and a non-empty env line
+  with no `=` is an ERROR rather than a silently dropped variable.
+- **The web card is a COLUMN, structurally.** It has its own `.cset-mcp-*` classes
+  rather than reusing `.cset-cred-row`, a single-line flex row with no wrap that
+  pushed Approve/Deny off-screen behind an unshrinkable `<pre>` — rendered, correct,
+  and unreachable, which `happy-dom` cannot see. The layout contract (column
+  direction, per-block `overflow-x`, a wrapping action row, every emitted class
+  declared) is asserted against `landing/chat-react.html` itself.
 - **The ApprovalManager is built ONCE** by the composer and handed to the graph as
   `approval_manager`; `build-core-modules` reuses a caller-supplied one exactly as
   it already does for `ChannelRouter`. Two instances over one `tool_approvals`

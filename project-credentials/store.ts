@@ -38,7 +38,15 @@ export const GLOBAL_PROJECT_ID = ''
 /** Max lengths, mirroring the Work Board store's defensive caps. */
 const MAX_SERVICE_LEN = 128
 const MAX_LABEL_LEN = 256
-const MAX_TOKEN_LEN = 8192
+/**
+ * Longest stored plaintext. EXPORTED because a caller that composes a token out of
+ * several owner-supplied pieces has to refuse an oversized payload at ITS boundary,
+ * where the owner is present and can be told which value to shorten — reaching this
+ * cap instead produces a thrown error from an encrypted write, with nothing useful to
+ * say. `runtime/mcp-servers.ts` declares its own lower limit and a test pins the
+ * ordering against this one.
+ */
+export const MAX_TOKEN_LEN = 8192
 
 export type CredentialScope = 'project' | 'global'
 

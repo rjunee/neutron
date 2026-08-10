@@ -8535,3 +8535,41 @@ message); both are mutation-tested, along with each approval guard and each of t
 separable links into the spawn.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.
+
+### 2026-08-10 — Installable MCP servers, review round 2
+
+Eight real holes in the above, found by review rather than by tests, and the shape of
+most of them is the same: **a guard that was enforced everywhere except the one path the
+owner actually uses.**
+
+The grant hash was recomputed on every resolve, matched against the stored row, and
+covered every field — and then the decision that CONSUMED it arrived as
+`{name, decision}` and was bound to whatever spec happened to be installed at that
+instant. Edit the server from the phone while the browser still shows the old request,
+press Approve there, and he approved a command he had never seen. `POST …/decision` now
+requires `grant_hash`; a mismatch is refused with the current list attached so the client
+re-renders. The same change made deny-then-approve a single press instead of a 409 and an
+unexplained retry, because a matching hash is proof of which spec was on screen.
+
+Uninstalling did not revoke, so reinstalling a byte-identical command re-matched the old
+approval and the server came back wired, never re-shown. The approval prompt joined the
+command and its arguments with spaces, so two specs that hash differently — a program
+named `example mcp`, versus `example` with the argument `mcp` — displayed the same text;
+the prompt now itemises argv and the test asserts hash-distinct implies render-distinct.
+Both clients called an approved server "running with your assistant" when nothing runs
+until the next session starts and the servers reach the Claude-backed session only.
+
+The web card reused a single-line flex row for a six-block stack, so Approve sat off the
+right edge — rendered, correct, and unreachable, which the `happy-dom` tests could not
+see; the fix is a column layout with its own classes, checked against the stylesheet.
+Concurrent installs lost each other (read-modify-write with no serialization) and the
+write order paired an old APPROVED command with new secrets on a crash; both fixed. A
+failed spawn stranded the 0600 MCP config — dev-channel token and every server's env
+values — in `tmpdir()`, and nothing ever removed the 0700 directory even on success. And
+the blocking MCP handshake, safe when the config held only our own two scripts, is now
+bounded by `MCP_TIMEOUT` so a hung third-party server cannot wedge the owner's live chat.
+
+Twelve more mutants, each broken, confirmed failing, restored. One survived and was
+instructive: it mutated a line that was not the guard.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md` § What review round 2 changed.
