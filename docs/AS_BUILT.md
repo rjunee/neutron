@@ -8430,3 +8430,21 @@ The wiring test now checks the READ half separately from the write half — the 
 assertion had passed for a whole PR during which nothing read the series.
 
 Detail: `docs/as-built/2026-08-09-usage-dashboard-card.md`.
+
+## 2026-08-09 — The chat agent can search the web
+
+`LIVE_AGENT_TOOL_NAMES` had never contained `WebSearch` or `WebFetch`, and that array
+is the only thing that decides. Reported via a ritual, but it was never ritual-specific:
+ordinary chat could not look anything up either. A missing built-in produces no error,
+only an agent that says it has no such tool, which is why nothing upstream noticed.
+
+The worse half: a ritual declaring a web tool must be approved for `egress: 'web'`
+through a separate grant reading "may reach the public internet". That grant was given
+for `kaizen` over a capability the code could not exercise. An approval prompt that
+overstates what it grants spends the credibility the whole gate rests on.
+
+Guarded by a new test asserting every bundled ritual's declared built-ins are a subset
+of the live surface — the join between two green suites whose union was broken, the same
+shape as the push-kind drift.
+
+Detail: `docs/as-built/2026-08-09-live-agent-web-tools.md`.
