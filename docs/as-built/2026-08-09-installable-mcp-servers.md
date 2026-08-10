@@ -395,7 +395,7 @@ byte-identical:
 | approved row claims "running" again | the no-label-claims-running parity test |
 | web card back on `.cset-cred-row` | the layout-contract test |
 
-Round 3 added five more, same discipline — broken, confirmed failing, restored
+Round 3 added seven more, same discipline — broken, confirmed failing, restored
 byte-identical:
 
 | Mutant | Caught by |
@@ -406,6 +406,7 @@ byte-identical:
 | `remove()` restored to spec-write-then-revoke | both uninstall-ordering tests, including the injected mid-sequence failure |
 | `decided_by` reverted to the project slug | the store attribution test + the surface attribution test |
 | the invisible-character ranges narrowed back to the round-2 set | the every-invisible validator test |
+| `ownerMcpStartupTimeoutMs` returns a flat 10 s (division removed) | both `MCP_TIMEOUT` tests — the 8-server aggregate and the floor |
 
 One round-3 mutant deliberately does NOT fail a test, and that is the point: removing the
 deny-revoke leaves "approve after deny re-wires it" passing, because that test exists to
@@ -439,3 +440,23 @@ reports no new cross-band edge. The new suites:
 `open/__tests__/open-mcp-servers-wiring.test.ts`,
 `landing/chat-react/__tests__/settings-tab-mcp-servers.test.tsx`,
 `app/__tests__/mcp-servers-reachable.test.tsx`.
+
+Round 3 re-ran the same gates plus `bash scripts/ci/depcruise.sh`,
+`depcruise-ratchet-guard.sh`, `composition-wiring-gate.sh`, `route-slot-ratchet-guard.sh`
+and `composition-field-ratchet-guard.sh` — all pass, no new cross-band edge and no shrunk
+baseline.
+
+Two failures in the full local `scripts/run-tests.sh` run are PRE-EXISTING and were
+verified as such by running each one against unmodified `main` in a separate checkout,
+where both fail identically:
+
+- `tests/integration/orphan-survival.test.ts` — the SIGTERM-cleanup case expects the booted
+  gateway to exit 0 and gets 143 (raw SIGTERM) on both.
+- `open/__tests__/open-projects-changed-wiring.test.ts` — the post-onboarding
+  `projects_changed` fan-out case, on both.
+
+Recorded rather than waved through: "pre-existing" is a claim that needs the control run,
+and the control run is what makes it one. Neither touches this feature's files, and CI's own
+`purity` (leak) and `typecheck` gates pass on the PR — the local leak-gate run is NOT
+comparable, because it loads a broader personal denylist and reports the same class of
+finding against unmodified `main` (README, SECURITY, `install.sh`).
