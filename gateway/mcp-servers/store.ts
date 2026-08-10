@@ -122,7 +122,16 @@ export interface McpServerStatus extends OwnerMcpServerSpec {
   grant_hash: string
   /** Whether every declared env var has a stored value. False ⇒ never wired. */
   secrets_present: boolean
-  /** True when this exact spec is approved AND usable, i.e. it is wired right now. */
+  /**
+   * True when this exact spec is approved AND usable — i.e. the next spawn of the
+   * owner's conversational session will attach it.
+   *
+   * NOT "a process is running". `mcpServers` is read once by `claude` at startup, so
+   * nothing is running between turns, and the wiring reaches the CLAUDE-backed session
+   * only (`gateway/wiring/build-llm-call-substrate.ts` returns on its non-Anthropic
+   * branch before any of it). Both clients' labels say that rather than "running";
+   * a `serverSummary` that overstated it was the review finding that renamed this.
+   */
   active: boolean
 }
 
@@ -327,7 +336,7 @@ export class OwnerMcpServerStore {
    * ── ONE PRESS IS ONE DECISION ───────────────────────────────────────────────
    * Given a matching hash, the decision is applied whether or not a pending row is
    * sitting there: a matching pending row is resolved, and if there is none (he
-   * denied it earlier and changed his mind, or the prompt expired on the TTL) a fresh
+   * denied it earlier and changed his mind, or an uninstall cancelled the prompt) a fresh
    * grant is opened and resolved in the same call. This is safe precisely BECAUSE the
    * hash matched — the affirmative act is about a spec that is provably the one that
    * was rendered — and it fixes a deny-then-approve that used to answer 409 and need

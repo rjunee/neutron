@@ -301,7 +301,7 @@ async function spawnSession(
   // turn can never bleed onto a more-privileged warm session.
   const toolSurface = spec.tools.map((t) => t.name)
   const claudeBin = options.claude_bin ?? process.env['CLAUDE_BIN'] ?? 'claude'
-  const argv = buildReplArgv({
+  const argv = orUnlinkConfigs(() => buildReplArgv({
     claudeBin,
     sessionId,
     resume: resume !== undefined,
@@ -341,7 +341,7 @@ async function spawnSession(
     ...(options.permission_mode !== undefined
       ? { permissionMode: options.permission_mode }
       : {}),
-  })
+  }))
 
   session.toolSurface = toolSurface.join(',')
   // Stamp the active project scope this REPL serves (folded into the pool key, so
