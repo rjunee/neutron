@@ -79,6 +79,22 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
+   * Installable MCP servers — `/api/app/mcp-servers` and
+   * `/api/app/mcp-servers/decision`.
+   *
+   * When omitted the routes are unmounted and BOTH clients' MCP-server section can
+   * neither list what is installed nor approve anything — and since approval is the
+   * gate, an unmounted surface means no owner-installed server can ever run. Unlike
+   * the phase-models surface, "cannot change it" and "it stops working" are the same
+   * thing here for anything not already approved.
+   *
+   * Surface factory:
+   * `gateway/http/app-mcp-servers-surface.ts:createAppMcpServersSurface`.
+   */
+  app_mcp_servers_surface?: {
+    handler: (req: Request) => Promise<Response | null>
+  }
+  /**
    * Per-phase model/effort settings — `/api/app/trident/phase-models`.
    *
    * When omitted the route is unmounted and the code-gen Settings section can

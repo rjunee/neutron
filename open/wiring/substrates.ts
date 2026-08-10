@@ -24,6 +24,8 @@
  *     distinctness is the whole fix for a fired reminder tearing down the owner's
  *     warm chat child. Its GRANTS are deliberately identical to the chat lane;
  *     only the SESSION is separate.
+ *   - Only `cc-agent-*` also sets `resolveExtraMcpServers` for installed servers;
+ *     the other substrate families deliberately omit that resolver.
  *   - `cc-trident-fire-*` stays WARM per repo cwd (Map cache, non-ephemeral).
  *   - The `substrateFactory` test-seam is threaded verbatim via the
  *     `...(substrateFactory !== undefined ? { substrateFactory } : {})` spread.
@@ -277,6 +279,20 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // `tools-bridge.ts`). The untrusted import (`cc-import-*`) and
           // disposable Trident (`cc-trident-*`) substrates deliberately omit it.
           enableToolBridge: true,
+          // The owner's APPROVED installed MCP servers — the ONE substrate that gets
+          // them, mirroring `enableToolBridge` exactly. A server the owner installs in
+          // Settings becomes reachable from THIS session and nowhere else: the
+          // untrusted import, the per-project compose and the disposable Trident
+          // substrates omit the resolver, and `spawn.ts` also refuses to apply it
+          // without the tool-bridge opt-in, so a prompt-injection in imported content
+          // has two independent gates between it and a subprocess.
+          //
+          // A resolver, not a list: it is read per dispatch so an install lands on the
+          // next turn (the persistent pool respawns the warm child when the installed
+          // set changes — see `ReplSession.mcpFingerprint`).
+          ...(ctx.resolveMcpServers !== undefined
+            ? { resolveExtraMcpServers: ctx.resolveMcpServers }
+            : {}),
           // O6 — the notice-family sinks + recovered-reply sink are wired ONLY
           // here (the owner's conversational REPL). So a rising-edge dead-turn /
           // size-alert / rate-limit-banner state surfaces as an owner chat bubble

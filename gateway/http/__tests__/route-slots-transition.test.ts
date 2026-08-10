@@ -77,6 +77,11 @@ const EXPECTED_LADDER: ReadonlyArray<[string, string, string | null, boolean]> =
   // mirroring its slot order. Both are machine-scoped settings routes with no
   // project segment, so neither can shadow the other or anything below.
   ['app-trident-phase-models', 'appTridentPhaseModels', 'app_trident_phase_models_surface', true],
+  // Installable MCP servers. RATCHET EXTENSION (the documented "adding a surface"
+  // step), NOT a relaxed assertion: it sits immediately after phase-models, mirroring
+  // its slot order, and is a third machine-scoped settings route with no project
+  // segment — so it can shadow nothing above or below it.
+  ['app-mcp-servers', 'appMcpServers', 'app_mcp_servers_surface', true],
   ['app-launcher', 'appLauncher', 'app_launcher_surface', true],
   ['app-tasks', 'appTasks', 'app_tasks_surface', true],
   ['app-reminders', 'appReminders', 'app_reminders_surface', true],
@@ -477,6 +482,7 @@ function fullComposition(): RouteSlotComposition {
     app_focus_current_surface: { handler: h() },
     app_diagnostics_surface: { handler: h() },
     app_trident_phase_models_surface: { handler: h() },
+    app_mcp_servers_surface: { handler: h() },
     app_admin_surface: { handler: h() },
     app_persona_surface: { handler: h() },
     app_devices_surface: { handler: h() },
@@ -520,6 +526,8 @@ const GATE_FIELDS: readonly (keyof RouteSlotComposition)[] = [
   'app_upload_surface',
   // Local voice transcription install surface (ratchet extension).
   'app_voice_transcription_surface',
+  // Installable MCP servers (ratchet extension).
+  'app_mcp_servers_surface',
   'app_launcher_surface',
   'app_tasks_surface',
   'app_reminders_surface',

@@ -1,0 +1,416 @@
+/**
+ * owner-mcp-servers.test.ts — the owner's installed MCP servers reach the SPAWN.
+ *
+ * Two links, and either can be dropped while the other still passes:
+ *
+ *   1. THE CONFIG. The server must appear in `--mcp-config`'s `mcpServers`, or
+ *      `claude` never starts it.
+ *   2. THE ALLOW-LIST. Its `mcp__<name>` namespace must appear in `--allowedTools`,
+ *      or its tools hit a per-call permission prompt no headless REPL can answer —
+ *      the server starts and is useless.
+ *
+ * They are asserted SEPARATELY, in both the positive and the negative, because
+ * "wired" is a conjunction and a single combined assertion would let half of it rot.
+ *
+ * THE SECURITY BLOCK is the point of the file. The history-import (`cc-import-*`) and
+ * disposable Trident (`cc-trident-*`) REPLs run untrusted content under
+ * `--dangerously-skip-permissions` with `tools: []` default-deny, specifically to close
+ * a prompt-injection vector. An owner-installed MCP server is a SUBPROCESS — strictly
+ * more capability than any built-in tool — so those substrates must receive none, and
+ * the tests assert that they receive none EVEN WHEN handed the resolver, because the
+ * second gate in `spawn.ts` is what makes a future wiring mistake survivable.
+ *
+ * THE REUSE BLOCK pins the two symmetric ways to get warm-session reuse wrong: too
+ * coarse and an installed server never appears until a restart; too sensitive and the
+ * owner pays a cold spawn on every single message. Both are silent in production.
+ */
+
+import { afterEach, describe, expect, it } from 'bun:test'
+import { readFileSync } from 'node:fs'
+
+import type { Event } from '../../../../events.ts'
+import type { ResolvedOwnerMcpServer } from '../../../../mcp-servers.ts'
+import type { SessionHandle } from '../../../../session-handle.ts'
+import type { AgentSpec } from '../../../../substrate.ts'
+import type { PtyChild, PtyHost } from '../pty-host.ts'
+import {
+  createPersistentReplSubstrate,
+  getReplSinkInfo,
+  setReplToolBridge,
+  shutdownAllPersistentRepls,
+  type PersistentReplSubstrateOptions,
+  type ReplToolBridge,
+} from '../persistent-repl-substrate.ts'
+
+afterEach(async () => {
+  await shutdownAllPersistentRepls()
+  setReplToolBridge(undefined)
+})
+
+const EXAMPLE: ResolvedOwnerMcpServer = {
+  name: 'example-server',
+  command: '/usr/local/bin/example-mcp',
+  args: ['--stdio', '--region', 'eu'],
+  env_names: ['EXAMPLE_API_KEY'],
+  env: { EXAMPLE_API_KEY: 'sk-not-a-real-key' },
+}
+
+/** Echo host capturing every spawn's argv (mirrors `tool-bridge.test.ts`). */
+function makeCapturingHost(): { host: PtyHost; argvs: string[][] } {
+  const argvs: string[][] = []
+  let spawns = 0
+  const host: PtyHost = {
+    spawn(argv: string[]): PtyChild {
+      spawns += 1
+      argvs.push(argv)
+      const pid = 410000 + spawns
+      const i = argv.indexOf('--session-id')
+      const r = argv.indexOf('--resume')
+      const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
+      const { port: sinkPort, token } = getReplSinkInfo()
+      let hasExited = false
+      let exitResolve: (code: number | null) => void = () => {}
+      const exited = new Promise<number | null>((res) => {
+        exitResolve = res
+      })
+      const post = (path: string, body: unknown): Promise<unknown> =>
+        fetch(`http://127.0.0.1:${sinkPort}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+          body: JSON.stringify(body),
+        }).catch(() => undefined)
+      let seen = 0
+      const server = Bun.serve({
+        port: 0,
+        hostname: '127.0.0.1',
+        async fetch(req) {
+          const url = new URL(req.url)
+          if (url.pathname === '/health') return Response.json({ ok: true })
+          if (req.method === 'POST' && url.pathname === '/message') {
+            const body = (await req.json()) as { text: string; turn_id?: string }
+            void post('/reply', { session_id: sid, text: `ok=${seen} ${body.text}`, turn_id: body.turn_id })
+            seen += 1
+            return Response.json({ status: 'delivered' })
+          }
+          return new Response('nf', { status: 404 })
+        },
+      })
+      void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+      void post('/channel-bound', { session_id: sid })
+      return {
+        pid,
+        write() {},
+        resize() {},
+        kill() {
+          if (hasExited) return
+          hasExited = true
+          try {
+            server.stop(true)
+          } catch {
+            /* ignore */
+          }
+          exitResolve(143)
+        },
+        exited,
+        hasExited: () => hasExited,
+      }
+    },
+  }
+  return { host, argvs }
+}
+
+function opts(
+  host: PtyHost,
+  extra: Partial<PersistentReplSubstrateOptions>,
+): PersistentReplSubstrateOptions {
+  return {
+    substrate_instance_id: 'cc-agent-acme',
+    cwd: '/tmp/neutron-acme-mcp',
+    ptyHost: host,
+    skipTrustSeed: true,
+    idleQuietMs: 0,
+    skip_permissions: true,
+    user_id: 'u-1',
+    project_id: 'default',
+    credential_identity: 'cred-1',
+    captureConfig: { maxAttempts: 1, attemptDelayMs: 1 },
+    assertConfig: {
+      readyBudgetMs: 5000,
+      readyIntervalMs: 25,
+      healthBudgetMs: 5000,
+      healthIntervalMs: 25,
+    },
+    ...extra,
+  }
+}
+
+function spec(prompt: string, tools: string[] = ['Read']): AgentSpec {
+  return {
+    prompt,
+    tools: tools.map((name) => ({ name })) as AgentSpec['tools'],
+    model_preference: ['claude-opus-4-7'],
+  }
+}
+
+async function drain(handle: SessionHandle): Promise<string> {
+  let text = ''
+  for await (const ev of handle.events as AsyncIterable<Event>) {
+    if (ev.kind === 'token') text += ev.text
+    else if (ev.kind === 'completion') return text
+    else if (ev.kind === 'error') throw new Error(`drain error: ${ev.message}`)
+  }
+  return text
+}
+
+/** A bridge advertising one tool, so `enableToolBridge` actually attaches. */
+function bridge(): ReplToolBridge {
+  return {
+    listToolSchemas: () => [
+      { name: 'doc_search', description: 'search docs', input_schema: { type: 'object' } },
+    ],
+    dispatch: async () => ({ ok: true }),
+  }
+}
+
+function mcpConfig(argv: string[]): {
+  mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>
+} {
+  return JSON.parse(readFileSync(argv[argv.indexOf('--mcp-config') + 1]!, 'utf8'))
+}
+
+function allowedTools(argv: string[]): string[] {
+  const i = argv.indexOf('--allowedTools')
+  return i < 0 ? [] : argv[i + 1]!.split(',')
+}
+
+describe('an approved server reaches BOTH the config and the allow-list', () => {
+  it('appears in mcpServers with its exact command, args and env', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    const entry = mcpConfig(argvs[0]!).mcpServers['example-server']
+    expect(entry).toBeDefined()
+    // The exact argv the approval prompt described — not a normalised variant.
+    expect(entry!.command).toBe('/usr/local/bin/example-mcp')
+    expect(entry!.args).toEqual(['--stdio', '--region', 'eu'])
+    expect(entry!.env).toEqual({ EXAMPLE_API_KEY: 'sk-not-a-real-key' })
+  })
+
+  it('gets its OWN mcp__<name> grant, alongside the tool bridge\'s', async () => {
+    // The second, separable link: in the config but not the allow-list means the
+    // server starts and every tool call hits a prompt nobody can answer.
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    const granted = allowedTools(argvs[0]!)
+    expect(granted).toContain('mcp__neutron')
+    expect(granted).toContain('mcp__example-server')
+  })
+
+  it('keeps the dev-channel sink and the tool bridge working exactly as before', async () => {
+    // The regression that would break chat entirely: merging over a built-in key.
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    const names = Object.keys(mcpConfig(argvs[0]!).mcpServers)
+    expect(names.some((n) => n.startsWith('neutron-'))).toBe(true) // dev-channel reply sink
+    expect(names).toContain('neutron') // in-process tool bridge
+    expect(names).toContain('example-server')
+  })
+
+  it('grants the allow-list for an installed server even with NO bridge tools', async () => {
+    // The bridge attaches only when the registry has ≥1 tool. An empty registry must
+    // not silently switch off the owner's servers, which are unrelated to it.
+    setReplToolBridge({ listToolSchemas: () => [], dispatch: async () => ({}) })
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    expect(allowedTools(argvs[0]!)).toEqual(['mcp__example-server'])
+    expect(mcpConfig(argvs[0]!).mcpServers['neutron']).toBeUndefined()
+  })
+
+  it('resolving NONE leaves the spawn byte-identical to before this feature', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    expect(allowedTools(argvs[0]!)).toEqual(['mcp__neutron'])
+    expect(Object.keys(mcpConfig(argvs[0]!).mcpServers)).toHaveLength(2)
+  })
+
+  it('refuses to let an installed server shadow a built-in name', async () => {
+    // Belt and braces behind the name validator: which of the two survived a
+    // collision would otherwise be decided by merge order.
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        resolveExtraMcpServers: async () => [{ ...EXAMPLE, name: 'neutron' }],
+      }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    // The BRIDGE still owns `neutron`, and the impostor got no grant.
+    expect(mcpConfig(argvs[0]!).mcpServers['neutron']!.command).toBe('bun')
+    expect(allowedTools(argvs[0]!)).toEqual(['mcp__neutron'])
+  })
+})
+
+describe('SECURITY: the untrusted substrates receive nothing', () => {
+  it('an import REPL gets no server and no grant, EVEN handed the resolver', async () => {
+    // `cc-import-*` runs untrusted imported content with `tools: []`. The second gate
+    // in `spawn.ts` (`enableToolBridge` required) is what makes this hold even if a
+    // future wiring change mistakenly passes the resolver here.
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        substrate_instance_id: 'cc-import-acme',
+        project_id: 'import',
+        resolveExtraMcpServers: async () => [EXAMPLE],
+      }),
+    )
+    await drain(sub.start(spec('untrusted chunk', [])))
+
+    const cfg = mcpConfig(argvs[0]!)
+    expect(cfg.mcpServers['example-server']).toBeUndefined()
+    expect(allowedTools(argvs[0]!)).toEqual([])
+    // And the default-deny built-in surface is untouched by any of this.
+    expect(argvs[0]!).toContain('--tools')
+    expect(argvs[0]![argvs[0]!.indexOf('--tools') + 1]).toBe('')
+  })
+
+  it('a disposable Trident REPL gets no server and no grant, EVEN handed the resolver', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        substrate_instance_id: 'cc-trident-acme',
+        project_id: 'build',
+        resolveExtraMcpServers: async () => [EXAMPLE],
+      }),
+    )
+    await drain(sub.start(spec('build something', [])))
+
+    expect(mcpConfig(argvs[0]!).mcpServers['example-server']).toBeUndefined()
+    expect(allowedTools(argvs[0]!)).toEqual([])
+  })
+
+  it('the resolver is not even CALLED on an untrusted substrate', async () => {
+    // Stronger than "the output is empty": an untrusted spawn must not reach into the
+    // owner's credential store to decrypt secrets it can never be given.
+    setReplToolBridge(bridge())
+    const { host } = makeCapturingHost()
+    let calls = 0
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        substrate_instance_id: 'cc-import-acme',
+        project_id: 'import',
+        resolveExtraMcpServers: async () => {
+          calls += 1
+          return [EXAMPLE]
+        },
+      }),
+    )
+    await drain(sub.start(spec('untrusted chunk', [])))
+    expect(calls).toBe(0)
+  })
+
+  it('the config file stays owner-only, secrets and all', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    const path = argvs[0]![argvs[0]!.indexOf('--mcp-config') + 1]!
+    const { statSync } = await import('node:fs')
+    // 0600: the file now carries the dev-channel token AND every installed server's
+    // secrets, so any same-uid process being able to read it would be a real leak.
+    expect(statSync(path).mode & 0o777).toBe(0o600)
+  })
+})
+
+describe('a change takes effect on the next turn, and an unchanged set does not thrash', () => {
+  it('the SAME installed set REUSES the warm child — no cold spawn per message', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('one')))
+    await drain(sub.start(spec('two')))
+    await drain(sub.start(spec('three')))
+    // One spawn for three turns. A fingerprint that varied per call would show 3.
+    expect(argvs).toHaveLength(1)
+  })
+
+  it('an ADDED server evicts and respawns, and the new spawn carries it', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    let installed: ResolvedOwnerMcpServer[] = []
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => installed }),
+    )
+    await drain(sub.start(spec('before')))
+    expect(mcpConfig(argvs[0]!).mcpServers['example-server']).toBeUndefined()
+
+    installed = [EXAMPLE]
+    await drain(sub.start(spec('after')))
+    expect(argvs).toHaveLength(2)
+    expect(mcpConfig(argvs[1]!).mcpServers['example-server']).toBeDefined()
+    expect(allowedTools(argvs[1]!)).toContain('mcp__example-server')
+  })
+
+  it('a REVOKED server evicts too — the child stops being able to reach it', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    let installed: ResolvedOwnerMcpServer[] = [EXAMPLE]
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => installed }),
+    )
+    await drain(sub.start(spec('before')))
+    installed = []
+    await drain(sub.start(spec('after')))
+    expect(argvs).toHaveLength(2)
+    expect(mcpConfig(argvs[1]!).mcpServers['example-server']).toBeUndefined()
+    expect(allowedTools(argvs[1]!)).toEqual(['mcp__neutron'])
+  })
+
+  it('a ROTATED VALUE evicts, because a running child holds the old one', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    let secret = 'sk-first'
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        resolveExtraMcpServers: async () => [{ ...EXAMPLE, env: { EXAMPLE_API_KEY: secret } }],
+      }),
+    )
+    await drain(sub.start(spec('before')))
+    secret = 'sk-second'
+    await drain(sub.start(spec('after')))
+    expect(argvs).toHaveLength(2)
+    expect(mcpConfig(argvs[1]!).mcpServers['example-server']!.env['EXAMPLE_API_KEY']).toBe('sk-second')
+  })
+})
