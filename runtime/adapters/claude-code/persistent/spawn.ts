@@ -229,7 +229,7 @@ async function spawnSession(
   // whose surface differs from the warm REPL's, so a less-privileged (e.g. import)
   // turn can never bleed onto a more-privileged warm session.
   const toolSurface = spec.tools.map((t) => t.name)
-  const argv = buildReplArgv({
+  const argv = orUnlinkConfigs(() => buildReplArgv({
     ...(options.claude_bin !== undefined ? { claudeBin: options.claude_bin } : {}),
     sessionId,
     resume: resume !== undefined,
@@ -260,7 +260,7 @@ async function spawnSession(
         }
       : {}),
     ...(options.skip_permissions !== undefined ? { skipPermissions: options.skip_permissions } : {}),
-  })
+  }))
 
   // Construct + register the session BEFORE spawning so a fast /channel-ready
   // POST from the dev-channel can never race ahead of the sink registration.
