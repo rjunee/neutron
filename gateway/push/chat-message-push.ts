@@ -21,12 +21,24 @@
  *
  * The `project_id` it carries is the ROUTE the tap resolves
  * (`app/lib/push-deep-link-dispatch.ts` → `/projects/<id>/chat?message_id=<id>`),
- * and it is deliberately ABSENT for the no-project General scope — the client
- * owns General's route spelling (`app/lib/project-rail-view.ts` `GENERAL_PROJECT_ID`),
- * and inventing a second copy of that sentinel here is how the `~general` /
- * `#general` / `general` confusion of ISSUES #410/#411 happened in the first place.
+ * and it is ALWAYS PRESENT — including for the no-project General scope, which
+ * names itself with the shared `GENERAL_RAIL_ID` sentinel.
+ *
+ * That was the other way round for one round of review, on the argument that the
+ * client should own General's route spelling and a second copy of the sentinel is
+ * what caused the `~general` / `#general` / `general` confusion of ISSUES
+ * #410/#411. The argument is right about the hazard and wrong about the fix. A
+ * payload that omits the field is MALFORMED to every app bundle already installed
+ * (`resolvePushRoute` on the released client warns and returns null when
+ * `agent_message` carries no project) — and a store artifact cannot be upgraded in
+ * lockstep with a self-hosted gateway, so "the owner taps and the app opens
+ * nowhere" would have survived the fix that was supposed to end it. The real
+ * answer to #410/#411 is ONE definition, not silence: the sentinel lives in
+ * `wire-types/topic-id.ts`, above both sides, and `app/__tests__/general-scope.test.ts`
+ * pins the client's copy to it.
  */
 
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { PUSH_KIND_AGENT_MESSAGE } from '@neutronai/wire-types/push-kind.ts'
 
 /**
@@ -60,12 +72,30 @@ export const CHAT_PUSH_GENERAL_TITLE = 'General'
 export function chatPushExcerpt(body: string, max: number = CHAT_PUSH_BODY_MAX): string {
   const flat = body.replace(/\s+/g, ' ').trim()
   if (flat.length <= max) return flat
-  const clipped = flat.slice(0, max)
+  const clipped = dropDanglingSurrogate(flat.slice(0, max))
   const lastSpace = clipped.lastIndexOf(' ')
   // A single word longer than the whole budget has no boundary to cut on — take
   // the hard clip rather than returning nothing.
   const head = lastSpace > 0 ? clipped.slice(0, lastSpace) : clipped
-  return `${head.replace(/[\s,;:.!?-]+$/, '')}…`
+  const trimmed = head.replace(/[\s,;:.!?-]+$/, '')
+  // A head that is ENTIRELY trailing punctuation strips to nothing, and `…` alone
+  // is a buzz with no words. It also survives the sink's `length === 0` check, so
+  // the guard has to be here rather than there. Fall back to the untrimmed clip,
+  // which cannot be empty because `flat.length > max >= 1`.
+  return `${trimmed.length > 0 ? trimmed : clipped}…`
+}
+
+/**
+ * Drop a LONE high surrogate left at the end by a mid-codepoint clip.
+ *
+ * `slice` counts UTF-16 units, so cutting at a fixed budget can land between the
+ * halves of an emoji. The orphan renders as `�` in the shade — the first
+ * visible character of a notification being a replacement glyph reads as a
+ * corrupted message rather than a truncated one.
+ */
+function dropDanglingSurrogate(s: string): string {
+  const last = s.charCodeAt(s.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? s.slice(0, -1) : s
 }
 
 /** The scope a delivered chat message belongs to, as the tap must route it. */
@@ -82,6 +112,24 @@ export interface ChatMessagePushScope {
  * else (a `web:` topic, a Telegram topic, a malformed string) yields General,
  * because the mobile client only ever binds and hydrates an `app:` topic, so
  * there is no other chat a tap could open.
+ *
+ * WHAT THAT MEANS TODAY, stated plainly so nobody reads the project branch as a
+ * live mode it is not: EVERY out-of-turn producer in the Open composer delivers to
+ * the owner's BARE `app:<user>` topic — fired reminders and rituals
+ * (`open/composer.ts` `reminderGeneralTopic`), the proactive brief + idle nudge
+ * (`proactiveGeneralTopic`), the overnight report (`overnightBriefTopic`) — because
+ * that is the one topic the mobile client binds and hydrates, and suffixing it is
+ * the PR #105 deliver-to-nobody bug. So every notification the owner receives right
+ * now is General-scoped, and that is CORRECT: the message really did land in his
+ * General chat, which is where he asked the tap to take him.
+ *
+ * The project branch is not speculative either — `app:<user>:<project>` is a real
+ * topic the mobile client binds when a project chat is open
+ * (`app/lib/chat-core/use-mobile-chat.ts:300`). It is the answer for the first
+ * producer that posts into one. It is covered by unit tests over this parser, and
+ * deliberately NOT by an integration test, because there is nothing yet to
+ * integrate — a test that claimed otherwise would be asserting a mode no call site
+ * can reach.
  */
 export function chatMessagePushScope(topic_id: string): ChatMessagePushScope {
   if (!topic_id.startsWith('app:')) return { project_id: null }
@@ -124,10 +172,11 @@ export function buildChatMessagePush(input: ChatMessagePushInput): ChatMessagePu
     data: {
       kind: PUSH_KIND_AGENT_MESSAGE,
       message_id: input.message_id,
-      // Omitted for General — see the module docblock. The resolver reads absence
-      // as "the no-project scope", which is why this is a conditional spread and
-      // not a `null`.
-      ...(input.project_id !== null ? { project_id: input.project_id } : {}),
+      // ALWAYS a string, never omitted and never null — General names itself with
+      // the shared sentinel. See the module docblock for why absence was the wrong
+      // encoding: an already-installed app bundle treats a missing project as a
+      // malformed payload and refuses to route at all.
+      project_id: input.project_id ?? GENERAL_RAIL_ID,
     },
   }
 }

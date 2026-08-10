@@ -30,6 +30,7 @@ import {
   httpProjectSegmentEncoded,
 } from '../lib/general-scope'
 import { GENERAL_PROJECT_ID } from '../lib/project-rail-view'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { GENERAL_WORK_BOARD_PROJECT_ID, workBoardPathSegment } from '../lib/work-board-client'
 import { GENERAL_ACTIVITY_SCOPE, activityScopeKey } from '../lib/activity-client'
 import { DocsClient } from '../lib/docs-client'
@@ -41,6 +42,17 @@ describe('the one mapping', () => {
     // client that must not gain the rail-view import chain), so the constant is
     // duplicated. This is the pin that stops the copy drifting.
     expect(RAIL_GENERAL_ID).toBe(GENERAL_PROJECT_ID)
+  })
+
+  test('the GATEWAY spells General the same way — a push payload names this scope', () => {
+    // 2026-08-09: the sentinel is now spoken on BOTH sides of the wire. A
+    // chat-message notification for a General-scope post carries `project_id`
+    // set to this string, and the tap resolver turns it back into the route. If
+    // the gateway's copy and the rail's copy ever differ, the tap lands on a
+    // project that does not exist — silently, because both halves stay green on
+    // their own. `wire-types` holds the definition; this is the pin that proves
+    // the client did not fork it.
+    expect(GENERAL_RAIL_ID).toBe(GENERAL_PROJECT_ID)
   })
 
   test('every client-side spelling of General collapses to the server id', () => {

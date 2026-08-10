@@ -13,6 +13,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { isPushKind, PUSH_KIND_AGENT_MESSAGE } from '@neutronai/wire-types/push-kind.ts'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import {
   buildChatMessagePush,
   buildChatMessagePushSink,
@@ -56,6 +57,33 @@ describe('chatPushExcerpt', () => {
 
   test('a blank body excerpts to the empty string rather than whitespace', () => {
     expect(chatPushExcerpt('   \n\t ')).toBe('')
+  })
+
+  test('never a BARE ELLIPSIS — a head that is all punctuation keeps its characters', () => {
+    // The punctuation strip can empty the head. `…` alone is a buzz with no words,
+    // and it slips past the sink's `length === 0` guard because it IS one character
+    // long, so the notification would fire saying nothing whatsoever.
+    const out = chatPushExcerpt('.'.repeat(200), 20)
+    expect(out).not.toBe('…')
+    expect(out.length).toBeGreaterThan(1)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
+  test('never splits an emoji in half at the clip boundary', () => {
+    // `slice` counts UTF-16 units, so a fixed budget can land between the halves of
+    // a surrogate pair. The orphan renders as the replacement glyph, which reads as
+    // a corrupted message rather than a truncated one.
+    const out = chatPushExcerpt(`${'a'.repeat(9)}🎉🎉🎉`, 10)
+    expect(out).toBe(`${'a'.repeat(9)}…`)
+    expect(out).not.toContain('�')
+    // And the assertion that generalises: no lone surrogate anywhere in the output.
+    for (let i = 0; i < out.length; i++) {
+      const code = out.charCodeAt(i)
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = out.charCodeAt(i + 1)
+        expect(next >= 0xdc00 && next <= 0xdfff).toBe(true)
+      }
+    }
   })
 
   test('the default budget is the exported constant', () => {
@@ -120,12 +148,24 @@ describe('buildChatMessagePush', () => {
     expect(Object.keys(push.data).sort()).toEqual(['kind', 'message_id', 'project_id'])
   })
 
-  test('General OMITS project_id rather than sending null', () => {
-    // Absence is the wire encoding for "the no-project scope"; the client owns
-    // General's route spelling. A literal `null` would be decoded as a string by
-    // nothing and route nowhere.
+  test('General NAMES ITSELF — the field is always a string, never absent or null', () => {
+    // It was the other way round for one round of review: General was encoded by
+    // ABSENCE so the gateway would not have to spell the client's route sentinel.
+    // That breaks every app bundle already on a device — the released resolver
+    // reads `agent_message` with no project as MALFORMED and refuses to route, so
+    // the tap would open the app and go nowhere, which is the reported bug. A store
+    // app and a self-hosted gateway do not upgrade together, so the payload has to
+    // be readable by the client that is already installed.
     const push = buildChatMessagePush({ project_id: null, message_id: 'p1', body: 'x' })
-    expect('project_id' in push.data).toBe(false)
+    expect(push.data['project_id']).toBe(GENERAL_RAIL_ID)
+    expect(typeof push.data['project_id']).toBe('string')
+  })
+
+  test('the General sentinel is the SHARED one, not a second copy', () => {
+    // The `~general` / `#general` / `general` confusion of ISSUES #410/#411 came
+    // from two definitions drifting. There is one, in `wire-types`, and both sides
+    // import it; `app/__tests__/general-scope.test.ts` pins the client's end.
+    expect(GENERAL_RAIL_ID).toBe('~general')
   })
 })
 

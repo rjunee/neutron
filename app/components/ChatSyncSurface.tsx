@@ -50,8 +50,8 @@ import { dispatchUnseenDeepLinks } from '../lib/chat-core/deep-link-dispatch';
 import {
   anchorScrollProps,
   chatDeepLinkAnchor,
+  chatDeepLinkScrollIndex,
   chatInitialAnchor,
-  indexOfChatMessage,
   receiptEligibleMessageId,
   type ChatInitialAnchor,
 } from '../lib/chat-core/chat-initial-anchor';
@@ -592,9 +592,9 @@ export function ChatSyncSurface({
   // (`useRecyclerViewController.tsx:585-591`), so the frozen anchor above has
   // already been spent and the owner stays exactly where he was — which is the
   // complaint. This is the imperative seam that fixes that case, and it is
-  // deliberately NOT a second anchor rule: it asks `chatDeepLinkAnchor` the same
-  // question the render path asks, so on a cold open both agree and neither has to
-  // win a race.
+  // deliberately NOT a second anchor rule: `chatDeepLinkScrollIndex` asks
+  // `chatDeepLinkAnchor` the same question the render path asks, so on a cold open
+  // both agree and neither has to win a race.
   //
   // ONCE PER TARGET. The ref latches the id after a successful jump, so a later
   // `rows` change (a receipt landing, the resume replay appending) cannot yank the
@@ -606,17 +606,22 @@ export function ChatSyncSurface({
   useEffect(() => {
     if (deepLinkTarget.length === 0) return;
     if (honouredDeepLink.current === deepLinkTarget) return;
-    if (indexOfChatMessage(rows, deepLinkTarget) < 0) return;
+    // THE SAME GUARD THE RENDER PATH APPLIES. Without a device id there is no read
+    // watermark, so `chatInitialAnchor` cannot tell an unread run from a read one —
+    // and the two halves of this surface would answer differently for the same
+    // rows, which is the one thing having two paths must never cost.
+    if (selfDeviceId.length === 0) return;
+    const index = chatDeepLinkScrollIndex(rows, selfDeviceId, deepLinkTarget);
+    if (index === null) return;
+    const scrollToIndex = listRef.current?.scrollToIndex;
+    // LATCH ONLY AFTER A SCROLL CAN ACTUALLY HAPPEN. Latching first burned the
+    // target when the ref was not attached yet (a real ordering on a cold mount):
+    // the effect returned having moved nothing, and the `honouredDeepLink` check
+    // then swallowed every retry, so the tap silently did nothing. Leaving the
+    // latch unset means the next `rows` commit tries again with an attached ref.
+    if (typeof scrollToIndex !== 'function') return;
     honouredDeepLink.current = deepLinkTarget;
-    const anchor = chatDeepLinkAnchor(rows, selfDeviceId, deepLinkTarget);
-    // `bottom` is the honest answer when the read signal cannot be trusted
-    // (`chatInitialAnchor` reason 3) — and for a push about the newest message the
-    // bottom IS the message, so scroll to the end rather than inventing an index.
-    if (anchor.kind === 'bottom') {
-      listRef.current?.scrollToEnd?.({ animated: true });
-      return;
-    }
-    listRef.current?.scrollToIndex?.({ index: anchor.index, animated: true });
+    scrollToIndex.call(listRef.current, { index, animated: true });
   }, [deepLinkTarget, rows, selfDeviceId]);
 
   // The owner's jump-to-bottom affordance. Driven off scroll GEOMETRY rather than

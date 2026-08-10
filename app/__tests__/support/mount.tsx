@@ -47,6 +47,17 @@ export interface MountedScreen {
    * and miss the reported one.
    */
   rerender(element: ReactElement): Promise<void>;
+  /**
+   * Run something that pushes state in from OUTSIDE React, inside an act window.
+   *
+   * A fake socket's `onopen` / `onmessage` is such a thing: calling it straight from
+   * a test sets state outside act, so React batches the resulting render on its own
+   * schedule and whether an effect has run by the next assertion depends on
+   * timing. That is a flaky test dressed as a passing one — and this suite asserts
+   * on WHEN a scroll happened relative to a frame arriving, which is exactly the
+   * property such a race destroys.
+   */
+  dispatch(fn: () => void): Promise<void>;
   unmount(): void;
 }
 
@@ -138,6 +149,12 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       // the whole point (see the interface docblock).
       await act(async () => {
         root.render(withComposerDock(next));
+      });
+      await settle();
+    },
+    async dispatch(fn: () => void): Promise<void> {
+      await act(async () => {
+        fn();
       });
       await settle();
     },

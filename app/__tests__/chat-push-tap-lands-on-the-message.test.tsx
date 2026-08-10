@@ -44,7 +44,7 @@ const { AuthSessionProvider } = await import('../lib/session');
 const { ChatSyncSurface } = await import('../components/ChatSyncSurface');
 const { __resetSharedMobileStoreForTests } = await import('../lib/chat-core/op-sqlite-store');
 const { clearSessionCache } = await import('../lib/chat-core/session-cache');
-const { chatDeepLinkAnchor, indexOfChatMessage } = await import(
+const { chatDeepLinkAnchor, chatDeepLinkScrollIndex, indexOfChatMessage } = await import(
   '../lib/chat-core/chat-initial-anchor'
 );
 // The stub BY PATH, not by the `'expo-router'` specifier: the harness aliases that
@@ -150,6 +150,58 @@ describe('chatDeepLinkAnchor — the unread run wins over the exact message', ()
   });
 });
 
+describe('chatDeepLinkScrollIndex — what the IMPERATIVE re-anchor asks for', () => {
+  it('returns null for an unresolvable target, so nothing is scrolled on a guess', () => {
+    const rows = [agentRow('m1', [THIS_DEVICE]), agentRow('m2', null)];
+    expect(chatDeepLinkScrollIndex(rows, THIS_DEVICE, 'not-here')).toBeNull();
+    expect(chatDeepLinkScrollIndex(rows, THIS_DEVICE, '')).toBeNull();
+    expect(chatDeepLinkScrollIndex([], THIS_DEVICE, 'm1')).toBeNull();
+  });
+
+  it('agrees with the render path exactly — one rule, two consumers', () => {
+    // The render path freezes `chatDeepLinkAnchor`; the effect asks this. If the two
+    // could differ, a cold open would race to two positions. Asserted as equality
+    // rather than as two literals, so a change to the rule cannot drift them apart.
+    const rows = [agentRow('m1', [THIS_DEVICE]), agentRow('m2', null), agentRow('m3', null)];
+    const anchor = chatDeepLinkAnchor(rows, THIS_DEVICE, 'm3');
+    expect(anchor.kind).toBe('unread');
+    expect(chatDeepLinkScrollIndex(rows, THIS_DEVICE, 'm3')).toBe(
+      (anchor as { kind: 'unread'; index: number }).index,
+    );
+  });
+
+  it('a RESOLVED target never yields the bottom — the branch that used to handle it was dead', () => {
+    // The effect used to ask `chatDeepLinkAnchor` and then branch on `kind`, with a
+    // `scrollToEnd` arm for `bottom`. That arm could not run: once the target
+    // resolves, every path through the rule returns `unread`. The sweep below is the
+    // proof, so the deletion rests on a measurement rather than on reading the code
+    // carefully — and if the rule ever CAN return `bottom` for a resolved target,
+    // this reds instead of the surface silently scrolling to index 0.
+    const reads: (readonly string[] | null)[] = [null, [], [THIS_DEVICE], ['other-device']];
+    let resolvedCases = 0;
+    for (const r0 of reads) {
+      for (const r1 of reads) {
+        for (const r2 of reads) {
+          const rows = [agentRow('m1', r0), agentRow('m2', r1), agentRow('m3', r2)];
+          for (const target of ['m1', 'm2', 'm3']) {
+            for (const device of [THIS_DEVICE, 'unknown-device']) {
+              const index = chatDeepLinkScrollIndex(rows, device, target);
+              // Every one of these targets IS in the transcript, so a null here would
+              // mean the helper refused a resolvable target.
+              expect(index).not.toBeNull();
+              expect(index).toBeGreaterThanOrEqual(0);
+              expect(index).toBeLessThan(rows.length);
+              resolvedCases += 1;
+            }
+          }
+        }
+      }
+    }
+    // Guards the guard: a loop that swept nothing would pass every line above.
+    expect(resolvedCases).toBe(reads.length ** 3 * 3 * 2);
+  });
+});
+
 // ───────────────────────────── mounted-arm plumbing ───────────────────────────
 
 beforeEach(() => {
@@ -193,14 +245,28 @@ function surface(targetMessageId?: string): ReactElement {
 async function mountChat(targetMessageId?: string): Promise<Screen> {
   const screen = await mountScreen(surface(targetMessageId));
   await screen.settle();
-  FakeChatSocket.current().onopen?.();
-  await screen.settle();
+  await openSocket(screen);
   return screen;
 }
 
+/**
+ * Every socket callback goes through `screen.dispatch`, which runs it inside an act
+ * window. Calling `onmessage` directly sets state from outside React, so the render
+ * it causes is scheduled on React's own terms and "had the effect run by the next
+ * line?" becomes a race. This suite asserts on the ORDER of scrolls against frames
+ * arriving, so that race would make it pass or fail by timing rather than by
+ * behaviour — the kind of green that means nothing.
+ */
+async function openSocket(screen: Screen): Promise<void> {
+  await screen.dispatch(() => {
+    FakeChatSocket.current().onopen?.();
+  });
+}
+
 async function deliver(screen: Screen, frame: Record<string, unknown>): Promise<void> {
-  FakeChatSocket.current().onmessage?.({ data: JSON.stringify(frame) });
-  await screen.settle();
+  await screen.dispatch(() => {
+    FakeChatSocket.current().onmessage?.({ data: JSON.stringify(frame) });
+  });
 }
 
 function deviceIdOnTheWire(): string {
@@ -327,8 +393,7 @@ describe('the chat ROUTE reads ?message_id= off the URL', () => {
       createElement(AuthSessionProvider, { initialUser: OWNER }, createElement(Slot, null)),
     );
     await screen.settle();
-    FakeChatSocket.current().onopen?.();
-    await screen.settle();
+    await openSocket(screen);
 
     const device = deviceIdOnTheWire();
     await deliver(screen, agentMessageFrame('m1', 1, 'first reply'));

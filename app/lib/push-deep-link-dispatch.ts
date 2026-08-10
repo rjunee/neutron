@@ -11,23 +11,43 @@
  * Payload shape (as written by `gateway/push/chat-message-push.ts` +
  * the Core emitters):
  *
- *   - `{kind: 'agent_message', message_id, project_id?}`
+ *   - `{kind: 'agent_message', message_id, project_id}`
  *       → `/projects/<pid>/chat?message_id=<mid>`
  *
  *     THE ONE SHAPE A CHAT MESSAGE TAKES — a fired reminder, a ritual post, an
- *     agent post. `project_id` is ABSENT when the message landed in the
- *     no-project General scope, and that absence is the ENCODING, not a
- *     malformed payload: the gateway deliberately does not name General's route
- *     spelling, because the client owns it (`GENERAL_PROJECT_ID`, and the
- *     `~general` / `#general` / `general` confusion of ISSUES #410/#411 is what a
- *     second copy of that sentinel costs).
+ *     agent post, a brief, a nudge. `project_id` is always present; for the
+ *     no-project General scope it is the shared `GENERAL_RAIL_ID` sentinel
+ *     (`wire-types/topic-id.ts`), which is the one definition both sides import.
+ *     A missing one is still tolerated and read as General, because a payload
+ *     already sitting in the notification shade was built by whatever gateway
+ *     version delivered it.
  *
- *     Until 2026-08-09 there was a `reminder` kind here that routed to
- *     `/projects/<pid>/reminders` — the Reminders TAB, not the chat the message
- *     was actually in — and it was composed from the reminder ROW, so a ritual
- *     fire notified the owner with the literal dispatch token `ritual:<id>`. Both
- *     halves are gone: the notification is a chat message and the tap opens the
- *     chat. See `wire-types/push-kind.ts`.
+ *   - `{kind: 'reminder', reminder_id, project_id?}`
+ *       → `/projects/<pid>/reminders?reminder_id=<rid>`
+ *
+ *     LEGACY, DECODE-ONLY — no sender remains (grep-verified: no `PUSH_KIND_REMINDER`
+ *     and no `kind: 'reminder'` producer anywhere in the gateway). Until 2026-08-09
+ *     this was how a fired reminder notified, composed from the reminder ROW, which
+ *     is why a ritual fire put the literal dispatch token `ritual:<id>` on the
+ *     owner's lock screen and why the tap opened the Reminders TAB instead of the
+ *     chat the message was in. Both are fixed by `agent_message` above.
+ *
+ *     THIS BRANCH STAYS ANYWAY, and it is not a dual code path — there is exactly
+ *     one SENDER. It is the DECODER for payloads that already exist: notifications
+ *     sitting undismissed in the shade right now, and any gateway a self-hoster has
+ *     not upgraded yet. A store-published app and a self-hosted gateway do not
+ *     upgrade atomically, so deleting the decoder would turn those taps into the
+ *     "opens the app and nothing routes" the change exists to end. It also keeps the
+ *     reminders deep-link surface (ISSUE #38 — `app/app/projects/[id]/reminders.tsx`
+ *     + `ReminderList`'s highlight/scroll) reachable rather than orphaned.
+ *
+ *     One thing DID change: an UNRESOLVABLE project no longer refuses outright. A
+ *     project-scoped legacy reminder carries its project as `topic_id =
+ *     'app-project:<id>'` and resolves fine; a GENERAL one carried no project field
+ *     at all (only `project_slug`, the owner slug), so this branch used to return
+ *     null for every General reminder notification ever sent — the owner's *"it
+ *     opens the app but not the right project"*, in the code. It now falls back to
+ *     General, whose tab lists every reminder, so a legacy tap lands somewhere true.
  *
  *   - `{kind: 'wow_fired', project_id}` → `/projects/<pid>/chat` (no sender today)
  *   - `{kind: 'calendar_pre_meeting_brief', project_id, event_id}` → `/projects/<pid>/chat`
@@ -93,11 +113,12 @@ export function resolvePushRoute(
 
   // A CHAT MESSAGE — the one shape a reminder, a ritual and an agent post share.
   //
-  // A missing `project_id` means the General (no-project) scope, NOT a bad
-  // payload: that is the wire encoding (see the module docblock), and General's
-  // route id lives in exactly one place on this side of the wire. A missing
-  // `message_id` still opens the right chat — the transcript then lands wherever
-  // its own unread anchor puts it, which is strictly better than not routing.
+  // A missing `project_id` is read as General rather than refused. The live sender
+  // always writes one, so this only forgives an older gateway's payload — and
+  // refusing it would mean "the app opened and nothing routed", which is the exact
+  // complaint. A missing `message_id` still opens the right chat: the transcript
+  // then lands wherever its own unread anchor puts it, which is strictly better
+  // than not routing.
   if (kind === 'agent_message') {
     const target = project_id ?? GENERAL_PROJECT_ID;
     const message_id =
@@ -113,6 +134,27 @@ export function resolvePushRoute(
     return (
       `/projects/${encodeURIComponent(target)}/chat` +
       `?message_id=${encodeURIComponent(message_id)}`
+    );
+  }
+
+  // LEGACY, DECODE-ONLY — see the module docblock. No sender remains; this keeps
+  // taps working on notifications that were already delivered and on gateways a
+  // self-hoster has not upgraded. Kept OUT of `PUSH_KINDS` for the same reason
+  // `wow_fired` is: that list is what the system SENDS, and padding it with a kind
+  // nothing emits is what let the two lists drift into being disjoint.
+  if (kind === 'reminder') {
+    const reminder_id =
+      typeof payload.reminder_id === 'string' && payload.reminder_id.length > 0
+        ? payload.reminder_id
+        : null;
+    if (reminder_id === null) {
+      warn('legacy reminder payload has no reminder_id', { project_id });
+      return null;
+    }
+    const target = project_id ?? GENERAL_PROJECT_ID;
+    return (
+      `/projects/${encodeURIComponent(target)}/reminders` +
+      `?reminder_id=${encodeURIComponent(reminder_id)}`
     );
   }
 
@@ -148,18 +190,31 @@ export function resolvePushRoute(
   return null;
 }
 
+/** The topic prefix a project-scoped reminder row wears (`reminders/store.ts:474`). */
+const APP_PROJECT_PREFIX = 'app-project:';
+
 /**
  * The project a payload names, or null.
  *
- * There used to be a second source here: `topic_id = 'app-project:<project_id>'`,
- * the shape the retired `reminder` push carried instead of a project id. Every
- * live sender writes `project_id` outright, so the fallback had no producer left
- * once that kind was deleted — and a decode path with no encoder is a branch that
- * cannot be exercised, which is how a wrong one survives.
+ * TWO SOURCES, and the second one is not dead code. The live sender writes
+ * `project_id` outright. The retired `reminder` sender wrote the OWNER slug into
+ * `project_slug` and — only when the reminder row had one — the row's own
+ * `topic_id`, which for a project-scoped reminder is `app-project:<project_id>`
+ * (`git show main:gateway/push/dispatcher.ts:277`, read before writing this).
+ * So a legacy notification for a project reminder carries its project ONLY here,
+ * and dropping this decode would land those taps on the General tab instead of
+ * the project they belong to.
  */
 function resolveProjectId(payload: PushPayload): string | null {
   if (typeof payload.project_id === 'string' && payload.project_id.length > 0) {
     return payload.project_id;
+  }
+  if (
+    typeof payload.topic_id === 'string' &&
+    payload.topic_id.startsWith(APP_PROJECT_PREFIX)
+  ) {
+    const id = payload.topic_id.slice(APP_PROJECT_PREFIX.length);
+    return id.length > 0 ? id : null;
   }
   return null;
 }

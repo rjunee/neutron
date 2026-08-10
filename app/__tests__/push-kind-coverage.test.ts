@@ -33,6 +33,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import { PUSH_KINDS, type PushKind } from '@neutronai/wire-types/push-kind.ts';
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts';
 import { buildChatMessagePush } from '@neutronai/gateway/push/chat-message-push.ts';
 import { resolvePushRoute, type PushPayload } from '../lib/push-deep-link-dispatch';
 
@@ -110,10 +111,32 @@ describe('the chat-message kind, end to end across the two sides', () => {
       message_id: 'msg-2',
       body: 'morning brief',
     });
-    // The sender omits the field; the resolver reads the omission as General.
-    expect('project_id' in built.data).toBe(false);
+    // The sender NAMES General with the shared sentinel rather than omitting the
+    // field: an app bundle already installed reads an absent project as malformed
+    // and refuses to route, and a store app cannot be upgraded in lockstep with a
+    // self-hosted gateway.
+    expect(built.data['project_id']).toBe(GENERAL_RAIL_ID);
     const route = resolvePushRoute(built.data as PushPayload, { warn: () => {} });
     expect(route).toBe('/projects/~general/chat?message_id=msg-2');
+  });
+
+  test('the ROW ID the gateway put in reaches the route the client will open', () => {
+    // THE LINKAGE, walked rather than assumed. The previous version of this file
+    // asserted the ROUTE and left `message_id` to a hand-written fixture that
+    // happened to use the same literal as the sender's test — so a gateway that
+    // renamed the field, or dropped it, would have kept both green. Here the id is
+    // generated, handed to the SENDER, and read back out of the resolver's OUTPUT,
+    // so nothing in the chain is transcribed by hand.
+    const rowId = `durable-${Math.random().toString(36).slice(2, 10)}`;
+    const built = buildChatMessagePush({
+      project_id: 'acme',
+      message_id: rowId,
+      body: 'the composed body',
+    });
+    const route = resolvePushRoute(built.data as PushPayload, { warn: () => {} });
+    expect(route).not.toBeNull();
+    const query = new URLSearchParams((route as string).split('?')[1] ?? '');
+    expect(query.get('message_id')).toBe(rowId);
   });
 });
 

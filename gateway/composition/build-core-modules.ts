@@ -391,9 +391,11 @@ export function buildCoreModules(
       // `on_fired` and composed a notification from the reminder ROW — which for a
       // ritual is the dispatch token `ritual:<id>`, so the owner's lock screen read
       // `ritual:kaizen`. The tick cannot see the message the fire posted, so it was
-      // never a place a truthful chat notification could be built; it is composed
-      // where the message is delivered instead
-      // (`gateway/proactive/reminder-outbound.ts`).
+      // never a place a truthful chat notification could be built. It is composed
+      // by the ONE out-of-turn delivery seam instead (`gateway/http/deliver.ts` →
+      // its `notify` sink), which knows the posted text and the durable row id AND
+      // is shared by every producer, so a brief and a nudge notify the same way a
+      // fired reminder does.
       // Rituals (ISSUES #504) — install the ritual fire PLANNER now that the
       // graph's ApprovalManager exists. NOTE what is NOT here: the tick loop gets
       // no ritual option, because a ritual is not a special kind of fire. The

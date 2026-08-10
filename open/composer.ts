@@ -2415,8 +2415,50 @@ export function buildOpenGraphComposer(
     // `buildAppWsSendReply` / `landing.registry`, touched only at FIRE time (tick
     // loop / brief cron / notice edge), long after boot wires the adapter — never
     // during composition. NO feature flag.
+    // NATIVE PUSH — the transport. `/api/app/devices/{register,unregister}`
+    // (mounted further down over this SAME store) records the owner's device
+    // tokens; this is the half that sends to them.
+    //
+    // ALWAYS ON, and safe to be: every send reads the token table first and
+    // returns before any fetch when the list is empty, so the zero-device state a
+    // fresh install starts in makes no network call at all.
+    //
+    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
+    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
+    const devicePushTokens = new DevicePushTokenStore(db)
+    const pushTransport = createPushDispatcher({
+      store: devicePushTokens,
+      client: createExpoPushClient(
+        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
+          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
+          : {},
+      ),
+    })
+    // THE NOTIFICATION FOR A CHAT MESSAGE, composed from the chat message, and
+    // handed to `deliver` below so EVERY out-of-turn post carries it — the fired
+    // reminder, the ritual, the morning brief, the idle nudge, the overnight
+    // report. Built here (above `deliver`) rather than beside the reminder
+    // dispatcher because it is no longer a reminder's concern.
+    //
+    // 2026-08-09, owner-reported: his phone said `ritual:kaizen`. The push was
+    // composed in the reminder TICK from the reminder ROW, and a ritual row's
+    // `message` IS that dispatch token — so the notification could never contain
+    // the text that got posted, and the payload carried the owner slug where the
+    // tap needed a project id. Both halves of his complaint were that one mistake.
+    //
+    // `project_slug` is the key `/api/app/devices/register` writes its rows under
+    // (`gateway/http/app-devices-surface.ts:206` — the resolved owner bearer's
+    // slug). Reading and writing under one key is what makes "a registered device
+    // is a notified device" true rather than aspirational.
+    const chatMessagePush = buildChatMessagePushSink({
+      fanOut: pushTransport,
+      project_slug,
+    })
     const deliver: Deliver = createDeliver({
       buttonStore: landing.buttonStore,
+      // Every durably-posted out-of-turn message notifies the owner's devices;
+      // a transient `durability: 'none'` pill does not (no row, nothing to tap).
+      notify: chatMessagePush,
       push: {
         // `buildAppWsSendReply` now AWAITS the app-ws adapter and classifies its real
         // result marker, so `delivered_live` reflects the TRUE fan-out (an offline
@@ -2469,51 +2511,10 @@ export function buildOpenGraphComposer(
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
     const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
       reminderGeneralTopic
-    // NATIVE PUSH — the transport. `/api/app/devices/{register,unregister}`
-    // (mounted further down over this SAME store) records the owner's device
-    // tokens; this is the half that sends to them.
-    //
-    // ALWAYS ON, and safe to be: every send reads the token table first and
-    // returns before any fetch when the list is empty, so the zero-device state a
-    // fresh install starts in makes no network call at all.
-    //
-    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
-    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
-    const devicePushTokens = new DevicePushTokenStore(db)
-    const pushTransport = createPushDispatcher({
-      store: devicePushTokens,
-      client: createExpoPushClient(
-        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
-          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
-          : {},
-      ),
-    })
-    // THE NOTIFICATION FOR A CHAT MESSAGE, composed from the chat message.
-    //
-    // 2026-08-09, owner-reported: his phone said `ritual:kaizen`. The push used to
-    // be composed in the reminder TICK from the reminder ROW, and a ritual row's
-    // `message` IS that dispatch token — so the notification could never contain
-    // the text that got posted, and the payload carried the owner slug where the
-    // tap needed a project id. Both halves of his complaint were that one mistake.
-    // The sink below is handed the DELIVERED body + the durable row id by
-    // `buildButtonStoreReminderOutbound`, so a nudge and a ritual produce the same
-    // notification because they take the same path.
-    // `project_slug` is the key `/api/app/devices/register` writes its rows under
-    // (`gateway/http/app-devices-surface.ts:206` — the resolved owner bearer's
-    // slug), and the same slug every reminder row carries as `owner_slug`. Reading
-    // and writing under one key is what makes "a registered device is a notified
-    // device" true rather than aspirational.
-    const chatMessagePush = buildChatMessagePushSink({
-      fanOut: pushTransport,
-      project_slug,
-    })
     // ONE outbound + ONE runs store hoisted so the nudge dispatcher, the ritual
     // executor, and the boot reap all post through / write to the SAME instances
     // (one deliver seam, one `code_ritual_runs` writer).
-    const reminderOutbound = buildButtonStoreReminderOutbound({
-      deliver,
-      chat_push: chatMessagePush,
-    })
+    const reminderOutbound = buildButtonStoreReminderOutbound({ deliver })
     const ritualRuns = createRitualRunStore(db)
     const reminder_dispatcher = buildReminderDispatcher({
       outbound: reminderOutbound,
@@ -2715,6 +2716,15 @@ export function buildOpenGraphComposer(
     // contain a current-boot 'running' row (`code_ritual_runs` has no boot_id;
     // ordering IS the current-boot safety). The prune chains after the reap.
     // fireAndForget precedent: the boot dispatch sweep just above (composer:888).
+    //
+    // 2026-08-09 — this NOW NOTIFIES, and that is intended rather than incidental.
+    // The reap posts one chat message per run it found orphaned, through the same
+    // `reminderOutbound` → `deliver` path everything else uses, so those posts pick
+    // up the device notification like any other. A ritual that died mid-flight is
+    // exactly the kind of thing the owner should learn about without opening the
+    // app. It is bounded by design: the reap only speaks for runs left 'running' by
+    // a PRIOR boot, so the steady state is zero messages and a restart storm cannot
+    // manufacture new ones (a reaped row is settled, not re-reaped).
     fireAndForget(
       'composer.reapOrphanRitualRuns',
       reapOrphanRitualRuns({

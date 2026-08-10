@@ -381,16 +381,24 @@ describe('LINK 3 — push has a producer, and it is the DELIVERED MESSAGE', () =
       expect(batch[0]!.data.kind).toBe('agent_message')
       expect(typeof batch[0]!.data.message_id).toBe('string')
       expect(batch[0]!.data.message_id!.length).toBeGreaterThan(0)
-      // General is the no-project scope, and absence is how the wire says so.
-      expect(Object.prototype.hasOwnProperty.call(batch[0]!.data, 'project_id')).toBe(false)
+      // General names itself. An app bundle already on a device reads a payload
+      // with no project as malformed and refuses to route at all.
+      expect(batch[0]!.data.project_id).toBe('~general')
     })
   })
 
-  test('a RITUAL row notifies with the same shape — never the `ritual:<id>` token', async () => {
-    // The owner's exact complaint. A ritual row carries its dispatch token in
-    // `message`; with no approval grant on this box the planner refuses to compose
-    // the ritual, so the assertion that matters here is the one that would have
-    // failed before: whatever reaches Expo, it is never that token.
+  test('an UNAPPROVED ritual row notifies NOTHING — fail-closed, all the way to Expo', async () => {
+    // A ritual row carries its dispatch token in `message`, and on a box with no
+    // approval grant the planner refuses to compose it. So the honest assertion
+    // here is that NOTHING was sent — stated as an empty collection.
+    //
+    // It used to be written as `for (const msg of sent) expect(msg.body).not.toContain('ritual:')`,
+    // which passed over zero notifications and therefore proved nothing at all
+    // about the reported bug. The positive case — an APPROVED ritual whose
+    // notification carries the COMPOSED report and never the token — needs a
+    // granted approval and a composing turn, so it lives where those can be wired:
+    // `gateway/push/__tests__/ritual-post-notifies-as-a-chat-message.test.ts`,
+    // which drives the real planner, dispatcher, outbound, deliver and sink.
     const h = await boot()
     await registerDevice(h.base, 'ExponentPushToken[ritual-device]')
 
@@ -398,13 +406,50 @@ describe('LINK 3 — push has a producer, and it is the DELIVERED MESSAGE', () =
       await h.composition.reminder_dispatcher!.dispatch(
         reminderRow({ id: 'rem-ritual', message: 'ritual:kaizen', ritual_id: 'kaizen' }),
       )
-      for (const call of sent) {
-        const batch = call.body as Array<{ body: string; data: { kind: string } }>
-        for (const msg of batch) {
-          expect(msg.body).not.toContain('ritual:')
-          expect(msg.data.kind).toBe('agent_message')
-        }
-      }
+      expect(sent).toEqual([])
+    })
+  })
+
+  test('a NON-REMINDER post notifies too — the notification is not a reminder feature', async () => {
+    // THE GAP THE FIRST ROUND OF THIS FIX LEFT. The morning brief, the idle nudge,
+    // the overnight report and the system notices do not go through the reminder
+    // outbound at all — they post through other sinks over the SAME `deliver` — so
+    // a notification wired to the reminder path left every one of them silent.
+    //
+    // Driven through `POST /api/app/system-notice`, a REAL out-of-turn producer
+    // that is not a reminder and whose durability is `'inert'` rather than
+    // `'reply'`. It reaches the same `deliver` the proactive sink is built over
+    // (`open/composer.ts` — `buildButtonStoreProactiveSink({ deliver })`), so it
+    // proves the notification is a property of the SEAM and not of one producer.
+    const h = await boot()
+    const token = 'ExponentPushToken[notice-device]'
+    await registerDevice(h.base, token)
+
+    await withExpoStub([{ status: 'ok' }], async (sent) => {
+      const res = await fetch(`${h.base}/api/app/system-notice`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${OWNER_BEARER}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ body: 'Morning brief: three things today.' }),
+      })
+      expect(res.status).toBe(200)
+
+      expect(sent).toHaveLength(1)
+      const batch = sent[0]!.body as Array<{
+        to: string
+        title: string
+        body: string
+        data: { kind: string; message_id?: string; project_id?: string }
+      }>
+      expect(batch).toHaveLength(1)
+      expect(batch[0]!.to).toBe(token)
+      expect(batch[0]!.body).toBe('Morning brief: three things today.')
+      expect(batch[0]!.title).toBe('General')
+      expect(batch[0]!.data.kind).toBe('agent_message')
+      expect(batch[0]!.data.project_id).toBe('~general')
+      expect(typeof batch[0]!.data.message_id).toBe('string')
     })
   })
 

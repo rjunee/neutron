@@ -34,6 +34,22 @@
  *
  * The composer wires deliver ONCE at the composition root (the sole place that
  * names the concrete registries) and injects it into every producer.
+ *
+ * ── 2026-08-09 — THE NATIVE NOTIFICATION IS A FOURTH THING DELIVER OWNS ──────
+ *
+ * The owner's report was about a ritual: his lock screen said `ritual:kaizen`
+ * instead of the text that got posted. The first fix composed the notification in
+ * the reminder OUTBOUND, which cured that message and left every other
+ * out-of-turn post silent — the morning brief, the idle nudge and the overnight
+ * report all reach the owner's chat through this same seam and none of them
+ * notified anybody. A per-producer notification is the same shape of mistake as
+ * the per-producer registry pick this module exists to have ended.
+ *
+ * So it lives HERE, once, and the rule is the one the owner stated: *"a ritual
+ * posting is just a chat message"* — and so is a brief, and so is a nudge. If a
+ * post got a DURABLE ROW, the owner is notified about it; a `durability: 'none'`
+ * transient pill is not notified, because there is no row for a tap to land on.
+ * A producer can no longer notify differently, or forget to.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -44,6 +60,8 @@ import type { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { parseAnyTopicId } from '@neutronai/channels/topic-id.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import { createLogger } from '@neutronai/logger'
+
+import { chatMessagePushScope, type ChatMessagePushSink } from '../push/chat-message-push.ts'
 
 const moduleLog = createLogger('deliver')
 
@@ -120,6 +138,16 @@ export interface DeliverPushTargets {
 export interface CreateDeliverInput {
   buttonStore: ButtonStore
   push: DeliverPushTargets
+  /**
+   * The owner's DEVICES — the native notification for a message that just landed
+   * in chat. Fires for every post that got a durable row (`'reply'` and
+   * `'inert'`) and never for `'none'`, which has no row for a tap to open.
+   *
+   * Absent ⇒ posts are durable + live-pushed exactly as before and no device is
+   * notified: the state of a box with no registered device, and what every test
+   * that does not care about push wants.
+   */
+  notify?: ChatMessagePushSink
   log?: (msg: string) => void
 }
 
@@ -152,6 +180,29 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       // the owner on the next hydration.
       log(`${LOG_TAG} live push failed (durable row is the guarantee) topic=${topic_id}: ${errMsg(err)}`)
       return false
+    }
+  }
+
+  /**
+   * Notify the owner's devices that this landed in chat. Best-effort in the same
+   * sense the live push is, and swallowed HERE rather than at the producer —
+   * because of what a throw would mean upstream. `buildButtonStoreReminderOutbound`
+   * reports `persisted` as "the post happened", and the reminder tick reads a false
+   * there as "revert the claim and fire again next tick" (`reminders/tick.ts` #319).
+   * An Expo outage that escaped this line would double-post every reminder.
+   */
+  const notifyDevices = async (
+    topic_id: string,
+    message_id: string,
+    body: string,
+  ): Promise<void> => {
+    if (input.notify === undefined) return
+    try {
+      await input.notify({ ...chatMessagePushScope(topic_id), message_id, body })
+    } catch (err) {
+      log(
+        `${LOG_TAG} device notification failed (durable row is the guarantee) topic=${topic_id}: ${errMsg(err)}`,
+      )
     }
   }
 
@@ -220,6 +271,11 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       allow_freeform: true,
       prompt_id,
     })
+    // AFTER the live push, and UNCONDITIONALLY on its result. A live socket is not
+    // evidence the owner is looking: Android keeps the app-ws socket open while the
+    // app sits in the background, so gating the notification on `delivered_live`
+    // would silence exactly the case a notification exists for.
+    await notifyDevices(topic_id, prompt_id, body)
     return { prompt_id, persisted: true, delivered_live: delivered }
   }
 }

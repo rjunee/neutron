@@ -20,6 +20,7 @@ import {
   type PushPayload,
 } from '../lib/push-deep-link-dispatch';
 import { GENERAL_PROJECT_ID } from '../lib/project-rail-view';
+import { PUSH_KINDS } from '@neutronai/wire-types/push-kind.ts';
 
 function recordingWarn(): {
   warn: (msg: string, meta?: Record<string, unknown>) => void;
@@ -88,19 +89,65 @@ describe('resolvePushRoute', () => {
     });
   });
 
-  describe('the retired `reminder` kind', () => {
-    it('no longer routes — nothing sends it, so nothing decodes it', () => {
-      // It was composed from the reminder ROW, which for a ritual is the dispatch
-      // token `ritual:<id>` — the string the owner's phone actually displayed. The
-      // sender is gone (`wire-types/push-kind.ts`), so the branch is gone too
-      // rather than left as a decoder with no encoder.
+  describe('the LEGACY `reminder` kind — no sender left, but its payloads are real', () => {
+    // The SENDER is retired: it composed from the reminder ROW, which for a ritual
+    // is the dispatch token `ritual:<id>`, i.e. the string the owner's phone
+    // actually displayed. The DECODER stays, and these are the reasons — each one
+    // an already-delivered payload this resolver will still be handed:
+    //   - a notification sitting undismissed in the shade right now;
+    //   - a self-hosted gateway that has not been upgraded, talking to a store app.
+    // Deleting the decoder would turn those taps into "the app opens and nothing
+    // routes", which is the complaint this whole change exists to end.
+
+    it('an explicit project still lands on that project’s reminders tab', () => {
       const { warn, entries } = recordingWarn();
       const path = resolvePushRoute(
         { kind: 'reminder', project_id: 'acme', reminder_id: 'rem-abc' },
         { warn },
       );
+      expect(path).toBe('/projects/acme/reminders?reminder_id=rem-abc');
+      expect(entries).toEqual([]);
+    });
+
+    it('a PROJECT-scoped legacy payload resolves its project from `topic_id`', () => {
+      // The retired sender wrote the reminder row's own topic when it had one
+      // (`git show main:gateway/push/dispatcher.ts:277`), and a project reminder's
+      // topic is `app-project:<id>` (`reminders/store.ts:474`). That is the ONLY
+      // place a legacy project notification carries its project, so dropping this
+      // decode would land those taps on General instead.
+      const path = resolvePushRoute({
+        kind: 'reminder',
+        reminder_id: 'rem-abc',
+        project_slug: 'owner',
+        topic_id: 'app-project:beacon',
+      });
+      expect(path).toBe('/projects/beacon/reminders?reminder_id=rem-abc');
+    });
+
+    it('a GENERAL legacy payload falls back to General rather than refusing', () => {
+      // The old sender put the OWNER slug in `project_slug` and no project id
+      // anywhere, so this branch used to return null for every General reminder
+      // notification ever sent — the owner's "it opens the app but not the right
+      // project", in the code.
+      const path = resolvePushRoute({
+        kind: 'reminder',
+        reminder_id: 'rem-abc',
+        project_slug: 'owner',
+      });
+      expect(path).toBe('/projects/~general/reminders?reminder_id=rem-abc');
+    });
+
+    it('without a reminder_id there is nothing to open, so it refuses and says why', () => {
+      const { warn, entries } = recordingWarn();
+      const path = resolvePushRoute({ kind: 'reminder', project_id: 'acme' }, { warn });
       expect(path).toBeNull();
-      expect(entries[0]?.msg).toContain('unknown push payload kind');
+      expect(entries[0]?.msg).toContain('legacy reminder payload has no reminder_id');
+    });
+
+    it('is NOT in the sent list — that list is what the system emits', () => {
+      // Padding `PUSH_KINDS` with a kind nothing sends is how the sent list and the
+      // handled list drifted into being disjoint in the first place.
+      expect((PUSH_KINDS as readonly string[]).includes('reminder')).toBe(false);
     });
   });
 

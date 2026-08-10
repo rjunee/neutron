@@ -374,3 +374,130 @@ describe("createDeliver — envelope options (task 8, 'reply' only)", () => {
     expect(bs.prompts).toHaveLength(0) // inert path does not call emit()
   })
 })
+
+/**
+ * THE NATIVE NOTIFICATION, owned by deliver (2026-08-09).
+ *
+ * The owner's report was `ritual:kaizen` on his lock screen. The first fix
+ * composed the notification in the reminder OUTBOUND — which cured the reported
+ * message and left the morning brief, the idle nudge and the overnight report
+ * silent, because those post through this seam on a different sink. So the
+ * notification lives here, and these are the properties that make "a ritual
+ * posting is just a chat message" true of every producer rather than one:
+ *
+ *   - a durable post notifies, whatever wrote it;
+ *   - a transient pill does not (no row, so a tap has nowhere to land);
+ *   - the notification carries the POSTED body and the DURABLE row id;
+ *   - a notification failure can never cost the delivery, because `persisted` is
+ *     what the reminder tick reads to decide whether to fire the row AGAIN.
+ */
+describe('deliver notifies the owner devices for a durable post', () => {
+  interface Notice {
+    project_id: string | null
+    message_id: string
+    body: string
+  }
+
+  function recordingNotify(): { notify: (n: Notice) => Promise<void>; sent: Notice[] } {
+    const sent: Notice[] = []
+    return {
+      notify: async (n): Promise<void> => {
+        sent.push(n)
+      },
+      sent,
+    }
+  }
+
+  it("a 'reply' post (a fired reminder / ritual) notifies with the posted body + row id", async () => {
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+
+    await deliver('app:owner', {
+      body: 'Kaizen review: two things landed, one is blocked on the importer.',
+      durability: 'reply',
+    })
+
+    expect(n.sent).toHaveLength(1)
+    expect(n.sent[0]!.body).toBe(
+      'Kaizen review: two things landed, one is blocked on the importer.',
+    )
+    // `reply-1` is what the fake store returns as the durable id. The tap anchors
+    // the transcript on it, so a notification carrying anything else would open
+    // the right chat and land in the wrong place.
+    expect(n.sent[0]!.message_id).toBe('reply-1')
+    // MUTATION-SENSITIVE, and the whole point: the reminder row's dispatch token
+    // must not be able to reach the owner. deliver is only ever handed the body
+    // that was posted, so there is no path by which it could.
+    expect(n.sent[0]!.body).not.toContain('ritual:')
+  })
+
+  it("an 'inert' post (the brief / the nudge / the overnight report) notifies too", async () => {
+    // THE BLOCKER THIS FIXES. Those producers post through
+    // `buildButtonStoreProactiveSink`, never through the reminder outbound, so a
+    // notification wired to the reminder path left every one of them silent.
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+
+    await deliver('app:owner', {
+      body: 'Morning brief: three things today.',
+      durability: 'inert',
+    })
+
+    expect(n.sent).toHaveLength(1)
+    expect(n.sent[0]!.body).toBe('Morning brief: three things today.')
+    expect(n.sent[0]!.message_id).toBe('inert-1')
+  })
+
+  it("a transient 'none' pill notifies NOBODY — there is no row to tap", async () => {
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+    await deliver('app:owner', { body: 'reconnecting…', durability: 'none' })
+    expect(n.sent).toEqual([])
+  })
+
+  it('a failed durable persist notifies nobody — the notification would point at no row', async () => {
+    const { store } = fakeButtonStore({ throwOn: 'emit' })
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+    const r = await deliver('app:owner', { body: 'take a break', durability: 'reply' })
+    expect(r.persisted).toBe(false)
+    expect(n.sent).toEqual([])
+  })
+
+  it('the bare owner topic is the General scope; a suffixed one names its project', async () => {
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+    await deliver('app:owner', { body: 'a', durability: 'reply' })
+    await deliver('app:owner:beacon', { body: 'b', durability: 'reply' })
+    expect(n.sent.map((s) => s.project_id)).toEqual([null, 'beacon'])
+  })
+
+  it('A THROWING notify cannot cost the delivery — otherwise the reminder double-posts', async () => {
+    // `persisted` is the reminder tick's signal to KEEP its claim on the row
+    // (#319). If an Expo outage escaped as a throw here, the claim would revert
+    // and the same message would be posted again on the next tick, forever.
+    const { store } = fakeButtonStore()
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: async () => {
+        throw new Error('expo unreachable')
+      },
+    })
+    const r = await deliver('app:owner', { body: 'take a break', durability: 'reply' })
+    expect(r.persisted).toBe(true)
+    expect(r.prompt_id).toBe('reply-1')
+  })
+
+  it('no notify wired → delivery behaves exactly as it did before push existed', async () => {
+    const { store, trace } = fakeButtonStore()
+    const deliver = createDeliver({ buttonStore: store, push: {} })
+    const r = await deliver('app:owner', { body: 'take a break', durability: 'reply' })
+    expect(r).toEqual({ prompt_id: 'reply-1', persisted: true, delivered_live: false })
+    expect(trace.emits).toEqual([{ topic_id: 'app:owner', body: 'take a break' }])
+  })
+})

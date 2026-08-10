@@ -8997,18 +8997,25 @@ on the tick's `on_fired` hook, and a ritual row's `message` IS that dispatch tok
 so the notification could never carry the posted text, and its project field was the
 instance slug, which resolves to no project.
 
-Composition moved to the DELIVERY seam, the only place that holds the posted body and
-the durable row id (`gateway/proactive/reminder-outbound.ts` →
-`gateway/push/chat-message-push.ts`). A nudge and a ritual take the same `post`, so
-they cannot produce different notifications. `pushReminder`, `onFired`,
+Composition moved into the ONE out-of-turn delivery seam — `createDeliver` now takes a
+`notify` sink and fires it for every post that got a durable row
+(`gateway/http/deliver.ts` → `gateway/push/chat-message-push.ts`), never for a
+transient `'none'` pill. So a fired reminder, a ritual, the morning brief, the idle
+nudge and a system notice all notify identically, because they are all one thing.
+Composing it in the reminder outbound instead — the first version of this change —
+cured the reported message and left every other producer silent, which is the
+per-producer mistake `deliver` exists to have ended. `pushReminder`, `onFired`,
 `ReminderTickLoop.on_fired` and the `push_dispatcher` composition field are DELETED —
 the tick can only see the row, so it was never a place this could be built correctly.
 
 `agent_message` joined `PUSH_KINDS` (it was a resolver branch with no sender, kept out
 of the list precisely so the exhaustiveness test could not be padded); `reminder` left
-it, and its resolver branch went with it. General is encoded by the ABSENCE of
-`project_id` — the client owns that route sentinel, and #410/#411 is what a second
-copy costs.
+it, because nothing sends it — but its RESOLVER branch stays, because a store app and
+a self-hosted gateway do not upgrade together and undismissed notifications still
+carry that kind. General names itself with `GENERAL_RAIL_ID`, now defined once in
+`wire-types/topic-id.ts` and pinned to the client's copies: encoding it by ABSENCE
+(the first version) is malformed to every already-installed bundle, which would have
+preserved the exact symptom the change was for.
 
 `?message_id=` is finally consumed. It reached the chat route since 2026-05 with no
 reader. The frozen #505 anchor and a new once-per-target imperative `scrollToIndex`

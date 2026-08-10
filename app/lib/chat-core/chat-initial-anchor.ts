@@ -244,6 +244,28 @@ export function chatDeepLinkAnchor(
 }
 
 /**
+ * The row index a push tap should scroll an ALREADY-MOUNTED transcript to, or
+ * `null` when the referenced message is not in the transcript yet.
+ *
+ * A TOTAL function on purpose. The imperative re-anchor in `ChatSyncSurface` used
+ * to ask {@link chatDeepLinkAnchor} and then branch on `kind`, which read as
+ * careful and was not: once the target resolves, that function cannot return
+ * `bottom` — every path through it yields `unread` — so the `scrollToEnd` arm was
+ * unreachable code with a comment explaining when it would run. Returning the
+ * index or nothing removes the arm rather than documenting it, and a caller can no
+ * longer be wrong about which case it is in.
+ */
+export function chatDeepLinkScrollIndex(
+  rows: readonly RenderRow[],
+  selfDeviceId: string,
+  targetMessageId: string,
+): number | null {
+  if (indexOfChatMessage(rows, targetMessageId) < 0) return null;
+  const anchor = chatDeepLinkAnchor(rows, selfDeviceId, targetMessageId);
+  return anchor.kind === 'unread' ? anchor.index : null;
+}
+
+/**
  * The `initialScrollIndex` / `initialScrollIndexParams` pair an anchor becomes.
  *
  * Kept next to the rule so the translation from "what the owner asked for" to

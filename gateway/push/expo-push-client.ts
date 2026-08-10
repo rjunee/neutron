@@ -86,7 +86,14 @@ export interface ExpoPushSendResult {
 /** Minimal fetch typing so the client is injectable from tests. */
 export type ExpoFetch = (
   input: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: {
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+    /** The per-batch deadline (`AbortSignal.timeout`). Optional so a test fetch
+     *  stub can ignore it; production always passes one. */
+    signal?: AbortSignal
+  },
 ) => Promise<{
   ok: boolean
   status: number
@@ -112,7 +119,22 @@ export interface ExpoPushClientOptions {
    * without manufacturing 200 fake tokens.
    */
   batch_size?: number
+  /**
+   * Per-request deadline in ms. Defaults to {@link EXPO_PUSH_TIMEOUT_MS}.
+   *
+   * A BARE `fetch` HAS NO DEADLINE, and since 2026-08-09 this call is awaited
+   * INSIDE a durable delivery (`gateway/http/deliver.ts` notifies every
+   * out-of-turn post), once or twice per fire. A hung TCP connection to
+   * `exp.host` would therefore park a reminder fire — and with it the tick that
+   * claimed the row — for as long as the socket stayed open, which on a stalled
+   * connection is minutes. The notification is the nicety and the chat row is
+   * the guarantee, so it gets a deadline and gives up.
+   */
+  timeout_ms?: number
 }
+
+/** How long one Expo batch may take before it is abandoned. */
+export const EXPO_PUSH_TIMEOUT_MS = 10_000
 
 /**
  * Build an Expo Push API client. The returned `send()` chunks messages
@@ -132,6 +154,7 @@ export function createExpoPushClient(options: ExpoPushClientOptions = {}): ExpoP
   const fetchImpl: ExpoFetch =
     options.fetch ?? ((input, init) => globalThis.fetch(input, init))
   const batchSize = options.batch_size ?? EXPO_PUSH_BATCH_SIZE
+  const timeoutMs = options.timeout_ms ?? EXPO_PUSH_TIMEOUT_MS
   if (!Number.isFinite(batchSize) || batchSize <= 0) {
     throw new Error('ExpoPushClient: batch_size must be a positive number')
   }
@@ -155,6 +178,11 @@ export function createExpoPushClient(options: ExpoPushClientOptions = {}): ExpoP
           method: 'POST',
           headers,
           body: JSON.stringify(chunk),
+          // Abandon a stalled batch rather than parking the delivery that awaits
+          // it. `AbortSignal.timeout` makes the abort the fetch's own rejection,
+          // so it surfaces through the SAME throw path a network failure does and
+          // the dispatcher's existing catch handles it unchanged.
+          signal: AbortSignal.timeout(timeoutMs),
         })
         if (!res.ok) {
           const text = await safeText(res)

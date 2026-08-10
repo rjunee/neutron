@@ -3779,15 +3779,33 @@ reminder-shaped and no ritual-shaped notification. `open/composer.ts` builds ONE
 sign-in/sign-out) and `createPushDispatcher`, which is now purely the Expo
 TRANSPORT.
 
-The notification is COMPOSED AT DELIVERY, in
-`gateway/proactive/reminder-outbound.ts` — the one place that holds the text the
-fire actually posted and the durable row id it became — via the pure builders in
-`gateway/push/chat-message-push.ts`: title = the project (or `General`), body = the
-first part of the posted message truncated on a word boundary, data =
-`{ kind: 'agent_message', message_id, project_id? }`. `project_id` is OMITTED for
-the no-project General scope, because the client owns General's route spelling
-(`app/lib/project-rail-view.ts` `GENERAL_PROJECT_ID`). A nudge and a ritual reach
-that one `post`, so they cannot produce different notifications.
+The notification is COMPOSED BY THE DELIVERY SEAM. `createDeliver`
+(`gateway/http/deliver.ts`) takes a `notify` sink and calls it for every post that
+got a DURABLE row — `'reply'` (a fired reminder or ritual) and `'inert'` (the
+morning brief, the idle nudge, the overnight report, a system notice) — and never
+for `'none'`, a transient live-only pill with no row for a tap to land on. So every
+out-of-turn producer notifies identically, because a notification is a property of
+the seam rather than of any one producer. (Composing it in
+`gateway/proactive/reminder-outbound.ts` instead was the first attempt: it cured the
+reported message and left every other producer silent, which is the same
+per-producer mistake `deliver` exists to have ended.)
+
+The payload comes from the pure builders in `gateway/push/chat-message-push.ts`:
+title = the project (or `General`), body = the first part of the posted message
+truncated on a word boundary, data = `{ kind: 'agent_message', message_id,
+project_id }`. `project_id` is ALWAYS present; the no-project General scope names
+itself with `GENERAL_RAIL_ID`, defined once in `wire-types/topic-id.ts` and pinned
+to the client's constants by `app/__tests__/general-scope.test.ts`. Omitting it for
+General — the first attempt again — is malformed to every app bundle already
+installed, and a store artifact cannot be upgraded in lockstep with a self-hosted
+gateway.
+
+Every out-of-turn producer in the Open composer delivers to the owner's BARE
+`app:<user>` topic (suffixing it is the PR #105 deliver-to-nobody bug), so in
+practice every notification is General-scoped and its tap opens the General chat —
+which is where the message actually landed. `chatMessagePushScope` also parses the
+project form `app:<user>:<project>`, the topic the mobile client binds when a
+project chat is open, for the first producer that posts into one.
 
 It used to be composed on the reminder TICK, from the reminder ROW
 (`push_dispatcher` → `ReminderTickLoop.on_fired` → `pushReminder`). All four are
@@ -3802,9 +3820,11 @@ no such message; with zero registered tokens the transport returns before issuin
 any HTTP request, which is the state of every fresh install; a ticket Expo marks
 `DeviceNotRegistered` DELETES that token row, so a dead device is retried once
 rather than on every send forever (other ticket errors — rate limits, credential
-problems — never prune); and a notification failure is swallowed at BOTH the sink
-and the producer, because an escaping throw would be read by the tick as "the post
-did not happen" and would re-post the same message next tick.
+problems — never prune); and a notification failure is swallowed inside `deliver`,
+because an escaping throw would be read by the reminder tick as "the post did not
+happen" and would re-post the same message next tick. The Expo POST also carries an
+`AbortSignal.timeout`, since it is now awaited inside a durable delivery and a
+stalled connection would otherwise park the fire.
 `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are merely rate-limited.
 
 **The tap** (`app/lib/push-deep-link-dispatch.ts`). `agent_message` resolves to
@@ -3819,7 +3839,10 @@ mounted (FlashList applies its initial scroll once and latches
 `isInitialScrollComplete`). Both paths ask the same function, so they cannot land
 in different places. The rule prefers the unread run's START when the referenced
 message is inside it (§ ISSUES #505) and the referenced row itself when it is
-behind the read watermark. With no pushed id, nothing scrolls imperatively.
+behind the read watermark. With no pushed id, nothing scrolls imperatively. A
+`reminder` kind is still DECODED to `/projects/<id>/reminders?reminder_id=<id>` even
+though nothing sends it any more: a store-published app and a self-hosted gateway do
+not upgrade together, and notifications already in the shade still carry it.
 
 ## Ritual executor — approval-gated code rituals (`reminders/`)
 

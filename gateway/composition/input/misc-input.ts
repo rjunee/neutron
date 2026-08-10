@@ -9,11 +9,13 @@ export interface MiscCompositionInput {
   // `ReminderTickLoop.on_fired` hook it fed. It composed a native notification
   // from the reminder ROW, and the row is the wrong source — a ritual's stored
   // `message` is the dispatch token `ritual:<id>`, which is literally what the
-  // owner's phone displayed. The notification for a chat message is composed
-  // where the message is delivered (`gateway/proactive/reminder-outbound.ts` →
-  // `gateway/push/chat-message-push.ts`), the only place that knows the posted
-  // text and its durable row id. The Expo transport itself
-  // (`gateway/push/dispatcher.ts`) is unchanged and still built by the composer.
+  // owner's phone displayed. The notification for a chat message is now composed
+  // by the ONE out-of-turn delivery seam (`gateway/http/deliver.ts` → its `notify`
+  // sink → `gateway/push/chat-message-push.ts`), which is the only place that
+  // knows the posted text AND its durable row id AND is shared by every producer
+  // — a fired reminder, a ritual, the morning brief, the idle nudge, a system
+  // notice. The Expo transport itself (`gateway/push/dispatcher.ts`) is unchanged
+  // and still built by the composer.
   /**
    * P1.5 / Sprint 21 — wiring cleanup callbacks. The realmode
    * composer opens auxiliary DB handles (e.g. RW registry/identity for
