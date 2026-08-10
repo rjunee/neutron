@@ -8354,3 +8354,30 @@ would have shipped an invisible chip border: `--hairline` is not a token here, `
 is, and it is defined for both themes.
 
 Detail: `docs/as-built/2026-08-09-codegen-settings-web.md`.
+
+## 2026-08-09 — a review panel cannot see a red build, so now something else does
+
+Four reviewers read the DIFF and none runs the tests, so a change that type-errors or reds
+a shard could be unanimously APPROVED and merged. The reference deployment never showed
+this because a GitHub setting blocks it there — which is the problem: the discipline lived
+in repository CONFIGURATION, so every self-hoster and every local-merge run had nothing.
+
+DETERMINISTIC, NEVER INTERPRETED: the agent reports `gh pr checks --json` output verbatim
+and every judgement happens in JS. ONE GATE, PEERS AS DATA: red → code blockers that force
+REQUEST_CHANGES so the fix loop re-Forges; pending/unreadable → a deferred peer on the
+EXISTING list, so the loop exits infra-only rather than editing code to fix a timer;
+green/none → nothing. `none` is distinct from `green` (a repo with no CI has nothing to
+wait for), and local mode short-circuits before spending an agent.
+
+THE HOLE IT NEARLY SHIPPED WITH: `enforceCrossModelGate` returns the synthesis untouched
+when there are no deferred peers, so attaching CI findings without setting the verdict
+would have APPROVED a red build carrying a "CI FAILING" finding. Red now forces the
+verdict. A second near-miss: an unreadable exit-0 reply first classified as `none` — the
+unsafe direction; my own test caught it, not my reading.
+
+22 tests against the REAL functions extracted from the .mjs. FIVE MUTANTS, all fail-open,
+each caught. The new agent label was caught by #157's coverage test and routed to the
+cheap tier — leaving it to the fallback is how head-probe sat on the most expensive tier
+for months.
+
+Detail: `docs/as-built/2026-08-09-trident-ci-gate.md`.

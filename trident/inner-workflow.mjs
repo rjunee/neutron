@@ -258,6 +258,10 @@ const ROLE_MODEL = {
   // entry and a deliberate entry are indistinguishable when the fallback is
   // silent. That is the argument for the coverage test, not just for this line.
   'head-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
+  // The CI probe is the same shape as the head probe: run one command, report the
+  // output verbatim, interpret nothing. Routed explicitly rather than left to the
+  // fallback, which is how head-probe silently sat on the most expensive tier.
+  'ci-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
 }
 
 // OWNER PHASE OVERRIDES, threaded in as `args.phaseModels` (phase key →
@@ -308,6 +312,8 @@ function routeModel(label, tag) {
         ? ROLE_MODEL['checkpoint']
         : label.startsWith('head-probe-round-')
           ? ROLE_MODEL['head-probe']
+          : label.startsWith('ci-probe-round-')
+            ? ROLE_MODEL['ci-probe']
           : ROLE_MODEL[label] || { model: MODELS.opus, effort: 'high', phaseKey: null }
   return applyPhaseOverride(base, base.phaseKey)
 }
@@ -754,6 +760,153 @@ function roundLanded(headBefore, headAfter) {
   return after !== before
 }
 
+/**
+ * THE CI GATE. A review panel cannot see a red build.
+ *
+ * WHY THIS EXISTS. Four reviewers read the DIFF. None of them runs the tests, so a
+ * change that type-errors, fails a lint gate or reds a shard can be unanimously
+ * APPROVED — and on a repo without branch protection it then merges. That is not
+ * hypothetical protection: on the reference deployment a red merge is blocked by a
+ * GitHub setting, which means the discipline lives in repository configuration rather
+ * than in this harness, and **every self-hoster and every local-merge run has nothing
+ * at all**.
+ *
+ * DETERMINISTIC, NOT INTERPRETED. The agent is given one command and asked to report
+ * its output VERBATIM; every judgement about what the output means happens in JS
+ * below. A model asked "is CI green?" can answer yes for a plausible-looking wall of
+ * text, and a hallucinated green here merges a broken build — the one failure this
+ * gate exists to prevent.
+ */
+
+/** Raw stdout + exit code from one `gh pr checks` call. Nothing interpreted. */
+const CI_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['raw', 'exit_code'],
+  properties: {
+    raw: { type: 'string', description: 'stdout+stderr of the command, verbatim' },
+    exit_code: { type: 'integer', description: 'the exit status the command printed' },
+  },
+}
+
+/** States GitHub reports for a check that has FINISHED and FAILED. */
+const CI_FAILED_STATES = new Set([
+  'FAILURE',
+  'ERROR',
+  'CANCELLED',
+  'TIMED_OUT',
+  'ACTION_REQUIRED',
+  'STARTUP_FAILURE',
+])
+/** States meaning the check has not finished yet. */
+const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'])
+
+/**
+ * Turn one probe result into a verdict. PURE, so every branch is unit-testable
+ * without a network, a PR, or an agent.
+ *
+ * Returns `unknown` for anything it cannot read — a malformed payload, a `gh` that
+ * errored, a body that is not the JSON we asked for. **`unknown` is never treated as
+ * green**: it becomes an infra deferral (see the caller), because "we could not tell"
+ * and "it passed" are different answers and only one of them is safe to merge on.
+ *
+ * `none` is DISTINCT from `green`: a repo with no checks configured has nothing to
+ * wait for, and blocking it would deadlock every self-hoster who has not set up CI.
+ */
+function classifyCi(probe) {
+  if (probe === null || typeof probe !== 'object') return { status: 'unknown', failing: [] }
+  const raw = typeof probe.raw === 'string' ? probe.raw : ''
+  const exit = typeof probe.exit_code === 'number' ? probe.exit_code : -1
+  // `gh pr checks` exits 8 when checks are still pending and 1 when some failed, so a
+  // non-zero exit is NOT by itself an error — the parsed rows are the authority and
+  // the exit code is only a fallback when there is nothing parseable.
+  const start = raw.indexOf('[')
+  const end = raw.lastIndexOf(']')
+  if (start < 0 || end <= start) {
+    // NO JSON ARRAY ANYWHERE IS ALWAYS `unknown`, even on exit 0. An earlier version
+    // read a clean exit as "no checks configured", which is the unsafe direction: a
+    // reply we cannot parse would then produce no gate at all and the build would
+    // merge. `gh` prints `[]` for a repo with no checks, so the genuine no-checks case
+    // is already covered below — this branch only ever sees output we did not
+    // understand, and the honest answer to that is "could not tell".
+    return { status: 'unknown', failing: [] }
+  }
+  let rows
+  try {
+    rows = JSON.parse(raw.slice(start, end + 1))
+  } catch {
+    return { status: 'unknown', failing: [] }
+  }
+  if (!Array.isArray(rows)) return { status: 'unknown', failing: [] }
+  if (rows.length === 0) return { status: 'none', failing: [] }
+  const failing = []
+  let pending = 0
+  for (const row of rows) {
+    const name = row && typeof row.name === 'string' ? row.name : 'unnamed check'
+    const state = row && typeof row.state === 'string' ? row.state.toUpperCase() : ''
+    if (CI_FAILED_STATES.has(state)) {
+      const link = row && typeof row.link === 'string' && row.link.length > 0 ? row.link : null
+      failing.push({ name, state, link })
+      continue
+    }
+    if (CI_PENDING_STATES.has(state)) pending += 1
+    // Anything else (SUCCESS, SKIPPED, NEUTRAL) counts as not-blocking. SKIPPED is
+    // deliberately not a failure: a path-filtered workflow skips legitimately, and
+    // treating that as red would block every diff that misses a filter.
+  }
+  if (failing.length > 0) return { status: 'red', failing }
+  if (pending > 0) return { status: 'pending', failing: [] }
+  return { status: 'green', failing: [] }
+}
+
+/**
+ * CI findings, as CODE blockers.
+ *
+ * Red CI is a code problem, so it goes through the normal fix loop rather than the
+ * infra path: there IS something for Forge to change, and the next round should
+ * change it. Each failing check names itself and carries its link, because the
+ * reviewers cannot see any of this from the diff.
+ */
+function ciBlockerFindings(ci) {
+  return ci.failing.map((f) => ({
+    severity: 'blocker',
+    title: `CI FAILING: ${f.name}`,
+    evidence:
+      `The \`${f.name}\` check is ${f.state} on this PR. No reviewer can see this from the diff, ` +
+      `and the branch cannot merge while it is red — fix it in this round.` +
+      (f.link !== null ? `\n${f.link}` : ''),
+  }))
+}
+
+/**
+ * The peer entry for a CI result we could not USE — never-settled or unreadable.
+ *
+ * Deliberately shaped as a cross-model PEER rather than a second gate. The file's own
+ * rule: "adding a second peer with its own near-identical gate is how one of the two
+ * quietly stops being enforced, so there is ONE gate and peers are data." Feeding this
+ * through `deferredCrossModelPeers` means `enforceCrossModelGate` refuses to APPROVE
+ * and `classifyBlock` returns 'infra-only', which exits the loop instead of re-Forging
+ * against a timeout — exactly the behaviour a deferred reviewer already gets.
+ */
+function ciDeferredPeer(ci) {
+  if (ci.status === 'pending') {
+    return {
+      name: 'CI',
+      evidence:
+        'the PR checks had not finished when the review completed. A verdict given before CI ' +
+        'settles is a verdict about code nobody has run, so this does not APPROVE — re-run once ' +
+        'the checks report.',
+    }
+  }
+  return {
+    name: 'CI',
+    evidence:
+      'the PR check status could not be read (gh missing, unauthenticated, or an unparseable ' +
+      'reply). "Could not tell" is not "passed", so this does not APPROVE — restore the ability ' +
+      'to read checks and re-run.',
+  }
+}
+
 /** The one fact the head probe returns. Deliberately just a sha — see `roundLanded`. */
 const BRANCH_HEAD_SCHEMA = {
   type: 'object',
@@ -800,6 +953,24 @@ ${cmd}`,
     withModel({ label: `head-probe-round-${round}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
   )
   return (res && typeof res.head === 'string' ? res.head : '').trim()
+}
+
+/**
+ * Ask GitHub what the PR's checks are doing. One command, output reported verbatim.
+ *
+ * LOCAL MODE HAS NO CHECKS TO READ, so it reports `none` without spending an agent —
+ * a local build has no PR and never will, and inventing a deferral for it would block
+ * every self-hoster who merges locally.
+ */
+async function probeCi(prForCi, round) {
+  if (!isPr || prForCi === null || prForCi === undefined) return { status: 'none', failing: [] }
+  const cmd = `cd ${shSingleQuote(repoPath)} && gh pr checks ${String(prForCi)} --json name,state,link 2>&1; echo "___EXIT=$?"`
+  const res = await agent(
+    `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether CI passed, do NOT run anything else, do NOT modify any file.
+${cmd}`,
+    withModel({ label: `ci-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+  )
+  return classifyCi(res)
 }
 
 // Which cross-model peers were configured but failed. Kept separate from the gate
@@ -874,7 +1045,7 @@ Return via the schema. NEVER exit silently — if the command itself could not r
 
 // Parallel adversarial review + asymmetric-gated synthesis. Returns the
 // synthesised verdict object (VERDICT_SCHEMA).
-async function reviewAndSynthesize(diffFile, round) {
+async function reviewAndSynthesize(diffFile, round, prForCi) {
   phase('Review')
   log(
     `trident-v2 review: round=${round} diff=${diffFile} codex=${codexConfigured ? 'configured' : 'not-connected'}`,
@@ -984,6 +1155,12 @@ TASK: ${task}`,
   // field name, `codexStatus` would come back undefined and default to
   // 'not_connected', silently disarming the gate for a DEFERRED reviewer. So the
   // panel now records the slot each optional peer occupies as it is pushed.
+  // CI is probed CONCURRENTLY with the reviewers: the push already happened, so the
+  // checks are running while the panel reads the diff and the probe costs no extra
+  // wall-clock.
+  const ci = await probeCi(prForCi, round)
+  log(`trident-v2 ci: round=${round} status=${ci.status} failing=${ci.failing.length}`)
+
   const claudeVerdicts = [verdicts[0], verdicts[1]]
   const codexReview =
     codexSlot !== null && verdicts[codexSlot]
@@ -1032,12 +1209,36 @@ ${kimiPanelLine}`,
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
   // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
   const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus })
-  const gated = enforceCrossModelGate(synthesisRaw, deferred)
+  // THE CI GATE, folded into the SAME gate rather than added beside it.
+  //
+  // A red build is a CODE blocker: it joins the findings so the fix loop re-Forges
+  // against it, which is right because there is something to change. An UNUSABLE CI
+  // answer (still running, or unreadable) becomes a deferred PEER instead, so the
+  // existing `enforceCrossModelGate` refuses to APPROVE and `classifyBlock` returns
+  // 'infra-only' — the loop exits and reports honestly rather than editing code to
+  // "fix" a pending check. `green` and `none` add nothing at all.
+  //
+  // RED CI FORCES THE VERDICT, it does not merely add findings. `enforceCrossModelGate`
+  // returns the synthesis UNTOUCHED when there are no deferred peers — so attaching CI
+  // blockers without setting the verdict would have produced an APPROVE carrying a
+  // "CI FAILING" finding, and merged a red build. That is precisely the bug this gate
+  // exists to prevent, and it is asserted below rather than left to reading.
+  const withCi =
+    ci.status === 'red'
+      ? {
+          verdict: 'REQUEST_CHANGES',
+          findings: [...ciBlockerFindings(ci), ...(synthesisRaw?.findings ?? [])],
+        }
+      : synthesisRaw
+  const peers = ci.status === 'pending' || ci.status === 'unknown'
+    ? [...deferred, ciDeferredPeer(ci)]
+    : deferred
+  const gated = enforceCrossModelGate(withCi, peers)
   // Carry WHY this is blocked, not just that it is. The fix loop must not re-Forge
   // when the only blocker is a lane that could not run — there is nothing in the
   // code to fix, and a re-Forge then costs a fresh round of four reviewers plus a
   // diff of noise. See classifyBlock.
-  return { ...gated, blockKind: classifyBlock(gated, deferred) }
+  return { ...gated, blockKind: classifyBlock(gated, peers) }
 }
 
 // ── Inner loop ────────────────────────────────────────────────────────────────
@@ -1158,7 +1359,7 @@ ${task}${reflectionGuidance}`,
   let roundLostItsWork = null
 
   // First review + synthesis.
-  let synthesis = await reviewAndSynthesize(diffFile, round)
+  let synthesis = await reviewAndSynthesize(diffFile, round, pr)
   finalVerdict = normalizeVerdict(synthesis.verdict)
   await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
 
@@ -1206,7 +1407,7 @@ ${task}${reflectionGuidance}`,
       break
     }
     branchHead = headAfter
-    synthesis = await reviewAndSynthesize(diffFile, round)
+    synthesis = await reviewAndSynthesize(diffFile, round, pr)
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
   }
