@@ -34,6 +34,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { clampFraction, usageBand } from '@neutronai/contracts/credential-usage.ts'
+
 import type { BootstrapConfig } from './config.ts'
 import {
   WebProjectCredentialsClient,
@@ -49,6 +51,16 @@ import {
   type PhaseModelsPayload,
   type PhaseOverride,
 } from './phase-models-client.ts'
+import {
+  WebUsageDashboardClient,
+  accountName,
+  formatDuration,
+  formatPace,
+  formatPercent,
+  paceNote,
+  type UsageDashboard,
+  type UsageWindow,
+} from './usage-dashboard-client.ts'
 import {
   WebVoiceTranscriptionClient,
   describeJob,
@@ -128,6 +140,30 @@ export function SettingsTab({
     () => new WebPhaseModelsClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
     [config.origin, config.token, withSignal],
   )
+
+  // Model usage — read off the persisted sample series, not the live snapshot.
+  const usageDashboardClient = useMemo(
+    () =>
+      new WebUsageDashboardClient({
+        base_url: config.origin,
+        token: config.token,
+        fetchImpl: withSignal,
+      }),
+    [config.origin, config.token, withSignal],
+  )
+
+  // ── model usage ──
+  // `null` is "not asked yet". The client never rejects, so there is no error
+  // state here: an unreachable server is one of its two ANSWERS, and giving it a
+  // third representation would put the same branch in two places.
+  const [usage, setUsage] = useState<UsageDashboard | null>(null)
+
+  const loadUsage = useCallback((): void => {
+    void usageDashboardClient.load().then((next) => {
+      if (!mountedRef.current) return
+      setUsage(next)
+    })
+  }, [usageDashboardClient])
 
   // ── per-phase build models ──
   const [phaseModels, setPhaseModels] = useState<PhaseModelsPayload | null>(null)
@@ -554,7 +590,17 @@ export function SettingsTab({
     loadCodex()
     loadPhaseModels()
     loadAsr()
-  }, [loadCreds, loadAccounts, loadSettings, loadCodex, loadPhaseModels, loadAsr, projectId])
+    loadUsage()
+  }, [
+    loadCreds,
+    loadAccounts,
+    loadSettings,
+    loadCodex,
+    loadPhaseModels,
+    loadAsr,
+    loadUsage,
+    projectId,
+  ])
 
   const addCredential = useCallback((): void => {
     const svc = service.trim()
@@ -932,6 +978,64 @@ export function SettingsTab({
             </button>
           </div>
         </form>
+      </section>
+
+      {/* ── Model usage ──────────────────────────────────────────────────────
+          Deliberately placed IMMEDIATELY ABOVE Code generation: the only reason to
+          look at quota in a settings pane is to decide where to spend it, and the
+          controls that spend it are the next section down.
+
+          It reports PACE, not just fullness — the meter in the divider already
+          says how full the window is, and "72%" is not a decision until you know
+          whether it is climbing. Everything here is server-computed off the
+          persisted series; this markup does no arithmetic on quota. */}
+      <section className="cset-section" aria-label="Model usage">
+        <h2 className="cset-h">Model usage</h2>
+        <p className="cset-sub">
+          How much of each window this box has consumed, and whether it is on track to
+          run out before the window resets. Measured once a minute and kept for 30 days.
+        </p>
+
+        {usage === null ? (
+          <div className="cset-empty">Loading…</div>
+        ) : !usage.reachable ? (
+          // NOT "0% used". An older server does not mount the route at all, and
+          // drawing an empty bar here would invent a measurement.
+          <div className="cset-empty" data-testid="usage-unreachable">
+            Usage history isn’t available from this server.
+          </div>
+        ) : usage.pools.length === 0 ? (
+          <div className="cset-empty" data-testid="usage-empty">
+            No readings yet.
+          </div>
+        ) : (
+          usage.pools.map((pool) => (
+            <div className="cset-usage-pool" key={pool.pool} data-testid={`usage-${pool.pool}`}>
+              {/* NEVER a guessed account name. The credential is swapped by a
+                  process outside this box, so nothing here can know which account
+                  a reading belongs to unless something upstream labels it. */}
+              <p className="cset-label" data-testid={`usage-${pool.pool}-account`}>
+                {accountName(pool.account_label)}
+              </p>
+              {pool.measured_at === null ? (
+                <div className="cset-empty">No readings yet.</div>
+              ) : (
+                <>
+                  <UsageWindowRow
+                    label="5-hour window"
+                    testid={`usage-${pool.pool}-session`}
+                    win={pool.session}
+                  />
+                  <UsageWindowRow
+                    label="7-day window"
+                    testid={`usage-${pool.pool}-weekly`}
+                    win={pool.weekly}
+                  />
+                </>
+              )}
+            </div>
+          ))
+        )}
       </section>
 
       {/* ── Code generation: which model runs each build phase ───────────────
@@ -1490,5 +1594,95 @@ function CredentialRow({
         </button>
       )}
     </li>
+  )
+}
+
+/**
+ * One window's row: a bar, the percent, when it resets, and the pace.
+ *
+ * WHY THE BAND COMES FROM `@neutronai/contracts`. The same three thresholds
+ * colour the 2px meter in the divider, this bar, and the phone's. A local
+ * constant here would let the card call something amber that the divider above it
+ * still draws green — two different answers about one reading, on one screen.
+ *
+ * A NULL WINDOW IS NOT A ZERO WINDOW. When upstream reported nothing for this
+ * window, the row says so in words and draws no track at all: an empty coloured
+ * track is the specific, possibly false claim "0% used".
+ */
+function UsageWindowRow({
+  label,
+  testid,
+  win,
+}: {
+  label: string
+  testid: string
+  win: UsageWindow | null
+}): React.JSX.Element {
+  if (win === null) {
+    return (
+      <div className="cset-usage-row" data-testid={testid}>
+        <span className="cset-label">{label}</span>
+        <span className="cset-sub" data-testid={`${testid}-none`}>
+          not reported
+        </span>
+      </div>
+    )
+  }
+  const band = usageBand(win.fraction)
+  const pct = Math.round(clampFraction(win.fraction) * 100)
+  const note = paceNote(win.pace)
+  return (
+    <div className="cset-usage-row" data-testid={testid}>
+      <div className="cset-usage-head">
+        <span className="cset-label">{label}</span>
+        <span className="cset-usage-pct" data-testid={`${testid}-pct`}>
+          {formatPercent(win.fraction)}
+        </span>
+      </div>
+      <div
+        className="cset-usage-track"
+        role="progressbar"
+        aria-label={`${label} used`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+        aria-valuetext={`${pct}% used`}
+      >
+        <div
+          className={`cset-usage-fill cset-usage-${band}`}
+          data-testid={`${testid}-fill`}
+          data-band={band}
+          style={{ width: `${(clampFraction(win.fraction) * 100).toFixed(2)}%` }}
+        />
+      </div>
+      <dl className="cset-usage-facts">
+        <div>
+          <dt>Resets in</dt>
+          <dd data-testid={`${testid}-resets`}>{formatDuration(win.resets_in_ms)}</dd>
+        </div>
+        <div>
+          <dt>Pace</dt>
+          {/* An em dash, never "0.0×". Null pace means the server declined to
+              answer — a barely-started window or an unknown reset — and a zero
+              would read as "you are using nothing". */}
+          <dd data-testid={`${testid}-pace`}>
+            {formatPace(win.pace)}
+            {note !== null ? <span className="cset-sub"> {note}</span> : null}
+          </dd>
+        </div>
+        {/* Rendered ONLY when there is a projection. Null is the common, good case
+            — the window refills faster than it drains — and an always-present row
+            reading "—" would train the eye to look for a warning that is normally
+            absent. */}
+        {win.exhausts_at !== null ? (
+          <div>
+            <dt>Caps out in</dt>
+            <dd data-testid={`${testid}-exhausts`}>
+              {formatDuration(win.exhausts_at - Date.now())}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+    </div>
   )
 }

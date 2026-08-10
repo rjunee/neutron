@@ -3880,6 +3880,12 @@ export function buildOpenGraphComposer(
     const appUsageSurface = createAppUsageSurface({
       auth: appOwnerAuth,
       snapshot: () => credentialUsageMonitor.snapshot(),
+      // The SAME store the monitor writes into, read back as a summary. The
+      // dashboard is the only reason the series is kept at all — a persisted
+      // reading nothing reads is just disk — so these two are deliberately
+      // constructed next to each other, and a change that unwires one should be
+      // impossible to make without seeing the other.
+      dashboard: () => [usageSamplesStore.summarise('anthropic')],
     })
 
     // `POST /api/app/system-notice` — the seam an out-of-process caller uses to

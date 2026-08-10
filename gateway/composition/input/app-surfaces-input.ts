@@ -325,13 +325,22 @@ export interface AppSurfacesCompositionInput {
     handler: (req: Request) => Promise<Response | null>
   }
   /**
-   * Active-credential usage meter. Owns `GET /api/app/usage` — the 5-hour and
-   * 7-day utilization of the ONE credential the box is currently dispatching
-   * with, served from `CredentialUsageMonitor`'s in-memory snapshot. Both
-   * clients draw the tab-bar/chat divider from it. When omitted the route is
-   * unmounted, the clients' fetch fails, and each renders the plain divider it
-   * had before the meter existed. Surface factory:
-   * `gateway/http/app-usage-surface.ts:createAppUsageSurface`.
+   * Active-credential usage. Owns TWO paths:
+   *
+   *   - `GET /api/app/usage` — the 5-hour and 7-day utilization of the ONE
+   *     credential the box is currently dispatching with, served from
+   *     `CredentialUsageMonitor`'s in-memory snapshot. Both clients draw the
+   *     tab-bar/chat divider from it.
+   *   - `GET /api/app/usage/dashboard` — the same two windows read off the
+   *     PERSISTED series, carrying the pace and the exhaustion projection that a
+   *     single snapshot cannot produce. The Settings usage card renders it.
+   *
+   * When omitted BOTH are unmounted: the clients' meter fetch fails and each
+   * renders the plain divider it had before the meter existed, and the usage card
+   * reports that it cannot reach the series. Recording is unaffected — the
+   * monitor writes samples regardless of whether anything is mounted to read
+   * them, so an unmounted surface loses the view, never the history. Surface
+   * factory: `gateway/http/app-usage-surface.ts:createAppUsageSurface`.
    */
   app_usage_surface?: {
     handler: (req: Request) => Promise<Response | null>

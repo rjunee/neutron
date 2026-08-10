@@ -121,4 +121,26 @@ describe('the monitor actually writes to it — the wiring, not the store', () =
     expect(block.includes('usageSamplesStore.record(')).toBe(true)
     expect(block.includes('usageSamplesStore.prune()')).toBe(true)
   })
+
+  test('the COMPOSER also gives the usage surface a way to READ the series', async () => {
+    // The other half, and the one that fails silently: a series written by nobody
+    // reading it is just disk. The write assertion above passed for a whole PR
+    // during which no endpoint existed, so both halves need their own check —
+    // links in a chain are independently absent.
+    const src = await Bun.file(new URL('../composer.ts', import.meta.url)).text()
+    const code = src
+      .split('\n')
+      .filter((l) => {
+        const t = l.trim()
+        return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+      })
+      .join('\n')
+    const at = code.indexOf('createAppUsageSurface({')
+    expect(at).toBeGreaterThan(-1)
+    const block = code.slice(at, code.indexOf('\n    })', at))
+    // Scoped to the CONSTRUCT, not to an argument list or a variable name: this
+    // has to survive the surface gaining another dependency.
+    expect(block.includes('dashboard:')).toBe(true)
+    expect(block.includes('.summarise(')).toBe(true)
+  })
 })

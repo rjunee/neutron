@@ -1533,6 +1533,42 @@
   }
   .cset-chip:hover { border-color: var(--accent); }
   .cset-chip-on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+  /* Model-usage card. Taller than the 2px divider meter on purpose: this one is
+     READ deliberately rather than glanced at, so it carries a label, a number and
+     the pace beside the bar. The band colours are the SAME three tokens the
+     divider uses, so the card and the hairline above it can never disagree about
+     where amber starts. */
+  .cset-usage-pool { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .cset-usage-row { display: flex; flex-direction: column; gap: 5px; }
+  .cset-usage-head { display: flex; align-items: baseline; gap: 8px; }
+  .cset-usage-pct {
+    margin-left: auto; font-size: 14px; font-weight: 700; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .cset-usage-track {
+    height: 6px; border-radius: 999px; background: var(--surface);
+    border: 1px solid var(--border); overflow: hidden;
+  }
+  /* A measured-but-tiny fraction still shows: without a floor, 0.4% renders as
+     nothing and is indistinguishable from unmeasured. */
+  .cset-usage-fill { height: 100%; min-width: 2px; border-radius: 999px; }
+  .cset-usage-nominal { background: var(--usage-nominal); }
+  .cset-usage-warning { background: var(--usage-warning); }
+  .cset-usage-critical { background: var(--usage-critical); }
+  /* auto-fit rather than a breakpoint: the same rule gives three columns on a
+     desktop pane and one on a phone, with nothing to keep in sync. */
+  .cset-usage-facts {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 4px 14px; margin: 2px 0 0;
+  }
+  .cset-usage-facts dt {
+    font-size: 11px; color: var(--muted); font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .cset-usage-facts dd {
+    margin: 0; font-size: 13px; color: var(--fg); font-variant-numeric: tabular-nums;
+  }
+  .cset-usage-facts dd .cset-sub { font-size: 12px; margin: 0; }
   .cset-cred-ul { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .cset-cred-row {
     display: flex; align-items: center; gap: 8px; min-height: 34px;
