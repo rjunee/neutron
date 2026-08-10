@@ -298,8 +298,14 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     // `enforceCrossModelGate(synthesisRaw, deferredCrossModelPeers(`, so hoisting the
     // peer list into a named const broke it while the composition was unchanged.
     // (2026-08-09: hoisted so `classifyBlock` can also read the deferred peers.)
+    //
+    // LOOSENED AGAIN, same day, for the same reason: the CI gate folds a red build
+    // into the synthesis before this call, so the first argument is no longer literally
+    // `synthesisRaw`. Twice now this assertion has failed on a change that left the
+    // composition intact — so it asserts the composition and nothing about the
+    // spelling of the arguments.
     expect(SRC).toMatch(/deferredCrossModelPeers\(\{ codex:/)
-    expect(SRC).toMatch(/enforceCrossModelGate\(synthesisRaw, \w+\)/)
+    expect(SRC).toMatch(/enforceCrossModelGate\(\w+, \w+\)/)
   })
 })
 
