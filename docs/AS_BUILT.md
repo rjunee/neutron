@@ -8602,3 +8602,20 @@ emitted a verdict, and one cross-model lane that failed — and no code change c
 them.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md` § What review round 3 changed.
+
+## 2026-08-10 — MCP `decide()` joins the write chain (an uninstall could lose its revoke)
+
+`install()` and `remove()` were serialized on `OwnerMcpServerStore`'s in-process write
+chain; `decide()` was not, though it read-modify-writes `tool_approvals`. An approve that
+passed its hash check, then an uninstall deleting the spec and revoking the grant, then
+the approve resuming to open and resolve a fresh `approved` row, left an approval for a
+server that no longer existed — and reinstalling the identical spec re-matched it by
+grant hash and came back WIRED with no prompt. `decide()` now runs inside `serialize`
+(body unchanged, moved to a private `decideLocked`).
+
+The regression test's first version passed against the unfixed code, because `remove()`
+already sweeps pending rows; the real window is a grant MINTED by `openApproval` after
+that sweep. Retargeted, it fails the mutant with `Expected: "pending" / Received:
+"approved"`.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.

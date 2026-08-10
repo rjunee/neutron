@@ -393,6 +393,35 @@ export class OwnerMcpServerStore {
     expect_grant_hash: unknown,
     decided_by?: string,
   ): Promise<{ ok: boolean; error: string | null; servers: ReadonlyArray<McpServerStatus> }> {
+    // ON THE WRITE CHAIN — see § ONE WRITER AT A TIME. `install` and `remove` were
+    // serialized and this was not, which made an ORPHANED APPROVAL ordinary rather
+    // than exotic: a `decide('approve')` reads the spec and passes its hash check, a
+    // `remove()` then deletes the spec AND revokes the grant, and the approve resumes
+    // to open + resolve a fresh `approved` row for a server that is no longer
+    // installed. The revoke is simply lost — it ran before the row it was meant to
+    // kill existed. Reinstalling the identical spec then produces the same grant hash,
+    // `approvalStateFor` finds the survivor, and the server comes back WIRED with no
+    // approval prompt at all. That is the gate failing silently open, which is the one
+    // outcome this feature must never have.
+    //
+    // Two clients make the interleaving normal: the phone decides while the tab still
+    // shows the prompt, or an uninstall lands from one surface mid-decision on the
+    // other. The body is unchanged and lives in `decideLocked` so this stays a lock,
+    // not a rewrite; nothing it calls is itself serialized (`list` and
+    // `requestApproval` are both already invoked from inside `install`'s critical
+    // section), so there is no re-entrancy to deadlock on.
+    return await this.serialize(() =>
+      this.decideLocked(name, decision, expect_grant_hash, decided_by),
+    )
+  }
+
+  /** {@link decide}'s body. Runs INSIDE {@link serialize} — never call it directly. */
+  private async decideLocked(
+    name: unknown,
+    decision: 'approve' | 'deny',
+    expect_grant_hash: unknown,
+    decided_by?: string,
+  ): Promise<{ ok: boolean; error: string | null; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
     const spec = this.specs().find((s) => s.name === wanted)
     if (spec === undefined) {
