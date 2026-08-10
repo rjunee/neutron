@@ -118,6 +118,19 @@
         "a project's first write still appears in that project's grid.",
         "Rows are materialised on the first MUTATION, never on a read (ISSUES #412)."
       ]
+    },
+    "usage_pool_samples": {
+      "owner": "persistence/usage-samples-store.ts",
+      "writers": [
+        "persistence/usage-samples-store.ts"
+      ],
+      "notes": [
+        "Added to the map on creation rather than retrofitted: the table has exactly",
+        "ONE writer and enrolling it now is what keeps that true. A usage series with",
+        "several writers would make a gap in the data impossible to attribute.",
+        "The monitor does not write directly \u2014 it calls an injected sink, so the",
+        "60-second tick and the storage stay separable and the tick stays fail-soft."
+      ]
     }
   }
 }

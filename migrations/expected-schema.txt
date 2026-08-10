@@ -236,6 +236,10 @@ CREATE INDEX idx_upload_sessions_expires
 CREATE INDEX idx_upload_sessions_project
     ON upload_sessions (project_slug, status)
 
+[index] idx_usage_pool_samples_pool_ts (tbl=usage_pool_samples)
+CREATE INDEX idx_usage_pool_samples_pool_ts
+    ON usage_pool_samples (pool, ts)
+
 [index] idx_watchdog_alerts_detected_at (tbl=watchdog_alerts)
 CREATE INDEX idx_watchdog_alerts_detected_at ON watchdog_alerts(detected_at)
 
@@ -1427,6 +1431,18 @@ CREATE TABLE upload_sessions (
                         CHECK (status IN ('uploading', 'complete', 'expired')),
     created_at      INTEGER NOT NULL,
     expires_at      INTEGER NOT NULL
+) STRICT
+
+[table] usage_pool_samples (tbl=usage_pool_samples)
+CREATE TABLE usage_pool_samples (
+    ts               INTEGER NOT NULL,
+    pool             TEXT    NOT NULL,
+    account_label    TEXT,
+    session          REAL,
+    weekly           REAL,
+    session_reset_at INTEGER,
+    weekly_reset_at  INTEGER,
+    PRIMARY KEY (ts, pool)
 ) STRICT
 
 [table] watchdog_alerts (tbl=watchdog_alerts)

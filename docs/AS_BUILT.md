@@ -8381,3 +8381,33 @@ cheap tier — leaving it to the fallback is how head-probe sat on the most expe
 for months.
 
 Detail: `docs/as-built/2026-08-09-trident-ci-gate.md`.
+
+## 2026-08-09 — the usage readings are remembered, and turned into a pace
+
+The monitor has always probed the active credential every 60s, cached ONE reading, and
+aged it out at five minutes — so the product measured utilisation continuously and
+remembered nothing. "Which pool can take this build?" is a question about a TREND, which
+is why the dashboard needed a migration before a chart.
+
+Migration 0119 + `persistence/usage-samples-store.ts` + a fail-soft `onSample` hook wired
+beside the existing `onStanding` observer. Prune rides on the same call (a cleanup job
+that can fall out of step with its writer grows forever or deletes something in use).
+PACE = fraction consumed ÷ fraction of window elapsed, computed at read time and never
+stored.
+
+TWO THINGS THE TESTS FOUND THAT READING DID NOT. The exhaustion projection divided by
+pace TWICE — plausible-looking and wrong; now derived, and pinned by a hand-checkable
+case (5h window, half elapsed, 75% used → pace 1.5 → 50 minutes). And an `at < reset_at`
+guard turned out to be MATHEMATICALLY UNREACHABLE: pace > 1 implies the projection is
+always earlier than the reset. Removed with the proof written down — a dead branch dressed
+as safety cannot be tested, so it reads as protection never exercised.
+
+`account_label` exists and is always NULL today: rotation happens outside this process, so
+the instance cannot name the account. An inferred name shown as a measurement would be
+worse than none.
+
+Six mutants; five caught immediately and the sixth exposed the dead branch. The wiring
+tests had to move from `persistence/` to `open/__tests__/` — `open` depends on
+`persistence`, never the reverse, and the lint refusal was the architecture talking.
+
+Detail: `docs/as-built/2026-08-09-usage-sample-series.md`.
