@@ -1,7 +1,8 @@
 /**
  * WEB AND MOBILE MUST AGREE ABOUT WHICH PROGRAMS THE ASSISTANT MAY START.
  *
- * `splitCommandLine` and `serverSummary` exist twice — `app/lib/mcp-servers-client.ts`
+ * `splitCommandLine`, `serverSummary` and `parseEnvLines` exist twice —
+ * `app/lib/mcp-servers-client.ts`
  * and `landing/chat-react/mcp-servers-client.ts` — because each client bundle is
  * deliberately free of the other's workspace. That duplication is correct, and it is
  * also the risk: **these two functions encode product decisions, not transport.**
@@ -17,6 +18,9 @@
  *   - `serverSummary().needs_owner` decides where the "act on this" affordance
  *     appears. A copy that dropped `denied` would hide the row the owner has to
  *     revisit, on one platform only.
+ *   - `parseEnvLines` decides WHICH VARIABLES a server is installed with, and whether a
+ *     malformed line is refused or dropped. One copy that dropped it silently would
+ *     install a server missing the token it needs, from one device only.
  *
  * SO THE COPIES ARE EXECUTED SIDE BY SIDE over the same inputs.
  *
@@ -53,6 +57,29 @@ const LINES: string[] = [
   '   ',
   '"/path with spaces/example-mcp" --stdio',
   "example-mcp --it's-quoted",
+  // A quote INSIDE a segment is an ordinary character — a real path, and the case that
+  // used to lose it.
+  "/srv/it's/example-mcp --stdio",
+  "example-mcp --say don't",
+  'example-mcp "quoted"unquoted',
+]
+
+/** Every shape the environment box can take, including the malformed ones. */
+const ENV_TEXTS: string[] = [
+  '',
+  'EXAMPLE_API_KEY=sk-not-a-real-key',
+  'EXAMPLE_API_KEY=sk-not-a-real-key\nEXAMPLE_REGION=eu',
+  '  EXAMPLE_API_KEY = sk-not-a-real-key  ',
+  // A value containing `=` — only the FIRST one splits.
+  'EXAMPLE_API_KEY=a=b=c',
+  // Malformed: no `=` at all.
+  'EXAMPLE_API_KEY sk-not-a-real-key',
+  // Malformed: an `=` with nothing before it.
+  '=orphan',
+  // Blank lines are not errors.
+  'EXAMPLE_API_KEY=x\n\n\nEXAMPLE_REGION=eu',
+  // One good line, one bad — the bad one must not be silently dropped.
+  'EXAMPLE_API_KEY=x\nEXAMPLE_REGION eu',
 ]
 
 const ROWS: web.McpServerRow[] = (
@@ -72,6 +99,7 @@ const ROWS: web.McpServerRow[] = (
   env_names: ['EXAMPLE_API_KEY'],
   approval,
   grant_prompt: 'rendered by the server',
+  grant_hash: 'f'.repeat(64),
   secrets_present,
   active: approval === 'approved' && secrets_present,
 }))
@@ -121,14 +149,68 @@ describe('serverSummary — the phone and the browser show the same row', () => 
     expect(at('approved')).toBe(false)
   })
 
-  test('an approved server with a MISSING secret is not reported as running', () => {
+  test('an approved server with a MISSING secret is not reported as usable', () => {
     // "Approved" and "actually starting" are different facts, and the difference is
     // invisible from chat.
     const label = web.serverSummary({ ...ROWS[0]!, approval: 'approved', secrets_present: false }).label
     expect(label).toContain('missing')
-    expect(web.serverSummary({ ...ROWS[0]!, approval: 'approved', secrets_present: true }).label).toContain(
-      'running',
-    )
+  })
+
+  test('NO label claims a server is RUNNING — because none of them is', () => {
+    // The old approved label read "Approved and running with your assistant", which
+    // overstated the wiring twice: nothing runs while the assistant is idle, and the
+    // servers reach the Claude-backed session only — a project on another model provider
+    // never gets them (`gateway/wiring/build-llm-call-substrate.ts` returns before this
+    // wiring). Overstating a grant is the failure this feature exists to avoid, so the
+    // claim is pinned OUT of both copies.
+    for (const row of ROWS) {
+      expect(web.serverSummary(row).label.toLowerCase()).not.toContain('running')
+      expect(
+        mobile.serverSummary(row as unknown as mobile.McpServerRow).label.toLowerCase(),
+      ).not.toContain('running')
+    }
+    expect(
+      web.serverSummary({ ...ROWS[0]!, approval: 'approved', secrets_present: true }).label,
+    ).toContain('next session')
+  })
+})
+
+describe('parseEnvLines — the phone and the browser store the same variables', () => {
+  for (const text of ENV_TEXTS) {
+    test(JSON.stringify(text), () => {
+      expect(web.parseEnvLines(text)).toEqual(
+        mobile.parseEnvLines(text) as ReturnType<typeof web.parseEnvLines>,
+      )
+    })
+  }
+
+  test('a line with no `=` is an ERROR, not a line to skip', () => {
+    // Dropping it installed a server with no variables, and the reply listing only the
+    // saved names made the absence look like a display quirk rather than the reason the
+    // server would never start.
+    const { env, errors } = web.parseEnvLines('EXAMPLE_API_KEY sk-not-a-real-key')
+    expect(env).toEqual({})
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('line 1')
+  })
+
+  test('it reports EVERY bad line, and keeps the good ones', () => {
+    const { env, errors } = web.parseEnvLines('EXAMPLE_ONE=1\nbad one\nEXAMPLE_TWO=2\nbad two')
+    expect(env).toEqual({ EXAMPLE_ONE: '1', EXAMPLE_TWO: '2' })
+    expect(errors).toHaveLength(2)
+    expect(errors[0]).toContain('line 2')
+    expect(errors[1]).toContain('line 4')
+  })
+
+  test('only the FIRST `=` splits — a token can contain one', () => {
+    expect(web.parseEnvLines('EXAMPLE_API_KEY=a=b=c').env).toEqual({ EXAMPLE_API_KEY: 'a=b=c' })
+  })
+
+  test('a complaint quotes the line SHORT — an error string is a log line waiting to happen', () => {
+    const pasted = 'z'.repeat(400)
+    const { errors } = web.parseEnvLines(pasted)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]!.length).toBeLessThan(80)
   })
 })
 
@@ -138,10 +220,27 @@ describe('the agreement is real, not vacuous', () => {
     // every comparison above. The suite must be able to fail.
     expect(web.splitCommandLine('a b c')).toEqual({ command: 'a', args: ['b', 'c'] })
     expect(web.serverSummary({ ...ROWS[0]!, approval: 'pending' }).needs_owner).toBe(true)
+    expect(web.parseEnvLines('EXAMPLE_A=1').env).toEqual({ EXAMPLE_A: '1' })
+    expect(web.parseEnvLines('nope').errors).toHaveLength(1)
+  })
+
+  test('a quote INSIDE a segment survives, on both — the apostrophe case', () => {
+    // `/srv/it's/example-mcp` used to become `/srv/its/example-mcp`: a different path,
+    // accepted silently, then faithfully described by a prompt for a command the owner
+    // never wrote. Agreement alone would not have caught it — both copies were wrong the
+    // same way — so the VALUE is pinned here, not just the parity.
+    for (const impl of [web.splitCommandLine, mobile.splitCommandLine]) {
+      expect(impl("/srv/it's/example-mcp --stdio")).toEqual({
+        command: "/srv/it's/example-mcp",
+        args: ['--stdio'],
+      })
+      expect(impl('example-mcp --json {"a":1}').args).toEqual(['--json', '{"a":1}'])
+    }
   })
 
   test('both copies are the SAME shape of function, not one wrapping the other', () => {
     expect(web.splitCommandLine.length).toBe(mobile.splitCommandLine.length)
     expect(web.serverSummary.length).toBe(mobile.serverSummary.length)
+    expect(web.parseEnvLines.length).toBe(mobile.parseEnvLines.length)
   })
 })

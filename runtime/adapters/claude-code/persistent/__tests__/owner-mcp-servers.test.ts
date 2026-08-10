@@ -26,13 +26,17 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname } from 'node:path'
+
+import { OWNER_MCP_STARTUP_TIMEOUT_MS } from '../signatures.ts'
 
 import type { Event } from '../../../../events.ts'
 import type { ResolvedOwnerMcpServer } from '../../../../mcp-servers.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
-import type { PtyChild, PtyHost } from '../pty-host.ts'
+import type { PtyChild, PtyHost, PtySpawnOpts } from '../pty-host.ts'
 import {
   createPersistentReplSubstrate,
   getReplSinkInfo,
@@ -55,14 +59,20 @@ const EXAMPLE: ResolvedOwnerMcpServer = {
   env: { EXAMPLE_API_KEY: 'sk-not-a-real-key' },
 }
 
-/** Echo host capturing every spawn's argv (mirrors `tool-bridge.test.ts`). */
-function makeCapturingHost(): { host: PtyHost; argvs: string[][] } {
+/** Echo host capturing every spawn's argv + env (mirrors `tool-bridge.test.ts`). */
+function makeCapturingHost(): {
+  host: PtyHost
+  argvs: string[][]
+  envs: Array<Record<string, string | undefined>>
+} {
   const argvs: string[][] = []
+  const envs: Array<Record<string, string | undefined>> = []
   let spawns = 0
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    spawn(argv: string[], spawnOpts: PtySpawnOpts): PtyChild {
       spawns += 1
       argvs.push(argv)
+      envs.push(spawnOpts.env ?? {})
       const pid = 410000 + spawns
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
@@ -116,7 +126,7 @@ function makeCapturingHost(): { host: PtyHost; argvs: string[][] } {
       }
     },
   }
-  return { host, argvs }
+  return { host, argvs, envs }
 }
 
 function opts(
@@ -348,6 +358,82 @@ describe('SECURITY: the untrusted substrates receive nothing', () => {
     // 0600: the file now carries the dev-channel token AND every installed server's
     // secrets, so any same-uid process being able to read it would be a real leak.
     expect(statSync(path).mode & 0o777).toBe(0o600)
+  })
+
+  it('the config — SECRETS AND ALL — is gone once the session is torn down', async () => {
+    setReplToolBridge(bridge())
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+    const cfgPath = argvs[0]![argvs[0]!.indexOf('--mcp-config') + 1]!
+    const cfgDir = dirname(cfgPath)
+    expect(existsSync(cfgPath)).toBe(true)
+
+    await shutdownAllPersistentRepls()
+    // The FILE went, and so did its 0700 directory — which used to survive every spawn
+    // forever, one per session, in `tmpdir()`.
+    expect(existsSync(cfgPath)).toBe(false)
+    expect(existsSync(cfgDir)).toBe(false)
+  })
+
+  it('A FAILED SPAWN STRANDS NOTHING — no plaintext secrets left in tmpdir', async () => {
+    // The window: the config is written, then `buildSettings` / trust-seeding / the
+    // spawn itself can throw, and cleanup is owned by the child-exit handler — which
+    // does not exist yet. A throw there left the MCP config, holding the dev-channel
+    // token and every installed server's env VALUES, sitting in `tmpdir()` for the life
+    // of the box.
+    setReplToolBridge(bridge())
+    const dirsBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('neutron-repl-')))
+    const exploding: PtyHost = {
+      spawn(): PtyChild {
+        throw new Error('pty host refused to spawn')
+      },
+    }
+    const sub = createPersistentReplSubstrate(
+      opts(exploding, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await expect(drain(sub.start(spec('hi')))).rejects.toThrow()
+
+    const leaked = readdirSync(tmpdir()).filter(
+      (n) => n.startsWith('neutron-repl-') && !dirsBefore.has(n),
+    )
+    expect(leaked).toEqual([])
+  })
+})
+
+describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
+  it('bounds the blocking MCP startup wait when an installed server is wired', async () => {
+    // `MCP_CONNECTION_NONBLOCKING=false` makes `claude` AWAIT the MCP handshake before
+    // accepting input. That was safe while the config held only our own two `bun`
+    // scripts; an owner-installed program that accepts a connection and never completes
+    // `initialize` would hold that wait open inside the post-spawn assertion's 30 s ready
+    // budget, on the PRIMARY conversational REPL, and present as `channel-wedged`.
+    setReplToolBridge(bridge())
+    const { host, envs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+
+    // Still blocking — the dev-channel bind guarantee is unchanged…
+    expect(envs[0]!['MCP_CONNECTION_NONBLOCKING']).toBe('false')
+    // …but now BOUNDED, and well under the ready budget.
+    expect(envs[0]!['MCP_TIMEOUT']).toBe(String(OWNER_MCP_STARTUP_TIMEOUT_MS))
+    expect(OWNER_MCP_STARTUP_TIMEOUT_MS).toBeLessThan(30_000)
+  })
+
+  it('leaves the no-installed-servers spawn exactly as it was', async () => {
+    // The bound is a response to third-party code being in the config. With none there,
+    // the startup behaviour must not change at all.
+    setReplToolBridge(bridge())
+    const { host, envs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(opts(host, { enableToolBridge: true }))
+    await drain(sub.start(spec('hi')))
+
+    expect(envs[0]!['MCP_CONNECTION_NONBLOCKING']).toBe('false')
+    expect(envs[0]!['MCP_TIMEOUT']).toBeUndefined()
   })
 })
 
