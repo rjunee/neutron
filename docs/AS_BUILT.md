@@ -9025,3 +9025,46 @@ and the anchor is byte-identical — asserted, because this is the #505/#511 bla
 radius.
 
 Detail: `docs/as-built/2026-08-09-notification-is-a-chat-message.md`.
+
+## 2026-08-10 — Two guards in that change were decorative; review found both
+
+Follow-up on the entry above, and the interesting part is not the fixes — it is that
+both defects were guards that READ a value nothing WROTE, and both were covered by
+passing tests.
+
+The re-emit suppression was INERT. `deliver` asked the ButtonStore whether the owner
+had already been shown a row, and the store answers from `delivered_at` — but
+`markDelivered`'s only callers were the onboarding engines, so no row `deliver` created
+was ever stamped, `was_delivered` was structurally false, and the double-buzz the guard
+was added to stop still happened on every idempotent re-emit (the ritual-approval
+prompt, the credential-lapse notice). The test that "proved" the suppression used a fake
+whose `emit` returned `was_delivered: true` from a literal, so it asserted the branch
+and assumed the write. `deliver` now stamps the row after the owner has ACTUALLY been
+reached — a device notification the transport accepted, or a live socket — and the
+suppression is asserted against the REAL `ButtonStore` on a real migrated DB, which is
+the only harness where "the answer was written" is a fact rather than a fixture. Not
+stamping on failure is load-bearing: a row that persisted while every transport failed
+must still buzz on the retry, so `ChatMessagePushSink` now RESOLVES a boolean and reads
+`PushResult.ok` — `pushAll` catches an Expo outage and resolves rather than throwing, so
+a sink watching only for a throw would have called an outage a delivered notification.
+
+A legacy General reminder tap 400ed. `resolvePushRoute` emits the mobile RAIL spelling
+`~general`, and `reminders-client.ts` interpolated it raw into
+`/api/app/projects/<id>/reminders`, which `sanitizeProjectId` rejects — so the tap
+opened `invalid_project_id` where the reminders should be, on the rail's General
+Reminders tab as well as on the push tap. It now maps through `general-scope.ts` like
+`docs-client` and `tabs-client` do; that module exists because the fifth client to talk
+to a project-scoped surface was the fifth to forget. The regression test walks the real
+resolver's output into the real client, because both modules' own suites were green —
+the same sender/resolver seam this whole change was about. It asserts the raw sentinel
+rather than `%7E`: `~` is UNRESERVED, so `encodeURIComponent` leaves it intact, which is
+why every existing "does it encode the segment?" test was blind to it.
+
+Also: the notification can no longer hold a delivery open (`POST
+/api/app/system-notice` awaits `deliver`, and the only bound underneath was Expo's 10 s
+per batch), bounded at 3 s and asserted as an ORDERING rather than elapsed wall-clock
+time; `chatPushExcerpt` clamps a non-positive budget so it cannot return a bare
+ellipsis; and five in-code pointers that sent readers to `reminder-outbound.ts` for the
+notification — contradicted by that file's own header — now name the seam that has it.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.

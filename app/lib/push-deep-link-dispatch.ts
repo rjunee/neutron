@@ -73,6 +73,15 @@ export interface PushPayload {
   kind?: unknown;
   project_id?: unknown;
   message_id?: unknown;
+  /**
+   * LEGACY decode-only fields. Declared rather than left to the index signature
+   * below because `resolvePushRoute` and `resolveProjectId` actually read them, and
+   * this tsconfig has no `noPropertyAccessFromIndexSignature` — so an undeclared
+   * read compiles, and renaming one in the decoder would compile too. Naming them
+   * here is what makes the interface a description of what is read.
+   */
+  reminder_id?: unknown;
+  topic_id?: unknown;
   // Open-ended: a future kind may carry additional fields the helper
   // doesn't need to interpret. The `Record` index keeps TS from
   // complaining when tests pass extra keys.

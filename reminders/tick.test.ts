@@ -365,8 +365,11 @@ describe('ReminderTickLoop.runOnce', () => {
     // testing a place the notification should never have been built: the hook sees
     // only the reminder ROW, and a ritual's row `message` is the dispatch token
     // `ritual:<id>` — the string the owner's phone displayed. Composition moved to
-    // `gateway/proactive/reminder-outbound.ts`, which holds the delivered text and
-    // the durable row id, and is tested there.
+    // the shared out-of-turn delivery seam `gateway/http/deliver.ts` (composing via
+    // `gateway/push/chat-message-push.ts`), which holds the delivered text and the
+    // durable row id, and is tested there. Not to
+    // `gateway/proactive/reminder-outbound.ts` — a notification wired to the
+    // reminder path leaves the brief, the nudge and the overnight report silent.
     //
     // What remains worth pinning at THIS level is the absence: the tick's
     // responsibility ends at "dispatch it, advance the row", and nothing about a

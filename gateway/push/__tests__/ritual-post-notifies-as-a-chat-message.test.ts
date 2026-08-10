@@ -113,6 +113,11 @@ function fakeButtonStore(): ButtonStore {
     async persistInertAgentTurn() {
       return { prompt_id: 'durable-row-inert' }
     },
+    // `deliver` stamps the row delivered after a successful notification, so the
+    // NEXT idempotent re-emit can stay quiet. Present here so that call is a real
+    // one rather than a TypeError absorbed by deliver's catch — the suppression
+    // itself is asserted against the real store in `gateway/http/__tests__/deliver.test.ts`.
+    async markDelivered() {},
   } as unknown as ButtonStore
 }
 

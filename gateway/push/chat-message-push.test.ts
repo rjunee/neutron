@@ -90,6 +90,18 @@ describe('chatPushExcerpt', () => {
     const body = 'w '.repeat(400)
     expect(chatPushExcerpt(body).length).toBeLessThanOrEqual(CHAT_PUSH_BODY_MAX + 1)
   })
+
+  test('a nonsense budget never produces the bare ellipsis', () => {
+    // The function's stated invariant is "never a buzz with no words", and a budget
+    // of 0 / negative / NaN broke it by making every branch return `…` alone.
+    // Unreachable from the single call site today, which is exactly why it needed a
+    // test rather than a promise — the second call site is where it would have bitten.
+    for (const budget of [0, -1, Number.NaN]) {
+      const out = chatPushExcerpt('hello world', budget)
+      expect(out).not.toBe('…')
+      expect(out.replace(/…$/, '').length).toBeGreaterThan(0)
+    }
+  })
 })
 
 describe('chatMessagePushScope', () => {
@@ -198,11 +210,11 @@ describe('buildChatMessagePushSink', () => {
     ])
   })
 
-  test('a body with nothing in it sends NO notification', async () => {
+  test('a body with nothing in it sends NO notification, and reports not-sent', async () => {
     // A buzz with no words tells the owner nothing he cannot already see in chat.
     const f = fake()
     const sink = buildChatMessagePushSink({ fanOut: f.fanOut, project_slug: 'owner' })
-    await sink({ project_id: null, message_id: 'p1', body: '   \n ' })
+    expect(await sink({ project_id: null, message_id: 'p1', body: '   \n ' })).toBe(false)
     expect(f.calls).toEqual([])
   })
 
@@ -217,8 +229,35 @@ describe('buildChatMessagePushSink', () => {
       project_slug: 'owner',
       log: (m) => logged.push(m),
     })
-    await sink({ project_id: null, message_id: 'p1', body: 'hi' })
+    // Swallowed, AND reported as not-sent — `deliver` reads this to decide whether to
+    // record the row as one the owner has seen. Returning `true` here would suppress
+    // the notification on the retry of a message that never reached him.
+    expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(false)
     expect(logged).toHaveLength(1)
     expect(logged[0]).toContain('expo 503')
+  })
+
+  test('an accepted fan-out reports SENT', async () => {
+    const f = fake()
+    const sink = buildChatMessagePushSink({ fanOut: f.fanOut, project_slug: 'owner' })
+    expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(true)
+  })
+
+  test('an Expo OUTAGE reports not-sent even though pushAll RESOLVED', async () => {
+    // The trap this exists for: `PushDispatcher.pushAll` catches its own network
+    // failure and resolves with `ok: false` rather than throwing
+    // (`gateway/push/dispatcher.ts` `PushResult`). A sink that only watched for a
+    // throw would call an outage a delivered notification, and `deliver` would stamp
+    // the row as seen for a buzz that never happened — silencing the retry.
+    const logged: string[] = []
+    const sink = buildChatMessagePushSink({
+      fanOut: {
+        pushAll: async () => ({ attempted: 1, delivered: 0, errored: 0, ok: false, error: null }),
+      },
+      project_slug: 'owner',
+      log: (m) => logged.push(m),
+    })
+    expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(false)
+    expect(logged).toHaveLength(1)
   })
 })

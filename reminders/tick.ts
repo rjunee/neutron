@@ -95,10 +95,14 @@ export interface ReminderDispatcher {
  * received read `ritual:kaizen`. No title override fixes that, because the text he
  * wanted is produced downstream, at compose+post time.
  *
- * So the notification is built where the message is DELIVERED —
- * `gateway/proactive/reminder-outbound.ts`, which holds the posted body and the
- * durable row id the tap anchors on. The tick's job ends at "dispatch it and
- * advance the row".
+ * So the notification is built where the message is DELIVERED — the shared
+ * out-of-turn seam `gateway/http/deliver.ts`, which holds the posted body and the
+ * durable row id the tap anchors on, and composes through
+ * `gateway/push/chat-message-push.ts`. It is NOT in
+ * `gateway/proactive/reminder-outbound.ts`: putting it there cured the reported
+ * reminder and left the brief, the nudge and the overnight report silent, because
+ * they reach chat through the same seam and not through that file. The tick's job
+ * ends at "dispatch it and advance the row".
  */
 export interface ReminderTickOptions {
   store: ReminderStore

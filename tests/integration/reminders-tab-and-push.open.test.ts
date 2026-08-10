@@ -39,7 +39,7 @@
  * MUTATION TEST (each verified by deleting the wiring and re-running):
  *   - drop `props_schema` from `cores/free/reminders/package.json` → the two tab
  *     tests red ("Reminders tab survives the real resolver").
- *   - drop `chat_push` from `buildButtonStoreReminderOutbound(...)` in
+ *   - drop `notify: chatMessagePush` from the `createDeliver({...})` call in
  *     `open/composer.ts` → every push test below reds (no notification is sent).
  *   - compose the notification from `reminder.message` instead of the posted body →
  *     the ritual test reds on the `ritual:` token.
@@ -332,8 +332,10 @@ describe('LINK 3 — push has a producer, and it is the DELIVERED MESSAGE', () =
    * composed the notification from the reminder ROW. For a ritual the row's
    * `message` is the dispatch token `ritual:<id>`, so the owner's phone said
    * `ritual:kaizen` (2026-08-09). The tick cannot see the message a fire posts, so
-   * the notification is now composed where the message is DELIVERED
-   * (`gateway/proactive/reminder-outbound.ts`), and the only honest way to assert it
+   * the notification is now composed where the message is DELIVERED — the shared
+   * out-of-turn seam `gateway/http/deliver.ts` (via
+   * `gateway/push/chat-message-push.ts`), which every producer posts through, NOT
+   * `gateway/proactive/reminder-outbound.ts` — and the only honest way to assert it
    * end to end is to fire a reminder through the real dispatcher and read what
    * reaches Expo. That is strictly MORE coverage than before: the old test could
    * assert the payload without the message ever being posted at all.

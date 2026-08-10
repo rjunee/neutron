@@ -20,8 +20,9 @@
  * `ritual:kaizen`, and it carried the OWNER slug where the tap needed a project
  * id. A notification for a chat message has to be composed from the CHAT MESSAGE,
  * which this module never sees — so composition moved to the one place that does
- * (`gateway/push/chat-message-push.ts`, driven by
- * `gateway/proactive/reminder-outbound.ts`) and this file kept the transport.
+ * (`gateway/push/chat-message-push.ts`, driven by the shared out-of-turn delivery
+ * seam `gateway/http/deliver.ts`, which is what every producer posts through) and
+ * this file kept the transport.
  *
  * Failure semantics, unchanged: "gracefully no-ops if no tokens registered or
  * Expo API unreachable." We:

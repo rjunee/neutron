@@ -70,9 +70,14 @@ export const CHAT_PUSH_GENERAL_TITLE = 'General'
  * because a notification with no body is a buzz with no information).
  */
 export function chatPushExcerpt(body: string, max: number = CHAT_PUSH_BODY_MAX): string {
+  // A budget of 0 / a negative / NaN would make every branch below return the
+  // bare ellipsis — a buzz with no words, which is the one output this function
+  // promises never to produce. Unreachable from the single call site today; the
+  // clamp is here so the invariant holds for the second one.
+  const budget = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : CHAT_PUSH_BODY_MAX
   const flat = body.replace(/\s+/g, ' ').trim()
-  if (flat.length <= max) return flat
-  const clipped = dropDanglingSurrogate(flat.slice(0, max))
+  if (flat.length <= budget) return flat
+  const clipped = dropDanglingSurrogate(flat.slice(0, budget))
   const lastSpace = clipped.lastIndexOf(' ')
   // A single word longer than the whole budget has no boundary to cut on — take
   // the hard clip rather than returning nothing.
@@ -81,7 +86,7 @@ export function chatPushExcerpt(body: string, max: number = CHAT_PUSH_BODY_MAX):
   // A head that is ENTIRELY trailing punctuation strips to nothing, and `…` alone
   // is a buzz with no words. It also survives the sink's `length === 0` check, so
   // the guard has to be here rather than there. Fall back to the untrimmed clip,
-  // which cannot be empty because `flat.length > max >= 1`.
+  // which cannot be empty because `flat.length > budget >= 1`.
   return `${trimmed.length > 0 ? trimmed : clipped}…`
 }
 
@@ -182,12 +187,20 @@ export function buildChatMessagePush(input: ChatMessagePushInput): ChatMessagePu
 }
 
 /** The slice of `PushDispatcher` this sink needs. Narrow on purpose: a sink that
- *  could also prune tokens or fan per-user would be a second delivery policy. */
+ *  could also prune tokens or fan per-user would be a second delivery policy.
+ *
+ *  The RESULT is read for one field only. `PushDispatcher.pushAll` does NOT throw
+ *  on an Expo outage — it catches the network failure and resolves with
+ *  `ok: false` (`gateway/push/dispatcher.ts` `PushResult`). A sink that only
+ *  watched for a throw would therefore report an outage as a successful
+ *  notification, and `deliver` would stamp the row delivered for a buzz that never
+ *  happened. Anything without an explicit `ok: false` counts as accepted, so a
+ *  fake that resolves `undefined` reads as success. */
 export interface ChatMessagePushFanOut {
   pushAll(
     project_slug: string,
     message: { title?: string; body: string; data?: Record<string, unknown> },
-  ): Promise<unknown>
+  ): Promise<{ ok?: boolean } | unknown>
 }
 
 /**
@@ -198,8 +211,16 @@ export interface ChatMessagePushFanOut {
  * delivery — so every throw is swallowed here rather than at the producer, where
  * forgetting the try/catch once would make a fired reminder retry forever over an
  * Expo outage.
+ *
+ * RESOLVES TO WHETHER THE NOTIFICATION WAS HANDED TO THE TRANSPORT — `true` when
+ * the fan-out accepted it, `false` when it was skipped (nothing to say) or the
+ * transport threw. This is not decoration: `deliver` stamps the durable row
+ * `delivered_at` on a `true` and leaves it NULL on a `false`, and that stamp is
+ * the ONLY thing that lets a later idempotent re-emit tell "he already got this"
+ * from "the row exists but never reached him". A sink that always answered `true`
+ * would suppress the notification for a message the owner never saw.
  */
-export type ChatMessagePushSink = (input: ChatMessagePushInput) => Promise<void>
+export type ChatMessagePushSink = (input: ChatMessagePushInput) => Promise<boolean>
 
 export interface BuildChatMessagePushSinkInput {
   fanOut: ChatMessagePushFanOut
@@ -211,19 +232,29 @@ export interface BuildChatMessagePushSinkInput {
 export function buildChatMessagePushSink(
   input: BuildChatMessagePushSinkInput,
 ): ChatMessagePushSink {
-  return async (msg): Promise<void> => {
+  return async (msg): Promise<boolean> => {
     const push = buildChatMessagePush(msg)
     // A body that excerpts to nothing carries no information — a buzz with no
-    // words is worse than silence, and the durable row is already in chat.
-    if (push.body.length === 0) return
+    // words is worse than silence, and the durable row is already in chat. Report
+    // `false`: nothing was sent, so nothing should be recorded as delivered.
+    if (push.body.length === 0) return false
     try {
-      await input.fanOut.pushAll(input.project_slug, push)
+      const result = await input.fanOut.pushAll(input.project_slug, push)
+      // An Expo outage resolves with `ok: false` rather than throwing — see the
+      // `ChatMessagePushFanOut` docblock. Treat it as not-sent so the row stays
+      // unstamped and the next re-emit tries again.
+      if (typeof result === 'object' && result !== null && (result as { ok?: boolean }).ok === false) {
+        input.log?.('[push] chat-message push not accepted by the transport (the chat row is the guarantee)')
+        return false
+      }
+      return true
     } catch (err) {
       input.log?.(
         `[push] chat-message push failed (the chat row is the guarantee): ${
           err instanceof Error ? err.message : String(err)
         }`,
       )
+      return false
     }
   }
 }

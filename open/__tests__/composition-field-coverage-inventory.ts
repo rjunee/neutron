@@ -26,8 +26,11 @@
  * WIRED_FIELDS because the field itself was DELETED on 2026-08-09: it composed the
  * notification from the reminder ROW (`ritual:<id>` for a ritual), which is the one
  * place a chat notification cannot be built correctly, so composition moved to the
- * delivery seam (`gateway/proactive/reminder-outbound.ts`). Deleting a field is the
- * one move the ratchet permits besides wiring it — see the guard's header.
+ * shared out-of-turn delivery seam `gateway/http/deliver.ts` (composing via
+ * `gateway/push/chat-message-push.ts`) — the one thing every producer posts
+ * through, and so the only place that cannot leave the brief or the nudge silent.
+ * Deleting a field is the one move the ratchet permits besides wiring it — see the
+ * guard's header.
  *
  * HOW TO CHANGE IT.
  *   - Wired a field? Move its entry from UNWIRED_FIELDS to WIRED_FIELDS. The

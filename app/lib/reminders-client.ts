@@ -6,7 +6,20 @@
  * P5.3 `LauncherClient` shape: pass the bearer token at construction
  * time; each call returns the post-mutation reminder list (server is
  * authoritative — no optimistic UI without echo).
+ *
+ * EVERY project segment goes through `general-scope.ts`, like `docs-client` and
+ * `tabs-client` do. The mobile rail spells the no-project scope `'~general'` and
+ * the gateway's `sanitizeProjectId` rejects it (`~` is outside its
+ * `[A-Za-z0-9_.-]` alphabet) → `invalid_project_id`, so a raw interpolation puts
+ * an error banner where General's reminders should be. That was live on two
+ * paths at once: opening General's Reminders tab from the rail, and a legacy
+ * reminder push tap, which `resolvePushRoute` routes to
+ * `/projects/~general/reminders` (`app/lib/push-deep-link-dispatch.ts`). The
+ * fifth client to talk to a project-scoped surface was the fifth to forget the
+ * mapping, which is the defect `general-scope.ts` exists to stop.
  */
+
+import { httpProjectSegmentEncoded } from './general-scope';
 
 export interface ReminderItem {
   id: string;
@@ -76,7 +89,7 @@ export class RemindersClient {
         ? opts.include_id
         : null;
     const path =
-      `/api/app/projects/${encodeURIComponent(project_id)}/reminders?status=pending` +
+      `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/reminders?status=pending` +
       (include_id !== null ? `&include_id=${encodeURIComponent(include_id)}` : '');
     const res = await this.req(path);
     return res.reminders;
@@ -88,7 +101,7 @@ export class RemindersClient {
     fire_at: number,
   ): Promise<ReminderItem[]> {
     const res = await this.req(
-      `/api/app/projects/${encodeURIComponent(project_id)}/reminders`,
+      `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/reminders`,
       { method: 'POST', body: { message, fire_at } },
     );
     return res.reminders;
@@ -100,7 +113,7 @@ export class RemindersClient {
     new_fire_at: number,
   ): Promise<ReminderItem[]> {
     const res = await this.req(
-      `/api/app/projects/${encodeURIComponent(project_id)}/reminders/${encodeURIComponent(reminder_id)}/snooze`,
+      `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/reminders/${encodeURIComponent(reminder_id)}/snooze`,
       { method: 'POST', body: { new_fire_at } },
     );
     return res.reminders;
@@ -108,7 +121,7 @@ export class RemindersClient {
 
   async cancel(project_id: string, reminder_id: string): Promise<ReminderItem[]> {
     const res = await this.req(
-      `/api/app/projects/${encodeURIComponent(project_id)}/reminders/${encodeURIComponent(reminder_id)}/cancel`,
+      `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/reminders/${encodeURIComponent(reminder_id)}/cancel`,
       { method: 'POST' },
     );
     return res.reminders;
@@ -128,7 +141,7 @@ export class RemindersClient {
     opts?: { title?: string; priority?: number },
   ): Promise<ReminderConvertToTaskResult> {
     const res = await this.req(
-      `/api/app/projects/${encodeURIComponent(project_id)}/reminders/${encodeURIComponent(reminder_id)}/convert-to-task`,
+      `/api/app/projects/${httpProjectSegmentEncoded(project_id)}/reminders/${encodeURIComponent(reminder_id)}/convert-to-task`,
       { method: 'POST', body: opts ?? {} },
     );
     const payload = res as ListResponse & {

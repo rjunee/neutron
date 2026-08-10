@@ -53,9 +53,17 @@ export const PUSH_KINDS = [
   /**
    * A message posted into a project's chat by an agent, a fired reminder, or a
    * ritual. Carries `message_id` (the durable row the tap anchors on) and
-   * `project_id` — ABSENT when the message landed in the no-project General
-   * scope, which is the one kind for which absence is meaningful rather than a
-   * payload bug.
+   * `project_id`, which is ALWAYS A STRING — never omitted and never null. The
+   * no-project General scope names itself with the `GENERAL_RAIL_ID` sentinel from
+   * `topic-id.ts` (the one definition both sides import).
+   *
+   * Absence was the encoding for one round of review, on the argument that the
+   * client should own General's spelling. It was retracted: a payload with no
+   * project is MALFORMED to every app bundle already installed, whose
+   * `resolvePushRoute` warns and refuses to route — and a store artifact cannot be
+   * upgraded in lockstep with a self-hosted gateway, so the silent encoding would
+   * have preserved the very "the app opens and nothing routes" it was meant to
+   * end. See `gateway/push/chat-message-push.ts`, which is the sender.
    */
   'agent_message',
   /** The Calendar Core's pre-meeting brief. Carries `event_id` + `project_id`. */

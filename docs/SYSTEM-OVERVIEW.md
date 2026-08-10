@@ -3800,6 +3800,15 @@ General — the first attempt again — is malformed to every app bundle already
 installed, and a store artifact cannot be upgraded in lockstep with a self-hosted
 gateway.
 
+General has THREE spellings and they are not interchangeable — the rail id
+`'~general'`, the client chat scope `''`, and the HTTP path segment `'general'` —
+so every mobile client that talks to a project-scoped surface maps through
+`app/lib/general-scope.ts`. `reminders-client.ts` was the one that did not: it
+interpolated the rail id raw, and `sanitizeProjectId` rejects `~`, so General's
+Reminders tab and every legacy reminder push tap rendered `invalid_project_id`.
+Note that `encodeURIComponent` does NOT help here — `~` is unreserved and passes
+through unchanged, which is why an "it encodes the segment" test cannot catch this.
+
 Every out-of-turn producer in the Open composer delivers to the owner's BARE
 `app:<user>` topic (suffixing it is the PR #105 deliver-to-nobody bug), so in
 practice every notification is General-scoped and its tap opens the General chat —
@@ -3830,6 +3839,27 @@ because an escaping throw would be read by the reminder tick as "the post did no
 happen" and would re-post the same message next tick. The Expo POST also carries an
 `AbortSignal.timeout`, since it is now awaited inside a durable delivery and a
 stalled connection would otherwise park the fire.
+
+That re-emit suppression only works because `deliver` also WRITES the value it reads.
+`was_delivered` comes from `button_prompts.delivered_at`, whose only writers had been
+the onboarding engines — so for one round of review the suppression was INERT: no row
+`deliver` created was ever stamped, the condition could never be true, and the
+double-buzz continued. `deliver` now calls `ButtonStore.markDelivered` after the owner
+has ACTUALLY been reached, which is why `ChatMessagePushSink` resolves a boolean rather
+than `void`: it reports whether the transport accepted the push, reading
+`PushResult.ok` and not merely the absence of a throw (`pushAll` catches an Expo outage
+and RESOLVES). Stamping is deliberately skipped when nothing was reached, so a message
+that persisted while every transport failed still buzzes on the retry instead of being
+silenced forever. Only `durability: 'reply'` is stamped — `persistInertAgentTurn` writes
+`delivered_at` in its own INSERT. The notification is additionally bounded at 3 s
+(`DEFAULT_NOTIFY_TIMEOUT_MS`) so it can never hold a delivery open: `POST
+/api/app/system-notice` awaits `deliver` to answer its caller, and the only limit
+underneath was Expo's 10 s PER BATCH. A timed-out notification counts as not sent.
+
+The notification is NOT gated on `delivered_live`, deliberately. Android keeps the
+app-ws socket open while the app sits in the background, so a live socket is a render,
+not a read receipt; gating on it would silence exactly the case a notification exists
+for.
 `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are merely rate-limited.
 
 **The tap** (`app/lib/push-deep-link-dispatch.ts`). `agent_message` resolves to
