@@ -181,6 +181,69 @@ export function chatInitialAnchor(
 }
 
 /**
+ * The index of the row a push payload's `message_id` names, or `-1`.
+ *
+ * MATCHES EITHER IDENTITY, and it has to. A chat row carries two server-assigned
+ * ids: `message_id` (chat-core's per-topic identity) and `prompt_id` (the durable
+ * ButtonStore row an OUT-OF-TURN post is written as — `chat-core/types.ts:237`).
+ * A fired reminder or ritual is delivered through `gateway/http/deliver.ts`, whose
+ * durable id is the `prompt_id`, and that is what its notification carries. A
+ * future per-message push would carry the `message_id`. Matching both means the
+ * notification does not have to know which producer wrote the row it points at,
+ * and neither does this function.
+ */
+export function indexOfChatMessage(
+  rows: readonly RenderRow[],
+  messageId: string,
+): number {
+  if (messageId.length === 0) return -1;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (row === undefined || row.kind !== 'message') continue;
+    if (row.message.message_id === messageId) return i;
+    if (row.message.prompt_id === messageId) return i;
+  }
+  return -1;
+}
+
+/**
+ * Where a transcript opened FROM A PUSH TAP should land.
+ *
+ * The owner tapped a notification for one specific message, so "wherever you were
+ * last" is wrong — but so is "that exact message", when the message sits inside a
+ * run of unread ones. He asked for the unread run to be read from its beginning
+ * (ISSUES #505), and a push for the newest message is precisely the case where the
+ * run's start is what he wants to see. So:
+ *
+ *   - the referenced row is inside (or after) the trailing unread run → the
+ *     ordinary {@link chatInitialAnchor} answer, unchanged;
+ *   - the referenced row is BEHIND the unread watermark (an old notification tapped
+ *     late, a receipt that has since landed) → the referenced row itself, because
+ *     the tap was explicitly about that message;
+ *   - the referenced row is not in the transcript yet → the ordinary answer, and
+ *     the surface re-asks when the row syncs.
+ *
+ * ONE FUNCTION FOR BOTH HALVES OF THE SURFACE, deliberately. `ChatSyncSurface`
+ * consumes this twice — once at render, to freeze the initial anchor of a FRESH
+ * mount, and once imperatively, to re-anchor a transcript that was ALREADY mounted
+ * (where FlashList has latched `isInitialScrollComplete` and no computed anchor can
+ * reach it). Because both paths compute the same index from the same rows, the two
+ * cannot race to different places on a cold open — which is the only reason it is
+ * safe to have both.
+ */
+export function chatDeepLinkAnchor(
+  rows: readonly RenderRow[],
+  selfDeviceId: string,
+  targetMessageId: string,
+): ChatInitialAnchor {
+  const base = chatInitialAnchor(rows, selfDeviceId);
+  const target = indexOfChatMessage(rows, targetMessageId);
+  if (target < 0) return base;
+  if (base.kind === 'unread' && base.index <= target) return base;
+  return { kind: 'unread', index: target };
+}
+
+/**
  * The `initialScrollIndex` / `initialScrollIndexParams` pair an anchor becomes.
  *
  * Kept next to the rule so the translation from "what the owner asked for" to

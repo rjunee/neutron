@@ -11,6 +11,11 @@
  * ISSUE #17 — the launcher long-press dispatch rides in as query params:
  * `?prefill=<prefix>` mounts the composer pre-populated (`chat_send_prefix`),
  * `?autosend=<text>` fires one send once the socket connects (`chat_send`).
+ *
+ * `?message_id=<id>` is the PUSH TAP's landing instruction — the message the
+ * notification was about (`app/lib/push-deep-link-dispatch.ts`). It reached this
+ * route for months with nothing reading it, so a tap opened the chat and left the
+ * owner wherever he last was; the surface anchors on it now.
  */
 
 import { useLocalSearchParams, usePathname } from 'expo-router';
@@ -19,7 +24,12 @@ import { ChatSyncSurface } from '../../../components/ChatSyncSurface';
 import { projectIdFromPathname } from '../../../lib/project-rail-view';
 
 export default function ProjectChatTab(): React.JSX.Element {
-  const params = useLocalSearchParams<{ id: string; prefill?: string; autosend?: string }>();
+  const params = useLocalSearchParams<{
+    id: string;
+    prefill?: string;
+    autosend?: string;
+    message_id?: string;
+  }>();
   const pathname = usePathname();
   // THE SCOPE COMES FROM THE PATH, exactly as the shell around this screen
   // resolves it (`_layout.tsx` `projectIdFromPathname`) — because the route
@@ -31,11 +41,13 @@ export default function ProjectChatTab(): React.JSX.Element {
     projectIdFromPathname(pathname) ?? (typeof params.id === 'string' ? params.id : '');
   const prefill = typeof params.prefill === 'string' ? params.prefill : '';
   const autosend = typeof params.autosend === 'string' ? params.autosend : '';
+  const messageId = typeof params.message_id === 'string' ? params.message_id : '';
   return (
     <ChatSyncSurface
       projectId={projectId}
       {...(prefill.length > 0 ? { initialPrefill: prefill } : {})}
       {...(autosend.length > 0 ? { initialAutosend: autosend } : {})}
+      {...(messageId.length > 0 ? { targetMessageId: messageId } : {})}
     />
   );
 }

@@ -386,9 +386,14 @@ export function buildCoreModules(
           return tz !== null && isValidIanaTimezone(tz) ? tz : null
         },
       }
-      if (input.push_dispatcher !== undefined) {
-        loopOpts.on_fired = input.push_dispatcher
-      }
+      // NOTE what is NOT here any more: a reminder-fired PUSH hook. Until
+      // 2026-08-09 the composition's `push_dispatcher` was attached to the tick's
+      // `on_fired` and composed a notification from the reminder ROW — which for a
+      // ritual is the dispatch token `ritual:<id>`, so the owner's lock screen read
+      // `ritual:kaizen`. The tick cannot see the message the fire posted, so it was
+      // never a place a truthful chat notification could be built; it is composed
+      // where the message is delivered instead
+      // (`gateway/proactive/reminder-outbound.ts`).
       // Rituals (ISSUES #504) — install the ritual fire PLANNER now that the
       // graph's ApprovalManager exists. NOTE what is NOT here: the tick loop gets
       // no ritual option, because a ritual is not a special kind of fire. The

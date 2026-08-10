@@ -12,12 +12,12 @@
  *   Reminders tab existed only in the mobile PRE-FETCH placeholder
  *   (`app/lib/project-tabs.ts:44-51`) and vanished the moment `/tabs` answered.
  *
- *   LINK 3 — PUSH HAD NO PRODUCER. Registering a device is half of push;
- *   delivery needs the `push_dispatcher` composition field, which
- *   `gateway/composition/build-core-modules.ts:396-398` attaches to the reminder
- *   tick's `on_fired`. No composer set it, so `createPushDispatcher`
- *   (`gateway/push/dispatcher.ts:133`) had no non-test call site and the reminder
- *   deep link (`app/lib/push-deep-link-dispatch.ts:93-108`) was unreachable.
+ *   LINK 3 — PUSH HAD NO PRODUCER. Registering a device is half of push; delivery
+ *   needs a sender, and no composer built one, so `createPushDispatcher` had no
+ *   non-test call site and the deep link was unreachable. (The seam has since moved:
+ *   the notification is composed at DELIVERY rather than on the reminder tick —
+ *   2026-08-09, because a tick-composed notification can only see the reminder ROW,
+ *   which for a ritual is the dispatch token `ritual:<id>`. See the LINK 3 block.)
  *
  * WHY THIS SHAPE OF TEST. Asserting the manifest has a `props_schema` key is
  * exactly what "declared but never served" looks like — the manifest had the
@@ -25,11 +25,11 @@
  * composer, real production graph, real HTTP) and reads the payload a client
  * fetches over the wire, per the `tasks-tab-served.open.test.ts` precedent.
  *
- * `push_dispatcher` is NOT a route slot, so `route-slot-coverage.test.ts` cannot
- * see it. The push half therefore asserts against the REAL composer's output and
- * then drives the dispatcher it produced — over a stubbed `globalThis.fetch`, so
- * the suite never reaches `exp.host`, and so the assertions can prove the safety
- * properties that made it defensible to ship this ON:
+ * Neither the push sender nor the fire-time dispatcher is a route slot, so
+ * `route-slot-coverage.test.ts` cannot see either. The push half therefore asserts
+ * against the REAL composer's output and then FIRES A REMINDER through it — over a
+ * stubbed `globalThis.fetch`, so the suite never reaches `exp.host`, and so the
+ * assertions can prove the safety properties that made it defensible to ship ON:
  *
  *   - zero registered devices (the state of every fresh install) makes NO
  *     network call whatsoever
@@ -39,9 +39,10 @@
  * MUTATION TEST (each verified by deleting the wiring and re-running):
  *   - drop `props_schema` from `cores/free/reminders/package.json` → the two tab
  *     tests red ("Reminders tab survives the real resolver").
- *   - drop `push_dispatcher` from the `open/composer.ts` composition object →
- *     all four push tests red, plus
- *     `open/__tests__/open-composition-fields-characterization.test.ts`.
+ *   - drop `chat_push` from `buildButtonStoreReminderOutbound(...)` in
+ *     `open/composer.ts` → every push test below reds (no notification is sent).
+ *   - compose the notification from `reminder.message` instead of the posted body →
+ *     the ritual test reds on the `ritual:` token.
  *   - drop the `pruneUnregistered` call in `gateway/push/dispatcher.ts` → the
  *     stale-token test reds.
  */
@@ -81,19 +82,19 @@ const OWNER_BEARER = 'owner'
 /** What the REAL Open composer returns. */
 type OpenComposition = Awaited<ReturnType<ReturnType<typeof buildOpenGraphComposer>>>
 /**
- * The reminder row the tick loop hands `on_fired`. Derived from the composition
- * field's own signature rather than imported: `@neutronai/reminders` is a
- * workspace but not a ROOT dependency, so a direct import does not resolve under
- * the root tsconfig that covers `tests/integration/`.
+ * The reminder row the tick loop hands the dispatcher. Derived from the composition
+ * field's own signature rather than imported: `@neutronai/reminders` is a workspace
+ * but not a ROOT dependency, so a direct import does not resolve under the root
+ * tsconfig that covers `tests/integration/`.
  */
-type FiredReminder = Parameters<NonNullable<OpenComposition['push_dispatcher']>['onFired']>[0]
+type FiredReminder = Parameters<NonNullable<OpenComposition['reminder_dispatcher']>['dispatch']>[0]
 
 let home: IsolatedHome
 
 interface Harness {
   base: string
-  /** The composition the REAL Open composer returned — the push assertions
-   *  read `push_dispatcher` straight off it. */
+  /** The composition the REAL Open composer returned — the push assertions drive
+   *  `reminder_dispatcher` off it, which is the seam the tick loop uses. */
   composition: OpenComposition
   close(): Promise<void>
 }
@@ -256,7 +257,7 @@ describe('LINK 2 — the Reminders tab survives the real resolver', () => {
 })
 
 /** A plain (non-ritual) pending nudge row — the exact shape the tick loop hands
- *  `on_fired` after a successful dispatch. */
+ *  `reminder_dispatcher.dispatch`. */
 function reminderRow(overrides: Partial<FiredReminder> = {}): FiredReminder {
   return {
     id: 'rem-1',
@@ -322,50 +323,88 @@ async function registerDevice(base: string, device_token: string): Promise<void>
   expect(res.status).toBe(200)
 }
 
-describe('LINK 3 — push has a producer', () => {
-  test('the REAL composer populates push_dispatcher', async () => {
+describe('LINK 3 — push has a producer, and it is the DELIVERED MESSAGE', () => {
+  /**
+   * DRIVEN THROUGH `reminder_dispatcher`, not through a push hook, and that is the
+   * change this rewrite records.
+   *
+   * The push used to hang off `push_dispatcher` → `ReminderTickLoop.on_fired`, which
+   * composed the notification from the reminder ROW. For a ritual the row's
+   * `message` is the dispatch token `ritual:<id>`, so the owner's phone said
+   * `ritual:kaizen` (2026-08-09). The tick cannot see the message a fire posts, so
+   * the notification is now composed where the message is DELIVERED
+   * (`gateway/proactive/reminder-outbound.ts`), and the only honest way to assert it
+   * end to end is to fire a reminder through the real dispatcher and read what
+   * reaches Expo. That is strictly MORE coverage than before: the old test could
+   * assert the payload without the message ever being posted at all.
+   */
+  test('the REAL composer wires a fire-time dispatcher', async () => {
     const h = await boot()
-    // The field build-core-modules.ts:396-398 reads to install the tick's
-    // `on_fired`. Absent → a fired reminder never leaves the chat topic.
-    expect(h.composition.push_dispatcher).toBeDefined()
-    expect(typeof h.composition.push_dispatcher!.onFired).toBe('function')
+    expect(h.composition.reminder_dispatcher).toBeDefined()
+    expect(typeof h.composition.reminder_dispatcher!.dispatch).toBe('function')
   })
 
   test('SAFETY — zero registered devices makes no network call and does not throw', async () => {
     const h = await boot()
-    // The state every fresh install boots in. `dispatch` returns before any
-    // fetch when the message list is empty (`gateway/push/dispatcher.ts:145-147`),
-    // which is what makes it defensible to ship this ON with no flag.
+    // The state every fresh install boots in. Every send reads the token table
+    // first and returns before any fetch when the list is empty, which is what
+    // makes it defensible to ship this ON with no flag.
     await withExpoStub([], async (sent) => {
-      await h.composition.push_dispatcher!.onFired(reminderRow())
+      await h.composition.reminder_dispatcher!.dispatch(reminderRow())
       expect(sent).toHaveLength(0)
     })
   })
 
-  test('a device registered over HTTP is the device the fired reminder reaches', async () => {
+  test('a device registered over HTTP receives the POSTED message, as a chat notification', async () => {
     const h = await boot()
     const token = 'ExponentPushToken[live-device]'
     await registerDevice(h.base, token)
 
     await withExpoStub([{ status: 'ok' }], async (sent) => {
-      await h.composition.push_dispatcher!.onFired(reminderRow({ message: 'drink water' }))
-      // ONE batch, to the token the register route persisted — proof the
-      // dispatcher reads the same rows that surface writes, not a second store.
+      await h.composition.reminder_dispatcher!.dispatch(reminderRow({ message: 'drink water' }))
+      // ONE batch, to the token the register route persisted — proof the sender
+      // reads the same rows that surface writes, not a second store.
       expect(sent).toHaveLength(1)
       const batch = sent[0]!.body as Array<{
         to: string
+        title: string
         body: string
-        data: { kind: string; reminder_id: string; topic_id?: string }
+        data: { kind: string; message_id?: string; project_id?: string }
       }>
       expect(batch).toHaveLength(1)
       expect(batch[0]!.to).toBe(token)
+      // THE REPORTED DEFECT. The body is the text that reached chat.
       expect(batch[0]!.body).toBe('drink water')
-      // The payload the tap handler resolves to `/projects/<id>/reminders`
-      // (`app/lib/push-deep-link-dispatch.ts:93-108` recovers the project from
-      // `topic_id`'s `app-project:` prefix).
-      expect(batch[0]!.data.kind).toBe('reminder')
-      expect(batch[0]!.data.reminder_id).toBe('rem-1')
-      expect(batch[0]!.data.topic_id).toBe(`app-project:${PROJECT_ID}`)
+      expect(batch[0]!.title).toBe('General')
+      // And the tap payload is a CHAT-message payload carrying the durable row id
+      // the transcript anchors on — not a reminder id, and not the owner slug.
+      expect(batch[0]!.data.kind).toBe('agent_message')
+      expect(typeof batch[0]!.data.message_id).toBe('string')
+      expect(batch[0]!.data.message_id!.length).toBeGreaterThan(0)
+      // General is the no-project scope, and absence is how the wire says so.
+      expect(Object.prototype.hasOwnProperty.call(batch[0]!.data, 'project_id')).toBe(false)
+    })
+  })
+
+  test('a RITUAL row notifies with the same shape — never the `ritual:<id>` token', async () => {
+    // The owner's exact complaint. A ritual row carries its dispatch token in
+    // `message`; with no approval grant on this box the planner refuses to compose
+    // the ritual, so the assertion that matters here is the one that would have
+    // failed before: whatever reaches Expo, it is never that token.
+    const h = await boot()
+    await registerDevice(h.base, 'ExponentPushToken[ritual-device]')
+
+    await withExpoStub([{ status: 'ok' }], async (sent) => {
+      await h.composition.reminder_dispatcher!.dispatch(
+        reminderRow({ id: 'rem-ritual', message: 'ritual:kaizen', ritual_id: 'kaizen' }),
+      )
+      for (const call of sent) {
+        const batch = call.body as Array<{ body: string; data: { kind: string } }>
+        for (const msg of batch) {
+          expect(msg.body).not.toContain('ritual:')
+          expect(msg.data.kind).toBe('agent_message')
+        }
+      }
     })
   })
 
@@ -376,7 +415,7 @@ describe('LINK 3 — push has a producer', () => {
     await withExpoStub(
       [{ status: 'error', details: { error: 'DeviceNotRegistered' } }],
       async (sent) => {
-        await h.composition.push_dispatcher!.onFired(reminderRow())
+        await h.composition.reminder_dispatcher!.dispatch(reminderRow())
         expect(sent).toHaveLength(1)
       },
     )
@@ -385,7 +424,7 @@ describe('LINK 3 — push has a producer', () => {
     // at all. Without pruning this token would be re-sent on every reminder for
     // the life of the install.
     await withExpoStub([{ status: 'ok' }], async (sent) => {
-      await h.composition.push_dispatcher!.onFired(reminderRow({ id: 'rem-2' }))
+      await h.composition.reminder_dispatcher!.dispatch(reminderRow({ id: 'rem-2' }))
       expect(sent).toHaveLength(0)
     })
   })
@@ -398,7 +437,7 @@ describe('LINK 3 — push has a producer', () => {
     await withExpoStub(
       [{ status: 'error', details: { error: 'MessageRateExceeded' } }],
       async (sent) => {
-        await h.composition.push_dispatcher!.onFired(reminderRow())
+        await h.composition.reminder_dispatcher!.dispatch(reminderRow())
         expect(sent).toHaveLength(1)
       },
     )
@@ -406,7 +445,7 @@ describe('LINK 3 — push has a producer', () => {
     // Still registered — a rate limit must never silently end push for the
     // owner's phone until their next sign-in.
     await withExpoStub([{ status: 'ok' }], async (sent) => {
-      await h.composition.push_dispatcher!.onFired(reminderRow({ id: 'rem-2' }))
+      await h.composition.reminder_dispatcher!.dispatch(reminderRow({ id: 'rem-2' }))
       expect(sent).toHaveLength(1)
       const batch = sent[0]!.body as Array<{ to: string }>
       expect(batch[0]!.to).toBe(token)

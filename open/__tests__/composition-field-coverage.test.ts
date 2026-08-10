@@ -6,23 +6,22 @@
  * A field on it is only live when a real composer assigns it; when no composer
  * does, the consumer takes its `if (input.x !== undefined)` branch the other
  * way and the capability is simply absent, with nothing anywhere reporting a
- * problem. That is how `push_dispatcher` came to be declared
- * (`gateway/composition/input/misc-input.ts:30`), consumed
- * (`gateway/composition/build-core-modules.ts:396`), covered by tests, and set
- * by nobody — so the app registered device push tokens and delivered to none of
- * them.
+ * problem. That is how `push_dispatcher` came to be declared in
+ * `gateway/composition/input/misc-input.ts`, consumed in
+ * `gateway/composition/build-core-modules.ts`, covered by tests, and set by
+ * nobody — so the app registered device push tokens and delivered to none of them.
+ * (That field is gone as of 2026-08-09; the incident is what this gate is for.)
  *
  * WHY NEITHER EXISTING GATE CATCHES THAT.
  *   - `scripts/ci/composition-wiring-gate.sh` is lexical and covers `enable_*`
  *     BOOLEANS only. It works precisely because you cannot write a boolean
  *     literal in ES object shorthand, so `enable_x: true` always has a colon to
- *     match. `push_dispatcher` is an object, and `push_dispatcher,` in shorthand
- *     is invisible to it.
+ *     match. `push_dispatcher` was an object, and `push_dispatcher,` in shorthand
+ *     was invisible to it — as any object-valued field still is.
  *   - `open/__tests__/route-slot-coverage.test.ts` is runtime and correct, but
  *     it only asks about fields that back an HTTP route slot.
- *     `tests/integration/reminders-tab-and-push.open.test.ts:28` says outright
- *     that `push_dispatcher` "is NOT a route slot, so route-slot-coverage.test.ts
- *     cannot" see it.
+ *     `push_dispatcher` was not a route slot, so route-slot-coverage could not
+ *     see it — and neither can any other object-valued field.
  *
  * This file covers the complement: the 29 optional `CompositionInput` fields
  * that are neither. The 8 REQUIRED fields need no gate — the compiler already

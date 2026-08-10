@@ -376,6 +376,7 @@ import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
+import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
 import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
@@ -2468,10 +2469,51 @@ export function buildOpenGraphComposer(
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
     const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
       reminderGeneralTopic
+    // NATIVE PUSH — the transport. `/api/app/devices/{register,unregister}`
+    // (mounted further down over this SAME store) records the owner's device
+    // tokens; this is the half that sends to them.
+    //
+    // ALWAYS ON, and safe to be: every send reads the token table first and
+    // returns before any fetch when the list is empty, so the zero-device state a
+    // fresh install starts in makes no network call at all.
+    //
+    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
+    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
+    const devicePushTokens = new DevicePushTokenStore(db)
+    const pushTransport = createPushDispatcher({
+      store: devicePushTokens,
+      client: createExpoPushClient(
+        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
+          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
+          : {},
+      ),
+    })
+    // THE NOTIFICATION FOR A CHAT MESSAGE, composed from the chat message.
+    //
+    // 2026-08-09, owner-reported: his phone said `ritual:kaizen`. The push used to
+    // be composed in the reminder TICK from the reminder ROW, and a ritual row's
+    // `message` IS that dispatch token — so the notification could never contain
+    // the text that got posted, and the payload carried the owner slug where the
+    // tap needed a project id. Both halves of his complaint were that one mistake.
+    // The sink below is handed the DELIVERED body + the durable row id by
+    // `buildButtonStoreReminderOutbound`, so a nudge and a ritual produce the same
+    // notification because they take the same path.
+    // `project_slug` is the key `/api/app/devices/register` writes its rows under
+    // (`gateway/http/app-devices-surface.ts:206` — the resolved owner bearer's
+    // slug), and the same slug every reminder row carries as `owner_slug`. Reading
+    // and writing under one key is what makes "a registered device is a notified
+    // device" true rather than aspirational.
+    const chatMessagePush = buildChatMessagePushSink({
+      fanOut: pushTransport,
+      project_slug,
+    })
     // ONE outbound + ONE runs store hoisted so the nudge dispatcher, the ritual
     // executor, and the boot reap all post through / write to the SAME instances
     // (one deliver seam, one `code_ritual_runs` writer).
-    const reminderOutbound = buildButtonStoreReminderOutbound({ deliver })
+    const reminderOutbound = buildButtonStoreReminderOutbound({
+      deliver,
+      chat_push: chatMessagePush,
+    })
     const ritualRuns = createRitualRunStore(db)
     const reminder_dispatcher = buildReminderDispatcher({
       outbound: reminderOutbound,
@@ -3093,41 +3135,12 @@ export function buildOpenGraphComposer(
     // while this was unmounted NO device could ever register and the
     // `device_push_tokens` table stayed empty on every install.
     //
-    // ONE store instance, shared with the delivery half below, so the rows the
-    // register route writes are literally the rows the reminder push reads.
-    const devicePushTokens = new DevicePushTokenStore(db)
+    // ONE store instance, shared with the delivery half (the push transport is
+    // built earlier, above the reminder outbound that feeds it), so the rows the
+    // register route writes are literally the rows a notification is sent to.
     const appDevicesSurface = createAppDevicesSurface({
       store: devicePushTokens,
       auth: appOwnerAuth,
-    })
-    // The OTHER half of push. Registration on its own delivers nothing: the
-    // fan-out lives behind the `push_dispatcher` composition field, which
-    // `build-core-modules.ts:396-398` attaches to the reminder tick's `on_fired`
-    // hook — and until now NO composer set it, so `createPushDispatcher`
-    // (`gateway/push/dispatcher.ts:133`) had no non-test call site and the
-    // reminder deep link (`app/lib/push-deep-link-dispatch.ts:93-108`) could
-    // never be reached. It is not a route slot, so the route-slot coverage gate
-    // cannot see the gap; `tests/integration/reminders-tab-and-push.open.test.ts`
-    // is what holds this wiring down.
-    //
-    // ALWAYS ON, and safe to be: `pushReminder` reads the token table first and
-    // `dispatch` returns before any fetch when the message list is empty
-    // (`gateway/push/dispatcher.ts:145-147`), so the zero-device state every
-    // fresh install starts in makes no network call at all. Downstream of a
-    // SUCCESSFUL nudge dispatch only (`reminders/tick.ts:314-323`), so push
-    // never adds a notification for a reminder the owner was not already being
-    // told about, and its own failures are caught and logged without touching
-    // the fired row.
-    //
-    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
-    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
-    const push_dispatcher = createPushDispatcher({
-      store: devicePushTokens,
-      client: createExpoPushClient(
-        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
-          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
-          : {},
-      ),
     })
     // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
     // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
@@ -5336,10 +5349,6 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
-      // The reminder-fired PUSH hook. `build-core-modules.ts:396-398` attaches
-      // it to `ReminderTickLoop.on_fired`, so a fired reminder reaches the
-      // owner's registered devices instead of only the in-app chat topic.
-      push_dispatcher,
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.

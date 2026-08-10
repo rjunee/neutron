@@ -1,14 +1,18 @@
 /**
  * @neutronai/gateway/push — PushDispatcher tests.
  *
- * Covers:
+ * This is the TRANSPORT's test. What a notification SAYS is composed elsewhere
+ * (`chat-message-push.test.ts`) — the `pushReminder` operation these tests used to
+ * drive was deleted on 2026-08-09 because it composed the payload from the reminder
+ * ROW, which for a ritual is the dispatch token `ritual:<id>`. Everything the
+ * transport owns is still covered here, now driven through `pushAll`:
  *   - empty-token-list short-circuits with attempted=0
- *   - reminder push uses owner token list with title/body/sound/data
- *   - web tokens are filtered out (deferred to follow-up sprint)
- *   - per-ticket errors are logged but PushResult.ok stays true
+ *   - every registered token is POSTed with the given title/body/sound/data
+ *   - web rows cannot exist post-migration 0042
+ *   - per-ticket errors are logged but PushResult.ok stays true, and a
+ *     `DeviceNotRegistered` token is pruned while other failures are not
  *   - thrown Expo errors are downgraded to logger.warn + ok=false
- *   - pushAll mirrors pushReminder over an ad-hoc message
- *   - instance isolation: pushReminder for instance A only sees instance A's tokens
+ *   - instance isolation: a send for instance A only sees instance A's tokens
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -17,7 +21,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import type { Reminder } from '@neutronai/reminders/store.ts'
 import {
   ExpoPushError,
   type ExpoPushClient,
@@ -77,23 +80,11 @@ function throwingClient(err: unknown): FakeClient {
   }
 }
 
-function makeReminder(overrides: Partial<Reminder> = {}): Reminder {
-  return {
-    id: 'r-1',
-    owner_slug: 't1',
-    topic_id: 'app-project:demo',
-    fire_at: 1700000000,
-    message: 'walk the dog',
-    status: 'fired',
-    recurrence: null,
-    recurrence_spec: null,
-    ritual_id: null,
-    source: null,
-    created_at: 1699999000,
-    fired_at: 1700000005,
-    cancelled_at: null,
-    ...overrides,
-  }
+/** One composed chat message, standing in for whatever a producer sends. */
+const CHAT_PUSH = {
+  title: 'General',
+  body: 'walk the dog',
+  data: { kind: 'agent_message', message_id: 'p-1' },
 }
 
 type LogEntry = { message: string; meta?: Record<string, unknown> }
@@ -122,12 +113,12 @@ function recordingLogger(): {
   }
 }
 
-describe('PushDispatcher.pushReminder', () => {
+describe('PushDispatcher — the Expo transport', () => {
   test('no tokens → attempted=0, no client call', async () => {
     const client = fakeClient([])
     const { logger, entries } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(result.attempted).toBe(0)
     expect(result.delivered).toBe(0)
     expect(result.errored).toBe(0)
@@ -153,7 +144,7 @@ describe('PushDispatcher.pushReminder', () => {
       msgs.map(() => ({ status: 'ok', id: 'tick' })),
     )
     const dispatcher = createPushDispatcher({ store, client })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(result.attempted).toBe(2)
     expect(result.delivered).toBe(2)
     expect(result.ok).toBe(true)
@@ -163,31 +154,15 @@ describe('PushDispatcher.pushReminder', () => {
       new Set(['ExponentPushToken[ios]', 'ExponentPushToken[android]']),
     )
     for (const m of msgs) {
-      expect(m.title).toBe('Reminder')
-      expect(m.body).toBe('walk the dog')
+      // The transport forwards the composed message VERBATIM. It does not author
+      // a title, a body or a `kind` of its own any more — that authorship is what
+      // put `ritual:kaizen` on the owner's lock screen, and it now lives in
+      // `chat-message-push.ts` where the message is actually in hand.
+      expect(m.title).toBe(CHAT_PUSH.title)
+      expect(m.body).toBe(CHAT_PUSH.body)
       expect(m.sound).toBe('default')
-      expect(m.data?.kind).toBe('reminder')
-      expect(m.data?.reminder_id).toBe('r-1')
-      expect(m.data?.project_slug).toBe('t1')
-      expect(m.data?.topic_id).toBe('app-project:demo')
+      expect(m.data).toEqual(CHAT_PUSH.data)
     }
-  })
-
-  test('reminder_title override overrides the default "Reminder"', async () => {
-    await store.register({
-      project_slug: 't1',
-      user_id: 'u',
-      device_token: 'tok',
-      platform: 'ios',
-    })
-    const client = fakeClient([{ status: 'ok' }])
-    const dispatcher = createPushDispatcher({
-      store,
-      client,
-      reminder_title: 'Neutron',
-    })
-    await dispatcher.pushReminder(makeReminder())
-    expect(client.calls[0]?.[0]?.title).toBe('Neutron')
   })
 
   test('web platform rows cannot be inserted post-migration 0042', async () => {
@@ -212,12 +187,12 @@ describe('PushDispatcher.pushReminder', () => {
     // 0 sends" path.
     const client = fakeClient([])
     const dispatcher = createPushDispatcher({ store, client })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(result.attempted).toBe(0)
     expect(client.calls.length).toBe(0)
   })
 
-  test('instance isolation: pushReminder for instance A does not touch instance B tokens', async () => {
+  test('instance isolation: a send for instance A does not touch instance B tokens', async () => {
     await store.register({
       project_slug: 't1',
       user_id: 'u1',
@@ -232,7 +207,7 @@ describe('PushDispatcher.pushReminder', () => {
     })
     const client = fakeClient([{ status: 'ok' }])
     const dispatcher = createPushDispatcher({ store, client })
-    await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+    await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(client.calls.length).toBe(1)
     expect(client.calls[0]?.length).toBe(1)
     expect(client.calls[0]?.[0]?.to).toBe('tok-1')
@@ -280,7 +255,7 @@ describe('PushDispatcher.pushReminder', () => {
     )
     const { logger, entries } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(result.attempted).toBe(2)
     expect(result.delivered).toBe(1)
     expect(result.errored).toBe(1)
@@ -313,7 +288,7 @@ describe('PushDispatcher.pushReminder', () => {
     ])
     const { logger, entries } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(result.errored).toBe(1)
     expect(entries.map((e) => e.message)).toEqual(['expo push ticket error'])
     expect(store.getByDeviceToken('t1', 'tok-1')).not.toBeNull()
@@ -329,7 +304,7 @@ describe('PushDispatcher.pushReminder', () => {
     const client = throwingClient(new ExpoPushError('Expo 503', 503))
     const { logger, entries } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(result.ok).toBe(false)
     expect(result.delivered).toBe(0)
     expect(result.errored).toBe(1)
@@ -348,13 +323,15 @@ describe('PushDispatcher.pushReminder', () => {
     const client = throwingClient(new TypeError('fetch failed'))
     const { logger, entries } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
-    const result = await dispatcher.pushReminder(makeReminder())
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
     expect(result.ok).toBe(false)
     expect(result.error?.name).toBe('TypeError')
     expect(entries.length).toBe(1)
   })
 
-  test('reminder with null topic_id omits the field from the data payload', async () => {
+  test('a message with no data omits the field entirely', async () => {
+    // The transport must not invent a `data` bag. A payload with a `data: {}` the
+    // producer never asked for is a payload the tap resolver has to reject.
     await store.register({
       project_slug: 't1',
       user_id: 'u',
@@ -363,11 +340,10 @@ describe('PushDispatcher.pushReminder', () => {
     })
     const client = fakeClient([{ status: 'ok' }])
     const dispatcher = createPushDispatcher({ store, client })
-    await dispatcher.pushReminder(makeReminder({ topic_id: null }))
-    const data = client.calls[0]?.[0]?.data
-    expect(data?.kind).toBe('reminder')
-    expect(data?.project_slug).toBe('t1')
-    expect(Object.prototype.hasOwnProperty.call(data ?? {}, 'topic_id')).toBe(false)
+    await dispatcher.pushAll('t1', { body: 'bare' })
+    const msg = client.calls[0]?.[0]
+    expect(msg?.body).toBe('bare')
+    expect(Object.prototype.hasOwnProperty.call(msg ?? {}, 'data')).toBe(false)
   })
 })
 
@@ -537,7 +513,7 @@ describe('PushDispatcher — the success tally (push observability)', () => {
     const { logger, entries, infos } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
 
-    const result = await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
 
     expect(result.delivered).toBe(1)
     // The point of the change: a SUCCESS is now visible, not inferred from the
@@ -562,7 +538,7 @@ describe('PushDispatcher — the success tally (push observability)', () => {
     const { logger, infos } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
 
-    await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+    await dispatcher.pushAll('t1', CHAT_PUSH)
 
     const serialised = JSON.stringify(infos)
     expect(serialised).not.toContain(token)
@@ -591,7 +567,7 @@ describe('PushDispatcher — the success tally (push observability)', () => {
     const { logger, entries, infos } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
 
-    await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+    await dispatcher.pushAll('t1', CHAT_PUSH)
 
     expect(infos[0]?.meta).toMatchObject({ attempted: 2, delivered: 1, errored: 1 })
     expect(entries.some((e) => e.message === 'expo push ticket error')).toBe(true)
@@ -604,7 +580,7 @@ describe('PushDispatcher — the success tally (push observability)', () => {
     const { logger, infos } = recordingLogger()
     const dispatcher = createPushDispatcher({ store, client, logger })
 
-    const result = await dispatcher.pushReminder(makeReminder({ owner_slug: 't1' }))
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
 
     expect(result.attempted).toBe(0)
     expect(infos.length).toBe(0)

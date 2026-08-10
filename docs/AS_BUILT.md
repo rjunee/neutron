@@ -8989,3 +8989,32 @@ Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
+## 2026-08-09 — A ritual post is a chat message, and so is its notification
+
+The owner's phone said `ritual:kaizen`, and tapping it opened the app but not the
+conversation. One root cause under both: the push was composed from the reminder ROW
+on the tick's `on_fired` hook, and a ritual row's `message` IS that dispatch token —
+so the notification could never carry the posted text, and its project field was the
+instance slug, which resolves to no project.
+
+Composition moved to the DELIVERY seam, the only place that holds the posted body and
+the durable row id (`gateway/proactive/reminder-outbound.ts` →
+`gateway/push/chat-message-push.ts`). A nudge and a ritual take the same `post`, so
+they cannot produce different notifications. `pushReminder`, `onFired`,
+`ReminderTickLoop.on_fired` and the `push_dispatcher` composition field are DELETED —
+the tick can only see the row, so it was never a place this could be built correctly.
+
+`agent_message` joined `PUSH_KINDS` (it was a resolver branch with no sender, kept out
+of the list precisely so the exhaustiveness test could not be padded); `reminder` left
+it, and its resolver branch went with it. General is encoded by the ABSENCE of
+`project_id` — the client owns that route sentinel, and #410/#411 is what a second
+copy costs.
+
+`?message_id=` is finally consumed. It reached the chat route since 2026-05 with no
+reader. The frozen #505 anchor and a new once-per-target imperative `scrollToIndex`
+now ask ONE function, so a cold open cannot land in two places, and a tap into an
+already-mounted project can be re-anchored at all. With no pushed id, nothing scrolls
+and the anchor is byte-identical — asserted, because this is the #505/#511 blast
+radius.
+
+Detail: `docs/as-built/2026-08-09-notification-is-a-chat-message.md`.

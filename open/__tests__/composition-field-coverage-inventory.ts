@@ -18,13 +18,16 @@
  * neither a boolean switch (`scripts/ci/composition-wiring-gate.sh` has those)
  * nor an HTTP surface, and which consequently NO existing gate can see.
  *
- * `push_dispatcher` is the field that proved the hole was real: declared at
- * `gateway/composition/input/misc-input.ts:30`, consumed at
- * `gateway/composition/build-core-modules.ts:396`, set by no composer, so the
- * app registered push tokens and delivered to none of them. It is not a route
- * slot and it is not a boolean, so both existing gates were blind to it, and
- * `tests/integration/reminders-tab-and-push.open.test.ts:28` says so in as many
- * words. It is now the first entry in WIRED_FIELDS and cannot silently regress.
+ * `push_dispatcher` is the field that proved the hole was real: declared in
+ * `gateway/composition/input/misc-input.ts`, consumed in
+ * `gateway/composition/build-core-modules.ts`, set by no composer, so the app
+ * registered push tokens and delivered to none of them. It was not a route slot and
+ * not a boolean, so both existing gates were blind to it. It is no longer in
+ * WIRED_FIELDS because the field itself was DELETED on 2026-08-09: it composed the
+ * notification from the reminder ROW (`ritual:<id>` for a ritual), which is the one
+ * place a chat notification cannot be built correctly, so composition moved to the
+ * delivery seam (`gateway/proactive/reminder-outbound.ts`). Deleting a field is the
+ * one move the ratchet permits besides wiring it — see the guard's header.
  *
  * HOW TO CHANGE IT.
  *   - Wired a field? Move its entry from UNWIRED_FIELDS to WIRED_FIELDS. The
@@ -84,11 +87,6 @@ export const MIN_EXPECTED_WIRED_FIELDS = 18
  * SET by the production Open composition. This list may only grow.
  */
 export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
-  {
-    field: 'push_dispatcher',
-    provides:
-      'reminder fan-out to registered mobile devices — unset, the app records push tokens and no reminder is ever delivered to one',
-  },
   {
     field: 'agent_dispatch',
     provides:

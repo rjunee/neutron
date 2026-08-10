@@ -3772,20 +3772,54 @@ with no declared `path`, so the tab survived only in the mobile pre-fetch
 placeholder and vanished the moment `/tabs` answered.
 
 **Push delivery** (`gateway/push/`). A fired reminder also reaches the owner's
-registered devices. `open/composer.ts` builds ONE `DevicePushTokenStore` and
-hands it to both halves — `/api/app/devices/{register,unregister}` (what the app
-calls on every sign-in/sign-out) and `createPushDispatcher`, supplied as
-`composition.push_dispatcher` and attached by `build-core-modules.ts` to
-`ReminderTickLoop.on_fired`. Three properties make it safe to run unconditionally:
-it fires only AFTER a successful nudge dispatch, so push never announces a
-reminder the owner was not already being told about; with zero registered tokens
-`dispatch` returns before issuing any HTTP request, which is the state of every
-fresh install; and a ticket Expo marks `DeviceNotRegistered` DELETES that token
-row, so a dead device is retried once rather than on every reminder forever
-(other ticket errors — rate limits, credential problems — never prune). Failures
-are caught inside the tick, so an unreachable Expo cannot stop a reminder from
-being marked fired. `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are
-merely rate-limited.
+registered devices, **as a chat-message notification** — there is no
+reminder-shaped and no ritual-shaped notification. `open/composer.ts` builds ONE
+`DevicePushTokenStore` and hands it to both halves:
+`/api/app/devices/{register,unregister}` (what the app calls on every
+sign-in/sign-out) and `createPushDispatcher`, which is now purely the Expo
+TRANSPORT.
+
+The notification is COMPOSED AT DELIVERY, in
+`gateway/proactive/reminder-outbound.ts` — the one place that holds the text the
+fire actually posted and the durable row id it became — via the pure builders in
+`gateway/push/chat-message-push.ts`: title = the project (or `General`), body = the
+first part of the posted message truncated on a word boundary, data =
+`{ kind: 'agent_message', message_id, project_id? }`. `project_id` is OMITTED for
+the no-project General scope, because the client owns General's route spelling
+(`app/lib/project-rail-view.ts` `GENERAL_PROJECT_ID`). A nudge and a ritual reach
+that one `post`, so they cannot produce different notifications.
+
+It used to be composed on the reminder TICK, from the reminder ROW
+(`push_dispatcher` → `ReminderTickLoop.on_fired` → `pushReminder`). All four are
+DELETED (2026-08-09). The tick can only see the row, and a ritual row's `message`
+IS the dispatch token `ritual:<id>` — so the owner's notification literally read
+`ritual:kaizen`, and it carried the instance slug where the tap needed a project
+id. Both symptoms were that one mistake.
+
+Four properties make push safe to run unconditionally: it fires only AFTER a
+durable chat row exists, so a notification never points at a transcript that has
+no such message; with zero registered tokens the transport returns before issuing
+any HTTP request, which is the state of every fresh install; a ticket Expo marks
+`DeviceNotRegistered` DELETES that token row, so a dead device is retried once
+rather than on every send forever (other ticket errors — rate limits, credential
+problems — never prune); and a notification failure is swallowed at BOTH the sink
+and the producer, because an escaping throw would be read by the tick as "the post
+did not happen" and would re-post the same message next tick.
+`EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are merely rate-limited.
+
+**The tap** (`app/lib/push-deep-link-dispatch.ts`). `agent_message` resolves to
+`/projects/<id>/chat?message_id=<id>`, and the chat route CONSUMES that param:
+`app/app/projects/[id]/chat.tsx` threads it as `targetMessageId`, and
+`ChatSyncSurface` feeds it to `chatDeepLinkAnchor`
+(`app/lib/chat-core/chat-initial-anchor.ts`) twice — once at render, joining
+`projectId` in the frozen-anchor key so a COLD open from a tap anchors the
+latch-friendly way, and once in an effect that calls `scrollToIndex` ONCE per
+target, which is the only way to re-anchor a project whose transcript is ALREADY
+mounted (FlashList applies its initial scroll once and latches
+`isInitialScrollComplete`). Both paths ask the same function, so they cannot land
+in different places. The rule prefers the unread run's START when the referenced
+message is inside it (§ ISSUES #505) and the referenced row itself when it is
+behind the read watermark. With no pushed id, nothing scrolls imperatively.
 
 ## Ritual executor — approval-gated code rituals (`reminders/`)
 

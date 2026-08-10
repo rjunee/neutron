@@ -49,7 +49,9 @@ import {
 import { dispatchUnseenDeepLinks } from '../lib/chat-core/deep-link-dispatch';
 import {
   anchorScrollProps,
+  chatDeepLinkAnchor,
   chatInitialAnchor,
+  indexOfChatMessage,
   receiptEligibleMessageId,
   type ChatInitialAnchor,
 } from '../lib/chat-core/chat-initial-anchor';
@@ -107,6 +109,14 @@ export interface ChatSyncSurfaceProps {
   initialPrefill?: string;
   /** ISSUE #17 — launcher long-press `chat_send` one-shot autosend text. */
   initialAutosend?: string;
+  /**
+   * The message a PUSH TAP asked for (`?message_id=` on the chat route).
+   *
+   * Present only when the owner arrived from a notification. Absent — every
+   * ordinary open — leaves both anchor paths byte-identical to before, which is
+   * the property that keeps this away from the ISSUES #505/#511 blast radius.
+   */
+  targetMessageId?: string;
 }
 
 /** FlashList viewable-items payload (loosely typed — FlashList v2's callback
@@ -119,6 +129,7 @@ export function ChatSyncSurface({
   projectId,
   initialPrefill,
   initialAutosend,
+  targetMessageId,
 }: ChatSyncSurfaceProps): React.JSX.Element {
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
@@ -537,10 +548,31 @@ export function ChatSyncSurface({
   // anchor would arrive after the only moment it could be honoured. Writing the
   // ref here is safe because it is idempotent: the same rows always freeze the
   // same anchor, so a discarded or replayed render cannot change the outcome.
-  const anchorRef = useRef<{ scope: string; anchor: ChatInitialAnchor } | null>(null);
-  if (anchorRef.current !== null && anchorRef.current.scope !== projectId) anchorRef.current = null;
+  //
+  // A PUSH TAP PARTICIPATES IN THE FREEZE rather than fighting it. `deepLinkTarget`
+  // joins `projectId` in the freeze key, so arriving from a notification decides a
+  // fresh anchor even when the scope did not change — and `chatDeepLinkAnchor` is
+  // the SAME function the imperative re-anchor below uses, so a cold open cannot
+  // have the two land in different places.
+  const deepLinkTarget = targetMessageId ?? '';
+  const anchorRef = useRef<{ scope: string; target: string; anchor: ChatInitialAnchor } | null>(
+    null,
+  );
+  if (
+    anchorRef.current !== null &&
+    (anchorRef.current.scope !== projectId || anchorRef.current.target !== deepLinkTarget)
+  ) {
+    anchorRef.current = null;
+  }
   if (anchorRef.current === null && rows.length > 0 && selfDeviceId.length > 0) {
-    anchorRef.current = { scope: projectId, anchor: chatInitialAnchor(rows, selfDeviceId) };
+    anchorRef.current = {
+      scope: projectId,
+      target: deepLinkTarget,
+      anchor:
+        deepLinkTarget.length > 0
+          ? chatDeepLinkAnchor(rows, selfDeviceId, deepLinkTarget)
+          : chatInitialAnchor(rows, selfDeviceId),
+    };
   }
   // The ROW COUNT is read LIVE even though the decision is frozen. `bottom` means
   // the last row plus the overscroll, and the resume replay appends rows after the
@@ -552,6 +584,40 @@ export function ChatSyncSurface({
   );
 
   const listRef = useRef<FlashListRef<RenderRow> | null>(null);
+
+  // THE PUSH TAP'S RE-ANCHOR — the half a computed anchor cannot do.
+  //
+  // A notification tap can land on a project whose transcript is ALREADY MOUNTED.
+  // FlashList applies its initial scroll ONCE and latches `isInitialScrollComplete`
+  // (`useRecyclerViewController.tsx:585-591`), so the frozen anchor above has
+  // already been spent and the owner stays exactly where he was — which is the
+  // complaint. This is the imperative seam that fixes that case, and it is
+  // deliberately NOT a second anchor rule: it asks `chatDeepLinkAnchor` the same
+  // question the render path asks, so on a cold open both agree and neither has to
+  // win a race.
+  //
+  // ONCE PER TARGET. The ref latches the id after a successful jump, so a later
+  // `rows` change (a receipt landing, the resume replay appending) cannot yank the
+  // transcript back after the owner has started scrolling. And it only latches once
+  // the row is actually PRESENT: a push arrives before the message syncs, so the
+  // effect re-runs on each `rows` update and jumps the first time it can resolve
+  // the id. If it never syncs, nothing moves.
+  const honouredDeepLink = useRef<string | null>(null);
+  useEffect(() => {
+    if (deepLinkTarget.length === 0) return;
+    if (honouredDeepLink.current === deepLinkTarget) return;
+    if (indexOfChatMessage(rows, deepLinkTarget) < 0) return;
+    honouredDeepLink.current = deepLinkTarget;
+    const anchor = chatDeepLinkAnchor(rows, selfDeviceId, deepLinkTarget);
+    // `bottom` is the honest answer when the read signal cannot be trusted
+    // (`chatInitialAnchor` reason 3) — and for a push about the newest message the
+    // bottom IS the message, so scroll to the end rather than inventing an index.
+    if (anchor.kind === 'bottom') {
+      listRef.current?.scrollToEnd?.({ animated: true });
+      return;
+    }
+    listRef.current?.scrollToIndex?.({ index: anchor.index, animated: true });
+  }, [deepLinkTarget, rows, selfDeviceId]);
 
   // The owner's jump-to-bottom affordance. Driven off scroll GEOMETRY rather than
   // viewability of the last row: a single agent reply is routinely taller than the

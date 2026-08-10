@@ -5,31 +5,15 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 export interface MiscCompositionInput {
   db: ProjectDb
   project_slug: string
-  /**
-   * P5.6 — optional reminder-fired push hook. When supplied, the
-   * reminders module wires this hook into `ReminderTickLoop.on_fired`
-   * so an Expo Push notification fans out at the same instant the
-   * substrate dispatcher fires the Telegram message.
-   *
-   * `push_dispatcher.onFired(reminder)` is called AFTER the tick
-   * loop has advanced the row (markFired for one-shot, advanceRecurrence
-   * for recurring). Failure-safe: thrown errors are caught and logged
-   * but never block the tick from advancing to the next reminder.
-   *
-   * `open/composer.ts` wires `createPushDispatcher(...)`
-   * (`gateway/push/dispatcher.ts`) over the SAME `DevicePushTokenStore` the
-   * `/api/app/devices/register` surface writes to, so a registered device is a
-   * delivered device. Test/dev paths leave this unset so the reminder tick
-   * behaves exactly as it did before push existed.
-   *
-   * (This comment claimed "Production wires createPushDispatcher" for months
-   * while NO composer set the field and the function had no non-test call site.
-   * It is true as of the wiring above; do not let it drift back — the assertion
-   * that holds it is `tests/integration/reminders-tab-and-push.open.test.ts`.)
-   */
-  push_dispatcher?: {
-    onFired(reminder: import('@neutronai/reminders/store.ts').Reminder): Promise<void>
-  }
+  // LOOKING FOR `push_dispatcher`? It was DELETED on 2026-08-09, along with the
+  // `ReminderTickLoop.on_fired` hook it fed. It composed a native notification
+  // from the reminder ROW, and the row is the wrong source — a ritual's stored
+  // `message` is the dispatch token `ritual:<id>`, which is literally what the
+  // owner's phone displayed. The notification for a chat message is composed
+  // where the message is delivered (`gateway/proactive/reminder-outbound.ts` →
+  // `gateway/push/chat-message-push.ts`), the only place that knows the posted
+  // text and its durable row id. The Expo transport itself
+  // (`gateway/push/dispatcher.ts`) is unchanged and still built by the composer.
   /**
    * P1.5 / Sprint 21 — wiring cleanup callbacks. The realmode
    * composer opens auxiliary DB handles (e.g. RW registry/identity for

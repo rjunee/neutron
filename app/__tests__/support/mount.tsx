@@ -36,6 +36,17 @@ export interface MountedScreen {
   byTestId(testId: string): HTMLElement | null;
   /** Let queued microtasks + effects settle. */
   settle(): Promise<void>;
+  /**
+   * Re-render the SAME root with new props, without unmounting.
+   *
+   * The only way to reach a class of bug that a fresh mount cannot: behaviour that
+   * depends on state the component has already latched. A push tap is exactly that
+   * — Expo Router pushes the same chat route with a new `?message_id=`, so the
+   * surface is already mounted, its opening anchor already frozen, and FlashList's
+   * one initial scroll already spent. Remounting instead would test the easy path
+   * and miss the reported one.
+   */
+  rerender(element: ReactElement): Promise<void>;
   unmount(): void;
 }
 
@@ -122,6 +133,14 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
     text: () => host.textContent ?? '',
     composer,
     settle,
+    async rerender(next: ReactElement): Promise<void> {
+      // Same root, same dock — so React reconciles rather than remounting, which is
+      // the whole point (see the interface docblock).
+      await act(async () => {
+        root.render(withComposerDock(next));
+      });
+      await settle();
+    },
     async type(value: string): Promise<void> {
       const input = composer();
       await act(async () => {

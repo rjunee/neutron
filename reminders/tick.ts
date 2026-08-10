@@ -86,22 +86,20 @@ export interface ReminderDispatcher {
 }
 
 /**
- * P5.6 — optional post-dispatch hook. Fires AFTER `dispatcher.dispatch`
- * has returned AND after the store has been advanced (markFired for
- * one-shot rows; advanceRecurrence for recurring rows). The hook runs
- * once per fired row, with the SAME `Reminder` snapshot the dispatcher
- * saw.
+ * THERE IS NO POST-DISPATCH PUSH HOOK, and its absence is deliberate (2026-08-09).
  *
- * Production wires the push dispatcher's `pushReminder` here so
- * registered Expo devices get a native notification at fire time.
- * Failure-safety: thrown errors are caught + logged but never block
- * the tick from continuing with the next reminder. This mirrors the
- * dispatcher try/catch.
+ * `on_fired` used to live here and the composition attached the Expo push
+ * dispatcher to it, composing a notification from the `Reminder` row. The tick can
+ * only ever see the ROW, and the row is not the message: a ritual's stored
+ * `message` is the dispatch token `ritual:<id>`, so the notification the owner
+ * received read `ritual:kaizen`. No title override fixes that, because the text he
+ * wanted is produced downstream, at compose+post time.
+ *
+ * So the notification is built where the message is DELIVERED —
+ * `gateway/proactive/reminder-outbound.ts`, which holds the posted body and the
+ * durable row id the tap anchors on. The tick's job ends at "dispatch it and
+ * advance the row".
  */
-export interface ReminderFiredHook {
-  onFired(reminder: Reminder): Promise<void>
-}
-
 export interface ReminderTickOptions {
   store: ReminderStore
   dispatcher: ReminderDispatcher
@@ -131,14 +129,6 @@ export interface ReminderTickOptions {
    * Coarse-label cadences are timezone-agnostic fixed deltas and ignore this.
    */
   resolve_time_zone?: (owner_slug: string) => string | null | undefined
-  /**
-   * P5.6 — optional post-dispatch hook fired AFTER markFired /
-   * advanceRecurrence. Production wires this to the push dispatcher
-   * so an Expo notification fans out at the same instant the
-   * substrate dispatcher's Telegram send fires. Omitted in tests
-   * that don't care about the push path.
-   */
-  on_fired?: ReminderFiredHook
 }
 
 export class ReminderTickLoop {
@@ -148,7 +138,6 @@ export class ReminderTickLoop {
   private readonly per_tick_limit: number
   private readonly now: () => number
   private readonly resolve_time_zone: (owner_slug: string) => string | null | undefined
-  private readonly on_fired: ReminderFiredHook | null
   /** Loop scaffolding — single-flight, per-tick catch-all, quiescing stop (§F1). */
   private readonly loop: SupervisedLoop
   private firedCount = 0
@@ -160,7 +149,6 @@ export class ReminderTickLoop {
     this.per_tick_limit = options.per_tick_limit ?? 50
     this.now = options.now ?? Date.now
     this.resolve_time_zone = options.resolve_time_zone ?? (() => null)
-    this.on_fired = options.on_fired ?? null
     this.loop = new SupervisedLoop({
       name: 'reminders',
       intervalMs: this.interval_ms,
@@ -273,20 +261,6 @@ export class ReminderTickLoop {
         try {
           await this.dispatcher.dispatch(reminder)
           fired++
-          // P5.6 — fire the optional push hook AFTER the claim + dispatch
-          // succeed. Wrapped in its own try/catch so a push-side failure
-          // (network, Expo 5xx) NEVER stops the tick from processing the next
-          // reminder and can't undo the claim we already committed.
-          if (this.on_fired !== null) {
-            try {
-              await this.on_fired.onFired(reminder)
-            } catch (err) {
-              log.error('on_fired_hook_failed', {
-                reminder: reminder.id,
-                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-              })
-            }
-          }
         } catch (err) {
           // A caught throw means the post did NOT succeed (the dispatcher
           // throws on a rejected/failed post, never after a delivered one) —

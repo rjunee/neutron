@@ -172,10 +172,6 @@ const EXPECTED_COMPOSITION_KEYS = [
   'onboarding_overnight_cron',
   'platform',
   'project_slug',
-  // The reminder-fired push hook (`ReminderTickLoop.on_fired`). Registering a
-  // device was only ever half of push; this is the delivery half, and its
-  // absence is why `createPushDispatcher` had no non-test call site.
-  'push_dispatcher',
   'realmode_cleanups',
   'reminder_dispatcher',
   // Executor-mode reminders (plan task 4) — ritual executor factory, set when

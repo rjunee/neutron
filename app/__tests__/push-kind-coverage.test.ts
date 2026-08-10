@@ -24,24 +24,34 @@
  * never met. This test is that meeting point: it walks `PUSH_KINDS`, the list the
  * senders now import their constants from, and requires the resolver to produce a
  * route for each. Add a kind and forget the client, and this reds.
+ *
+ * 2026-08-09 — `reminder` left the SENT list and `agent_message` joined it (a
+ * fired reminder is a chat message; see `wire-types/push-kind.ts`). The union is
+ * checked the same way, which is the point of having the list at all: the swap
+ * could not be made on one side only.
  */
 import { describe, expect, test } from 'bun:test';
 
 import { PUSH_KINDS, type PushKind } from '@neutronai/wire-types/push-kind.ts';
+import { buildChatMessagePush } from '@neutronai/gateway/push/chat-message-push.ts';
 import { resolvePushRoute, type PushPayload } from '../lib/push-deep-link-dispatch';
 
 /**
  * A well-formed payload for each kind — the fields the gateway actually attaches.
  * Keeping these beside the kind list means "what a sender sends" is written down
  * once and checked, rather than implied.
+ *
+ * `agent_message` is not hand-written: it is whatever the REAL gateway builder
+ * emits. A hand-copied fixture is exactly how the two lists drifted the first
+ * time — it asserts what the author BELIEVED the sender sends. Taking the payload
+ * from the sender means a field renamed on the gateway side reds here.
  */
 const WELL_FORMED: Record<PushKind, PushPayload> = {
-  reminder: {
-    kind: 'reminder',
-    reminder_id: 'rem-1',
+  agent_message: buildChatMessagePush({
     project_id: 'acme',
-    project_slug: 'owner',
-  },
+    message_id: 'msg-1',
+    body: 'the composed body',
+  }).data as PushPayload,
   calendar_pre_meeting_brief: {
     kind: 'calendar_pre_meeting_brief',
     event_id: 'evt-1',
@@ -70,6 +80,41 @@ describe('every sent push kind resolves to a route', () => {
       expect(route).toContain('/projects/acme/');
     });
   }
+});
+
+describe('the chat-message kind, end to end across the two sides', () => {
+  test('what the gateway builds is what the resolver routes to the chat', () => {
+    // THE UNION, walked in one assertion: the SENDER composes the payload, the
+    // RESOLVER consumes it, and nothing in between is hand-transcribed. This is
+    // the shape of test whose absence let the sent list and the handled list
+    // drift into being disjoint.
+    const built = buildChatMessagePush({
+      project_id: 'acme',
+      message_id: 'msg-1',
+      body: 'Kaizen: three things landed today.',
+    });
+    const warned: string[] = [];
+    const route = resolvePushRoute(built.data as PushPayload, {
+      warn: (m) => warned.push(m),
+    });
+    expect(route).toBe('/projects/acme/chat?message_id=msg-1');
+    expect(warned).toEqual([]);
+    // And the notification the owner SEES carries the message, not a token.
+    expect(built.body).toBe('Kaizen: three things landed today.');
+    expect(built.title).toBe('acme');
+  });
+
+  test('a General-scope message routes to the General chat, not to nothing', () => {
+    const built = buildChatMessagePush({
+      project_id: null,
+      message_id: 'msg-2',
+      body: 'morning brief',
+    });
+    // The sender omits the field; the resolver reads the omission as General.
+    expect('project_id' in built.data).toBe(false);
+    const route = resolvePushRoute(built.data as PushPayload, { warn: () => {} });
+    expect(route).toBe('/projects/~general/chat?message_id=msg-2');
+  });
 });
 
 describe('the two Core kinds specifically — these were the dead ones', () => {
