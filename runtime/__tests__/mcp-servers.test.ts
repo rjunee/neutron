@@ -23,6 +23,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   MCP_SERVER_ARGS_MAX,
+  MCP_SERVER_BANNED_CHARS_RE,
   MCP_SERVER_ENV_TOTAL_MAX,
   MCP_SERVER_ENV_VALUE_MAX,
   computeMcpServerGrantHash,
@@ -80,6 +81,45 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     expect(parseOwnerMcpServerInput({ ...GOOD, command: '/bin/a\n/bin/b' }).spec).toBeNull()
     expect(parseOwnerMcpServerInput({ ...GOOD, command: '/bin/a‮b' }).spec).toBeNull()
     expect(parseOwnerMcpServerInput({ ...GOOD, args: ['--flag​'] }).spec).toBeNull()
+  })
+
+  test('refuses EVERY invisible, not just the bidi and zero-width ones', () => {
+    // The first draft of the denylist enumerated the bidi controls, the zero-widths and
+    // the C0 controls, and stopped — leaving a whole family of characters that also
+    // occupy no width. Measured in a browser against the approval prompt's own type
+    // styles, three specs differing only by a WORD JOINER rendered to the identical
+    // pixel width, so two grants the hash correctly DISTINGUISHES were indistinguishable
+    // on screen. That is a legibility hole rather than a substitution one — an invisible
+    // can pad a string but cannot hide a visible character — and it still has to close,
+    // because the promise this prompt makes is that the owner can SEE what he approves.
+    //
+    // Asserted CHARACTER BY CHARACTER, by code point, so a future narrowing of the
+    // regex fails here instead of quietly re-opening one range.
+    const invisibles: Array<[string, string]> = [
+      ['NEL', ''],
+      ['SOFT HYPHEN', '­'],
+      ['ARABIC LETTER MARK', '؜'],
+      ['MONGOLIAN VOWEL SEPARATOR', '᠎'],
+      ['LINE SEPARATOR', ' '],
+      ['PARAGRAPH SEPARATOR', ' '],
+      ['WORD JOINER', '⁠'],
+      ['INVISIBLE TIMES', '⁢'],
+      ['DEPRECATED INHIBIT SYMMETRIC SWAPPING', '⁪'],
+      ['INTERLINEAR ANNOTATION ANCHOR', '￹'],
+      ['TAG SPACE', '\u{E0020}'],
+    ]
+    for (const [label, ch] of invisibles) {
+      expect(MCP_SERVER_BANNED_CHARS_RE.test(ch)).toBe(true)
+      // Refused in all three of the fields the grant hash covers, not only in `command`.
+      expect(parseOwnerMcpServerInput({ ...GOOD, command: `/bin/a${ch}b` }).spec).toBeNull()
+      expect(parseOwnerMcpServerInput({ ...GOOD, args: [`--flag${ch}`] }).spec).toBeNull()
+      expect(label.length).toBeGreaterThan(0)
+    }
+    // A DENYLIST of invisibles, not an allowlist of printable ASCII: a path or an
+    // argument can legitimately carry non-ASCII text, and refusing all of it would break
+    // working servers to close a rendering hole.
+    expect(parseOwnerMcpServerInput({ ...GOOD, command: '/opt/сервер/example-mcp' }).spec).not.toBeNull()
+    expect(parseOwnerMcpServerInput({ ...GOOD, args: ['--label', 'für-alle'] }).spec).not.toBeNull()
   })
 
   test('refuses an env name that is not a POSIX variable, and an empty value', () => {

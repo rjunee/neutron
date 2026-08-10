@@ -98,7 +98,17 @@ export function createAppMcpServersSurface(opts: McpServersSurfaceOptions): McpS
         // a decision that does not name the spec it is deciding about, so a prompt
         // rendered before an edit landed can never be answered as though it described
         // the new one. See `OwnerMcpServerStore.decide`.
-        const result = await store.decide(body?.['name'], decision, body?.['grant_hash'])
+        //
+        // The fourth argument is the bearer this handler ALREADY resolved, recorded as
+        // `tool_approvals.decided_by`. It was being discarded, so the audit row for
+        // every MCP decision named the instance rather than the person who pressed the
+        // button — a column documented as the decider's user_id, holding a place.
+        const result = await store.decide(
+          body?.['name'],
+          decision,
+          body?.['grant_hash'],
+          resolved.user_id,
+        )
         if (!result.ok) {
           // The refusal CARRIES THE FRESH LIST. The store has already minted a prompt
           // for the spec that is actually installed, and a client that only learned
