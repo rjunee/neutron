@@ -617,7 +617,8 @@ gateway's in-process tool surface — Cores (`/cal` `/email` `/remind`
 a slash-command.
 
 - **The transport.** At spawn the substrate writes a per-session `--mcp-config`
-  with TWO `mcpServers`: the dev-channel (the reply sink) **and** a `neutron`
+  with two COMPILED-IN `mcpServers` (plus any the owner installed — see
+  "Owner-installable MCP servers" below): the dev-channel (the reply sink) **and** a `neutron`
   tools-bridge (`tools-bridge.ts`). The bridge is a stdio MCP server that
   advertises the registry's tools (from a manifest the substrate snapshots at
   spawn time) and forwards each `CallTool` to the substrate's reply-sink HTTP
@@ -660,6 +661,87 @@ a slash-command.
   per-site inline literals. All six encode today's value byte-for-byte
   (`skip_permissions: true`); the split into distinct constants is what lets the
   coming permission migration diverge per caller-trust-class as N constant edits.
+
+### Owner-installable MCP servers (2026-08-09) — a THIRD `mcpServers` entry, gated on his approval
+
+The two entries above are compiled in, and until this landed nothing could add a
+third: the whole published MCP ecosystem was unreachable from the owner's own
+instance. He can now install one from Settings → **MCP servers** on either client,
+and the assistant can call its tools.
+
+**Installing is not approving,** and that separation is the whole security model —
+an installed MCP server is a subprocess started with the owner's permissions and
+there is nothing underneath him.
+
+- **The grant** is an ordinary `tool_approvals` row under `mcp-server:<name>`,
+  bound to a SHA-256 over `[name, command, args, sorted env NAMES]`. Same
+  content-hash mechanism as the ritual grants (`reminders/ritual-approval.ts`),
+  deliberately not a second approval concept; `approve` resolves through
+  `ApprovalManager.respondApproval`. Change the command, an arg or the set of
+  variable names and the hash moves, the old row stops matching, and the server
+  drops out of the spawn until he approves the new request — so **a program cannot
+  widen what it runs after approval**. Rotating a VALUE does not re-ask: what was
+  granted is which program runs with which variables set. Recomputed every resolve,
+  never cached. There is no `auto` policy and no pre-approved server, and a missing
+  or garbled `decision` is a 400 rather than a default in either direction.
+- **The prompt is rendered by code** (`renderMcpServerGrant`,
+  `runtime/mcp-servers.ts`) from the same fields the hash covers — the name, the
+  command, every argument, the variable NAMES, never a value — and states that
+  approving starts the program on this machine. Both clients display it
+  **verbatim**; neither assembles or summarises it, because a prompt that
+  misstates what it grants is worse than no prompt (this repo shipped exactly that
+  once — see the 2026-08-09 live-agent web-tools entry in `docs/AS_BUILT.md`).
+- **Three stores, one join.** `instance_metadata.mcp_servers` (migration 0120)
+  holds names/command/args/`env_names`; the VALUES live in the AES-256-GCM
+  `project_credentials` store at global scope under `mcp_env.<name>`; the
+  permission lives in `tool_approvals`. `gateway/mcp-servers/store.ts` is the only
+  place that joins them, and `resolveApproved()` returns a server only when it is
+  installed and valid, hash-matched approved, AND has a stored value for every
+  variable it declares — fail-closed, because starting the program with a promised
+  variable unset is not what was approved. Keeping values out of the spec is what
+  makes the spec safe to store in a plain metadata column, return to both clients,
+  render in a prompt and log.
+- **Two independent gates confine it to the owner's session.**
+  `resolveExtraMcpServers` is wired onto `cc-agent-*` alone
+  (`open/wiring/substrates.ts`), AND `spawn.ts` requires `enableToolBridge` as
+  well — the same trust class the in-process bridge rides. The untrusted import and
+  disposable Trident REPLs satisfy neither, and the resolver is not even CALLED
+  there, so an untrusted spawn never reaches into the credential store. Each
+  installed server also needs its own `mcp__<name>` in `--allowedTools`: presence
+  in `mcpServers` only makes it START, and its tools would then hit a per-call
+  permission prompt no headless REPL can answer. A name colliding with a built-in
+  is skipped, not merged.
+- **A change reaches the next turn** by joining the warm-pool freshness guards.
+  `claude` reads `--mcp-config` once at startup, so a warm child cannot learn about
+  a later install; `mcpSurfaceFingerprint` → `ReplSession.mcpFingerprint` makes the
+  installed set comparable the way `authFingerprintFor` makes a rotated credential
+  comparable, and a change evicts + respawns with `--resume` (conversation
+  survives). Equal configuration yields an equal fingerprint, so an unchanged set
+  reuses the warm child instead of paying a cold spawn per message. Env VALUES are
+  hashed in — never logged or persisted — so a rotated secret actually reaches the
+  subprocess. A resolver REJECTION propagates and fails the turn deliberately:
+  treating it as "no servers" would lose his tools invisibly, and because the guard
+  and the spawn resolve separately, an intermittent failure would then evict the
+  child every turn.
+- **Surfaces.** HTTP `gateway/http/app-mcp-servers-surface.ts` — machine-scoped
+  `/api/app/mcp-servers` (GET the whole picture, POST install-or-replace, DELETE
+  `?name=`) plus `POST …/mcp-servers/decision` (`{ name, decision }`). Every route
+  answers with the same `{ servers, reserved_names, max_servers }` object, so a
+  client re-renders from the reply. The two paths are matched by string EQUALITY,
+  never prefix — the collection path is a prefix of the decision path, and a prefix
+  match would answer one with the other's handler, a 200 carrying the wrong body
+  that no client can detect. Clients: web
+  `landing/chat-react/mcp-servers-client.ts` → `SettingsTab.tsx` § "MCP servers";
+  mobile `app/lib/mcp-servers-client.ts` → `app/app/mcp-servers.tsx`, reached from
+  `app/app/settings.tsx`. `splitCommandLine` and `serverSummary` are duplicated
+  across the two bundles (no browser package in Metro) and held in sync by
+  `gateway/__tests__/mcp-servers-client-parity.test.ts` — `splitCommandLine`
+  decides what argv a server is installed WITH, so two copies disagreeing would
+  build two different programs from the same pasted line.
+- **The ApprovalManager is built ONCE** by the composer and handed to the graph as
+  `approval_manager`; `build-core-modules` reuses a caller-supplied one exactly as
+  it already does for `ChannelRouter`. Two instances over one `tool_approvals`
+  table would each hold their own map of pending decisions.
 
 ### Native SKILL.md discovery for the agent (P1-5)
 
