@@ -189,6 +189,12 @@ describe('buildChatMessagePushSink', () => {
       fanOut: {
         pushAll: async (project_slug, message) => {
           calls.push({ project_slug, message })
+          // A fake that wants to model a DELIVERY has to say so. This used to
+          // resolve `undefined` and read as success, which is exactly how the
+          // zero-delivery stamp survived a whole review round: the tests could not
+          // tell "Expo accepted this for a device" from "nothing was sent". The sink
+          // now fails closed, so the count is part of the fixture.
+          return { attempted: 1, delivered: 1, errored: 0, ok: true, error: null }
         },
       },
     }
@@ -259,5 +265,72 @@ describe('buildChatMessagePushSink', () => {
     })
     expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(false)
     expect(logged).toHaveLength(1)
+  })
+
+  // ── ok:true AND NOBODY REACHED ────────────────────────────────────────────────
+  // The bug three reviewers confirmed independently. `ok` means only "no HTTP/network
+  // exception", and there are two ordinary paths where it is `true` with a delivered
+  // count of zero. On both, an `ok`-only sink answers `true`, `deliver` stamps
+  // `delivered_at`, and the idempotent re-emit is silenced FOREVER for a message the
+  // owner never received — the precise failure `gateway/http/deliver.ts` claims to
+  // prevent. These are not edge cases: the first is the state of every fresh install.
+
+  test('NO REGISTERED DEVICE reports not-sent, even though pushAll resolved ok', async () => {
+    // `dispatch` short-circuits before Expo is ever called:
+    // `{ attempted: 0, delivered: 0, errored: 0, ok: true }` (`gateway/push/dispatcher.ts`).
+    // Nobody was reached, so nothing may be recorded as seen.
+    const logged: string[] = []
+    const sink = buildChatMessagePushSink({
+      fanOut: {
+        pushAll: async () => ({ attempted: 0, delivered: 0, errored: 0, ok: true, error: null }),
+      },
+      project_slug: 'owner',
+      log: (m) => logged.push(m),
+    })
+    expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(false)
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toContain('reached no device')
+  })
+
+  test('EVERY TICKET ERRORED reports not-sent, even though pushAll resolved ok', async () => {
+    // Expo returned tickets, so `ok` stays true — but every one was an error (the
+    // whole batch `DeviceNotRegistered` after a reinstall, say). Delivered is what
+    // decides.
+    const sink = buildChatMessagePushSink({
+      fanOut: {
+        pushAll: async () => ({ attempted: 2, delivered: 0, errored: 2, ok: true, error: null }),
+      },
+      project_slug: 'owner',
+    })
+    expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(false)
+  })
+
+  test('ONE accepted ticket among failures IS a delivery', async () => {
+    // The owner's other phone got it. That is a real notification, and re-buzzing him
+    // on the next re-emit would be the opposite mistake.
+    const sink = buildChatMessagePushSink({
+      fanOut: {
+        pushAll: async () => ({ attempted: 2, delivered: 1, errored: 1, ok: true, error: null }),
+      },
+      project_slug: 'owner',
+    })
+    expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(true)
+  })
+
+  test('a fan-out that reports NO COUNT fails closed', async () => {
+    // An unreported count has not proven that anything was accepted. Reading it as
+    // success is what the previous contract did ("anything without an explicit
+    // `ok: false` counts as accepted"), and that default is the enabler of every
+    // case above.
+    const sink = buildChatMessagePushSink({
+      fanOut: { pushAll: async () => ({ ok: true }) },
+      project_slug: 'owner',
+    })
+    expect(await sink({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(false)
+    const undef = buildChatMessagePushSink({
+      fanOut: { pushAll: async () => undefined },
+      project_slug: 'owner',
+    })
+    expect(await undef({ project_id: null, message_id: 'p1', body: 'hi' })).toBe(false)
   })
 })

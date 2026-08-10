@@ -140,3 +140,63 @@ dead and the test proving it is a fixture talking to itself.
 The corollary for tests: a fake that supplies the value under test cannot verify the
 value is ever produced. Where a guard's correctness depends on a write, the test needs
 the real store.
+
+---
+
+## Round-3 review fixes — `ok: true` is not a delivery, and a ritual row must never nudge
+
+Two blockers from the adversarial review round, both fixed here.
+
+### 1. A push that reached nobody was recorded as delivered
+
+`gateway/push/chat-message-push.ts` decided "was this notification sent?" by looking at
+`PushResult.ok` alone. But `ok` means only *no HTTP/network exception*, and it is `true`
+in two ordinary cases where nothing was delivered:
+
+* **zero registered devices** — `gateway/push/dispatcher.ts` short-circuits with
+  `{ attempted: 0, delivered: 0, ok: true }` and never calls Expo. This is the state of
+  every fresh install.
+* **every ticket errored** — e.g. all tokens `DeviceNotRegistered` after a reinstall.
+  `{ delivered: 0, errored: N, ok: true }`, because the gateway did receive the tickets.
+
+In both, the sink answered `true`, `gateway/http/deliver.ts` stamped `delivered_at`, and
+the idempotent re-emit was silenced **forever** for a message the owner never got — the
+precise failure that file's own docblock claims to prevent.
+
+The sink now requires a numeric `delivered >= 1`, and **fails closed**: a result that
+does not report a count has proven nothing. That inverts the previous contract, which
+said "anything without an explicit `ok: false` counts as accepted, so a fake that
+resolves `undefined` reads as success" — that permissive default is what let this
+through, and it meant the test doubles could not distinguish "accepted for a device"
+from "sent nowhere". Fixtures now carry the count.
+
+### 2. The `ritual:<id>` token could still reach the owner, by a second route
+
+`ritual_planner` is null on a box with no LLM (`init_ritual_planner` never runs), and
+`reminders/dispatcher.ts` then classified **every** row as a nudge — including ritual
+rows, whose stored `message` IS the dispatch token. So the token went through
+`classifyReminderMessage` as literal intent and the lock screen read `ritual:kaizen`
+again, arriving by a completely different path from the one this lane originally fixed.
+
+The comment on `ritualPlanner` in `open/composer.ts` called that fall-through
+"fail-closed: nothing reads a ritual's prompt" — true about the prompt, silent about the
+notification, and it made a null planner read as harmless. The dispatcher now refuses a
+ritual row outright when it cannot plan one, keyed on `reminder.ritual_id`
+(`reminders/store.ts:59`) rather than on the shape of the message text: the column is
+what makes the row a ritual, and a prefix test would also swallow a plain reminder the
+owner happened to word that way. The composer comment now says what actually makes the
+null safe.
+
+### Verification
+
+Each guard was mutation-tested by deleting it and confirming a red run: the delivery
+guard kills 3 of its 4 new cases (the fourth, "one accepted ticket among failures IS a
+delivery", is the positive control and must keep passing), and the ritual-row guard
+kills the no-planner case. A second control asserts a **plain** reminder still fires
+normally with no planner — without it the fix could have traded one reported bug for a
+much worse unreported one.
+
+📌 **Both fixes are the same shape as the two above them in this document: a success
+signal that was weaker than the thing it was taken to prove.** `ok` was read as
+"delivered"; "no prompt was read" was read as "nothing leaked". In each case the
+narrower true statement was sitting right next to the broader false one.

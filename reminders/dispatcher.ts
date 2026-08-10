@@ -455,6 +455,33 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
         return
       }
 
+      // A RITUAL ROW WITH NO PLANNER MUST POST NOTHING — it must never fall through
+      // to the nudge path below.
+      //
+      // `ritual_planner` is null on a box with no LLM (`open/composer.ts` —
+      // `init_ritual_planner` never runs), and the decision above then reads
+      // `{ kind: 'nudge' }` for EVERY row including ritual rows. A ritual row's
+      // stored `message` is the dispatch token `ritual:<id>`
+      // (`reminders/ritual-registration.ts:982`), so composing it as an ordinary
+      // nudge puts that token through `classifyReminderMessage` as literal intent —
+      // and the owner's lock screen reads `ritual:kaizen`. That is the exact symptom
+      // this whole lane exists to remove, arriving by a second route.
+      //
+      // The comment on `ritualPlanner` called the fall-through "fail-closed: nothing
+      // reads a ritual's prompt". True and beside the point: the prompt is protected,
+      // the NOTIFICATION is not. Fail-closed here means posting nothing at all, the
+      // same posture as the planner's own `skipped`.
+      //
+      // Keyed on `reminder.ritual_id` (`reminders/store.ts:59`), not on the shape of
+      // the message text — the column is what makes the row a ritual, and a prefix
+      // test would also swallow a plain reminder the owner happened to word that way.
+      if (reminder.ritual_id !== null && reminder.ritual_id.length > 0) {
+        log(
+          `reminder ${reminder.id} is ritual ${reminder.ritual_id} but no ritual planner is available — posting nothing`,
+        )
+        return
+      }
+
       const shape = classifyReminderMessage(reminder.message)
       // A reminder whose stored `message` is empty/whitespace (the Reminders
       // Core create path, unlike the app surface, has no non-empty guard) has

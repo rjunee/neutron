@@ -1558,8 +1558,17 @@ export function buildOpenGraphComposer(
     // exist when the reminder DISPATCHER is built below. The dispatcher is handed a
     // stable seam that DEREFS this binding per fire, so a ritual and a nudge share
     // one dispatcher rather than one dispatcher plus one executor. `null` until
-    // `init_ritual_planner` runs (LLM-less box ⇒ never runs ⇒ every row composes as
-    // an ordinary nudge, which is fail-closed: nothing reads a ritual's prompt).
+    // `init_ritual_planner` runs (LLM-less box ⇒ never runs).
+    //
+    // ⚠️ WHAT THAT NULL MEANS WAS WRITTEN DOWN WRONG HERE. It said the fall-through
+    // was "fail-closed: nothing reads a ritual's prompt" — true about the prompt, and
+    // it made a null planner sound harmless. It was not: with no planner the
+    // dispatcher classified EVERY row as a nudge, so a ritual row composed from its
+    // stored `message`, which is the dispatch token `ritual:<id>`, and the owner's
+    // lock screen read `ritual:kaizen`. The dispatcher now refuses a ritual row
+    // outright when it cannot plan one (`reminders/dispatcher.ts`, keyed on
+    // `reminder.ritual_id`) — THAT is what makes this null fail-closed, not the
+    // absence of a prompt read.
     let ritualPlanner: RitualFirePlanner | null = null
     // ── THE canonical TaskStore — ONE instance for the whole box ────────────
     // Every task surface must be the SAME object, not merely the same table.

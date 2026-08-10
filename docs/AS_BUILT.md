@@ -9068,3 +9068,19 @@ ellipsis; and five in-code pointers that sent readers to `reminder-outbound.ts` 
 notification — contradicted by that file's own header — now name the seam that has it.
 
 Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — `ok: true` is not a delivery; a ritual row must never fall through to a nudge
+
+Two adversarial-review blockers on the notification lane. `gateway/push/chat-message-push.ts`
+treated `PushResult.ok` as proof of delivery, but `ok` is `true` with `delivered: 0` both
+when no device is registered (the state of a fresh install, short-circuited before Expo is
+called) and when every ticket errored — so `gateway/http/deliver.ts` stamped `delivered_at`
+and silenced the idempotent re-emit forever for a message nobody received. The sink now
+requires `delivered >= 1` and fails closed on a result that reports no count.
+
+Separately, `ritual_planner` is null on an LLM-less box, and `reminders/dispatcher.ts` then
+classified every row as a nudge — so a ritual row composed from its stored `message`, which
+is the dispatch token, and the owner's lock screen read `ritual:kaizen` by a second route.
+The dispatcher now refuses a ritual row it cannot plan, keyed on `reminder.ritual_id`.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.

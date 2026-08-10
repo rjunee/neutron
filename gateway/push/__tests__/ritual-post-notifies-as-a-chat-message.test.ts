@@ -137,7 +137,7 @@ interface ExpoMessage {
  * (below) uses the REAL `ApprovalManager` path, so the fail-closed behaviour is
  * still exercised against the real thing.
  */
-function buildChain(opts: { approved: boolean }): {
+function buildChain(opts: { approved: boolean; planner?: boolean }): {
   dispatch: (r: Reminder) => Promise<void>
   expo: ExpoMessage[]
   composeCalls: () => number
@@ -151,7 +151,12 @@ function buildChain(opts: { approved: boolean }): {
       async pushAll(project_slug, message) {
         expect(project_slug).toBe(OWNER_SLUG)
         expo.push({ to: 'ExponentPushToken[device]', ...message })
-        return { ok: true }
+        // A real `PushResult`, count included. `ok` alone is not a delivery — the
+        // sink requires `delivered >= 1`, because `dispatch` returns `ok: true` with
+        // `delivered: 0` both when no device is registered and when every ticket
+        // errored (`gateway/push/chat-message-push.ts`). Reporting only `ok` here
+        // would model a chain that reached a device when it had not.
+        return { attempted: 1, delivered: 1, errored: 0, ok: true, error: null }
       },
     },
   })
@@ -173,18 +178,27 @@ function buildChain(opts: { approved: boolean }): {
     },
   }
 
+  // `planner: false` models the LLM-less box: `open/composer.ts` never runs
+  // `init_ritual_planner`, so the dispatcher is handed NO planner at all. That is a
+  // different arm from `approved: false` (a planner that refuses) and it used to
+  // reach the owner very differently — see the test below.
+  const planner =
+    opts.planner === false
+      ? undefined
+      : buildRitualFirePlanner({
+          registry,
+          approvals: new ApprovalManager(db, noopNotifier),
+          project_slug: OWNER_SLUG,
+          runs: createRitualRunStore(db),
+          ...(opts.approved ? { build_approval_check: () => ({ isApproved: () => true }) } : {}),
+          mint_run_id: () => 'run-1',
+        })
+
   const dispatcher = buildReminderDispatcher({
     outbound: buildButtonStoreReminderOutbound({ deliver }),
     llm,
     resolveTopicId: () => OWNER_TOPIC,
-    ritual_planner: buildRitualFirePlanner({
-      registry,
-      approvals: new ApprovalManager(db, noopNotifier),
-      project_slug: OWNER_SLUG,
-      runs: createRitualRunStore(db),
-      ...(opts.approved ? { build_approval_check: () => ({ isApproved: () => true }) } : {}),
-      mint_run_id: () => 'run-1',
-    }),
+    ...(planner !== undefined ? { ritual_planner: planner } : {}),
     resolve_ritual_model: () => 'model-best',
   })
 
@@ -276,5 +290,55 @@ describe('an ordinary NUDGE reaches the identical notification shape', () => {
     // is exactly the divergence the owner was complaining about.
     expect(fromNudge).toEqual(fromRitual)
     expect(fromNudge.data?.kind).toBe('agent_message')
+  })
+})
+
+describe('a ritual row with NO PLANNER reaches the owner with nothing at all', () => {
+  test('the `ritual:<id>` token never becomes a notification on an LLM-less box', async () => {
+    // THE SECOND ROUTE TO THE REPORTED SYMPTOM, and the one the first fix left open.
+    // `ritual_planner` is null whenever `init_ritual_planner` does not run — an
+    // LLM-less box (`open/composer.ts`). The dispatcher's decision then read
+    // `{ kind: 'nudge' }` for EVERY row, so a ritual row composed from its stored
+    // `message`, which IS `ritual:<id>` — and the owner's lock screen read
+    // `ritual:kaizen` again, by a completely different path from the one this lane
+    // originally fixed.
+    //
+    // The comment on `ritualPlanner` called that fall-through "fail-closed: nothing
+    // reads a ritual's prompt". Correct about the prompt, silent about the
+    // notification. Fail-closed here has to mean posting NOTHING.
+    const chain = buildChain({ approved: true, planner: false })
+
+    await chain.dispatch(await ritualRow('kaizen'))
+
+    // EMPTINESS IS THE ASSERTION, stated as such. This file's own docblock records
+    // the trap: an earlier arm looped `not.toContain('ritual:')` over an empty
+    // collection and passed on zero notifications. So assert the count, and assert
+    // the compose turn never ran either — a nudge fall-through would have spent one.
+    expect(chain.expo).toEqual([])
+    expect(chain.composeCalls()).toBe(0)
+  })
+
+  test('a PLAIN reminder still fires normally with no planner — the guard is keyed on the row, not the box', async () => {
+    // The control that keeps the guard honest. A box with no planner must still
+    // deliver ordinary reminders; if this went silent the fix would have traded one
+    // reported bug for a much worse unreported one.
+    const chain = buildChain({ approved: true, planner: false })
+    const plain = await store.create({
+      owner_slug: OWNER_SLUG,
+      topic_id: null,
+      fire_at: 1000,
+      message: 'take the dogs out',
+    })
+
+    await chain.dispatch(plain)
+
+    expect(chain.expo).toHaveLength(1)
+    // The EXCERPT, not the whole report — a notification body is budgeted and ends
+    // in an ellipsis on a word boundary (`chatPushExcerpt`). Asserting equality with
+    // `COMPOSED` here would be asserting the excerpt never happened.
+    const body = chain.expo[0]?.body ?? ''
+    expect(COMPOSED.startsWith(body.replace(/…$/, ''))).toBe(true)
+    expect(body.length).toBeGreaterThan(0)
+    expect(body).not.toContain('ritual:')
   })
 })

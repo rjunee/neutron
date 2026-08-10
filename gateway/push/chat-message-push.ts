@@ -200,18 +200,40 @@ export function buildChatMessagePush(input: ChatMessagePushInput): ChatMessagePu
 /** The slice of `PushDispatcher` this sink needs. Narrow on purpose: a sink that
  *  could also prune tokens or fan per-user would be a second delivery policy.
  *
- *  The RESULT is read for one field only. `PushDispatcher.pushAll` does NOT throw
- *  on an Expo outage — it catches the network failure and resolves with
- *  `ok: false` (`gateway/push/dispatcher.ts` `PushResult`). A sink that only
- *  watched for a throw would therefore report an outage as a successful
- *  notification, and `deliver` would stamp the row delivered for a buzz that never
- *  happened. Anything without an explicit `ok: false` counts as accepted, so a
- *  fake that resolves `undefined` reads as success. */
+ *  TWO FIELDS ARE READ, AND `ok` ALONE IS NOT ENOUGH.
+ *
+ *  `PushDispatcher.pushAll` does NOT throw on an Expo outage — it catches the
+ *  network failure and resolves with `ok: false` (`gateway/push/dispatcher.ts`
+ *  `PushResult`), so a sink that only watched for a throw would report an outage as
+ *  a successful notification.
+ *
+ *  But `ok` means only "no HTTP/network exception", and it is `true` in two cases
+ *  where NOBODY WAS REACHED:
+ *    * zero registered devices — `dispatch` returns early with
+ *      `{ attempted: 0, delivered: 0, ok: true }` and never calls Expo at all,
+ *      which is the normal state of a fresh install;
+ *    * every ticket came back `error` (e.g. all tokens `DeviceNotRegistered`) —
+ *      `{ delivered: 0, errored: N, ok: true }`, because the gateway did receive
+ *      the tickets.
+ *  In both, an `ok`-only sink answers `true`, `deliver` stamps `delivered_at`, and
+ *  the idempotent re-emit is silenced FOREVER for a message the owner never got.
+ *  So `delivered` is the field that decides, and it must be a number ≥ 1.
+ *
+ *  IT FAILS CLOSED. A result that does not expose a numeric `delivered` has not
+ *  proven that anything was accepted, so it reads as NOT delivered. (This inverts
+ *  an earlier contract here which said "anything without an explicit `ok: false`
+ *  counts as accepted, so a fake that resolves `undefined` reads as success" — that
+ *  permissive default is precisely what let the zero-delivery stamp through, and a
+ *  test double that wants to model a delivery now has to say so.)
+ *
+ *  `delivered ≥ 1` means Expo ACCEPTED the message for at least one device. It is
+ *  not proof the device displayed it — no available signal is — but it is the
+ *  difference between "handed to a transport with a recipient" and "sent nowhere". */
 export interface ChatMessagePushFanOut {
   pushAll(
     project_slug: string,
     message: { title?: string; body: string; data?: Record<string, unknown> },
-  ): Promise<{ ok?: boolean } | unknown>
+  ): Promise<{ ok?: boolean; delivered?: number } | unknown>
 }
 
 /**
@@ -223,13 +245,16 @@ export interface ChatMessagePushFanOut {
  * forgetting the try/catch once would make a fired reminder retry forever over an
  * Expo outage.
  *
- * RESOLVES TO WHETHER THE NOTIFICATION WAS HANDED TO THE TRANSPORT — `true` when
- * the fan-out accepted it, `false` when it was skipped (nothing to say) or the
- * transport threw. This is not decoration: `deliver` stamps the durable row
- * `delivered_at` on a `true` and leaves it NULL on a `false`, and that stamp is
+ * RESOLVES TO WHETHER A DEVICE WAS ACTUALLY REACHED — `true` only when the fan-out
+ * reports at least one accepted ticket; `false` when it was skipped (nothing to
+ * say), when no device was reached (no tokens registered, or every ticket errored),
+ * or when the transport threw. This is not decoration: `deliver` stamps the durable
+ * row `delivered_at` on a `true` and leaves it NULL on a `false`, and that stamp is
  * the ONLY thing that lets a later idempotent re-emit tell "he already got this"
- * from "the row exists but never reached him". A sink that always answered `true`
- * would suppress the notification for a message the owner never saw.
+ * from "the row exists but never reached him". A sink that answered `true` for a
+ * send with zero recipients would suppress the notification for a message the owner
+ * never saw — see the `ChatMessagePushFanOut` docblock for the two `ok: true`
+ * cases where exactly that happens.
  */
 export type ChatMessagePushSink = (input: ChatMessagePushInput) => Promise<boolean>
 
@@ -251,11 +276,28 @@ export function buildChatMessagePushSink(
     if (push.body.length === 0) return false
     try {
       const result = await input.fanOut.pushAll(input.project_slug, push)
+      const tally =
+        typeof result === 'object' && result !== null
+          ? (result as { ok?: boolean; delivered?: number })
+          : {}
       // An Expo outage resolves with `ok: false` rather than throwing — see the
       // `ChatMessagePushFanOut` docblock. Treat it as not-sent so the row stays
       // unstamped and the next re-emit tries again.
-      if (typeof result === 'object' && result !== null && (result as { ok?: boolean }).ok === false) {
+      if (tally.ok === false) {
         input.log?.('[push] chat-message push not accepted by the transport (the chat row is the guarantee)')
+        return false
+      }
+      // `ok: true` with nothing delivered is the dangerous case, not an edge case:
+      // zero registered devices short-circuits before Expo is called, and a
+      // fully-errored batch still returns ok. Both must read as not-delivered or
+      // the stamp silences the re-emit for a message nobody received. A result that
+      // does not report a count has proven nothing — fail closed.
+      if (typeof tally.delivered !== 'number' || !(tally.delivered >= 1)) {
+        input.log?.(
+          `[push] chat-message push reached no device (delivered=${
+            typeof tally.delivered === 'number' ? tally.delivered : 'unreported'
+          }); leaving the row unstamped so the next re-emit retries`,
+        )
         return false
       }
       return true
