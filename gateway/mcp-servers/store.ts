@@ -87,7 +87,6 @@ import {
   type ResolvedOwnerMcpServer,
 } from '@neutronai/runtime/mcp-servers.ts'
 import { createLogger } from '@neutronai/logger'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import {
   readOwnerMcpServers,
   writeOwnerMcpServers,
@@ -518,10 +517,11 @@ export class OwnerMcpServerStore {
       return { ok: true, error: null, servers: await this.list() }
     }
     const pending = rows.find((row) => row.status === 'pending' && grantHashOf(row) === hash)
-    // AWAITED, unlike `requestApproval`'s fire-and-forget: the row has to EXIST before
-    // it can be resolved on the next line, and the read side is synchronous so it
-    // would not see an un-awaited insert. `openApproval` is `requestApproval` without
-    // the wait-for-the-owner half.
+    // `openApproval`, not `requestApproval`: the row has to EXIST before it can be
+    // resolved on the next line, and the read side is synchronous so it would not see
+    // an un-awaited insert. `openApproval` is `requestApproval` without the
+    // wait-for-the-owner half — the same call {@link requestApproval} makes, and for
+    // the same reason.
     const id =
       pending?.id ??
       (await manager.openApproval(this.approvalRequestFor(spec))).id
@@ -577,9 +577,9 @@ export class OwnerMcpServerStore {
   // ── internals ─────────────────────────────────────────────────────────────
 
   /**
-   * The `prompt-user` request for one spec. ONE definition, used by both the
-   * fire-and-forget mint below and the awaited `openApproval` in {@link decide}, so
-   * the two cannot come to disagree about what a grant records.
+   * The `prompt-user` request for one spec. ONE definition, used by the mint in
+   * {@link requestApproval} and by the open-and-resolve in {@link decide}, so the two
+   * cannot come to disagree about what a grant records.
    */
   private approvalRequestFor(spec: OwnerMcpServerSpec): {
     project_slug: string
@@ -622,18 +622,35 @@ export class OwnerMcpServerStore {
     for (const row of rows) {
       if (row.status === 'pending' && grantHashOf(row) !== hash) await manager.cancelPending(row.id)
     }
-    // NOT AWAITED. The returned promise resolves only when the OWNER answers — minutes
-    // to never — so awaiting it would hang the HTTP request that installed the server.
-    // The row it inserts is the state that matters, and `resolveApproved` reads THAT,
-    // not this promise. (There is no TTL sweep running in this build: `expireStale`
-    // has no production caller, so a prompt nobody answers simply stays pending until
-    // it is decided, replaced by an edit, or cancelled by an uninstall. That is why
-    // `decide` can open and resolve a grant itself rather than relying on a sweep to
-    // clear a stale one.)
-    fireAndForget(
-      'mcp-servers.requestApproval',
-      manager.requestApproval(this.approvalRequestFor(spec)),
-    )
+    // `openApproval`, AWAITED — not `fireAndForget(requestApproval(...))`.
+    //
+    // `requestApproval` returns a promise that resolves only when the OWNER answers —
+    // minutes to never — so it cannot be awaited from an HTTP request, and it was
+    // therefore fired and forgotten. But the INSERT it performs is the state every
+    // caller here goes on to READ: `install` and `decide` both finish with
+    // `await this.list()`, and the read side (`findByToolName`) is a SYNCHRONOUS
+    // `prepare().all()` that bypasses the db mutex the INSERT goes through. So the row
+    // was only present by the time the reply was built when the mutex happened to be
+    // idle — and it is not always idle. Reproduced: an EDIT takes the
+    // `await manager.cancelPending(...)` branch above, which is a yield AFTER this
+    // method's own writes and BEFORE the INSERT, and a foreign writer taking the mutex
+    // at that instant put the INSERT behind itself. `install` then answered with the
+    // server as `unapproved` — fail-closed, and the Approve control still renders, but
+    // the label said "Not approved" for a server that had in fact just asked, and the
+    // Deny button (rendered only for `pending`) was missing.
+    //
+    // `openApproval` is `requestApproval` MINUS the wait-for-the-owner half: it inserts
+    // the row, fires the notifier, and resolves. Awaiting it is exactly the use its own
+    // docblock names, and it is what `decide` already does. Nothing here ever consumed
+    // the discarded waiter promise — this store reads the durable row, and the settings
+    // surface is the delivery channel — so dropping it removes a never-resolving promise
+    // rather than a behaviour.
+    //
+    // (There is no TTL sweep running in this build: `expireStale` has no production
+    // caller, so a prompt nobody answers simply stays pending until it is decided,
+    // replaced by an edit, or cancelled by an uninstall. That is why `decide` can open
+    // and resolve a grant itself rather than relying on a sweep to clear a stale one.)
+    await manager.openApproval(this.approvalRequestFor(spec))
   }
 
   /** The state of the grant for THIS exact spec (hash-matched, newest first). */
