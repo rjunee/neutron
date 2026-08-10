@@ -8448,3 +8448,20 @@ of the live surface — the join between two green suites whose union was broken
 shape as the push-kind drift.
 
 Detail: `docs/as-built/2026-08-09-live-agent-web-tools.md`.
+
+## 2026-08-09 — Model usage on the phone
+
+☰ → Settings → Model usage. Same two windows, same pace, same refusals as the web card.
+Both wiring points present (nav row + Stack.Screen — they fail independently) and the
+screen test presses real controls.
+
+A first draft re-declared `usageBand`/`clampFraction` on the phone with a bundle-
+independence justification that `app/components/UsageMeter.tsx:20` disproves — it already
+imports both from `@neutronai/contracts`. Both now come from the contract and the parity
+test asserts neither client exports its own. The formatters stay twinned, correctly:
+production code in `app/lib` never imports `landing`.
+
+Every refusal mutation-tested separately, including one attempt that was NOT faithful and
+proved nothing until rewritten.
+
+Detail: `docs/as-built/2026-08-09-mobile-usage-card.md`.
