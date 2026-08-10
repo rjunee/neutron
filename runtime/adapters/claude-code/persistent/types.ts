@@ -6,6 +6,7 @@ import type { DeadTurnNotice } from './api5xx-dead-turn-watcher.ts'
 import type { SettingsPermissions } from './build-settings.ts'
 import { EventChannel } from './event-channel.ts'
 import { buildDetectorContext } from './output-scan.ts'
+import type { ResolvedOwnerMcpServer } from '../../../mcp-servers.ts'
 import type { SpawnAssertionConfig } from './post-spawn-assertion.ts'
 import type { PtyHost } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_BOTTOM_N, type RateLimitBannerSeverity, matchRateLimitBanner, severityForBannerDetectorId } from './rate-limit-banner.ts'
@@ -299,6 +300,45 @@ export interface PersistentReplSubstrateOptions {
    * a `ReplToolBridge` was also wired via `setReplToolBridge`.
    */
   enableToolBridge?: boolean
+  /**
+   * OWNER-INSTALLED MCP servers, resolved PER DISPATCH.
+   *
+   * A thunk rather than a value because the whole point is that a server added in
+   * Settings reaches the NEXT turn: the substrate is constructed once at boot, so a
+   * captured array would freeze whatever was installed at boot and the owner's
+   * install would appear to do nothing until a restart (the `coresState` latch bug,
+   * in a place where the symptom is "the feature silently doesn't work"). Resolving
+   * it per dispatch also means an APPROVAL revoked between two turns takes effect on
+   * the second one.
+   *
+   * The returned servers are merged into the spawn's `mcpServers` and their
+   * `mcp__<name>` namespaces are added to `--allowedTools`, alongside — never in
+   * place of — the dev-channel reply sink and the Neutron tool bridge.
+   *
+   * SECURITY-CRITICAL default-off, TWICE. Only the owner's warm conversational REPL
+   * is given this thunk (`open/wiring/substrates.ts`), and `spawn.ts` ALSO refuses to
+   * apply it unless `enableToolBridge` is set — the same gate the in-process tool
+   * bridge rides. The untrusted history-import (`cc-import-*`) and disposable Trident
+   * (`cc-trident-*`) REPLs satisfy neither condition, so a prompt-injection in
+   * imported content cannot reach an owner-installed subprocess even if a future
+   * wiring change mistakenly hands one of them the thunk.
+   *
+   * Called TWICE per dispatch — once by the warm-reuse guard to fingerprint the
+   * requested surface, once by the spawn to build the config. Two calls rather than
+   * one threaded value because the wedge-respawn and watchdog-respawn paths spawn
+   * without going through the guard and must resolve freshly anyway; the cost is an
+   * indexed row read plus one decrypt per server.
+   *
+   * A REJECTION PROPAGATES and fails the turn, deliberately. The alternative —
+   * treating a failed resolve as "no servers installed" — would be worse in both
+   * directions: the owner's tools would vanish for a turn with no visible cause, and
+   * because the guard and the spawn resolve separately, an INTERMITTENT failure would
+   * make the two disagree and evict the warm child on every single turn. A throw
+   * surfaces once, through the turn-failure path that already has a retry
+   * affordance, and it means the instance's own database is broken rather than
+   * anything about MCP.
+   */
+  resolveExtraMcpServers?: () => Promise<ReadonlyArray<ResolvedOwnerMcpServer>>
   // --- host / test injection (all optional; production uses defaults) ---
   /** PTY backend. Default: Bun-native terminal host. Tests inject a fake. */
   ptyHost?: PtyHost

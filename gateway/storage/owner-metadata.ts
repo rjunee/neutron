@@ -14,10 +14,17 @@
  * (migration 0111 — which voice-note transcriber the owner chose) is the second
  * such field and is read/written here for the same reason: one module owns the
  * table, so a second reader can't drift from the first on what a NULL means.
+ * `trident_phase_models` (0118) and `mcp_servers` (0120 — the owner's installed MCP
+ * servers, names only, never their secret values) are the third and fourth.
  */
 
 import { parsePhaseModelConfig } from '@neutronai/trident/phase-models.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  MCP_SERVERS_MAX,
+  parseOwnerMcpServerInput,
+  type OwnerMcpServerSpec,
+} from '@neutronai/runtime/mcp-servers.ts'
 import {
   isTranscriptionBackendChoice,
   type TranscriptionBackendChoice,
@@ -168,6 +175,106 @@ export async function writeTridentPhaseModels(
     [project_slug, value],
   )
   return { ok: true, errors: [] }
+}
+
+/**
+ * Read the owner's INSTALLED MCP servers (migration 0120).
+ *
+ * RE-VALIDATED ON THE WAY OUT, for the same reason `readTridentPhaseModels` is: a
+ * row written by an older or looser build must not reach a spawn, and by the time a
+ * bad entry is inside `--mcp-config` the only available response is to start a
+ * subprocess and hope. So the last typed layer is the last chance to drop it.
+ *
+ * Returns `[]` for absent / NULL / unparseable — all of which mean "nothing
+ * installed", which is what the caller does with them anyway. An individually
+ * invalid entry is DROPPED rather than failing the whole read: one bad row must not
+ * be able to switch off every other server the owner installed, and a dropped entry
+ * cannot become a security problem — a server that is not returned is a server that
+ * is not wired.
+ *
+ * Names are de-duplicated, first occurrence winning, so a hand-edited column cannot
+ * produce two entries whose `mcpServers` keys would collide at spawn.
+ *
+ * NOTE the values are NOT here — `env_names` only. The values live in the encrypted
+ * credential store; `gateway/mcp-servers/store.ts` is what joins the two.
+ */
+export function readOwnerMcpServers(
+  db: ProjectDb,
+  project_slug: string,
+): ReadonlyArray<OwnerMcpServerSpec> {
+  const row = db
+    .prepare<{ mcp_servers: string | null }, [string]>(
+      `SELECT mcp_servers FROM instance_metadata WHERE instance_slug = ? LIMIT 1`,
+    )
+    .get(project_slug)
+  const raw = row?.mcp_servers
+  if (typeof raw !== 'string' || raw.trim().length === 0) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const out: OwnerMcpServerSpec[] = []
+  const seen = new Set<string>()
+  for (const entry of parsed) {
+    // The stored shape carries `env_names`; the validator's input shape carries
+    // `env`. Re-validating through the ONE validator means the read cannot accept a
+    // command the write would have refused, so the round-trip is fed the names back
+    // as keys with a placeholder value that is discarded.
+    const e = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>
+    const names = Array.isArray(e['env_names']) ? (e['env_names'] as unknown[]) : []
+    const env: Record<string, string> = {}
+    for (const n of names) if (typeof n === 'string') env[n] = 'x'
+    const { spec } = parseOwnerMcpServerInput({
+      name: e['name'],
+      command: e['command'],
+      args: e['args'],
+      env,
+    })
+    if (spec === null || seen.has(spec.name)) continue
+    seen.add(spec.name)
+    out.push(spec)
+  }
+  return out.slice(0, MCP_SERVERS_MAX)
+}
+
+/**
+ * Persist the complete installed set (migration 0120). Replaces, never merges — the
+ * caller owns the whole list, which is what keeps "remove a server" expressible.
+ *
+ * An empty list clears the column to NULL rather than storing `[]`, so "never
+ * configured" and "configured to nothing" stay one state instead of two — the same
+ * choice `writeTridentPhaseModels` makes.
+ *
+ * Writes ONLY `name`/`command`/`args`/`env_names`, field by field, rather than
+ * serialising whatever object it was handed. A caller that passes a
+ * {@link ResolvedOwnerMcpServer} — which carries the decrypted `env` values — must
+ * not thereby write secrets into a plain metadata column, and the surface that holds
+ * both shapes is one refactor away from doing exactly that.
+ */
+export async function writeOwnerMcpServers(
+  db: ProjectDb,
+  project_slug: string,
+  servers: ReadonlyArray<OwnerMcpServerSpec>,
+): Promise<void> {
+  const value =
+    servers.length > 0
+      ? JSON.stringify(
+          servers.slice(0, MCP_SERVERS_MAX).map((s) => ({
+            name: s.name,
+            command: s.command,
+            args: [...s.args],
+            env_names: [...s.env_names],
+          })),
+        )
+      : null
+  await db.run(
+    `INSERT INTO instance_metadata (instance_slug, mcp_servers) VALUES (?, ?)
+       ON CONFLICT(instance_slug) DO UPDATE SET mcp_servers = excluded.mcp_servers`,
+    [project_slug, value],
+  )
 }
 
 /** Upper bound on an accepted IANA identifier (the longest real zone,

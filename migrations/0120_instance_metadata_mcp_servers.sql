@@ -1,0 +1,57 @@
+-- 0120_instance_metadata_mcp_servers.sql
+--
+-- The owner's installed MCP servers get somewhere to live.
+--
+-- BACKGROUND. The spawned agent's session received exactly TWO MCP servers, both
+-- compiled in: the dev-channel reply sink and the in-process Neutron tool bridge
+-- (`runtime/adapters/claude-code/persistent/spawn.ts`). Nothing anywhere let the
+-- owner add a third, so every MCP server the ecosystem publishes was unreachable
+-- from his own assistant. He asked for it directly — "it seems like mcp servers
+-- should be installable" — and it is a cutover-parity blocker, not a nicety.
+--
+-- WHY `instance_metadata` AND NOT A NEW TABLE. Installed servers are an INSTANCE
+-- setting: one set serves every project on this box, exactly like the transcription
+-- backend (0111) and the per-phase build models (0118). That table's own header
+-- prescribes this — "future instance-level fields land as additive columns on the
+-- same row" — and using it keeps the two prior settings and this one in one place
+-- with one reader (`gateway/storage/owner-metadata.ts`), so no second module can
+-- drift on what a NULL means.
+--
+-- WHY A JSON COLUMN AND NOT A ROW PER SERVER. The value is read whole, written
+-- whole and validated whole, matching 0118's reasoning. Nothing queries INTO it: the
+-- only read is "give me every installed server" at spawn time, and the only write is
+-- "here is the new complete list". A table would invite a per-row write, and a
+-- half-applied write here is the dangerous kind — a server whose command was updated
+-- but whose approval row was not would be a program running under an approval the
+-- owner gave for something else.
+--
+-- WHAT IS **NOT** IN THIS COLUMN: the environment-variable VALUES. Only the NAMES
+-- are stored here. The values are secrets (API tokens, in practice) and go where
+-- every other secret on this box goes — the AES-256-GCM `project_credentials` store
+-- (migration 0092), at global scope, under the reserved service name
+-- `mcp_env.<server>`. That split is what makes this column safe to return to both
+-- clients, render in an approval prompt, and log. The same reasoning 0111 applied to
+-- the OpenAI transcription key.
+--
+-- APPROVAL IS ALSO NOT HERE. A server is not wired into the agent's session until
+-- the owner approves it, and that approval is an ordinary `tool_approvals` row
+-- (migration 0004) under `mcp-server:<name>`, bound to a content hash of the command,
+-- the args and the env-var names — the same durable-grant mechanism the scheduled
+-- rituals use (`reminders/ritual-approval.ts`), deliberately not a second concept.
+-- So this column records what the owner INSTALLED; the approvals table records what
+-- he PERMITTED; and the spawn path wires only the intersection. Storing an "approved"
+-- boolean here would have been a second, forgeable answer to a question that already
+-- has an authoritative one.
+--
+-- THE COLUMN IS NOT AUTHORITATIVE ON READ. Whatever is stored is re-validated by
+-- `parseOwnerMcpServerInput` on the way out, so a row written by an older or looser
+-- build cannot reach a spawn — where the only available response to a bad entry is to
+-- start a subprocess and hope.
+--
+-- NULL / absent ⇒ no installed servers, and the spawned session's `mcpServers` is
+-- byte-identical to what it was before this migration.
+--
+-- Forward-only; no down-migration (Neutron OSS contract). ADD COLUMN with a nullable
+-- TEXT type is legal on a STRICT table.
+
+ALTER TABLE instance_metadata ADD COLUMN mcp_servers TEXT;

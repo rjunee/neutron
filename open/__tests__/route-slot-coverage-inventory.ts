@@ -164,6 +164,11 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
     serves: 'the code-gen settings — which model and effort run each build phase',
   },
   {
+    rung: 'app-mcp-servers',
+    composition: 'app_mcp_servers_surface',
+    serves: 'installing, listing, removing and APPROVING the owner\'s MCP servers',
+  },
+  {
     rung: 'app-tasks',
     composition: 'app_tasks_surface',
     serves: 'the Tasks tab — list, create, complete, cancel',

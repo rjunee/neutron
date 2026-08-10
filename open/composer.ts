@@ -130,6 +130,7 @@ import { wireMemory } from './wiring/memory.ts'
 import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
+import { ApprovalManager } from '@neutronai/tools/approval.ts'
 import { buildAppWsApprovalNotifier } from './wiring/approval-notifier.ts'
 import { buildWatchdogAlertEnvelope, wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
@@ -237,6 +238,7 @@ export type OpenComposition = CompositionInput &
       | 'app_upload_surface'
       | 'app_voice_transcription_surface'
       | 'app_trident_phase_models_surface'
+      | 'app_mcp_servers_surface'
     >
   >
 
@@ -394,6 +396,9 @@ import {
   freeBytesAt,
 } from '@neutronai/gateway/transcription/whisper-install.ts'
 import { createVoiceTranscriptionSurface } from '@neutronai/gateway/http/voice-transcription-surface.ts'
+import { createAppMcpServersSurface } from '@neutronai/gateway/http/app-mcp-servers-surface.ts'
+import { OwnerMcpServerStore } from '@neutronai/gateway/mcp-servers/store.ts'
+import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 import { createTridentPhaseModelsSurface } from '@neutronai/gateway/http/trident-phase-models-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
@@ -950,6 +955,17 @@ export function buildOpenGraphComposer(
             store: recoveredReplyStore,
           })
         : undefined
+    // OWNER-INSTALLED MCP SERVERS — a two-phase holder, because the store needs the
+    // credential store and the app-ws approval registry, both built far below this
+    // line, while the live-chat substrate that CONSUMES it is built here.
+    //
+    // A plain holder rather than a `late<T>` seam: unbound has a correct, meaningful
+    // answer here (no store yet ⇒ no installed servers ⇒ nothing wired), which is
+    // fail-closed. `late<T>` exists for seams where a skipped call LOSES a write and
+    // must therefore be loud; a resolver that answers "none" during boot is not that.
+    const mcpServerStoreHolder: { store?: OwnerMcpServerStore } = {}
+    const resolveMcpServers = async (): Promise<ReadonlyArray<ResolvedOwnerMcpServer>> =>
+      mcpServerStoreHolder.store === undefined ? [] : await mcpServerStoreHolder.store.resolveApproved()
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,
@@ -967,6 +983,10 @@ export function buildOpenGraphComposer(
           }
         : {}),
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+      // Wired onto the owner's live-chat substrate ONLY (`open/wiring/substrates.ts`),
+      // which is what confines an owner-installed subprocess to the owner's own
+      // session.
+      resolveMcpServers,
     }
     const {
       llmCallSubstrate,
@@ -3368,6 +3388,40 @@ export function buildOpenGraphComposer(
     // Managed layers its own auth as the wrapper.
     const appWsRegistry = new InMemoryAppWsSessionRegistry()
 
+    // THE APPROVAL MANAGER, built HERE and handed to the graph rather than built by
+    // it. Two surfaces need the same one: the graph's Cores/tool approvals, and the
+    // MCP-server settings surface below. `build-core-modules` reuses a caller-supplied
+    // manager exactly as it already reuses a caller-supplied `ChannelRouter`, so there
+    // is ONE instance over `tool_approvals` — a second would have its own in-memory
+    // waiter map and the two would disagree about which decisions are still pending.
+    const approvalNotifier = buildAppWsApprovalNotifier({ registry: appWsRegistry })
+    const approvalManager = new ApprovalManager(db, approvalNotifier)
+
+    // The owner's installable MCP servers. Joins three stores — the installed list in
+    // `instance_metadata` (0120), the env secrets in the encrypted credential store,
+    // and the durable grants in `tool_approvals` — and hands the intersection to the
+    // live-chat spawn through the `mcpServerStoreHolder` bound here.
+    //
+    // BINDING THIS IS THE WHOLE FEATURE. The store, the surface and the substrate
+    // plumbing are each correct on their own with this line missing, and the owner
+    // would install a server that never appeared in his session: the
+    // built-but-never-wired failure this repo keeps hitting. Pinned by
+    // `open/__tests__/open-mcp-servers-wiring.test.ts` against the REAL composer.
+    const mcpServerStore = new OwnerMcpServerStore({
+      db,
+      project_slug,
+      credentials: projectCredentialStore,
+      owner_slug: asOwnerHandle(project_slug),
+      // A getter: the graph's manager is THIS instance, but reading it as a value
+      // here would still be correct only by accident if that ever changed.
+      approvals: () => approvalManager,
+    })
+    mcpServerStoreHolder.store = mcpServerStore
+    const appMcpServersSurface = createAppMcpServersSurface({
+      auth: appOwnerAuth,
+      store: mcpServerStore,
+    })
+
     // FIX 1 (P2 follow-up to #84) — live project-rail refresh. The served
     // `/chat` HTML injects the project list ONCE at page-load; a brand-new owner
     // bootstraps with NONE, and when onboarding CREATES projects in the SAME
@@ -5327,7 +5381,10 @@ export function buildOpenGraphComposer(
       // production caller. App-ws broadcast per the `watchdogNotifier`
       // precedent above (`appWsRegistry` :2051 satisfies the structural
       // `ApprovalNotifierRegistry`); plain-text, fail-soft, never prompt bytes.
-      approval_notifier: buildAppWsApprovalNotifier({ registry: appWsRegistry }),
+      approval_notifier: approvalNotifier,
+      // The ONE `ApprovalManager` (built beside `appWsRegistry`), so the MCP-server
+      // settings surface and the graph's tool approvals share one waiter map.
+      approval_manager: approvalManager,
       // F4 — real supervision-watchdog notifier (app-ws + O4 system_events),
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
@@ -5801,6 +5858,10 @@ export function buildOpenGraphComposer(
       // Settings-tab install/remove control for the keyless whisper.cpp backend.
       app_voice_transcription_surface: { handler: voiceTranscriptionSurface.handler },
       app_trident_phase_models_surface: { handler: tridentPhaseModelsSurface.handler },
+      // Installable MCP servers (`/api/app/mcp-servers[/decision]`) — the Settings
+      // section where the owner adds a server, and the ONLY place an installed one
+      // can be approved. Unmounted, the whole feature would be invisible.
+      app_mcp_servers_surface: { handler: appMcpServersSurface.handler },
       // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
       // owner-gated. Additive; mounts no write route.
       app_diagnostics_surface: { handler: appDiagnosticsSurface.handler },

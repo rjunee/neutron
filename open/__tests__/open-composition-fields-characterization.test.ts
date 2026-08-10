@@ -82,6 +82,11 @@ const EXPECTED_COMPOSITION_KEYS = [
   // builtin and this key is what stops tapping it from reaching four 404s, as it
   // did in every install until ISSUES #447.
   'app_launcher_surface',
+  // Installable MCP servers (`/api/app/mcp-servers[/decision]`) — the Settings
+  // section where the owner adds a server and, separately, APPROVES it. Its presence
+  // HERE is the done-means-served proof, and it matters more than most: approval is
+  // the gate, so an unmounted surface means no installed server can ever run.
+  'app_mcp_servers_surface',
   // The Personality pane inside the Admin screen (`/api/app/persona/*`) —
   // read/write of SOUL.md, USER.md, priority-map.md.
   'app_persona_surface',
@@ -116,6 +121,10 @@ const EXPECTED_COMPOSITION_KEYS = [
   'app_voice_transcription_surface',
   'app_work_board_surface',
   'app_ws_surface',
+  // The ONE `ApprovalManager`, built by the composer and reused by the graph (the
+  // `channel_router` precedent below) so the MCP-server settings surface and the
+  // graph's tool approvals share a single waiter map over `tool_approvals`.
+  'approval_manager',
   'approval_notifier',
   // C5b — Open now supplies the single-owner gate through the unified
   // `composition.auth_gate` seam (both modes flow through ONE seam) instead of

@@ -132,6 +132,28 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.skip_permissions).toBe(true)
   })
 
+  test('ONLY cc-agent-* receives the owner-installed MCP server resolver', async () => {
+    // An installed MCP server is a SUBPROCESS — strictly more capability than any
+    // built-in tool — so it rides the same single-substrate confinement the tool
+    // bridge does. The untrusted import, the per-project compose and the disposable
+    // Trident substrates must omit it; `spawn.ts` enforces the tool-bridge condition
+    // independently, so both gates have to fail before an untrusted REPL sees one.
+    const resolveMcpServers = async (): Promise<[]> => []
+    const { ctx, captured } = makeCtx({ resolveMcpServers })
+    const w = wireSubstrates(ctx)
+    await drain(w.liveAgentSubstrate!)
+    await drain(w.llmCallSubstrate!)
+    await drain(w.makeComposeSubstrate('project-x')!)
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/x'))
+    await drain(w.makeWarmFireSubstrate('/repo/y'))
+
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')!
+    expect(agent.resolveExtraMcpServers).toBe(resolveMcpServers)
+    const others = captured.filter((o) => o.substrate_instance_id !== 'cc-agent-owner')
+    expect(others.length).toBeGreaterThanOrEqual(4)
+    for (const o of others) expect(o.resolveExtraMcpServers).toBeUndefined()
+  })
+
   test('makeComposeSubstrate: per-project ISOLATED compose session — keyed by project_id, distinct pool key from cc-agent, TOOLLESS (#377/#378 white-box)', async () => {
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)

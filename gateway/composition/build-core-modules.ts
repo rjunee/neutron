@@ -279,7 +279,10 @@ export function buildCoreModules(
   const approvalModule: GatewayModule<ApprovalManager> = {
     name: 'approval',
     deps: ['tools'],
-    init: () => new ApprovalManager(input.db, input.approval_notifier),
+    // Reuse the boot shell's manager when it supplied one (the `channelsModule`
+    // precedent below), so the settings surface that approves an installed MCP server
+    // and the graph's tool approvals share ONE waiter map over `tool_approvals`.
+    init: () => input.approval_manager ?? new ApprovalManager(input.db, input.approval_notifier),
   }
 
   const channelsModule: GatewayModule<ChannelRouter> = {

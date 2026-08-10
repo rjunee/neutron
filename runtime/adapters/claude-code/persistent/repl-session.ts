@@ -146,6 +146,17 @@ export class ReplSession {
    *  authenticates via `claudeConfigDir`'s credentials.json and self-refreshes,
    *  so there is nothing to fingerprint and the guard is correctly inert. */
   authFingerprint = ''
+  /** Fingerprint of the OWNER-INSTALLED MCP servers this REPL was SPAWNED with
+   *  ({@link mcpSurfaceFingerprint}); `''` when none were wired. `claude` reads
+   *  `--mcp-config` once at startup, so a warm child cannot learn about a server the
+   *  owner installed, approved, revoked or re-keyed since — the reuse guard compares
+   *  this against the CURRENT dispatch's fingerprint and evicts + respawns (resuming
+   *  the transcript) on a change, which is what makes a Settings change take effect
+   *  on the next turn. Deterministic over equal configuration, so an unchanged set
+   *  reuses the warm child and the pool does not thrash. Derived from the servers'
+   *  env VALUES (so a rotated secret reaches the subprocess) and therefore never
+   *  logged or persisted, exactly like {@link authFingerprint}. */
+  mcpFingerprint = ''
   /** Per-session temp config files (`neutron-repl-*-mcp.json` + `*-settings.json`)
    *  this REPL was spawned with. Stashed so teardown can unlink them — an ephemeral
    *  one-shot spawns a fresh pair per call, so without cleanup they accumulate in

@@ -8508,3 +8508,30 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+## 2026-08-09 — Installable MCP servers
+
+Settings → MCP servers, on both clients. The owner adds a name, a command and
+`NAME=value` variables; the assistant can then call that server's tools. Before this the
+spawned session got exactly two MCP servers, both compiled in, and no surface existed to
+add a third — the published MCP ecosystem was unreachable from his own instance.
+
+Installing does not approve. The row lands pending, showing a server-rendered request
+that names the command, every argument and the variable NAMES (never a value), and a
+separate press permits it. The grant is an ordinary `tool_approvals` row bound to a hash
+of exactly those fields — the same mechanism the ritual grants use — so a program cannot
+widen what it runs after approval, while rotating a key does not re-ask.
+
+Values live in the AES credential store; only names reach `instance_metadata`, the wire,
+the prompt or a log. Two independent gates keep an installed subprocess in the owner's
+own session: the resolver is wired onto `cc-agent-*` alone, and the spawn also requires
+the tool-bridge opt-in, so the untrusted import and disposable Trident REPLs receive
+nothing even if handed the resolver.
+
+A config change reaches the next turn by joining the warm-pool freshness guards —
+`claude` reads `--mcp-config` once at startup, so the child is evicted and respawned with
+`--resume` when the installed set's fingerprint moves, and reused when it does not. Both
+failure modes there are silent and opposite (never takes effect / cold spawn per
+message); both are mutation-tested, along with each approval guard and each of the two
+separable links into the spawn.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.

@@ -849,7 +849,7 @@ CREATE TABLE instance_metadata (
   -- time; an unknown identifier throws and the cron tick / surface request
   -- fails closed (which is preferable to silently picking the wrong day).
   timezone TEXT
-, transcription_backend TEXT, trident_phase_models TEXT)
+, transcription_backend TEXT, trident_phase_models TEXT, mcp_servers TEXT)
 
 [table] instance_scope_ledger (tbl=instance_scope_ledger)
 CREATE TABLE instance_scope_ledger (

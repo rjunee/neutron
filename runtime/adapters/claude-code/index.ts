@@ -25,6 +25,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
+import type { ResolvedOwnerMcpServer } from '../../mcp-servers.ts'
 import type { Substrate } from '../../substrate.ts'
 import {
   createPersistentReplSubstrate,
@@ -177,6 +178,15 @@ export interface ClaudeCodeSubstrateOptions {
    */
   enableToolBridge?: boolean
   /**
+   * OWNER-INSTALLED MCP servers, resolved PER DISPATCH — see
+   * `PersistentReplSubstrateOptions.resolveExtraMcpServers` for the contract and the
+   * two security gates. Wired ONLY onto the owner's warm conversational substrate;
+   * `spawn.ts` additionally requires `enableToolBridge`, so the untrusted import and
+   * disposable Trident REPLs receive nothing even if handed the thunk. Absent ⇒ the
+   * spawned session's `mcpServers` is exactly the two compiled-in entries.
+   */
+  resolveExtraMcpServers?: () => Promise<ReadonlyArray<ResolvedOwnerMcpServer>>
+  /**
    * Executor-mode reminders (plan task 4/5) — override the spawned REPL's
    * `--append-system-prompt-file`, forwarded verbatim onto
    * `PersistentReplSubstrateOptions.appendSystemPromptFile`
@@ -282,6 +292,13 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   }
   // P0-1 — native-MCP tool bridge opt-in (owner's warm conversational REPL only).
   if (options.enableToolBridge !== undefined) p.enableToolBridge = options.enableToolBridge
+  // Owner-installed MCP servers — forward the per-dispatch resolver. Dropping it
+  // here (the DEFAULT anthropic factory) would leave the owner's installed servers
+  // out of every real spawn while every unit test on the substrate still passed:
+  // the exact built-but-never-wired shape this repo keeps hitting.
+  if (options.resolveExtraMcpServers !== undefined) {
+    p.resolveExtraMcpServers = options.resolveExtraMcpServers
+  }
   // Executor-mode reminders (task 4/5) — forward the non-default agent-base prompt
   // so a scheduled ritual REPL spawns as the UNATTENDED executor persona rather
   // than the chat agent. Dropping it here (the DEFAULT factory) is exactly what

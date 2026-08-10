@@ -21,6 +21,7 @@ import type {
   ClaudeCodeSubstrateOptions,
   RecoveredReply,
 } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
 import type { Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -113,6 +114,24 @@ export interface OpenWiringContext {
    * to the substrate's stderr fallback.
    */
   liveAgentRecoveredReplySink?: (reply: RecoveredReply) => void
+  /**
+   * The owner's APPROVED installed MCP servers, resolved per dispatch.
+   *
+   * Wired ONLY onto the owner's warm conversational substrate (`cc-agent-*`) — the
+   * same one substrate that gets `enableToolBridge`, and for the same reason: an
+   * owner-installed server is a subprocess, which is a strictly larger capability
+   * than a built-in tool, so the untrusted history-import (`cc-import-*`), the
+   * per-project compose (`cc-compose-*`) and the disposable Trident
+   * (`cc-trident-*` / `cc-trident-fire-*`) substrates must never receive it.
+   * `spawn.ts` enforces the tool-bridge condition independently, so both gates must
+   * fail before an untrusted REPL could see one.
+   *
+   * A THUNK because the store is read live: a server installed (or approved, or
+   * uninstalled) over the running server has to reach the next turn without a
+   * restart. Absent ⇒ the spawned session's `mcpServers` is byte-identical to what it
+   * was before this feature existed.
+   */
+  resolveMcpServers?: () => Promise<ReadonlyArray<ResolvedOwnerMcpServer>>
   /**
    * O6 / #106 — the owner reconnect channel (`app:<owner>`) recorded on a dropped-
    * turn entry so the substrate's replay path can route a recovered reply to the

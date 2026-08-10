@@ -471,6 +471,18 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_trident_phase_models_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0e5. Installable MCP servers — `/api/app/mcp-servers[/decision]`. The owner adds,
+  //      lists, removes and APPROVES the MCP servers his assistant may start. Sits
+  //      beside the two settings surfaces above because it is the same shape of thing:
+  //      machine-scoped, owner-gated, no project segment.
+  slot({
+    key: 'appMcpServers',
+    rung: 'app-mcp-servers',
+    composition: 'app_mcp_servers_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_mcp_servers_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0f. Project launcher — P5.3. `/api/app/projects/<id>/launcher[*]`.
   slot({
     key: 'appLauncher',

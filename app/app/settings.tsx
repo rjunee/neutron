@@ -409,6 +409,28 @@ export default function SettingsScreen() {
           <Text style={styles.navRowChevron}>›</Text>
         </Pressable>
 
+        {/* Sits directly under Code generation and Model usage because it is the third
+            machine-scoped agent setting, and above Integrations because it is a
+            heavier decision: an MCP server is a PROGRAM this box will run, not a key
+            it will send. A registered route nothing pushes is the ISSUES #385 defect,
+            so this row is part of the feature —
+            `__tests__/mcp-servers-reachable.test.tsx` guards it. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="MCP servers"
+          testID="settings-mcp-servers"
+          onPress={() => router.push('/mcp-servers')}
+          style={({ pressed }) => [styles.navRow, pressed && styles.pressed]}
+        >
+          <View style={styles.navRowText}>
+            <Text style={styles.navRowTitle}>MCP servers</Text>
+            <Text style={styles.navRowSubtitle}>
+              Extra tools your assistant can use. You approve each one.
+            </Text>
+          </View>
+          <Text style={styles.navRowChevron}>›</Text>
+        </Pressable>
+
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Integrations"
