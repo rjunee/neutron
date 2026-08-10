@@ -123,6 +123,17 @@ target with no retry. `chatDeepLinkScrollIndex` returns an index or `null` rathe
 than an anchor union, which removed an unreachable `scrollToEnd` arm — once the target
 resolves, `chatDeepLinkAnchor` cannot return `bottom`.
 
+**An idempotent re-emit does not buzz twice.** `(topic_id, idempotency_key)` is
+unique on `button_prompts`, so a re-emit — a reconnect re-render, a retried
+ritual-approval prompt — collapses onto the existing row and returns
+`was_new: false`. `deliver` suppresses the notification in that case, and follows the
+exception the ButtonStore contract already spells out: `was_new: false` **with**
+`was_delivered: false` means the row landed in the DB but never reached the owner, so
+it still notifies, for the same reason the channel adapters still re-render it.
+Suppressing on `was_new` alone would have silenced a prompt he has never seen,
+permanently. Only the notification is affected — `persisted` and `prompt_id` are
+unchanged, so no producer's control flow moves.
+
 **Transport.** The Expo POST now carries `AbortSignal.timeout(EXPO_PUSH_TIMEOUT_MS)`.
 A bare `fetch` has no deadline, and this call is now awaited inside a durable
 delivery, so a stalled connection to `exp.host` would park a reminder fire — and the
@@ -132,8 +143,9 @@ tick that claimed its row — for as long as the socket stayed open.
 
 - `gateway/http/__tests__/deliver.test.ts` — a `'reply'` post notifies, an `'inert'`
   post notifies, a `'none'` pill does not, a failed persist does not, the topic's
-  scope is derived, and a THROWING notify cannot cost `persisted` (which is what the
-  tick reads to decide whether to fire the row again).
+  scope is derived, an idempotent re-emit does not buzz twice while one the owner
+  never saw still does, and a THROWING notify cannot cost `persisted` (which is what
+  the tick reads to decide whether to fire the row again).
 - `gateway/push/__tests__/ritual-post-notifies-as-a-chat-message.test.ts` — the whole
   chain, from a ritual `reminders` row through the REAL planner, dispatcher, outbound,
   deliver and sink, to the bytes Expo is handed. The approved arm requires a composed
@@ -163,6 +175,7 @@ tick that claimed its row — for as long as the socket stayed open.
 Mutation-tested by deliberately breaking each guard and confirming a red: deleting
 the `notifyDevices` call from `deliver` (3 of 4 arms of the ritual suite red), posting
 `ritual:${reminder_id}` instead of the composed body (2 red, including the token
-assertion), and omitting `project_id` for General (the tap-payload arm red). The
-act-wrapping change is the exception and is not claimed as mutation-tested: it removes
-nondeterminism rather than a failure, so reverting it does not flip a result.
+assertion), omitting `project_id` for General (the tap-payload arm red), and dropping
+the `alreadySeen` guard (the duplicate-buzz test red). The act-wrapping change is the
+exception and is not claimed as mutation-tested: it removes nondeterminism rather than
+a failure, so reverting it does not flip a result.

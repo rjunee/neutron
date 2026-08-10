@@ -3820,7 +3820,12 @@ no such message; with zero registered tokens the transport returns before issuin
 any HTTP request, which is the state of every fresh install; a ticket Expo marks
 `DeviceNotRegistered` DELETES that token row, so a dead device is retried once
 rather than on every send forever (other ticket errors — rate limits, credential
-problems — never prune); and a notification failure is swallowed inside `deliver`,
+problems — never prune); an idempotent re-emit (`was_new: false` with
+`was_delivered: true`) is NOT re-notified, so a reconnect re-render or a retried
+approval prompt cannot buzz the owner about a message already in his chat — with the
+ButtonStore contract's exception honoured, since a row he never saw
+(`was_delivered: false`) still needs the notification; and a notification failure is
+swallowed inside `deliver`,
 because an escaping throw would be read by the reminder tick as "the post did not
 happen" and would re-post the same message next tick. The Expo POST also carries an
 `AbortSignal.timeout`, since it is now awaited inside a durable delivery and a
