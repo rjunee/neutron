@@ -493,6 +493,66 @@ describe('deliver notifies the owner devices for a durable post', () => {
     expect(r.prompt_id).toBe('reply-1')
   })
 
+  it('an IDEMPOTENT RE-EMIT of a message he already has does not buzz again', async () => {
+    // `(topic_id, idempotency_key)` is unique, so a re-emit — a reconnect
+    // re-render, a retried approval prompt — collapses onto the existing row.
+    // Notifying again would buzz him about a message already in his chat.
+    const sent: string[] = []
+    const store = {
+      async emit() {
+        return { prompt_id: 'reply-1', was_new: false, was_delivered: true }
+      },
+      async persistInertAgentTurn() {
+        return { prompt_id: 'inert-1' }
+      },
+    } as unknown as ButtonStore
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: async (n) => {
+        sent.push(n.message_id)
+      },
+    })
+    const r = await deliver('app:owner', {
+      body: 'approve the kaizen ritual?',
+      durability: 'reply',
+      idempotency_key: 'ritual-approval-kaizen',
+    })
+    // The DELIVERY still succeeded — only the notification is suppressed.
+    expect(r.persisted).toBe(true)
+    expect(r.prompt_id).toBe('reply-1')
+    expect(sent).toEqual([])
+  })
+
+  it('a re-emit he NEVER SAW still buzzes — the ButtonStore contract exception', async () => {
+    // `was_new: false` with `was_delivered: false` means the row landed in the DB
+    // but never reached him (a transient send failure on the prior call). The
+    // channel adapters re-render in that case; the notification must fire for the
+    // same reason, or a prompt he has never seen stays silent forever.
+    const sent: string[] = []
+    const store = {
+      async emit() {
+        return { prompt_id: 'reply-1', was_new: false, was_delivered: false }
+      },
+      async persistInertAgentTurn() {
+        return { prompt_id: 'inert-1' }
+      },
+    } as unknown as ButtonStore
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: async (n) => {
+        sent.push(n.message_id)
+      },
+    })
+    await deliver('app:owner', {
+      body: 'approve the kaizen ritual?',
+      durability: 'reply',
+      idempotency_key: 'ritual-approval-kaizen',
+    })
+    expect(sent).toEqual(['reply-1'])
+  })
+
   it('no notify wired → delivery behaves exactly as it did before push existed', async () => {
     const { store, trace } = fakeButtonStore()
     const deliver = createDeliver({ buttonStore: store, push: {} })

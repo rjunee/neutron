@@ -230,6 +230,8 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
 
     // DURABLE-ROW-FIRST — persist BEFORE the best-effort live push.
     let prompt_id: string
+    /** True when this post collapsed onto a row the owner has already been shown. */
+    let alreadySeen = false
     try {
       if (durability === 'reply') {
         const prompt = buildButtonPrompt({
@@ -245,6 +247,14 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
         })
         const emitted = await buttonStore.emit(prompt, { topic_id })
         prompt_id = emitted.prompt_id
+        // AN IDEMPOTENT RE-EMIT MUST NOT BUZZ TWICE. `(topic_id,
+        // idempotency_key)` is unique, so a re-emit collapses onto the existing
+        // row and returns `was_new: false` — the owner already has this message.
+        // `was_delivered` is the exception the ButtonStore contract spells out:
+        // both false means the row landed in the DB but never reached him, so it
+        // still needs rendering AND still needs the notification. Same rule the
+        // channel adapters apply to the re-render, applied to the push.
+        alreadySeen = !emitted.was_new && emitted.was_delivered
       } else {
         const persisted = await buttonStore.persistInertAgentTurn({ topic_id, body })
         prompt_id = persisted.prompt_id
@@ -274,8 +284,10 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
     // AFTER the live push, and UNCONDITIONALLY on its result. A live socket is not
     // evidence the owner is looking: Android keeps the app-ws socket open while the
     // app sits in the background, so gating the notification on `delivered_live`
-    // would silence exactly the case a notification exists for.
-    await notifyDevices(topic_id, prompt_id, body)
+    // would silence exactly the case a notification exists for. `alreadySeen` is a
+    // different question and the only thing that suppresses it: an idempotent
+    // re-emit of a message he already has.
+    if (!alreadySeen) await notifyDevices(topic_id, prompt_id, body)
     return { prompt_id, persisted: true, delivered_live: delivered }
   }
 }
