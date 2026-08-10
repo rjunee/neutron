@@ -233,6 +233,7 @@ function RootLayoutContent() {
           <Stack.Screen name="admin" />
           <Stack.Screen name="codegen" />
           <Stack.Screen name="usage" />
+          <Stack.Screen name="mcp-servers" />
         </Stack>
       </AuthSessionProvider>
     </DiagnosticsErrorBoundary>
