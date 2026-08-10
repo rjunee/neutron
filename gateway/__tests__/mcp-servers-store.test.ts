@@ -735,6 +735,14 @@ describe('a decision and an uninstall cannot interleave', () => {
       release = resolve
     })
     let parkedOnce = false
+    // ARMED EXPLICITLY, not by call ORDER. Parking the FIRST `openApproval` was a claim
+    // about which caller happens to reach it first, and that changed the moment
+    // `requestApproval` started awaiting its own mint instead of firing and forgetting
+    // it: `install`'s prompt became the first call, and the setup deadlocked on a park
+    // meant for the approve. A test whose target is "the first one" silently retargets
+    // when the code around it changes — so the park is armed at the exact line the
+    // interleave begins.
+    let armed = false
 
     // A PROXY, not a hand-listed set of delegating methods. The first draft of this
     // enumerated the four calls `decide` makes and broke on `remove`'s
@@ -749,7 +757,7 @@ describe('a decision and an uninstall cannot interleave', () => {
           return typeof value === 'function' ? value.bind(target) : value
         }
         return async (...args: unknown[]): Promise<unknown> => {
-          if (!parkedOnce) {
+          if (armed && !parkedOnce) {
             parkedOnce = true
             await parked
           }
@@ -779,6 +787,9 @@ describe('a decision and an uninstall cannot interleave', () => {
     // uninstall's sweep has already run and found nothing to cancel.
     expect((await racy.decide('example-server', 'deny', hash)).ok).toBe(true)
 
+    // From here on, the next `openApproval` — the fresh grant this approve has to mint,
+    // there being no pending row left to resolve — is the one that parks.
+    armed = true
     const approving = racy.decide('example-server', 'approve', hash)
     // Let `decide` reach the park before the uninstall is issued.
     await new Promise((r) => setTimeout(r, 0))
@@ -886,5 +897,79 @@ describe('a revocation retires what is already running', () => {
     // Every other test in this file constructs one, so the optionality is load-bearing.
     await store.install(DRAFT)
     expect((await store.remove('example-server')).removed).toBe(true)
+  })
+})
+
+describe('THE REPLY DESCRIBES THE GRANT IT JUST MINTED', () => {
+  /**
+   * `requestApproval` used to `fireAndForget(manager.requestApproval(...))` and then let
+   * its caller finish with `await this.list()`. The INSERT goes through the db mutex;
+   * `findByToolName` is a SYNCHRONOUS `prepare().all()` that does not. So the row was
+   * present in the reply only when the mutex happened to be idle, and it is not always
+   * idle: `install` reported the server it had just made a prompt for as `unapproved`.
+   *
+   * Fail-closed (nothing was wired) and the Approve control still rendered — but the
+   * label read "Not approved — review the request below" for a server that had in fact
+   * just asked, and the Deny button, which renders only for `pending`, was absent. The
+   * fix is `await manager.openApproval(...)`: the same insert, minus the
+   * wait-for-the-owner half nothing here ever consumed.
+   *
+   * FORCING IT DETERMINISTICALLY. Contention alone is not enough — `install`'s own two
+   * writes queue on the same mutex, so by the time it reaches the mint the mutex is
+   * idle again. The window is the ONE yield inside the critical section that happens
+   * after those writes and before the INSERT: the `await manager.cancelPending(...)`
+   * an EDIT takes to retire the prompt for the previous spec. A foreign writer taking
+   * the mutex at that instant puts the INSERT behind itself. The proxy below is that
+   * foreign writer, arriving at exactly that moment.
+   */
+  test('an EDIT answers with the fresh prompt even when a foreign writer holds the db mutex', async () => {
+    let hog: Promise<void> | undefined
+    const hogTheMutex = (): Promise<void> =>
+      db.transaction(async (tx) => {
+        for (let i = 0; i < 200; i += 1) {
+          await tx.run(
+            `INSERT INTO system_events (id, ts, module, event_name) VALUES (?, ?, ?, ?)`,
+            [`mutex-hog-${String(i)}`, Date.now(), 'test', 'hog'],
+          )
+        }
+      })
+
+    // A PROXY, matching the interleave harness above: everything delegates, and exactly
+    // one call is instrumented — here to start an unrelated write the moment the
+    // cancel's mutex slot is released.
+    const gated = new Proxy(approvals, {
+      get(target, prop, receiver) {
+        if (prop !== 'cancelPending') {
+          const value = Reflect.get(target, prop, receiver)
+          return typeof value === 'function' ? value.bind(target) : value
+        }
+        return async (id: string): Promise<boolean> => {
+          const out = await target.cancelPending(id)
+          hog = hogTheMutex()
+          return out
+        }
+      },
+    })
+    const racy = new OwnerMcpServerStore({
+      db,
+      project_slug: SLUG,
+      credentials: new ProjectCredentialStore(db, {
+        crypto: new SecretsStore({ data_dir: tmp, db }),
+      }),
+      owner_slug: asOwnerHandle(SLUG),
+      approvals: () => gated,
+    })
+
+    await racy.install(DRAFT)
+    // The EDIT: a different command, so the pending row for the old spec is cancelled
+    // and a fresh grant is minted — the path that yields mid-section.
+    const edited = await racy.install({ ...DRAFT, command: '/usr/local/bin/example-mcp-v2' })
+    expect(edited.ok).toBe(true)
+    // THE ASSERTION THE BUG FAILS: the reply that carries the new `grant_prompt` must
+    // also say the owner is being asked. `unapproved` here hid the Deny button and told
+    // him nothing was pending when something was.
+    expect(edited.servers[0]!.approval).toBe('pending')
+    expect(edited.servers[0]!.command).toBe('/usr/local/bin/example-mcp-v2')
+    await hog
   })
 })

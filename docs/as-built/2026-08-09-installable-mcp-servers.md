@@ -603,3 +603,79 @@ evidence about the code. The run that produced the real answer was the one whose
 anchor was asserted first. This is the same shape as the CLAUDE.md rule about a tool that
 cannot read the format returning a negative that looks like an answer — here the tool was
 my own edit script.
+
+---
+
+## What review round 4 changed
+
+Three lanes this round (adversarial on Opus, rubric on codex, and codex) — the Kimi lane
+was deliberately off, so the verdict is a THREE-lane one and is not the four-lane agreement
+earlier rounds recorded.
+
+Both round-3 fixes were re-verified against the tip rather than against the round-3
+summary, and both hold under mutation:
+
+- **`decide()` on the write chain.** Reverting `decide` to call `decideLocked` directly
+  fails the interleave test with `Expected: "pending" / Received: "approved"` — the
+  orphaned-approval hole, exactly as claimed.
+- **Revocation retires the warm child.** Two independent mutants kill the idle-eviction
+  test: dropping `terminateChild` leaves `kills.n` at 0, and treating every session as busy
+  reports `poisoned: 1` instead of `evicted: 1`. The round-3 note calling this path
+  uncoverable had already been retracted in this document; `docs/AS_BUILT.md` was still
+  carrying the retracted version and has been corrected.
+
+### THE ONE DEFECT FOUND — an install's reply could describe the wrong state
+
+`requestApproval` fired and forgot `ApprovalManager.requestApproval`, whose promise
+resolves only when the owner answers. Its callers then finish with `await this.list()`, and
+the read side (`findByToolName`) is a SYNCHRONOUS `prepare().all()` that bypasses the db
+mutex the INSERT goes through — so the pending row was present in the reply only when the
+mutex happened to be idle.
+
+Contention alone does not expose it: `install`'s own two writes queue on the same mutex, so
+by the time it reaches the mint the mutex is idle again. The window is the ONE yield inside
+the critical section that falls after those writes and before the INSERT — the
+`await manager.cancelPending(...)` an EDIT takes to retire the previous spec's prompt. A
+foreign writer taking the mutex at that instant put the INSERT behind itself, and
+`install()` answered with the server it had just made a prompt for as `unapproved`.
+
+Fail-closed (nothing was wired) and still approvable — the Approve control renders for
+every non-`approved` state and `decide` mints a fresh grant when no pending row exists —
+but the label read "Not approved — review the request below" for a server that had in fact
+just asked, and the Deny button, which renders only for `pending`, was absent.
+
+The fix is `await manager.openApproval(...)`: the same insert, minus the
+wait-for-the-owner half. `openApproval`'s own docblock names this use, `decide` already
+made the same call, and nothing in this store ever consumed the discarded waiter promise —
+it reads the durable row, and the settings surface is the delivery channel — so this
+removes a never-resolving promise rather than a behaviour.
+
+📌 **A test that targets "the first call" is making a claim about call ORDER, and it
+retargets silently when the order changes.** The round-3 interleave test parked the FIRST
+`openApproval`, which was the approve's fresh grant only because `install` was not calling
+`openApproval` at all. The moment `requestApproval` started awaiting its own mint, `install`
+became the first caller and the setup deadlocked on a park meant for something else — a
+15 s timeout in a test whose subject was untouched. The park is now ARMED at the line the
+interleave begins, so what it intercepts is stated rather than inferred.
+
+### Checked and left alone
+
+- **A stale `deny` arriving after another client approved the same hash.** Not a hole:
+  `decideLocked` revokes every approved grant BEFORE it records the denial and re-reads the
+  rows afterwards, so the server is unwired and the reply is honest.
+- **`decided_by`.** The HTTP surface passes the bearer it already resolved; the slug
+  survives only as the fallback for a caller with no authenticated actor, of which this
+  build's wiring has none.
+- **The aggregate MCP startup budget.** `ownerMcpStartupTimeoutMs` divides a 20 s share of
+  the 30 s ready budget across the servers actually wired, with a 2 s floor — and the
+  docblock states plainly that past ~10 servers the floor wins and a serial worst case can
+  still exceed the budget, which is a bound this knob cannot supply.
+- **The invisibles denylist.** Now takes C1 and U+2060–206F as whole ranges plus the TAG
+  block. What remains open is the CONFUSABLES class — an NBSP renders like a space, a
+  Cyrillic `а` like an `a` — which no denylist closes and which the docblock already
+  declines to close with an ASCII allowlist, because paths legitimately carry non-ASCII.
+  Worth naming; not a regression, and not something this round should invent a fix for.
+- **A slow test, not a failing one.** `A FAILED SPAWN STRANDS NOTHING` needs ~5.5 s, so a
+  bare `bun test` (5 s default) reports it as a timeout while CI's `--timeout=15000` passes
+  it. Verified green at the CI timeout; noted because the local-vs-CI gap reads as a real
+  failure to anyone running the file directly.

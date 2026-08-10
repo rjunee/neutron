@@ -8630,9 +8630,38 @@ immediately and poisons a busy one for a clean respawn at the next boundary; the
 announces revocations through a new `onRevoked` dep (a callback, not an import, so no
 persistence→runtime-adapter edge); `open/composer.ts` wires the two.
 
-The store side is mutation-verified (three mutants, three distinct failures). The
-idle-termination path is NOT covered: the fake-pty session leaves a rejected pooled
-promise after `drain`, so the eviction loop skips it — a property of the harness that
-`shutdownAllPersistentRepls` shares. Recorded rather than implied covered.
+The store side is mutation-verified (three mutants, three distinct failures).
+
+**CORRECTION, same day.** This entry first recorded the idle-termination path as
+uncoverable, on the stated ground that a drained fake-pty session leaves a REJECTED pooled
+promise the eviction loop skips. That diagnosis was wrong: the pooled promise resolves
+fine, and the `evicted: 0, poisoned: 1` reading came from `session.activeTurn` still being
+set on the tick `drain` returns — the function answering correctly about a session that is,
+for one more tick, mid-turn. Letting the queue settle first makes the idle path directly
+observable, and it IS now covered: `TERMINATES a warm IDLE child` counts real
+`PtyChild.kill()` calls, and two mutants kill it (drop `terminateChild` → `kills.n` 0;
+always-busy → `poisoned: 1`). An impossibility claim about one's own harness is an absence
+claim, and absence claims are the ones that escape verification.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.
+
+## 2026-08-10 — an MCP install's reply now describes the grant it just minted
+
+`OwnerMcpServerStore.requestApproval` fired and forgot `ApprovalManager.requestApproval`
+(whose promise resolves only when the owner answers), then its callers finished with
+`await this.list()`. The INSERT goes through the db mutex; `findByToolName` is a
+synchronous `prepare().all()` that does not — so the pending row was in the reply only when
+the mutex happened to be idle. Reproduced: an EDIT takes the `await cancelPending(...)`
+branch, which yields after the method's own writes and before the INSERT, and a foreign
+writer taking the mutex there put the INSERT behind itself. `install()` answered with the
+server it had just made a prompt for as `unapproved` — fail-closed and still approvable,
+but the label read "Not approved" and the Deny button (rendered only for `pending`) was
+missing.
+
+Now `await manager.openApproval(...)` — the same insert minus the wait-for-the-owner half,
+which nothing here ever consumed. Regression test kills the fire-and-forget mutant with
+`Expected: "pending" / Received: "unapproved"`. The interleave test's park is now ARMED at
+the line the interleave begins rather than targeting the FIRST `openApproval`: that
+ordering claim silently retargeted onto `install`'s own mint and deadlocked the setup.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.
