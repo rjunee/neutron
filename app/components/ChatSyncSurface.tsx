@@ -614,11 +614,17 @@ export function ChatSyncSurface({
     const index = chatDeepLinkScrollIndex(rows, selfDeviceId, deepLinkTarget);
     if (index === null) return;
     const scrollToIndex = listRef.current?.scrollToIndex;
-    // LATCH ONLY AFTER A SCROLL CAN ACTUALLY HAPPEN. Latching first burned the
-    // target when the ref was not attached yet (a real ordering on a cold mount):
-    // the effect returned having moved nothing, and the `honouredDeepLink` check
-    // then swallowed every retry, so the tap silently did nothing. Leaving the
-    // latch unset means the next `rows` commit tries again with an attached ref.
+    // LATCH ONLY AFTER A SCROLL CAN ACTUALLY HAPPEN, and ORDER MATTERS HERE.
+    // Latching before the call meant an unresolved ref spent the target: the effect
+    // returned having moved nothing, and the `honouredDeepLink` check then swallowed
+    // every retry, so the tap silently did nothing for the rest of the session.
+    // Leaving the latch unset lets the next `rows` commit try again.
+    //
+    // HONEST STATUS: this is a latent ordering, not an observed failure — the ref is
+    // attached by the time this effect runs in every case reproduced so far, and the
+    // review that raised it could not prove reachability either. It is fixed because
+    // the correct order costs one line and the failure mode is silent, which is the
+    // worst kind to leave to chance in the #505/#511 blast radius.
     if (typeof scrollToIndex !== 'function') return;
     honouredDeepLink.current = deepLinkTarget;
     scrollToIndex.call(listRef.current, { index, animated: true });
