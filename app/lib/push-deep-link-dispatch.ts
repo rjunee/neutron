@@ -47,7 +47,22 @@
  *     at all (only `project_slug`, the owner slug), so this branch used to return
  *     null for every General reminder notification ever sent — the owner's *"it
  *     opens the app but not the right project"*, in the code. It now falls back to
- *     General, whose tab lists every reminder, so a legacy tap lands somewhere true.
+ *     General, so a legacy tap lands on a real, working surface instead of nowhere.
+ *
+ *     AND THAT IS THE WHOLE OF THE CLAIM — the tapped row itself may well not be in
+ *     the list. General's Reminders tab is not an "everything" view: the surface
+ *     lists `listPendingByTopic(project_slug, 'app-project:<general>')`
+ *     (`gateway/http/app-reminders-surface.ts:212`) and the `include_id` widening
+ *     that exists for exactly this deep-link case re-checks
+ *     `extra.topic_id === topic_id` before admitting a row (:247). A legacy General
+ *     reminder was written by an engine path with `topic_id` NULL, so it matches
+ *     neither test and cannot be highlighted. The tap lands on the right TAB, not on
+ *     the row. That is still strictly better than the `null` it used to return (the
+ *     app opened and nothing routed at all), and it is not worth chasing further: no
+ *     sender has emitted this kind since 2026-08-09, so the population is finite and
+ *     shrinking. Stated plainly because the earlier wording here claimed the tab
+ *     "lists every reminder", which is the kind of confident, specific, WRONG
+ *     docblock that gets believed instead of checked.
  *
  *   - `{kind: 'wow_fired', project_id}` → `/projects/<pid>/chat` (no sender today)
  *   - `{kind: 'calendar_pre_meeting_brief', project_id, event_id}` → `/projects/<pid>/chat`
