@@ -1013,17 +1013,78 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
  * because of the 632-orphan / ~19 GB incident, and what replaces it is the guarantee
  * that a surviving pane is always reachable from a row the next boot reads.
  */
+/**
+ * The owner changed WHICH MCP SERVERS MAY RUN — retire the warm children that were
+ * spawned under the old answer, now rather than eventually.
+ *
+ * `getOrSpawnSession`'s `freshMcpServers` guard already evicts a stale child, but it
+ * only runs ON A DISPATCH. A warm REPL can sit idle for hours, so revoking a server
+ * left its stdio subprocess alive that whole time — still holding the copied
+ * environment it was handed, which for a server configured with a secret means that
+ * secret stays resident in a process the owner has just said must not run. The durable
+ * grant is revoked immediately and correctly; it is the PROCESS that lingered.
+ *
+ * IDLE CHILDREN DIE NOW; A BUSY ONE IS POISONED INSTEAD. Killing a child mid-turn
+ * would strand the turn and desync the dev-channel correlation — the cascade the
+ * abandon-poison guard exists for. So a session with an active turn is marked
+ * `poisoned`, which `getOrSpawnSession` already treats like a failed freshness guard:
+ * it evicts and respawns at the next dispatch boundary, resuming the transcript. The
+ * in-flight turn is not made safer by killing it either — it is running under a grant
+ * that WAS in force when it started.
+ *
+ * Instance-wide on purpose. Installed servers are instance-wide (one set serves every
+ * project on this box), so a revocation invalidates every warm child, not one key's.
+ * Returns the counts so the caller can log what it retired; never throws — an eviction
+ * failure must not turn into a failed revocation.
+ */
+export async function evictWarmReplsForMcpSurfaceChange(): Promise<{
+  evicted: number
+  poisoned: number
+}> {
+  let evicted = 0
+  let poisoned = 0
+  for (const [key, p] of [...pool.entries()]) {
+    let session: ReplSession
+    try {
+      session = await p
+    } catch {
+      // A spawn that rejected is not a child anyone has to retire; its own
+      // `spawning.catch` already removes it from the pool.
+      continue
+    }
+    // BUSY IS `session.activeTurn`, NOT AN `activeTurnRoutes` LOOKUP. Both are cleared
+    // on the same completion path, one line apart, but the route delete is guarded on a
+    // RECOMPUTED key (`activeTurnRoutes.get(activeTurnRouteKey(options))?.turn === turn`)
+    // while the session field is plain identity. A key that does not recompute to the
+    // one used at insert leaves a route entry behind for a session that is idle — and
+    // reading that as "busy" would have made this function poison every child and
+    // evict none, i.e. do nothing beyond the freshness guard it exists to pre-empt.
+    // The first draft did read the routes, and the test caught it: `evicted=0,
+    // poisoned=1` on a session whose turn had already drained.
+    if (session.activeTurn !== undefined) {
+      session.poisoned = true
+      poisoned += 1
+      continue
+    }
+    pool.delete(key)
+    if (childByKey.get(key) === session.child) childByKey.delete(key)
+    try {
+      session.sizeWatchdog?.stop()
+      if (!session.hasChildExited()) await terminateChild(session.child)
+      sink.unregister(session.sessionId)
+      unlinkSessionConfigs(session)
+    } catch {
+      // ignore — best effort, and the entry is already out of the pool
+    }
+    evicted += 1
+  }
+  return { evicted, poisoned }
+}
+
 export async function shutdownAllPersistentRepls(
   opts: {
-    /** Test seam for {@link SHUTDOWN_PENDING_SPAWN_GRACE_MS}. Production takes the
-     *  default; a case that pins the traversal passes a small one so it does not spend
-     *  the real budget proving a spawn never settles. */
     pendingSpawnGraceMs?: number
-    /** Test seam for {@link SHUTDOWN_ADOPTION_GRACE_MS}, same argument. */
     adoptionGraceMs?: number
-    /** Fires once the adoption settle has latched and snapshotted, before it waits — the
-     *  seam a concurrency case needs to act inside that window rather than pace it with a
-     *  sleep. Production passes nothing. */
     onAdoptionSnapshot?: () => void
   } = {},
 ): Promise<void> {
