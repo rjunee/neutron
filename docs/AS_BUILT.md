@@ -8619,3 +8619,20 @@ that sweep. Retargeted, it fails the mutant with `Expected: "pending" / Received
 "approved"`.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.
+
+## 2026-08-10 — revoking an MCP server retires the warm child, not just the grant
+
+`claude` reads `mcpServers` once at startup and the spawn path's freshness guard only
+retires a stale child on its next dispatch, so a revoked server's stdio subprocess kept
+running — with the environment and any secret it was handed — for as long as the session
+stayed idle. `evictWarmReplsForMcpSurfaceChange()` (runtime pool) terminates idle children
+immediately and poisons a busy one for a clean respawn at the next boundary; the MCP store
+announces revocations through a new `onRevoked` dep (a callback, not an import, so no
+persistence→runtime-adapter edge); `open/composer.ts` wires the two.
+
+The store side is mutation-verified (three mutants, three distinct failures). The
+idle-termination path is NOT covered: the fake-pty session leaves a rejected pooled
+promise after `drain`, so the eviction loop skips it — a property of the harness that
+`shutdownAllPersistentRepls` shares. Recorded rather than implied covered.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.

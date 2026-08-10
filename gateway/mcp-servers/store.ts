@@ -161,6 +161,26 @@ export interface OwnerMcpServerStoreDeps {
    * approved, and therefore nothing can be wired.
    */
   approvals: () => ApprovalManager | null
+
+  /**
+   * Called after a revocation has landed, so whatever is already RUNNING under the old
+   * answer can be retired.
+   *
+   * Revoking the grant is immediate and correct, but a warm REPL was spawned with the
+   * old `mcpServers` config and `claude` reads that once at startup. The spawn path's
+   * freshness guard evicts a stale child — on its NEXT DISPATCH, which for an idle
+   * session may be hours away. Until then the revoked server's stdio subprocess is
+   * still alive, still holding the environment it was handed, including any secret the
+   * owner configured for it.
+   *
+   * A CALLBACK RATHER THAN AN IMPORT. This store must not reach into the REPL pool: it
+   * is a persistence-layer object and the pool is a runtime adapter, and the layering
+   * gate is right to refuse that edge. The composer owns both and wires them.
+   *
+   * Optional, and its failure is swallowed at the call site — an eviction that cannot
+   * happen must never turn a successful revocation into a failed one.
+   */
+  onRevoked?: () => Promise<void>
 }
 
 /** The outcome of an install/edit attempt. */
@@ -323,6 +343,24 @@ export class OwnerMcpServerStore {
    * target and completes. The only cost is that an interrupted uninstall shows him a
    * server that has lost its approval — the fail-closed direction.
    */
+  /**
+   * Retire anything already running under the answer we just changed.
+   *
+   * Swallows its own failure by design: the revocation has ALREADY landed durably, and
+   * turning a completed revoke into a reported failure would invite the owner to press
+   * again on state that is already correct. See {@link OwnerMcpServerStoreDeps.onRevoked}.
+   */
+  private async announceRevocation(): Promise<void> {
+    if (this.deps.onRevoked === undefined) return
+    try {
+      await this.deps.onRevoked()
+    } catch (err) {
+      log.warn('mcp_revocation_evict_failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
   async remove(name: unknown): Promise<{ removed: boolean; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
     return await this.serialize(async () => {
@@ -343,6 +381,9 @@ export class OwnerMcpServerStore {
         this.deps.project_slug,
         existing.filter((s) => s.name !== wanted),
       )
+      // AFTER the spec write, so a child respawned by the eviction reads the list
+      // WITHOUT this server rather than racing the delete and re-wiring it.
+      await this.announceRevocation()
       return { removed: true, servers: await this.list() }
     })
   }
@@ -460,6 +501,8 @@ export class OwnerMcpServerStore {
     // saying he once approved that command.
     if (decision === 'deny') {
       await manager.revokeApproved(this.deps.project_slug, tool_name)
+      // A deny is a STOP, and a stop that leaves the subprocess running is not one.
+      await this.announceRevocation()
     }
     // READ AFTER THE REVOKE: the idempotency checks below must see post-revoke state,
     // or a deny arriving twice would short-circuit on its own first `denied` row while

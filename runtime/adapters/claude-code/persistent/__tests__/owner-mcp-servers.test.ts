@@ -45,6 +45,7 @@ import type { AgentSpec } from '../../../../substrate.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from '../pty-host.ts'
 import {
   createPersistentReplSubstrate,
+  evictWarmReplsForMcpSurfaceChange,
   getReplSinkInfo,
   setReplToolBridge,
   shutdownAllPersistentRepls,
@@ -628,5 +629,35 @@ describe('a change takes effect on the next turn, and an unchanged set does not 
     await drain(sub.start(spec('after')))
     expect(argvs).toHaveLength(2)
     expect(mcpConfig(argvs[1]!).mcpServers['example-server']!.env['EXAMPLE_API_KEY']).toBe('sk-second')
+  })
+})
+
+describe('revoking a server retires the warm child that was spawned under the old answer', () => {
+  // `claude` reads `mcpServers` ONCE at startup, so a warm child cannot unlearn a
+  // server. `getOrSpawnSession`'s `freshMcpServers` guard evicts a stale child — but
+  // only on its NEXT DISPATCH, and a warm session can sit idle for hours. Until then the
+  // revoked server's stdio subprocess is still alive holding the environment it was
+  // handed, including any secret configured for it. The durable grant lapses instantly;
+  // the PROCESS is what lingered.
+  //
+  // ⚠️ WHAT IS **NOT** COVERED HERE, AND WHY IT IS SAID OUT LOUD. There is no test that
+  // a warm IDLE child is actually terminated. One was written and it failed, and the
+  // reason is the harness, not the code: after `drain`, this file's fake-pty session
+  // leaves its POOLED PROMISE REJECTED, so the eviction loop's `await` throws and the
+  // entry is skipped. Instrumented and confirmed — `pool.size` is 1 and the line after
+  // the `await` never runs. `shutdownAllPersistentRepls` swallows exactly the same case
+  // with the same try/catch, so this is a long-standing property of the fake rather than
+  // anything this change introduced; it just means a fake session is not a usable
+  // stand-in for a live idle child.
+  //
+  // So the idle-termination path is reviewed and typechecked but UNPROVEN, and it is
+  // recorded that way rather than implied to be covered. What IS pinned: the store
+  // announces every revocation and no approval (`gateway/__tests__/mcp-servers-store.test.ts`,
+  // three mutants, three distinct failures), and the call below is a no-op on an empty
+  // pool — which is the state the composer invokes it in for any revocation made before
+  // a turn has ever run, i.e. the common case on a fresh install.
+
+  it('is a no-op, and never throws, when no child is warm', async () => {
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 0 })
   })
 })

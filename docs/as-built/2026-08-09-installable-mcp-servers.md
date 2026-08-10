@@ -508,3 +508,63 @@ what the mutation run behind it proves.
 four delegating methods, chosen by reading what `decide` calls; `remove()` then reached
 `listPending` and died with a `TypeError` that read like a bug in the code under test. It
 is a `Proxy` now: everything delegates, exactly one call is intercepted.
+
+---
+
+## Round-3 review fix — a revocation now retires what is already RUNNING
+
+Revoking a grant was durable and immediate; the subprocess spawned under the old answer
+was not. `claude` reads `mcpServers` once at startup, and `getOrSpawnSession`'s
+`freshMcpServers` guard retires a stale child only ON A DISPATCH — which for an idle
+session can be hours away. Until then a revoked server's stdio child kept running,
+holding the environment it was handed, including any secret configured for it.
+
+Three parts, because the seam crosses a layer:
+
+* `runtime/…/persistent/pool.ts` — `evictWarmReplsForMcpSurfaceChange()`. An idle child
+  is terminated and dropped from the pool now; a session with a turn in flight is marked
+  `poisoned` instead, which the spawn path already treats like a failed freshness guard
+  and respawns cleanly at the next boundary. Killing mid-turn would strand the turn and
+  desync the channel correlation, and buys nothing — that turn is running under a grant
+  that WAS in force when it started. Instance-wide, because installed servers are.
+* `gateway/mcp-servers/store.ts` — an `onRevoked` dep, fired after `remove()`'s spec
+  write (so a respawn reads the list without the server rather than racing the delete)
+  and after a deny's revoke. A callback rather than an import: the store is
+  persistence-layer, the pool is a runtime adapter, and the layering gate is right to
+  refuse that edge.
+* `open/composer.ts` — the line that connects them. Without it the seam exists and
+  nothing calls it.
+
+### What is proven, and what is NOT
+
+Proven, mutation-verified: the store announces every revocation and no approval. Three
+mutants — drop the announce in `remove()`, drop it on deny, let the eviction's failure
+escape — each fail exactly ONE test, so none of the three checks is redundant.
+
+**Not proven: that a warm IDLE child is actually terminated.** A test for it was written
+and failed, and the cause is the harness. After `drain`, the fake-pty session in
+`runtime/…/__tests__/owner-mcp-servers.test.ts` leaves its POOLED PROMISE REJECTED, so
+the eviction loop's `await` throws and the entry is skipped. Instrumented and confirmed:
+`pool.size` is 1 and the statement after the `await` never executes.
+`shutdownAllPersistentRepls` swallows the identical case with the identical try/catch, so
+this is a long-standing property of the fake, not something this change introduced — but
+it does mean a fake session is not a usable stand-in for a live idle child. The path is
+reviewed and typechecked; it is not covered.
+
+📌 **Two lessons, and the second cost more than the first.**
+
+**A guard whose condition is never entered is a no-op that reads as a fix.** The first
+draft decided "is this session busy?" by scanning `activeTurnRoutes`. The test reported
+`evicted=0, poisoned=1` for a session whose turn had already drained — so the function
+would have poisoned every child and evicted none, i.e. done nothing beyond the freshness
+guard it exists to pre-empt. `session.activeTurn` is plain identity; the route delete is
+guarded on a RECOMPUTED key (`activeTurnRoutes.get(activeTurnRouteKey(options))?.turn ===
+turn`), and a key that does not recompute to the one used at insert leaves a route behind
+for an idle session.
+
+**A `replace` without an assert is a probe that cannot fail.** Three debugging runs were
+wasted on instrumentation that silently patched nothing, and the empty output was read as
+evidence about the code. The run that produced the real answer was the one whose every
+anchor was asserted first. This is the same shape as the CLAUDE.md rule about a tool that
+cannot read the format returning a negative that looks like an answer — here the tool was
+my own edit script.

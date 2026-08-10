@@ -801,3 +801,90 @@ describe('a decision and an uninstall cannot interleave', () => {
     expect(await racy.resolveApproved()).toEqual([])
   })
 })
+
+describe('a revocation retires what is already running', () => {
+  /**
+   * Revoking a grant is durable and immediate. The SUBPROCESS spawned under the old
+   * answer is not: `claude` reads `mcpServers` once at startup, and the spawn path's
+   * freshness guard only retires a stale child ON A DISPATCH — which for an idle
+   * session can be hours away. So a revoked server's stdio child kept running with the
+   * environment it was handed, including any secret configured for it.
+   *
+   * The store cannot reach the REPL pool (persistence layer to runtime adapter — the
+   * layering gate is right to refuse that edge), so it announces the revocation and
+   * `open/composer.ts` supplies the eviction.
+   */
+  function spyStore(onRevoked: () => Promise<void>): OwnerMcpServerStore {
+    return new OwnerMcpServerStore({
+      db,
+      project_slug: SLUG,
+      credentials: new ProjectCredentialStore(db, {
+        crypto: new SecretsStore({ data_dir: tmp, db }),
+      }),
+      owner_slug: asOwnerHandle(SLUG),
+      approvals: () => approvals,
+      onRevoked,
+    })
+  }
+
+  test('UNINSTALLING announces the revocation', async () => {
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    await s.install(DRAFT)
+    expect(calls).toBe(0)
+    expect((await s.remove('example-server')).removed).toBe(true)
+    expect(calls).toBe(1)
+  })
+
+  test('DENYING announces it too — a stop that leaves the process running is not a stop', async () => {
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    await s.install(DRAFT)
+    const hash = (await s.list())[0]!.grant_hash
+    expect((await s.decide('example-server', 'deny', hash)).ok).toBe(true)
+    expect(calls).toBe(1)
+  })
+
+  test('APPROVING does NOT — nothing was revoked, and thrashing the pool on approve would be a defect', async () => {
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    await s.install(DRAFT)
+    const hash = (await s.list())[0]!.grant_hash
+    expect((await s.decide('example-server', 'approve', hash)).ok).toBe(true)
+    expect(calls).toBe(0)
+  })
+
+  test('uninstalling something that is NOT installed announces nothing', async () => {
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    expect((await s.remove('never-installed')).removed).toBe(false)
+    expect(calls).toBe(0)
+  })
+
+  test('an eviction that FAILS does not fail the revocation', async () => {
+    // The revoke has already landed durably by then. Surfacing the eviction's failure
+    // would invite the owner to press Remove again on state that is already correct —
+    // and would make an unrelated pool problem look like a broken uninstall.
+    const s = spyStore(async () => {
+      throw new Error('pool unavailable')
+    })
+    await s.install(DRAFT)
+    expect((await s.remove('example-server')).removed).toBe(true)
+    expect(await s.list()).toEqual([])
+    expect(await s.resolveApproved()).toEqual([])
+  })
+
+  test('a store with NO hook behaves exactly as before', async () => {
+    // Every other test in this file constructs one, so the optionality is load-bearing.
+    await store.install(DRAFT)
+    expect((await store.remove('example-server')).removed).toBe(true)
+  })
+})

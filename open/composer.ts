@@ -435,6 +435,7 @@ import type { AppWsOutboundActivityEvent } from '@neutronai/wire-types'
 import {
   setReplActivityTap,
   type ReplActivityTap,
+  evictWarmReplsForMcpSurfaceChange,
 } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
 import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
@@ -3417,6 +3418,20 @@ export function buildOpenGraphComposer(
       // A getter: the graph's manager is THIS instance, but reading it as a value
       // here would still be correct only by accident if that ever changed.
       approvals: () => approvalManager,
+      // WIRED HERE FOR THE SAME REASON `approvals` IS. Revoking a grant is durable and
+      // immediate; the SUBPROCESS spawned under the old answer is not. The spawn path's
+      // freshness guard retires it on the next dispatch, which for an idle session can
+      // be hours, so a revoked server's stdio child kept running with the environment —
+      // and any secret — it was handed. The store cannot reach the REPL pool itself
+      // (persistence layer to runtime adapter; the layering gate is right to refuse
+      // that edge), so the composer, which owns both, connects them. Without this line
+      // the seam exists and nothing calls it: built-but-never-wired.
+      onRevoked: async () => {
+        const { evicted, poisoned } = await evictWarmReplsForMcpSurfaceChange()
+        if (evicted > 0 || poisoned > 0) {
+          log.info('mcp_revocation_retired_warm_repls', { evicted, poisoned })
+        }
+      },
     })
     mcpServerStoreHolder.store = mcpServerStore
     const appMcpServersSurface = createAppMcpServersSurface({
