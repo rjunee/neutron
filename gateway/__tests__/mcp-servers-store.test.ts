@@ -26,7 +26,14 @@ import { join } from 'node:path'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
-import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import {
+  MAX_TOKEN_LEN as CREDENTIAL_TOKEN_MAX,
+  ProjectCredentialStore,
+} from '@neutronai/project-credentials/store.ts'
+import {
+  MCP_SERVER_ENV_TOTAL_MAX,
+  MCP_SERVER_ENV_VALUE_MAX,
+} from '@neutronai/runtime/mcp-servers.ts'
 import { ApprovalManager } from '@neutronai/tools/approval.ts'
 import { readOwnerMcpServers } from '@neutronai/gateway/storage/owner-metadata.ts'
 import {
@@ -73,9 +80,17 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-/** Approve whatever grant is currently pending for `name`. */
+/** The `grant_hash` of the spec CURRENTLY installed under `name` — what a client
+ *  reads off the row it rendered, and must echo back on a decision. */
+async function liveHash(name: string): Promise<string> {
+  const row = (await store.list()).find((r) => r.name === name)
+  expect(row).toBeDefined()
+  return row!.grant_hash
+}
+
+/** Approve the spec currently installed under `name`, the way a client does. */
 async function approve(name: string): Promise<void> {
-  const result = await store.decide(name, 'approve')
+  const result = await store.decide(name, 'approve', await liveHash(name))
   expect(result.ok).toBe(true)
 }
 
@@ -92,7 +107,9 @@ describe('an UNAPPROVED server is never wired', () => {
 
   test('a DENIED server is not wired, and stays in the list so it can be fixed', async () => {
     await store.install(DRAFT)
-    expect((await store.decide('example-server', 'deny')).ok).toBe(true)
+    expect((await store.decide('example-server', 'deny', await liveHash('example-server'))).ok).toBe(
+      true,
+    )
     expect(await store.resolveApproved()).toEqual([])
     const rows = await store.list()
     // Deleting the owner's typed-in command because he said "not now" would make him
@@ -116,7 +133,10 @@ describe('an UNAPPROVED server is never wired', () => {
     await bare.install(DRAFT)
     expect((await bare.list())[0]!.approval).toBe('unapproved')
     expect(await bare.resolveApproved()).toEqual([])
-    expect((await bare.decide('example-server', 'approve')).ok).toBe(false)
+    // No hash is readable either (the row has one, but nothing can be approved), so the
+    // refusal is proven with the hash the OTHER store computes for the same spec.
+    const hash = (await bare.list())[0]!.grant_hash
+    expect((await bare.decide('example-server', 'approve', hash)).ok).toBe(false)
   })
 
   test('approval cannot be minted by writing a row for a DIFFERENT hash', async () => {
@@ -138,17 +158,34 @@ describe('an UNAPPROVED server is never wired', () => {
     expect(await store.resolveApproved()).toEqual([])
   })
 
-  test('a REMOVED server is not wired even though its approval row survives', async () => {
+  test('a REMOVED server is not wired', async () => {
     await store.install(DRAFT)
     await approve('example-server')
     expect(await store.resolveApproved()).toHaveLength(1)
     expect((await store.remove('example-server')).removed).toBe(true)
-    // The approved row is deliberately left as a record of the decision; the
-    // installed list is read FIRST, so it cannot resurrect the server.
-    expect(
-      approvals.findApproved(SLUG, mcpServerApprovalToolName('example-server')),
-    ).toHaveLength(1)
     expect(await store.resolveApproved()).toEqual([])
+  })
+
+  test('UNINSTALLING REVOKES THE GRANT — reinstalling the identical spec asks again', async () => {
+    // The hole this closes: `approvalStateFor` matches on the grant hash alone, so an
+    // approved row that outlived the uninstall re-matched a byte-identical reinstall and
+    // the server came back WIRED, never shown to the owner a second time. He removed it;
+    // that has to mean something.
+    await store.install(DRAFT)
+    await approve('example-server')
+    await store.remove('example-server')
+    // The row survives as history, no longer as a grant.
+    expect(approvals.findApproved(SLUG, mcpServerApprovalToolName('example-server'))).toHaveLength(0)
+    expect(
+      approvals.findByToolName(SLUG, mcpServerApprovalToolName('example-server')).length,
+    ).toBeGreaterThan(0)
+
+    await store.install(DRAFT)
+    expect((await store.list())[0]!.approval).toBe('pending')
+    expect(await store.resolveApproved()).toEqual([])
+    // …and it becomes usable only after he answers again.
+    await approve('example-server')
+    expect(await store.resolveApproved()).toHaveLength(1)
   })
 })
 
@@ -242,18 +279,58 @@ describe('EDITING requires re-approval — a server cannot widen itself', () => 
     }
   })
 
-  test('a decision on a spec that has since MOVED is refused, not applied', async () => {
-    // The owner reads a prompt, the spec changes underneath, then he presses Approve.
-    // Applying that press to the new command is precisely what the hash prevents.
+  test('a decision carrying a STALE hash is refused — the press was about another command', async () => {
+    // The owner reads a prompt on one device, the spec is edited from another, then he
+    // presses Approve on the screen he still has. Applying that press to the new command
+    // is precisely what the hash prevents — and before the decision carried a hash, that
+    // is exactly what happened: the store bound the press to whatever was current.
     await store.install(DRAFT)
-    const stale = await store.list()
-    expect(stale[0]!.approval).toBe('pending')
+    const staleHash = await liveHash('example-server')
     await store.install({ ...DRAFT, command: '/usr/local/bin/other-mcp' })
-    // The old pending row was cancelled, a fresh one minted; a decision still lands
-    // on the CURRENT spec only — and there is exactly one live grant to answer.
-    const result = await store.decide('example-server', 'approve')
-    expect(result.ok).toBe(true)
+
+    const refused = await store.decide('example-server', 'approve', staleHash)
+    expect(refused.ok).toBe(false)
+    expect(refused.error).toContain('older version')
+    // NOTHING was approved. The new command did not inherit the press…
+    expect(await store.resolveApproved()).toEqual([])
+    // …and the refusal handed back the list carrying the prompt he now has to read.
+    expect(refused.servers[0]!.approval).toBe('pending')
+    expect(refused.servers[0]!.command).toBe('/usr/local/bin/other-mcp')
+
+    // Answering the CURRENT prompt works, and wires the command that prompt described.
+    await approve('example-server')
     expect((await store.resolveApproved())[0]!.command).toBe('/usr/local/bin/other-mcp')
+  })
+
+  test('a decision with NO hash at all is refused', async () => {
+    // A client that forgot the field must not fall back to "whatever is installed".
+    await store.install(DRAFT)
+    expect((await store.decide('example-server', 'approve', undefined)).ok).toBe(false)
+    expect(await store.resolveApproved()).toEqual([])
+  })
+
+  test('DENY then APPROVE takes one press, not two', async () => {
+    // The denied row fails the pending+hash match, so this used to mint a fresh request,
+    // answer `ok:false`, surface a 409 — and need an unexplained second press. Safe to
+    // apply directly BECAUSE the hash matched: the press is provably about the spec that
+    // was on screen.
+    await store.install(DRAFT)
+    const hash = await liveHash('example-server')
+    expect((await store.decide('example-server', 'deny', hash)).ok).toBe(true)
+    expect((await store.list())[0]!.approval).toBe('denied')
+
+    const approved = await store.decide('example-server', 'approve', hash)
+    expect(approved.ok).toBe(true)
+    expect(approved.servers[0]!.approval).toBe('approved')
+    expect(await store.resolveApproved()).toHaveLength(1)
+  })
+
+  test('denying an ALREADY-denied spec is idempotent too', async () => {
+    await store.install(DRAFT)
+    const hash = await liveHash('example-server')
+    expect((await store.decide('example-server', 'deny', hash)).ok).toBe(true)
+    expect((await store.decide('example-server', 'deny', hash)).ok).toBe(true)
+    expect(await store.resolveApproved()).toEqual([])
   })
 
   test('approving an ALREADY-approved spec is idempotent, not an error', async () => {
@@ -261,13 +338,13 @@ describe('EDITING requires re-approval — a server cannot widen itself', () => 
     // the state the owner asked for is the state he has.
     await store.install(DRAFT)
     await approve('example-server')
-    const again = await store.decide('example-server', 'approve')
+    const again = await store.decide('example-server', 'approve', await liveHash('example-server'))
     expect(again.ok).toBe(true)
     expect((await store.resolveApproved())).toHaveLength(1)
   })
 
   test('deciding on a server that is not installed is refused', async () => {
-    const result = await store.decide('never-installed', 'approve')
+    const result = await store.decide('never-installed', 'approve', 'any-hash')
     expect(result.ok).toBe(false)
     expect(result.error).toContain('never-installed')
   })
@@ -292,6 +369,79 @@ describe('EDITING requires re-approval — a server cannot widen itself', () => 
     // accurate description of what would run. Matches the ritual grants' behaviour.
     await store.install(DRAFT)
     expect((await store.list())[0]!.approval).toBe('approved')
+  })
+})
+
+describe('CONCURRENT writes do not lose each other', () => {
+  test('two simultaneous installs both survive', async () => {
+    // `install` reads the whole list, does async secret work, then rewrites the whole
+    // list. Interleaved, the second write was computed from a list taken before the
+    // first landed, and one of the owner's servers silently vanished — the web tab and
+    // the phone doing this at the same time is an ordinary Tuesday, not an edge case.
+    await Promise.all([
+      store.install({ ...DRAFT, name: 'first-server' }),
+      store.install({ ...DRAFT, name: 'second-server' }),
+    ])
+    expect((await store.list()).map((s) => s.name).sort()).toEqual([
+      'first-server',
+      'second-server',
+    ])
+  })
+
+  test('a simultaneous install and remove leave a coherent list', async () => {
+    await store.install({ ...DRAFT, name: 'keeper' })
+    await store.install({ ...DRAFT, name: 'doomed' })
+    await Promise.all([
+      store.remove('doomed'),
+      store.install({ ...DRAFT, name: 'newcomer' }),
+    ])
+    expect((await store.list()).map((s) => s.name).sort()).toEqual(['keeper', 'newcomer'])
+  })
+
+  test('a FAILED install does not poison the writes that follow it', async () => {
+    // The chain advances with a promise that cannot reject; a rejecting tail would make
+    // the next caller throw somebody else's error.
+    const bad = await store.install({ name: 'NOT A NAME', command: 'x' })
+    expect(bad.ok).toBe(false)
+    const good = await store.install({ ...DRAFT, name: 'after-failure' })
+    expect(good.ok).toBe(true)
+    expect((await store.list()).map((s) => s.name)).toEqual(['after-failure'])
+  })
+})
+
+describe('the ENV payload is refused before it can fail server-side', () => {
+  test('an oversized total is a complaint, not an error', async () => {
+    // Each value passes the 4096-per-value check; together they exceed the credential
+    // store's 8192-byte token cap, which used to surface as a thrown error from the
+    // encrypted write rather than something the owner could act on.
+    const big = 'x'.repeat(MCP_SERVER_ENV_VALUE_MAX)
+    const result = await store.install({
+      ...DRAFT,
+      env: { EXAMPLE_ONE: big, EXAMPLE_TWO: big },
+    })
+    expect(result.ok).toBe(false)
+    expect(result.errors.join(' ')).toContain('over the')
+    // Nothing was stored: not the spec, and not a secret row for it.
+    expect(await store.list()).toEqual([])
+  })
+
+  test('the validator cap sits BELOW the credential store cap', () => {
+    // The two limits are declared in different packages (`runtime` cannot import
+    // `project-credentials`), so the relationship is pinned here instead of assumed.
+    expect(MCP_SERVER_ENV_TOTAL_MAX).toBeLessThan(CREDENTIAL_TOKEN_MAX)
+  })
+
+  test('a LARGE payload that fits is still accepted', async () => {
+    // Two near-maximum values, together comfortably under the aggregate cap: the new
+    // check must refuse only what would actually fail, or it becomes its own bug.
+    const nearMax = 'y'.repeat(MCP_SERVER_ENV_VALUE_MAX - 1)
+    const result = await store.install({
+      ...DRAFT,
+      env: { EXAMPLE_ONE: nearMax, EXAMPLE_TWO: 'z'.repeat(3000) },
+    })
+    expect(result.ok).toBe(true)
+    await approve('example-server')
+    expect(await store.resolveApproved()).toHaveLength(1)
   })
 })
 

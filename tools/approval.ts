@@ -66,15 +66,6 @@ export interface ApprovalNotifier {
  */
 export const APPROVAL_DEFAULT_TTL_MS = 5 * 60_000
 
-// A day matches the normal response window; a week would leave gated work stale.
-export const APPROVAL_RERAISE_INTERVAL_MS = 24 * 60 * 60_000
-// A fourth identical reminder becomes noise. Keep the expired row as evidence.
-export const APPROVAL_MAX_RERAISES = 3
-
-// Share serialization across managers over the same connection, without holding
-// a SQL transaction open across channel delivery (delivery writes its own rows).
-const approvalOperations = new WeakMap<ProjectDb, Promise<unknown>>()
-
 export interface ApprovalManagerOptions {
   ttl_ms?: number
   /**
@@ -111,6 +102,29 @@ export class ApprovalManager {
     if (req.policy === 'auto') {
       return 'approved'
     }
+    const row = await this.openApproval(req)
+    return new Promise<ApprovalDecision>((resolve, reject) => {
+      this.pending.set(row.id, { resolve, reject })
+    })
+  }
+
+  /**
+   * Persist a prompt-user / prompt-admin request and surface it, WITHOUT waiting for
+   * the decision. Returns the row as inserted.
+   *
+   * The half of {@link requestApproval} that is OBSERVABLE. `requestApproval` returns
+   * a promise that resolves when the OWNER answers — minutes, or never — so a caller
+   * that must not block cannot await it, and therefore cannot know when the row
+   * exists. That matters because the read side (`findByToolName`, `listPending`) is
+   * SYNCHRONOUS `prepare().all()`, which bypasses the db mutex the INSERT goes
+   * through: a `fireAndForget(requestApproval(...))` followed by a synchronous read
+   * can legitimately miss its own row. A caller that needs the row (to mint a grant
+   * and immediately resolve it, say) awaits THIS instead.
+   *
+   * Policy is not consulted here — `auto` never persists a row, so it has nothing to
+   * open, and {@link requestApproval} still short-circuits it before calling in.
+   */
+  async openApproval(req: ApprovalRequest): Promise<ApprovalRow> {
     const id = req.id ?? crypto.randomUUID()
     const requested_at = this.now() / 1000
     const args_json = JSON.stringify(req.args ?? null)
@@ -142,109 +156,30 @@ export class ApprovalManager {
       log.error('notifier_failed', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
     })
 
-    return new Promise<ApprovalDecision>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-    })
+    return row
   }
 
   /**
    * Apply a decision. Called by the channel adapter when the user clicks
    * approve/deny. Idempotent: a second decision on the same id no-ops.
-   *
-   * ATOMIC CLAIM. Returns TRUE only for the call that actually transitioned the
-   * row out of 'pending', and FALSE when the row was already decided, expired or
-   * absent. The `WHERE status = 'pending'` predicate and the affected-row count
-   * are read inside ONE transaction, so of two callers racing the same id
-   * exactly one is told `true`. A caller that DOES something on the strength of a
-   * decision — dispatches a deploy, schedules a ritual — must gate that side
-   * effect on this boolean; without it, two taps that interleave across an
-   * `await` both believe they won, and an Approve can act after a concurrent Deny
-   * has already settled the row (Argus r1 BLOCKER against the host-deploy caller,
-   * `open/host-deploy.ts`). Callers that ignore the value keep their previous
-   * behaviour exactly.
    */
   async respondApproval(
     id: string,
     decision: 'approved' | 'denied',
     decided_by: string,
-  ): Promise<boolean> {
-    return this.serialize(async () => {
-      const decided_at = this.now() / 1000
-      // `runSync` inside `transaction` because only the sync form reports
-      // `changes`; the transaction holds the per-instance mutex across the read of
-      // that count, so the claim and its result cannot be split by another writer.
-      const claimed = await this.db.transaction((tx) => {
-        const res = tx.runSync(
-          `UPDATE tool_approvals
-             SET status = ?, decided_at = ?, decided_by = ?
-           WHERE id = ? AND status = 'pending'`,
-          [decision, decided_at, decided_by, id],
-        )
-        return res.changes > 0
-      })
-      const waiter = this.pending.get(id)
-      if (waiter) {
-        this.pending.delete(id)
-        waiter.resolve(decision)
-      }
-      return claimed
-    })
-  }
-
-  private serialize<T>(work: () => Promise<T>): Promise<T> {
-    const next = (approvalOperations.get(this.db) ?? Promise.resolve()).then(work)
-    approvalOperations.set(this.db, next.catch(() => undefined))
-    return next
-  }
-
-  /** Reserve a daily reminder durably before delivery. Answers and sends share
-   * serialization: an answer committed after selection but before this operation
-   * suppresses it, and an answer during delivery waits for that delivery to finish.
-   * Failed/crashed sends consume an attempt, bounding noise even after restart.
-   * The renderer returns null when the original grant can no longer be rendered.
-   */
-  async reraisePending(
-    id: string,
-    render: (row: ApprovalRow, attempt: number) => (() => Promise<void>) | null,
-  ): Promise<'skipped' | 'raised' | 'expired'> {
-    const reserved = await this.serialize(async (): Promise<'skipped' | 'expired' | (() => Promise<void>)> => {
-      const row = this.get(id)
-      if (row?.status !== 'pending') return 'skipped'
-      let args: Record<string, unknown>
-      try { args = JSON.parse(row.args_json) } catch { args = {} }
-      args = { ...args }
-      const count = args.reraise_count === undefined ? 0 : args.reraise_count
-      const last = args.last_raised_at === undefined ? row.requested_at : args.last_raised_at
-      const now = this.now()
-      const valid = typeof last === 'number' && Number.isFinite(last) && last >= 0 &&
-        last * 1000 <= now && typeof count === 'number' && Number.isInteger(count) && count >= 0
-      if (valid && now - last * 1000 < APPROVAL_RERAISE_INTERVAL_MS) return 'skipped'
-      const attempt = Number(count) + 1
-      const send = valid && Number(count) < APPROVAL_MAX_RERAISES ? render(row, attempt) : null
-      if (send === null) {
-        const reason = !valid ? 'Approval age or reminder history is unreadable' :
-          Number(count) >= APPROVAL_MAX_RERAISES ? 'No answer after three daily reminders' :
-          'Original approval content is no longer available'
-        await this.db.run(
-          `UPDATE tool_approvals SET status = 'expired', decided_at = ?, args_json = ?
-           WHERE id = ? AND status = 'pending'`,
-          [now / 1000, JSON.stringify({ ...args, expiry_reason: reason }), id],
-        )
-        this.pending.get(id)?.resolve('expired')
-        this.pending.delete(id)
-        return 'expired'
-      }
-      await this.mergeArgs(id, { reraise_count: attempt, last_raised_at: now / 1000 })
-      return send
-    })
-    if (typeof reserved !== 'function') return reserved
-    // Queue delivery separately so answers arriving during the reservation win.
-    return this.serialize(async () => {
-      // Re-read after the durable write: an answer or cancellation may have won.
-      if (this.get(id)?.status !== 'pending') return 'skipped'
-      await reserved()
-      return 'raised'
-    })
+  ): Promise<void> {
+    const decided_at = this.now() / 1000
+    await this.db.run(
+      `UPDATE tool_approvals
+         SET status = ?, decided_at = ?, decided_by = ?
+       WHERE id = ? AND status = 'pending'`,
+      [decision, decided_at, decided_by, id],
+    )
+    const waiter = this.pending.get(id)
+    if (waiter) {
+      this.pending.delete(id)
+      waiter.resolve(decision)
+    }
   }
 
   /**
@@ -278,57 +213,6 @@ export class ApprovalManager {
       }
     }
     return stale.length
-  }
-
-  /**
-   * Record the id of the button prompt this grant was surfaced as, merged into
-   * the row's `args_json` (every other stored argument is preserved).
-   *
-   * THE GRANT→PROMPT LINK. A host-deploy grant dies after its TTL, but the
-   * `button_prompts` row it was rendered as does not (its `expires_at` is a
-   * decade out), so the owner is left staring at a button that is still drawn,
-   * still tappable and connected to nothing. The host-deploy expiry sweep
-   * (`open/host-deploy.ts` → `sweepExpiredGrants`) uses this link to RETIRE that
-   * prompt when it expires the grant. Written AFTER the emit rather than at
-   * insert time because the prompt id does not exist until the prompt has been
-   * delivered — the row must already be pending for the emit to reference it.
-   *
-   * No-op for an unknown id. A row whose `args_json` will not parse is replaced
-   * with `{ prompt_id }` — the link is what this method owes the sweep, and
-   * unparseable arguments were already unreadable to every other caller.
-   */
-  async recordPromptLink(id: string, prompt_id: string): Promise<void> {
-    await this.mergeArgs(id, { prompt_id })
-  }
-
-  /**
-   * Merge `patch` into a row's stored `args_json`, preserving every other key.
-   *
-   * The general form of `recordPromptLink`, extracted when a second caller
-   * needed it: the standing deploy window records each deploy it authorised onto
-   * its own grant row (`open/host-deploy.ts`), so "which permission authorised
-   * this deploy, and what else did it authorise" has an answer after the fact.
-   * A grant that cannot say what it was used for is not an audit trail.
-   *
-   * No-op for an unknown id. A row whose `args_json` will not parse is REPLACED
-   * with the patch — those arguments were already unreadable to every caller.
-   */
-  async mergeArgs(id: string, patch: Record<string, unknown>): Promise<void> {
-    const row = this.get(id)
-    if (row === null) return
-    let args: Record<string, unknown>
-    try {
-      const parsed = JSON.parse(row.args_json) as unknown
-      args = parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
-    } catch {
-      args = {}
-    }
-    // Async `run` — the same per-instance mutex path `cancelPending` uses, so
-    // this write serializes behind the INSERT rather than racing it.
-    await this.db.run(`UPDATE tool_approvals SET args_json = ? WHERE id = ?`, [
-      JSON.stringify({ ...args, ...patch }),
-      id,
-    ])
   }
 
   /**
@@ -429,35 +313,39 @@ export class ApprovalManager {
   }
 
   /**
-   * REVOKE a grant the owner already APPROVED, before it would otherwise lapse.
+   * Revoke every still-APPROVED grant for `tool_name`: transition it to 'expired'.
+   * Returns the number of rows transitioned.
    *
-   * `cancelPending` cannot do this: its predicate is `status = 'pending'`, which
-   * is exactly right for a prompt nobody answered and useless for a durable
-   * grant that was answered YES and is still in force. The standing deploy
-   * window (`open/host-deploy-window.ts`) is the first such grant — a permission
-   * with hours left on its clock that the owner must be able to take back in one
-   * move, without waiting for the clock.
+   * For the case where the thing that was approved CEASES TO EXIST. An approval is a
+   * durable grant deliberately not re-asked while the approved content is unchanged
+   * (`grant_hash` matching, `createRitualApprovalCheck`), and that is exactly what
+   * makes a delete-then-recreate dangerous: recreating the identical content re-matches
+   * the old grant and the thing is live again having never been shown to the owner a
+   * second time. `gateway/mcp-servers/store.ts` calls this on uninstall so reinstalling
+   * a server asks again.
    *
-   * ATOMIC CLAIM, like `respondApproval`. The `WHERE status = 'approved'`
-   * predicate and the affected-row count are read inside ONE transaction, so of
-   * two racing revocations exactly one is told `true`. A caller that reports
-   * "closed" to the owner must gate that sentence on this boolean, or two taps
-   * both claim to have done it.
-   *
-   * The row lands on 'expired' rather than 'denied' deliberately: 'denied' is
-   * the record of an owner who refused the grant when asked, and overwriting a
-   * real YES with it would erase the fact that the permission WAS given and used.
+   * 'expired' rather than a new status because it is TRUE and needs no migration: the
+   * grant is no longer in force. The row itself is kept — including the `args_json`
+   * recording what was approved, and `decided_at`/`decided_by` — so the audit trail
+   * still says the owner approved that command, only that the grant has since lapsed.
    */
-  async revokeApproved(id: string): Promise<boolean> {
+  async revokeApproved(project_slug: string, tool_name: string): Promise<number> {
+    const approved = this.db
+      .prepare<{ id: string }, [string, string]>(
+        `SELECT id FROM tool_approvals
+          WHERE project_slug = ? AND tool_name = ? AND status = 'approved'`,
+      )
+      .all(project_slug, tool_name)
+    if (approved.length === 0) return 0
     const decided_at = this.now() / 1000
-    return await this.db.transaction((tx) => {
-      const res = tx.runSync(
-        `UPDATE tool_approvals
-           SET status = 'expired', decided_at = ?
-         WHERE id = ? AND status = 'approved'`,
+    // Async `run` (the db mutex) for the same reason `cancelPending` uses it: a revoke
+    // issued in the same tick as a not-yet-settled write must serialize after it.
+    for (const { id } of approved) {
+      await this.db.run(
+        `UPDATE tool_approvals SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'approved'`,
         [decided_at, id],
       )
-      return res.changes > 0
-    })
+    }
+    return approved.length
   }
 }

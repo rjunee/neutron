@@ -42,10 +42,29 @@
  * owner already approved that exact program with those exact variables, and the
  * grant he gave is still an accurate description of what would run.
  *
+ * UNINSTALLING IS DIFFERENT, and it took a review to see why. Editing leaves a
+ * server the owner is still curating; uninstalling ENDS it. Left alone, the approved
+ * row survived the uninstall and a later reinstall of the identical command
+ * re-matched it — so a server the owner had removed came back WIRED, with no prompt,
+ * having never been shown to him a second time. `remove()` therefore revokes the
+ * approved grants (`ApprovalManager.revokeApproved`) as well as cancelling the
+ * pending ones. The rows stay, recording what was approved and by whom; only the
+ * grant lapses.
+ *
  * ── WHY DENY DOES NOT UNINSTALL ─────────────────────────────────────────────
  * A denied server stays in the list, unapproved. Deleting the owner's typed-in
  * command because he answered "not now" would make him retype it, and the list is
  * the only record of what he was setting up. `remove()` is the uninstall.
+ *
+ * ── ONE WRITER AT A TIME ────────────────────────────────────────────────────
+ * `install` and `remove` both READ the whole installed list, do async work, then
+ * REWRITE the whole list. Two of them interleaved (the web tab and the phone, or one
+ * owner double-tapping) meant the second write was computed from a list that no
+ * longer existed, and the first install silently vanished. Both now run inside
+ * {@link OwnerMcpServerStore.serialize} — an in-process promise chain — and re-read
+ * the list INSIDE it. One gateway process owns this database, so a chain is the whole
+ * fix; it is not a substitute for a transaction across the two stores, which is why
+ * the write ORDER below is also fail-closed.
  */
 
 import type { OwnerHandle, ProjectDb } from '@neutronai/persistence/index.ts'
@@ -92,6 +111,15 @@ export interface McpServerStatus extends OwnerMcpServerSpec {
   approval: McpServerApprovalState
   /** The verbatim prompt for THIS spec — see `renderMcpServerGrant`. */
   grant_prompt: string
+  /**
+   * The digest of the spec THIS row describes — what a client must echo back on a
+   * decision, so an approve can only ever land on the spec that was on screen. See
+   * {@link OwnerMcpServerStore.decide}.
+   *
+   * Not a secret and not a capability: it is derived from the name, command, args and
+   * env-var NAMES, every one of which is already in this same payload.
+   */
+  grant_hash: string
   /** Whether every declared env var has a stored value. False ⇒ never wired. */
   secrets_present: boolean
   /** True when this exact spec is approved AND usable, i.e. it is wired right now. */
@@ -128,6 +156,28 @@ export interface McpServerWriteResult {
 export class OwnerMcpServerStore {
   constructor(private readonly deps: OwnerMcpServerStoreDeps) {}
 
+  /**
+   * Tail of the write chain — see § ONE WRITER AT A TIME in the header. Every
+   * read-modify-write on the installed list queues behind it.
+   */
+  private writes: Promise<unknown> = Promise.resolve()
+
+  /**
+   * Run `body` with no other read-modify-write of the installed list interleaved.
+   *
+   * The chain is advanced with a promise that CANNOT reject (`.then(noop, noop)`), so
+   * one failed install does not poison every later one — a rejected tail would make
+   * the next `await this.writes` throw somebody else's error.
+   */
+  private serialize<T>(body: () => Promise<T>): Promise<T> {
+    const run = this.writes.then(body, body)
+    this.writes = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+
   /** The installed specs, straight from `instance_metadata`. */
   specs(): ReadonlyArray<OwnerMcpServerSpec> {
     return readOwnerMcpServers(this.deps.db, this.deps.project_slug)
@@ -146,6 +196,7 @@ export class OwnerMcpServerStore {
         ...spec,
         approval,
         grant_prompt: renderMcpServerGrant(spec),
+        grant_hash: computeMcpServerGrantHash(spec),
         secrets_present,
         active: approval === 'approved' && secrets_present,
       })
@@ -161,88 +212,126 @@ export class OwnerMcpServerStore {
    * present and can be told, so a silent partial write is the worst outcome
    * available.
    *
-   * Order matters. The SECRET is written first, then the spec, then the pending
-   * grant is minted. If the process dies between those steps the visible result is a
-   * server the owner has to approve (or an orphan credential row that the next write
-   * to the same name overwrites) — never an APPROVED server whose command was only
-   * half-updated.
+   * ORDER MATTERS, and it is SPEC FIRST, then the secrets, then the pending grant.
+   * The two stores cannot be written in one transaction (different tables, one of
+   * them encrypted through its own API), so the ordering is chosen for what a crash
+   * in the middle LEAVES BEHIND:
+   *
+   *   - spec written, secrets not: the new spec hashes differently from any approved
+   *     grant, so it is unapproved AND `secrets_present` is false. Two independent
+   *     reasons it is not wired. The owner sees a server asking to be approved.
+   *   - the reverse order (secrets first) leaves the OLD, still-APPROVED spec paired
+   *     with the NEW secrets — an approved command running with variables the owner
+   *     set for a different command. That is the one outcome worth engineering
+   *     against, so the order that cannot produce it is the one used.
    *
    * A replace does not touch the old approval row at all. It does not need to: the
    * new spec hashes differently, so the old grant stops matching and the server
    * drops out of `resolveApproved` on the very next spawn. Deleting the old row
    * would also destroy the record that the owner once approved that command.
+   *
+   * Runs inside {@link serialize}, and re-reads the installed list in there, so two
+   * concurrent installs cannot both rewrite a list they read before the other wrote.
    */
   async install(raw: unknown): Promise<McpServerWriteResult> {
     const { spec, env, errors } = parseOwnerMcpServerInput(raw)
     if (spec === null) return { ok: false, errors, servers: await this.list() }
 
-    const existing = this.specs()
-    const isNew = !existing.some((s) => s.name === spec.name)
-    if (isNew && existing.length >= MCP_SERVERS_MAX) {
-      return {
-        ok: false,
-        errors: [`this instance already has the maximum of ${MCP_SERVERS_MAX} MCP servers`],
-        servers: await this.list(),
+    return await this.serialize(async () => {
+      const existing = this.specs()
+      const isNew = !existing.some((s) => s.name === spec.name)
+      if (isNew && existing.length >= MCP_SERVERS_MAX) {
+        return {
+          ok: false,
+          errors: [`this instance already has the maximum of ${MCP_SERVERS_MAX} MCP servers`],
+          servers: await this.list(),
+        }
       }
-    }
 
-    if (spec.env_names.length > 0) {
-      await this.deps.credentials.set(this.deps.owner_slug, {
-        service: mcpServerEnvService(spec.name),
-        plaintext: JSON.stringify(env),
-        scope: 'global',
-      })
-    } else {
-      // An edit that REMOVES every variable must not leave the old secrets behind:
-      // they would be dead weight in the credential store and, worse, would come
-      // back if the owner later re-added a variable of the same name.
-      await this.forgetSecrets(spec.name)
-    }
+      const next = isNew
+        ? [...existing, spec]
+        : existing.map((s) => (s.name === spec.name ? spec : s))
+      await writeOwnerMcpServers(this.deps.db, this.deps.project_slug, next)
 
-    const next = isNew ? [...existing, spec] : existing.map((s) => (s.name === spec.name ? spec : s))
-    await writeOwnerMcpServers(this.deps.db, this.deps.project_slug, next)
-    await this.requestApproval(spec)
-    return { ok: true, errors: [], servers: await this.list() }
+      if (spec.env_names.length > 0) {
+        await this.deps.credentials.set(this.deps.owner_slug, {
+          service: mcpServerEnvService(spec.name),
+          plaintext: JSON.stringify(env),
+          scope: 'global',
+        })
+      } else {
+        // An edit that REMOVES every variable must not leave the old secrets behind:
+        // they would be dead weight in the credential store and, worse, would come
+        // back if the owner later re-added a variable of the same name.
+        await this.forgetSecrets(spec.name)
+      }
+
+      await this.requestApproval(spec)
+      return { ok: true, errors: [], servers: await this.list() }
+    })
   }
 
   /**
-   * Uninstall a server: drop the spec, forget its secrets, and cancel any grant that
-   * is still pending.
+   * Uninstall a server: drop the spec, forget its secrets, and REVOKE the grant —
+   * both the pending prompts and the approval itself.
    *
-   * The APPROVED rows are deliberately left in place — `tool_approvals` is a durable
-   * record of decisions, and an approved-then-uninstalled server is not wired
-   * anyway (it is no longer in the installed list, which `resolveApproved` reads
-   * first). Rewriting history to make the current state tidier is how an audit trail
-   * stops being one.
+   * Revoking the approved rows is what makes an uninstall mean something. Without it,
+   * `approvalStateFor` matches on the grant hash alone, so reinstalling the identical
+   * command re-matched the old approval and the server came back RUNNING with no
+   * prompt — the owner having removed it, and never seen it again. See § UNINSTALLING
+   * IS DIFFERENT in the header. The rows survive the revoke (status 'expired', with
+   * their `args_json` and decider intact), so the audit trail still records that he
+   * approved that command; only the grant lapses.
    */
   async remove(name: unknown): Promise<{ removed: boolean; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
-    const existing = this.specs()
-    const target = existing.find((s) => s.name === wanted)
-    if (target === undefined) return { removed: false, servers: await this.list() }
-    await writeOwnerMcpServers(
-      this.deps.db,
-      this.deps.project_slug,
-      existing.filter((s) => s.name !== wanted),
-    )
-    await this.forgetSecrets(wanted)
-    const manager = this.deps.approvals()
-    if (manager !== null) {
-      for (const row of manager.listPending(this.deps.project_slug)) {
-        if (row.tool_name === mcpServerApprovalToolName(wanted)) await manager.cancelPending(row.id)
+    return await this.serialize(async () => {
+      const existing = this.specs()
+      const target = existing.find((s) => s.name === wanted)
+      if (target === undefined) return { removed: false, servers: await this.list() }
+      await writeOwnerMcpServers(
+        this.deps.db,
+        this.deps.project_slug,
+        existing.filter((s) => s.name !== wanted),
+      )
+      await this.forgetSecrets(wanted)
+      const manager = this.deps.approvals()
+      if (manager !== null) {
+        const tool_name = mcpServerApprovalToolName(wanted)
+        for (const row of manager.listPending(this.deps.project_slug)) {
+          if (row.tool_name === tool_name) await manager.cancelPending(row.id)
+        }
+        await manager.revokeApproved(this.deps.project_slug, tool_name)
       }
-    }
-    return { removed: true, servers: await this.list() }
+      return { removed: true, servers: await this.list() }
+    })
   }
 
   /**
    * Record the owner's decision on a server's CURRENT spec.
    *
-   * Resolves the pending row whose `grant_hash` matches the live spec — never merely
-   * "the newest pending row for this name". If the spec changed after the prompt was
-   * rendered, no row matches and the decision is refused: approving is an act about
-   * a SPECIFIC command, and applying it to a different one is the precise failure
-   * the hash exists to prevent.
+   * ── THE DECISION CARRIES THE HASH OF WHAT WAS ON SCREEN ─────────────────────
+   * `expect_grant_hash` is REQUIRED and must equal the hash recomputed from the live
+   * spec. It comes from the same `list()` payload that carried the `grant_prompt` the
+   * owner read, so it is a claim about WHICH SPEC he was looking at when he pressed
+   * the button.
+   *
+   * Without it the decision was `{name, decision}` and nothing more, and the store
+   * bound it to whatever the CURRENT spec happened to be. An install/edit from another
+   * device (or another browser tab) between render and press therefore turned an
+   * Approve for the command on screen into an Approve for a command he had never
+   * seen — the exact substitution the grant hash exists to prevent, arriving through
+   * the one door that was not checking it. A mismatch is refused, and the reply
+   * carries the fresh list so the client re-renders the prompt he now has to read.
+   *
+   * ── ONE PRESS IS ONE DECISION ───────────────────────────────────────────────
+   * Given a matching hash, the decision is applied whether or not a pending row is
+   * sitting there: a matching pending row is resolved, and if there is none (he
+   * denied it earlier and changed his mind, or the prompt expired on the TTL) a fresh
+   * grant is opened and resolved in the same call. This is safe precisely BECAUSE the
+   * hash matched — the affirmative act is about a spec that is provably the one that
+   * was rendered — and it fixes a deny-then-approve that used to answer 409 and need
+   * an unexplained second press.
    *
    * There is no `policy: 'auto'` path here and no pre-approved server, so approval
    * can never be inferred from silence, from an unrelated action, or from the mere
@@ -251,6 +340,7 @@ export class OwnerMcpServerStore {
   async decide(
     name: unknown,
     decision: 'approve' | 'deny',
+    expect_grant_hash: unknown,
   ): Promise<{ ok: boolean; error: string | null; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
     const spec = this.specs().find((s) => s.name === wanted)
@@ -262,26 +352,38 @@ export class OwnerMcpServerStore {
       return { ok: false, error: 'the approval service is not available yet', servers: await this.list() }
     }
     const hash = computeMcpServerGrantHash(spec)
-    const rows = manager.findByToolName(this.deps.project_slug, mcpServerApprovalToolName(wanted))
+    if (typeof expect_grant_hash !== 'string' || expect_grant_hash !== hash) {
+      // Mint a fresh prompt for the spec that IS installed, so the owner is not left
+      // with a button that does nothing — then refuse, and return the new list.
+      await this.requestApproval(spec)
+      return {
+        ok: false,
+        error:
+          "that request describes an older version of this server — read the request below, which is what would run now, and decide again",
+        servers: await this.list(),
+      }
+    }
+    const tool_name = mcpServerApprovalToolName(wanted)
+    const rows = manager.findByToolName(this.deps.project_slug, tool_name)
     // Already decided for THIS exact spec: report success rather than an error. A
     // double-tap, or two clients open on the same row, must not read as a failure —
     // the state the owner asked for is the state he has.
     if (decision === 'approve' && rows.some((r) => r.status === 'approved' && grantHashOf(r) === hash)) {
       return { ok: true, error: null, servers: await this.list() }
     }
-    const pending = rows.find((row) => row.status === 'pending' && grantHashOf(row) === hash)
-    if (pending === undefined) {
-      // Either it was already decided, or the spec moved. Mint a fresh prompt rather
-      // than leaving the owner with a button that does nothing.
-      await this.requestApproval(spec)
-      return {
-        ok: false,
-        error: 'that request no longer matches the installed server — review the new prompt and decide again',
-        servers: await this.list(),
-      }
+    if (decision === 'deny' && rows.some((r) => r.status === 'denied' && grantHashOf(r) === hash)) {
+      return { ok: true, error: null, servers: await this.list() }
     }
+    const pending = rows.find((row) => row.status === 'pending' && grantHashOf(row) === hash)
+    // AWAITED, unlike `requestApproval`'s fire-and-forget: the row has to EXIST before
+    // it can be resolved on the next line, and the read side is synchronous so it
+    // would not see an un-awaited insert. `openApproval` is `requestApproval` without
+    // the wait-for-the-owner half.
+    const id =
+      pending?.id ??
+      (await manager.openApproval(this.approvalRequestFor(spec))).id
     await manager.respondApproval(
-      pending.id,
+      id,
       decision === 'approve' ? 'approved' : 'denied',
       this.deps.project_slug,
     )
@@ -322,6 +424,33 @@ export class OwnerMcpServerStore {
 
   // ── internals ─────────────────────────────────────────────────────────────
 
+  /**
+   * The `prompt-user` request for one spec. ONE definition, used by both the
+   * fire-and-forget mint below and the awaited `openApproval` in {@link decide}, so
+   * the two cannot come to disagree about what a grant records.
+   */
+  private approvalRequestFor(spec: OwnerMcpServerSpec): {
+    project_slug: string
+    topic_id: null
+    tool_name: string
+    policy: 'prompt-user'
+    args: Record<string, unknown>
+  } {
+    return {
+      project_slug: this.deps.project_slug,
+      topic_id: null,
+      tool_name: mcpServerApprovalToolName(spec.name),
+      policy: 'prompt-user',
+      args: {
+        server: spec.name,
+        grant_hash: computeMcpServerGrantHash(spec),
+        command: spec.command,
+        args: [...spec.args],
+        env_names: [...spec.env_names],
+      },
+    }
+  }
+
   /** Mint a fresh `prompt-user` grant bound to this spec's hash. */
   private async requestApproval(spec: OwnerMcpServerSpec): Promise<void> {
     const manager = this.deps.approvals()
@@ -341,23 +470,18 @@ export class OwnerMcpServerStore {
     for (const row of rows) {
       if (row.status === 'pending' && grantHashOf(row) !== hash) await manager.cancelPending(row.id)
     }
-    // NOT AWAITED. The returned promise resolves when the OWNER answers (or on the
-    // TTL sweep) — minutes to never — so awaiting it would hang the HTTP request that
-    // installed the server. The row it inserts before returning is the state that
-    // matters, and `resolveApproved` reads that, not this promise.
-    fireAndForget('mcp-servers.requestApproval', manager.requestApproval({
-      project_slug: this.deps.project_slug,
-      topic_id: null,
-      tool_name,
-      policy: 'prompt-user',
-      args: {
-        server: spec.name,
-        grant_hash: hash,
-        command: spec.command,
-        args: [...spec.args],
-        env_names: [...spec.env_names],
-      },
-    }))
+    // NOT AWAITED. The returned promise resolves only when the OWNER answers — minutes
+    // to never — so awaiting it would hang the HTTP request that installed the server.
+    // The row it inserts is the state that matters, and `resolveApproved` reads THAT,
+    // not this promise. (There is no TTL sweep running in this build: `expireStale`
+    // has no production caller, so a prompt nobody answers simply stays pending until
+    // it is decided, replaced by an edit, or cancelled by an uninstall. That is why
+    // `decide` can open and resolve a grant itself rather than relying on a sweep to
+    // clear a stale one.)
+    fireAndForget(
+      'mcp-servers.requestApproval',
+      manager.requestApproval(this.approvalRequestFor(spec)),
+    )
   }
 
   /** The state of the grant for THIS exact spec (hash-matched, newest first). */

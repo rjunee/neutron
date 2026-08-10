@@ -23,6 +23,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   MCP_SERVER_ARGS_MAX,
+  MCP_SERVER_ENV_TOTAL_MAX,
   MCP_SERVER_ENV_VALUE_MAX,
   computeMcpServerGrantHash,
   isReservedMcpServerName,
@@ -106,6 +107,21 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     expect(errors).toEqual([])
     expect(spec!.args).toEqual([])
     expect(spec!.env_names).toEqual([])
+  })
+
+  test('refuses an env payload that passes per-value but blows the AGGREGATE cap', () => {
+    // Two values, each legal on its own, whose JSON together exceeds what the credential
+    // store will hold. Refused HERE — where the owner is present and gets a complaint —
+    // rather than server-side, where it was a thrown error with nothing useful to say.
+    const big = 'x'.repeat(MCP_SERVER_ENV_VALUE_MAX)
+    const { spec, errors } = parseOwnerMcpServerInput({
+      ...GOOD,
+      env: { EXAMPLE_ONE: big, EXAMPLE_TWO: big },
+    })
+    expect(spec).toBeNull()
+    expect(errors.join(' ')).toContain(String(MCP_SERVER_ENV_TOTAL_MAX))
+    // The complaint reports SIZES and never echoes the payload.
+    expect(errors.join(' ')).not.toContain(big.slice(0, 32))
   })
 })
 
@@ -192,6 +208,68 @@ describe('renderMcpServerGrant — the prompt says exactly what the hash covers'
     // changing what is shown and this fails, whatever the wording is.
     const fields = [spec.name, spec.command, ...spec.args, ...spec.env_names]
     for (const field of fields) expect(prompt).toContain(field)
+  })
+
+  test('TWO SPECS THAT HASH DIFFERENTLY NEVER RENDER THE SAME', () => {
+    // "Contains every field" is necessary and NOT sufficient, which is how the
+    // space-joined command line survived review: `{command:'a b'}` and
+    // `{command:'a',args:['b']}` both contain every field and both printed `a b`, so the
+    // owner could read one grant and approve the other. Different hash ⇒ different
+    // prompt is the property that actually makes the display honest, and these are the
+    // adversarial pairs — argv-boundary confusion, whitespace, and arg ORDER.
+    const pairs: Array<[unknown, unknown]> = [
+      [
+        { name: 'ambiguity', command: '/usr/local/bin/example mcp' },
+        { name: 'ambiguity', command: '/usr/local/bin/example', args: ['mcp'] },
+      ],
+      [
+        { name: 'ambiguity', command: 'example-mcp', args: ['--flag one', '--other'] },
+        { name: 'ambiguity', command: 'example-mcp', args: ['--flag', 'one --other'] },
+      ],
+      [
+        { name: 'ambiguity', command: 'example-mcp', args: ['--a', '--b'] },
+        { name: 'ambiguity', command: 'example-mcp', args: ['--b', '--a'] },
+      ],
+      [
+        { name: 'ambiguity', command: 'example-mcp', args: ['--flag'] },
+        { name: 'ambiguity', command: 'example-mcp', args: ['--flag '] },
+      ],
+      [
+        { name: 'ambiguity', command: 'example-mcp', args: [] },
+        { name: 'ambiguity', command: 'example-mcp', args: [''] },
+      ],
+    ]
+    for (const [rawA, rawB] of pairs) {
+      const a = parseOwnerMcpServerInput(rawA).spec
+      const b = parseOwnerMcpServerInput(rawB).spec
+      expect(a).not.toBeNull()
+      expect(b).not.toBeNull()
+      // The premise: these ARE different grants.
+      expect(computeMcpServerGrantHash(a!)).not.toBe(computeMcpServerGrantHash(b!))
+      // The property: so the owner is shown different text.
+      expect(renderMcpServerGrant(a!)).not.toBe(renderMcpServerGrant(b!))
+    }
+  })
+
+  test('an argument list is numbered in ARGV ORDER, so the order is checkable', () => {
+    const ordered = parseOwnerMcpServerInput({
+      name: 'ordered',
+      command: 'example-mcp',
+      args: ['--first', '--second'],
+    }).spec!
+    const text = renderMcpServerGrant(ordered)
+    expect(text.indexOf('--first')).toBeLessThan(text.indexOf('--second'))
+    expect(text).toContain('arg 1')
+    expect(text).toContain('arg 2')
+  })
+
+  test('a server with no ARGUMENTS says so rather than leaving the section empty', () => {
+    const bare = parseOwnerMcpServerInput({ name: 'bare', command: 'example-mcp' }).spec!
+    expect(renderMcpServerGrant(bare)).toContain('no arguments')
+  })
+
+  test('says that removing the server revokes the approval — because it now does', () => {
+    expect(prompt).toContain('revokes this approval')
   })
 })
 
