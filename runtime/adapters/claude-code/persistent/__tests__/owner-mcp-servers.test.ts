@@ -71,9 +71,13 @@ function makeCapturingHost(): {
   host: PtyHost
   argvs: string[][]
   envs: Array<Record<string, string | undefined>>
+  /** Real `PtyChild.kill()` calls. A dropped pool entry is not a dead child, so the
+   *  eviction test asserts on THIS rather than on the returned counts alone. */
+  kills: { n: number }
 } {
   const argvs: string[][] = []
   const envs: Array<Record<string, string | undefined>> = []
+  const kills = { n: 0 }
   let spawns = 0
   const host: PtyHost = {
     spawn(argv: string[], spawnOpts: PtySpawnOpts): PtyChild {
@@ -120,6 +124,7 @@ function makeCapturingHost(): {
         resize() {},
         kill() {
           if (hasExited) return
+          kills.n += 1
           hasExited = true
           try {
             server.stop(true)
@@ -133,7 +138,7 @@ function makeCapturingHost(): {
       }
     },
   }
-  return { host, argvs, envs }
+  return { host, argvs, envs, kills }
 }
 
 function opts(
@@ -640,24 +645,58 @@ describe('revoking a server retires the warm child that was spawned under the ol
   // handed, including any secret configured for it. The durable grant lapses instantly;
   // the PROCESS is what lingered.
   //
-  // ⚠️ WHAT IS **NOT** COVERED HERE, AND WHY IT IS SAID OUT LOUD. There is no test that
-  // a warm IDLE child is actually terminated. One was written and it failed, and the
-  // reason is the harness, not the code: after `drain`, this file's fake-pty session
-  // leaves its POOLED PROMISE REJECTED, so the eviction loop's `await` throws and the
-  // entry is skipped. Instrumented and confirmed — `pool.size` is 1 and the line after
-  // the `await` never runs. `shutdownAllPersistentRepls` swallows exactly the same case
-  // with the same try/catch, so this is a long-standing property of the fake rather than
-  // anything this change introduced; it just means a fake session is not a usable
-  // stand-in for a live idle child.
+  // ── WHY THE IDLE CASE NEEDS A SETTLE, AND WHAT AN EARLIER NOTE GOT WRONG ────
+  // This block previously recorded the idle-termination path as UNPROVABLE against this
+  // harness, on the stated ground that a drained fake-pty session leaves its POOLED
+  // PROMISE REJECTED so the eviction loop's `await` throws and skips the entry. That
+  // diagnosis was wrong. The pooled promise resolves fine; what is still true the
+  // instant `drain` returns is that `session.activeTurn` is STILL SET — the turn's own
+  // bookkeeping is cleared after the completion event reaches the consumer, not before
+  // it. So an evict issued on that exact tick correctly reads the session as BUSY and
+  // poisons it, which is the `{evicted: 0, poisoned: 1}` the earlier attempt saw and
+  // read as a harness defect.
   //
-  // So the idle-termination path is reviewed and typechecked but UNPROVEN, and it is
-  // recorded that way rather than implied to be covered. What IS pinned: the store
-  // announces every revocation and no approval (`gateway/__tests__/mcp-servers-store.test.ts`,
-  // three mutants, three distinct failures), and the call below is a no-op on an empty
-  // pool — which is the state the composer invokes it in for any revocation made before
-  // a turn has ever run, i.e. the common case on a fresh install.
+  // It is not one. It is the function behaving correctly on a session that is, for one
+  // more tick, mid-turn. Letting the queue drain first makes the idle path directly
+  // observable, and it terminates the child — which is the property that matters,
+  // because the whole point is that a revoked server's stdio subprocess must not
+  // outlive the grant.
+  //
+  // The settle is a bounded TICK LOOP, not a wall-clock sleep: what has to happen is
+  // that already-queued continuations run, which is a property of the queue rather than
+  // of elapsed time, so it cannot flake on a slow runner.
 
   it('is a no-op, and never throws, when no child is warm', async () => {
     expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 0 })
+  })
+
+  it('TERMINATES a warm IDLE child, rather than waiting for its next dispatch', async () => {
+    // The gap this closes: revoking left the subprocess alive — with the secret it was
+    // handed — until the session happened to be dispatched again, which for an idle
+    // session can be hours. `kills` counts real `PtyChild.kill()` calls, so this asserts
+    // the CHILD DIED and not merely that a pool entry was dropped.
+    setReplToolBridge(bridge())
+    const { host, kills } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+    expect(kills.n).toBe(0)
+    // Let the finished turn's bookkeeping settle — see the block comment above.
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 0))
+
+    // EVICTED, NOT POISONED — a poison would defer the kill to the next dispatch, which
+    // is exactly the delay this function exists to remove, so the counts are asserted
+    // whole rather than just `evicted >= 1`.
+    //
+    // WHAT THIS DOES NOT PROVE, checked rather than assumed: it is NOT a regression test
+    // for the first draft's `activeTurnRoutes`-based busy check. Substituting that draft
+    // back in leaves this test PASSING, because in this scenario the route entry's key
+    // does recompute and the entry is duly deleted. The routes lookup is still the wrong
+    // signal — it is deleted under a recomputed key while `session.activeTurn` is plain
+    // identity, so only the latter is guaranteed to have been cleared — but that
+    // difference is not observable here and is not claimed to be.
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 1, poisoned: 0 })
+    expect(kills.n).toBe(1)
   })
 })
