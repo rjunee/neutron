@@ -96,7 +96,18 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     // Asserted CHARACTER BY CHARACTER, by code point, so a future narrowing of the
     // regex fails here instead of quietly re-opening one range.
     const invisibles: Array<[string, string]> = [
-      ['NEL', ''],
+      ['NEL (U+0085)', '\u{0085}'],
+      // The rest of the C1 block. An earlier revision banned both of its neighbours
+      // — DEL (U+007F) and NEL (U+0085) — and left U+0080-U+0084 / U+0086-U+009F out,
+      // though every one of them renders as nothing too: a spec padded with one
+      // printed identically to a spec without it while hashing differently, which is
+      // the same legibility hole this test exists for. Written as ESCAPES, not literal
+      // bytes, so the file stays greppable and no editor can silently eat one; pinned
+      // at both ends of the range and either side of the NEL that was already there.
+      ['C1 PAD (U+0080)', '\u{0080}'],
+      ['C1 U+0084', '\u{0084}'],
+      ['C1 U+0086', '\u{0086}'],
+      ['C1 APC (U+009F)', '\u{009F}'],
       ['SOFT HYPHEN', '­'],
       ['ARABIC LETTER MARK', '؜'],
       ['MONGOLIAN VOWEL SEPARATOR', '᠎'],

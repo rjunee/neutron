@@ -899,10 +899,20 @@ export async function evictWarmReplsForMcpSurfaceChange(): Promise<{
     // RECOMPUTED key (`activeTurnRoutes.get(activeTurnRouteKey(options))?.turn === turn`)
     // while the session field is plain identity. A key that does not recompute to the
     // one used at insert leaves a route entry behind for a session that is idle — and
-    // reading that as "busy" would have made this function poison every child and
-    // evict none, i.e. do nothing beyond the freshness guard it exists to pre-empt.
-    // The first draft did read the routes, and the test caught it: `evicted=0,
-    // poisoned=1` on a session whose turn had already drained.
+    // reading that as "busy" would poison a child this function is supposed to evict,
+    // deferring the kill to the next dispatch and doing nothing beyond the freshness
+    // guard it exists to pre-empt. The first draft did read the routes; `activeTurn` is
+    // the strictly safer signal, so it is the one used.
+    //
+    // THE DIFFERENCE IS NOT COVERED, and an earlier revision of this comment wrongly
+    // said it was. Substituting the routes lookup back in leaves the whole suite —
+    // including the idle-eviction test in `__tests__/owner-mcp-servers.test.ts` —
+    // passing, because in every scenario exercised there the key DOES recompute and the
+    // route entry is duly deleted. The `evicted=0, poisoned=1` reading that was
+    // attributed to the routes lookup turned out to have a different cause entirely: an
+    // evict issued on the same tick `drain` returns, when `activeTurn` has legitimately
+    // not been cleared yet. That is this function answering correctly about a session
+    // that is still, for one more tick, mid-turn.
     if (session.activeTurn !== undefined) {
       session.poisoned = true
       poisoned += 1

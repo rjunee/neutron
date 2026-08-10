@@ -345,6 +345,23 @@ denylist of invisibles rather than an allowlist of printable ASCII, because a pa
 argument can legitimately carry non-ASCII text and refusing all of it would break working
 servers to close a rendering hole.
 
+**…and it left the C1 block, having banned both of its neighbours.** The revision above
+took NEL (U+0085) out of the C1 controls and left U+0080-U+0084 and U+0086-U+009F in,
+sitting directly beside a DEL (U+007F) it also banned. Verified against the validator
+rather than reasoned about: all five probed code points were ACCEPTED, and two specs
+differing only by U+0086 hashed differently while rendering as the same text — the identical
+hole, in the range next door. The block is now taken WHOLE (`\u007F-\u009F`), for the same
+reason U+2060-U+206F was taken as a range rather than code point by code point: a contiguous
+family of zero-advance characters should not be enumerated, because the enumeration is what
+leaves the gap. No argv or path legitimately carries one. Mutation-verified — narrowing the
+class back to `\u007F\u0085` fails the every-invisible validator test, which now pins both
+ends of C1 and either side of the NEL that was already there.
+
+📌 **A denylist written by enumerating examples has a gap where the examples ran out.** Both
+misses here are the same shape: the fix listed the characters someone had thought of, in a
+range whose neighbours were already banned. The corrective habit is the one the second fix
+applied — when banning a member of a contiguous block, ban the block.
+
 **The audit row named the box, not the person.** `tool_approvals.decided_by` is documented
 in migration 0004 as the user_id of the decider, and the decision surface — which had
 already resolved the bearer in order to authorize the request — was discarding it and
@@ -541,26 +558,44 @@ Proven, mutation-verified: the store announces every revocation and no approval.
 mutants — drop the announce in `remove()`, drop it on deny, let the eviction's failure
 escape — each fail exactly ONE test, so none of the three checks is redundant.
 
-**Not proven: that a warm IDLE child is actually terminated.** A test for it was written
-and failed, and the cause is the harness. After `drain`, the fake-pty session in
-`runtime/…/__tests__/owner-mcp-servers.test.ts` leaves its POOLED PROMISE REJECTED, so
-the eviction loop's `await` throws and the entry is skipped. Instrumented and confirmed:
-`pool.size` is 1 and the statement after the `await` never executes.
-`shutdownAllPersistentRepls` swallows the identical case with the identical try/catch, so
-this is a long-standing property of the fake, not something this change introduced — but
-it does mean a fake session is not a usable stand-in for a live idle child. The path is
-reviewed and typechecked; it is not covered.
+**Now proven: a warm IDLE child IS terminated.** This section previously recorded the
+opposite, and the reason it gave was wrong. It said a test had been attempted and failed
+because the drained fake-pty session leaves its POOLED PROMISE REJECTED, so the eviction
+loop's `await` throws and skips the entry. The pooled promise resolves fine. What is
+actually still true the instant `drain` returns is that `session.activeTurn` is STILL SET
+— the turn's bookkeeping is cleared after the completion event reaches the consumer, not
+before it — so an evict issued on that tick correctly reads the session as BUSY and
+poisons it. That is the `{evicted: 0, poisoned: 1}` the earlier attempt saw, and it is the
+function behaving correctly rather than a harness defect.
 
-📌 **Two lessons, and the second cost more than the first.**
+Letting the queue drain first makes the idle path directly observable. The test
+(`TERMINATES a warm IDLE child, rather than waiting for its next dispatch`) asserts
+`{evicted: 1, poisoned: 0}` AND a real `PtyChild.kill()`, because a dropped pool entry is
+not a dead child. Two mutants, two failures: make the busy branch unconditional (poison
+everything, evict nothing — the no-op that reads as a fix) and drop the `terminateChild`
+call while still evicting. The settle is a bounded TICK LOOP rather than a wall-clock
+sleep, so it cannot flake on a slow runner.
+
+📌 **Three lessons, and the last two each invalidated a claim this document had made.**
 
 **A guard whose condition is never entered is a no-op that reads as a fix.** The first
-draft decided "is this session busy?" by scanning `activeTurnRoutes`. The test reported
-`evicted=0, poisoned=1` for a session whose turn had already drained — so the function
-would have poisoned every child and evicted none, i.e. done nothing beyond the freshness
-guard it exists to pre-empt. `session.activeTurn` is plain identity; the route delete is
-guarded on a RECOMPUTED key (`activeTurnRoutes.get(activeTurnRouteKey(options))?.turn ===
-turn`), and a key that does not recompute to the one used at insert leaves a route behind
-for an idle session.
+draft decided "is this session busy?" by scanning `activeTurnRoutes`. `session.activeTurn`
+is plain identity; the route delete is guarded on a RECOMPUTED key
+(`activeTurnRoutes.get(activeTurnRouteKey(options))?.turn === turn`), and a key that does
+not recompute to the one used at insert leaves a route behind for an idle session — so the
+routes lookup is the weaker signal and `activeTurn` is the one used.
+
+**But that difference is NOT covered, and this document claimed it was.** Substituting the
+routes lookup back in leaves the entire suite passing, including the new idle-eviction
+test: in every scenario it exercises, the key does recompute and the route entry is duly
+deleted. The `evicted=0, poisoned=1` reading was real but had the other cause above. A
+mutation test is the only thing that separates "my reasoning is sound" from "my test
+proves it" — and here the reasoning was sound while the test proved something else.
+
+**"Not covered because the harness cannot" deserves the same scrutiny as a positive
+claim.** The rejected-promise diagnosis was specific, confident, and wrong, and it closed
+off a path that needed one extra line to test. An impossibility claim about one's own test
+harness is an absence claim, and absence claims are the ones that escape verification.
 
 **A `replace` without an assert is a probe that cannot fail.** Three debugging runs were
 wasted on instrumentation that silently patched nothing, and the empty output was read as

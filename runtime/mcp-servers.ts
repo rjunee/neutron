@@ -153,15 +153,24 @@ export function isReservedMcpServerName(name: string): boolean {
  * prompt makes is that the owner can SEE what he is approving, and a difference he
  * cannot see is a difference he cannot check.
  *
- * Added, every one of them zero-advance or line-breaking: NEL (U+0085), SOFT HYPHEN
- * (U+00AD), ARABIC LETTER MARK (U+061C), MONGOLIAN VOWEL SEPARATOR (U+180E), LINE and
- * PARAGRAPH SEPARATOR (U+2028-U+2029), the whole U+2060-U+206F block (WORD JOINER, the
- * invisible math operators, the bidi isolates already listed, and the deprecated format
- * controls — taken as one range rather than three, so an unassigned code point in the
- * middle of it cannot be the one gap), the interlinear annotation marks
- * (U+FFF9-U+FFFB), and the TAG block (U+E0000-U+E007F), whose
- * characters are invisible by design and are the tag-smuggling vector. The `u` flag is
- * what lets that last range be written as a code point instead of a surrogate pair.
+ * Added, every one of them zero-advance or line-breaking: the C1 CONTROLS
+ * (U+0080-U+009F), SOFT HYPHEN (U+00AD), ARABIC LETTER MARK (U+061C), MONGOLIAN VOWEL
+ * SEPARATOR (U+180E), LINE and PARAGRAPH SEPARATOR (U+2028-U+2029), the whole
+ * U+2060-U+206F block (WORD JOINER, the invisible math operators, the bidi isolates
+ * already listed, and the deprecated format controls — taken as one range rather than
+ * three, so an unassigned code point in the middle of it cannot be the one gap), the
+ * interlinear annotation marks (U+FFF9-U+FFFB), and the TAG block (U+E0000-U+E007F),
+ * whose characters are invisible by design and are the tag-smuggling vector. The `u`
+ * flag is what lets that last range be written as a code point instead of a surrogate
+ * pair.
+ *
+ * C1 IS A RANGE FOR THE REASON U+2060-U+206F IS. An earlier revision banned only NEL
+ * (U+0085) out of that block, next to a DEL (U+007F) it also banned — so U+0080-U+0084
+ * and U+0086-U+009F were the gap, accepted by the validator and rendered as nothing by
+ * a browser. Two specs differing only by one of them hash differently (correctly) and
+ * printed identically, which is precisely the legibility hole the paragraph above
+ * exists to close; the block is contiguous with U+007F and no argv or path legitimately
+ * carries one, so it is taken whole rather than code point by code point.
  *
  * Deliberately a DENYLIST of invisibles rather than an allowlist of printable ASCII: a
  * path or an argument can legitimately carry non-ASCII text, and refusing all of it
@@ -169,7 +178,7 @@ export function isReservedMcpServerName(name: string): boolean {
  */
 // eslint-disable-next-line no-control-regex
 export const MCP_SERVER_BANNED_CHARS_RE =
-  /[\u0000-\u001F\u007F\u0085\u00AD\u061C\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/u
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/u
 
 /**
  * One installed MCP server, as stored and as displayed. Never carries a secret:
