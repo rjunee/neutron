@@ -326,9 +326,28 @@ const ATTACHMENT_TRANSCRIPT_MAX_CHARS = 4000
  * CONSTANT-surface change: it is present on EVERY turn, so the reuse guard below
  * is satisfied (a constant surface, just a larger one).
  *
+ * `WebSearch` + `WebFetch` are here because an assistant that cannot look anything
+ * up is a materially different product from one that can, and this surface is the
+ * ONLY thing that decides. Their absence was not a policy — nothing anywhere
+ * declined web access; the two names had simply never been added to this array, and
+ * the effect was invisible because a missing built-in produces no error, only an
+ * agent that says it cannot search.
+ *
+ * ⚠️ IT ALSO MADE AN APPROVAL PROMPT LIE. A ritual declaring `WebSearch` must be
+ * approved for `egress: 'web'` through a SEPARATE grant whose prompt says the ritual
+ * "may reach the public internet" — and the owner granted it for `kaizen`. But a
+ * ritual composes on THIS surface and cannot apply its own (`reminders/ritual-fire.ts`
+ * module header: the warm-session reuse guard would evict the session), so the tool
+ * was never present and the grant could never do anything. An approval prompt that
+ * overstates what is being granted costs more than a missing feature: it spends the
+ * credibility the entire gate depends on. The gate is now truthful in the only way
+ * that matters — the capability it names exists.
+ *
  * Constant across turns (the persistent substrate's reuse guard refuses to serve
  * a turn whose `--tools` surface differs from the warm REPL's, so a varying
- * surface would thrash the pool).
+ * surface would thrash the pool). Adding to this array is safe for that reason and
+ * that reason only: it is a bigger CONSTANT, not a varying one. The first turn after
+ * a deploy respawns the warm child once, as any deploy does.
  */
 export const LIVE_AGENT_TOOL_NAMES = [
   'Read',
@@ -339,6 +358,8 @@ export const LIVE_AGENT_TOOL_NAMES = [
   'Bash',
   'Skill',
   'Workflow',
+  'WebSearch',
+  'WebFetch',
 ] as const
 
 /**

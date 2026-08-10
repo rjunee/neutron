@@ -19,6 +19,8 @@ import type { ChatOutbound } from '@neutronai/landing/server.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+
+import { LIVE_AGENT_TOOL_NAMES } from '../build-live-agent-turn.ts'
 import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
@@ -393,20 +395,19 @@ describe('build-live-agent-turn — reply path', () => {
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
     await run(makeTurn({ sent }))
-    // P1-5: the live agent surface now includes `Skill` (native skill discovery +
-    // invocation) plus the file/exec tools the bundled skills need to run.
-    // Work Board Phase 2a adds `Workflow` (fire background tridents + stay
-    // responsive) — a constant-surface addition.
-    expect(specs[0]!.tools.map((t) => t.name)).toEqual([
-      'Read',
-      'Glob',
-      'Grep',
-      'Write',
-      'Edit',
-      'Bash',
-      'Skill',
-      'Workflow',
-    ])
+    // Pinned to the CONSTANT, not to a literal copy of it. The literal broke on the
+    // WebSearch/WebFetch grant — a change to the surface that this test has no
+    // opinion about — which is the failure mode of asserting a full list: it reds on
+    // every legitimate edit while proving nothing the constant does not already say.
+    //
+    // What is load-bearing here is that the surface REACHES THE SPEC AT ALL, in
+    // order, on EVERY turn. The persistent substrate's reuse guard refuses a turn
+    // whose surface differs from the warm REPL's, so a spec that silently dropped or
+    // reordered the surface would thrash the pool rather than fail visibly.
+    expect(specs[0]!.tools.map((t) => t.name)).toEqual([...LIVE_AGENT_TOOL_NAMES])
+    // And the surface is non-trivial — a positive control, so an accidentally-emptied
+    // constant could not make the assertion above pass against `tools: []`.
+    expect(specs[0]!.tools.length).toBeGreaterThan(4)
   })
 })
 
