@@ -44,7 +44,10 @@
 
 import { createLogger } from '@neutronai/logger'
 import { SupervisedLoop } from '@neutronai/loop/index.ts'
-import type { CredentialUsagePayload } from '@neutronai/contracts/credential-usage.ts'
+import type {
+  CredentialUsagePayload,
+  CredentialUsageReading,
+} from '@neutronai/contracts/credential-usage.ts'
 import {
   probeCredentialUsage,
   type CredentialUsageProbeOutcome,
@@ -113,6 +116,19 @@ export interface CredentialUsageMonitorDeps {
    * it (`open/composer.ts`) because an unwatched lapse is the defect.
    */
   onStanding?: CredentialStandingObserver
+  /**
+   * Told every reading, so the series outlives the 60-second tick.
+   *
+   * Optional for the same reason `onStanding` is: the monitor stays usable as a pure
+   * meter. The production composer wires it, because a measurement taken and discarded
+   * is the reason the product could say how full a window was and never whether that
+   * was climbing.
+   *
+   * Called ONLY for a successful measurement. An unauthorized or failed probe learned
+   * nothing about utilisation, and writing a row for it would put a gap in the series
+   * indistinguishable from a genuine zero.
+   */
+  onSample?: (reading: CredentialUsageReading) => void | Promise<void>
   /** `SupervisedLoop` timer seams, threaded straight through for tests. */
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
@@ -130,6 +146,9 @@ export class CredentialUsageMonitor {
   private readonly probe: (token: string) => Promise<CredentialUsageProbeOutcome>
   private readonly credentialDeps: ActiveCredentialDeps
   private readonly onStanding: CredentialStandingObserver | undefined
+  private readonly onSample:
+    | ((reading: CredentialUsageReading) => void | Promise<void>)
+    | undefined
 
   /** Last SUCCESSFUL measurement, if there has ever been one. */
   private cached: CachedReading | null = null
@@ -149,6 +168,7 @@ export class CredentialUsageMonitor {
         probeCredentialUsage(token, probeDeps ?? {}))
     this.credentialDeps = deps.credentialDeps ?? {}
     this.onStanding = deps.onStanding
+    this.onSample = deps.onSample
     this.loop = new SupervisedLoop({
       name: 'credential-usage',
       intervalMs: USAGE_POLL_INTERVAL_MS,
@@ -197,6 +217,7 @@ export class CredentialUsageMonitor {
         this.cached = {
           payload: { available: true, measured_at: this.now(), ...outcome.reading },
         }
+        await this.persist(outcome.reading)
         await this.report('healthy')
         return
       case 'no-windows':
@@ -235,6 +256,26 @@ export class CredentialUsageMonitor {
    * not commit until delivery succeeds, so a swallowed throw is re-attempted on
    * the next tick rather than lost).
    */
+  /**
+   * Hand the reading to the sample sink, fail-soft.
+   *
+   * Same posture as {@link report} and for the same reason: the sink touches a database
+   * and can throw, the METER is this monitor's contract and has already been updated by
+   * the time this runs, and repeated tick failures escalate the loop. Losing one row
+   * from a 60-second series costs nothing; losing the meter costs the feature.
+   */
+  private async persist(reading: CredentialUsageReading): Promise<void> {
+    const sink = this.onSample
+    if (sink === undefined) return
+    try {
+      await sink(reading)
+    } catch (err) {
+      moduleLog.warn('usage_sample_persist_threw', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
   private async report(standing: CredentialStanding): Promise<void> {
     const observer = this.onStanding
     if (observer === undefined) return

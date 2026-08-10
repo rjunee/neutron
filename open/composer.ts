@@ -170,6 +170,7 @@ import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interv
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
+import { UsageSamplesStore } from '@neutronai/persistence/usage-samples-store.ts'
 import { readTridentPhaseModels, writeTridentPhaseModels } from '@neutronai/gateway/storage/owner-metadata.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
@@ -3853,9 +3854,21 @@ export function buildOpenGraphComposer(
     // durably (it is waiting for him with nothing connected), exactly once per
     // lapse, and never on a transient network failure. See
     // `credential-lapse-notice.ts` for why each of those three is load-bearing.
+    const usageSamplesStore = new UsageSamplesStore({ db })
     const credentialUsageMonitor = new CredentialUsageMonitor({
       env,
       onStanding: createCredentialLapseNotifier({ deliver, topic_id: ownerNoticeTopic }),
+      // PERSIST every reading, so the series outlives the 60-second tick. Before this
+      // the monitor measured continuously and remembered nothing: it could say a window
+      // was 72% full and never whether that was climbing or flat.
+      //
+      // The prune rides on the SAME call rather than a separate schedule — a cleanup
+      // job that can fall out of step with its writer eventually either grows forever
+      // or deletes something in use. It is cheap: one indexed DELETE per minute.
+      onSample: async (reading): Promise<void> => {
+        await usageSamplesStore.record({ pool: 'anthropic', ...reading })
+        await usageSamplesStore.prune()
+      },
     })
     realmodeCleanups.push(async () => {
       try {
