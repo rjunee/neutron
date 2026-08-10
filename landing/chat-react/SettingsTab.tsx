@@ -43,6 +43,13 @@ import {
 import { oauthServiceTitle } from './integrations-oauth-view.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
 import {
+  WebPhaseModelsClient,
+  applyRowEdit,
+  effectiveRow,
+  type PhaseModelsPayload,
+  type PhaseOverride,
+} from './phase-models-client.ts'
+import {
   WebVoiceTranscriptionClient,
   describeJob,
   formatBytes,
@@ -115,6 +122,74 @@ export function SettingsTab({
     () => new WebCodexCredentialClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
     [config.origin, config.token, withSignal],
   )
+
+  // Per-phase build models — which model + reasoning effort runs each phase.
+  const phaseModelsClient = useMemo(
+    () => new WebPhaseModelsClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
+    [config.origin, config.token, withSignal],
+  )
+
+  // ── per-phase build models ──
+  const [phaseModels, setPhaseModels] = useState<PhaseModelsPayload | null>(null)
+  const [phaseOverrides, setPhaseOverrides] = useState<Record<string, PhaseOverride>>({})
+  const [phaseBusy, setPhaseBusy] = useState(false)
+  const [phaseError, setPhaseError] = useState<string | null>(null)
+  const [phaseSaved, setPhaseSaved] = useState(false)
+
+  const loadPhaseModels = useCallback((): void => {
+    void phaseModelsClient
+      .load()
+      .then((next) => {
+        if (!mountedRef.current) return
+        setPhaseModels(next)
+        setPhaseOverrides(next.overrides)
+        setPhaseError(null)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        // A failed LOAD is reported, not rendered as an empty pipeline: zero phases
+        // would read as "this build has no phases", which the owner cannot act on.
+        setPhaseModels(null)
+        setPhaseError(err instanceof Error ? err.message : 'could not load the build settings')
+      })
+  }, [phaseModelsClient])
+
+  const editPhase = useCallback(
+    (phaseKey: string, patch: { model?: string; effort?: string }): void => {
+      setPhaseModels((current) => {
+        if (current === null) return current
+        const phase = current.phases.find((p) => p.key === phaseKey)
+        if (phase !== undefined) setPhaseOverrides((prev) => applyRowEdit(prev, phase, patch))
+        return current
+      })
+      // A pending edit invalidates the confirmation — leaving it up would say the
+      // newest change is already stored.
+      setPhaseSaved(false)
+    },
+    [],
+  )
+
+  const savePhaseModels = useCallback((): void => {
+    if (phaseBusy) return
+    setPhaseBusy(true)
+    setPhaseError(null)
+    void phaseModelsClient
+      .save(phaseOverrides)
+      .then((next) => {
+        if (!mountedRef.current) return
+        setPhaseModels(next)
+        setPhaseOverrides(next.overrides)
+        setPhaseSaved(true)
+        setPhaseBusy(false)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        // The local edits are KEPT so a rejected value can be corrected in place;
+        // discarding them would punish a typo by throwing away the rest of the work.
+        setPhaseError(err instanceof Error ? err.message : 'could not save the build settings')
+        setPhaseBusy(false)
+      })
+  }, [phaseModelsClient, phaseOverrides, phaseBusy])
 
   // ── credentials ──
   const [projectCreds, setProjectCreds] = useState<Rec[]>([])
@@ -477,8 +552,9 @@ export function SettingsTab({
     loadAccounts()
     loadSettings()
     loadCodex()
+    loadPhaseModels()
     loadAsr()
-  }, [loadCreds, loadAccounts, loadSettings, loadCodex, loadAsr, projectId])
+  }, [loadCreds, loadAccounts, loadSettings, loadCodex, loadPhaseModels, loadAsr, projectId])
 
   const addCredential = useCallback((): void => {
     const svc = service.trim()
@@ -856,6 +932,101 @@ export function SettingsTab({
             </button>
           </div>
         </form>
+      </section>
+
+      {/* ── Code generation: which model runs each build phase ───────────────
+          Machine-scoped, like the voice setting below: which model runs a build is
+          a property of the owner's subscriptions and quota, not of the project
+          being built. The phase list is SERVER-SUPPLIED — labels, descriptions,
+          defaults and legal values all arrive in the payload — so a phase added to
+          the engine appears here with no client change, and the phone and the web
+          cannot disagree about what the phases are. */}
+      <section className="cset-section" aria-label="Code generation">
+        <h2 className="cset-h">Code generation</h2>
+        <p className="cset-sub">
+          Which model runs each part of a build, and how hard it thinks. Changes apply to
+          the next build — nothing restarts. A dot marks the default; choosing it clears
+          the override, so the phase keeps following the default if that ever changes.
+        </p>
+
+        {phaseError !== null ? (
+          <p className="cset-error" data-testid="phase-models-error">
+            {phaseError}
+          </p>
+        ) : null}
+        {phaseSaved && phaseError === null ? (
+          <p className="cset-saved" data-testid="phase-models-saved">
+            Saved
+          </p>
+        ) : null}
+
+        {phaseModels === null ? (
+          <div className="cset-empty">
+            {phaseError === null ? 'Loading…' : 'Build settings unavailable.'}
+          </div>
+        ) : (
+          <>
+            {phaseModels.phases.map((phase) => {
+              const row = effectiveRow(phase, phaseOverrides)
+              return (
+                <fieldset
+                  className="cset-field"
+                  key={phase.key}
+                  data-testid={`phase-${phase.key}`}
+                >
+                  <legend className="cset-label">
+                    {phase.label}
+                    {row.overridden ? (
+                      <em data-testid={`phase-${phase.key}-changed`}> — changed</em>
+                    ) : null}
+                  </legend>
+                  <p className="cset-sub">{phase.description}</p>
+                  <div className="cset-chiprow">
+                    <span className="cset-label">Model</span>
+                    {phaseModels.model_tiers.map((tier) => (
+                      <button
+                        key={tier}
+                        type="button"
+                        className={`cset-chip${row.model === tier ? ' cset-chip-on' : ''}`}
+                        aria-pressed={row.model === tier}
+                        data-testid={`phase-${phase.key}-model-${tier}`}
+                        onClick={() => editPhase(phase.key, { model: tier })}
+                      >
+                        {tier}
+                        {phase.default.model === tier ? ' ·' : ''}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="cset-chiprow">
+                    <span className="cset-label">Effort</span>
+                    {phaseModels.efforts.map((eff) => (
+                      <button
+                        key={eff}
+                        type="button"
+                        className={`cset-chip${row.effort === eff ? ' cset-chip-on' : ''}`}
+                        aria-pressed={row.effort === eff}
+                        data-testid={`phase-${phase.key}-effort-${eff}`}
+                        onClick={() => editPhase(phase.key, { effort: eff })}
+                      >
+                        {eff}
+                        {phase.default.effort === eff ? ' ·' : ''}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+              )
+            })}
+            <button
+              type="button"
+              className="cset-btn"
+              disabled={phaseBusy}
+              data-testid="phase-models-save"
+              onClick={savePhaseModels}
+            >
+              {phaseBusy ? 'Saving…' : 'Save'}
+            </button>
+          </>
+        )}
       </section>
 
       {/* ── Voice transcription ──────────────────────────────────────────────

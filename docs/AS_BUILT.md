@@ -8327,3 +8327,30 @@ DEFERRED AND NAMED: the web half (`SettingsTab.tsx`) — same endpoint, no new s
 but genuinely not done.
 
 Detail: `docs/as-built/2026-08-09-codegen-settings-mobile.md`.
+
+## 2026-08-09 — the build-phase models are settable on the web too
+
+Closes the half #163 named as deferred: a Code generation section in the web Settings tab
+over the same endpoint, mirroring the three decisions (server-supplied phase list;
+choosing the default CLEARS the override; a rejected save KEEPS the edits and shows the
+server message verbatim).
+
+The interesting part is a PARITY test. `effectiveRow`/`applyRowEdit` now exist twice
+because each client bundle is free of the other's workspace — correct, and also the risk,
+since those two functions encode product DECISIONS. A divergence is the failure nobody
+reports: each surface stays self-consistent and the owner just gets a different answer
+depending on the device. The copies are executed side by side over ten edit shapes and
+seven display shapes.
+
+WHERE it lives was not the first attempt: it began in `landing/` importing the mobile
+client relatively, the lint rule caught it, and the workspace specifier then failed to
+resolve — because `landing` does not depend on `@neutronai/app` and MUST NOT, that
+independence being why the helpers are duplicated. `gateway` declares both, and already
+hosts `doc-links-parity` for the same reason.
+
+Four mutants each caught, two of which SURVIVED the first pass (the web component's error
+behaviour was untested — found by mutation, not by reading). Also fixed a CSS token that
+would have shipped an invisible chip border: `--hairline` is not a token here, `--border`
+is, and it is defined for both themes.
+
+Detail: `docs/as-built/2026-08-09-codegen-settings-web.md`.
