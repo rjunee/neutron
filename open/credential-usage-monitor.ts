@@ -128,10 +128,23 @@ export interface CredentialUsageMonitorDeps {
    * nothing about utilisation, and writing a row for it would put a gap in the series
    * indistinguishable from a genuine zero.
    */
-  onSample?: (reading: CredentialUsageReading) => void | Promise<void>
+  onSample?: (reading: PersistedSample) => void | Promise<void>
   /** `SupervisedLoop` timer seams, threaded straight through for tests. */
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
+}
+
+/**
+ * A reading plus the account it came from.
+ *
+ * `account_label` is null whenever nothing can name the account, which is the
+ * ordinary case: the credential is swapped from outside this process. It is a
+ * SEPARATE type from `CredentialUsageReading` on purpose — the reading is what the
+ * probe measured and travels to the meter, while the label is context about WHERE
+ * it came from and only the series needs it.
+ */
+export interface PersistedSample extends CredentialUsageReading {
+  account_label: string | null
 }
 
 interface CachedReading {
@@ -146,9 +159,7 @@ export class CredentialUsageMonitor {
   private readonly probe: (token: string) => Promise<CredentialUsageProbeOutcome>
   private readonly credentialDeps: ActiveCredentialDeps
   private readonly onStanding: CredentialStandingObserver | undefined
-  private readonly onSample:
-    | ((reading: CredentialUsageReading) => void | Promise<void>)
-    | undefined
+  private readonly onSample: ((reading: PersistedSample) => void | Promise<void>) | undefined
 
   /** Last SUCCESSFUL measurement, if there has ever been one. */
   private cached: CachedReading | null = null
@@ -217,7 +228,10 @@ export class CredentialUsageMonitor {
         this.cached = {
           payload: { available: true, measured_at: this.now(), ...outcome.reading },
         }
-        await this.persist(outcome.reading)
+        // The label rides with the reading it describes: `credential` was resolved
+        // in the SAME call that produced this token, so the pair cannot disagree
+        // about which account was measured.
+        await this.persist({ ...outcome.reading, account_label: credential.account_label })
         await this.report('healthy')
         return
       case 'no-windows':
@@ -264,7 +278,7 @@ export class CredentialUsageMonitor {
    * the time this runs, and repeated tick failures escalate the loop. Losing one row
    * from a 60-second series costs nothing; losing the meter costs the feature.
    */
-  private async persist(reading: CredentialUsageReading): Promise<void> {
+  private async persist(reading: PersistedSample): Promise<void> {
     const sink = this.onSample
     if (sink === undefined) return
     try {

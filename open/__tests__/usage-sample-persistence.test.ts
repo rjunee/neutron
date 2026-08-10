@@ -48,6 +48,45 @@ describe('the monitor actually writes to it — the wiring, not the store', () =
    * sink, and only on a successful probe) and one on the composer's source (it supplies
    * a sink at all).
    */
+  test('THE ACCOUNT LABEL RIDES WITH THE READING, and lands on the row', async () => {
+    // The column existed and was null on every row for a release. A label that
+    // resolves correctly and is then dropped on the way to the sink is the exact
+    // "built but never carried" shape — so this asserts the value ARRIVES, not that
+    // the resolver works (which has its own tests).
+    const samples: Array<Record<string, unknown>> = []
+    const monitor = new CredentialUsageMonitor({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'tok' } as never,
+      now: () => NOW,
+      credentialDeps: { readLabel: () => 'acct-2' },
+      probe: async () => ({ kind: 'ok', reading: { session: 0.4, weekly: 0.2 } }) as never,
+      onSample: async (reading) => {
+        samples.push(reading as unknown as Record<string, unknown>)
+        await store.record({ pool: 'anthropic', ...reading })
+      },
+    })
+    await monitor.measureOnce()
+    expect(samples[0]?.['account_label']).toBe('acct-2')
+    // And on the row, because the sink writing it somewhere else would be the same
+    // defect one layer down.
+    expect(store.latest('anthropic')?.account_label).toBe('acct-2')
+  })
+
+  test('an UNLABELLED credential still records, with a null label', async () => {
+    // The ordinary case. It must not become a row that fails to write, or a label
+    // invented to fill the column.
+    const monitor = new CredentialUsageMonitor({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'tok' } as never,
+      now: () => NOW,
+      credentialDeps: { readLabel: () => null },
+      probe: async () => ({ kind: 'ok', reading: { session: 0.4, weekly: 0.2 } }) as never,
+      onSample: async (reading) => {
+        await store.record({ pool: 'anthropic', ...reading })
+      },
+    })
+    await monitor.measureOnce()
+    expect(store.latest('anthropic')?.account_label).toBeNull()
+  })
+
   test('a SUCCESSFUL probe reaches the sink, and lands in the series', async () => {
     const samples: unknown[] = []
     const monitor = new CredentialUsageMonitor({

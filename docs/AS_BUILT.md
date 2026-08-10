@@ -8835,3 +8835,24 @@ test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the fail
 specific: a guard that exists in TWO independently-built copies gets one copy's evidence
 pasted onto the other's test, and the untested copy is then defended by a citation. The
 control is mechanical — run the named mutant and read WHICH tests go red, not how many.
+
+## 2026-08-09 — Naming the account behind a usage reading
+
+The `account_label` column has been null on every row since it was created. This reads an
+optional `.credentials.meta.json` sidecar beside the credential, written by whatever swaps
+it, and uses the label ONLY when its fingerprint matches the token actually resolved.
+
+A missing label is harmless — it renders "active credential". A STALE one is not: it would
+attach the previous account's name to the current account's reading and send the owner to
+move quota away from an account that was never under load. Mismatch degrades to null.
+
+Token and label come from ONE `resolveActiveCredential` call, so a swap landing between two
+calls cannot pair one account's reading with another's name.
+
+The instructive mutant: dropping the fingerprint check fails immediately, but making the
+MONITOR persist a null label while the resolver stayed correct passed everything — "resolved
+but never carried", one layer along from "built but never wired". Now covered.
+
+Nothing writes a sidecar yet, so every label is still null and behaviour is unchanged.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
