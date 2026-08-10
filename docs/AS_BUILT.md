@@ -8411,3 +8411,22 @@ tests had to move from `persistence/` to `open/__tests__/` — `open` depends on
 `persistence`, never the reverse, and the lint refusal was the architecture talking.
 
 Detail: `docs/as-built/2026-08-09-usage-sample-series.md`.
+
+## 2026-08-09 — Usage dashboard: the endpoint and the web card
+
+`GET /api/app/usage/dashboard` + the Model usage card in web Settings. The endpoint
+went into the EXISTING usage surface rather than a new one: same owner gate, same
+subject, and a second near-identical surface is how one stops being wired. The cost
+of that is a prefix hazard — the meter's path is a strict prefix of the dashboard's —
+pinned in both directions.
+
+What the card refuses to say is the substance. An unreachable route draws no bar
+(a 0% bar invents a measurement); a null pace renders as an em dash, never `0.0×`;
+a null projection OMITS its row, because null is the common good case and a
+permanent dash trains the eye to hunt for an absent warning; and a null account
+label reads "active credential" and never guesses.
+
+The wiring test now checks the READ half separately from the write half — the write
+assertion had passed for a whole PR during which nothing read the series.
+
+Detail: `docs/as-built/2026-08-09-usage-dashboard-card.md`.

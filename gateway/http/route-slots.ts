@@ -528,8 +528,10 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_activity_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
-  // 0h1b3. Active-credential usage meter — `GET /api/app/usage`. The two clients
-  //        draw the tab-bar divider from this; unknown is a 200, not a 404.
+  // 0h1b3. Active-credential usage — `GET /api/app/usage` (the snapshot the two
+  //        clients draw the tab-bar divider from; unknown is a 200, not a 404) and
+  //        `GET /api/app/usage/dashboard` (the same windows off the persisted
+  //        series, with pace). ONE slot for both: same owner gate, same subject.
   slot({
     key: 'appUsage',
     rung: 'app-usage',

@@ -208,7 +208,8 @@ export const MOUNTED_SLOTS: readonly RouteSlotServedEntry[] = [
   {
     rung: 'app-usage',
     composition: 'app_usage_surface',
-    serves: 'the credential usage meter under the tab bar',
+    serves:
+      'the credential usage meter under the tab bar, and the usage dashboard card in Settings',
   },
   {
     rung: 'app-system-notice',
