@@ -137,7 +137,7 @@ export interface ReminderLlm {
  * session instead of destroying it. The persistent-REPL reuse guard compares the
  * requested `--tools` surface against the one the warm child was spawned with and,
  * on a mismatch, EVICTS the child and respawns it
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). This dispatcher
+ * (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`). This dispatcher
  * composes on `liveAgentSubstrate` — the SAME substrate the live chat uses, and
  * the only one carrying the native-MCP tool bridge — so a narrower surface here
  * would tear down the owner's chat REPL on every fire, and his next chat turn

@@ -367,7 +367,9 @@ export const LIVE_AGENT_TOOL_NAMES = [
  * PROPERTY OF THE SESSION, not of this one caller, and every other turn that
  * composes on the same warm session must present the identical surface or the
  * reuse guard evicts and respawns the child
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). The fired-reminder
+ * (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts` —
+ * cited by NAME rather than by line, because adding the installed-MCP-server guard
+ * beside it moved the line and a stale citation reads as authoritative). The fired-reminder
  * dispatcher composes on this very substrate, so the composer threads this
  * constant into it rather than letting it default to a narrower list.
  */

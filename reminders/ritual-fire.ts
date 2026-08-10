@@ -47,7 +47,7 @@
  * owner's warm pooled session, and that session's `--tools` allow-list is fixed
  * at SPAWN: the persistent-REPL reuse guard EVICTS AND RESPAWNS a warm child
  * whose requested surface differs from the one it was spawned with
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). Passing a
+ * (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`). Passing a
  * per-ritual surface would therefore not restrict the ritual — it would destroy
  * and rebuild the owner's live chat REPL on every fire, and leave the NEXT chat
  * turn to evict it right back. So `tool_surface` is what the owner is SHOWN and

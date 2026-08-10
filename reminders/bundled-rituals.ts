@@ -70,7 +70,7 @@ export const BUNDLED_RITUAL_TEMPLATES_DIR: string = join(HERE, 'rituals')
  * own `tool_surface`. A ritual now composes on the OWNER'S OWN warm session, whose
  * `--tools` surface includes `Bash`, `Write` and `Edit`, and whose surface cannot be
  * narrowed per fire without evicting the session
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). The `description` is
+ * (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`). The `description` is
  * rendered verbatim into the approval prompt, and that prompt is now the ONLY
  * security boundary — so a description promising containment the runtime does not
  * provide is not a stale comment, it is the gate lying to the owner at the exact

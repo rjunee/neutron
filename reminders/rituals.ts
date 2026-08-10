@@ -124,7 +124,7 @@ const WEB_TOOLS = new Set(['WebSearch', 'WebFetch'])
  * owner's WARM chat session, which is spawned with `Bash`, `Write` and `Edit` in its
  * `--tools` surface; a ritual's own `tool_surface` cannot be applied per fire,
  * because the persistent-REPL reuse guard would evict and respawn that session
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). So a ritual whose
+ * (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`). So a ritual whose
  * declared surface is `['Read','Glob','Grep']` still executes somewhere Bash exists.
  *
  * It is KEPT anyway, deliberately: it stops a ritual being registered and approved

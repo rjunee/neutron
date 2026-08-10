@@ -8,7 +8,7 @@
  * uses and the only one wiring the native-MCP tool bridge. The persistent-REPL pool
  * compares each request's `--tools` surface against the one the warm child was
  * spawned with and, on a MISMATCH, evicts the child and respawns it
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`; the live-agent
+ * (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`; the live-agent
  * docblock says outright that "a varying surface would thrash the pool"). So a
  * reminder that composes with a narrower surface does not get a narrower sandbox —
  * it tears down the owner's live chat REPL, and his next chat turn tears it down

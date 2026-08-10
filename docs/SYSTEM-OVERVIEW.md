@@ -3858,7 +3858,7 @@ ritual content in chat.
   mechanical consequence, not a preference. A ritual composes on the owner's warm
   pooled session, whose `--tools` allow-list is fixed at SPAWN; the persistent-REPL
   reuse guard EVICTS AND RESPAWNS a warm child whose requested surface differs
-  (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). Passing a per-ritual
+  (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`). Passing a per-ritual
   surface would not restrict the ritual — it would destroy the owner's live chat
   REPL on every fire. So fired reminders present the LIVE-CHAT surface
   (`LIVE_AGENT_TOOL_NAMES`, threaded by the composer as `tool_names`), and the

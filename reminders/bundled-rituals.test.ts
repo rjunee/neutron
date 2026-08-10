@@ -419,7 +419,7 @@ describe('bundled ritual approved fire — composes on the shared session and po
     // surface — NOT the ritual def's narrower ['Read','Glob','Grep']. That is the
     // #504 fix, not a leak: the ritual composes on the owner's WARM session, and
     // the persistent pool evicts+respawns a warm child whose requested surface
-    // differs from the spawned one (spawn.ts:824,837). Presenting the ritual's own
+    // differs from the spawned one (the `freshSurface` guard in spawn.ts). Presenting the ritual's own
     // surface would tear the owner's chat REPL down on every fire AND still not
     // restrict the ritual. `tool_surface` is now the APPROVAL declaration; the
     // session is the runtime.

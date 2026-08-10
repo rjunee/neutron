@@ -6,7 +6,7 @@
  * REPL, and the ONLY substrate wiring the native-MCP tool bridge, which is what lets
  * a ritual reach a Core at all. The persistent pool evicts and respawns a warm child
  * whose requested `--tools` surface differs from the one it was spawned with
- * (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`), so composing with a
+ * (the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`), so composing with a
  * NARROWER surface does not sandbox the reminder — it destroys the owner's live chat
  * session on every fire, and his next chat turn destroys it right back.
  *

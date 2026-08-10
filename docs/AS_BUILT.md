@@ -184,7 +184,7 @@ pin (#361), the approval records, and the `code_ritual_runs` ledger.
 mechanical consequence.** A ritual composes on the owner's warm pooled session,
 whose `--tools` allow-list is fixed at SPAWN, and the persistent-REPL reuse guard
 EVICTS AND RESPAWNS a warm child whose requested surface differs
-(`runtime/adapters/claude-code/persistent/spawn.ts:824,837`). Passing a per-ritual
+(the `freshSurface` guard in `runtime/adapters/claude-code/persistent/spawn.ts`). Passing a per-ritual
 surface would not restrict the ritual — it would destroy the owner's live chat REPL
 on every fire and his next chat turn would destroy it again. This also exposed a
 PRE-EXISTING defect: `reminders/dispatcher.ts` had its own narrower

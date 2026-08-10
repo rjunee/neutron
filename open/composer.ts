@@ -2504,7 +2504,9 @@ export function buildOpenGraphComposer(
       // tidiness. A fired reminder composes on `liveAgentSubstrate`, the owner's
       // WARM chat REPL, and the persistent pool's reuse guard EVICTS AND RESPAWNS a
       // warm child whose requested `--tools` surface differs from the one it was
-      // spawned with (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`).
+      // spawned with (the `freshSurface` guard in
+      // `runtime/adapters/claude-code/persistent/spawn.ts`, cited by name — the line
+      // moved when the installed-MCP-server guard landed beside it).
       // The dispatcher's own default is the narrower ['Read','Glob','Grep'], so
       // leaving it unset meant every fired reminder tore down the owner's live chat
       // REPL and his next chat turn tore it down again. Passing the same surface is
