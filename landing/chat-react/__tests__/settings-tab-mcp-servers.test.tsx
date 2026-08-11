@@ -103,7 +103,7 @@ function row(over: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 function payload(servers: Array<Record<string, unknown>>): Response {
-  return json({ ok: true, servers, reserved_names: ['neutron'], max_servers: 24 })
+  return json({ ok: true, servers, reserved_names: ['neutron'], max_servers: 10 })
 }
 
 async function mount(handler: Handler) {
