@@ -291,12 +291,36 @@ proof that the two tests cover different things.
 - **Backup diff viewer.** Added/deleted/changed lines were pinned pastels
   (`#bbf7d0` 1.21, `#fecaca` 1.45, `#bfdbfe` 1.42 on white) — gone, not dim. Now the
   `success` / `danger` / `info` tokens.
-- **Unwrapped-act warnings.** `MountedScreen.unmount()` called `root.unmount()`
-  outside `act`, logging a warning on every teardown. Noise like that is what a real
-  warning has to be spotted among.
+- **Unwrapped-act warnings: NOT fixed, and the attempt is recorded.** Wrapping
+  `MountedScreen.unmount()` in `act` silences them and took the 18-file
+  device-harness set from 138 pass / 10 fail to **53 pass / 95 fail**; reverting
+  restored the baseline exactly. The harness runs several files per PROCESS against
+  one shared happy-dom, so an `act` scope opened during teardown interleaves with
+  the next file's mount. The warning stays; the measurement is in the docblock at
+  the call site. Right about the mechanism, wrong about the content — the real fix
+  is process-per-file isolation, not a wrapper there.
 - **A stale comment.** The web light-theme block said it used Apple's `#007AFF`; the
   code has never used it here (`#1064cc`), and `#007AFF` would fail AA under white
   ink at 4.02.
+
+### A pre-existing red this lane neither caused nor fixed
+
+`channels/__tests__/button-store.test.ts` ("two rows minted in the SAME ms resolve to
+the LAST-inserted row") times out at 5000ms. Reproduced identically on `origin/main`,
+on this branch's round-1 commit, and on its HEAD — 38 pass / 1 fail at all three — so
+it is not this work's and not a flake. This branch touches only `app/`, `landing/` and
+`docs/`, so `channels` is outside its lane; flagged rather than fixed. It is a
+TIMEOUT, so it may be machine-speed-dependent.
+
+### How the test signal was actually established
+
+Worth writing down because the obvious method is wrong here: `bun test app/__tests__`
+in ONE process reports ~200 failures on an untouched tree. Several app tests install
+process-global `mock.module('react-native', …)` fakes and the device harness registers
+a happy-dom for the whole process, so a single-process directory run measures
+interference rather than correctness — which is exactly why `scripts/run-tests.sh`
+chunks and why the device-harness lane exists. Every claim here rests on that runner,
+or on running an identical file set at the baseline commit and diffing the counts.
 
 ### Still not covered
 
