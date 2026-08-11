@@ -8550,3 +8550,38 @@ covered too: it must not clear a status on its way past.
 📌 **The first draft of these tests went in the wrong file.** `trident/terminate.test.ts`
 uses a FAKE store, so a SQL-level fix is invisible there — the tests would have passed
 without exercising the change at all. Test the SQL where the SQL lives.
+
+**Review pass (3-lane panel) added two cases and corrected one claim above.**
+
+The blast-radius question resolved clean: the only production path into
+`terminalTransition` is `terminate.ts:143`, its four callers read `.phase`/`.failure_reason`
+only, and no reader of `subagent_status` exists outside
+`trident/{orchestrator,state-machine,store,inner-loop-sim}.ts`. The tick loop is a separate
+terminal writer (`saveIfActive`), so the hang watchdog and orphan recovery — which set the
+column explicitly in their outcome — are untouched.
+
+Two gaps the original 6 cases left:
+
+1. **The SHORT `params` branch was unpinned.** Omitting `failure_reason` makes `params` one
+   element shorter, and the board X-cancel (`work-board-surface.ts:531`) and `/code stop`
+   (`code-command.ts:281`) BOTH terminate without a reason — two of the four callers take
+   the branch no test covered. It binds correctly, but nothing held it there. Now pinned
+   column-by-column, killed by a mutant that pushes the parameter unconditionally.
+
+2. **The stated reason the `'running'`-only restriction is load-bearing is not the real
+   one.** The comment credits #143's harvest gate, but `step()` no-ops on an already-terminal
+   phase (`orchestrator.ts:680-683`), so that gate is unreachable once the row is terminal.
+   The path where preserving `'crashed'` actually bites is `update()` — the ONE writer with
+   no `phase NOT IN (terminal)` guard, whose `subagent_status IS NOT 'crashed'` veto
+   (`store.ts:447-449`) is all that latches a crash on a terminal row. Nulling
+   unconditionally would lift that veto. The restriction is right; the justification was
+   aimed at the wrong mechanism, so a future "simplify to NULL" could have cleared the
+   cited-but-unreachable gate and still broken the real one.
+
+Both `'running'`-clearing guards elsewhere are also gated on `phase NOT IN (terminal)`
+(`store.ts:411`, `:638`), so clearing the claim at terminal time makes no guard unreachable:
+`crashRunningByLauncher` could never sweep a terminal row regardless.
+
+📌 **A placeholder/parameter arity mismatch is LOUD, not silent** — sqlite throws, and the
+mutant that introduced one reddened eleven tests. The dangerous shape is a same-count
+REORDER, which is why the new case asserts each column separately instead of just the status.
