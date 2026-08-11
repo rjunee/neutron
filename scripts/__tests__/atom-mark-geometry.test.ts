@@ -85,6 +85,12 @@ function drawing(source: string): string {
 interface Pixels {
   readonly width: number;
   readonly height: number;
+  /**
+   * Samples per pixel in the FILE: 1 greyscale, 3 RGB, 4 RGBA. Exposed because "has an
+   * alpha channel" is a property of the encoding, not of the sample values — an RGBA
+   * file whose every pixel is opaque is still an RGBA file, and iOS rejects the channel.
+   */
+  readonly channels: number;
   /** `[r, g, b, a]`, alpha 255 for images with no alpha channel. */
   at(x: number, y: number): [number, number, number, number];
 }
@@ -157,6 +163,7 @@ function decodePng(buf: Buffer): Pixels {
   return {
     width,
     height,
+    channels,
     at(x, y) {
       const i = y * stride + x * channels;
       if (channels === 1) {
@@ -674,6 +681,14 @@ describe('the COMMITTED icons look like the mark, not merely cite it', () => {
       ['icon.png', ios()],
       ['apple-touch-icon.png', appleTouch()],
     ] as const) {
+      // NO ALPHA CHANNEL AT ALL, which is a stronger and different statement from "every
+      // pixel is opaque" — and it is the one the docstring in gen-app-icons.py makes.
+      // icon.png shipped as RGBA-with-everything-opaque until 2026-08-11, so the
+      // every-pixel check below passed over exactly the file that did not satisfy the
+      // constraint; without this line, reverting the generator's `.convert("RGB")` is
+      // invisible here.
+      expect(image.channels, `${label} samples per pixel (3 = RGB, no alpha)`).toBe(3);
+
       let transparent = 0;
       for (let y = 0; y < image.height; y++) {
         for (let x = 0; x < image.width; x++) {
