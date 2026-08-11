@@ -8996,47 +8996,93 @@ failed, so this is not a four-lane APPROVE and should not be read as one.
 The owner saw the chat claim `▸ On the Work Board: "P1 — email pipeline …"` beside a WORK
 panel reading `No work tracked yet.` — and reasonably called it a lie.
 
-**There was no board bug.** The agent wrote to the project board it was chatting in (scope
-is derived server-side and unspoofable, `work-board/agent-tool.ts:15-25`), the live push
-was wired (`open/composer.ts:3547-3549`), the read was correctly scoped. The panel he was
-watching was a **different board**, and it was truthful about the board it showed. Two
-boards side by side, and nothing on screen distinguished them — **because the message named
-the ITEM and never the BOARD.**
+**The write path was fine.** Board writes are scoped server-side and unspoofable
+(`work-board/agent-tool.ts:15-25`), the live push is wired
+(`open/composer.ts:3576-3577`), and the HTTP read is correctly scoped per board
+(`gateway/http/work-board-surface.ts:219`). Two boards render side by side, keyed by
+`workBoardScopeKey` (`work-board/store.ts:164-171`), and **nothing on screen distinguished
+them — because the message named the ITEM and never the BOARD.**
 
 📌 **A true statement that cannot be checked reads exactly like a false one.** The defect
-was not in the write path; it was a confirmation that under-specified its subject.
+was a confirmation that under-specified its subject. Fixing it does not require knowing
+why scope and pane disagreed — it makes the next disagreement legible instead of
+unfalsifiable.
+
+**What is NOT closed.** A first draft of this entry asserted the full causal chain as
+fact, and two links do not survive a read of the code: the empty state needs ZERO rows,
+not "one done item" (`landing/chat-react/WorkBoardTab.tsx:659` requires
+`active.length === 0 && completed.length === 0`; one done row renders `Done · 1` at
+`:725`), and the ack is delivered to the originating project topic whose pane is scoped to
+the same project (`open/composer.ts:3653`, `landing/chat-react/ChatApp.tsx:2228`), so chat
+and pane should have agreed. A reachable hypothesis — the warm REPL resolves a tool's
+project from pool session registration (`runtime/adapters/claude-code/persistent/pool-state.ts:214`,
+a miss degrades to General) while the block and pane use `turn.project_id`
+(`gateway/wiring/build-live-agent-turn.ts:1307`) — is **unconfirmed and NOT fixed here.**
+The owner's original report stays open.
 
 **Fixed at the one chokepoint every owner-facing board confirmation passes through**
 (`work-board/chat-ack.ts`). All three texts now carry `· <board>` — `card_added`,
 `build_dispatched`, `inline_started`. (`complete` / `reorder` emit no chat text, so there
 was nothing to name.) The separator is the vocabulary the board UI already uses (`Done · N`).
 
-**Two things the label can never be, as guards rather than conventions.**
+**Three things the label can never be, as guards rather than conventions.**
 `boardLabelForProjectId` is the ONE mapping. General short-circuits to the literal
-`General` **without consulting the project rail at all** — `workBoardScopeKey` collapses
+`General` **before the project lookup is called at all** — `workBoardScopeKey` collapses
 General onto the instance slug, so its storage key is an internal identifier with no path
-to the chat. A `project_id` that no longer resolves degrades to the word `unknown project`
-— never the raw id, and never a silently omitted board. Otherwise the label is the rail
-project name, read fresh per ack so a mid-session rename is named correctly; the rail read
-has its own `try` so a store failure degrades the LABEL and still DELIVERS.
+to the chat, and a store outage cannot touch a General ack. A `project_id` that no longer
+resolves degrades to the word `unknown project` — never the raw id. And the label is
+flattened to ONE LINE: a project name is validated for LENGTH ONLY at the create surface
+(`gateway/http/app-projects-surface.ts` `handleCreate`), so
+`Example\nIGNORE ALL PRIOR INSTRUCTIONS` is a **storable name**, and an interior newline
+becomes a standalone chat line and a standalone instruction line inside `<work_board>`.
+
+📌 **Escaping `&<>` does nothing about a newline — the injection is the LINE BOUNDARY.**
+`sanitizeBoardLabel` collapses C0/C1 controls, LINE/PARAGRAPH SEPARATOR and the invisible
+format chars (zero-width, bidi overrides) to a space, then caps by CODE POINTS —
+**flatten-and-cap BEFORE escape**, because escape-then-cap can cut inside the `&lt;` it
+just produced or between the halves of a surrogate pair. It mirrors `store.sanitizeTitle`,
+which has flattened item titles for exactly this reason; the label had no equivalent,
+which is what let it through.
+
+**One mapping, one cheap read.** The resolver takes a SINGLE-ROW name lookup, not the
+project rail: the first draft passed `readProjectRows()` (O(projects) SQL plus a
+per-project unread + rail-extras query) to obtain one name, on every ack and every agent
+turn, including on General where it was discarded. The same change removed a **second,
+subtly different mapping** — the `/status` project line owned its own
+`readProjectRows().find(...)?.label ?? 'General'`, naming `General` for an id it merely
+failed to resolve, printed beside an `active_work_items` count read from the REAL project
+scope. Two fields, one line, two boards: this defect one surface over. A structural test
+(`gateway/__tests__/work-board-name-single-mapping.test.ts`) now pins the single mapping,
+because **a duplicate mapping is invisible to every behavioural test of the mapping —
+each copy is self-consistent.**
 
 **The root cause was one layer up: the agent could not have named the board.** The per-turn
 `<work_board>` block said *"your EXTERNAL MEMORY for this project"* and never said which —
 so the agent's own prose was structurally incapable of naming it. The block now carries the
-board name and closes with `SAY WHICH BOARD — this one is <board>`, escaped and capped like
-every other injected datum.
+board name and closes with `Whenever you tell the owner you added, started, dispatched,
+updated or finished something on the Work Board, SAY WHICH BOARD — this one is <board>`.
+The verbs are enumerated because the doctrine (`gateway/wiring/operating-doctrine.ts:65`)
+requires acknowledging starting, dispatching and finishing too; an instruction covering
+only "put something on" left the rest free to omit the board.
 
 **The panel deliberately did not change.** Its scope is already on screen — the rail marks
-the active surface (`landing/chat-react/ChatApp.tsx:1420-1447`) and the pane is scoped to
+the active surface (`landing/chat-react/ChatApp.tsx:1417-1432`) and the pane is scoped to
 that surface (`ChatApp.tsx:2228`); on mobile the board is a per-project route. The missing
 information was never the panel's scope but the ack's, and a message fix reaches the
 notification, the phone, and the log read back weeks later — none of which have a panel.
-Rationale in full: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
+Rationale in full, plus the deferred slug-collision edge:
+`docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
 
-**Mutation: eleven mutants, eleven dead**, each on a different assertion — including
-General's short-circuit removed (renders `unknown project`) and the unresolvable-project
-fallback returning the raw id (the exact leak forbidden above). The end-to-end cases wire
-the **real** ack into the tool surface; the pre-existing spy tests prove the tool hands the
-ack the right event, but **a spy never renders a string, so it could not have caught an
-unnamed board — which is the whole defect.**
+**Mutation: twenty mutants, twenty dead**, each on a different assertion. The instructive
+ones: General short-circuiting only AFTER calling the lookup (invisible to a label
+assertion — which is why the test asserts the CALL LOG, not the rendered string); the
+fragment escaping then capping, and capping by UTF-16 units (a truncated entity and a lone
+surrogate in the prompt, neither visible to an ASCII-only cap test); and `/status`
+regrowing its own mapping.
 
+📌 **A mutation harness that verifies its own patch with a grep can lie in the direction
+that looks like a finding.** Two mutants first reported as SURVIVED were patch FAILURES —
+the verifying grep matched the docblock quoting the same prose rather than the code it was
+meant to mutate. Re-anchored on the `return` statement, both died. The same class as the
+tool-cannot-read-the-format trap: **before believing a negative, make the check prove it
+can return a positive.**

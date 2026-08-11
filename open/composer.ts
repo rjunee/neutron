@@ -435,6 +435,7 @@ import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-class
 import {
   boardLabelForProjectId,
   buildWorkBoardChatAck,
+  GENERAL_BOARD_LABEL,
 } from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
@@ -1906,7 +1907,10 @@ export function buildOpenGraphComposer(
     const statusChatCommandFilter = buildStatusChatCommandFilter({
       snapshot: async (input) =>
         statusSnapshotHolder.deref((fn) => fn(input)) ?? {
-          active_project: 'General',
+          // Pre-bind fallback only (a fully-degraded all-zero snapshot). The NAME
+          // still comes from the shared board vocabulary, not a local literal, so
+          // `General` is spelled in exactly one place in the codebase.
+          active_project: GENERAL_BOARD_LABEL,
           model: getBestModel(),
           pending_reminders: 0,
           active_work_items: 0,
@@ -2301,6 +2305,28 @@ export function buildOpenGraphComposer(
           }))
       } catch {
         return []
+      }
+    }
+    // ONE project id → its rail name, for every owner-facing "which board" label
+    // (`boardLabelForProjectId`: the three deterministic work-board acks, the
+    // per-turn `<work_board>` block, and the `/status` project line).
+    //
+    // Deliberately NOT `readProjectRows()`: that reads every live project and runs
+    // a per-project unread count + rail-extras query, and these callers discard
+    // all of it but one name — on every ack and every agent turn. Returns null on
+    // a miss or a read failure; `boardLabelForProjectId` turns that into a WORD,
+    // never the raw id.
+    const readProjectName = (project_id: string): string | null => {
+      try {
+        return (
+          db
+            .prepare<{ name: string }, [string]>(
+              `SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+            )
+            .get(project_id)?.name ?? null
+        )
+      } catch {
+        return null
       }
     }
     // ── The owner gate (C3c: carved to open/wiring/owner-gate.ts) ──────────
@@ -3558,10 +3584,13 @@ export function buildOpenGraphComposer(
     // exists (projects reader / reminder store / work-board / Trident run store).
     // Deterministic READ-only aggregation, scoped to the turn's active project.
     statusSnapshotHolder.bind((input): StatusSnapshot => {
-      const activeProject =
-        input.project_id !== undefined
-          ? readProjectRows().find((p) => p.id === input.project_id)?.label ?? 'General'
-          : 'General'
+      // `/status` names the board too, and through the SAME mapping as the acks
+      // and the prompt block — this line used to own a second, subtly different
+      // one that fell back to `General` for an id it could not resolve. That is
+      // this PR's defect exactly: it printed `Project: General` beside an
+      // `active_work_items` count read from the REAL project scope below, so the
+      // count and the name described different boards.
+      const activeProject = boardLabelForProjectId(input.project_id ?? null, readProjectName)
       let pendingReminders = 0
       try {
         pendingReminders = new ReminderStore(db).listPending(input.project_slug).length
@@ -3646,12 +3675,13 @@ export function buildOpenGraphComposer(
     // a feature flag — Open always wires it; there is no env gate.
     const workBoardChatAck = buildWorkBoardChatAck({
       resolve_chat_id: (projectId) => tridentDeliveryChatId(projectId),
-      // #502 — hand the ack the LIVE project rail so every confirmation names
-      // the board it mutated in the owner's own words (the rail project name, or
-      // `General`). Read fresh per ack, so a project renamed mid-session is named
-      // correctly. `boardLabelForProjectId` owns the mapping — this closure never
-      // supplies a storage key or an internal id as a fallback.
-      projects: () => readProjectRows(),
+      // Hand the ack a project-NAME lookup so every confirmation names the board
+      // it mutated in the owner's own words (the rail project name, or `General`).
+      // Read fresh per ack, so a project renamed mid-session is named correctly.
+      // `boardLabelForProjectId` owns the mapping — this closure never supplies a
+      // storage key or an internal id as a fallback, and is not called at all when
+      // the mutation is General-scoped.
+      project_name: readProjectName,
       post: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
     })
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
@@ -4640,14 +4670,15 @@ export function buildOpenGraphComposer(
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
-            // #502 — the block also NAMES the board (rail project name, or
-            // `General`) and tells the agent to name it when it confirms, so its
-            // own prose can no longer be mistaken for a claim about the board the
-            // owner happens to be watching.
+            // The block also NAMES the board (rail project name, or `General`) and
+            // tells the agent to name it when it confirms, so its own prose can no
+            // longer be mistaken for a claim about the board the owner happens to
+            // be watching. The DATA and the NAME are derived from the same
+            // `project_id`, so the block cannot mislabel the board it is showing.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
                 workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
-                boardLabelForProjectId(project_id, readProjectRows()),
+                boardLabelForProjectId(project_id, readProjectName),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the

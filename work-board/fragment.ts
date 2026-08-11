@@ -12,26 +12,32 @@
  * INSTRUCTIONS") cannot break out of the boundary and inject sibling
  * instructions. Mirrors the `<project_persona>` escaping hardening.
  *
- * NAMING THE BOARD (#502)
- * ----------------------
+ * NAMING THE BOARD
+ * ----------------
  * The block used to say "for this project" and never say WHICH — so the agent
  * had no way to name the board in its own prose, and its confirmations ("I put
- * it on the Work Board") were unfalsifiable from the owner's seat: he watched
- * the General pane stay empty while the item landed on a project board. The
- * header now carries the board's owner-facing name (the rail project name, or
- * `General`, via `chat-ack.boardLabelForProjectId` — one mapping, shared with the
- * deterministic acks) and the closing line tells the agent to name it too. The
- * label is escaped like any other injected datum.
+ * it on the Work Board") were unfalsifiable from the owner's seat: he watched a
+ * pane holding none of it while the item landed on another board. The header now
+ * carries the board's owner-facing name (the rail project name, or `General`, via
+ * `chat-ack.boardLabelForProjectId` — one mapping, shared with the deterministic
+ * acks) and the closing line tells the agent to name it too.
+ *
+ * The label is FLATTENED AND CAPPED BEFORE IT IS ESCAPED (`sanitizeBoardLabel`,
+ * then `escapeData`), and that order is the whole guard. Escape-then-cap can cut
+ * inside the `&lt;` it just produced, or between the two halves of an astral
+ * char's surrogate pair, and emit the broken remainder into the prompt; and a
+ * project name is validated for LENGTH ONLY, so an interior `\n` reaches here and
+ * escaping `&<>` does nothing about it — the injection is the LINE BOUNDARY, which
+ * only the flatten removes.
  */
 
+import { sanitizeBoardLabel } from './chat-ack.ts'
 import type { WorkBoardItem, WorkBoardStatus } from './store.ts'
 
 /** Don't let a pathological board blow up the prompt. */
 const MAX_ITEMS_INJECTED = 40
 /** Per-line title cap inside the fragment (the store caps at 256 already). */
 const MAX_TITLE_CHARS = 200
-/** Board-label cap inside the fragment (owner-authored project name). */
-const MAX_BOARD_LABEL_CHARS = 64
 
 /** Escape the three XML-significant chars so a title can't break the tag. */
 function escapeData(text: string): string {
@@ -50,13 +56,17 @@ function statusLabel(status: WorkBoardStatus): string {
  *
  * @param boardLabel the board's OWNER-FACING name (a rail project name, or
  *   `General`) — resolved by `chat-ack.boardLabelForProjectId`, never a storage
- *   key or an internal project id (#502).
+ *   key or an internal project id. Re-flattened + re-capped here rather than
+ *   trusted: this is the last hop before the prompt, and the same string reaching
+ *   it by another route must not be able to add a line to the block.
  */
 export function formatWorkBoardFragment(
   activeItems: ReadonlyArray<WorkBoardItem>,
   boardLabel: string,
 ): string {
-  const board = escapeData(boardLabel).slice(0, MAX_BOARD_LABEL_CHARS)
+  // Flatten + cap FIRST, escape SECOND — see the module docblock. Reversing these
+  // two calls is the bug, not a style choice.
+  const board = escapeData(sanitizeBoardLabel(boardLabel))
   const lines: string[] = []
   lines.push('<work_board>')
   lines.push(
@@ -86,11 +96,18 @@ export function formatWorkBoardFragment(
   lines.push(
     'If you are about to act on something with no matching Work Board item, add one first (work_board_add).',
   )
-  // #502 — the owner runs one board per project plus General, side by side. A
+  // The owner runs one board per project plus General, side by side. A
   // confirmation that names only the item is indistinguishable from a false
   // claim when he happens to be looking at a DIFFERENT board's pane.
+  //
+  // Enumerate the VERBS rather than saying "when you mention the board": the
+  // doctrine (`gateway/wiring/operating-doctrine.ts` "Track your work on the
+  // board") requires the agent to acknowledge adding, starting, dispatching AND
+  // finishing work in its own voice, and an instruction that named only "put
+  // something on" left the other four confirmations unnamed — the same defect,
+  // one verb over.
   lines.push(
-    `When you tell the owner you put something on the Work Board, SAY WHICH BOARD — this one is ${board}.`,
+    `Whenever you tell the owner you added, started, dispatched, updated or finished something on the Work Board, SAY WHICH BOARD — this one is ${board}.`,
   )
   lines.push('</work_board>')
   return lines.join('\n')

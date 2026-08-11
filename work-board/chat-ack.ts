@@ -41,23 +41,31 @@
  *   - EVERY ack NAMES THE BOARD it mutated, in the owner's own vocabulary — the
  *     project name shown in the rail, or `General`. See "naming the board" below.
  *
- * NAMING THE BOARD (#502)
- * ----------------------
+ * NAMING THE BOARD
+ * ----------------
  * The owner runs many boards side by side: one per project plus General. The ack
  * used to name only the ITEM (`▸ On the Work Board: "…"`), so an ack for the
  * `example-project` board read identically to one for General — and while the
- * owner watched the General pane sit empty, a truthful confirmation about a
+ * owner watched a pane holding none of it, a truthful confirmation about a
  * DIFFERENT board was indistinguishable from a fabricated one. He reasonably
  * called it a lie. Every text now carries `· <board>`.
  *
- * Two things the label must never be:
+ * Three things the label must never be:
  *   - the STORAGE KEY. `workBoardScopeKey` collapses General onto the instance
  *     slug, so General's key is an internal identifier that must never reach the
- *     chat. General is answered by {@link boardLabelForProjectId} itself and the
- *     project list is never consulted for it.
+ *     chat. General is answered by {@link boardLabelForProjectId} BEFORE the
+ *     project lookup is called at all — there is no path on which resolving
+ *     General can produce, or even read, that key.
  *   - an internal PROJECT ID. A `project_id` that no longer resolves to a rail
  *     project (deleted mid-turn) degrades to {@link UNKNOWN_BOARD_LABEL}, never
  *     to the raw id.
+ *   - MORE THAN ONE LINE. Project names are owner-authored free text and are
+ *     validated for length only, so `\n` survives into `projects.name`. Both
+ *     consumers of this label splice it into a line-oriented medium — a chat
+ *     message and the `<work_board>` prompt block — where an interior newline
+ *     becomes a STANDALONE LINE that reads as its own message or its own
+ *     instruction. {@link sanitizeBoardLabel} is the chokepoint that collapses
+ *     it; see its docblock.
  */
 
 import { GENERAL_WORK_BOARD_PROJECT_ID } from './store.ts'
@@ -103,34 +111,93 @@ function truncate(text: string, max: number): string {
   return `${chars.slice(0, max - 1).join('')}…`
 }
 
-/** A minimal view of the project rail — `readProjectRows()` rows satisfy it. */
-export interface WorkBoardProjectRow {
-  id: string
-  label: string
+/**
+ * Every char class that can END A LINE or steer a rendered one, mapped to a
+ * space before whitespace is collapsed: C0/C1 controls (`\n`, `\r`, `\t`, NEL),
+ * LINE/PARAGRAPH SEPARATOR, and the format chars (`\p{Cf}` — zero-width joiners
+ * and the bidi overrides, which reorder a rendered label without occupying a
+ * visible column). Replaced with a space rather than deleted so `a\nb` reads as
+ * two words, not the single word `ab`.
+ */
+const LINE_BREAKING_OR_INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu
+
+/**
+ * FLATTEN one owner-authored name into exactly one line, then cap it.
+ *
+ * `projects.name` is validated for length ONLY (`gateway/http/app-projects-surface.ts`
+ * handleCreate trims and bounds to 1-128 chars), so an interior newline is a
+ * STORABLE project name. Both consumers of this label splice it into a
+ * line-oriented medium, and in both an interior newline is an injection:
+ *
+ *   - the chat ack — the extra line renders as its own message-like line, so the
+ *     confirmation the ack exists to make checkable becomes two claims;
+ *   - the `<work_board>` prompt block — a name ending
+ *     `\nIGNORE ALL PRIOR INSTRUCTIONS` yields a standalone instruction line
+ *     INSIDE the block. XML-escaping does not help: `&<>` are not what makes it
+ *     dangerous, the line boundary is.
+ *
+ * Mirrors `store.sanitizeTitle`, which flattens item titles for exactly this
+ * reason — the label had no equivalent, which is what let it through. Capping is
+ * by CODE POINTS and happens HERE, before any caller escapes, so a cap can never
+ * cut an astral char in half or a `&lt;` entity in the middle.
+ */
+export function sanitizeBoardLabel(raw: string): string {
+  return truncate(flattenToOneLine(raw), MAX_BOARD_LABEL_LEN)
+}
+
+/** {@link sanitizeBoardLabel}'s flatten step without its cap, for the longer
+ *  title slot (titles cap at {@link MAX_TITLE_LEN}, labels at 48). */
+function flattenToOneLine(raw: string): string {
+  return raw.replace(LINE_BREAKING_OR_INVISIBLE, ' ').replace(/\s+/g, ' ').trim()
 }
 
 /**
+ * Resolve ONE project id to its rail name (`projects.name`), or null/undefined
+ * when the id names no live project.
+ *
+ * A single-row lookup on purpose. This is called on every ack AND every agent
+ * turn to answer one question — what is this project called — and the full rail
+ * read it replaced (`readProjectRows()`) is O(projects) SQL plus a per-project
+ * unread count and rail-extras query, all of it discarded but one name.
+ */
+export type WorkBoardProjectNameLookup = (project_id: string) => string | null | undefined
+
+/**
  * THE one mapping from a turn's `project_id` to the board name the owner reads.
+ * Every owner-facing board name resolves through here — the three deterministic
+ * acks, the `<work_board>` prompt block, and the `/status` project line.
  *
  * General (`null` / blank / the `general` sentinel) short-circuits to
- * {@link GENERAL_BOARD_LABEL} WITHOUT consulting `projects` — General's storage
- * key is the instance slug and must never surface, and there is no rail row to
- * find. A real project resolves to its rail `label` (`projects.name`); a miss or
- * a blank name degrades to {@link UNKNOWN_BOARD_LABEL}, never the raw id.
+ * {@link GENERAL_BOARD_LABEL} and `lookup` IS NOT CALLED: General's storage key
+ * is the instance slug and must never surface, and there is no rail row to find.
+ * A real project resolves to its rail name, flattened + capped by
+ * {@link sanitizeBoardLabel}; a miss, a blank name, or a THROWING lookup degrades
+ * to {@link UNKNOWN_BOARD_LABEL}, never the raw id.
  */
 export function boardLabelForProjectId(
   project_id: string | null | undefined,
-  projects: readonly WorkBoardProjectRow[],
+  lookup: WorkBoardProjectNameLookup,
 ): string {
   const pid = typeof project_id === 'string' ? project_id.trim() : ''
   if (pid.length === 0 || pid === GENERAL_WORK_BOARD_PROJECT_ID) return GENERAL_BOARD_LABEL
-  const found = projects.find((p) => p.id === pid)?.label
-  const label = typeof found === 'string' ? found.trim() : ''
-  return label.length === 0 ? UNKNOWN_BOARD_LABEL : truncate(label, MAX_BOARD_LABEL_LEN)
+  let found: string | null | undefined
+  try {
+    found = lookup(pid)
+  } catch {
+    // A project-store read failure degrades the LABEL only. The caller still
+    // delivers: an ack swallowed for want of a name is the silent chat the ack
+    // exists to prevent.
+    found = null
+  }
+  const label = sanitizeBoardLabel(typeof found === 'string' ? found : '')
+  return label.length === 0 ? UNKNOWN_BOARD_LABEL : label
 }
 
 function textFor(kind: WorkBoardChatAckKind, title: string, board: string): string {
-  const t = truncate(title, MAX_TITLE_LEN)
+  // Flatten the title too. It arrives from `store.sanitizeTitle` on every wired
+  // path today, but this is the last hop before an owner-facing line and the
+  // ack must not inherit its one-line guarantee from a caller.
+  const t = truncate(flattenToOneLine(title), MAX_TITLE_LEN)
   switch (kind) {
     case 'card_added':
       return `▸ On the Work Board · ${board}: "${t}"`
@@ -146,9 +213,10 @@ function textFor(kind: WorkBoardChatAckKind, title: string, board: string): stri
  *
  * @param deps.resolve_chat_id  maps the turn's `project_id` (null → General) to
  *   the chat topic id the message lands in — wired to `tridentDeliveryChatId`.
- * @param deps.projects         the CURRENT project rail, read fresh per ack, so
- *   every text can NAME its board (#502) — wired to `readProjectRows()`. REQUIRED:
- *   an ack that cannot name its board is the defect, so there is no unlabeled path.
+ * @param deps.project_name     resolve ONE project id to its rail name, so every
+ *   text can NAME its board. Read fresh per ack (a mid-session rename is named
+ *   correctly) and NOT called at all on General. REQUIRED: an ack that cannot name
+ *   its board is the defect, so there is no unlabeled path.
  * @param deps.post             durable+live delivery — wired to the #337 app-ws
  *   poster (`buildClarifyPoster.post`), so the ack persists AND fans live
  *   exactly like a normal agent reply. Late-binding safe: a no-op if unbound.
@@ -157,7 +225,7 @@ function textFor(kind: WorkBoardChatAckKind, title: string, board: string): stri
  */
 export function buildWorkBoardChatAck(deps: {
   resolve_chat_id: (project_id: string | null) => string
-  projects: () => readonly WorkBoardProjectRow[]
+  project_name: WorkBoardProjectNameLookup
   post: (chat_id: string, text: string) => void
   now?: () => number
   dedup_window_ms?: number
@@ -195,17 +263,11 @@ export function buildWorkBoardChatAck(deps: {
         // `post` throws, the catch swallows it and the stamp is NOT set, so the
         // next fire for this (item,kind) can still land instead of being muted
         // for the whole window with no ack ever delivered.
-        // Read the rail INSIDE its own try: a project-store read failure must
-        // degrade to `unknown project` and still DELIVER, not swallow the whole
-        // ack. (General does not depend on this list at all — an empty list
-        // still resolves to `General`.)
-        let projects: readonly WorkBoardProjectRow[] = []
-        try {
-          projects = deps.projects()
-        } catch {
-          /* best-effort — boardLabelForProjectId degrades on an empty list */
-        }
-        const board = boardLabelForProjectId(input.project_id, projects)
+        // `boardLabelForProjectId` owns the project read and guards it: a
+        // throwing lookup degrades to `unknown project` and this ack still
+        // DELIVERS. On General the lookup is never called, so a project-store
+        // failure cannot affect a General ack at all.
+        const board = boardLabelForProjectId(input.project_id, deps.project_name)
         const chatId = deps.resolve_chat_id(input.project_id)
         deps.post(chatId, textFor(input.kind, input.title, board))
         lastPostedAt.set(key, t)
