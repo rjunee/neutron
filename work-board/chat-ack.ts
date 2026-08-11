@@ -38,10 +38,43 @@
  *     inline_active false→true flips, successful build dispatch/start). Human
  *     HTTP mutations and rejected dispatches post nothing — those callers simply
  *     never invoke it.
+ *   - EVERY ack NAMES THE BOARD it mutated, in the owner's own vocabulary — the
+ *     project name shown in the rail, or `General`. See "naming the board" below.
+ *
+ * NAMING THE BOARD (#502)
+ * ----------------------
+ * The owner runs many boards side by side: one per project plus General. The ack
+ * used to name only the ITEM (`▸ On the Work Board: "…"`), so an ack for the
+ * `example-project` board read identically to one for General — and while the
+ * owner watched the General pane sit empty, a truthful confirmation about a
+ * DIFFERENT board was indistinguishable from a fabricated one. He reasonably
+ * called it a lie. Every text now carries `· <board>`.
+ *
+ * Two things the label must never be:
+ *   - the STORAGE KEY. `workBoardScopeKey` collapses General onto the instance
+ *     slug, so General's key is an internal identifier that must never reach the
+ *     chat. General is answered by {@link boardLabelForProjectId} itself and the
+ *     project list is never consulted for it.
+ *   - an internal PROJECT ID. A `project_id` that no longer resolves to a rail
+ *     project (deleted mid-turn) degrades to {@link UNKNOWN_BOARD_LABEL}, never
+ *     to the raw id.
  */
+
+import { GENERAL_WORK_BOARD_PROJECT_ID } from './store.ts'
 
 /** Which board event the ack speaks to. Distinct dedup identities per item. */
 export type WorkBoardChatAckKind = 'card_added' | 'build_dispatched' | 'inline_started'
+
+/** The owner-facing name of the no-project board. NEVER the instance slug. */
+export const GENERAL_BOARD_LABEL = 'General'
+
+/**
+ * Shown when a non-null `project_id` does not resolve to a rail project (the
+ * project was deleted between the mutation and the ack). Deliberately a WORD,
+ * not the id — an internal id in the chat is exactly what (c) forbids, and an
+ * ack that silently omitted the board would re-open the defect this closes.
+ */
+export const UNKNOWN_BOARD_LABEL = 'unknown project'
 
 export interface WorkBoardChatAckInput {
   /** The composing turn's ACTIVE project (null on the General surface). */
@@ -58,25 +91,53 @@ export interface WorkBoardChatAck {
 
 const DEFAULT_DEDUP_WINDOW_MS = 30_000
 const MAX_TITLE_LEN = 96
+/** Board labels are owner-authored project names — cap them like a title. */
+const MAX_BOARD_LABEL_LEN = 48
 
-function truncateTitle(title: string): string {
+function truncate(text: string, max: number): string {
   // Measure + slice by CODE POINTS, not UTF-16 code units: a raw `.slice` on a
   // string whose astral char (emoji, etc.) straddles the cut index yields a lone
   // surrogate → mojibake before the ellipsis. `Array.from` iterates code points.
-  const chars = Array.from(title)
-  if (chars.length <= MAX_TITLE_LEN) return title
-  return `${chars.slice(0, MAX_TITLE_LEN - 1).join('')}…`
+  const chars = Array.from(text)
+  if (chars.length <= max) return text
+  return `${chars.slice(0, max - 1).join('')}…`
 }
 
-function textFor(kind: WorkBoardChatAckKind, title: string): string {
-  const t = truncateTitle(title)
+/** A minimal view of the project rail — `readProjectRows()` rows satisfy it. */
+export interface WorkBoardProjectRow {
+  id: string
+  label: string
+}
+
+/**
+ * THE one mapping from a turn's `project_id` to the board name the owner reads.
+ *
+ * General (`null` / blank / the `general` sentinel) short-circuits to
+ * {@link GENERAL_BOARD_LABEL} WITHOUT consulting `projects` — General's storage
+ * key is the instance slug and must never surface, and there is no rail row to
+ * find. A real project resolves to its rail `label` (`projects.name`); a miss or
+ * a blank name degrades to {@link UNKNOWN_BOARD_LABEL}, never the raw id.
+ */
+export function boardLabelForProjectId(
+  project_id: string | null | undefined,
+  projects: readonly WorkBoardProjectRow[],
+): string {
+  const pid = typeof project_id === 'string' ? project_id.trim() : ''
+  if (pid.length === 0 || pid === GENERAL_WORK_BOARD_PROJECT_ID) return GENERAL_BOARD_LABEL
+  const found = projects.find((p) => p.id === pid)?.label
+  const label = typeof found === 'string' ? found.trim() : ''
+  return label.length === 0 ? UNKNOWN_BOARD_LABEL : truncate(label, MAX_BOARD_LABEL_LEN)
+}
+
+function textFor(kind: WorkBoardChatAckKind, title: string, board: string): string {
+  const t = truncate(title, MAX_TITLE_LEN)
   switch (kind) {
     case 'card_added':
-      return `▸ On the Work Board: "${t}"`
+      return `▸ On the Work Board · ${board}: "${t}"`
     case 'build_dispatched':
-      return `⑂ Build dispatched: "${t}" — running autonomously; the result will post here when it lands.`
+      return `⑂ Build dispatched · ${board}: "${t}" — running autonomously; the result will post here when it lands.`
     case 'inline_started':
-      return `› Working on "${t}" now — I'll post here when it's done.`
+      return `› Started "${t}" · ${board} — I'll post here when it's done.`
   }
 }
 
@@ -85,6 +146,9 @@ function textFor(kind: WorkBoardChatAckKind, title: string): string {
  *
  * @param deps.resolve_chat_id  maps the turn's `project_id` (null → General) to
  *   the chat topic id the message lands in — wired to `tridentDeliveryChatId`.
+ * @param deps.projects         the CURRENT project rail, read fresh per ack, so
+ *   every text can NAME its board (#502) — wired to `readProjectRows()`. REQUIRED:
+ *   an ack that cannot name its board is the defect, so there is no unlabeled path.
  * @param deps.post             durable+live delivery — wired to the #337 app-ws
  *   poster (`buildClarifyPoster.post`), so the ack persists AND fans live
  *   exactly like a normal agent reply. Late-binding safe: a no-op if unbound.
@@ -93,6 +157,7 @@ function textFor(kind: WorkBoardChatAckKind, title: string): string {
  */
 export function buildWorkBoardChatAck(deps: {
   resolve_chat_id: (project_id: string | null) => string
+  projects: () => readonly WorkBoardProjectRow[]
   post: (chat_id: string, text: string) => void
   now?: () => number
   dedup_window_ms?: number
@@ -130,8 +195,19 @@ export function buildWorkBoardChatAck(deps: {
         // `post` throws, the catch swallows it and the stamp is NOT set, so the
         // next fire for this (item,kind) can still land instead of being muted
         // for the whole window with no ack ever delivered.
+        // Read the rail INSIDE its own try: a project-store read failure must
+        // degrade to `unknown project` and still DELIVER, not swallow the whole
+        // ack. (General does not depend on this list at all — an empty list
+        // still resolves to `General`.)
+        let projects: readonly WorkBoardProjectRow[] = []
+        try {
+          projects = deps.projects()
+        } catch {
+          /* best-effort — boardLabelForProjectId degrades on an empty list */
+        }
+        const board = boardLabelForProjectId(input.project_id, projects)
         const chatId = deps.resolve_chat_id(input.project_id)
-        deps.post(chatId, textFor(input.kind, input.title))
+        deps.post(chatId, textFor(input.kind, input.title, board))
         lastPostedAt.set(key, t)
       } catch {
         // The ack must NEVER perturb the tool result — swallow everything.

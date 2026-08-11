@@ -8508,6 +8508,7 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+
 ## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
 
 Observed live: the owner cancelled a running email-core build and the row settled at
@@ -8989,3 +8990,53 @@ Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
+
+## 2026-08-11 — "added to the work board" now says WHICH board
+
+The owner saw the chat claim `▸ On the Work Board: "P1 — email pipeline …"` beside a WORK
+panel reading `No work tracked yet.` — and reasonably called it a lie.
+
+**There was no board bug.** The agent wrote to the project board it was chatting in (scope
+is derived server-side and unspoofable, `work-board/agent-tool.ts:15-25`), the live push
+was wired (`open/composer.ts:3547-3549`), the read was correctly scoped. The panel he was
+watching was a **different board**, and it was truthful about the board it showed. Two
+boards side by side, and nothing on screen distinguished them — **because the message named
+the ITEM and never the BOARD.**
+
+📌 **A true statement that cannot be checked reads exactly like a false one.** The defect
+was not in the write path; it was a confirmation that under-specified its subject.
+
+**Fixed at the one chokepoint every owner-facing board confirmation passes through**
+(`work-board/chat-ack.ts`). All three texts now carry `· <board>` — `card_added`,
+`build_dispatched`, `inline_started`. (`complete` / `reorder` emit no chat text, so there
+was nothing to name.) The separator is the vocabulary the board UI already uses (`Done · N`).
+
+**Two things the label can never be, as guards rather than conventions.**
+`boardLabelForProjectId` is the ONE mapping. General short-circuits to the literal
+`General` **without consulting the project rail at all** — `workBoardScopeKey` collapses
+General onto the instance slug, so its storage key is an internal identifier with no path
+to the chat. A `project_id` that no longer resolves degrades to the word `unknown project`
+— never the raw id, and never a silently omitted board. Otherwise the label is the rail
+project name, read fresh per ack so a mid-session rename is named correctly; the rail read
+has its own `try` so a store failure degrades the LABEL and still DELIVERS.
+
+**The root cause was one layer up: the agent could not have named the board.** The per-turn
+`<work_board>` block said *"your EXTERNAL MEMORY for this project"* and never said which —
+so the agent's own prose was structurally incapable of naming it. The block now carries the
+board name and closes with `SAY WHICH BOARD — this one is <board>`, escaped and capped like
+every other injected datum.
+
+**The panel deliberately did not change.** Its scope is already on screen — the rail marks
+the active surface (`landing/chat-react/ChatApp.tsx:1420-1447`) and the pane is scoped to
+that surface (`ChatApp.tsx:2228`); on mobile the board is a per-project route. The missing
+information was never the panel's scope but the ack's, and a message fix reaches the
+notification, the phone, and the log read back weeks later — none of which have a panel.
+Rationale in full: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
+
+**Mutation: eleven mutants, eleven dead**, each on a different assertion — including
+General's short-circuit removed (renders `unknown project`) and the unresolvable-project
+fallback returning the raw id (the exact leak forbidden above). The end-to-end cases wire
+the **real** ack into the tool surface; the pre-existing spy tests prove the tool hands the
+ack the right event, but **a spy never renders a string, so it could not have caught an
+unnamed board — which is the whole defect.**
+

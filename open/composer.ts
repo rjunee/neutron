@@ -432,7 +432,10 @@ import {
   type ReplActivityTap,
 } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
-import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
+import {
+  boardLabelForProjectId,
+  buildWorkBoardChatAck,
+} from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
 import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-connect-surface.ts'
@@ -3643,6 +3646,12 @@ export function buildOpenGraphComposer(
     // a feature flag — Open always wires it; there is no env gate.
     const workBoardChatAck = buildWorkBoardChatAck({
       resolve_chat_id: (projectId) => tridentDeliveryChatId(projectId),
+      // #502 — hand the ack the LIVE project rail so every confirmation names
+      // the board it mutated in the owner's own words (the rail project name, or
+      // `General`). Read fresh per ack, so a project renamed mid-session is named
+      // correctly. `boardLabelForProjectId` owns the mapping — this closure never
+      // supplies a storage key or an internal id as a fallback.
+      projects: () => readProjectRows(),
       post: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
     })
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
@@ -4631,9 +4640,14 @@ export function buildOpenGraphComposer(
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
+            // #502 — the block also NAMES the board (rail project name, or
+            // `General`) and tells the agent to name it when it confirms, so its
+            // own prose can no longer be mistaken for a claim about the board the
+            // owner happens to be watching.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
                 workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                boardLabelForProjectId(project_id, readProjectRows()),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the

@@ -6,6 +6,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ToolRegistry, type ToolCallContext } from '@neutronai/tools/registry.ts'
 import { WorkBoardStore } from './store.ts'
+import { buildWorkBoardChatAck } from './chat-ack.ts'
 import {
   registerWorkBoardToolSurface,
   WORK_BOARD_ADD_TOOL,
@@ -348,5 +349,60 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     )) as { ok: boolean; item?: { id: string } }
     expect(out.ok).toBe(true)
     expect(out.item?.id).toBeDefined()
+  })
+})
+
+// #502 — END-TO-END over the PRODUCTION ack, not a spy. The spy tests above prove
+// the tool hands the ack the right event; only wiring the REAL
+// `buildWorkBoardChatAck` proves the TEXT the owner reads names the board it
+// mutated. A spy can never catch an unnamed board.
+describe('work_board agent tools → REAL chat ack names the board (#502)', () => {
+  function realAck() {
+    const texts: string[] = []
+    const ack = buildWorkBoardChatAck({
+      resolve_chat_id: (pid) => (pid === null ? 'chat:general' : `chat:${pid}`),
+      projects: () => [{ id: 'acme', label: 'Example Project' }],
+      post: (_chatId, text) => texts.push(text),
+    })
+    return { texts, ack }
+  }
+
+  test('a project-scoped add names the PROJECT, not its id', async () => {
+    const reg = new ToolRegistry()
+    const { texts, ack } = realAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    await reg.get(WORK_BOARD_ADD_TOOL)!.handler({ title: 'Ship it' }, ctx('owner', 'acme'))
+    expect(texts).toEqual(['▸ On the Work Board · Example Project: "Ship it"'])
+  })
+
+  // (b) The General board's STORAGE key is the owner/instance slug
+  // (`workBoardScopeKey('owner', null) === 'owner'`). That key must NEVER be what
+  // the owner reads — a General add says `General`.
+  test('a General-scoped add says "General" and never the owner slug', async () => {
+    const reg = new ToolRegistry()
+    const { texts, ack } = realAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    await reg.get(WORK_BOARD_ADD_TOOL)!.handler({ title: 'Call the plumber' }, ctx('owner', null))
+    // The row really did land on the slug-keyed General bucket…
+    expect(store.list('owner').map((i) => i.title)).toContain('Call the plumber')
+    // …and the owner-facing text says General, not 'owner'.
+    expect(texts).toEqual(['▸ On the Work Board · General: "Call the plumber"'])
+    expect(texts[0]).not.toContain('owner')
+  })
+
+  test('an inline_active flip names the board too', async () => {
+    const reg = new ToolRegistry()
+    const { texts, ack } = realAck()
+    registerWorkBoardToolSurface(reg, store, { chatAck: ack })
+    const created = (await reg
+      .get(WORK_BOARD_ADD_TOOL)!
+      .handler({ title: 'Inline work' }, ctx('owner', 'acme'))) as { item: { id: string } }
+    texts.length = 0
+    await reg
+      .get(WORK_BOARD_UPDATE_TOOL)!
+      .handler({ id: created.item.id, inline_active: true }, ctx('owner', 'acme'))
+    expect(texts).toEqual([
+      '› Started "Inline work" · Example Project — I\'ll post here when it\'s done.',
+    ])
   })
 })
