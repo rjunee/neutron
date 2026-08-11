@@ -199,9 +199,19 @@ function WorkBoardBody({
       onActivity: (row) => {
         setActivityRows((prev) => mergeActivityRow(prev, row, ACTIVITY_ROW_CAP));
       },
+      // RE-FETCH ON EVERY (RE)CONNECT — not only on mount. A push-only board
+      // permanently loses any item written while the socket was down: nothing
+      // re-asks, so the pane stays empty until the owner reloads by hand. That
+      // is not hypothetical — on 2026-08-11 his sessions all closed at 19:36:43
+      // and the first of five items was written at 19:36:47, and the board sat
+      // empty until he reloaded. The mount fetch cannot cover this, because a
+      // reconnect is not a mount.
+      onConnect: () => {
+        refresh();
+      },
     });
     return () => live.stop();
-  }, [config.base_url, token, projectId, deviceId]);
+  }, [config.base_url, token, projectId, deviceId, refresh]);
 
   // The AUTHORITATIVE half of the liveness signal: only the server knows
   // `turns_in_flight`, and only a re-fetch can retire a turn whose `completion`

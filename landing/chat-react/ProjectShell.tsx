@@ -549,6 +549,34 @@ export function ProjectShell({
     if (key !== undefined) setActiveKey(key)
   }, [config.initialTabKey, tabsScope])
 
+  // REVEAL THE WORK TAB WHEN THE BOARD GAINS ITEMS.
+  //
+  // Owner-asked 2026-08-11: "i need the workboard to POP open immediate as soon
+  // as items are added". A plan materialising behind a tab he is not looking at
+  // is invisible work, and he had just spent minutes staring at Chat while five
+  // items were written.
+  //
+  // Keyed on the controller's monotonic growth nonce, NOT on an item count: a
+  // count would re-fire on every unrelated re-render, and the controller already
+  // refuses to bump on a board's FIRST frame (a fresh subscription delivers the
+  // whole board at once, and yanking him off Chat for that would be wrong).
+  //
+  // The nonce is skipped on mount via the ref seed, so entering a project never
+  // steals focus — only growth observed while he is here does.
+  const lastBoardGrew = useRef<number | null>(null)
+  useEffect(() => {
+    const n = vm.workBoardGrewNonce
+    if (lastBoardGrew.current === null) {
+      lastBoardGrew.current = n // seed: mount is not growth
+      return
+    }
+    if (n === lastBoardGrew.current) return
+    lastBoardGrew.current = n
+    const workTab = tabs.find((t) => t.mount.kind === 'builtin' && t.mount.target === 'workboard')
+    if (workTab === undefined) return
+    setActiveKey(workTab.key)
+  }, [vm.workBoardGrewNonce, tabs])
+
   // P-A — resolve a pending doc-link tap: once the shell is scoped to the
   // link's project AND that project's tabs have RESOLVED (not the previous
   // project's stale set) AND its Documents tab exists, activate that tab and
