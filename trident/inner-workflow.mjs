@@ -631,6 +631,49 @@ function normalizeVerdict(v) {
   return v === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
 }
 
+// A NIT MAY NOT COST A ROUND. (Owner-locked 2026-08-11: "NIT and minor becomes
+// comments.")
+//
+// The synthesis prompt has ALWAYS said this — "a single-reviewer NON-blocking
+// finding → keep it but label it 'unverified' (surface it; do NOT block merge on
+// it alone)" — and NOTHING enforced it. So the rule held only as far as one LLM's
+// obedience, and it did not hold: on PR #171 a reviewer seat returned APPROVE
+// with four MINOR/NIT findings and the synthesis still came back REQUEST_CHANGES.
+// Six of six capped lanes on 2026-08-11 terminated REQUEST_CHANGES and none
+// converged, because every round surfaces new non-blocking observations — a
+// reviewer asked for findings will always find some, so a loop that blocks on
+// them cannot terminate by construction. That is the whole reason the pipeline
+// merged 2 of 8.
+//
+// THE DIRECTION OF FAILURE IS THE DESIGN. This gate can only ever turn a
+// REJECTION into a PASS, which is the dangerous direction, so it is deliberately
+// built to refuse in every ambiguous case:
+//
+//   • It downgrades ONLY when EVERY finding is EXPLICITLY 'minor' or 'nit'.
+//     An unknown, absent, misspelled or newly-added severity is therefore
+//     BLOCKING — `every` fails on it. Listing the BLOCKING severities instead
+//     would have inverted that: a typo'd 'blockers' would sail through as a pass.
+//   • A REQUEST_CHANGES carrying NO findings is left ALONE. A rejection with no
+//     stated reason is malformed, not benign, and converting it to a merge is the
+//     exact silent-downgrade this harness forbids elsewhere.
+//   • It runs FIRST in the chain, so the CI gate and the cross-model gate both
+//     get the last word and can re-block anything it let through. A gate that
+//     forces REQUEST_CHANGES must never be undoable by this one.
+//
+// The findings are NOT discarded — they ride along on the verdict and reach the
+// PR as comments. The quality floor is unchanged: any blocker or major still
+// vetoes, red CI still vetoes, a deferred reviewer still vetoes, and the
+// mutation-prover phase still stands between APPROVE and merge.
+const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
+
+function enforceSeverityGate(synthesis) {
+  if (!synthesis || synthesis.verdict !== 'REQUEST_CHANGES') return synthesis
+  const findings = Array.isArray(synthesis.findings) ? synthesis.findings : []
+  if (findings.length === 0) return synthesis
+  if (!findings.every((f) => f && NON_BLOCKING_SEVERITIES.has(f.severity))) return synthesis
+  return { ...synthesis, verdict: 'APPROVE' }
+}
+
 // NEVER-SILENT-DOWNGRADE guard (mirrors the legacy harness's CODEX_REVIEW_PRECHECK_FAILED /
 // CODEX_REVIEW_TIMEOUT rule). Enforced DETERMINISTICALLY in code, not left to the
 // synthesis LLM: a codex review that was CONFIGURED but FAILED ('deferred') must
@@ -1208,6 +1251,10 @@ ${kimiPanelLine}`,
   )
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
   // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
+  // A NIT MAY NOT COST A ROUND — applied FIRST, so both gates below can re-block
+  // anything it lets through. See enforceSeverityGate for why the ordering is the
+  // load-bearing part rather than an implementation detail.
+  const severityGated = enforceSeverityGate(synthesisRaw)
   const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus })
   // THE CI GATE, folded into the SAME gate rather than added beside it.
   //
@@ -1227,9 +1274,9 @@ ${kimiPanelLine}`,
     ci.status === 'red'
       ? {
           verdict: 'REQUEST_CHANGES',
-          findings: [...ciBlockerFindings(ci), ...(synthesisRaw?.findings ?? [])],
+          findings: [...ciBlockerFindings(ci), ...(severityGated?.findings ?? [])],
         }
-      : synthesisRaw
+      : severityGated
   const peers = ci.status === 'pending' || ci.status === 'unknown'
     ? [...deferred, ciDeferredPeer(ci)]
     : deferred
