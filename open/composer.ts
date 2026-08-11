@@ -3577,7 +3577,29 @@ export function buildOpenGraphComposer(
           ...(framePid !== undefined ? { project_id: framePid } : {}),
           ts: nowMs,
         }
-        appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
+        // Fan to the base topic AND every live per-project topic — the SAME
+        // topology `fanProjectsChanged` uses, for the same reason. Each served
+        // client holds ONE socket scoped to whatever it is currently viewing
+        // (`app:<owner>:<project>`; General stays on `app:<owner>`), and the
+        // registry routes by EXACT topic string (`session-registry.send` is a
+        // single `Map.get`, no prefix match). A board push addressed only to the
+        // base topic therefore reached a client sitting INSIDE a project NEVER:
+        // its pane rendered `No work tracked yet` while the agent wrote rows to
+        // exactly the board it was showing, and the 15s fallback poll could not
+        // repair it because that poll only runs once a live row is ALREADY
+        // visible. Both halves are fixed — here, and at the poll's gate.
+        //
+        // Widening the fan cannot cross-apply one board onto another: every
+        // client re-checks the frame's `project_id` tag against its own view
+        // before applying it (`WorkBoardTab.tsx` `(framePid ?? '') !== projectId`,
+        // `app/lib/work-board-live.decodeWorkBoardFrame`), and each socket lives
+        // on exactly one topic so nothing receives the frame twice.
+        const base = appWsTopicId(OWNER_USER_ID)
+        const scopedPrefix = `${base}:`
+        appWsRegistry.send(base, frame)
+        for (const topic of appWsRegistry.topics()) {
+          if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+        }
       } catch (err) {
         log.warn('work_board_push_failed', {
           project: changedKey,

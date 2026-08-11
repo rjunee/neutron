@@ -44,6 +44,7 @@ const read = (...parts: string[]): string => readFileSync(join(APP_ROOT, ...part
 function project(over: Partial<Project> & Pick<Project, 'id'>): Project {
   return {
     name: over.id,
+    label: over.id,
     description: '',
     emoji: '📁',
     last_activity_ms: 0,

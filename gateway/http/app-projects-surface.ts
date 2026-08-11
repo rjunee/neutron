@@ -48,6 +48,7 @@ import {
   isAgentEngagementMode,
 } from '@neutronai/connect/agent-engagement.ts'
 import { defaultProjectEmoji, normaliseEmojiInput } from '../projects/default-emoji.ts'
+import { disambiguateProjectBoardLabel } from '@neutronai/work-board/chat-ack.ts'
 import {
   handleAppProjectInvite,
   httpStatusForInvite,
@@ -153,6 +154,21 @@ export type ProjectOrigin = 'solo' | 'shared'
  * the client so nothing persists it into this instance's GBrain.
  */
 export interface ProjectListItem extends ProjectListEntry {
+  /**
+   * The owner-facing display name for this project — `name` put through the ONE
+   * server-side board-label rule ({@link disambiguateProjectBoardLabel}), so a
+   * project named `General` is not rendered identically to the General board.
+   *
+   * It rides the HTTP list because the two rails read the project set over
+   * DIFFERENT transports: web takes the `projects_changed` app-ws frame (which
+   * has carried `label` since `open/composer.ts` readProjectRows), while mobile
+   * lists over THIS endpoint. Serving the rule on only one of them is what left
+   * the mobile rail rendering the raw name — the ack named a board that, on that
+   * device, no rail row answered to. Kept SEPARATE from `name` (rather than
+   * overwriting it) because `name` still round-trips through the settings
+   * drawer's rename field, which must not be seeded with the qualifier.
+   */
+  label: string
   /** `solo` (local) | `shared` (from a workspace the user belongs to). */
   kind: ProjectOrigin
   /** Slug of the instance that owns this project. Equals this gateway's
@@ -812,6 +828,7 @@ async function handleList(
   const local = await store.list(project_slug, user_id)
   const soloItems: ProjectListItem[] = local.map((p) => ({
     ...p,
+    label: disambiguateProjectBoardLabel(p.name),
     kind: 'solo',
     origin_instance: project_slug,
     owning_instance_slug: project_slug,
@@ -964,6 +981,9 @@ function sharedItemToListItem(item: SharedProjectItem): ProjectListItem {
   return {
     id: item.project_id,
     name: item.display_name,
+    // Same ONE rule as the solo half — a shared project named `General` is just
+    // as indistinguishable from the General board as a local one.
+    label: disambiguateProjectBoardLabel(item.display_name),
     description: '',
     persona: '',
     // Deterministic default emoji from the shared project's display name — a

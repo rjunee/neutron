@@ -77,9 +77,22 @@ export function slugifyProjectId(name: string): string {
   const capped = trimmed.slice(0, 64)
   if (capped.length === 0) return 'project'
   // Suffix rather than reject: a create must still succeed, and the owner's NAME
-  // is unaffected — `projects.name` keeps "General", only the id becomes
-  // `general-project`. Applied after the cap so the result stays within bounds.
-  return capped === RESERVED_GENERAL_PROJECT_ID ? `${capped}-project` : capped
+  // is unaffected — `projects.name` keeps "General", only the id changes.
+  // Applied after the cap so the result stays within bounds.
+  //
+  // THE SUFFIX IS A TRAILING `-`, AND THAT IS THE WHOLE POINT. The obvious
+  // spelling `general-project` is REACHABLE by this very function — a project
+  // genuinely named "General Project" slugifies to it — so the escape hatch for
+  // one collision silently minted another, and `resolveBindTarget`
+  // (`gateway/wiring/project-create.ts`) resolves a colliding slug to the
+  // EXISTING project, so two distinct names would have quietly become one
+  // project. A trailing `-` cannot be produced from any input at all, because the
+  // trim two lines up strips exactly that: whatever a name slugifies to, it never
+  // ends in `-`. Collision-proof BY CONSTRUCTION rather than by picking a word we
+  // hope nobody uses — the same reasoning that made the mobile rail's General
+  // sentinel `~general` (`app/lib/project-rail-view.ts`), a value the id
+  // validator itself rejects.
+  return capped === RESERVED_GENERAL_PROJECT_ID ? `${capped}-` : capped
 }
 
 /** Hard cap on the synthesized at-rest context paragraph. */

@@ -348,6 +348,33 @@ describe('disambiguateProjectBoardLabel — General and a project called General
     expect(countGraphemes(project)).toBeLessThanOrEqual(MAX_BOARD_LABEL_LEN)
     expect(project).not.toBe(GENERAL_BOARD_LABEL)
   })
+
+  /**
+   * THE RULE'S OWN OUTPUT IS A COLLIDING INPUT — the defect's third case, and the
+   * one the first fix walked straight past. A project literally named
+   * `General (project)` was returned UNTOUCHED, which is byte-identical to what a
+   * project named `General` becomes. So the function written to guarantee two
+   * boards get two names produced two boards with one name, one step further out.
+   *
+   * Owner-authored names are free text; nothing stops him typing the qualified
+   * form, and on a box that already has a project called `General` it is a fairly
+   * natural thing to type.
+   */
+  test('a project named "General (project)" does not collide with the QUALIFIED General', () => {
+    const fromGeneral = boardLabelForProjectId('p9', () => 'General')
+    const literal = boardLabelForProjectId('p8', () => 'General (project)')
+    expect(literal).not.toBe(fromGeneral)
+    // Both still keep the owner's own words rather than being renamed.
+    expect(fromGeneral).toContain('General')
+    expect(literal).toContain('General (project)')
+  })
+
+  test('...and neither collides with the General board itself', () => {
+    const general = boardLabelForProjectId(null, () => null)
+    for (const name of ['General', 'General (project)', 'general (PROJECT)']) {
+      expect(boardLabelForProjectId('p9', () => name)).not.toBe(general)
+    }
+  })
 })
 
 /**
@@ -452,12 +479,59 @@ describe('sanitizeBoardLabel — one owner-authored name, exactly one line', () 
     expect(boardLabelForProjectId('p9', () => '\n\n\t')).toBe(UNKNOWN_BOARD_LABEL)
   })
 
-  test('the cap counts CODE POINTS, so an astral char is never cut in half', () => {
+  /**
+   * THE FLOOR'S JOB IS "DOES THIS RENDER AS ANYTHING", AND IT USED TO ASK ONLY
+   * ABOUT THE JOINER. Four other legal characters occupy no column, are not
+   * whitespace (so `trim` leaves them), and are not touched by the flatten — so
+   * each walked straight through a floor written to catch exactly this. Reachable
+   * because `projects.name` is validated for LENGTH only, and the result is `· `
+   * — a board-naming line that names no board, which is the unnamed ack this
+   * module exists to remove.
+   *
+   * One case per Unicode reason, because they fail for different reasons and a
+   * single example would leave three untested:
+   */
+  test.each([
+    ['\uFE0F', 'VARIATION SELECTOR-16 — restyles a preceding glyph; alone, nothing'],
+    ['\u3164', 'HANGUL FILLER — an ordinary letter to Unicode, blank on screen'],
+    ['\u2800', 'BRAILLE PATTERN BLANK — an ordinary symbol, blank on screen'],
+    ['\u0301', 'COMBINING ACUTE — decorates a base char; alone, decorates nothing'],
+  ])('a name of only %j renders as nothing and is refused (%s)', (ch) => {
+    expect(sanitizeBoardLabel(ch.repeat(5))).toBe('')
+    expect(boardLabelForProjectId('p9', () => ch.repeat(5))).toBe(UNKNOWN_BOARD_LABEL)
+  })
+
+  test('the invisible-char floor does not eat names that merely CONTAIN them', () => {
+    // The floor strips only to answer its question; it never rewrites the label.
+    // An accented name is visible because of its base letters, and must survive
+    // byte-for-byte — over-stripping here would rename the owner's project.
+    const accented = 'Café Ops'
+    expect(sanitizeBoardLabel(accented)).toBe(accented)
+    const emoji = '\u{1F4BB}️ Dev'
+    expect(sanitizeBoardLabel(emoji)).toBe(emoji)
+  })
+
+  /**
+   * The cap's UNIT is the grapheme, and this test has to be able to SEE that —
+   * its previous form could not. It capped a string of plain astral emoji, where
+   * one glyph is exactly one code point, so the assertion held identically under
+   * a code-point cap and a grapheme cap. It was named for the wrong unit and
+   * could not have caught the rename being a lie. The second half below is the
+   * part that distinguishes them: a ZWJ sequence is THREE code points per glyph,
+   * so a code-point cap keeps a third as many glyphs and this assertion fails.
+   */
+  test('the cap counts GRAPHEMES, so no glyph is ever cut in half', () => {
     const label = sanitizeBoardLabel('😀'.repeat(200))
-    expect(Array.from(label).length).toBe(48)
+    expect(countGraphemes(label)).toBe(MAX_BOARD_LABEL_LEN)
     expect(
       /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(label),
     ).toBe(false)
+
+    // The discriminating case: graphemes and code points disagree here.
+    const zwjLabel = sanitizeBoardLabel('👨‍💻'.repeat(200))
+    expect(countGraphemes(zwjLabel)).toBe(MAX_BOARD_LABEL_LEN)
+    // A code-point cap would have produced exactly MAX code points instead.
+    expect(Array.from(zwjLabel).length).toBeGreaterThan(MAX_BOARD_LABEL_LEN)
   })
 
   test('an ordinary name is returned untouched', () => {

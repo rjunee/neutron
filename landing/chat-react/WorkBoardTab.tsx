@@ -404,6 +404,18 @@ export function WorkBoardTab({
   // (via `isLinkedRunning`) so a finished/terminal run does NOT poll forever.
   const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
 
+  // ...AND while the pane is showing NOTHING. A board with zero rows cannot
+  // contain a live row to gate on, so the live-run gate above made the empty
+  // state the one state the fallback could never repair: any push this pane
+  // missed — a dropped frame, a reconnect gap, a frame addressed to a topic this
+  // socket is not on — left `No work tracked yet` on screen indefinitely while
+  // the agent wrote rows to this very board. That is the owner-reported symptom
+  // ("activity claiming things are being added to the work board, but they are
+  // NOT"), and a self-healing empty pane is the belt to the fan-out's braces.
+  // Gated on a SETTLED empty read (`!loading`, no `listError`) so this neither
+  // races the initial fetch nor hammers a surface that is already failing.
+  const shouldPoll = hasLiveRun || (!loading && listError === null && items.length === 0)
+
   // PR-4 — surface the live-activity roll-up to the desktop slide-out pane on
   // every board change (initial load, live snapshot, or poll). The pane keys its
   // auto-open/close + header count off this; `summarize` is pure so the effect
@@ -412,12 +424,12 @@ export function WorkBoardTab({
     onSummary?.(summarize(items))
   }, [items, onSummary])
   useEffect(() => {
-    if (!hasLiveRun) return
+    if (!shouldPoll) return
     const interval = setInterval(() => {
       refresh(true)
     }, 15_000)
     return () => clearInterval(interval)
-  }, [hasLiveRun, refresh])
+  }, [shouldPoll, refresh])
 
   const addItem = useCallback((): void => {
     const title = newTitle.trim()

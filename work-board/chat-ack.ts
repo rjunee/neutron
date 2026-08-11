@@ -260,15 +260,52 @@ export const PROJECT_BOARD_SUFFIX = '(project)'
  * full names and this function must not quietly become a second cap.
  */
 export function disambiguateProjectBoardLabel(name: string): string {
-  const flattened = flattenToOneLine(name)
-  return flattened.toLowerCase() === GENERAL_BOARD_LABEL.toLowerCase()
-    ? `${name} ${PROJECT_BOARD_SUFFIX}`
-    : name
+  const flattened = flattenToOneLine(name).toLowerCase()
+  const general = GENERAL_BOARD_LABEL.toLowerCase()
+  // The QUALIFIED form is reserved too, and it has to be. Qualifying only the
+  // bare name left the output colliding with a DIFFERENT input: a project
+  // literally named `General (project)` was returned untouched, byte-identical
+  // to what a project named `General` becomes — so the rule that exists to make
+  // two boards distinguishable produced two boards with one name, one step
+  // further out. Qualifying it again (`General (project) (project)`) is ugly and
+  // correct; it is also self-terminating, because the result is a new string
+  // only ever produced from an input the owner deliberately chose to collide.
+  const collides = flattened === general || flattened === `${general} ${PROJECT_BOARD_SUFFIX}`
+  return collides ? `${name} ${PROJECT_BOARD_SUFFIX}` : name
 }
 
-/** Does this label render as anything at all? Joiners are invisible on their own. */
+/**
+ * Every char that occupies NO visible column on its own, yet is neither
+ * whitespace (so `trim` leaves it) nor removed by the flatten step (so it
+ * survives to be counted as content):
+ *
+ *   - U+200D ZERO WIDTH JOINER — {@link ZERO_WIDTH_JOINER}, deliberately kept by
+ *     the flatten because inside an emoji it is content;
+ *   - U+FE00-U+FE0F VARIATION SELECTORS (incl. VS16, the emoji presentation
+ *     selector) and the supplementary U+E0100-U+E01EF — they restyle a
+ *     PRECEDING glyph, so with no glyph in front they style nothing;
+ *   - `\p{M}` COMBINING MARKS — likewise decorations on a preceding base;
+ *   - the BLANK-BUT-NOT-WHITESPACE fillers U+115F, U+1160, U+3164, U+FFA0
+ *     (Hangul) and U+2800 (BRAILLE PATTERN BLANK), which Unicode classes as
+ *     ordinary letters/symbols yet which render as nothing at all.
+ *
+ * The floor used to strip only the joiner, so every one of the others walked
+ * straight through it: a project name of a single U+FE0F is a "non-empty"
+ * string, passes, and publishes `· ` — a board-naming line with no board
+ * named, which is the unnamed ack this module exists to remove. Reachable
+ * because `projects.name` is validated for LENGTH only.
+ *
+ * Escapes, not the literal characters: a source line of invisible bytes cannot
+ * be reviewed, and cannot be diffed when one of them is later dropped.
+ * Stripping happens for the TEST only — the label itself is never rewritten
+ * here.
+ */
+const INVISIBLE_ALONE =
+  /[\u200D\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u115F\u1160\u3164\uFFA0\u2800\p{M}]/gu
+
+/** Does this label render as anything at all? See {@link INVISIBLE_ALONE}. */
 function hasVisibleContent(label: string): boolean {
-  return label.split(ZERO_WIDTH_JOINER).join('').trim().length > 0
+  return label.replace(INVISIBLE_ALONE, '').trim().length > 0
 }
 
 /** {@link sanitizeBoardLabel}'s flatten step without its cap, for the longer

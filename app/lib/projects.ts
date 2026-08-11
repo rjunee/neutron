@@ -37,6 +37,15 @@ export interface Project {
   id: string;
   /** Display name shown on the card + project header. */
   name: string;
+  /**
+   * The name to RENDER — `name` after the server's one board-label rule. Equal
+   * to `name` for every project whose name doesn't collide with the General
+   * board, so every surface can render `label` unconditionally.
+   *
+   * `name` is kept raw alongside it because the settings drawer's rename field
+   * round-trips it; seeding that field with the qualifier would persist it.
+   */
+  label: string;
   /** One-line tagline rendered under the name on the project card. */
   description: string;
   /** Short glyph shown at the start of the project card title row. */
@@ -226,6 +235,8 @@ function listItemToProject(p: ProjectListItem, now: number): Project {
   return {
     id: p.id,
     name: p.name,
+    // Fall back to the raw name when an older gateway omits `label`.
+    label: p.label !== undefined && p.label.length > 0 ? p.label : p.name,
     description: p.description,
     // Default to a neutral folder glyph when an older gateway omits emoji.
     emoji: p.emoji !== undefined && p.emoji.length > 0 ? p.emoji : '📁',

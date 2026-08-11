@@ -9228,3 +9228,86 @@ graphemes that render as nothing), which is the input that can see the differenc
 now uses it and the mutant dies.
 
 Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
+
+### 2026-08-11 — the board push never reached a project pane (work-board, round 5)
+
+Round 5 of PR #178. The previous rounds fixed how a board is NAMED; this one found and fixed
+why a pane could show nothing at all — the owner's original report, which four rounds had
+left explicitly unexplained.
+
+**THE ZERO-ROW PANE IS EXPLAINED, AND IT WAS A DELIVERY BUG.** `fanWorkBoardChanged`
+addressed its snapshot to `appWsTopicId(OWNER)` — the base topic, and only that. But a
+served client holds ONE socket scoped to whatever it is currently viewing: General sits on
+`app:<owner>`, a project sits on `app:<owner>:<project_id>`
+(`gateway/http/app-ws-surface.ts` registers `resolveChannelTopicId(user_id, project_id)`;
+`landing/chat-react/config.ts` `topicForProject` and `app/lib/work-board-live.ts` derive the
+same string). `InMemoryAppWsSessionRegistry.send` resolves its target with a single
+`Map.get` — an exact key match, no prefix fan. **So a board push reached a client sitting
+inside a project never.** The pane rendered `No work tracked yet` while the agent wrote rows
+to exactly the board it was showing, which is the screenshot the owner sent.
+
+It could not self-repair either: the 15s fallback poll was gated on a live row being ALREADY
+VISIBLE (`hasLiveRun`), and a board with zero rows cannot contain a live row — so the empty
+state was the one state the fallback could never reach. Both halves are fixed. The poll now
+also runs on a SETTLED empty read (`!loading && listError === null && items.length === 0`),
+so a dropped frame, a reconnect gap, or any future misrouting heals within 15s instead of
+persisting until reload.
+
+📌 **The fix was already written twenty lines above the bug, with a docblock describing it.**
+`fanProjectsChanged` fans to the base topic AND every live per-project topic, and its comment
+explains this exact failure for the project rail (#132: "Create Project from inside a project
+→ rail doesn't update until reload"). The work-board fan was written afterwards, against the
+same registry, and did not copy it. Widening the fan is safe because both clients already
+re-check the frame's `project_id` tag before applying it — that gate is now asserted, because
+without it a General snapshot would overwrite a project pane.
+
+**What was ruled out, and what remains open.** Not reproduced: an error rendering as empty
+(both clients have a distinct error branch ahead of the zero-row branch), a client-derived
+stale key at mount, and a writer/reader slug divergence. Still open and NOT closed by this
+PR: the warm REPL's `/tool-call` sink can resolve a write scope from the pool's session
+registration and degrade to General on a lookup miss, while the pane derives from
+`turn.project_id`. That remains a hypothesis; no miss was reproduced.
+
+**The mobile rail rendered the raw project name, and the as-built said otherwise.** The
+disambiguation rule is server-side with one implementation, but the two rails read the
+project set over DIFFERENT transports: web takes the `projects_changed` app-ws frame (which
+has always carried `label`), mobile lists over `GET /api/app/projects`, which carried no
+`label` at all. The prior as-built asserted "BOTH clients render it verbatim, so this fix
+needs no web/mobile change" — a statement about the intended design, written as though it
+described the code. On a phone the ack therefore named a board that no rail row answered to.
+The HTTP list now serves `label` (both the solo and the shared half) and mobile maps it into
+the rail and header; `name` stays raw beside it because the rename field round-trips it.
+Parity is pinned by `gateway/__tests__/work-board-label-client-parity.test.ts` instead of by
+a paragraph.
+
+**The reserved-slug fix had minted a second collision.** `slugifyProjectId` suffixed a name
+that would mint the `general` sentinel — to `general-project`, which this same function
+produces from a project genuinely named "General Project". `resolveBindTarget` resolves a
+colliding slug to the EXISTING project, so two distinct names would have silently become one
+project. The suffix is now a trailing `-`, which no input can produce because the slugifier
+trims exactly that immediately before returning — collision-proof by construction rather
+than by picking a word nobody is expected to type, the same reasoning behind the mobile
+rail's `~general`.
+
+Also closed: the label rule's own OUTPUT was a colliding INPUT (a project named
+`General (project)` returned untouched, byte-identical to the qualified form of `General`),
+and the invisible-name floor stripped only the joiner, so U+FE0F, U+3164, U+2800 and any
+combining mark walked through it and published a board-naming line naming no board.
+
+**Mutation results: seven mutants, seven dead.** Reverting the fan → 4 of 5 topology tests
+red; reverting the poll gate → red; reverting the invisible-char floor → 4 red; reverting the
+qualified-form reservation → red; reverting the slug suffix → 2 red. The single-mapping guard
+was also REWRITTEN because it was bypassable: it approved any line containing an allowed
+substring, so a direct `readProjectName(id)` lookup sitting on the same line as a legitimate
+`boardLabelForProjectId(...)` call passed it. Executed both ways — the old form PASSES that
+mutant, the new form (no `readProjectName(` invocation anywhere) fails it. A guard a mutant
+passes is zero coverage that reads green.
+
+📌 **A doc that describes a design as though it were the implementation is more dangerous
+than a stale one, because it is confidently specific.** Two of this round's three blockers
+were sitting underneath such a sentence — "BOTH clients render it verbatim" and the fan's own
+`project_id`-tagging comment, which described a delivery that could not occur. In both cases
+the prose was a correct account of the intent and a false account of the code, and in both
+cases believing it would have closed the investigation one step short of the bug.
+
+Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.

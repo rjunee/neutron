@@ -97,6 +97,17 @@ export type ProjectOrigin = 'solo' | 'shared';
 /** A row in the unified project list: the owner's solo projects
  *  plus every group project from the workspaces the user belongs to. */
 export interface ProjectListItem extends ProjectSettings {
+  /**
+   * Owner-facing display name, server-computed (`disambiguateProjectBoardLabel`
+   * in `gateway/http/app-projects-surface.ts`), so a project named `General`
+   * does not render identically to the General board.
+   *
+   * OPTIONAL on the wire, deliberately: an older gateway does not send it, and
+   * the mapper falls back to `name`. The rule itself is never re-implemented
+   * here — a client-side copy is the second spelling this whole change exists
+   * to avoid.
+   */
+  label?: string;
   kind: ProjectOrigin;
   origin_instance: string;
   owning_instance_slug: string;

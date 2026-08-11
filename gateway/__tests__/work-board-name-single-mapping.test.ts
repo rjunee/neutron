@@ -90,15 +90,26 @@ describe('every owner-facing board name resolves through ONE mapping', () => {
    */
   test('the project-name query is only ever consumed by the shared resolver', () => {
     const mentions = codeLines.filter((line) => line.includes('readProjectName'))
-    // Definition + every legitimate consumption. Nothing else may touch it.
-    const allowed = mentions.filter(
-      (line) =>
-        line.includes('const readProjectName =') ||
-        line.includes('boardLabelForProjectId(') ||
-        line.includes('project_name:'),
-    )
     expect(mentions.length).toBeGreaterThan(0)
-    expect(mentions).toEqual(allowed)
+
+    // THE INVARIANT, in the one form a line cannot talk its way out of: the
+    // query is only ever PASSED (as a reference, to the resolver or to the ack's
+    // `project_name` port) and never INVOKED here. A second mapping has to call
+    // it to render a name, so `readProjectName(` — with the paren — IS the
+    // mutant, wherever on the line it appears.
+    //
+    // The previous form asked whether the LINE contained any allowed substring,
+    // which is not the same question and was bypassable: a single line holding a
+    // direct `readProjectName(id)` lookup NEXT TO a legitimate
+    // `boardLabelForProjectId(...)` call satisfied it, so the guard approved the
+    // exact duplicate it exists to reject. A guard that a mutant passes is zero
+    // coverage that reads green.
+    const invocations = codeLines.filter((line) => /readProjectName\s*\(/.test(line))
+    expect(invocations).toEqual([])
+
+    // And it is still DEFINED exactly once — one query, not one per caller.
+    const definitions = codeLines.filter((line) => /const\s+readProjectName\s*=/.test(line))
+    expect(definitions.length).toBe(1)
   })
 
   /**

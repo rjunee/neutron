@@ -160,11 +160,23 @@ resolver rather than reasoned about:
   whitespace-insensitive on the flattened name, so `general`, `GENERAL ` and `General\n`
   all collide.
 
-  Applied **server-side at both seams** — `boardLabelForProjectId` (acks, `<work_board>`
-  block, `/status`) and the rail's `label` in `open/composer.ts` `readProjectRows`. The rail
-  label is server-computed and BOTH clients render it verbatim, so there is no client copy
-  of the rule and no cross-client parity to maintain. That is why this fix needs no web/
-  mobile change: the check was to find where the string is produced, not where it is drawn.
+  Applied **server-side at every seam that produces an owner-facing name** —
+  `boardLabelForProjectId` (acks, `<work_board>` block, `/status`), the rail's `label` on
+  the `projects_changed` app-ws frame (`open/composer.ts` `readProjectRows`), and the
+  `label` field on the HTTP project list (`gateway/http/app-projects-surface.ts`, both the
+  solo and the shared half).
+
+  **The HTTP half was missing, and the earlier version of this bullet asserted the
+  opposite.** It claimed the rail label was server-computed and that "BOTH clients render it
+  verbatim, so this fix needs no web/mobile change". Only WEB does: it reads the app-ws
+  frame's `label` (`landing/chat-react/ChatApp.tsx` `p.label`). MOBILE lists over HTTP,
+  which carried no `label` at all, so `app/app/projects/[id]/_layout.tsx` mapped `p.name`
+  raw into the rail and rendered the undisambiguated name. On a phone the ack therefore
+  named a board that no rail row answered to — the exact failure the rule exists to prevent,
+  left in place by a doc that described the intended design as though it were the shipped
+  one. The rule still has ONE implementation; what was missing was one of its two
+  transports. Parity is now pinned by a test rather than by this paragraph
+  (`gateway/__tests__/work-board-label-client-parity.test.ts`).
 
 * **The 48-char cap collapsing two long names into one.** `projects.name` allows 1-128
   chars, so a head-only cap made any two names sharing a 47-char prefix render identically
@@ -249,9 +261,9 @@ Considered and declined, because the redundancy is not worth the diff:
   `▸ On the Work Board · <board>:` line from the tool layer, and prose alone emits none.
 * **A project whose id ALREADY is `general`.** This bullet previously claimed the
   sentinel reservation was unfixed and out of the blast radius. **That was wrong, and it
-  was wrong in the same commit that shipped the fix**: `slugifyProjectId` returns
-  `general-project` for a name that would mint the sentinel
-  (`onboarding/wow-moment/project-identity.ts:82`) and
+  was wrong in the same commit that shipped the fix**: `slugifyProjectId` suffixes
+  a name that would mint the sentinel
+  (`onboarding/wow-moment/project-identity.ts`) and
   `tests/integration/work-board-ack-names-board.open.test.ts:387-388` asserts it. The doc
   described the state before the fix as though it were the state after — the folklore
   failure class this repo already has a record of, committed alongside its own refutation.
@@ -437,7 +449,7 @@ PR.
 
 ## Deliberate tradeoffs
 
-* **Board labels cap at 48 code points** (`MAX_BOARD_LABEL_LEN`) while the create surface
+* **Board labels cap at 48 graphemes** (`MAX_BOARD_LABEL_LEN`) while the create surface
   allows 128, so a long project name elides in every ack and in `/status`. Chosen: the ack
   is one chat line and the item title needs the room.
 * **`/status`'s `active_project` is a BOARD label, not a project field.** An id that no
