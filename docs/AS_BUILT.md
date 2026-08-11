@@ -9863,8 +9863,9 @@ itself. Both were narrowed to the sign of `elapsed` — which round 8 found is s
 condition, and deleted in favour of pointing at it. The rest: "the head docblock gives … the rest
 of the caller-facing contract" contradicted the head docblock's own "not the whole caller-facing
 contract"; "a throwing sink … delivers nothing" ignores a sink that delivers and then throws;
-"a test cannot go stale quietly" had a counterexample in this very PR (round 1's 41 green tests
-with the flood restored); the composer's cron docblocks named the default cadence without the
+"a test cannot go stale quietly" had a counterexample in this very PR (round 1's suite was green
+with the flood restored — round 8 removed the specific count this sentence used to carry, which
+did not survive being traced); the composer's cron docblocks named the default cadence without the
 `interval_ms` override that three of them forward; and "All are fixed here" was, again, written
 before the pass that checked it. 📌 **A sentence written to correct an over-claim is written at
 speed, from the correction, and inherits its shape** — three rounds running, the fix reproduced
