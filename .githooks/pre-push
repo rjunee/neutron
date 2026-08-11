@@ -43,10 +43,16 @@ GATE="$ROOT/scripts/ci/leak-gate.sh"
 ZERO='0000000000000000000000000000000000000000'
 STATUS=0
 CHECKED=0
+# The ref lines are consumed by the loop below, so they are kept verbatim for the
+# trident advisory at the end — which must name the PUSHED branch, not whatever
+# happens to be checked out.
+REFLINES=''
 
 # git feeds one line per ref being pushed: <local_ref> <local_sha> <remote_ref> <remote_sha>
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
+  REFLINES="${REFLINES}${local_ref:-} ${local_sha} ${remote_ref:-} ${remote_sha:-}
+"
   # A deletion pushes no commits and no messages.
   [ "$local_sha" = "$ZERO" ] && continue
   CHECKED=1
@@ -133,26 +139,18 @@ fi
 # so it cannot exist before the push. Hence: advisory only, and every command
 # below is `|| true`.
 #
-# The command text is fetched FROM THE GATE (`--redeem-command`) rather than
-# copied. A second spelling would drift from the one CI prints, and a drifted
-# redemption path is a gate that only rejects.
-{
-  _tv_branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  _tv_gate="$ROOT/scripts/ci/trident-verdict.ts"
-  _tv_cmd=""
-  if [ -f "$_tv_gate" ] && command -v bun >/dev/null 2>&1; then
-    _tv_cmd="$(bun "$_tv_gate" --redeem-command --branch "${_tv_branch:-}" 2>/dev/null || true)"
-  fi
-  if [ -n "$_tv_cmd" ]; then
-    echo "" >&2
-    echo "note: pushed. The MERGE is gated on a review verdict for this head commit." >&2
-    echo "      If this branch has not been through a review lane, put it through one —" >&2
-    echo "      it re-enters the existing branch and reuses the PR, nothing is rebuilt:" >&2
-    echo "" >&2
-    echo "        $_tv_cmd" >&2
-    echo "" >&2
-    echo "      docs/trident-verdict-gate.md" >&2
-  fi
-} || true
+# It names the PUSHED refs, which is why the ref lines were kept above rather than
+# `git rev-parse HEAD` being consulted: `git push origin some-other-branch`, a
+# multi-ref push and a tag push all have a checked-out branch that is not the thing
+# being pushed, and naming the wrong branch in a redemption command is worse than
+# naming none.
+#
+# The command text is fetched FROM THE GATE (`--redeem-command`, via the advisory
+# script) rather than copied. A second spelling would drift from the one CI prints,
+# and a drifted redemption path is a gate that only rejects.
+_tv_advisory="$ROOT/scripts/ci/trident-redeem-advisory.sh"
+if [ -f "$_tv_advisory" ]; then
+  printf '%s' "$REFLINES" | bash "$_tv_advisory" || true
+fi
 
 exit 0

@@ -81,6 +81,46 @@ prover still vetoes a bad APPROVE today" written in the swallowed region passed
 at 17 pass / 0 fail. An exemption that widens on its own is a gate that stops
 firing with nobody watching, so an edit to either end now throws instead.
 
+## 2026-08-10 — a merge needs a review verdict, and the refusal hands the branch back (#179)
+
+`trident-verdict`, a job in `.github/workflows/ci.yml`, fails any pull request
+whose HEAD COMMIT carries no recorded review verdict. The rule that code here goes
+through the build-and-review loop was already written down, and hand-rolled PRs
+went around it twice — so this is a mechanism rather than a third wording. The
+verdict is a fenced `review-evidence` comment on the PR, posted by an account with
+write access, naming the full 40-hex commit it examined: keyed to the SHA, so a
+later fix commit invalidates an earlier approval and forces a fresh round. The
+record deliberately lives outside the PR's own diff, because a committed file would
+let the author of a change author its approval. The gate rides the existing
+required `test` aggregator, which demands `success` from it on pull-request events,
+so a skipped verdict job fails the required context instead of satisfying it — no
+branch-protection change needed.
+
+The failure is the feature: every failure path prints the one command that feeds
+the already-written branch into a review lane, reusing its branch and its PR rather
+than rebuilding. `.githooks/pre-push` prints the same command, from the same single
+definition, and never blocks — a push is fine, only the merge is gated.
+`TRIDENT_BYPASS=<reason>` at column 0 in the head commit message passes the gate
+and records why, and is not satisfiable by an empty, placeholder, or unreadable
+reason.
+
+Before believing any absence the gate runs its whole lookup against known inputs —
+a good verdict must pass, an absent one and a stale one must fail — and reports
+`THE LOOKUP IS BROKEN` distinctly from "no verdict recorded". A parser-only version
+of that control passed a mutant which reported "no verdict" for every PR in the
+repository.
+
+Sixteen mutants applied by script, suite run per mutant, source restored and
+verified byte-identical: 16 caught, 0 survived. They cover the candidate filter,
+the author-trust filter, pagination termination, the file-list truncation check,
+rename classification, extensionless executables, the redeeming command's argument
+spellings, the four failure paths that previously printed no command, and the
+push-time advisory naming the pushed ref rather than the checked-out branch. The
+hosted overlay repository needs the same gate, as a separate change made there —
+one repository per change.
+
+Detail: `docs/as-built/2026-08-10-trident-verdict-gate.md`.
+
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
 
 The `codegen_status`, `codegen_fetch`, and `codegen_cancel` tools now keep their

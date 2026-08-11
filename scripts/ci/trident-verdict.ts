@@ -31,6 +31,11 @@
  * branch. A committed `verdict.json` would be self-certifying — the author of
  * the change would also be the author of its approval.
  *
+ * AND NOT FROM JUST ANYBODY. This repository is public, so "a comment containing
+ * the block" is not a sufficient definition of a verdict: it would let any account
+ * on the internet green a required check, or force it red with a malformed one.
+ * The comment's author must hold write access — see `TRUSTED_ASSOCIATIONS`.
+ *
  * POSITIVE CONTROL. A lookup that cannot read the format returns a negative
  * that looks exactly like an answer ("no verdict found"). Before this gate
  * believes any absence, it parses a known-good fixture through the SAME parser
@@ -65,6 +70,17 @@ function fenceMatches(body: string): string[] {
 const SCALAR = /^([a-z_.]+):[ \t]*(.*?)[ \t]*$/
 /** A value the FAIL template printed and nobody filled in. Rejected everywhere. */
 const PLACEHOLDER = /^<[\s\S]*>$/
+/**
+ * A filled-in value that still says nothing — the shapes a writer reaches for
+ * when there is nothing to report.
+ *
+ * The PRODUCING side already refuses these: `isUnusableEvidence` in the review
+ * harness rejects empty, `<...>`-shaped, and `tbd|n/a|none|unknown` before it
+ * posts. This gate applied only the first two, so a HAND-WRITTEN verdict was held
+ * to a LOWER bar than a generated one — `- mutant: n/a` satisfied the mutation
+ * clause that exists precisely to stop "no mutation was run" passing for one.
+ */
+const UNUSABLE_VALUE = /^(tbd|t\.b\.d\.?|n\/a|n\.a\.?|na|none|nil|null|unknown|unproven|todo|-+)$/i
 /** `commit` must be the full SHA — never a truncation, never prose. */
 const FULL_SHA = /^[0-9a-f]{40}$/i
 
@@ -101,9 +117,14 @@ function count(raw: string, key: string): number {
   if (!/^-?\d+$/.test(trimmed)) {
     throw new VerdictError(`${key} must be an integer count, got ${JSON.stringify(trimmed)}`)
   }
-  const value = Number(trimmed)
-  if (value < 0) throw new VerdictError(`${key} must be >= 0, got ${value}`)
-  return value
+  // Reject the MINUS SIGN, not the resulting number. `Number('-0')` is `-0`, and
+  // `-0 < 0` is false — so a value-based guard lets `-0` through, and a regressed
+  // producer emitting `-1` or `-0` would read as "zero blocking findings". A count
+  // is never written with a sign, so the sign itself is the defect.
+  if (trimmed.startsWith('-')) {
+    throw new VerdictError(`${key} must be a non-negative integer count, got ${JSON.stringify(trimmed)}`)
+  }
+  return Number(trimmed)
 }
 
 function rejectPlaceholder(key: string, value: string): void {
@@ -123,6 +144,13 @@ function finishMutation(pending: Record<string, string>): Mutation {
   for (const [key, value] of Object.entries(pending)) {
     if (!value.trim()) throw new VerdictError(`mutation entry has an empty ${key}`)
     rejectPlaceholder(key, value)
+    if (UNUSABLE_VALUE.test(value.trim())) {
+      throw new VerdictError(
+        `mutation entry has an unusable ${key} (${JSON.stringify(value.trim())}) — ` +
+          'the producing side refuses these values before it posts, and a hand-written ' +
+          'verdict is not held to a lower bar than a generated one',
+      )
+    }
   }
   return { mutant: pending.mutant!, red: pending.red!, control: pending.control! }
 }
@@ -262,9 +290,22 @@ const ROOT_TEST_SELECTION = new Set([
   'package.json',
   'bunfig.toml',
   'tsconfig.json',
+  // The base config every other tsconfig EXTENDS, so it sets `strict`, `paths`
+  // and the type surface for the whole tree. Omitting it while listing
+  // `tsconfig.json` was a real hole: a PR that only relaxes the base config
+  // changes what typecheck accepts everywhere and owed no evidence.
+  'tsconfig.base.json',
   'eslint.config.mjs',
   '.dependency-cruiser.cjs',
 ])
+/**
+ * Directories whose files are executables regardless of extension.
+ *
+ * Suffix matching alone classified `bin/neutron` — the CLI entry point — as prose.
+ * A shebang script has no extension by convention, so the DIRECTORY is the only
+ * signal available, and these two are the ones this tree uses for them.
+ */
+const EXECUTABLE_DIRS = new Set(['bin', 'scripts'])
 
 /**
  * True when a changed file is on the surface that owes mutation evidence.
@@ -289,12 +330,52 @@ export function touchesGatedSurface(path: string): boolean {
   const base = parts[parts.length - 1]!
   if (/\.test\.[a-z]+$/.test(base)) return false
   if (parts.slice(0, -1).some((seg) => EXEMPT_SEGMENTS.has(seg))) return false
-  return EXEC_SUFFIXES.some((suffix) => base.endsWith(suffix))
+  if (EXEC_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true
+  // Extensionless file in an executable directory: a shebang script or the CLI
+  // entry point. `.`-less is the test, so `bin/neutron` gates and `bin/logo.svg`
+  // still falls through to the suffix rule above.
+  return parts.length > 1 && EXECUTABLE_DIRS.has(parts[0]!) && !base.includes('.')
+}
+
+/**
+ * True when ANY file in the PR's list is on the gated surface.
+ *
+ * `previous_filename` is consulted, not only `filename`. GitHub reports a rename
+ * under its DESTINATION path, so classifying the destination alone lets a rename
+ * hide the surface it moved off: `git mv .github/workflows/ci.yml docs/ci.yml`, or
+ * a production module renamed to `*.test.ts`, both read as prose-only while
+ * changing exactly the behaviour the evidence requirement exists for.
+ */
+export function filesTouchGatedSurface(files: { filename?: string; previous_filename?: string }[]): boolean {
+  return files.some(
+    (f) => touchesGatedSurface(f.filename ?? '') || touchesGatedSurface(f.previous_filename ?? ''),
+  )
 }
 
 // --------------------------------------------------------------------------- //
 // The redeeming command — the reason this gate is survivable
 // --------------------------------------------------------------------------- //
+
+/**
+ * Flag spellings the review-loop dispatcher actually PARSES on a start command.
+ *
+ * Its parse step recognises the task text plus `repo=`, `rounds=`, `mode=` and a
+ * bare `ralph` token. Everything else that LOOKS like a flag is swallowed into
+ * the task text — and the task text is what gets slugified into a branch name.
+ *
+ * That is not a style point, it is the difference between redeeming a branch and
+ * duplicating it. The first version of this gate printed `branch=<b>
+ * prNumber=<n>`, borrowed from the INNER workflow's argument names, which are
+ * real there but are not reachable from the typed command. Pasted verbatim, the
+ * two unparsed pairs became part of the task, the dispatcher minted a fresh
+ * `trident/<slug-of-that-sentence>` branch, and the redemption opened a SECOND
+ * branch and PR — the exact waste the redeeming message exists to prevent.
+ *
+ * So: the branch and the PR ride in the TASK TEXT, where they are read by the
+ * planner and the builder, and nothing in the printed command is flag-shaped
+ * unless it is in this set. `assertOnlyParsedFlags` in the test enforces it.
+ */
+export const DISPATCHER_PARSED_FLAGS = new Set(['repo', 'rounds', 'mode'])
 
 /**
  * The command that feeds an ALREADY-WRITTEN branch into a review lane.
@@ -304,11 +385,11 @@ export function touchesGatedSurface(path: string): boolean {
  * calling this file with `--redeem-command`. A second hand-copied spelling would
  * drift, and a drifted redemption path is a gate that only rejects.
  *
- * The spelling is the harness's real one, not an invented shorthand: the review
- * loop takes `branch` and `prNumber`, re-enters that branch WITHOUT `git switch
- * -c`, and reuses the existing PR instead of opening a duplicate. `repo=` is
- * omitted-able (the harness infers it), and is shown as a placeholder rather
- * than a real path because a filesystem path is not portable between machines.
+ * The re-entry itself is real — the inner workflow re-enters an existing branch
+ * without `git switch -c` and REUSES its PR rather than opening a duplicate —
+ * which is why the instruction to do so is stated in the task text explicitly
+ * rather than assumed. `repo=` is the one flag here; it is shown as a placeholder
+ * because a filesystem path is not portable between machines.
  */
 export function redeemCommand(opts: {
   branch?: string | null | undefined
@@ -317,10 +398,10 @@ export function redeemCommand(opts: {
   const rawBranch = (opts.branch ?? '').toString().trim()
   const branch = rawBranch || '<this branch>'
   const rawPr = (opts.prNumber ?? '').toString().trim()
-  const pr = rawPr || '<the PR number>'
+  const pr = rawPr ? `PR #${rawPr}` : 'the open PR'
   return (
-    `/trident v2 repo=<path-to-your-checkout> branch=${branch} prNumber=${pr} ` +
-    'review and fix the existing branch, reuse its PR, do not restart from scratch'
+    `/trident v2 repo=<path-to-your-checkout> review ${pr} on the EXISTING branch ${branch} — ` +
+    're-enter that branch, reuse that PR, do not restart from scratch and do not open a new PR'
   )
 }
 
@@ -408,19 +489,93 @@ export interface ControlResult {
   detail: string
 }
 
+/** The association GitHub reports for the account the review loop posts as. */
+const CONTROL_ASSOCIATION = 'OWNER'
+
 /**
- * Run the lookup against a known-good input.
+ * A fake GitHub for the control: one PR, one executable file, one comment.
+ *
+ * `comments` is what each case varies. Everything else is the shape the real
+ * endpoints return, including the `author_association` the candidate filter
+ * reads and the `changed_files` count the truncation check compares against.
+ */
+function controlApi(comments: { body: string; author_association?: string }[]) {
+  return async (path: string): Promise<unknown> => {
+    if (path.startsWith('repos/control/control/commits/')) {
+      return { commit: { message: 'control: a commit with no bypass marker\n' } }
+    }
+    if (/\/pulls\/1\/files\?/.test(path)) {
+      return /[?&]page=1(&|$)/.test(path) ? [{ filename: 'open/composer.ts' }] : []
+    }
+    if (/\/pulls\/1$/.test(path)) return { changed_files: 1 }
+    if (/\/comments\?/.test(path)) {
+      return /[?&]page=1(&|$)/.test(path) ? comments : []
+    }
+    throw new Error(`control: the gate asked for an endpoint the control does not model: ${path}`)
+  }
+}
+
+function controlEnv(): Record<string, string | undefined> {
+  return {
+    GITHUB_REPOSITORY: 'control/control',
+    PR_NUMBER: '1',
+    PR_HEAD_SHA: CONTROL_HEAD_SHA,
+    PR_HEAD_REF: 'control/branch',
+  }
+}
+
+/**
+ * Run the WHOLE lookup against known-good and known-bad inputs.
  *
  * A tool that cannot read the format reports "no verdict found", which is
- * indistinguishable from the real thing and reads as a finished answer. This
- * turns that class of failure into its own loud outcome.
+ * indistinguishable from the real thing and reads as a finished answer. This turns
+ * that class of failure into its own loud outcome.
+ *
+ * It drives `gate` itself — pagination, API-shape handling, the trusted-author
+ * filter, the candidate selection and the comparison — not `parseVerdict` alone.
+ * The earlier version called the parser directly, and a mutant that emptied the
+ * CANDIDATE FILTER passed that control while reporting "no verdict recorded" for
+ * every PR on the repository: a control that does not cover the step that broke
+ * proves the gate can read a string, not that it can find a verdict.
+ *
+ * Three cases, because a control that only proves a POSITIVE cannot detect a
+ * lookup stuck at "yes": a good verdict must pass, no verdict must fail, and a
+ * verdict for a DIFFERENT sha must fail.
  */
-export function selfTest(): ControlResult {
+export async function selfTest(): Promise<ControlResult> {
+  const quietDeps = (comments: { body: string; author_association?: string }[]): GateDeps => ({
+    env: controlEnv(),
+    fetchJson: controlApi(comments),
+    log: () => {},
+    // The control must not recurse into itself.
+    control: () => ({ ok: true, detail: 'inner control short-circuited' }),
+  })
+
+  const cases: { name: string; comments: { body: string; author_association?: string }[]; want: number }[] = [
+    {
+      name: 'a known-good verdict for the head sha PASSES',
+      comments: [{ body: CONTROL_COMMENT, author_association: CONTROL_ASSOCIATION }],
+      want: 0,
+    },
+    { name: 'no verdict at all FAILS', comments: [{ body: 'control: idle chatter' }], want: 1 },
+    {
+      name: 'a verdict for a different sha FAILS',
+      comments: [
+        {
+          body: CONTROL_COMMENT.replace(CONTROL_HEAD_SHA, 'f'.repeat(40)),
+          author_association: CONTROL_ASSOCIATION,
+        },
+      ],
+      want: 1,
+    },
+  ]
+
   try {
-    const parsed = parseVerdict(CONTROL_COMMENT)
-    const failures = verdictFailures(parsed, CONTROL_HEAD_SHA, { touchesSource: true })
-    if (failures.length > 0) {
-      return { ok: false, detail: `control verdict did not clear the bar: ${failures.join('; ')}` }
+    for (const c of cases) {
+      const got = await gate(quietDeps(c.comments))
+      if (got !== c.want) {
+        return { ok: false, detail: `control: ${c.name} — the gate returned ${got}, expected ${c.want}` }
+      }
     }
     if (!touchesGatedSurface('open/composer.ts')) {
       return { ok: false, detail: 'control: an executable source path did not classify as gated surface' }
@@ -428,9 +583,9 @@ export function selfTest(): ControlResult {
     if (touchesGatedSurface('docs/AS_BUILT.md')) {
       return { ok: false, detail: 'control: a prose path classified as gated surface' }
     }
-    return { ok: true, detail: 'control verdict parsed and cleared the bar' }
+    return { ok: true, detail: 'control: the full lookup found a good verdict, and rejected an absent and a stale one' }
   } catch (e) {
-    return { ok: false, detail: `control verdict failed to parse: ${e instanceof Error ? e.message : String(e)}` }
+    return { ok: false, detail: `control: the lookup threw — ${e instanceof Error ? e.message : String(e)}` }
   }
 }
 
@@ -447,7 +602,28 @@ export interface GateDeps {
   fetchJson: (path: string) => Promise<unknown>
   log: (line: string) => void
   /** Injectable so a broken lookup can be exercised in a test. */
-  control?: (() => ControlResult) | undefined
+  control?: (() => ControlResult | Promise<ControlResult>) | undefined
+}
+
+/**
+ * Comment authors whose verdict counts.
+ *
+ * THIS REPOSITORY IS PUBLIC. Without an author check the gate selected a verdict
+ * by BODY alone, so any GitHub account on the internet could post a
+ * `review-evidence` block and turn a required check green on a pull request they
+ * did not review — and, by posting a deliberately malformed one, could equally
+ * force it red, because a malformed newest candidate is fatal by design.
+ * "Anyone may comment" is the correct policy for a comment and the wrong one for
+ * an approval.
+ *
+ * `author_association` is what the issue-comments endpoint reports, and these
+ * three are the values that mean write access to this repository. CONTRIBUTOR,
+ * FIRST_TIME_CONTRIBUTOR, MEMBER-of-some-other-org and NONE are all outside.
+ */
+const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
+
+export function isTrustedAuthor(association: string | undefined): boolean {
+  return TRUSTED_ASSOCIATIONS.has((association ?? '').trim().toUpperCase())
 }
 
 async function allPages(deps: GateDeps, path: string): Promise<unknown[]> {
@@ -560,6 +736,7 @@ async function gate(deps: GateDeps): Promise<number> {
 
   if (!repo) {
     deps.log('trident-verdict: FAIL — GITHUB_REPOSITORY is not set; refusing to guess the repository.')
+    printRedemption(deps, branch, pr)
     return 1
   }
   if (!pr || !/^\d+$/.test(pr)) {
@@ -571,6 +748,7 @@ async function gate(deps: GateDeps): Promise<number> {
         'pull_request events; a non-PR invocation must never report green, because a green\n' +
         '(or skipped) run is what an aggregated required check reads as satisfied.',
     )
+    printRedemption(deps, branch, pr)
     return 1
   }
   if (!headSha || !FULL_SHA.test(headSha)) {
@@ -578,11 +756,12 @@ async function gate(deps: GateDeps): Promise<number> {
       `trident-verdict: FAIL — PR_HEAD_SHA is absent or not a full 40-hex SHA (${JSON.stringify(headSha ?? null)}).\n` +
         'A verdict is bound to a commit; without the commit there is nothing to bind it to.',
     )
+    printRedemption(deps, branch, pr)
     return 1
   }
 
   // POSITIVE CONTROL, before any negative is believed.
-  const control = (deps.control ?? selfTest)()
+  const control = await (deps.control ?? selfTest)()
   if (!control.ok) {
     deps.log('trident-verdict: FAIL — THE LOOKUP IS BROKEN, which is not the same as "no verdict".')
     deps.log(`  ${control.detail}`)
@@ -590,6 +769,10 @@ async function gate(deps: GateDeps): Promise<number> {
     deps.log('The verdict parser could not read a known-good fixture, so any "no verdict found"')
     deps.log('result from this run would be a property of the reader, not of the PR. Fix')
     deps.log('scripts/ci/trident-verdict.ts before drawing any conclusion about this branch.')
+    // Still redeems. The author of the branch did nothing wrong here and has the
+    // same next move either way; withholding the command only makes a red check
+    // they cannot act on, which is how a gate earns a bypass habit.
+    printRedemption(deps, branch, pr)
     return 1
   }
 
@@ -613,18 +796,79 @@ async function gate(deps: GateDeps): Promise<number> {
     deps.log(`::notice title=trident-verdict bypassed::${bypass.reason}`)
     deps.log(`trident-verdict: BYPASSED for ${headSha.slice(0, 12)} — no review verdict was required.`)
     deps.log(`  reason: ${bypass.reason}`)
-    deps.log('  recorded in the head commit message, which merges into permanent history.')
+    deps.log('  recorded in the head commit message.')
+    deps.log('')
+    // A squash merge composes a NEW message from the PR title and body, so the
+    // head commit's own body is not guaranteed to survive into the default branch
+    // — and after the branch is deleted the reason would be gone while the
+    // unreviewed change stayed merged. The gate cannot write the squash message,
+    // so it says what has to be carried, loudly, at the moment the hatch is used.
+    deps.log('CARRY THIS REASON INTO THE MERGE COMMIT. A squash merge composes its message from')
+    deps.log('the PR title and body, not from this commit, so the marker can be dropped on the')
+    deps.log('way in — and once the branch is deleted the only record of an unreviewed merge')
+    deps.log('goes with it. Put the same line in the PR body, at column 0:')
+    deps.log('')
+    deps.log(`    TRIDENT_BYPASS=${bypass.reason}`)
     return 0
   }
 
-  const files = (await allPages(deps, `repos/${repo}/pulls/${pr}/files`)) as { filename?: string }[]
-  const touchesSource = files.some((f) => touchesGatedSurface(f.filename ?? ''))
+  // The PR's own count of changed files, read BEFORE the list, so the list can be
+  // checked against it. The files endpoint caps at 3,000 files and a capped
+  // response is a complete-looking short page — it terminates the paginator
+  // exactly like a genuine last page, and a >3,000-file PR would then classify as
+  // whatever its first 3,000 files happened to be.
+  const prMeta = (await deps.fetchJson(`repos/${repo}/pulls/${pr}`)) as { changed_files?: unknown } | undefined
+  const changedFiles = prMeta?.changed_files
+  if (typeof changedFiles !== 'number' || !Number.isInteger(changedFiles) || changedFiles < 0) {
+    throw new Error(
+      `the PR endpoint did not report an integer changed_files (got ${JSON.stringify(changedFiles ?? null)}), ` +
+        'so the file list cannot be checked for truncation',
+    )
+  }
 
-  const comments = (await allPages(deps, `repos/${repo}/issues/${pr}/comments`)) as { body?: string }[]
+  const files = (await allPages(deps, `repos/${repo}/pulls/${pr}/files`)) as {
+    filename?: string
+    previous_filename?: string
+  }[]
+  if (files.length < changedFiles) {
+    throw new Error(
+      `the files endpoint returned ${files.length} of ${changedFiles} changed files — ` +
+        'refusing to classify the surface from a truncated list',
+    )
+  }
+  const touchesSource = filesTouchGatedSurface(files)
+
+  const comments = (await allPages(deps, `repos/${repo}/issues/${pr}/comments`)) as {
+    body?: string
+    author_association?: string
+  }[]
   // Newest first: a re-review supersedes an earlier one. Candidacy uses the SAME
   // anchored fence as the parser, so a comment merely quoting an old block does
-  // not displace the newest real verdict.
-  const candidates = [...comments].reverse().filter((c) => VERDICT_FENCE.test(c.body ?? ''))
+  // not displace the newest real verdict — AND the author must have write access,
+  // because this repository is public and a verdict selected by body alone is an
+  // approval anyone on the internet can write.
+  const fenced = [...comments].reverse().filter((c) => VERDICT_FENCE.test(c.body ?? ''))
+  const candidates = fenced.filter((c) => isTrustedAuthor(c.author_association))
+  const untrusted = fenced.length - candidates.length
+
+  if (candidates.length === 0 && untrusted > 0) {
+    // Named separately, because "someone posted one and it does not count" is a
+    // different fact from "nobody posted one", and the second reads as an
+    // instruction to go and review while the first reads as an instruction to
+    // argue with the gate.
+    deps.log(
+      `trident-verdict: FAIL — ${untrusted} review-evidence comment(s) on this PR, none from an account with`,
+    )
+    deps.log('write access to this repository, so none of them is a verdict.')
+    deps.log('')
+    deps.log(`  head SHA : ${headSha}`)
+    deps.log('')
+    deps.log('This repository is public: anyone may comment, so a verdict selected by its body')
+    deps.log('alone would be an approval anyone could write. Only OWNER, MEMBER or COLLABORATOR')
+    deps.log('comments count.')
+    printRedemption(deps, branch, pr)
+    return 1
+  }
 
   if (candidates.length === 0) {
     deps.log('trident-verdict: FAIL — no trident verdict recorded for this PR\'s head commit.')
@@ -691,7 +935,7 @@ if (import.meta.main) {
   }
 
   if (argv.includes('--self-test')) {
-    const result = selfTest()
+    const result = await selfTest()
     process.stdout.write(`trident-verdict self-test: ${result.ok ? 'OK' : 'BROKEN'} — ${result.detail}\n`)
     process.exit(result.ok ? 0 : 1)
   }
