@@ -84,6 +84,27 @@ export class ReplSession {
    * stops the abandon-poison paths from acquiring an eager teardown they never asked for.
    */
   retireOnIdle = false
+  /**
+   * The `pool` entry this session IS, when it is pooled — the exact promise
+   * `getOrSpawnSession` stored under its key. `undefined` for an ephemeral (never
+   * pooled) session.
+   *
+   * Exists so a teardown can ask "is the pool still holding ME?" SYNCHRONOUSLY and
+   * exactly. The obvious substitute, `childByKey.get(key) === session.child`, answers a
+   * different question and lags the pool in the wrong direction: `pool.set` happens at
+   * the top of a replacement spawn and `childByKey.set` only once that spawn has a live
+   * child, so for the whole length of a respawn the pool holds the NEW entry while
+   * `childByKey` still names the OLD child. A predecessor tearing itself down in that
+   * window read itself as current and deleted its successor's pool entry — un-pooling a
+   * live REPL, which then answered to nothing and was invisible to
+   * `shutdownAllPersistentRepls`. Promise identity has no such lag: it is assigned
+   * before the pooled promise resolves, so any holder of a session has its entry.
+   *
+   * Declared `| undefined` rather than optional (`?:`) because `exactOptionalPropertyTypes`
+   * is on: the tagging assignment happens inside a `.then` whose captured binding the
+   * compiler cannot narrow to non-`undefined` across the closure.
+   */
+  poolEntry: Promise<ReplSession> | undefined = undefined
   /** Timestamp of the last byte the REPL's PTY emitted. Used to gate the NEXT
    *  turn's inject on the REPL going idle — injecting a channel notification
    *  while claude is still finishing the prior turn drops the notification

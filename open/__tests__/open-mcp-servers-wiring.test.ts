@@ -318,7 +318,16 @@ describe('the production composer wires installable MCP servers end to end', () 
         hasChildExited: (): boolean => killed,
       }
       const KEY = 'mcp-wiring-probe'
-      pool.set(KEY, Promise.resolve(session as unknown as ReplSession))
+      // TAGGED WITH ITS OWN POOL ENTRY, because that tag is now part of what makes a
+      // session pooled. `retireWarmSession` deletes from `pool` only when the entry it
+      // finds there is the one THIS session is — the guard that stops a predecessor
+      // tearing itself down from un-pooling its successor mid-respawn — and the
+      // production `pool.set` in `spawn.ts` assigns it in the same breath. A stub that
+      // omitted it was not standing in for a pooled session; it was standing in for one
+      // the pool could not identify, and the retire correctly declined to touch it.
+      const entry = Promise.resolve(session as unknown as ReplSession)
+      ;(session as unknown as ReplSession).poolEntry = entry
+      pool.set(KEY, entry)
       childByKey.set(KEY, child as unknown as PtyChild)
 
       // Uninstall — a revocation, which is what has to reach the pool.

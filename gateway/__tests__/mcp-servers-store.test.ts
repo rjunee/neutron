@@ -55,12 +55,13 @@ let tmp: string
 let db: ProjectDb
 let approvals: ApprovalManager
 let store: OwnerMcpServerStore
+let credentials: ProjectCredentialStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'mcp-store-'))
   db = ProjectDb.open(join(tmp, 'project.db'))
   applyMigrations(db.raw())
-  const credentials = new ProjectCredentialStore(db, {
+  credentials = new ProjectCredentialStore(db, {
     crypto: new SecretsStore({ data_dir: tmp, db }),
   })
   // A notifier that does nothing: the DURABLE ROW is the state this feature reads,
@@ -510,6 +511,92 @@ describe('a VALUE leaves the encrypted store by exactly ONE route', () => {
     // The reserved name cannot re-enter through a hand-edited column; the valid
     // sibling still reads back, because one bad row must not disable the rest.
     expect(readOwnerMcpServers(db, SLUG).map((s) => s.name)).toEqual(['example-server'])
+  })
+
+  test('a spec the validator now REFUSES is still UNINSTALLABLE — residue has a removal path', async () => {
+    // FAIL-CLOSED FOR EXECUTION, PERMANENT AS RESIDUE. A stored entry the validating read
+    // refuses is not returned, so it is never wired — that part was always right. But
+    // `remove()` looked the name up in the validated list, did not find it, and answered
+    // `removed: false`, while the encrypted `mcp_env.example-server` row and the
+    // `tool_approvals` grant stayed behind. And because this store now RESERVES that
+    // credential namespace from the generic CRUD (which is the correct fix for a different
+    // hole), there was no longer any other surface in the system that could delete the
+    // secret either. The owner had a secret he could not remove and a grant he could not
+    // see — which also contradicts this subsystem's own "NOT silent" discipline.
+    //
+    // The tightening is simulated the way it would arrive in production: a column written
+    // by a looser build, re-read by a stricter one. A NUL in the command is refused by
+    // `MCP_SERVER_BANNED_CHARS_RE` and leaves the NAME intact, which is what makes this
+    // the residue case rather than a rename.
+    //
+    // MUTATION: restore the bare `if (target === undefined) return { removed: false, … }`
+    // in `removeLocked` and this fails at the `removed` assertion, with the secret and the
+    // approval row both still present afterwards.
+    await store.install(DRAFT)
+    await approve('example-server')
+    expect(await store.resolveApproved()).toHaveLength(1)
+
+    await db.run('UPDATE instance_metadata SET mcp_servers = ? WHERE instance_slug = ?', [
+      JSON.stringify([
+        { name: 'example-server', command: '/usr/local/bin/example\u0000mcp', args: [], env_names: ['EXAMPLE_API_KEY'] },
+      ]),
+      SLUG,
+    ])
+
+    // Invisible to every owner-facing read, and — the part that matters — not wired.
+    expect(readOwnerMcpServers(db, SLUG)).toEqual([])
+    expect(await store.list()).toEqual([])
+    expect(await store.resolveApproved()).toEqual([])
+    // …yet the secret and the grant are both still there. This is the residue.
+    const service = 'mcp_env.example-server'
+    expect(credentials.resolveReserved(asOwnerHandle(SLUG), '', service)).not.toBeNull()
+    expect(
+      approvals.findApproved(SLUG, mcpServerApprovalToolName('example-server')),
+    ).toHaveLength(1)
+
+    // THE REMOVAL PATH. By name, which is all the owner has.
+    const removed = await store.remove('example-server')
+    expect(removed.removed).toBe(true)
+    expect(removed.servers).toEqual([])
+
+    // Gone from all three stores.
+    const row = db
+      .prepare<{ mcp_servers: string | null }, [string]>(
+        'SELECT mcp_servers FROM instance_metadata WHERE instance_slug = ?',
+      )
+      .get(SLUG)
+    expect(row?.mcp_servers ?? null).toBeNull()
+    expect(credentials.resolveReserved(asOwnerHandle(SLUG), '', service)).toBeNull()
+    expect(
+      approvals.findApproved(SLUG, mcpServerApprovalToolName('example-server')),
+    ).toHaveLength(0)
+  })
+
+  test('removing ONE unreadable entry does not take the others with it', async () => {
+    // The tempting shortcut is to rewrite the column from the VALIDATED list, which drops
+    // every unreadable entry at once — a removal that removes more than it was asked to,
+    // and silently. Two residue entries in, one named, one left.
+    await store.install(DRAFT)
+    await db.run('UPDATE instance_metadata SET mcp_servers = ? WHERE instance_slug = ?', [
+      JSON.stringify([
+        { name: 'first-bad', command: 'a\u0000b', args: [], env_names: [] },
+        { name: 'second-bad', command: 'c\u0000d', args: [], env_names: [] },
+      ]),
+      SLUG,
+    ])
+    expect((await store.remove('first-bad')).removed).toBe(true)
+
+    const row = db
+      .prepare<{ mcp_servers: string | null }, [string]>(
+        'SELECT mcp_servers FROM instance_metadata WHERE instance_slug = ?',
+      )
+      .get(SLUG)
+    expect(row?.mcp_servers).toContain('second-bad')
+    expect(row?.mcp_servers).not.toContain('first-bad')
+    // Still not installable, still removable the same way.
+    expect(await store.list()).toEqual([])
+    expect((await store.remove('second-bad')).removed).toBe(true)
+    expect((await store.remove('second-bad')).removed).toBe(false)
   })
 })
 

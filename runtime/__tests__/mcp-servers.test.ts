@@ -314,6 +314,42 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     expect(errors.join(' ')).not.toContain('zzzz')
   })
 
+  test('refuses a NUL in a VALUE — a spawn the OS cannot perform is not an install', () => {
+    // FAIL-BROKEN, not a security hole, and that is exactly why it survived review: a
+    // process environment is a NUL-terminated array of `NAME=value` strings, so a value
+    // carrying U+0000 either fails the exec or truncates the secret at the NUL. The owner
+    // installed a server, approved it, and it could never start — with nothing anywhere
+    // saying why, because every gate it passed was a gate it legitimately passed.
+    const { spec, errors } = parseOwnerMcpServerInput({
+      ...GOOD,
+      env: { EXAMPLE_API_KEY: 'sk-live\u0000truncated-here' },
+    })
+    expect(spec).toBeNull()
+    // The NAME is named, so the owner can find the row.
+    expect(errors.join(' ')).toContain('EXAMPLE_API_KEY')
+    // The VALUE is not, on either side of the NUL — an error body is a log line waiting
+    // to happen, and a secret truncated at a NUL is still most of a secret.
+    expect(errors.join(' ')).not.toContain('sk-live')
+    expect(errors.join(' ')).not.toContain('truncated-here')
+  })
+
+  test('and refuses ONLY NUL — a multi-line secret is ordinary and stays accepted', () => {
+    // THE POSITIVE CONTROL, and the reason the check above is not
+    // `MCP_SERVER_BANNED_CHARS_RE`. That class exists to keep the APPROVAL PROMPT
+    // legible and it includes every `\p{Cc}` — newline among them. A value is never
+    // rendered, and a PEM private key is a perfectly normal MCP secret, so reusing the
+    // prompt-legibility class here would have rejected real secrets to close a rendering
+    // hole that does not exist for a field nothing renders.
+    const pem = '-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBg\n-----END PRIVATE KEY-----\n'
+    const { spec, errors } = parseOwnerMcpServerInput({
+      ...GOOD,
+      env: { EXAMPLE_API_KEY: pem },
+    })
+    expect(errors).toEqual([])
+    expect(spec).not.toBeNull()
+    expect(spec!.env_names).toEqual(['EXAMPLE_API_KEY'])
+  })
+
   test('caps the arg list rather than truncating it silently', () => {
     const args = Array.from({ length: MCP_SERVER_ARGS_MAX + 1 }, (_, i) => `--a${i}`)
     expect(parseOwnerMcpServerInput({ ...GOOD, args }).spec).toBeNull()
@@ -427,7 +463,15 @@ describe('renderMcpServerGrant — the prompt says exactly what the hash covers'
     for (const field of fields) expect(prompt).toContain(field)
   })
 
-  test('TWO SPECS THAT HASH DIFFERENTLY NEVER RENDER THE SAME', () => {
+  test('RENDERS DIFFERENTLY for each of the five argv-ambiguity pairs that hash differently', () => {
+    // TITLED FOR WHAT IT CHECKS. It used to claim the universal — "two specs that hash
+    // differently NEVER render the same" — which this suite itself disproves 155 lines
+    // up, where NFC and NFD `/bin/café` are pinned as hashing differently and rendering
+    // IDENTICALLY. That is a stated, argued residue of the design (see § CANONICAL
+    // EQUIVALENTS in `mcp-servers.ts`), not a gap this test closes, so a title asserting
+    // the universal made the suite read as guaranteeing something the code deliberately
+    // does not. What IS pinned is the curated list below.
+    //
     // "Contains every field" is necessary and NOT sufficient, which is how the
     // space-joined command line survived review: `{command:'a b'}` and
     // `{command:'a',args:['b']}` both contain every field and both printed `a b`, so the

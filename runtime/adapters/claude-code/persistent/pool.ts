@@ -1134,7 +1134,21 @@ export async function evictWarmReplsForMcpSurfaceChange(): Promise<{
  * disagree about, say, unregistering the reply sink.
  */
 async function retireWarmSession(key: string, session: ReplSession): Promise<void> {
-  pool.delete(key)
+  // BOTH DELETES ARE IDENTITY-GUARDED, and they need two DIFFERENT oracles because the
+  // two maps are written at different moments in a respawn: `pool.set` runs at the top of
+  // the replacement spawn, `childByKey.set` only once that spawn has a live child. So for
+  // the length of a respawn the pool holds the SUCCESSOR while `childByKey` still names
+  // the PREDECESSOR — and this function is reachable in exactly that window, from the
+  // turn-completion `retireOnIdle` check and from the no-dispatch eviction callback, both
+  // of which gate on `childByKey` and would therefore both read a predecessor as current.
+  // An unguarded `pool.delete` there dropped the successor's entry while its child was
+  // alive and serving: a REPL nobody could find, invisible to
+  // `shutdownAllPersistentRepls`, surviving until the process did.
+  //
+  // `poolEntry` is promise identity and is assigned before the pooled promise resolves,
+  // so it has no such lag. An ephemeral session has none, and must not fall back to
+  // deleting whatever the key holds.
+  if (session.poolEntry !== undefined && pool.get(key) === session.poolEntry) pool.delete(key)
   if (childByKey.get(key) === session.child) childByKey.delete(key)
   try {
     session.sizeWatchdog?.stop()

@@ -178,6 +178,110 @@ export async function writeTridentPhaseModels(
 }
 
 /**
+ * The stored `mcp_servers` array as records, before any validation. Returns `[]` for
+ * absent / NULL / unparseable-as-JSON / not-an-array — the states that mean "nothing
+ * installed" whichever way you read the column.
+ *
+ * The one place the raw shape is decoded, so the validating read and the two
+ * residue-handling helpers cannot drift on what an entry even is.
+ */
+function readStoredMcpEntries(db: ProjectDb, project_slug: string): Array<Record<string, unknown>> {
+  const row = db
+    .prepare<{ mcp_servers: string | null }, [string]>(
+      `SELECT mcp_servers FROM instance_metadata WHERE instance_slug = ? LIMIT 1`,
+    )
+    .get(project_slug)
+  const raw = row?.mcp_servers
+  if (typeof raw !== 'string' || raw.trim().length === 0) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  return parsed.map((entry) =>
+    (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>,
+  )
+}
+
+/** The stored `name` of one raw entry, normalised the way a server name is. */
+function storedEntryName(entry: Record<string, unknown>): string | null {
+  const name = entry['name']
+  if (typeof name !== 'string') return null
+  const trimmed = name.trim().toLowerCase()
+  return trimmed.length === 0 ? null : trimmed
+}
+
+/**
+ * Every name the column stores, INCLUDING the entries {@link readOwnerMcpServers}
+ * refuses. De-duplicated, in stored order.
+ *
+ * The difference between this and the validating read is the RESIDUE: an entry a
+ * tightened validator now rejects, a duplicate, or one past {@link MCP_SERVERS_MAX}.
+ * None of them can be wired, and before this pair existed none of them could be removed
+ * either — `remove(name)` looked the name up in the validated list, did not find it, and
+ * answered `removed: false` while the encrypted secret and the approval row stayed put.
+ *
+ * NOT a spawn input, and deliberately not shaped like one: it returns NAMES, so no
+ * caller can mistake it for something that yields a command to run.
+ */
+export function readOwnerMcpServerStoredNames(
+  db: ProjectDb,
+  project_slug: string,
+): ReadonlyArray<string> {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const entry of readStoredMcpEntries(db, project_slug)) {
+    const name = storedEntryName(entry)
+    if (name === null || seen.has(name)) continue
+    seen.add(name)
+    out.push(name)
+  }
+  return out
+}
+
+/**
+ * Drop every stored entry whose name is `name`, whether or not it validates. Returns
+ * whether anything was there.
+ *
+ * The removal half of the residue problem. Retained entries are rewritten through the
+ * SAME field-by-field projection {@link writeOwnerMcpServers} uses rather than passed
+ * through verbatim: the column must only ever hold `name`/`command`/`args`/`env_names`,
+ * and a verbatim rewrite of a hand-edited row is how a field nobody audits gets carried
+ * forward. It also means this cannot resurrect a value into a names-only column.
+ */
+export async function removeOwnerMcpServerStored(
+  db: ProjectDb,
+  project_slug: string,
+  name: string,
+): Promise<boolean> {
+  const wanted = name.trim().toLowerCase()
+  const entries = readStoredMcpEntries(db, project_slug)
+  const kept = entries.filter((e) => storedEntryName(e) !== wanted)
+  if (kept.length === entries.length) return false
+  const value =
+    kept.length > 0
+      ? JSON.stringify(
+          kept.map((e) => ({
+            name: e['name'],
+            command: e['command'],
+            args: e['args'],
+            env_names: e['env_names'],
+          })),
+        )
+      : null
+  // The same upsert `writeOwnerMcpServers` performs, and NULL for an emptied column for
+  // the same reason: "never configured" and "configured to nothing" stay one state.
+  await db.run(
+    `INSERT INTO instance_metadata (instance_slug, mcp_servers) VALUES (?, ?)
+       ON CONFLICT(instance_slug) DO UPDATE SET mcp_servers = excluded.mcp_servers`,
+    [project_slug, value],
+  )
+  return true
+}
+
+/**
  * Read the owner's INSTALLED MCP servers (migration 0120).
  *
  * RE-VALIDATED ON THE WAY OUT, for the same reason `readTridentPhaseModels` is: a
@@ -197,33 +301,26 @@ export async function writeTridentPhaseModels(
  *
  * NOTE the values are NOT here — `env_names` only. The values live in the encrypted
  * credential store; `gateway/mcp-servers/store.ts` is what joins the two.
+ *
+ * A DROPPED ENTRY IS FAIL-CLOSED FOR EXECUTION AND STILL LEAVES RESIDUE. It is not
+ * wired — that part is right — but its encrypted `mcp_env.<name>` row and its approval
+ * row are keyed by a NAME this function no longer reports, so the owner could neither
+ * see it nor remove it. {@link readOwnerMcpServerStoredNames} and
+ * {@link removeOwnerMcpServerStored} are the pair that makes such an entry reachable
+ * for removal without making it reachable for a spawn.
  */
 export function readOwnerMcpServers(
   db: ProjectDb,
   project_slug: string,
 ): ReadonlyArray<OwnerMcpServerSpec> {
-  const row = db
-    .prepare<{ mcp_servers: string | null }, [string]>(
-      `SELECT mcp_servers FROM instance_metadata WHERE instance_slug = ? LIMIT 1`,
-    )
-    .get(project_slug)
-  const raw = row?.mcp_servers
-  if (typeof raw !== 'string' || raw.trim().length === 0) return []
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return []
-  }
-  if (!Array.isArray(parsed)) return []
   const out: OwnerMcpServerSpec[] = []
   const seen = new Set<string>()
-  for (const entry of parsed) {
+  for (const entry of readStoredMcpEntries(db, project_slug)) {
     // The stored shape carries `env_names`; the validator's input shape carries
     // `env`. Re-validating through the ONE validator means the read cannot accept a
     // command the write would have refused, so the round-trip is fed the names back
     // as keys with a placeholder value that is discarded.
-    const e = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>
+    const e = entry
     const names = Array.isArray(e['env_names']) ? (e['env_names'] as unknown[]) : []
     const env: Record<string, string> = {}
     for (const n of names) if (typeof n === 'string') env[n] = 'x'

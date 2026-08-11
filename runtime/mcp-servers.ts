@@ -379,6 +379,28 @@ export function parseOwnerMcpServerInput(raw: unknown): ParsedOwnerMcpServer {
           errors.push(`env '${key}' must be at most ${MCP_SERVER_ENV_VALUE_MAX} characters`)
           continue
         }
+        // NUL, AND ONLY NUL. A process environment is a NUL-terminated array of
+        // `NAME=value` strings, so a value containing U+0000 is one the OS cannot
+        // pass on: the spawn either fails or silently truncates the secret at the
+        // NUL. Accepting it produced a FAIL-BROKEN install — the owner installs a
+        // server, approves it, and it can never start, with nothing anywhere saying
+        // why. Refused here, at the one place a value is ever validated, so the
+        // durable spec cannot hold a spawn that is guaranteed to fail.
+        //
+        // NOT {@link MCP_SERVER_BANNED_CHARS_RE}, which is applied to the name, the
+        // command and the args. That class is about LEGIBILITY of the approval prompt
+        // and it includes every `\p{Cc}` — newline among them. A value is never
+        // rendered, and a multi-line secret is ordinary (a PEM private key is the
+        // obvious one), so refusing the whole control class here would reject
+        // legitimate secrets to close a rendering hole that does not exist for a
+        // field nothing renders. NUL is refused for a mechanical reason, not a
+        // legibility one, which is why it is the only one named.
+        if (value.includes('\u0000')) {
+          // NAME only. The value is a secret and never appears in an error string —
+          // an error message is a log line waiting to happen.
+          errors.push(`env '${key}' must not contain a NUL character`)
+          continue
+        }
         env[key] = value
       }
     }

@@ -43,7 +43,7 @@ import type { ResolvedOwnerMcpServer } from '../../../../mcp-servers.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from '../pty-host.ts'
-import { pool } from '../pool-state.ts'
+import { childByKey, pool } from '../pool-state.ts'
 import { poolKeyFor } from '../pool.ts'
 // The supervision respawn's own entry point (`supervision.ts` calls exactly this), used
 // by the no-dispatch eviction test to reproduce a spawn with no turn driver behind it.
@@ -1160,5 +1160,181 @@ describe('revoking a server retires the warm child that was spawned under the ol
     for (let i = 0; i < 60; i += 1) await new Promise((r) => setTimeout(r, 0))
     expect(kills.n).toBe(1)
     expect(pool.size).toBe(0)
+  })
+})
+
+describe('the resolver AWAIT is a window, and three things went wrong inside it', () => {
+  // The installed-server resolver is the only DATABASE READ + DECRYPT on the spawn path,
+  // and it is awaited twice: once inside `spawnSession` while the 0700 config directory
+  // already exists on disk, and once inside the warm-reuse freshness check after liveness
+  // has already been decided. Everything in this block is a consequence of one of those two
+  // suspensions, which is why they are pinned together rather than filed under the
+  // subsystems they happen to surface in.
+
+  it('a REJECTING resolver strands no config directory — the await escaped the sync guard', async () => {
+    // `orUnlinkConfigs` is SYNCHRONOUS. Wrapping an `await` in it returns the pending
+    // promise, the `try` exits, and the later rejection lands with nothing watching — so
+    // the 0700 directory AND the tools manifest already written into it survived, once per
+    // retry, for the life of the box. The sibling test above ("A FAILED SPAWN STRANDS
+    // NOTHING") cannot see this: it throws from `ptyHost.spawn`, which is sync and was
+    // therefore already covered.
+    //
+    // The resolver is the realistic thing to reject here — it reads the installed list out
+    // of the database and decrypts every env value, so a locked DB or an unreadable secret
+    // rejects it in production.
+    //
+    // MUTATION: drop `orUnlinkConfigsAsync` from the resolver await in `spawn.ts` and this
+    // fails with one leaked `neutron-repl-*` directory.
+    setReplToolBridge(bridge())
+    const dirsBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith('neutron-repl-')))
+    const { host } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        resolveExtraMcpServers: async () => {
+          throw new Error('secrets store unavailable')
+        },
+      }),
+    )
+    await expect(drain(sub.start(spec('hi')))).rejects.toThrow()
+
+    const leaked = readdirSync(tmpdir()).filter(
+      (n) => n.startsWith('neutron-repl-') && !dirsBefore.has(n),
+    )
+    expect(leaked).toEqual([])
+  })
+
+  it('a child that DIES inside the freshness await is not served as warm', async () => {
+    // `getOrSpawnSession` tests `hasChildExited()` at the top of the warm branch and then
+    // awaits the resolver before deciding to reuse. A child that dies in between — its own
+    // crash, or the revocation evictor retiring it — was returned as WARM, and the caller
+    // injected into a corpse: the turn failed with a drain error. It self-healed on the next
+    // dispatch, which is exactly what made it invisible.
+    //
+    // PARKED WHERE THE PRODUCTION WINDOW IS, the same place the eviction probe above parks:
+    // holding the resolver open IS the window, because in the real composition it reads the
+    // database and decrypts every value.
+    //
+    // MUTATION: drop `!session.hasChildExited()` from the reuse conjunction and this fails
+    // with "drain error" — the exact user-visible symptom.
+    setReplToolBridge(bridge())
+    const { host, kills } = makeCapturingHost()
+    let hold = false
+    let release: (() => void) | undefined
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        resolveExtraMcpServers: async () => {
+          if (hold) await new Promise<void>((r) => (release = r))
+          return [EXAMPLE]
+        },
+      }),
+    )
+
+    // A warm IDLE child, settled.
+    expect(await drain(sub.start(spec('first')))).toContain('first')
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 0))
+    const warm = await [...pool.values()][0]!
+    expect(warm.hasChildExited()).toBe(false)
+
+    // Dispatch two, parked inside the freshness check. Ticked until the resolver is
+    // genuinely suspended, so the test cannot pass by racing ahead of its own window.
+    hold = true
+    const second = drain(sub.start(spec('second')))
+    for (let i = 0; i < 400 && release === undefined; i += 1) {
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    expect(release).toBeDefined()
+
+    // THE CHILD DIES RIGHT THERE — after liveness was read, before reuse is decided.
+    warm.child.kill()
+    expect(warm.hasChildExited()).toBe(true)
+    expect(kills.n).toBe(1)
+
+    // Let it through. `hold` is cleared first: the respawn resolves the servers again and
+    // must not park too.
+    hold = false
+    release!()
+    // DELIVERED, on a respawned child. `drain` throws on an error event, so awaiting it is
+    // the assertion, and the echoed prompt proves the inject reached a LIVE REPL.
+    expect(await second).toContain('second')
+  })
+
+  it('a teardown does not un-pool its SUCCESSOR — the pool delete is entry-identity guarded', async () => {
+    // `retireWarmSession` deleted from `pool` unguarded while identity-guarding its
+    // `childByKey` delete one line below. The two maps are written at different moments in a
+    // respawn — `pool.set` at the top of the replacement spawn, `childByKey.set` only once
+    // that spawn has a live child — so for the length of a respawn the pool holds the
+    // SUCCESSOR while `childByKey` still names the PREDECESSOR. Both callers of
+    // `retireWarmSession` gate on `childByKey`, so both would read a predecessor as current,
+    // and the unguarded delete then dropped the successor's entry while its child was alive:
+    // a REPL nobody could find, invisible to `shutdownAllPersistentRepls`.
+    //
+    // HONEST ABOUT WHAT IS AND IS NOT REPRODUCED HERE. The reviewer who raised this could
+    // not produce the production interleaving and neither could I — reaching it needs a pool
+    // entry replaced without `childByKey` being cleared, and every path that replaces an
+    // entry today clears it on the way. So this pins the PROPERTY the guard adds rather than
+    // a live race: the successor entry is installed by hand, which is the state a respawn is
+    // in, and the retire must leave it alone.
+    //
+    // THE SUCCESSOR IS LEFT PENDING, which is both realistic and load-bearing. A replacement
+    // spawn IS a pending promise for the whole window this is about. It also keeps the
+    // child-exit handler out of the way: that handler performs this very delete, correctly
+    // guarded by AWAITED SESSION identity, so a successor resolving to the same session
+    // would be un-pooled by IT and the test would fail while attributing it to the wrong
+    // line. That is not a hypothetical — the first draft of this test did exactly that.
+    //
+    // MUTATION: restore the unguarded `pool.delete(key)` in `retireWarmSession` and this
+    // fails — `pool.get(key)` comes back undefined instead of the successor.
+    setReplToolBridge(bridge())
+    let openTheGate: () => void = () => {}
+    const gate = new Promise<void>((res) => {
+      openTheGate = res
+    })
+    const { host, kills } = makeCapturingHost(() => gate)
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    const inFlight = drain(sub.start(spec('hi')))
+
+    // Hold the turn in flight so the revocation lands on a genuinely BUSY session — which
+    // poisons it and sets `retireOnIdle`, arming the turn-completion teardown.
+    let session: ReplSession | undefined
+    for (let i = 0; i < 400 && session === undefined; i += 1) {
+      const first = [...pool.values()][0]
+      if (first !== undefined) {
+        const s = await first
+        if (s.activeTurn !== undefined || s.turnSlotHeld > 0) session = s
+      }
+      if (session === undefined) await new Promise((r) => setTimeout(r, 5))
+    }
+    expect(session).toBeDefined()
+    const key = [...pool.keys()][0]!
+    // THE TAG ITSELF, pinned: a pooled session knows the entry it IS. Without this the
+    // guard below could pass by comparing two undefineds.
+    expect(session!.poolEntry).toBe(pool.get(key))
+
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+    expect(session!.retireOnIdle).toBe(true)
+
+    // THE RESPAWN WINDOW, installed by hand: the pool now holds a DIFFERENT, still-pending
+    // entry while `childByKey` still names this child.
+    const successor = new Promise<ReplSession>(() => {})
+    pool.set(key, successor)
+    expect(childByKey.get(key)).toBe(session!.child)
+
+    // Let the turn finish. Its completion path retires the session — and must not take the
+    // successor's pool entry with it.
+    openTheGate()
+    expect(await inFlight).toContain('ok=0')
+    for (let i = 0; i < 60; i += 1) await new Promise((r) => setTimeout(r, 0))
+
+    // The child IS dead (the retire did its job) and the successor's entry SURVIVED.
+    expect(kills.n).toBe(1)
+    expect(pool.get(key)).toBe(successor)
+
+    // Hand-installed, so hand-removed: `afterEach`'s `shutdownAllPersistentRepls` awaits
+    // every pool entry, and a promise that never settles would hang the whole suite there.
+    pool.delete(key)
   })
 })

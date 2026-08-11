@@ -1337,3 +1337,177 @@ cannot widen a grant: an unapproved server is still never wired, a changed comma
 env-var NAMES still requires re-approval, the prompt still renders names and never a value,
 `cc-import-*` and `cc-trident-*` still receive nothing, and the session MCP config is still
 `0600`.
+
+## Round 8 — five faults inside two `await`s, and a secret with no removal path
+
+The panel that produced this round was INCOMPLETE, and that shaped the work. The
+mandatory codex-rubric lane timed out at its 900 s cap with a 0-byte verdict, and the
+kimi lane was deliberately off (the owner's K3 quota). So five of the six findings
+carried "UNVERIFIED — single reviewer, not reproduced". Each was re-derived against the
+code before being fixed, and one of them turned out to describe a different mechanism
+than the one reported.
+
+### Four of the five live inside the installed-server resolver's `await`
+
+That was not visible from the findings list, which filed them under four different
+subsystems. `resolveExtraMcpServers` is the only database read + AES decrypt on the
+spawn path, and it is awaited twice — once inside `spawnSession` while the 0700 config
+directory already exists on disk, and once inside the warm-reuse freshness check after
+liveness has already been decided. Both suspensions are real windows, not a handful of
+microtasks, which is exactly why the round-6 eviction probe parked there to reproduce
+its own finding. The new tests are grouped by that shared cause rather than by symptom.
+
+**A rejecting resolver stranded a config directory per retry.** `orUnlinkConfigs` is
+synchronous: wrapping an `await` in it returns the pending promise, the `try` block
+exits, and the later rejection lands with nothing watching. The tools manifest is
+already written by that point, so a locked database or an unreadable secret left a 0700
+directory and its manifest in `tmpdir()` for the life of the box, once per retry. The
+sibling test that already covered this window (`A FAILED SPAWN STRANDS NOTHING`) could
+not see it — it throws from `ptyHost.spawn`, which is synchronous and therefore was
+already covered. Fixed with `orUnlinkConfigsAsync`, a separate function rather than a
+thenable-aware `orUnlinkConfigs`, sharing one `unlinkCfgDir` so the two cannot drift on
+what cleanup means.
+
+**A child that died inside the freshness await was served as warm.** `hasChildExited()`
+is read at the top of the warm branch and the reuse decision is made after the resolver
+await; nothing re-read it. A child that crashed in between — or that the revocation
+evictor retired — was returned as warm and the caller injected into a corpse: one turn
+failed with a drain error, then self-healed on the next dispatch, which is what kept it
+invisible. `!session.hasChildExited()` now joins the reuse conjunction, so the case falls
+through to the same evict-and-respawn every other stale-warm-child takes, resuming the
+captured session. `terminateChild` returns immediately on an already-exited child, so the
+fall-through costs nothing.
+
+### The NUL that made an approved server unstartable
+
+`runtime/mcp-servers.ts` validated env values for type, emptiness, length and aggregate
+size, but not for NUL. A process environment is a NUL-terminated array of `NAME=value`
+strings, so a value carrying U+0000 either fails the exec or truncates the secret at the
+NUL — the owner installs a server, approves it, and it can never start, with nothing
+saying why, because every gate it passed was a gate it legitimately passed. Fail-broken
+rather than a security hole, and refused now at the one place a value is validated.
+
+**Only NUL, and the test carries the positive control that says why.** The obvious move
+was to reuse `MCP_SERVER_BANNED_CHARS_RE`, which the name, command and args already use.
+That class exists to keep the approval prompt LEGIBLE and it includes every `\p{Cc}` —
+newline among them. A value is never rendered, and a PEM private key is an ordinary MCP
+secret, so reusing it here would have rejected real secrets to close a rendering hole
+that does not exist for a field nothing renders. The complaint names the variable and
+never the value, on either side of the NUL: a secret truncated at a NUL is still most of
+a secret.
+
+### A secret and a grant with no removal path
+
+The worst of the five, and the one the round-7 fix created. Reserving `mcp_env.*` from
+the generic credentials CRUD was correct — it closed a real hole where a caller could
+overwrite or delete an MCP secret outside this store, skipping validation and skipping
+`onRevoked`. But it also made the store's own read the ONLY route into that namespace,
+and that read silently drops any stored entry the validator refuses. So a spec written by
+a looser build and re-read by a stricter one became:
+
+- not wired — correct, and fail-closed,
+- invisible in Settings, because `list()` iterates the validated specs,
+- **and un-removable**, because `remove(name)` looked the name up in that same validated
+  list, did not find it, and answered `removed: false`.
+
+Its encrypted `mcp_env.<name>` row and its `tool_approvals` grant then had no deletion
+path anywhere in the system. That also contradicted this subsystem's own "NOT silent"
+discipline, which `resolveApproved` keeps for a server whose secret has gone missing.
+
+Two additions to `gateway/storage/owner-metadata.ts` close it without making residue
+reachable for a spawn: `readOwnerMcpServerStoredNames` (names only — deliberately not
+shaped like a spawn input, so no caller can mistake it for something yielding a command)
+and `removeOwnerMcpServerStored`. `removeLocked` now recognises a residue name and runs
+the same revoke then forget then write sequence for it, and `list()` logs
+`mcp_server_spec_unreadable` with names only.
+
+**Removal is by stored name, not by rewriting the validated list.** The shortcut —
+rewrite the column from `specs()` — works for the named entry and silently takes every
+OTHER unreadable entry with it: a removal that removes more than it was asked to. Its own
+mutant is in the log below, and it dies on exactly one test, which is the proof that
+assertion carries weight rather than decorating the one next to it.
+
+### The identity guard, and what it is honestly NOT proven against
+
+`retireWarmSession` deleted from `pool` unguarded while identity-guarding its `childByKey`
+delete on the very next line. The two maps are written at different moments in a respawn —
+`pool.set` at the top of the replacement spawn, `childByKey.set` only once that spawn has a
+live child — so for the length of a respawn the pool holds the SUCCESSOR while `childByKey`
+still names the PREDECESSOR. Both callers of `retireWarmSession` gate on `childByKey`, so
+both would read a predecessor as current, and the unguarded delete then dropped the
+successor's entry while its child was alive and serving: a REPL nobody could find,
+invisible to `shutdownAllPersistentRepls`.
+
+The reviewer proposed a one-line fix, "compare the pooled session before deleting". It is
+not one line, because the only SYNCHRONOUS oracle available (`childByKey`) lags the pool in
+precisely the wrong direction, and awaiting the pool entry would suspend a teardown behind
+the very spawn it is racing. So `ReplSession` now carries `poolEntry` — the exact promise
+the pool holds — assigned in a `.then` on the inner spawn promise, which makes it strictly
+earlier than any consumer's resolution of the outer one. No consumer can obtain a session
+untagged, and the guard is a synchronous promise-identity comparison with no lag in either
+direction. The failed-spawn sweep's `pool.delete` is guarded the same way, since it runs
+outside the get-or-spawn lock.
+
+**What is not claimed:** the production interleaving was not reproduced, by the reviewer or
+here. Reaching it needs a pool entry replaced without `childByKey` being cleared, and every
+path that replaces an entry today clears it on the way. The probe therefore pins the
+PROPERTY the guard adds — a hand-installed successor entry, which is the state a respawn is
+in — and says so in its own docblock. Two things about that probe are worth recording
+because the first draft got both wrong. The successor must be left PENDING: a successor
+resolving to the same session is un-pooled by the CHILD-EXIT handler, which performs this
+same delete correctly guarded by awaited-session identity, so the test failed while
+attributing it to the wrong line. And the hand-installed entry has to be deleted before the
+test returns, because `afterEach`'s `shutdownAllPersistentRepls` awaits every pool entry and
+a never-settling promise hangs the suite there.
+
+### The test title that claimed a universal its own suite disproves
+
+`TWO SPECS THAT HASH DIFFERENTLY NEVER RENDER THE SAME` checked five curated
+argv-ambiguity pairs, and the same file pins NFC and NFD `/bin/café` 155 lines earlier as
+hashing differently and rendering IDENTICALLY. That is a stated, argued residue of the
+design, not a gap the test closes — so the universal title made the suite read as
+guaranteeing something the code deliberately does not. Renamed to what it checks. This is
+the third over-broad title on this branch; the pattern is a title asserting the property
+the author WANTED over a body checking the cases they had.
+
+### One finding was checked and NOT fixed
+
+A reviewer reported `retireOnIdle` as write-only: "set in `pool.ts`, declared in
+`repl-session.ts`, read nowhere." It is read, in the turn-completion teardown guard in
+`pool.ts`, and asserted by two tests in
+`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts`. The grep
+they cited was `reapIdle|IDLE_TTL|idleTtl|maxIdleMs` — none of those symbols exist in this
+tree, so the search could not have found the read it claimed absent. A tool that cannot
+match the format returns a negative that reads like an answer. Left alone.
+
+### A near miss worth recording
+
+Two source files briefly carried RAW NUL BYTES, because the intended `\u0000` escapes were
+written as literal control characters. `grep` then reported no match for a string that was
+plainly on the line — it had classified the file as binary and suppressed output entirely.
+That is the same shape as the finding above: the absence came from the tool, not the file.
+Caught by hexdumping the line rather than trusting the grep, and every file this branch
+touches was then swept for a zero byte before commit.
+
+### Mutation log — six mutants, all RUN, all dead
+
+| Mutation | Result |
+|---|---|
+| `retireWarmSession`'s `pool.delete(key)` back to unguarded | 1 fail — `pool.get(key)` returns `undefined` instead of the successor |
+| `!session.hasChildExited()` dropped from the reuse conjunction | 1 fail — `drain error: Unable to connect`, the exact user-visible symptom |
+| `orUnlinkConfigsAsync` dropped from the resolver await | 1 fail — exactly one leaked `neutron-repl-*` directory |
+| env-value NUL check disabled | 1 fail — the spec parses instead of being refused |
+| `removeLocked`'s residue branch removed | 2 fail — `removed: false`, secret and approval row both still present |
+| residue write switched to rewriting the validated list | 1 fail — and ONLY the "does not take the others with it" test, which is the point of that assertion |
+
+### Security invariants, re-checked against these changes specifically
+
+None of the five widens a grant. An unapproved server is still never wired; a changed
+command, args or env-var NAMES still requires re-approval; the prompt still renders names
+and never a value; `cc-import-*` and `cc-trident-*` still receive nothing; the session MCP
+config is still `0600` in a `0700` directory. Two of the changes make the accepted surface
+strictly smaller — the NUL refusal removes a spec the store used to accept, and the residue
+removal path is the only way an orphaned secret can now be deleted at all. The one addition
+that touches a secret-bearing path, `removeOwnerMcpServerStored`, rewrites retained entries
+through the same field-by-field projection `writeOwnerMcpServers` uses, so it cannot carry a
+value into a names-only column or forward a field nobody audits.

@@ -88,7 +88,9 @@ import {
 } from '@neutronai/runtime/mcp-servers.ts'
 import { createLogger } from '@neutronai/logger'
 import {
+  readOwnerMcpServerStoredNames,
   readOwnerMcpServers,
+  removeOwnerMcpServerStored,
   writeOwnerMcpServers,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
 
@@ -220,6 +222,23 @@ export class OwnerMcpServerStore {
   }
 
   /**
+   * Names the column stores that {@link specs} does NOT return — an entry a tightened
+   * validator now rejects, a duplicate, or one past the installed maximum.
+   *
+   * Fail-closed for execution: none of them is wired. What they are NOT is gone — the
+   * encrypted `mcp_env.<name>` row and the approval row are keyed by the name, and that
+   * namespace is reserved from the generic credentials CRUD precisely so nothing outside
+   * this store can reach it. So this store owes them a removal path, which is what
+   * {@link removeLocked} uses this for.
+   */
+  private residueNames(): ReadonlyArray<string> {
+    const installed = new Set(this.specs().map((s) => s.name))
+    return readOwnerMcpServerStoredNames(this.deps.db, this.deps.project_slug).filter(
+      (n) => !installed.has(n),
+    )
+  }
+
+  /**
    * Every installed server with its approval state — the ONE payload every route
    * answers with, so a client never has to guess what a mutation did.
    */
@@ -235,6 +254,20 @@ export class OwnerMcpServerStore {
         grant_hash: computeMcpServerGrantHash(spec),
         secrets_present,
         active: approval === 'approved' && secrets_present,
+      })
+    }
+    // NOT SILENT, which is the discipline `resolveApproved` already keeps for a server
+    // whose secret has gone missing, and for the same reason: a row the owner cannot see
+    // in Settings and cannot account for is indistinguishable from one that was never
+    // written. Logged from the OWNER-FACING enumeration on purpose — a residue that
+    // persists reappears every time Settings is opened, which is the behaviour a fault
+    // needing a manual `remove` should have. NAMES ONLY; a stored entry's command is
+    // exactly the string the read refused and has no business in a log line.
+    const residue = this.residueNames()
+    if (residue.length > 0) {
+      log.warn('mcp_server_spec_unreadable', {
+        servers: residue.join(','),
+        note: 'stored but not installable; not wired — remove by name to clear its secret and grant',
       })
     }
     return out
@@ -479,7 +512,16 @@ export class OwnerMcpServerStore {
     return await this.serialize(async () => {
       const existing = this.specs()
       const target = existing.find((s) => s.name === wanted)
-      if (target === undefined) return { removed: false, servers: await this.list() }
+      // RESIDUE IS REMOVABLE TOO. A stored entry the validating read refuses is not in
+      // `existing`, so this used to answer `removed: false` — and because the
+      // `mcp_env.*` namespace is reserved from the generic credentials CRUD, that left
+      // its encrypted secret and its approval row with NO removal path anywhere in the
+      // system. Fail-closed for execution, permanent as residue. The name is enough to
+      // clean up by, and everything below this line works off the name.
+      const residue = target === undefined && this.residueNames().includes(wanted)
+      if (target === undefined && !residue) {
+        return { removed: false, servers: await this.list() }
+      }
       const manager = this.deps.approvals()
       if (manager !== null) {
         const tool_name = mcpServerApprovalToolName(wanted)
@@ -502,11 +544,19 @@ export class OwnerMcpServerStore {
         markRevoked()
       }
       await this.forgetSecrets(wanted)
-      await writeOwnerMcpServers(
-        this.deps.db,
-        this.deps.project_slug,
-        existing.filter((s) => s.name !== wanted),
-      )
+      if (residue) {
+        // BY STORED NAME, not by rewriting the validated list. Rewriting would work for
+        // this entry and would silently take every OTHER unreadable entry with it —
+        // a removal that removes more than it was asked to. This drops exactly the one
+        // named and leaves the rest to be removed the same way, one at a time.
+        await removeOwnerMcpServerStored(this.deps.db, this.deps.project_slug, wanted)
+      } else {
+        await writeOwnerMcpServers(
+          this.deps.db,
+          this.deps.project_slug,
+          existing.filter((s) => s.name !== wanted),
+        )
+      }
       // AND AGAIN, UNCONDITIONALLY. Setting the flag twice is free, and it keeps the
       // announcement firing on the path where `approvals()` returned null so the block
       // above was skipped: nothing was approved in that case, but the SPEC is now gone, and

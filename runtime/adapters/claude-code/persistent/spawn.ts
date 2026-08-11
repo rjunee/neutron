@@ -92,15 +92,42 @@ async function spawnSession(
    * Applied to the writers and to the spawn itself rather than by wrapping the whole
    * function body, so the cleanup sits visibly on each thing that can fail.
    */
+  const unlinkCfgDir = (): void => {
+    try {
+      rmSync(cfgDir, { recursive: true, force: true })
+    } catch {
+      /* best-effort: the throw we are propagating is the interesting one */
+    }
+  }
   const orUnlinkConfigs = <T>(fn: () => T): T => {
     try {
       return fn()
     } catch (err) {
-      try {
-        rmSync(cfgDir, { recursive: true, force: true })
-      } catch {
-        /* best-effort: the throw we are propagating is the interesting one */
-      }
+      unlinkCfgDir()
+      throw err
+    }
+  }
+  /**
+   * {@link orUnlinkConfigs} for a step that SUSPENDS.
+   *
+   * The sync wrapper cannot cover an `await`: it returns the pending promise, the
+   * `try` block exits, and a later rejection lands with nothing watching. That was
+   * not hypothetical — the only awaited step in this window is
+   * `resolveExtraMcpServers`, which reads the installed list out of the database and
+   * decrypts every env value, so it rejects on a locked DB or an unreadable secret.
+   * Each rejection stranded the 0700 directory AND the tools manifest already written
+   * into it, once per retry, for the life of the box.
+   *
+   * A separate function rather than making `orUnlinkConfigs` thenable-aware: a helper
+   * that sometimes returns a value and sometimes a promise it has attached a handler to
+   * is the kind of thing a future edit gets subtly wrong, and both share
+   * {@link unlinkCfgDir} so the two cannot drift on what cleanup means.
+   */
+  const orUnlinkConfigsAsync = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn()
+    } catch (err) {
+      unlinkCfgDir()
       throw err
     }
   }
@@ -165,9 +192,12 @@ async function spawnSession(
   // Gated on the OPT-IN (`options.enableToolBridge`) rather than on `toolBridgeActive`
   // (whether a bridge was actually attached): an empty tool registry must not silently
   // switch off the owner's MCP servers, which are unrelated to it.
+  // WRAPPED, because this is the one step in the config window that can reject while
+  // suspended — see {@link orUnlinkConfigsAsync}. The tools manifest is already on disk
+  // by here, so an unwrapped rejection stranded a directory per retry.
   const extraMcpServers =
     options.enableToolBridge === true && options.resolveExtraMcpServers !== undefined
-      ? await options.resolveExtraMcpServers()
+      ? await orUnlinkConfigsAsync(() => options.resolveExtraMcpServers!())
       : []
   const wiredExtraNames: string[] = []
   for (const server of extraMcpServers) {
@@ -1095,7 +1125,28 @@ async function getOrSpawnSessionLocked(
       // never delivers (the cascade). Evict + respawn a clean REPL instead, exactly
       // like the freshness guards below. NOT silent — log so the eviction is
       // observable in prod.
-      if (freshSurface && freshBridge && freshCredential && freshMcpServers && !session.poisoned) {
+      //
+      // LIVENESS IS RE-READ HERE, not trusted from the `hasChildExited()` test that
+      // opened this branch. That test ran BEFORE the resolver await above — and the
+      // resolver reads the database and decrypts every installed server's env, so it is
+      // a real window, not a handful of microtasks. A child that dies inside it (its own
+      // crash, or the revocation evictor retiring it) was returned as WARM, and the
+      // caller then injected into a corpse: one turn failed with a drain error. It
+      // self-healed on the next dispatch, which is exactly what made it invisible.
+      //
+      // Re-reading it into the reuse conjunction rather than re-branching keeps the
+      // handling identical to every other stale-warm-child case: fall through to the
+      // evict-and-respawn below, which resumes the captured session so the conversation
+      // survives. `terminateChild` returns immediately on an already-exited child, so
+      // the fall-through costs nothing on this path.
+      if (
+        freshSurface &&
+        freshBridge &&
+        freshCredential &&
+        freshMcpServers &&
+        !session.poisoned &&
+        !session.hasChildExited()
+      ) {
         return session
       }
       if (session.poisoned) {
@@ -1121,7 +1172,19 @@ async function getOrSpawnSessionLocked(
   // (`evictedResume`); else the normal registry-resolved directive.
   const resume = forceResume
     ?? (evictedForceFresh ? undefined : (evictedResume ?? resolveResumeDirective(sessionKey, options)))
-  const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
+  // TAGGED WITH THE ENTRY IT IS, so a teardown can tell "the pool still holds me" from
+  // "the pool holds my replacement" — see {@link ReplSession.poolEntry}. The tag is set
+  // in a `.then` on the INNER promise and `spawning` is that `.then`'s result, so it is
+  // assigned strictly before `spawning` resolves: no consumer can obtain this session
+  // untagged, which is the whole reason the tag is not attached after `pool.set`.
+  let pooled: Promise<ReplSession> | undefined
+  const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume).then(
+    (session) => {
+      session.poolEntry = pooled
+      return session
+    },
+  )
+  pooled = spawning
   pool.set(sessionKey, spawning)
   // MARKED PENDING FOR AS LONG AS IT IS PENDING. A cold spawn is a dispatch that has
   // already committed to this child — it just cannot say so through `activeTurn` /
@@ -1136,7 +1199,11 @@ async function getOrSpawnSessionLocked(
   }
   spawning.then(clearPending, clearPending)
   spawning.catch(() => {
-    pool.delete(sessionKey)
+    // IDENTITY-GUARDED, like the `pendingSpawns` clear above it and for the same reason:
+    // this handler runs outside the get-or-spawn lock, so by the time a failed spawn is
+    // swept the pool can already hold a replacement, and an unguarded delete would
+    // un-pool it.
+    if (pool.get(sessionKey) === spawning) pool.delete(sessionKey)
     // An async spawn failure (assertion / health) on a RESUME must clear the
     // in-flight stamp so the watchdog retries on the next tick instead of seeing
     // a latched "respawn in progress" that never completes (Codex P2-4).
