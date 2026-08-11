@@ -51,7 +51,7 @@
  *
  *     AND THAT IS THE WHOLE OF THE CLAIM — the tapped row itself may well not be in
  *     the list. General's Reminders tab is not an "everything" view: the surface
- *     lists `listPendingByTopic(project_slug, 'app-project:<general>')`
+ *     lists `listPendingByTopic(project_slug, 'app-project:~general')`
  *     (`gateway/http/app-reminders-surface.ts:212`) and the `include_id` widening
  *     that exists for exactly this deep-link case re-checks
  *     `extra.topic_id === topic_id` before admitting a row (:247). A legacy General
@@ -180,9 +180,11 @@ export function resolvePushRoute(
     // the tab lists `app-project:<segment>` rows and admits the tapped
     // `include_id` only when its `topic_id` matches EXACTLY
     // (`gateway/http/app-reminders-surface.ts` `handleList`). A General reminder
-    // the APP created carries `app-project:general` and lands correctly. One
-    // created through the Reminders Core or Telegram carries that channel's
-    // topic, so it is filtered out and the tab opens without the row.
+    // the APP created carries `app-project:~general` — the reserved no-project
+    // segment, NOT the literal `general`, which is a legal project id and used to
+    // collide with a real project of that name — and lands correctly. One created
+    // through the Reminders Core or Telegram carries that channel's topic, so it
+    // is filtered out and the tab opens without the row.
     //
     // NOT CHANGED, because the alternative is worse and this kind is decode-only:
     // the only other option is `return null`, i.e. the app opens and nothing

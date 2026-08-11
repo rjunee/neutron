@@ -5,16 +5,28 @@
  * green, and the path between them was broken: the resolver emits the mobile RAIL
  * spelling of the no-project scope (`~general`), expo-router hands that segment to
  * the Reminders screen verbatim, the screen passes it to the client as `project_id`,
- * and the client used to interpolate it straight into
- * `/api/app/projects/<id>/reminders`. The gateway's `sanitizeProjectId` rejects `~`
- * (outside its `[A-Za-z0-9_.-]` alphabet), so the owner's tap opened the app and
- * showed him `invalid_project_id` where his reminders should be.
+ * and the client interpolated it straight into `/api/app/projects/<id>/reminders`.
+ * The gateway's `sanitizeProjectId` rejects `~` (outside its `[A-Za-z0-9_.-]`
+ * alphabet), so the owner's tap opened the app and showed him `invalid_project_id`
+ * where his reminders should be.
  *
  * That is the same shape as the defect this whole change exists to fix — a sender
  * and a resolver each independently correct, disagreeing at the seam
  * (`wire-types/push-kind.ts` records the original). So this walks the REAL resolver
  * output into the REAL client and asserts on the URL that would actually go over the
  * wire. Neither module's own suite can see this, because neither one is wrong.
+ *
+ * WHICH WAY THE SEAM WAS CLOSED CHANGED, and this file's assertions changed with it
+ * (2026-08-11). The first fix collapsed the sentinel to the literal segment
+ * `general`, and these tests pinned that the tilde must NOT reach the wire. But
+ * `general` is a legal project id, so on an instance that HAS a project of that name
+ * the General scope and that project addressed ONE server-side topic — sharing a
+ * list and, once this client adopted the mapping, sharing create / snooze / cancel
+ * too. So the SERVER learned the sentinel instead
+ * (`gateway/http/app-reminders-surface.ts` `resolveScopeSegment`), and the tilde
+ * reaching the wire is now the CORRECT outcome rather than the bug. What has to hold
+ * is that both ends spell it the same way, which is what the pin below asserts
+ * against `wire-types`, the one definition each side imports.
  *
  * WHY THE LEGACY KIND STILL MATTERS. `reminder` has no sender left — the live
  * notification is `agent_message` and routes to chat. But a store-published app and
@@ -25,6 +37,8 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test';
+
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts';
 
 import { GENERAL_HTTP_ID, RAIL_GENERAL_ID } from '../lib/general-scope';
 import { resolvePushRoute } from '../lib/push-deep-link-dispatch';
@@ -85,25 +99,33 @@ describe('a legacy General reminder tap reaches the reminders API', () => {
 
     expect(urls).toHaveLength(1);
     expect(urls[0]).toBe(
-      `https://box.example.com/api/app/projects/${GENERAL_HTTP_ID}` +
+      `https://box.example.com/api/app/projects/${GENERAL_RAIL_ID}` +
         '/reminders?status=pending&include_id=rem-1',
     );
-    // MUTATION-SENSITIVE (verified by reverting `reminders-client.ts` to a raw
-    // `encodeURIComponent(project_id)`: this line reds with `/projects/~general/`).
-    //
-    // It asserts the raw sentinel, NOT `%7E`, and that distinction is the whole
-    // hazard: `~` is an UNRESERVED character, so `encodeURIComponent('~general')`
-    // returns `~general` unchanged. The tilde survives encoding intact and arrives at
-    // a gateway validator that rejects it — which is why the bug was invisible to
-    // every "does it encode the segment?" test, including the one already in
-    // `reminders-client.test.ts`.
-    expect(urls[0]).not.toContain(RAIL_GENERAL_ID);
+    // THE SEGMENT ON THE WIRE IS THE ONE THE SERVER RESERVES, asserted against
+    // `wire-types` rather than against a literal — that module is the single
+    // definition `gateway/http/app-reminders-surface.ts` imports for its exact-match
+    // reservation, so a drift in either copy reds here instead of producing a 400 on
+    // a device. The client's own constant is pinned to the same value in
+    // `general-scope.test.ts`.
+    expect(urls[0]).toContain(`/projects/${GENERAL_RAIL_ID}/`);
+    // NOT `%7E`, and that distinction is load-bearing in BOTH regimes: `~` is an
+    // UNRESERVED character, so `encodeURIComponent('~general')` returns it unchanged.
+    // Under the old collapse-to-`general` fix that property is what made the bug
+    // invisible to every "does it encode the segment?" test; under the reservation it
+    // is what lets the sentinel arrive intact for an exact-match compare.
+    expect(urls[0]).not.toContain('%7E');
+    // And the collapsed spelling must NOT appear — that value is a legal project id,
+    // and using it here is exactly the aliasing this fix removed.
+    expect(urls[0]).not.toContain(`/projects/${GENERAL_HTTP_ID}/`);
   });
 
   it('every mutating call maps it too, not just the list', async () => {
     // The tap lands on a LIST, but the screen the tap opens then offers snooze,
     // cancel and convert-to-task on those rows. Fixing only the read would leave the
-    // owner looking at his reminders and unable to touch any of them.
+    // owner looking at his reminders and unable to touch any of them — and mapping
+    // the writes onto the COLLIDING segment would be worse than leaving them broken,
+    // because a cancel would land on a real project's row.
     const urls = captureUrls();
     const client = new RemindersClient({ base_url: 'https://box.example.com', token: 't' });
     await client.create(RAIL_GENERAL_ID, 'stand up', 1_800_000_000);
@@ -113,14 +135,31 @@ describe('a legacy General reminder tap reaches the reminders API', () => {
 
     expect(urls).toHaveLength(4);
     for (const url of urls) {
-      expect(url).toContain(`/api/app/projects/${GENERAL_HTTP_ID}/reminders`);
-      expect(url).not.toContain(RAIL_GENERAL_ID);
+      expect(url).toContain(`/api/app/projects/${GENERAL_RAIL_ID}/reminders`);
+      expect(url).not.toContain(`/projects/${GENERAL_HTTP_ID}/`);
     }
   });
 
+  it('a project literally named `general` gets a DIFFERENT URL from the scope', async () => {
+    // The reason the segment changed. Both of these used to be
+    // `/api/app/projects/general/reminders`, so this project's reminders WERE the
+    // General tab's reminders — including its cancels.
+    const urls = captureUrls();
+    const client = new RemindersClient({ base_url: 'https://box.example.com', token: 't' });
+    await client.list(GENERAL_HTTP_ID);
+    await client.list(RAIL_GENERAL_ID);
+    expect(urls[0]).toBe(
+      'https://box.example.com/api/app/projects/general/reminders?status=pending',
+    );
+    expect(urls[1]).toBe(
+      'https://box.example.com/api/app/projects/~general/reminders?status=pending',
+    );
+    expect(urls[0]).not.toBe(urls[1]);
+  });
+
   it('a real project id passes through untouched', async () => {
-    // The mapping is an EXACT match on the sentinel, so a project of one's own —
-    // including one named `general` — is not rewritten into the General scope.
+    // The mapping is an EXACT match on the sentinel, so a project of one's own is
+    // never rewritten into the General scope.
     const urls = captureUrls();
     const client = new RemindersClient({ base_url: 'https://box.example.com', token: 't' });
     await client.list('beacon');

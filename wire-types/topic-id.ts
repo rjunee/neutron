@@ -14,10 +14,21 @@
 /**
  * The route id the NO-PROJECT General scope wears, owned in ONE place.
  *
- * General is not a project — it has no row, no id, and the gateway rejects
- * `~general` as a project id on every `/api/app/projects/<id>/…` route. But the
- * mobile router's chat path is `/projects/[id]/chat`, so General still needs a
- * path segment, and this sentinel is it.
+ * General is not a project — it has no row and no id. But the mobile router's
+ * chat path is `/projects/[id]/chat`, so General still needs a path segment, and
+ * this sentinel is it.
+ *
+ * IT IS ALSO THE RESERVED SEGMENT ON THE REMINDERS ROUTE, added 2026-08-11. This
+ * docblock used to say the gateway "rejects `~general` as a project id on every
+ * `/api/app/projects/<id>/…` route" — true when written, and now true of every
+ * route EXCEPT `…/reminders`, which reserves it for the no-project scope
+ * (`gateway/http/app-reminders-surface.ts` `resolveScopeSegment`). That exception
+ * exists because the alternative spelling, the literal `general`, is a legal
+ * project id: the scope and a project of that name resolved to one
+ * `app-project:general` topic, sharing a list AND its create / snooze / cancel.
+ * What makes this sentinel the fix is the very property the paragraph above
+ * describes — `~` is rejected by the project-id validator, so the segment a
+ * project can wear and the segment the SCOPE wears are disjoint by construction.
  *
  * IT LIVES HERE, above both sides of the wire, because it is now spoken on both.
  * A push payload names the scope the tap must open, and a notification for a

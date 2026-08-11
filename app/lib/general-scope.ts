@@ -65,30 +65,28 @@ export const GENERAL_HTTP_ID = 'general';
  * UNTOUCHED — including one that merely STARTS with the sentinel (the match is
  * exact, never a prefix).
  *
- * ⚠️ A PROJECT LITERALLY NAMED `general` THEREFORE PRODUCES THE SAME SEGMENT AS
- * THE SCOPE, AND THIS MAPPING CANNOT TELL THEM APART. The `~` sentinel is
- * collision-proof on the CLIENT — that is what ISSUES #410 bought, and the
- * docblock above says so — but the segment it maps to is a legal project id, and
- * the owner's own instance has a project whose id is exactly `general`
- * (`project-rail-view.ts`, which records #410). So the rail's two entries — the
- * General scope and that project — address one server-side scope: on the
- * reminders surface both derive `app-project:general`
- * (`gateway/http/app-reminders-surface.ts`), and the docs store roots both at
+ * ⚠️ A PROJECT LITERALLY NAMED `general` PRODUCES THE SAME SEGMENT AS THE SCOPE,
+ * AND THIS MAPPING CANNOT TELL THEM APART. The `~` sentinel is collision-proof on
+ * the CLIENT — that is what ISSUES #410 bought, and the docblock above says so —
+ * but the segment it maps to is a legal project id, and an instance can have a
+ * project whose id is exactly `general` (`project-rail-view.ts`, which records
+ * #410). So the rail's two entries — the General scope and that project — address
+ * ONE server-side scope: the docs store roots both at
  * `<owner_home>/Projects/general/docs`.
  *
- * Pre-existing and NOT introduced here: every project-scoped client already
- * shares this mapping. What is new is that reminders is the first MUTATING
- * surface to adopt it, so create/snooze/cancel now cross the same seam the reads
- * already did. Adopting it was still right — the alternative live on this path
- * was a hard `invalid_project_id` 400 where General's reminders belong — but a
- * wrong-scope write is quieter than a 400, and quieter is worse.
+ * REMINDERS NO LONGER USES THIS FUNCTION — use {@link httpScopeSegment} for any
+ * surface that reserves a segment for the no-project scope. Reminders was about
+ * to become the first MUTATING surface on the shared mapping, which would have
+ * put create/snooze/cancel across the same seam the reads already cross, so the
+ * server learned the reserved segment instead
+ * (`gateway/http/app-reminders-surface.ts` `resolveScopeSegment`).
  *
- * Closing it properly needs a SERVER change, which is why it is not done here: a
- * distinct route for the no-project scope, or `general` reserved as a project id.
- * Either one is a migration (General's existing rows live under
- * `app-project:general` today), so it wants its own lane rather than a rider on a
- * push fix. Do NOT "fix" it by changing the constant below — that orphans every
- * row already written.
+ * STILL OPEN for docs / tabs / work-board / activity, which are reads and
+ * pre-date this module. Closing those means moving General's existing content off
+ * `general` — `Projects/general/docs` is a directory with files in it — so it is
+ * a migration in its own lane, filed as #183, and NOT a rider on a push fix. Do
+ * NOT "close" it by changing the constant below: that orphans every General doc
+ * already written.
  *
  * Not percent-encoded here: encoding is the caller's job, because a caller
  * interpolating into a URL needs `encodeURIComponent` and a caller comparing
@@ -104,4 +102,43 @@ export function httpProjectSegment(project_id: string | null | undefined): strin
 /** {@link httpProjectSegment}, percent-encoded for interpolation into a URL. */
 export function httpProjectSegmentEncoded(project_id: string | null | undefined): string {
   return encodeURIComponent(httpProjectSegment(project_id));
+}
+
+/**
+ * Map a client-side scope id to its HTTP PATH SEGMENT on a surface that RESERVES
+ * a segment for the no-project scope.
+ *
+ * The difference from {@link httpProjectSegment} is the only thing that matters
+ * here: General keeps the `~general` sentinel all the way to the server instead
+ * of collapsing onto `general`. `~` is outside the gateway's project-id alphabet,
+ * so the segment a project can wear and the segment the SCOPE wears are disjoint
+ * by construction — the General scope and a project literally named `general`
+ * cannot address the same rows, which under `httpProjectSegment` they do.
+ *
+ * Use this for any project-scoped surface that MUTATES. Reminders is the one
+ * today (`reminders-client.ts` → `gateway/http/app-reminders-surface.ts`
+ * `resolveScopeSegment`); the read-only clients still share `httpProjectSegment`
+ * and its collision, for the migration reason recorded above.
+ *
+ * A server that has not learned the reserved segment answers `~general` with
+ * `invalid_project_id`, so this is not a drop-in for `httpProjectSegment` — the
+ * two halves have to agree, which is why they are named differently rather than
+ * flagged.
+ */
+export function httpScopeSegment(project_id: string | null | undefined): string {
+  if (project_id === null || project_id === undefined || project_id.length === 0) {
+    return RAIL_GENERAL_ID;
+  }
+  return project_id;
+}
+
+/**
+ * {@link httpScopeSegment}, percent-encoded for interpolation into a URL.
+ *
+ * `encodeURIComponent` leaves `~` alone (RFC 3986 unreserved), so the General
+ * segment survives as the literal `~general` — the same property that made `~`
+ * the right sentinel for the route in the first place (`project-rail-view.ts`).
+ */
+export function httpScopeSegmentEncoded(project_id: string | null | undefined): string {
+  return encodeURIComponent(httpScopeSegment(project_id));
 }

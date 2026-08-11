@@ -367,14 +367,23 @@ describe('the surface CONSUMES the pushed message id', () => {
       { method: 'scrollToIndex', arg: { index: 0, animated: true } },
     ]);
 
-    // ARM 6 — THE SAME NOTIFICATION, TAPPED TWICE. A notification stays in the shade
-    // until it is dismissed, and this surface is not remounted by a project switch
-    // (`projects/[id]` does not diverge on the dynamic segment, and FlashList carries
-    // no `key`), so the sequence tap-X → rail-tap elsewhere → tap-X again reaches the
-    // SAME component instance with the same target. The middle render carries no
-    // target, which is the moment the latch has to be released: without that release
-    // the second tap hit the `honouredDeepLink === deepLinkTarget` early return and
-    // the transcript did not move at all.
+    // ARM 6 — THE SAME TARGET, ARRIVING TWICE. This surface is not remounted by a
+    // project switch (`projects/[id]` does not diverge on the dynamic segment, and
+    // FlashList carries no `key`), so target-X → a render with no target → target-X
+    // again reaches the SAME component instance. The middle render carries no target,
+    // which is the moment the latch has to be released: without that release the second
+    // arrival hit the `honouredDeepLink === deepLinkTarget` early return and the
+    // transcript did not move at all.
+    //
+    // WHAT THIS ARM DOES NOT PROVE, stated because the version of this comment written
+    // alongside the fix claimed it: the two arrivals here are `rerender` calls, NOT two
+    // notification taps. A real second tap of the SAME notification never reaches this
+    // component — `installPushTapHandler` returns at `app/lib/push.ts:292` on a seen
+    // `request.identifier`, BEFORE `resolvePushRoute`, so no route is pushed and no
+    // `?message_id=` is re-supplied (7-day TTL; warm taps do not dismiss). This arm
+    // therefore proves the latch releases on a targetless visit — which is real and is
+    // what the mutation kills — and says nothing about tap-twice reachability. The
+    // dedupe gap is filed as #182.
     //
     // Asserted as a NEW ask appended after the no-target render, not as a count, so a
     // fix that re-anchored on the empty render instead would not pass by accident.

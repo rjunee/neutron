@@ -39,6 +39,7 @@ import {
   type RitualFirePlanner,
 } from './ritual-fire.ts'
 import { createLogger } from '@neutronai/logger'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 
 const dispatcherLog = createLogger('reminder-dispatcher')
 
@@ -80,12 +81,22 @@ export interface ReminderContextSource {
  * segment, → the instance slug (`owner_slug`), preserving instance-level
  * behaviour. A `[ROUTING]` header is a thread destination, not a project, so
  * it is deliberately NOT consulted here (only `reminder.topic_id` is).
+ *
+ * THE APP'S GENERAL SCOPE IS INSTANCE-LEVEL TOO, which is the third spelling of
+ * the same case. `app-project:~general` is the no-project scope on the app
+ * reminders surface (`gateway/http/app-reminders-surface.ts`
+ * `resolveScopeSegment`) — a scope, not a project — so it resolves to
+ * `owner_slug` exactly as its `web:<user_id>` twin above does. Without this it
+ * would resolve to the literal `~general` and the context source would go
+ * looking for `<owner_home>/Projects/~general/STATUS.md`, a directory that
+ * cannot exist because `~` is not a legal project id.
  */
 export function deriveReminderProjectId(reminder: Reminder): string {
   const topic = reminder.topic_id
   if (topic === null || topic.trim().length === 0) return reminder.owner_slug
   if (topic.startsWith('app-project:')) {
     const id = topic.slice('app-project:'.length)
+    if (id === GENERAL_RAIL_ID) return reminder.owner_slug
     return id.length > 0 ? id : reminder.owner_slug
   }
   if (topic.startsWith('web:')) {

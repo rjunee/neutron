@@ -634,12 +634,32 @@ export function ChatSyncSurface({
   // the note at the call below for why re-arming on a rejection would be worse.
   //
   // LEAVING THE DEEP-LINKED ROUTE RELEASES THE LATCH, and that release is what makes
-  // "once per target" mean "once per tap" instead of "once per app run". Without it:
-  // tap the notification for X (honoured, X latched), rail-tap to another project
-  // (`/projects/<other>/chat`, no query ⇒ no target), then tap the SAME notification
-  // again — it is still sitting in the shade — and the equality check below swallowed
-  // it. The target is a PER-VISIT instruction, so a visit without one must not leave a
-  // spent instruction behind.
+  // "once per target" mean "once per visit" instead of "once per app run". Without it:
+  // honour a target for X (X latched), rail-tap to another project
+  // (`/projects/<other>/chat`, no query ⇒ no target), then arrive at X's target again —
+  // and the equality check below swallowed it. The target is a PER-VISIT instruction,
+  // so a visit without one must not leave a spent instruction behind.
+  //
+  // WHAT DOES *NOT* REACH THIS CHECK — corrected 2026-08-11, and the earlier version of
+  // this comment (and commit 93245925's message) got it wrong. It said the motivating
+  // sequence was "tap the notification for X, rail-tap elsewhere, then tap the SAME
+  // notification again — it is still sitting in the shade". The premise is right and the
+  // conclusion is not: a real re-tap of the same notification never gets here at all. It
+  // is swallowed ONE LAYER UP, at `app/lib/push.ts:292` — `installPushTapHandler`'s
+  // dispatcher reads `response.notification.request.identifier`, returns early on
+  // `store.has(id)`, and only THEN calls `resolvePushRoute`/`push(path)`. So the second
+  // tap produces no navigation whatsoever and never re-supplies `?message_id=`; nothing
+  // reaches this component to be swallowed by the equality check. The dedupe TTL is 7
+  // DAYS (`push-tap-dedupe-store.ts:53`) and a warm tap passes `{dismiss:false}`
+  // (`push.ts:332`), so the notification genuinely does stay in the shade — which is
+  // exactly what made the false claim read as plausible. Filed as its own defect (#182)
+  // rather than widened into this change.
+  //
+  // WHAT DOES REACH IT is any SECOND ARRIVAL of the same target at this live component:
+  // a fresh notification for the same message (a new `request.identifier`, so the dedupe
+  // passes it), or the route otherwise re-supplying the same `message_id` after a
+  // no-target render. That is the reachable form of the sequence above, and it is the one
+  // the sixth arm of the test drives.
   //
   // WHAT SURVIVES A PROJECT SWITCH AND WHAT DOES NOT, stated exactly, because the two
   // halves point opposite ways and an earlier version of this comment got the second
@@ -660,11 +680,12 @@ export function ChatSyncSurface({
   //     new list's first paint.
   //
   // So the honest scope of this fix: the latch was a state machine with no exit, which
-  // is a defect by inspection and one line to close. Whether the owner could SEE it on
-  // the rail-switch path depends on the frozen anchor winning that repaint race, and
-  // that is a device claim not made here. The imperative seam is the only path when the
-  // list is NOT remounted — a target arriving while the scope holds steady — and that
-  // is the sequence the sixth arm of
+  // is a defect by inspection and one line to close. What it is NOT is a fix for the
+  // re-tap the earlier comment claimed — that never arrives (see above). Whether the
+  // owner could SEE the latch on the rail-switch path depends on the frozen anchor
+  // winning that repaint race, and that is a device claim not made here. The imperative
+  // seam is the only path when the list is NOT remounted — a target arriving while the
+  // scope holds steady — and that is the sequence the sixth arm of
   // `app/__tests__/chat-push-tap-lands-on-the-message.test.tsx` drives and mutation-kills.
   const honouredDeepLink = useRef<string | null>(null);
   useEffect(() => {

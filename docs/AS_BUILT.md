@@ -9319,3 +9319,103 @@ down.** The reachable defect here was not found by hunting for it — it was fou
 same file asserted "Expo can return fewer tickets than messages" in one place and "index i
 identifies message i's recipient" in another. When a diff teaches a file something new about
 its own failure mode, the next question is which OTHER paragraph was built on the old belief.
+
+## 2026-08-11 — the no-project scope was addressing a real project, and one comment claimed a tap that never arrives
+
+Two review findings on the ritual-push branch, from a panel where two independent lanes converged
+on the first. Both are about the same failure shape from opposite ends: a name that means two
+things, and a comment that describes a path no code takes.
+
+**A SCOPE IS NOT AN ID, and `general` is a legal project id.** The mobile rail spells the
+no-project General scope `~general`, deliberately outside the gateway's `[A-Za-z0-9_.-]`
+alphabet so the sentinel cannot collide with a real project — that is what #410 bought, and
+`app/lib/project-rail-view.ts` says so at length. `app/lib/general-scope.ts` then mapped it back
+onto the literal HTTP segment `general`, which **is** inside that alphabet. So a rail-tap on
+General and a rail-tap on a project whose id is literally `general` produced a byte-identical
+request, and the reminders surface derived one `app-project:general` topic for both. Collision-proof
+by construction, then mapped onto something that is not.
+
+What made it worth a round rather than a note: **reminders was about to be the first MUTATING
+surface on that mapping.** The read-only clients (docs, tabs, work-board, activity) have shared it
+for months. This branch routed `list`, `create`, `snooze`, `cancel` and `convert-to-task` through
+it, so two unrelated rail entries would have shared a pending list *and* its writes — a cancel
+aimed at General destroying a real project's row. Before the branch that path 400'd
+(`sanitizeProjectId` rejects `~`), which is loud and harmless; the branch would have converted it
+into a silent wrong-scope read AND write. **Quieter is worse.**
+
+**Fixed by reserving a segment on the server, not by renaming anything.** There is no value inside
+`[A-Za-z0-9_.-]` that can mean "no project" without also naming a project that might exist, so the
+fix had to come from outside the alphabet. `gateway/http/app-reminders-surface.ts`
+`resolveScopeSegment` accepts `GENERAL_RAIL_ID` — exact match, never a prefix — ahead of
+`sanitizeProjectId`, and the scope lands on `app-project:~general`. Deliberately **not** a new topic
+prefix: that string reuses the one shape every existing topic reader already decodes, and what they
+decode it back to (`~general`) is the rail id, which is the right answer for each of them —
+`push-deep-link-dispatch` builds `/projects/~general/reminders`, which is exactly where a General
+tap belongs. `reminders/dispatcher.ts` `deriveReminderProjectId` needed the one addition: the
+sentinel resolves to `owner_slug`, as its `web:<user_id>` General twin already did, or the context
+source would go looking for a `Projects/~general/STATUS.md` that cannot exist.
+
+Client side, `httpScopeSegment` / `httpScopeSegmentEncoded` sit beside `httpProjectSegment` rather
+than replacing it. Two functions, not a flag: a server that has not learned the reservation answers
+`~general` with a 400, so the halves must agree, and different names are how that is enforced.
+`~` is RFC-3986 unreserved so `encodeURIComponent` leaves it alone — the same property that made it
+the right route sentinel after `#general` shipped and broke on-device (#411).
+
+**SCOPE OF THE FIX, STATED RATHER THAN IMPLIED: reminders ONLY.** Docs, tabs, work-board and
+activity still collapse General onto `general` and still alias. They are reads, they pre-date this
+module, and closing them is a **data migration** — `Projects/general/docs` is a directory with files
+in it, and either way the split goes, one scope stops seeing content it can see today. Filed as
+**#183** with both fix directions, not ridden in on a push fix. Open has no root `ISSUES.md` (the
+purity gate reserves that path); its defect tracker is GitHub Issues.
+
+**THE SECOND FINDING IS A COMMENT, AND THE FIX IS TO CORRECT THE CLAIM.** The latch-release from the
+previous round is correct by inspection and stays. What was wrong is the sequence used to motivate
+it, in this file's own comment and in commit 93245925's message: *"tap the notification for X,
+rail-tap elsewhere, then tap the SAME notification again — it is still sitting in the shade"*. The
+premise is true and the conclusion is not. A real second tap never reaches the equality check,
+because `app/lib/push.ts:292` returns on a seen `request.identifier` **before** `resolvePushRoute` —
+so the re-tap produces no navigation at all and never re-supplies `?message_id=`. It is swallowed one
+layer up. The dedupe TTL is 7 days and warm taps pass `{dismiss:false}`, so the notification really
+does stay in the shade, which is precisely what made the false claim read as plausible.
+
+Corrected in `ChatSyncSurface.tsx` and in the sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, which now says what it actually drives:
+two `rerender` calls, proving the latch releases on a targetless visit — real, and still
+mutation-killed — and saying plainly that it proves nothing about tap-twice reachability. The dedupe
+gap itself is filed as **#182** rather than fixed here; a push-notification fix should not grow a
+navigation change on the way past.
+
+**Mutation-tested, each mutant named with the tests it reds:**
+
+* `resolveScopeSegment` → bare `sanitizeProjectId` (drop the reservation): **5 red** in
+  `gateway/__tests__/app-reminders-surface.test.ts` — accepts-the-sentinel, own-topic,
+  create-invisible-in-the-other, cannot-snooze-or-cancel, include_id-no-leak.
+* `resolveScopeSegment` → `startsWith` instead of `===`: **1 red** — the exact-match arm, which
+  is the one that would otherwise hand `~generalize` the General scope with a 200.
+* `reminders-client.ts` → back to `httpProjectSegmentEncoded`: **7 red** across
+  `general-scope.test.ts` + `legacy-reminder-push-tap-reaches-general.test.ts`.
+* `httpScopeSegment` → collapse the empty scope to `general`: **3 red**. Collapse the sentinel too
+  (i.e. make it identical to `httpProjectSegment`): **7 red**.
+* `deriveReminderProjectId` → drop the sentinel line: **1 red** in `reminders/dispatcher.test.ts`.
+* The latch release → back to the bare `if (deepLinkTarget.length === 0) return;`: still reds the
+  sixth arm and nothing else. Re-run rather than cited — the comment around it changed, so the
+  earlier round's evidence was not assumed to carry over.
+
+The comment corrections have **no mutant**, and that is stated rather than papered over: nothing
+executable changed, so there is no test to red. What they buy is that the next reader does not build
+on a reachability that does not hold.
+
+`legacy-reminder-push-tap-reaches-general.test.ts` needed its premise inverted, not just its
+literals: it existed to assert the tilde must NOT reach the wire, and now the tilde reaching the wire
+is the correct outcome. It pins the segment against `wire-types`, the one definition both sides
+import, so a drift in either copy reds here instead of 400ing on a device. `wire-types/topic-id.ts`
+also said the gateway "rejects `~general` … on every `/api/app/projects/<id>/…` route" — true when
+written, and now false of exactly one route, so it names the exception.
+
+📌 **A sentinel is only collision-proof at the layer that spells it.** `~general` was engineered to
+be unmistakable on the client and then translated, one function later, into a string a user can name
+their project. The property was real and it did not survive the mapping — and nothing failed, because
+both halves were individually correct. **When a value exists to be unforgeable, follow it to the last
+layer that reads it and check the guarantee is still true there.** The generalisation of the
+adjacent lesson from the same file: a comment describing a mode is a claim about reachability, and
+the way to check it is to walk the layer ABOVE the one the comment is written in.
