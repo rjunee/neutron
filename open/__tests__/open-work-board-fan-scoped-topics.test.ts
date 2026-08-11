@@ -85,7 +85,7 @@ describe('the fix: base + every live scoped topic', () => {
     const reg = new InMemoryAppWsSessionRegistry()
     const base = session(reg, BASE)
     const a = session(reg, SCOPED)
-    const b = session(reg, 'app:owner:pristine')
+    const b = session(reg, 'app:owner:second-project')
     fanLikeComposer(reg, boardFrame())
     expect(base).toHaveLength(1)
     expect(a).toHaveLength(1)
