@@ -22,7 +22,8 @@
 import { useCallback, useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from './theme';
+import { DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from './theme';
+import { useThemedStyles } from './theme-context';
 import type { AppWsOutboundAgentMessageOption } from '@neutronai/wire-types';
 
 export interface ButtonOptionRowProps {
@@ -44,6 +45,7 @@ export function ButtonOptionRow({
   onChoose,
   disabled = false,
 }: ButtonOptionRowProps) {
+  const styles = useThemedStyles(makeStyles);
   const [tapping, setTapping] = useState(false);
   const handle = useCallback(
     (value: string) => {
@@ -131,6 +133,7 @@ export function ImageGalleryRow({
   onChoose,
   disabled = false,
 }: ImageGalleryRowProps) {
+  const styles = useThemedStyles(makeStyles);
   const [tapping, setTapping] = useState(false);
   const handle = useCallback(
     (value: string) => {
@@ -211,91 +214,92 @@ export function ImageGalleryRow({
   );
 }
 
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.xs + 2,
-    marginTop: SPACING.sm,
-  },
-  btn: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: 10,
-    borderWidth: 1,
-    minHeight: 36,
-    justifyContent: 'center',
-  },
-  btnDefault: {
-    backgroundColor: THEME.surface,
-    borderColor: THEME.hairline,
-  },
-  btnPrimary: {
-    backgroundColor: THEME.accent,
-    borderColor: THEME.accent,
-  },
-  btnDestructive: {
-    backgroundColor: 'transparent',
-    borderColor: THEME.danger,
-  },
-  btnText: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_secondary,
-    fontWeight: '500',
-  },
-  btnTextPrimary: {
-    color: THEME.background,
-    fontWeight: '700',
-  },
-  btnTextDestructive: {
-    color: THEME.danger,
-    fontWeight: '600',
-  },
-  btnDisabled: {
-    opacity: 0.5,
-  },
-  pressed: { opacity: 0.6 },
-  collapsedRow: {
-    marginTop: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: DENSITY.banner_radius,
-    backgroundColor: THEME.surface,
-  },
-  collapsedText: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_muted,
-  },
-  gallery: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-    marginTop: SPACING.sm,
-  },
-  galleryTile: {
-    width: '48%',
-    aspectRatio: 1,
-    borderRadius: 10,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface,
-  },
-  galleryImage: {
-    width: '100%',
-    height: '100%',
-  },
-  galleryLabelOverlay: {
-    position: 'absolute',
-    left: 0,
-    bottom: 0,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    backgroundColor: 'rgba(10, 10, 10, 0.7)',
-  },
-  galleryLabel: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_primary,
-    fontWeight: '600',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.xs + 2,
+      marginTop: SPACING.sm,
+    },
+    btn: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs + 2,
+      borderRadius: 10,
+      borderWidth: 1,
+      minHeight: 36,
+      justifyContent: 'center',
+    },
+    btnDefault: {
+      backgroundColor: theme.surface,
+      borderColor: theme.hairline,
+    },
+    btnPrimary: {
+      backgroundColor: theme.accent,
+      borderColor: theme.accent,
+    },
+    btnDestructive: {
+      backgroundColor: 'transparent',
+      borderColor: theme.danger,
+    },
+    btnText: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_secondary,
+      fontWeight: '500',
+    },
+    btnTextPrimary: {
+      color: theme.background,
+      fontWeight: '700',
+    },
+    btnTextDestructive: {
+      color: theme.danger,
+      fontWeight: '600',
+    },
+    btnDisabled: {
+      opacity: 0.5,
+    },
+    pressed: { opacity: 0.6 },
+    collapsedRow: {
+      marginTop: SPACING.sm,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      borderRadius: DENSITY.banner_radius,
+      backgroundColor: theme.surface,
+    },
+    collapsedText: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_muted,
+    },
+    gallery: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.sm,
+      marginTop: SPACING.sm,
+    },
+    galleryTile: {
+      width: '48%',
+      aspectRatio: 1,
+      borderRadius: 10,
+      overflow: 'hidden',
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.surface,
+    },
+    galleryImage: {
+      width: '100%',
+      height: '100%',
+    },
+    galleryLabelOverlay: {
+      position: 'absolute',
+      left: 0,
+      bottom: 0,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      backgroundColor: 'rgba(10, 10, 10, 0.7)',
+    },
+    galleryLabel: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_primary,
+      fontWeight: '600',
+    },
+  });

@@ -29,7 +29,8 @@ import {
   formatHistoryDate,
   type MobilePane,
 } from './docs-shared';
-import { BinaryPreview, EditorDropTarget, styles } from './docs-ui';
+import { BinaryPreview, EditorDropTarget, makeStyles } from './docs-ui';
+import { useThemedStyles } from '../../lib/theme-context';
 import { type UseDocFile } from './use-doc-file';
 import { type UseDocHistory } from './use-doc-history';
 import { type UseDocMutations } from './use-doc-mutations';
@@ -64,6 +65,7 @@ export function DocViewerPane({
   mobilePane,
   setMobilePane,
 }: DocViewerPaneProps) {
+  const styles = useThemedStyles(makeStyles);
   const { file, selectedPath, mode, draftContent, conflict, setDraftContent, setMode, handleReload, resolveBinary } =
     docFile;
   const { historyEntries, historyCursor, historyOpen, handleToggleHistory, previewVersion, handleExitPreview } =
@@ -394,6 +396,7 @@ interface DocHistoryPaneProps {
 }
 
 export function DocHistoryPane({ docHistory, file, wideViewport }: DocHistoryPaneProps) {
+  const styles = useThemedStyles(makeStyles);
   const {
     historyUnavailable,
     historyLoading,

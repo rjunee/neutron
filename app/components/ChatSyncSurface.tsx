@@ -54,7 +54,8 @@ import {
   type ChatInitialAnchor,
 } from '../lib/chat-core/chat-initial-anchor';
 import { useMobileChat } from '../lib/chat-core/use-mobile-chat';
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { useAuthSession } from '../lib/session';
 import { loadAppConfig } from '../lib/config';
 import { RenderMarkdown } from '../lib/markdown-render';
@@ -80,13 +81,13 @@ import {
 } from '../lib/chat-core/jump-to-bottom';
 
 import {
-  AGENT_BUBBLE_TONE,
+  agentBubbleTone,
   BUBBLE_MAX_WIDTH,
   BUBBLE_PADDING_H_PT,
   BUBBLE_PADDING_V_PT,
   BUBBLE_RADIUS_PT,
   BUBBLE_TAIL_RADIUS_PT,
-  USER_BUBBLE_TONE,
+  userBubbleTone,
   bubbleGapPt,
   bubbleHasTail,
   type BubbleSpeaker,
@@ -120,6 +121,8 @@ export function ChatSyncSurface({
   initialPrefill,
   initialAutosend,
 }: ChatSyncSurfaceProps): React.JSX.Element {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
   const router = useRouter();
@@ -657,7 +660,7 @@ export function ChatSyncSurface({
       ) : null}
       {!ready ? (
         <View style={styles.center} testID="chat-attaching">
-          <ActivityIndicator color={THEME.accent} />
+          <ActivityIndicator color={theme.accent} />
         </View>
       ) : (
         <FlashList
@@ -801,6 +804,8 @@ function ChatRow({
   onRetry: (clientMsgId: string) => void;
   onDocRef: (ref: ChatMessageDocRef) => void;
 }): React.JSX.Element {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
 
@@ -918,7 +923,7 @@ function ChatRow({
             {isUser ? (
               message.body.length > 0 ? <Text style={styles.userText}>{message.body}</Text> : null
             ) : (
-              <RenderMarkdown source={message.body} textColor={THEME.text_primary} />
+              <RenderMarkdown source={message.body} textColor={theme.text_primary} />
             )}
             {attachmentUrls.length > 0 ? (
               // The top margin separates attachments from the words above them.
@@ -935,7 +940,7 @@ function ChatRow({
                     style={styles.attachment}
                     // The voice-note player draws no surface of its own, so it
                     // has to be told the colours of the bubble it is inside.
-                    tone={isUser ? USER_BUBBLE_TONE : AGENT_BUBBLE_TONE}
+                    tone={isUser ? userBubbleTone(theme) : agentBubbleTone(theme)}
                   />
                 ))}
               </View>
@@ -1104,11 +1109,13 @@ function TranscriptFooter({
  * to the shared `isTransientSystemNotice` predicate, not a second one.
  */
 function SystemNoticePill({ text }: { text: string | null }): React.JSX.Element | null {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   if (text === null) return null;
   return (
     <View style={styles.systemNoticeRow} testID="chat-system-notice">
       <View style={styles.systemNoticePill}>
-        <ActivityIndicator size="small" color={THEME.text_muted} />
+        <ActivityIndicator size="small" color={theme.text_muted} />
         <Text style={styles.systemNoticeText} accessibilityRole="text">
           {text}
         </Text>
@@ -1118,6 +1125,7 @@ function SystemNoticePill({ text }: { text: string | null }): React.JSX.Element 
 }
 
 function TypingIndicator(): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={[styles.bubbleWrap, styles.agentWrap, styles.footerGap]}>
       <View style={styles.bubbleColumn}>
@@ -1136,14 +1144,17 @@ function TypingIndicator(): React.JSX.Element {
  * projects feel broken (ISSUES #402).
  */
 function HydratingState(): React.JSX.Element {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.center} testID="chat-hydrating">
-      <ActivityIndicator color={THEME.accent} />
+      <ActivityIndicator color={theme.accent} />
     </View>
   )
 }
 
 function EmptyState(): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.center} testID="chat-empty">
       <Text style={styles.emptyText}>No messages yet. Say hello 👋</Text>
@@ -1157,209 +1168,211 @@ function EmptyState(): React.JSX.Element {
 // actually been down long enough to matter; the reasoning, and where the
 // per-message truth is carried instead, is documented in that file.
 
-const styles = StyleSheet.create({
-  fill: { flex: 1, backgroundColor: THEME.background },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: SPACING.xl },
-  listContent: { paddingVertical: SPACING.md, paddingHorizontal: SPACING.md },
-  // NO `marginVertical` HERE. A uniform margin puts identical space between every
-  // pair of bubbles, which is precisely what does NOT happen in iMessage — the
-  // gap is a function of whether the SENDER CHANGED, and it is applied per row as
-  // `marginTop` from `bubbleGapPt` (see `lib/chat-bubble-metrics.ts`).
-  bubbleWrap: { flexDirection: 'row' },
-  userWrap: { justifyContent: 'flex-end' },
-  agentWrap: { justifyContent: 'flex-start' },
-  bubble: {
-    // NO maxWidth HERE. `bubbleColumn` owns the ONE cap; a second percentage cap
-    // in this chain multiplies with it (see `lib/chat-bubble-metrics.ts`).
-    paddingHorizontal: BUBBLE_PADDING_H_PT,
-    paddingVertical: BUBBLE_PADDING_V_PT,
-    borderRadius: BUBBLE_RADIUS_PT,
-  },
-  // Painted FROM the tone constants, not from the palette directly, so a control
-  // that has to know what it is sitting on (the voice-note player) cannot end up
-  // drawing against a colour the bubble no longer uses.
-  userBubble: { backgroundColor: USER_BUBBLE_TONE.ground },
-  agentBubble: {
-    backgroundColor: AGENT_BUBBLE_TONE.ground,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.hairline,
-  },
-  // The tail corner, applied ONLY to the last bubble of a same-sender run —
-  // iMessage draws one tail per run, not one per bubble.
-  userTail: { borderBottomRightRadius: BUBBLE_TAIL_RADIUS_PT },
-  agentTail: { borderBottomLeftRadius: BUBBLE_TAIL_RADIUS_PT },
-  userText: { ...TYPOGRAPHY.body, color: USER_BUBBLE_TONE.ink },
-  agentText: { ...TYPOGRAPHY.body, color: THEME.text_primary },
-  attachments: {
-    marginTop: SPACING.sm,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.xs + 2,
-  },
-  /** The same row with no leading gap — for a message that is ONLY attachments,
-   *  where the bubble's own padding is already the whole inset. */
-  attachmentsOnly: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.xs + 2,
-  },
-  attachment: {
-    width: 96,
-    height: 96,
-    borderRadius: 8,
-    backgroundColor: THEME.surface_raised,
-  },
-  docRefs: { marginTop: SPACING.sm + 2, gap: SPACING.xs + 2 },
-  docRefsHeading: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_muted,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  docRefBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.sm + 2,
-    paddingVertical: SPACING.sm,
-    borderRadius: 8,
-    backgroundColor: THEME.background,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  docRefIcon: { fontSize: 16 },
-  docRefTextCol: { flex: 1, gap: 1 },
-  docRefLabel: { ...TYPOGRAPHY.body_small, color: THEME.text_secondary, fontWeight: '600' },
-  docRefPath: { ...TYPOGRAPHY.caption, color: THEME.text_muted },
-  pressed: { opacity: 0.6 },
-  // OUTSIDE the bubble now, so it reads as a status line under the thread rather
-  // than as extra padding inside the message.
-  delivery: { ...TYPOGRAPHY.caption, color: THEME.text_muted },
-  deliveryRead: { color: THEME.accent },
-  deliveryFailed: { color: THEME.warning },
-  metaRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs, marginTop: 2 },
-  editedLabel: { ...TYPOGRAPHY.caption, color: THEME.text_muted },
-  tombstoneBubble: {
-    backgroundColor: THEME.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.hairline,
-    borderBottomLeftRadius: BUBBLE_TAIL_RADIUS_PT,
-  },
-  tombstoneText: { ...TYPOGRAPHY.body, color: THEME.text_muted, fontStyle: 'italic' },
-  editInput: { padding: 0, margin: 0, minWidth: 160 },
-  trayAction: { ...TYPOGRAPHY.caption, color: THEME.text_primary, fontWeight: '600' },
-  trayActionDanger: { color: THEME.warning },
-  // THE single bubble width cap for every row on this surface. See
-  // `lib/chat-bubble-metrics.ts` for why it is 90% and why it lives in one place.
-  bubbleColumn: { maxWidth: BUBBLE_MAX_WIDTH },
-  reactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.xs, marginTop: SPACING.xs },
-  reactionTray: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.xs,
-    marginTop: SPACING.xs,
-    padding: SPACING.xs,
-    borderRadius: 16,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.hairline,
-  },
-  trayUser: { justifyContent: 'flex-end' },
-  trayAgent: { justifyContent: 'flex-start' },
-  trayEmojiBtn: { paddingHorizontal: SPACING.xs, paddingVertical: 2 },
-  trayEmoji: { ...TYPOGRAPHY.h3 },
-  // The jump-to-bottom affordance. `position: absolute` inside the surface, so it
-  // floats over the transcript and does NOT participate in the list's layout —
-  // adding height to the list would change `contentSize` and therefore the very
-  // geometry that decides whether to show it.
-  //
-  // `bottom` clears the composer rather than the screen edge: the owner asked for
-  // bottom-right, and bottom-right of the TRANSCRIPT is above the input, not behind
-  // it.
-  jumpToBottom: {
-    position: 'absolute',
-    right: SPACING.md,
-    // LOWER, on owner feedback ("put the scroll down arrow a bit lower"). It was 84,
-    // which cleared the composer by a wide margin and left it floating in the middle
-    // of the transcript. 52 keeps it clear of the input while reading as attached to
-    // the bottom of the conversation, which is where the eye looks for it.
-    bottom: 52,
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface_raised,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.hairline,
-    // Keep it above the transcript but below the modals/overlays that follow it in
-    // the tree, so an upload sheet is never obscured by a scroll button.
-    zIndex: 2,
-  },
-  /**
-   * The chevron, drawn rather than typed ("make the arrow look more beautiful").
-   *
-   * It was the text character "↓", which inherits the font's own weight and optical
-   * centring — so it sat slightly high in the circle and looked like a placeholder,
-   * because it was one. This is a square rotated 45° with only its bottom and right
-   * edges stroked: a true chevron with a stroke weight and corner join chosen here
-   * rather than inherited from a typeface, crisp at any density, and no new
-   * dependency to draw it.
-   *
-   * `text_secondary`, not primary: it is an affordance that appears over content, so
-   * it should read as available rather than shout. The circle already carries the
-   * contrast.
-   */
-  jumpToBottomChevron: {
-    width: 9,
-    height: 9,
-    borderRightWidth: 1.75,
-    borderBottomWidth: 1.75,
-    borderColor: THEME.text_secondary,
-    transform: [{ rotate: '45deg' }],
-    // Nudged up by the half-stroke the rotation pushes below centre, so the mark is
-    // optically centred in the circle rather than mathematically centred.
-    marginTop: -3,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 2,
-    borderRadius: 12,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.hairline,
-  },
-  chipSelf: { borderColor: THEME.accent, backgroundColor: THEME.surface },
-  chipText: { ...TYPOGRAPHY.caption, color: THEME.text_primary },
-  typingBubble: { paddingVertical: SPACING.xs },
-  typingText: { ...TYPOGRAPHY.h2, color: THEME.text_muted, letterSpacing: 2 },
-  emptyText: { ...TYPOGRAPHY.body, color: THEME.text_muted },
-  // Footer rows sit at a sender-change distance from the last bubble — they are
-  // the agent about to speak, so they read as a new turn.
-  footerGap: { marginTop: SPACING.sm },
-  // The transient system pill: CENTERED, muted, unmistakably not a bubble.
-  systemNoticeRow: { alignItems: 'center', paddingVertical: SPACING.sm },
-  systemNoticePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: 999,
-    backgroundColor: THEME.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: THEME.hairline,
-  },
-  systemNoticeText: { ...TYPOGRAPHY.body_small, color: THEME.text_muted },
-  dropMultiFileHint: {
-    paddingVertical: SPACING.xs,
-    paddingHorizontal: SPACING.md,
-    backgroundColor: THEME.surface,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: THEME.hairline,
-  },
-  dropMultiFileHintText: { ...TYPOGRAPHY.body_small, color: THEME.text_secondary },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    fill: { flex: 1, backgroundColor: theme.background },
+    center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: SPACING.xl },
+    listContent: { paddingVertical: SPACING.md, paddingHorizontal: SPACING.md },
+    // NO `marginVertical` HERE. A uniform margin puts identical space between every
+    // pair of bubbles, which is precisely what does NOT happen in iMessage — the
+    // gap is a function of whether the SENDER CHANGED, and it is applied per row as
+    // `marginTop` from `bubbleGapPt` (see `lib/chat-bubble-metrics.ts`).
+    bubbleWrap: { flexDirection: 'row' },
+    userWrap: { justifyContent: 'flex-end' },
+    agentWrap: { justifyContent: 'flex-start' },
+    bubble: {
+      // NO maxWidth HERE. `bubbleColumn` owns the ONE cap; a second percentage cap
+      // in this chain multiplies with it (see `lib/chat-bubble-metrics.ts`).
+      paddingHorizontal: BUBBLE_PADDING_H_PT,
+      paddingVertical: BUBBLE_PADDING_V_PT,
+      borderRadius: BUBBLE_RADIUS_PT,
+    },
+    // Painted FROM the tone helpers, not from the palette directly, so a control
+    // that has to know what it is sitting on (the voice-note player) cannot end up
+    // drawing against a colour the bubble no longer uses. They take the palette
+    // now instead of being frozen constants — same guarantee, per theme.
+    userBubble: { backgroundColor: userBubbleTone(theme).ground },
+    agentBubble: {
+      backgroundColor: agentBubbleTone(theme).ground,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.hairline,
+    },
+    // The tail corner, applied ONLY to the last bubble of a same-sender run —
+    // iMessage draws one tail per run, not one per bubble.
+    userTail: { borderBottomRightRadius: BUBBLE_TAIL_RADIUS_PT },
+    agentTail: { borderBottomLeftRadius: BUBBLE_TAIL_RADIUS_PT },
+    userText: { ...TYPOGRAPHY.body, color: userBubbleTone(theme).ink },
+    agentText: { ...TYPOGRAPHY.body, color: theme.text_primary },
+    attachments: {
+      marginTop: SPACING.sm,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.xs + 2,
+    },
+    /** The same row with no leading gap — for a message that is ONLY attachments,
+     *  where the bubble's own padding is already the whole inset. */
+    attachmentsOnly: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.xs + 2,
+    },
+    attachment: {
+      width: 96,
+      height: 96,
+      borderRadius: 8,
+      backgroundColor: theme.surface_raised,
+    },
+    docRefs: { marginTop: SPACING.sm + 2, gap: SPACING.xs + 2 },
+    docRefsHeading: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_muted,
+      fontWeight: '600',
+      letterSpacing: 0.5,
+      textTransform: 'uppercase',
+    },
+    docRefBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      paddingHorizontal: SPACING.sm + 2,
+      paddingVertical: SPACING.sm,
+      borderRadius: 8,
+      backgroundColor: theme.background,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    docRefIcon: { fontSize: 16 },
+    docRefTextCol: { flex: 1, gap: 1 },
+    docRefLabel: { ...TYPOGRAPHY.body_small, color: theme.text_secondary, fontWeight: '600' },
+    docRefPath: { ...TYPOGRAPHY.caption, color: theme.text_muted },
+    pressed: { opacity: 0.6 },
+    // OUTSIDE the bubble now, so it reads as a status line under the thread rather
+    // than as extra padding inside the message.
+    delivery: { ...TYPOGRAPHY.caption, color: theme.text_muted },
+    deliveryRead: { color: theme.accent },
+    deliveryFailed: { color: theme.warning },
+    metaRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs, marginTop: 2 },
+    editedLabel: { ...TYPOGRAPHY.caption, color: theme.text_muted },
+    tombstoneBubble: {
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.hairline,
+      borderBottomLeftRadius: BUBBLE_TAIL_RADIUS_PT,
+    },
+    tombstoneText: { ...TYPOGRAPHY.body, color: theme.text_muted, fontStyle: 'italic' },
+    editInput: { padding: 0, margin: 0, minWidth: 160 },
+    trayAction: { ...TYPOGRAPHY.caption, color: theme.text_primary, fontWeight: '600' },
+    trayActionDanger: { color: theme.warning },
+    // THE single bubble width cap for every row on this surface. See
+    // `lib/chat-bubble-metrics.ts` for why it is 90% and why it lives in one place.
+    bubbleColumn: { maxWidth: BUBBLE_MAX_WIDTH },
+    reactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.xs, marginTop: SPACING.xs },
+    reactionTray: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.xs,
+      marginTop: SPACING.xs,
+      padding: SPACING.xs,
+      borderRadius: 16,
+      backgroundColor: theme.surface_raised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.hairline,
+    },
+    trayUser: { justifyContent: 'flex-end' },
+    trayAgent: { justifyContent: 'flex-start' },
+    trayEmojiBtn: { paddingHorizontal: SPACING.xs, paddingVertical: 2 },
+    trayEmoji: { ...TYPOGRAPHY.h3 },
+    // The jump-to-bottom affordance. `position: absolute` inside the surface, so it
+    // floats over the transcript and does NOT participate in the list's layout —
+    // adding height to the list would change `contentSize` and therefore the very
+    // geometry that decides whether to show it.
+    //
+    // `bottom` clears the composer rather than the screen edge: the owner asked for
+    // bottom-right, and bottom-right of the TRANSCRIPT is above the input, not behind
+    // it.
+    jumpToBottom: {
+      position: 'absolute',
+      right: SPACING.md,
+      // LOWER, on owner feedback ("put the scroll down arrow a bit lower"). It was 84,
+      // which cleared the composer by a wide margin and left it floating in the middle
+      // of the transcript. 52 keeps it clear of the input while reading as attached to
+      // the bottom of the conversation, which is where the eye looks for it.
+      bottom: 52,
+      width: 38,
+      height: 38,
+      borderRadius: 19,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface_raised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.hairline,
+      // Keep it above the transcript but below the modals/overlays that follow it in
+      // the tree, so an upload sheet is never obscured by a scroll button.
+      zIndex: 2,
+    },
+    /**
+     * The chevron, drawn rather than typed ("make the arrow look more beautiful").
+     *
+     * It was the text character "↓", which inherits the font's own weight and optical
+     * centring — so it sat slightly high in the circle and looked like a placeholder,
+     * because it was one. This is a square rotated 45° with only its bottom and right
+     * edges stroked: a true chevron with a stroke weight and corner join chosen here
+     * rather than inherited from a typeface, crisp at any density, and no new
+     * dependency to draw it.
+     *
+     * `text_secondary`, not primary: it is an affordance that appears over content, so
+     * it should read as available rather than shout. The circle already carries the
+     * contrast.
+     */
+    jumpToBottomChevron: {
+      width: 9,
+      height: 9,
+      borderRightWidth: 1.75,
+      borderBottomWidth: 1.75,
+      borderColor: theme.text_secondary,
+      transform: [{ rotate: '45deg' }],
+      // Nudged up by the half-stroke the rotation pushes below centre, so the mark is
+      // optically centred in the circle rather than mathematically centred.
+      marginTop: -3,
+    },
+    chip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: 2,
+      borderRadius: 12,
+      backgroundColor: theme.surface_raised,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.hairline,
+    },
+    chipSelf: { borderColor: theme.accent, backgroundColor: theme.surface },
+    chipText: { ...TYPOGRAPHY.caption, color: theme.text_primary },
+    typingBubble: { paddingVertical: SPACING.xs },
+    typingText: { ...TYPOGRAPHY.h2, color: theme.text_muted, letterSpacing: 2 },
+    emptyText: { ...TYPOGRAPHY.body, color: theme.text_muted },
+    // Footer rows sit at a sender-change distance from the last bubble — they are
+    // the agent about to speak, so they read as a new turn.
+    footerGap: { marginTop: SPACING.sm },
+    // The transient system pill: CENTERED, muted, unmistakably not a bubble.
+    systemNoticeRow: { alignItems: 'center', paddingVertical: SPACING.sm },
+    systemNoticePill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs + 2,
+      borderRadius: 999,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.hairline,
+    },
+    systemNoticeText: { ...TYPOGRAPHY.body_small, color: theme.text_muted },
+    dropMultiFileHint: {
+      paddingVertical: SPACING.xs,
+      paddingHorizontal: SPACING.md,
+      backgroundColor: theme.surface,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.hairline,
+    },
+    dropMultiFileHintText: { ...TYPOGRAPHY.body_small, color: theme.text_secondary },
+  });

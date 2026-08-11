@@ -54,7 +54,8 @@ import {
   type AttachmentAuthCtx,
 } from '../lib/attachment-url';
 import { type BubbleTone } from '../lib/chat-bubble-metrics';
-import { THEME, TYPOGRAPHY } from '../lib/theme';
+import { TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 import { VoiceNoteBubble } from './VoiceNoteBubble';
 
 export interface AuthedAttachmentImageProps {
@@ -105,6 +106,7 @@ export function AuthedAttachmentImage({ url, auth, style, tone }: AuthedAttachme
  * a given instance — the invariant the rules of hooks require.
  */
 export function AuthedAttachmentImageView({ url, auth, style }: AuthedAttachmentImageProps) {
+  const styles = useThemedStyles(makeStyles);
   const source = resolveAttachmentSource(url, auth);
   // RN-web's <img> drops source.headers — fetch the blob with the bearer
   // instead. Native honors headers, so it renders the source directly.
@@ -205,6 +207,7 @@ export function AuthedAttachmentFile({
   url: string;
   auth: AttachmentAuthCtx | null;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const name = attachmentBasename(url);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -356,31 +359,32 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-const styles = StyleSheet.create({
-  fallback: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface_raised,
-  },
-  fallbackText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-  },
-  fileChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    maxWidth: '100%',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    backgroundColor: THEME.surface_raised,
-  },
-  fileChipPressed: {
-    opacity: 0.6,
-  },
-  fileChipText: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    fallback: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface_raised,
+    },
+    fallbackText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+    },
+    fileChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      alignSelf: 'flex-start',
+      maxWidth: '100%',
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      borderRadius: 10,
+      backgroundColor: theme.surface_raised,
+    },
+    fileChipPressed: {
+      opacity: 0.6,
+    },
+    fileChipText: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+    },
+  });

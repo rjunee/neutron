@@ -36,7 +36,8 @@
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 import type { Task } from '../lib/tasks-client';
 import {
   ALPHA_TINTS,
@@ -70,6 +71,7 @@ export {
 export type { DueKind } from '../lib/task-row-formatters';
 
 export function TaskRow({ task, mutating = false, onPress, onToggleDone }: TaskRowProps) {
+  const styles = useThemedStyles(makeStyles);
   const isDone = task.status === 'done';
   const isCancelled = task.status === 'cancelled';
 
@@ -147,20 +149,20 @@ export function TaskRow({ task, mutating = false, onPress, onToggleDone }: TaskR
           <View style={styles.meta} testID={`tasks-row-${task.id}-meta`}>
             {priorityLabel !== null && task.priority !== null && task.priority !== undefined ? (
               <View
-                style={[styles.chip, priorityChipStyle(task.priority)]}
+                style={[styles.chip, priorityChipStyle(task.priority, styles)]}
                 testID={`tasks-row-${task.id}-priority`}
               >
-                <Text style={[styles.chipText, priorityChipTextStyle(task.priority)]}>
+                <Text style={[styles.chipText, priorityChipTextStyle(task.priority, styles)]}>
                   {priorityLabel}
                 </Text>
               </View>
             ) : null}
             {dueLabel !== null ? (
               <View
-                style={[styles.chip, dueChipStyle(dueKind)]}
+                style={[styles.chip, dueChipStyle(dueKind, styles)]}
                 testID={`tasks-row-${task.id}-due`}
               >
-                <Text style={[styles.chipText, dueChipTextStyle(dueKind)]}>{dueLabel}</Text>
+                <Text style={[styles.chipText, dueChipTextStyle(dueKind, styles)]}>{dueLabel}</Text>
               </View>
             ) : null}
             {focusScoreLabel !== null ? (
@@ -178,28 +180,37 @@ export function TaskRow({ task, mutating = false, onPress, onToggleDone }: TaskR
   );
 }
 
-function priorityChipStyle(priority: number) {
+/**
+ * The chip pickers take the ACTIVE sheet rather than reaching for a module-scope
+ * one, which is what makes them theme-correct. The two tinted backgrounds they
+ * used to build inline (`THEME.danger + ALPHA_TINTS.panel`) are now sheet entries
+ * — a tint is a constant per palette, so it belongs where the rest of the palette
+ * is resolved, and the pickers become pure lookups.
+ */
+type TaskRowStyles = ReturnType<typeof makeStyles>;
+
+function priorityChipStyle(priority: number, styles: TaskRowStyles) {
   const kind = priorityChipKind(priority);
-  if (kind === 'danger') return { backgroundColor: THEME.danger + ALPHA_TINTS.panel };
-  if (kind === 'warning') return { backgroundColor: THEME.warning + ALPHA_TINTS.panel };
+  if (kind === 'danger') return styles.chipDangerTint;
+  if (kind === 'warning') return styles.chipWarningTint;
   return styles.chipNeutral;
 }
 
-function priorityChipTextStyle(priority: number) {
+function priorityChipTextStyle(priority: number, styles: TaskRowStyles) {
   if (priority === 0) return styles.chipTextDanger;
   if (priority === 1) return styles.chipTextWarning;
   if (priority === 2) return styles.chipTextSecondary;
   return styles.chipTextMuted;
 }
 
-function dueChipStyle(kind: DueKind) {
+function dueChipStyle(kind: DueKind, styles: TaskRowStyles) {
   const chip = dueChipKind(kind);
-  if (chip === 'danger') return { backgroundColor: THEME.danger + ALPHA_TINTS.panel };
-  if (chip === 'warning') return { backgroundColor: THEME.warning + ALPHA_TINTS.panel };
+  if (chip === 'danger') return styles.chipDangerTint;
+  if (chip === 'warning') return styles.chipWarningTint;
   return styles.chipNeutral;
 }
 
-function dueChipTextStyle(kind: DueKind) {
+function dueChipTextStyle(kind: DueKind, styles: TaskRowStyles) {
   const chip = dueChipKind(kind);
   if (chip === 'danger') return styles.chipTextDanger;
   if (chip === 'warning') return styles.chipTextWarning;
@@ -211,104 +222,111 @@ const ROW_MIN_HEIGHT = SPACING.lg * 4;
 const CHECKBOX_VISUAL = 24;
 const CHECKBOX_HIT = 44;
 
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: SPACING.md,
-    paddingVertical: SPACING.md,
-    paddingHorizontal: SPACING.lg,
-    minHeight: ROW_MIN_HEIGHT,
-    borderRadius: DENSITY.composer_radius,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  rowPressed: {
-    backgroundColor: THEME.surface_raised,
-  },
-  checkboxHitTarget: {
-    width: CHECKBOX_HIT,
-    height: CHECKBOX_HIT,
-    marginLeft: -SPACING.sm,
-    marginVertical: -SPACING.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  checkboxPressed: { opacity: 0.78 },
-  checkbox: {
-    width: CHECKBOX_VISUAL,
-    height: CHECKBOX_VISUAL,
-    borderRadius: CHECKBOX_VISUAL / 2,
-    borderWidth: 1.5,
-    borderColor: THEME.text_secondary,
-    backgroundColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  checkboxDone: {
-    backgroundColor: THEME.text_primary,
-    borderColor: THEME.text_primary,
-  },
-  checkboxCancelled: {
-    borderColor: THEME.text_muted,
-    backgroundColor: 'transparent',
-  },
-  checkboxMutating: { opacity: 0.6 },
-  checkboxGlyphDone: {
-    color: THEME.background,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '700',
-  },
-  checkboxGlyphCancelled: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  body: {
-    flex: 1,
-    gap: SPACING.xs,
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '500',
-  },
-  titleDone: {
-    color: THEME.text_muted,
-    textDecorationLine: 'line-through',
-    fontWeight: '400',
-  },
-  titleCancelled: {
-    color: THEME.text_muted,
-    fontStyle: 'italic',
-    fontWeight: '400',
-  },
-  meta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  chip: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: DENSITY.chip_radius,
-  },
-  chipNeutral: {
-    backgroundColor: THEME.surface_raised,
-  },
-  chipText: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  chipTextDanger: { color: THEME.danger },
-  chipTextWarning: { color: THEME.warning },
-  chipTextSecondary: { color: THEME.text_secondary },
-  chipTextMuted: { color: THEME.text_muted },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: SPACING.md,
+      paddingVertical: SPACING.md,
+      paddingHorizontal: SPACING.lg,
+      minHeight: ROW_MIN_HEIGHT,
+      borderRadius: DENSITY.composer_radius,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    rowPressed: {
+      backgroundColor: theme.surface_raised,
+    },
+    checkboxHitTarget: {
+      width: CHECKBOX_HIT,
+      height: CHECKBOX_HIT,
+      marginLeft: -SPACING.sm,
+      marginVertical: -SPACING.sm,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    checkboxPressed: { opacity: 0.78 },
+    checkbox: {
+      width: CHECKBOX_VISUAL,
+      height: CHECKBOX_VISUAL,
+      borderRadius: CHECKBOX_VISUAL / 2,
+      borderWidth: 1.5,
+      borderColor: theme.text_secondary,
+      backgroundColor: 'transparent',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    checkboxDone: {
+      backgroundColor: theme.text_primary,
+      borderColor: theme.text_primary,
+    },
+    checkboxCancelled: {
+      borderColor: theme.text_muted,
+      backgroundColor: 'transparent',
+    },
+    checkboxMutating: { opacity: 0.6 },
+    checkboxGlyphDone: {
+      color: theme.background,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '700',
+    },
+    checkboxGlyphCancelled: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    body: {
+      flex: 1,
+      gap: SPACING.xs,
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '500',
+    },
+    titleDone: {
+      color: theme.text_muted,
+      textDecorationLine: 'line-through',
+      fontWeight: '400',
+    },
+    titleCancelled: {
+      color: theme.text_muted,
+      fontStyle: 'italic',
+      fontWeight: '400',
+    },
+    meta: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    chip: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      borderRadius: DENSITY.chip_radius,
+    },
+    chipNeutral: {
+      backgroundColor: theme.surface_raised,
+    },
+    chipDangerTint: {
+      backgroundColor: theme.danger + ALPHA_TINTS.panel,
+    },
+    chipWarningTint: {
+      backgroundColor: theme.warning + ALPHA_TINTS.panel,
+    },
+    chipText: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    chipTextDanger: { color: theme.danger },
+    chipTextWarning: { color: theme.warning },
+    chipTextSecondary: { color: theme.text_secondary },
+    chipTextMuted: { color: theme.text_muted },
+  });

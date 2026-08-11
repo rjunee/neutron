@@ -12,8 +12,8 @@
  *   - `kindChipLabel(item)`     — `Task` / `Reminder`.
  *   - `projectChipLabel(item)`  — `item.project_id` or the owner-level
  *     label for owner-level rows. Truncated to `PROJECT_CHIP_MAX_CHARS`.
- *   - `bucketDotColor(bucket)`  — `THEME.danger` / `THEME.warning` /
- *     `THEME.text_muted`. No green for `soon` (brief § 4.6).
+ *   - `bucketDotColor(bucket, theme)` — the active palette's `danger` /
+ *     `warning` / `text_muted`. No green for `soon` (brief § 4.6).
  *   - `priorityChipKind(prio)`  — `'p0'`..`'p3'` discriminator the row
  *     uses to pick chip colors; null when the chip shouldn't render.
  *   - `dueChipKind(bucket)`     — `'overdue'` / `'today'` / `'soon'`
@@ -21,7 +21,8 @@
  */
 
 import type { FocusBucket, FocusItem } from './focus-client';
-import { THEME } from './theme';
+import type { NeutronTheme } from './theme';
+
 
 /**
  * Per brief § 4.4 — project chip text truncates to ~16 chars so long
@@ -98,13 +99,18 @@ export function isInstanceLevel(item: Pick<FocusItem, 'project_id'>): boolean {
 /**
  * Resolve the bucket-tinted dot color. No green for the `soon` bucket
  * by design (brief § 4.6) — soon is informational, not a success
- * signal; adding a `THEME.success` token to support it would be an
+ * signal; adding a `success` token to support it would be an
  * unjustified over-extension of the palette.
+ *
+ * The palette is a PARAMETER, not an import. This module is pure and has no
+ * render to hook into, so a captured palette here would have been a dot that
+ * stayed dark-theme red on a light page — the caller (`FocusRow`) has the active
+ * palette and passes it.
  */
-export function bucketDotColor(bucket: FocusBucket): string {
-  if (bucket === 'overdue') return THEME.danger;
-  if (bucket === 'today') return THEME.warning;
-  return THEME.text_muted;
+export function bucketDotColor(bucket: FocusBucket, theme: NeutronTheme): string {
+  if (bucket === 'overdue') return theme.danger;
+  if (bucket === 'today') return theme.warning;
+  return theme.text_muted;
 }
 
 /**

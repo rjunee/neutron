@@ -26,7 +26,8 @@ import { useRef, useEffect } from 'react';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { CurrentFocusPick } from '../lib/focus-client';
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 const PICK_BADGE_COPY = "Today's pick";
 
@@ -37,6 +38,7 @@ export interface FocusHeroCardProps {
 }
 
 export function FocusHeroCard({ pick, onPress }: FocusHeroCardProps) {
+  const styles = useThemedStyles(makeStyles);
   // Plain fade-in on mount. Per the plan: no bouncy easing, no spring.
   const opacity = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -85,43 +87,44 @@ export function FocusHeroCard({ pick, onPress }: FocusHeroCardProps) {
   );
 }
 
-const styles = StyleSheet.create({
-  wrap: {
-    gap: 0,
-  },
-  accentLine: {
-    height: 1,
-    backgroundColor: THEME.accent,
-    opacity: 0.6,
-  },
-  card: {
-    backgroundColor: THEME.surface,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.lg,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    minHeight: 88,
-    gap: SPACING.xs,
-  },
-  cardPressed: { opacity: 0.78 },
-  badge: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  rationale: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    wrap: {
+      gap: 0,
+    },
+    accentLine: {
+      height: 1,
+      backgroundColor: theme.accent,
+      opacity: 0.6,
+    },
+    card: {
+      backgroundColor: theme.surface,
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.lg,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      minHeight: 88,
+      gap: SPACING.xs,
+    },
+    cardPressed: { opacity: 0.78 },
+    badge: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    rationale: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+  });

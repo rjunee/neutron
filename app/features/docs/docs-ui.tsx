@@ -19,21 +19,27 @@ import {
   View,
 } from 'react-native';
 
-import { THEME } from '../../lib/theme';
+import { type NeutronTheme } from '../../lib/theme';
+import { useThemedStyles } from '../../lib/theme-context';
 import { type CommitSummary, type DocTreeNode } from '../../lib/docs-client';
 import { formatBytes, formatHistoryDate, treeIconFor } from './docs-shared';
 
 // P7.3 range UI consumer — highlight overlay alpha levels. The fill
 // uses 12% alpha; the 2 px left border uses 55% alpha (caller-visible
 // "this is the line you came here for" affordance). Both derive from
-// THEME.accent so a palette shift in `lib/theme.ts` follows by
-// construction — `withAlpha` parses the hex once and rebuilds the
-// rgba string.
+// the ACTIVE `accent` so a palette shift — including the whole theme
+// flipping to light — follows by construction; `withAlpha` parses the
+// hex and rebuilds the rgba string.
+//
+// These were two module-scope constants, which is exactly the capture this
+// refactor removes: `accent` is near-white in dark and near-black in light, so a
+// tint computed once at import would have painted a white wash over a light page.
+// They are now derived inside the sheet factory, per palette.
 const HIGHLIGHT_OVERLAY_FILL_ALPHA = 0.12;
 const HIGHLIGHT_OVERLAY_BORDER_ALPHA = 0.55;
 
 function withAlpha(hexColor: string, alpha: number): string {
-  // `#rrggbb` only — every THEME color today is a 6-digit hex.
+  // `#rrggbb` only — every palette color today is a 6-digit hex.
   const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hexColor);
   if (m === null) return hexColor;
   const r = parseInt(m[1]!, 16);
@@ -42,15 +48,13 @@ function withAlpha(hexColor: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
-const HIGHLIGHT_OVERLAY_FILL = withAlpha(THEME.accent, HIGHLIGHT_OVERLAY_FILL_ALPHA);
-const HIGHLIGHT_OVERLAY_BORDER = withAlpha(THEME.accent, HIGHLIGHT_OVERLAY_BORDER_ALPHA);
-
 interface BinaryPreviewProps {
   node: DocTreeNode;
   source: { uri: string; headers: Record<string, string> };
 }
 
 export function BinaryPreview({ node, source }: BinaryPreviewProps) {
+  const styles = useThemedStyles(makeStyles);
   const ct = node.content_type ?? '';
   if (ct.startsWith('image/')) {
     return (
@@ -112,6 +116,7 @@ export function EditorDropTarget({
   setDragOver,
   children,
 }: EditorDropTargetProps) {
+  const styles = useThemedStyles(makeStyles);
   if (Platform.OS !== 'web') {
     return <View style={styles.dropTarget}>{children}</View>;
   }
@@ -160,6 +165,7 @@ interface BinaryUploadButtonProps {
  * is a follow-up — expo-image-picker isn't a current dep).
  */
 export function BinaryUploadButton({ uploading, onUpload }: BinaryUploadButtonProps) {
+  const styles = useThemedStyles(makeStyles);
   const inputRef = useRef<HTMLInputElement | null>(null);
   return (
     <View style={styles.binaryUploadWrap}>
@@ -210,6 +216,7 @@ export function BinaryDeleteConfirmModal({
   onCancel,
   onConfirm,
 }: BinaryDeleteConfirmModalProps) {
+  const styles = useThemedStyles(makeStyles);
   const count = node.referenced_by_count ?? 0;
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
@@ -252,6 +259,7 @@ interface RevertConfirmModalProps {
 }
 
 export function RevertConfirmModal({ entry, onCancel, onConfirm }: RevertConfirmModalProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
       <View style={styles.modalBackdrop}>
@@ -295,6 +303,7 @@ interface TreeBranchProps {
 }
 
 export function TreeBranch({ nodes, depth, selectedPath, onSelect, onLongPress }: TreeBranchProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View>
       {nodes.map((node) => {
@@ -342,6 +351,7 @@ interface NewFileModalProps {
 }
 
 export function NewFileModal({ visible, onClose, onCreate }: NewFileModalProps) {
+  const styles = useThemedStyles(makeStyles);
   const [folder, setFolder] = useState('');
   const [filename, setFilename] = useState('');
 
@@ -405,6 +415,7 @@ interface FileExistsModalProps {
 }
 
 export function FileExistsModal({ path, onOpen, onCancel }: FileExistsModalProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
       <View style={styles.modalBackdrop}>
@@ -444,6 +455,7 @@ interface ActionSheetModalProps {
 }
 
 export function ActionSheetModal({ node, onClose, onRename, onDelete }: ActionSheetModalProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.modalBackdrop} onPress={onClose}>
@@ -487,6 +499,7 @@ interface RenameModalProps {
 }
 
 export function RenameModal({ node, onClose, onRename }: RenameModalProps) {
+  const styles = useThemedStyles(makeStyles);
   const [next, setNext] = useState(node.path);
 
   return (
@@ -524,363 +537,364 @@ export function RenameModal({ node, onClose, onRename }: RenameModalProps) {
   );
 }
 
-export const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1c1c1c',
-  },
-  intro: { flexShrink: 1 },
-  backRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  backChevron: { color: '#cfcfcf', fontSize: 26, marginTop: -2 },
-  title: { color: '#fafafa', fontSize: 20, fontWeight: '700' },
-  subtitle: { color: '#9a9a9a', fontSize: 12, lineHeight: 16 },
-  headerActions: { flexDirection: 'row', gap: 8 },
-  newBtn: {
-    backgroundColor: '#1f2937',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  newBtnText: { color: '#fafafa', fontWeight: '600', fontSize: 13 },
-  binaryUploadWrap: { flexDirection: 'row', alignItems: 'center' },
-  dropTarget: { flex: 1 },
-  uploadBtn: {
-    backgroundColor: '#1c2735',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: '#2c3e50',
-  },
-  uploadBtnText: { color: '#cfcfcf', fontWeight: '600', fontSize: 13 },
-  binaryPreviewWrap: {
-    flex: 1,
-    padding: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  binaryImage: {
-    width: '100%',
-    maxWidth: 800,
-    aspectRatio: 4 / 3,
-    backgroundColor: '#1c1c1c',
-    borderRadius: 8,
-  },
-  binaryMeta: {
-    color: '#7a7a7a',
-    fontSize: 11,
-    marginTop: 12,
-  },
-  binaryDownloadCard: {
-    backgroundColor: '#1c1c1c',
-    borderRadius: 12,
-    padding: 24,
-    alignItems: 'center',
-    gap: 12,
-    minWidth: 280,
-  },
-  binaryDownloadIcon: { fontSize: 40 },
-  binaryDownloadName: { color: '#fafafa', fontSize: 15, fontWeight: '600', textAlign: 'center' },
-  binaryDownloadMeta: { color: '#7a7a7a', fontSize: 11 },
-  pressed: { opacity: 0.7 },
-  disabled: { opacity: 0.5 },
+export const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: '#1c1c1c',
+    },
+    intro: { flexShrink: 1 },
+    backRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+    backChevron: { color: '#cfcfcf', fontSize: 26, marginTop: -2 },
+    title: { color: '#fafafa', fontSize: 20, fontWeight: '700' },
+    subtitle: { color: '#9a9a9a', fontSize: 12, lineHeight: 16 },
+    headerActions: { flexDirection: 'row', gap: 8 },
+    newBtn: {
+      backgroundColor: '#1f2937',
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+    },
+    newBtnText: { color: '#fafafa', fontWeight: '600', fontSize: 13 },
+    binaryUploadWrap: { flexDirection: 'row', alignItems: 'center' },
+    dropTarget: { flex: 1 },
+    uploadBtn: {
+      backgroundColor: '#1c2735',
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderWidth: 1,
+      borderColor: '#2c3e50',
+    },
+    uploadBtnText: { color: '#cfcfcf', fontWeight: '600', fontSize: 13 },
+    binaryPreviewWrap: {
+      flex: 1,
+      padding: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    binaryImage: {
+      width: '100%',
+      maxWidth: 800,
+      aspectRatio: 4 / 3,
+      backgroundColor: '#1c1c1c',
+      borderRadius: 8,
+    },
+    binaryMeta: {
+      color: '#7a7a7a',
+      fontSize: 11,
+      marginTop: 12,
+    },
+    binaryDownloadCard: {
+      backgroundColor: '#1c1c1c',
+      borderRadius: 12,
+      padding: 24,
+      alignItems: 'center',
+      gap: 12,
+      minWidth: 280,
+    },
+    binaryDownloadIcon: { fontSize: 40 },
+    binaryDownloadName: { color: '#fafafa', fontSize: 15, fontWeight: '600', textAlign: 'center' },
+    binaryDownloadMeta: { color: '#7a7a7a', fontSize: 11 },
+    pressed: { opacity: 0.7 },
+    disabled: { opacity: 0.5 },
 
-  body: { flex: 1 },
-  centeredBody: { alignItems: 'center', justifyContent: 'center' },
-  bodyWide: { flexDirection: 'row' },
-  bodyNarrow: { flexDirection: 'column' },
-  treePane: {
-    backgroundColor: '#0d0d0d',
-    borderRightWidth: 1,
-    borderRightColor: '#1c1c1c',
-  },
-  treePaneWide: { width: 260, flexShrink: 0 },
-  treePaneNarrow: { borderBottomWidth: 1, borderBottomColor: '#1c1c1c', maxHeight: 220 },
-  treeScroll: { paddingVertical: 8 },
-  treeEmpty: { color: '#5a5a5a', fontSize: 12, padding: 16 },
+    body: { flex: 1 },
+    centeredBody: { alignItems: 'center', justifyContent: 'center' },
+    bodyWide: { flexDirection: 'row' },
+    bodyNarrow: { flexDirection: 'column' },
+    treePane: {
+      backgroundColor: '#0d0d0d',
+      borderRightWidth: 1,
+      borderRightColor: '#1c1c1c',
+    },
+    treePaneWide: { width: 260, flexShrink: 0 },
+    treePaneNarrow: { borderBottomWidth: 1, borderBottomColor: '#1c1c1c', maxHeight: 220 },
+    treeScroll: { paddingVertical: 8 },
+    treeEmpty: { color: '#5a5a5a', fontSize: 12, padding: 16 },
 
-  treeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingRight: 12,
-    gap: 8,
-  },
-  treeRowSelected: { backgroundColor: '#1c2735' },
-  treeIcon: { fontSize: 14 },
-  treeLabel: { color: '#cfcfcf', fontSize: 13, fontWeight: '500', flex: 1 },
+    treeRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingVertical: 8,
+      paddingRight: 12,
+      gap: 8,
+    },
+    treeRowSelected: { backgroundColor: '#1c2735' },
+    treeIcon: { fontSize: 14 },
+    treeLabel: { color: '#cfcfcf', fontSize: 13, fontWeight: '500', flex: 1 },
 
-  viewerPane: { backgroundColor: '#0a0a0a' },
-  viewerPaneWide: { flex: 1 },
-  viewerPaneNarrow: { flex: 1 },
-  viewerEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  viewerEmptyText: { color: '#5a5a5a', fontSize: 13, textAlign: 'center' },
-  viewerInner: { flex: 1 },
-  viewerHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1c1c1c',
-    gap: 12,
-  },
-  viewerPath: { color: '#cfcfcf', fontSize: 13, fontWeight: '600', flex: 1 },
-  viewerActions: { flexDirection: 'row', gap: 8 },
-  actionBtn: {
-    backgroundColor: '#1f2937',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  actionBtnText: { color: '#fafafa', fontWeight: '600', fontSize: 12 },
-  actionBtnGhost: {
-    backgroundColor: 'transparent',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: '#2c2c2c',
-  },
-  actionBtnGhostText: { color: '#cfcfcf', fontWeight: '500', fontSize: 12 },
+    viewerPane: { backgroundColor: theme.background },
+    viewerPaneWide: { flex: 1 },
+    viewerPaneNarrow: { flex: 1 },
+    viewerEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+    viewerEmptyText: { color: '#5a5a5a', fontSize: 13, textAlign: 'center' },
+    viewerInner: { flex: 1 },
+    viewerHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: '#1c1c1c',
+      gap: 12,
+    },
+    viewerPath: { color: '#cfcfcf', fontSize: 13, fontWeight: '600', flex: 1 },
+    viewerActions: { flexDirection: 'row', gap: 8 },
+    actionBtn: {
+      backgroundColor: '#1f2937',
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+    },
+    actionBtnText: { color: '#fafafa', fontWeight: '600', fontSize: 12 },
+    actionBtnGhost: {
+      backgroundColor: 'transparent',
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderWidth: 1,
+      borderColor: '#2c2c2c',
+    },
+    actionBtnGhostText: { color: '#cfcfcf', fontWeight: '500', fontSize: 12 },
 
-  markdownScroll: { padding: 16, paddingBottom: 32 },
+    markdownScroll: { padding: 16, paddingBottom: 32 },
 
-  // P7.3 range UI consumer — single- OR multi-line highlight overlay
-  // painted on top of the markdown viewer. Reuses THEME.accent at
-  // 12% alpha for the fill + 55% alpha for the 2 px left border (no
-  // new shade per sprint design discipline). `left: 0` + `right: 0`
-  // span the full viewer width; `top` + `height` are computed inline
-  // from the current `highlightSpan`. `pointerEvents='none'` keeps
-  // the markdown touch targets reachable through the overlay. The
-  // alpha values + accent derivation live in the module-level
-  // `HIGHLIGHT_OVERLAY_*` constants so a palette tweak in
-  // `lib/theme.ts` rolls through by construction.
-  highlightOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    backgroundColor: HIGHLIGHT_OVERLAY_FILL,
-    borderLeftWidth: 2,
-    borderLeftColor: HIGHLIGHT_OVERLAY_BORDER,
-  },
+    // P7.3 range UI consumer — single- OR multi-line highlight overlay
+    // painted on top of the markdown viewer. Reuses theme.accent at
+    // 12% alpha for the fill + 55% alpha for the 2 px left border (no
+    // new shade per sprint design discipline). `left: 0` + `right: 0`
+    // span the full viewer width; `top` + `height` are computed inline
+    // from the current `highlightSpan`. `pointerEvents='none'` keeps
+    // the markdown touch targets reachable through the overlay. The
+    // alpha values + accent derivation live in the module-level
+    // `HIGHLIGHT_OVERLAY_*` constants so a palette tweak in
+    // `lib/theme.ts` rolls through by construction.
+    highlightOverlay: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      backgroundColor: withAlpha(theme.accent, HIGHLIGHT_OVERLAY_FILL_ALPHA),
+      borderLeftWidth: 2,
+      borderLeftColor: withAlpha(theme.accent, HIGHLIGHT_OVERLAY_BORDER_ALPHA),
+    },
 
-  editPanes: { flex: 1, flexDirection: 'row' },
-  editStack: { flex: 1 },
-  mobileToggle: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1c1c1c',
-  },
-  mobileToggleBtn: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  mobileToggleBtnActive: {
-    backgroundColor: '#1c2735',
-  },
-  mobileToggleText: { color: '#cfcfcf', fontSize: 12, fontWeight: '600' },
+    editPanes: { flex: 1, flexDirection: 'row' },
+    editStack: { flex: 1 },
+    mobileToggle: {
+      flexDirection: 'row',
+      borderBottomWidth: 1,
+      borderBottomColor: '#1c1c1c',
+    },
+    mobileToggleBtn: {
+      flex: 1,
+      paddingVertical: 10,
+      alignItems: 'center',
+    },
+    mobileToggleBtnActive: {
+      backgroundColor: '#1c2735',
+    },
+    mobileToggleText: { color: '#cfcfcf', fontSize: 12, fontWeight: '600' },
 
-  editor: {
-    flex: 1,
-    color: '#fafafa',
-    backgroundColor: '#0a0a0a',
-    fontSize: 13,
-    lineHeight: 20,
-    padding: 16,
-    fontFamily: 'Menlo',
-    textAlignVertical: 'top',
-  },
-  preview: {
-    flex: 1,
-    borderLeftWidth: 1,
-    borderLeftColor: '#1c1c1c',
-    backgroundColor: '#0d0d0d',
-  },
+    editor: {
+      flex: 1,
+      color: '#fafafa',
+      backgroundColor: theme.background,
+      fontSize: 13,
+      lineHeight: 20,
+      padding: 16,
+      fontFamily: 'Menlo',
+      textAlignVertical: 'top',
+    },
+    preview: {
+      flex: 1,
+      borderLeftWidth: 1,
+      borderLeftColor: '#1c1c1c',
+      backgroundColor: '#0d0d0d',
+    },
 
-  errorBanner: {
-    backgroundColor: '#3f1d1d',
-    borderColor: '#7a2c2c',
-    borderWidth: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 10,
-    margin: 12,
-    borderRadius: 8,
-  },
-  errorText: { color: '#fca5a5', flex: 1, fontSize: 12 },
-  errorDismiss: { color: '#fca5a5', fontWeight: '600', fontSize: 12 },
+    errorBanner: {
+      backgroundColor: '#3f1d1d',
+      borderColor: '#7a2c2c',
+      borderWidth: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: 10,
+      margin: 12,
+      borderRadius: 8,
+    },
+    errorText: { color: '#fca5a5', flex: 1, fontSize: 12 },
+    errorDismiss: { color: '#fca5a5', fontWeight: '600', fontSize: 12 },
 
-  conflictBanner: {
-    backgroundColor: '#3a2a13',
-    borderColor: '#7a5b1f',
-    borderWidth: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 10,
-    margin: 12,
-    borderRadius: 8,
-    gap: 12,
-  },
-  conflictText: { color: '#fcd34d', flex: 1, fontSize: 12, lineHeight: 16 },
-  conflictBtn: {
-    backgroundColor: '#7a5b1f',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  conflictBtnText: { color: '#fff7ed', fontWeight: '600', fontSize: 12 },
+    conflictBanner: {
+      backgroundColor: '#3a2a13',
+      borderColor: '#7a5b1f',
+      borderWidth: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: 10,
+      margin: 12,
+      borderRadius: 8,
+      gap: 12,
+    },
+    conflictText: { color: '#fcd34d', flex: 1, fontSize: 12, lineHeight: 16 },
+    conflictBtn: {
+      backgroundColor: '#7a5b1f',
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 6,
+    },
+    conflictBtnText: { color: '#fff7ed', fontWeight: '600', fontSize: 12 },
 
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 16,
-  },
-  modalCard: {
-    backgroundColor: '#0f0f0f',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#2c2c2c',
-    padding: 16,
-    width: '100%',
-    maxWidth: 480,
-    gap: 8,
-  },
-  modalTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700', marginBottom: 4 },
-  modalLabel: {
-    color: '#9a9a9a',
-    fontSize: 11,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginTop: 4,
-  },
-  modalInput: {
-    color: '#fafafa',
-    backgroundColor: '#121212',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: '#2c2c2c',
-    fontSize: 13,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 8,
-    marginTop: 12,
-  },
-  modalCancel: { paddingHorizontal: 14, paddingVertical: 10 },
-  modalCancelText: { color: '#cfcfcf', fontSize: 13, fontWeight: '500' },
-  modalConfirm: {
-    backgroundColor: '#1f2937',
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  modalConfirmText: { color: '#fafafa', fontSize: 13, fontWeight: '600' },
-  fileExistsBody: { color: '#cfcfcf', fontSize: 13, lineHeight: 18, marginTop: 6 },
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.6)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 16,
+    },
+    modalCard: {
+      backgroundColor: '#0f0f0f',
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: '#2c2c2c',
+      padding: 16,
+      width: '100%',
+      maxWidth: 480,
+      gap: 8,
+    },
+    modalTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700', marginBottom: 4 },
+    modalLabel: {
+      color: '#9a9a9a',
+      fontSize: 11,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+      marginTop: 4,
+    },
+    modalInput: {
+      color: '#fafafa',
+      backgroundColor: '#121212',
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      borderWidth: 1,
+      borderColor: '#2c2c2c',
+      fontSize: 13,
+    },
+    modalActions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: 8,
+      marginTop: 12,
+    },
+    modalCancel: { paddingHorizontal: 14, paddingVertical: 10 },
+    modalCancelText: { color: '#cfcfcf', fontSize: 13, fontWeight: '500' },
+    modalConfirm: {
+      backgroundColor: '#1f2937',
+      borderRadius: 8,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+    },
+    modalConfirmText: { color: '#fafafa', fontSize: 13, fontWeight: '600' },
+    fileExistsBody: { color: '#cfcfcf', fontSize: 13, lineHeight: 18, marginTop: 6 },
 
-  actionSheetBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#1c1c1c',
-  },
-  actionSheetText: { color: '#cfcfcf', fontSize: 14 },
-  actionSheetDelete: { borderTopColor: '#1c1c1c' },
-  actionSheetDeleteText: { color: '#fca5a5' },
-  actionSheetCancel: {
-    marginTop: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-    backgroundColor: '#1f2937',
-    borderRadius: 8,
-  },
-  actionSheetCancelText: { color: '#fafafa', fontWeight: '600', fontSize: 13 },
+    actionSheetBtn: {
+      paddingVertical: 12,
+      paddingHorizontal: 8,
+      borderTopWidth: 1,
+      borderTopColor: '#1c1c1c',
+    },
+    actionSheetText: { color: '#cfcfcf', fontSize: 14 },
+    actionSheetDelete: { borderTopColor: '#1c1c1c' },
+    actionSheetDeleteText: { color: '#fca5a5' },
+    actionSheetCancel: {
+      marginTop: 8,
+      paddingVertical: 10,
+      alignItems: 'center',
+      backgroundColor: '#1f2937',
+      borderRadius: 8,
+    },
+    actionSheetCancelText: { color: '#fafafa', fontWeight: '600', fontSize: 13 },
 
-  /* ─── P7.4 history pane + version badge + preview overlay ─── */
-  actionBtnGhostActive: { backgroundColor: '#1c2735', borderColor: '#395071' },
-  versionBadge: { color: '#9a9a9a', fontWeight: '500' },
-  historyPane: { backgroundColor: '#0d0d0d' },
-  historyPaneWide: {
-    width: 280,
-    borderLeftWidth: 1,
-    borderLeftColor: '#1c1c1c',
-    flexShrink: 0,
-  },
-  historyPaneNarrow: {
-    borderTopWidth: 1,
-    borderTopColor: '#1c1c1c',
-    maxHeight: 280,
-  },
-  historyHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1c1c1c',
-  },
-  historyTitle: { color: '#fafafa', fontSize: 14, fontWeight: '700' },
-  historyEmpty: { color: '#5a5a5a', fontSize: 12, padding: 16 },
-  historyScroll: { padding: 8, paddingBottom: 32 },
-  historyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1c1c1c',
-    gap: 8,
-  },
-  historyRowMain: { flex: 1 },
-  historyMessage: { color: '#cfcfcf', fontSize: 13, fontWeight: '500' },
-  historyMeta: { color: '#7a7a7a', fontSize: 11, marginTop: 2 },
-  historyRevertBtn: {
-    backgroundColor: '#1f2937',
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  historyRevertText: { color: '#fafafa', fontWeight: '600', fontSize: 11 },
-  historyLoadMore: {
-    backgroundColor: '#121212',
-    borderRadius: 8,
-    paddingVertical: 10,
-    marginTop: 8,
-    alignItems: 'center',
-  },
-  historyLoadMoreText: { color: '#cfcfcf', fontSize: 12, fontWeight: '600' },
+    /* ─── P7.4 history pane + version badge + preview overlay ─── */
+    actionBtnGhostActive: { backgroundColor: '#1c2735', borderColor: '#395071' },
+    versionBadge: { color: '#9a9a9a', fontWeight: '500' },
+    historyPane: { backgroundColor: '#0d0d0d' },
+    historyPaneWide: {
+      width: 280,
+      borderLeftWidth: 1,
+      borderLeftColor: '#1c1c1c',
+      flexShrink: 0,
+    },
+    historyPaneNarrow: {
+      borderTopWidth: 1,
+      borderTopColor: '#1c1c1c',
+      maxHeight: 280,
+    },
+    historyHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: '#1c1c1c',
+    },
+    historyTitle: { color: '#fafafa', fontSize: 14, fontWeight: '700' },
+    historyEmpty: { color: '#5a5a5a', fontSize: 12, padding: 16 },
+    historyScroll: { padding: 8, paddingBottom: 32 },
+    historyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingVertical: 8,
+      paddingHorizontal: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: '#1c1c1c',
+      gap: 8,
+    },
+    historyRowMain: { flex: 1 },
+    historyMessage: { color: '#cfcfcf', fontSize: 13, fontWeight: '500' },
+    historyMeta: { color: '#7a7a7a', fontSize: 11, marginTop: 2 },
+    historyRevertBtn: {
+      backgroundColor: '#1f2937',
+      borderRadius: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+    },
+    historyRevertText: { color: '#fafafa', fontWeight: '600', fontSize: 11 },
+    historyLoadMore: {
+      backgroundColor: '#121212',
+      borderRadius: 8,
+      paddingVertical: 10,
+      marginTop: 8,
+      alignItems: 'center',
+    },
+    historyLoadMoreText: { color: '#cfcfcf', fontSize: 12, fontWeight: '600' },
 
-  previewOverlay: {
-    flex: 1,
-    backgroundColor: '#0a0a0a',
-  },
-  previewHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1c1c1c',
-    backgroundColor: '#0d1622',
-    gap: 12,
-  },
-  previewTitle: { color: '#cfcfcf', fontSize: 12, fontWeight: '600', flex: 1 },
-});
+    previewOverlay: {
+      flex: 1,
+      backgroundColor: theme.background,
+    },
+    previewHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: '#1c1c1c',
+      backgroundColor: '#0d1622',
+      gap: 12,
+    },
+    previewTitle: { color: '#cfcfcf', fontSize: 12, fontWeight: '600', flex: 1 },
+  });

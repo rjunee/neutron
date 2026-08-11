@@ -294,7 +294,10 @@ describe('the player is the bubble content, not a panel inside it', () => {
   });
 
   it('paints every mark in the colours of the bubble it was given', async () => {
-    const { USER_BUBBLE_TONE, AGENT_BUBBLE_TONE } = await import('../lib/chat-bubble-metrics');
+    const { userBubbleTone, agentBubbleTone } = await import('../lib/chat-bubble-metrics');
+    const { DARK_THEME } = await import('../lib/theme');
+    const USER_BUBBLE_TONE = userBubbleTone(DARK_THEME);
+    const AGENT_BUBBLE_TONE = agentBubbleTone(DARK_THEME);
 
     // The owner's own bubble is a light accent capsule, so the disc is DARK with
     // a light triangle knocked out of it. Getting this from a fixed palette

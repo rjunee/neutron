@@ -65,14 +65,8 @@ import {
   useWindowDimensions,
 } from 'react-native';
 
-import {
-  BREAKPOINTS,
-  DENSITY,
-  MOTION,
-  SPACING,
-  THEME,
-  TYPOGRAPHY,
-} from '../lib/composer-constants';
+import { BREAKPOINTS, DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/composer-constants';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { useCommentsState } from '../lib/comments-state';
 import type { AnchorRow, ThreadSummary } from '../lib/docs-client';
 
@@ -128,6 +122,7 @@ export function CommentsSidePane({
   embed = false,
   format_anchor_line_label,
 }: CommentsSidePaneProps) {
+  const styles = useThemedStyles(makeStyles);
   const {
     threads,
     loading,
@@ -376,6 +371,7 @@ interface PanelHeaderProps {
 }
 
 function PanelHeader({ closeButtonRef, onClose, threadCount }: PanelHeaderProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.panelHeader}>
       <View style={styles.panelHeaderText}>
@@ -399,6 +395,7 @@ function PanelHeader({ closeButtonRef, onClose, threadCount }: PanelHeaderProps)
 }
 
 function EmptyState() {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.emptyState} testID="comments-side-pane-empty">
       <Text style={styles.emptyTitle}>No threads on this doc.</Text>
@@ -410,6 +407,7 @@ function EmptyState() {
 }
 
 function Section({ label, children }: { label: string; children: ReactNode }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.section}>
       <Text style={styles.sectionLabel}>{label}</Text>
@@ -439,6 +437,7 @@ function ResolvedSection({
   onPostReply,
   formatAnchorLineLabel,
 }: ResolvedSectionProps) {
+  const styles = useThemedStyles(makeStyles);
   const [expanded, setExpanded] = useState(false);
   return (
     <View style={styles.section}>
@@ -499,6 +498,8 @@ function ThreadCard({
   onPostReply,
   formatAnchorLineLabel,
 }: ThreadCardProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [expanded, setExpanded] = useState(!resolved);
   const [replyDraft, setReplyDraft] = useState('');
   const [posting, setPosting] = useState(false);
@@ -633,7 +634,7 @@ function ThreadCard({
                   onKeyPress={handleReplyKeyPress}
                   style={styles.replyInput}
                   placeholder="Reply…"
-                  placeholderTextColor={THEME.text_muted}
+                  placeholderTextColor={theme.text_muted}
                   testID={`comments-side-pane-reply-input-${thread.thread_root_id}`}
                   editable={!posting && !mutating}
                 />
@@ -728,266 +729,267 @@ function sortThreads(threads: ThreadSummary[]): ThreadSummary[] {
   });
 }
 
-const styles = StyleSheet.create({
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    flexDirection: 'row',
-  },
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-  },
-  backdropPressable: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  panel: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: THEME.surface,
-    borderLeftWidth: 1,
-    borderLeftColor: THEME.hairline,
-    shadowColor: '#000000',
-    shadowOpacity: 0.35,
-    shadowOffset: { width: -4, height: 0 },
-    shadowRadius: 16,
-    elevation: 12,
-  },
-  embeddedPanel: {
-    flex: 1,
-    backgroundColor: THEME.surface,
-  },
-  panelContent: {
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.xl,
-    paddingBottom: SPACING.xl,
-    gap: SPACING.lg,
-  },
-  panelHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: SPACING.sm,
-  },
-  panelHeaderText: { flex: 1 },
-  panelTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-    marginTop: SPACING.xs / 2,
-  },
-  overline: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: DENSITY.banner_radius,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  closeGlyph: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-  },
-  sections: { gap: SPACING.lg },
-  section: { gap: SPACING.xs },
-  sectionLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
-  sectionBody: { gap: SPACING.sm },
-  sectionEmpty: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontStyle: 'italic',
-  },
-  resolvedToggle: { paddingVertical: SPACING.xs },
-  loadingText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  emptyState: {
-    paddingVertical: SPACING.xl,
-    paddingHorizontal: SPACING.md,
-    gap: SPACING.xs,
-    alignItems: 'flex-start',
-  },
-  emptyTitle: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  emptyBody: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  threadCard: {
-    borderRadius: DENSITY.banner_radius,
-    padding: SPACING.md,
-    gap: SPACING.sm,
-    borderWidth: 1,
-  },
-  threadCardActive: {
-    backgroundColor: THEME.surface,
-    borderColor: THEME.accent,
-  },
-  threadCardResolved: {
-    backgroundColor: THEME.surface_raised,
-    borderColor: THEME.hairline,
-    opacity: 0.7,
-  },
-  threadHeader: { gap: SPACING.xs },
-  threadHeaderInner: { gap: SPACING.xs },
-  anchorExcerpt: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontStyle: 'italic',
-  },
-  // P7.3 range UI consumer — small muted "Line 12" / "Lines 12–18"
-  // label beneath the anchor excerpt. Caption-grade (11/16) so the
-  // existing two-line layout stays compact. No new shade — reuses
-  // `THEME.text_muted` so the label aligns with the excerpt above.
-  anchorLineLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    letterSpacing: 0.2,
-  },
-  threadBody: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  threadMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACING.sm,
-  },
-  threadMeta: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  skippedBadge: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs / 2,
-    borderRadius: DENSITY.chip_radius,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.warning,
-  },
-  skippedBadgeText: {
-    color: THEME.warning,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  threadActions: { gap: SPACING.sm },
-  replyRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: SPACING.sm,
-  },
-  replyInput: {
-    flex: 1,
-    minHeight: 36,
-    maxHeight: 120,
-    color: THEME.text_primary,
-    backgroundColor: THEME.background,
-    borderRadius: DENSITY.composer_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    textAlignVertical: 'top',
-  },
-  replyBtn: {
-    backgroundColor: THEME.surface_raised,
-    borderRadius: DENSITY.banner_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderWidth: 1,
-    borderColor: THEME.accent,
-  },
-  replyBtnText: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: SPACING.sm,
-    flexWrap: 'wrap',
-    alignItems: 'center',
-  },
-  ghostBtn: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs,
-    borderRadius: DENSITY.banner_radius,
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  ghostBtnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '500',
-  },
-  statusText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontStyle: 'italic',
-  },
-  errorBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACING.sm,
-    padding: SPACING.sm,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.danger,
-    backgroundColor: THEME.surface_raised,
-  },
-  errorText: {
-    flex: 1,
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  errorDismiss: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
-  pressed: { opacity: 0.7 },
-  disabled: { opacity: 0.5 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      flexDirection: 'row',
+    },
+    backdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0,0,0,0.45)',
+    },
+    backdropPressable: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    panel: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: theme.surface,
+      borderLeftWidth: 1,
+      borderLeftColor: theme.hairline,
+      shadowColor: '#000000',
+      shadowOpacity: 0.35,
+      shadowOffset: { width: -4, height: 0 },
+      shadowRadius: 16,
+      elevation: 12,
+    },
+    embeddedPanel: {
+      flex: 1,
+      backgroundColor: theme.surface,
+    },
+    panelContent: {
+      paddingHorizontal: SPACING.lg,
+      paddingTop: SPACING.xl,
+      paddingBottom: SPACING.xl,
+      gap: SPACING.lg,
+    },
+    panelHeader: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: SPACING.sm,
+    },
+    panelHeaderText: { flex: 1 },
+    panelTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+      marginTop: SPACING.xs / 2,
+    },
+    overline: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+    },
+    closeBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: DENSITY.banner_radius,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    closeGlyph: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+    },
+    sections: { gap: SPACING.lg },
+    section: { gap: SPACING.xs },
+    sectionLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+    },
+    sectionBody: { gap: SPACING.sm },
+    sectionEmpty: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontStyle: 'italic',
+    },
+    resolvedToggle: { paddingVertical: SPACING.xs },
+    loadingText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    emptyState: {
+      paddingVertical: SPACING.xl,
+      paddingHorizontal: SPACING.md,
+      gap: SPACING.xs,
+      alignItems: 'flex-start',
+    },
+    emptyTitle: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    emptyBody: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    threadCard: {
+      borderRadius: DENSITY.banner_radius,
+      padding: SPACING.md,
+      gap: SPACING.sm,
+      borderWidth: 1,
+    },
+    threadCardActive: {
+      backgroundColor: theme.surface,
+      borderColor: theme.accent,
+    },
+    threadCardResolved: {
+      backgroundColor: theme.surface_raised,
+      borderColor: theme.hairline,
+      opacity: 0.7,
+    },
+    threadHeader: { gap: SPACING.xs },
+    threadHeaderInner: { gap: SPACING.xs },
+    anchorExcerpt: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontStyle: 'italic',
+    },
+    // P7.3 range UI consumer — small muted "Line 12" / "Lines 12–18"
+    // label beneath the anchor excerpt. Caption-grade (11/16) so the
+    // existing two-line layout stays compact. No new shade — reuses
+    // `theme.text_muted` so the label aligns with the excerpt above.
+    anchorLineLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      letterSpacing: 0.2,
+    },
+    threadBody: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    threadMetaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: SPACING.sm,
+    },
+    threadMeta: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    skippedBadge: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs / 2,
+      borderRadius: DENSITY.chip_radius,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.warning,
+    },
+    skippedBadgeText: {
+      color: theme.warning,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    threadActions: { gap: SPACING.sm },
+    replyRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      gap: SPACING.sm,
+    },
+    replyInput: {
+      flex: 1,
+      minHeight: 36,
+      maxHeight: 120,
+      color: theme.text_primary,
+      backgroundColor: theme.background,
+      borderRadius: DENSITY.composer_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      textAlignVertical: 'top',
+    },
+    replyBtn: {
+      backgroundColor: theme.surface_raised,
+      borderRadius: DENSITY.banner_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      borderWidth: 1,
+      borderColor: theme.accent,
+    },
+    replyBtnText: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+    },
+    buttonRow: {
+      flexDirection: 'row',
+      gap: SPACING.sm,
+      flexWrap: 'wrap',
+      alignItems: 'center',
+    },
+    ghostBtn: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs,
+      borderRadius: DENSITY.banner_radius,
+      backgroundColor: 'transparent',
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    ghostBtnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '500',
+    },
+    statusText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontStyle: 'italic',
+    },
+    errorBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: SPACING.sm,
+      padding: SPACING.sm,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.danger,
+      backgroundColor: theme.surface_raised,
+    },
+    errorText: {
+      flex: 1,
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    errorDismiss: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+    },
+    pressed: { opacity: 0.7 },
+    disabled: { opacity: 0.5 },
+  });

@@ -50,13 +50,8 @@ import {
 
 import { loadAppConfig } from '../../../lib/config';
 import { useAuthSession } from '../../../lib/session';
-import {
-  BREAKPOINTS,
-  MOTION,
-  SPACING,
-  THEME,
-  TYPOGRAPHY,
-} from '../../../lib/composer-constants';
+import { BREAKPOINTS, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../../../lib/composer-constants';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 import {
   BackupsClient,
   BackupsClientError,
@@ -84,6 +79,8 @@ interface UndoState {
 }
 
 export default function BackupsTab(): ReactNode {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { id } = useLocalSearchParams<{ id: string }>();
   const project_id = typeof id === 'string' ? id : '';
   const { user } = useAuthSession();
@@ -267,7 +264,7 @@ export default function BackupsTab(): ReactNode {
         ) : null}
         {loading ? (
           <View style={styles.centered}>
-            <ActivityIndicator color={THEME.text_secondary} />
+            <ActivityIndicator color={theme.text_secondary} />
           </View>
         ) : snapshots.length === 0 ? (
           <Text style={styles.emptyState} testID="backups-empty">
@@ -356,6 +353,7 @@ function SnapshotRow({
   now: number;
   onPress: () => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const stat = snap.shortstat;
   return (
     <Pressable
@@ -404,6 +402,8 @@ function PreviewModal({
   onRequestRestore: (file_path: string | null, short_message: string) => void;
   wide: boolean;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [preview, setPreview] = useState<SnapshotPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -524,7 +524,7 @@ function PreviewModal({
           </View>
           {previewLoading ? (
             <View style={styles.centered}>
-              <ActivityIndicator color={THEME.text_secondary} />
+              <ActivityIndicator color={theme.text_secondary} />
             </View>
           ) : previewError !== null ? (
             <Text style={styles.errorBanner}>{previewError}</Text>
@@ -560,7 +560,7 @@ function PreviewModal({
                       working tree.
                     </Text>
                   ) : diffLoading ? (
-                    <ActivityIndicator color={THEME.text_secondary} />
+                    <ActivityIndicator color={theme.text_secondary} />
                   ) : diff !== null ? (
                     <DiffView diff={diff} />
                   ) : null}
@@ -615,6 +615,7 @@ function FileRow({
   selected: boolean;
   onPress: () => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <Pressable
       accessibilityRole="button"
@@ -627,8 +628,8 @@ function FileRow({
         pressed && styles.pressed,
       ]}
     >
-      <View style={[styles.fileBadge, fileBadgeStyle(file.status)]}>
-        <Text style={[styles.fileBadgeText, fileBadgeTextStyle(file.status)]}>
+      <View style={[styles.fileBadge, fileBadgeStyle(file.status, styles)]}>
+        <Text style={[styles.fileBadgeText, fileBadgeTextStyle(file.status, styles)]}>
           {fileStatusGlyph(file.status)}
         </Text>
       </View>
@@ -640,6 +641,7 @@ function FileRow({
 }
 
 function DiffView({ diff }: { diff: SnapshotFileDiff }) {
+  const styles = useThemedStyles(makeStyles);
   if (diff.hunks.length === 0) {
     return (
       <Text style={styles.muted}>
@@ -653,7 +655,7 @@ function DiffView({ diff }: { diff: SnapshotFileDiff }) {
         {diff.hunks.split('\n').map((line, idx) => (
           <Text
             key={idx}
-            style={[styles.diffLine, diffLineStyle(line)]}
+            style={[styles.diffLine, diffLineStyle(line, styles)]}
             testID={`backups-diff-line-${idx}`}
           >
             {line.length === 0 ? ' ' : line}
@@ -680,6 +682,7 @@ function ConfirmRestoreModal({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   if (confirm === null) return null;
   const scope = confirm.file_path === null ? 'whole project' : confirm.file_path;
   return (
@@ -757,6 +760,7 @@ function UndoBanner({
   onUndo: () => void;
   onDismiss: () => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const translateY = useRef(new Animated.Value(80)).current;
   const opacity = useRef(new Animated.Value(0)).current;
   const [reduceMotion, setReduceMotion] = useState(false);
@@ -885,7 +889,11 @@ function fileStatusGlyph(status: SnapshotFile['status']): string {
   }
 }
 
-function fileBadgeStyle(status: SnapshotFile['status']) {
+/** The three style pickers take the ACTIVE sheet, so a light-mode badge is
+ *  drawn from the light palette. They read a module-scope sheet before. */
+type BackupsStyles = ReturnType<typeof makeStyles>;
+
+function fileBadgeStyle(status: SnapshotFile['status'], styles: BackupsStyles) {
   switch (status) {
     case 'added':
       return styles.fileBadgeAdded;
@@ -898,7 +906,7 @@ function fileBadgeStyle(status: SnapshotFile['status']) {
   }
 }
 
-function fileBadgeTextStyle(status: SnapshotFile['status']) {
+function fileBadgeTextStyle(status: SnapshotFile['status'], styles: BackupsStyles) {
   switch (status) {
     case 'added':
       return styles.fileBadgeTextAdded;
@@ -911,7 +919,7 @@ function fileBadgeTextStyle(status: SnapshotFile['status']) {
   }
 }
 
-function diffLineStyle(line: string) {
+function diffLineStyle(line: string, styles: BackupsStyles) {
   if (line.startsWith('+') && !line.startsWith('+++')) return styles.diffAdd;
   if (line.startsWith('-') && !line.startsWith('---')) return styles.diffDel;
   if (line.startsWith('@@')) return styles.diffHunk;
@@ -924,346 +932,347 @@ function formatError(err: unknown): string {
   return String(err);
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: THEME.background,
-    paddingTop: SPACING.xxl + SPACING.lg,
-  },
-  centered: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.lg,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  headerBtn: { minWidth: 64 },
-  headerBtnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '500',
-  },
-  headerCenter: { flex: 1, alignItems: 'center' },
-  headerOverline: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  headerTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  scroll: {
-    padding: SPACING.lg,
-    paddingBottom: 120,
-    gap: SPACING.md,
-  },
-  intro: { gap: SPACING.sm },
-  bodyText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  mono: {
-    fontFamily: TYPOGRAPHY.mono.fontFamily,
-    color: THEME.text_secondary,
-  },
-  errorBanner: {
-    color: THEME.danger,
-    backgroundColor: '#3b1212',
-    borderWidth: 1,
-    borderColor: '#7f1d1d',
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: 8,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-  },
-  emptyState: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  dayBlock: { gap: SPACING.xs },
-  dayHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  dayHeaderLabel: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    fontWeight: '600',
-  },
-  dayHeaderCount: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-  },
-  snapshotRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.md,
-    backgroundColor: THEME.surface,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    gap: SPACING.sm,
-  },
-  snapshotRowText: { flex: 1, gap: 2 },
-  snapshotMessage: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '500',
-  },
-  snapshotMeta: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-  },
-  chevron: { color: THEME.text_muted, fontSize: 18, fontWeight: '300' },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.lg,
-  },
-  previewPanel: {
-    backgroundColor: THEME.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    overflow: 'hidden',
-  },
-  previewPanelNarrow: { width: '100%', maxHeight: '90%' },
-  previewPanelWide: { width: '90%', maxWidth: 920, maxHeight: '90%' },
-  previewHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    padding: SPACING.lg,
-    gap: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  previewOverline: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  previewTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  previewSubtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    marginTop: 2,
-  },
-  closeBtn: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-  },
-  closeGlyph: { color: THEME.text_secondary, fontSize: 18 },
-  previewBody: {
-    flexDirection: 'row',
-    flex: 1,
-    minHeight: 240,
-  },
-  previewLeftPane: {
-    width: 280,
-    padding: SPACING.md,
-    gap: SPACING.sm,
-    borderRightWidth: 1,
-    borderRightColor: THEME.hairline,
-  },
-  previewRightPane: {
-    flex: 1,
-    padding: SPACING.md,
-    gap: SPACING.sm,
-  },
-  previewSectionLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-  },
-  previewFilesScroll: { maxHeight: 360 },
-  fileRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: 6,
-    gap: SPACING.sm,
-  },
-  fileRowSelected: { backgroundColor: THEME.surface_raised },
-  filePath: {
-    color: THEME.text_secondary,
-    fontFamily: TYPOGRAPHY.mono.fontFamily,
-    fontSize: 12,
-    flex: 1,
-  },
-  fileBadge: {
-    width: 18,
-    height: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 4,
-  },
-  fileBadgeText: { fontWeight: '700', fontSize: 12 },
-  fileBadgeAdded: { backgroundColor: '#0f2418' },
-  fileBadgeTextAdded: { color: '#bbf7d0' },
-  fileBadgeDeleted: { backgroundColor: '#3b1212' },
-  fileBadgeTextDeleted: { color: '#fecaca' },
-  fileBadgeModified: { backgroundColor: '#1f2937' },
-  fileBadgeTextModified: { color: '#bfdbfe' },
-  fileBadgeNeutral: { backgroundColor: THEME.hairline },
-  fileBadgeTextNeutral: { color: THEME.text_muted },
-  diffScroll: { maxHeight: 360 },
-  diffLine: {
-    fontFamily: TYPOGRAPHY.mono.fontFamily,
-    fontSize: 12,
-    lineHeight: 16,
-  },
-  diffAdd: { color: '#bbf7d0' },
-  diffDel: { color: '#fecaca' },
-  diffHunk: { color: '#bfdbfe' },
-  diffContext: { color: THEME.text_secondary },
-  previewActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    padding: SPACING.md,
-    borderTopWidth: 1,
-    borderTopColor: THEME.hairline,
-  },
-  dangerBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md - SPACING.xs / 2,
-    borderRadius: 10,
-    backgroundColor: '#7f1d1d',
-  },
-  dangerBtnText: {
-    color: '#fff',
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
-  secondaryBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md - SPACING.xs / 2,
-    borderRadius: 10,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-  },
-  secondaryBtnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '500',
-  },
-  btnDisabled: { opacity: 0.5 },
-  pressed: { opacity: 0.7 },
-  confirmPanel: {
-    backgroundColor: THEME.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.lg,
-    gap: SPACING.md,
-    width: '100%',
-    maxWidth: 420,
-  },
-  confirmTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  confirmBody: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  confirmBodyEmphasis: { color: THEME.text_primary, fontWeight: '600' },
-  confirmWarning: {
-    color: '#fecaca',
-    backgroundColor: '#3b1212',
-    borderWidth: 1,
-    borderColor: '#7f1d1d',
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: 8,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  confirmActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-    marginTop: SPACING.sm,
-  },
-  undoBanner: {
-    position: 'absolute',
-    bottom: SPACING.lg,
-    left: SPACING.lg,
-    right: SPACING.lg,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.md,
-    shadowColor: '#000',
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  undoBannerBody: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.md,
-  },
-  undoBannerLabel: {
-    flex: 1,
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-  },
-  undoBannerActions: { flexDirection: 'row', gap: SPACING.xs },
-  undoActionBtn: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: 8,
-    backgroundColor: '#ffffff',
-  },
-  undoActionBtnText: {
-    color: '#0a0a0a',
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    fontWeight: '600',
-  },
-  undoDismissBtn: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    borderRadius: 8,
-  },
-  undoDismissText: {
-    color: THEME.text_muted,
-    fontSize: 14,
-  },
-  muted: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.background,
+      paddingTop: SPACING.xxl + SPACING.lg,
+    },
+    centered: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.lg,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.lg,
+      paddingBottom: SPACING.md,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    headerBtn: { minWidth: 64 },
+    headerBtnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '500',
+    },
+    headerCenter: { flex: 1, alignItems: 'center' },
+    headerOverline: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      textTransform: 'uppercase',
+      letterSpacing: 1,
+    },
+    headerTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    scroll: {
+      padding: SPACING.lg,
+      paddingBottom: 120,
+      gap: SPACING.md,
+    },
+    intro: { gap: SPACING.sm },
+    bodyText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    mono: {
+      fontFamily: TYPOGRAPHY.mono.fontFamily,
+      color: theme.text_secondary,
+    },
+    errorBanner: {
+      color: theme.danger,
+      backgroundColor: '#3b1212',
+      borderWidth: 1,
+      borderColor: '#7f1d1d',
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      borderRadius: 8,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+    },
+    emptyState: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    dayBlock: { gap: SPACING.xs },
+    dayHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      paddingVertical: SPACING.sm,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    dayHeaderLabel: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      fontWeight: '600',
+    },
+    dayHeaderCount: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+    },
+    snapshotRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.md,
+      backgroundColor: theme.surface,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      gap: SPACING.sm,
+    },
+    snapshotRowText: { flex: 1, gap: 2 },
+    snapshotMessage: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '500',
+    },
+    snapshotMeta: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+    },
+    chevron: { color: theme.text_muted, fontSize: 18, fontWeight: '300' },
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.6)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.lg,
+    },
+    previewPanel: {
+      backgroundColor: theme.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      overflow: 'hidden',
+    },
+    previewPanelNarrow: { width: '100%', maxHeight: '90%' },
+    previewPanelWide: { width: '90%', maxWidth: 920, maxHeight: '90%' },
+    previewHeader: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      padding: SPACING.lg,
+      gap: SPACING.md,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    previewOverline: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      textTransform: 'uppercase',
+      letterSpacing: 1,
+    },
+    previewTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    previewSubtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      marginTop: 2,
+    },
+    closeBtn: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+    },
+    closeGlyph: { color: theme.text_secondary, fontSize: 18 },
+    previewBody: {
+      flexDirection: 'row',
+      flex: 1,
+      minHeight: 240,
+    },
+    previewLeftPane: {
+      width: 280,
+      padding: SPACING.md,
+      gap: SPACING.sm,
+      borderRightWidth: 1,
+      borderRightColor: theme.hairline,
+    },
+    previewRightPane: {
+      flex: 1,
+      padding: SPACING.md,
+      gap: SPACING.sm,
+    },
+    previewSectionLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      textTransform: 'uppercase',
+      letterSpacing: 0.8,
+    },
+    previewFilesScroll: { maxHeight: 360 },
+    fileRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      borderRadius: 6,
+      gap: SPACING.sm,
+    },
+    fileRowSelected: { backgroundColor: theme.surface_raised },
+    filePath: {
+      color: theme.text_secondary,
+      fontFamily: TYPOGRAPHY.mono.fontFamily,
+      fontSize: 12,
+      flex: 1,
+    },
+    fileBadge: {
+      width: 18,
+      height: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: 4,
+    },
+    fileBadgeText: { fontWeight: '700', fontSize: 12 },
+    fileBadgeAdded: { backgroundColor: '#0f2418' },
+    fileBadgeTextAdded: { color: '#bbf7d0' },
+    fileBadgeDeleted: { backgroundColor: '#3b1212' },
+    fileBadgeTextDeleted: { color: '#fecaca' },
+    fileBadgeModified: { backgroundColor: '#1f2937' },
+    fileBadgeTextModified: { color: '#bfdbfe' },
+    fileBadgeNeutral: { backgroundColor: theme.hairline },
+    fileBadgeTextNeutral: { color: theme.text_muted },
+    diffScroll: { maxHeight: 360 },
+    diffLine: {
+      fontFamily: TYPOGRAPHY.mono.fontFamily,
+      fontSize: 12,
+      lineHeight: 16,
+    },
+    diffAdd: { color: '#bbf7d0' },
+    diffDel: { color: '#fecaca' },
+    diffHunk: { color: '#bfdbfe' },
+    diffContext: { color: theme.text_secondary },
+    previewActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      padding: SPACING.md,
+      borderTopWidth: 1,
+      borderTopColor: theme.hairline,
+    },
+    dangerBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md - SPACING.xs / 2,
+      borderRadius: 10,
+      backgroundColor: '#7f1d1d',
+    },
+    dangerBtnText: {
+      color: '#fff',
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+    },
+    secondaryBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md - SPACING.xs / 2,
+      borderRadius: 10,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: '#2a2a2a',
+    },
+    secondaryBtnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '500',
+    },
+    btnDisabled: { opacity: 0.5 },
+    pressed: { opacity: 0.7 },
+    confirmPanel: {
+      backgroundColor: theme.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.lg,
+      gap: SPACING.md,
+      width: '100%',
+      maxWidth: 420,
+    },
+    confirmTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    confirmBody: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    confirmBodyEmphasis: { color: theme.text_primary, fontWeight: '600' },
+    confirmWarning: {
+      color: '#fecaca',
+      backgroundColor: '#3b1212',
+      borderWidth: 1,
+      borderColor: '#7f1d1d',
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      borderRadius: 8,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    confirmActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+      marginTop: SPACING.sm,
+    },
+    undoBanner: {
+      position: 'absolute',
+      bottom: SPACING.lg,
+      left: SPACING.lg,
+      right: SPACING.lg,
+      backgroundColor: theme.surface_raised,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.md,
+      shadowColor: '#000',
+      shadowOpacity: 0.4,
+      shadowRadius: 16,
+      shadowOffset: { width: 0, height: 4 },
+    },
+    undoBannerBody: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.md,
+    },
+    undoBannerLabel: {
+      flex: 1,
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+    },
+    undoBannerActions: { flexDirection: 'row', gap: SPACING.xs },
+    undoActionBtn: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      borderRadius: 8,
+      backgroundColor: '#ffffff',
+    },
+    undoActionBtnText: {
+      color: '#0a0a0a',
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      fontWeight: '600',
+    },
+    undoDismissBtn: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.sm,
+      borderRadius: 8,
+    },
+    undoDismissText: {
+      color: theme.text_muted,
+      fontSize: 14,
+    },
+    muted: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+  });

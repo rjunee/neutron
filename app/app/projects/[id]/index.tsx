@@ -41,13 +41,16 @@ import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { GENERAL_CHAT_ROUTE } from '../../../lib/entry-route';
 import { projectIdFromPathname } from '../../../lib/project-rail-view';
 import { projectTabRoute } from '../../../lib/project-tab-route';
-import { THEME } from '../../../lib/composer-constants';
+import { type NeutronTheme } from '../../../lib/composer-constants';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 
 // Re-exported so the timeout keeps ONE home while the tests that assert the
 // handoff's deadline keep importing it from the screen that spends it.
 export { DEFAULT_TAB, LAST_TAB_READ_TIMEOUT_MS } from '../../../lib/project-tab-route';
 
 export default function ProjectIndexRedirect() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const pathname = usePathname();
   const { id: paramId } = useLocalSearchParams<{ id: string }>();
@@ -88,16 +91,17 @@ export default function ProjectIndexRedirect() {
 
   return (
     <View style={styles.container} testID="project-index-redirect">
-      <ActivityIndicator color={THEME.text_secondary} />
+      <ActivityIndicator color={theme.text_secondary} />
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.background,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.background,
+    },
+  });

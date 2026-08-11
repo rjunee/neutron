@@ -30,8 +30,8 @@
 
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
-import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
-import { PHASE } from '../lib/theme';
+import { BREAKPOINTS, DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme, type NeutronPhaseColors } from '../lib/composer-constants';
+import { usePhase, useThemedStyles } from '../lib/theme-context';
 import { PROJECT_TABS, type ProjectTabSpec } from '../lib/project-tabs';
 
 /**
@@ -91,6 +91,8 @@ export function ProjectTabBar({
 
 /** The tinted live-count badge (prototype `.tab .cap`). Renders only for `> 0`. */
 function TabBadge({ count }: { count: number }) {
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.cap} testID="tab-badge">
       <Text style={styles.capText}>{count > 99 ? '99+' : count}</Text>
@@ -117,6 +119,8 @@ function NarrowTabBar({
   onSelect: (key: string) => void;
   badges?: ReadonlyMap<string, number>;
 }) {
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.narrowBand} testID="project-tab-bar-narrow">
       <ScrollView
@@ -164,6 +168,8 @@ function WideTabBar({
   onSelect: (key: string) => void;
   badges?: ReadonlyMap<string, number>;
 }) {
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.wideBar} testID="project-tab-bar-wide">
       <View style={styles.wideItems}>
@@ -202,121 +208,122 @@ const WIDE_ITEM_ACCENT_WIDTH = 3;
 
 const TAB_SEAT_RADIUS = 9;
 
-const styles = StyleSheet.create({
-  // Seated tab band (M1 UX REDESIGN PR-6, mirror of PR-3 web `.tabs`): a
-  // `surface` band with a bottom hairline; tabs sit on it as top-rounded
-  // sheets, the active one fused to the content sheet below.
-  // THE BAND DRAWS ITS OWN BOTTOM HAIRLINE AGAIN. It had stopped, because
-  // `UsageMeter` rendered as the band's last child and WAS that seam — "one line,
-  // one owner". The meter has moved to sit above the message input at the owner's
-  // request, so the band would otherwise lose its edge entirely; the issue that
-  // recorded the move called this consequence out, and this is it being honoured.
-  narrowBand: {
-    flexGrow: 0,
-    backgroundColor: THEME.surface,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: THEME.hairline,
-  },
-  narrowContent: {
-    paddingHorizontal: SPACING.sm,
-    paddingTop: SPACING.sm,
-    gap: SPACING.xs / 2,
-    alignItems: 'flex-end',
-  },
-  // One seated tab (prototype `.tab`): top-rounded, transparent 1px border,
-  // muted label. Touch-sized padding.
-  seatTab: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs + 2,
-    paddingHorizontal: SPACING.md + SPACING.xs,
-    paddingVertical: SPACING.sm + 2,
-    borderTopLeftRadius: TAB_SEAT_RADIUS,
-    borderTopRightRadius: TAB_SEAT_RADIUS,
-    borderWidth: 1,
-    borderColor: 'transparent',
-    borderBottomWidth: 0,
-  },
-  // Active tab (prototype `.tab.active`): seats onto the content sheet — content
-  // `background`, hairline border. The old -1px overhang is gone: the seam it
-  // used to notch out is now the usage meter, and a gap in a fill bar reads as a
-  // wrong number rather than as a fused tab.
-  seatTabActive: {
-    backgroundColor: THEME.background,
-    borderColor: THEME.hairline,
-  },
-  seatLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-  },
-  seatLabelActive: {
-    color: THEME.text_primary,
-    fontWeight: '600',
-  },
-  // The live-run count badge (prototype `.tab .cap`): phase-build tinted pill.
-  cap: {
-    minWidth: 18,
-    height: 18,
-    paddingHorizontal: 5,
-    borderRadius: TAB_SEAT_RADIUS,
-    backgroundColor: PHASE.build.bg,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  capText: {
-    color: PHASE.build.fg,
-    fontSize: 11,
-    lineHeight: 14,
-    fontWeight: '700',
-  },
-  wideBar: {
-    width: WIDE_SIDEBAR_WIDTH,
-    backgroundColor: THEME.background,
-    borderRightWidth: 1,
-    borderRightColor: THEME.hairline,
-  },
-  // The tab rows own the sidebar's padding. This dates from when the usage meter
-  // sat beneath them and had to run the rail's full width; the meter has since
-  // moved above the message input, and the padding is left here because the
-  // sidebar's visible boundary is its RIGHT border, which never depended on it.
-  wideItems: {
-    paddingTop: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-    paddingBottom: SPACING.md,
-    gap: SPACING.xs,
-  },
-  wideItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.md - SPACING.xs / 2,
-    borderRadius: DENSITY.composer_radius,
-    backgroundColor: 'transparent',
-    gap: SPACING.sm,
-  },
-  wideItemActive: {
-    backgroundColor: THEME.surface_raised,
-  },
-  wideAccent: {
-    width: WIDE_ITEM_ACCENT_WIDTH,
-    height: 16,
-    borderRadius: WIDE_ITEM_ACCENT_WIDTH,
-    backgroundColor: 'transparent',
-  },
-  wideAccentActive: {
-    backgroundColor: THEME.text_primary,
-  },
-  wideLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '500',
-  },
-  wideLabelActive: {
-    color: THEME.text_primary,
-    fontWeight: '600',
-  },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme, phase: NeutronPhaseColors) =>
+  StyleSheet.create({
+    // Seated tab band (M1 UX REDESIGN PR-6, mirror of PR-3 web `.tabs`): a
+    // `surface` band with a bottom hairline; tabs sit on it as top-rounded
+    // sheets, the active one fused to the content sheet below.
+    // THE BAND DRAWS ITS OWN BOTTOM HAIRLINE AGAIN. It had stopped, because
+    // `UsageMeter` rendered as the band's last child and WAS that seam — "one line,
+    // one owner". The meter has moved to sit above the message input at the owner's
+    // request, so the band would otherwise lose its edge entirely; the issue that
+    // recorded the move called this consequence out, and this is it being honoured.
+    narrowBand: {
+      flexGrow: 0,
+      backgroundColor: theme.surface,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.hairline,
+    },
+    narrowContent: {
+      paddingHorizontal: SPACING.sm,
+      paddingTop: SPACING.sm,
+      gap: SPACING.xs / 2,
+      alignItems: 'flex-end',
+    },
+    // One seated tab (prototype `.tab`): top-rounded, transparent 1px border,
+    // muted label. Touch-sized padding.
+    seatTab: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.xs + 2,
+      paddingHorizontal: SPACING.md + SPACING.xs,
+      paddingVertical: SPACING.sm + 2,
+      borderTopLeftRadius: TAB_SEAT_RADIUS,
+      borderTopRightRadius: TAB_SEAT_RADIUS,
+      borderWidth: 1,
+      borderColor: 'transparent',
+      borderBottomWidth: 0,
+    },
+    // Active tab (prototype `.tab.active`): seats onto the content sheet — content
+    // `background`, hairline border. The old -1px overhang is gone: the seam it
+    // used to notch out is now the usage meter, and a gap in a fill bar reads as a
+    // wrong number rather than as a fused tab.
+    seatTabActive: {
+      backgroundColor: theme.background,
+      borderColor: theme.hairline,
+    },
+    seatLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+    },
+    seatLabelActive: {
+      color: theme.text_primary,
+      fontWeight: '600',
+    },
+    // The live-run count badge (prototype `.tab .cap`): phase-build tinted pill.
+    cap: {
+      minWidth: 18,
+      height: 18,
+      paddingHorizontal: 5,
+      borderRadius: TAB_SEAT_RADIUS,
+      backgroundColor: phase.build.bg,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    capText: {
+      color: phase.build.fg,
+      fontSize: 11,
+      lineHeight: 14,
+      fontWeight: '700',
+    },
+    wideBar: {
+      width: WIDE_SIDEBAR_WIDTH,
+      backgroundColor: theme.background,
+      borderRightWidth: 1,
+      borderRightColor: theme.hairline,
+    },
+    // The tab rows own the sidebar's padding. This dates from when the usage meter
+    // sat beneath them and had to run the rail's full width; the meter has since
+    // moved above the message input, and the padding is left here because the
+    // sidebar's visible boundary is its RIGHT border, which never depended on it.
+    wideItems: {
+      paddingTop: SPACING.sm,
+      paddingHorizontal: SPACING.sm,
+      paddingBottom: SPACING.md,
+      gap: SPACING.xs,
+    },
+    wideItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.md - SPACING.xs / 2,
+      borderRadius: DENSITY.composer_radius,
+      backgroundColor: 'transparent',
+      gap: SPACING.sm,
+    },
+    wideItemActive: {
+      backgroundColor: theme.surface_raised,
+    },
+    wideAccent: {
+      width: WIDE_ITEM_ACCENT_WIDTH,
+      height: 16,
+      borderRadius: WIDE_ITEM_ACCENT_WIDTH,
+      backgroundColor: 'transparent',
+    },
+    wideAccentActive: {
+      backgroundColor: theme.text_primary,
+    },
+    wideLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '500',
+    },
+    wideLabelActive: {
+      color: theme.text_primary,
+      fontWeight: '600',
+    },
+    pressed: { opacity: 0.7 },
+  });

@@ -44,7 +44,8 @@ import {
   type DimensionValue,
 } from 'react-native';
 
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import type {
   TranscriptionBackendChoice,
   VoiceTranscriptionStatus,
@@ -86,6 +87,7 @@ export interface VoiceTranscriptionCardProps {
 }
 
 export function VoiceTranscriptionCard(props: VoiceTranscriptionCardProps): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   const { status, failure, loading, busy, selectedModelId } = props;
   const running = isJobRunning(status?.job?.phase ?? null);
 
@@ -119,6 +121,7 @@ export function VoiceTranscriptionCard(props: VoiceTranscriptionCardProps): Reac
 function Body(
   props: VoiceTranscriptionCardProps & { status: VoiceTranscriptionStatus; running: boolean },
 ): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   const { status, running, busy, actionError, selectedModelId } = props;
   const blocker = installBlocker(status);
   const job = status.job;
@@ -285,6 +288,7 @@ function BackendRow(props: {
   disabled: boolean;
   onPress: () => void;
 }): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   const { backend, selected, active, blocker, disabled } = props;
   const title = backend === 'local' ? 'This server' : 'OpenAI API';
   return (
@@ -336,6 +340,8 @@ function OpenAiKeyField(props: {
   onSave: (api_key: string) => void;
   onRemove: () => void;
 }): React.JSX.Element {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { status, disabled } = props;
   const [draft, setDraft] = useState('');
   const source = describeKeySource(status);
@@ -359,7 +365,7 @@ function OpenAiKeyField(props: {
         value={draft}
         onChangeText={setDraft}
         placeholder={status.openai_key.present ? 'Replace the saved key' : 'Paste your OpenAI API key'}
-        placeholderTextColor={THEME.text_muted}
+        placeholderTextColor={theme.text_muted}
         // A key is not a word: no autocorrect, no capitalisation, no dictionary,
         // and masked so it is not left legible on a screen someone else can see.
         secureTextEntry
@@ -419,6 +425,7 @@ function ModelRow(props: {
   disabled: boolean;
   onPress: () => void;
 }): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   const { model, selected, recommended, disabled } = props;
   return (
     <Pressable
@@ -446,107 +453,108 @@ function ModelRow(props: {
   );
 }
 
-const styles = StyleSheet.create({
-  card: {
-    gap: 10,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  title: { color: THEME.text_primary, fontSize: 15, fontWeight: '600' },
-  subtitle: { color: THEME.text_secondary, fontSize: 12, lineHeight: 16 },
-  statusLine: { color: THEME.text_primary, fontSize: 13, lineHeight: 18, fontWeight: '600' },
-  statusLineWarning: { color: THEME.warning },
-  note: { color: THEME.text_secondary, fontSize: 12, lineHeight: 16 },
-  warning: { color: THEME.warning, fontSize: 12, lineHeight: 16 },
-  error: { color: THEME.danger, fontSize: 12, lineHeight: 16 },
-  rowHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  activeBadge: {
-    color: THEME.accent,
-    fontSize: 9,
-    fontWeight: '700',
-    letterSpacing: 0.8,
-    borderWidth: 1,
-    borderColor: THEME.accent,
-    borderRadius: 4,
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    overflow: 'hidden',
-  },
-  sectionLabel: {
-    color: THEME.text_muted,
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: THEME.hairline,
-  },
-  input: {
-    height: 44,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.background,
-    color: THEME.text_primary,
-    paddingHorizontal: 12,
-    fontSize: 14,
-  },
-  progressBlock: { gap: 6 },
-  progressTrack: {
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: THEME.surface_raised,
-    overflow: 'hidden',
-  },
-  progressFill: { height: 6, borderRadius: 3, backgroundColor: THEME.accent },
-  fieldLabel: {
-    color: THEME.text_muted,
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginTop: 4,
-  },
-  modelRow: {
-    flexDirection: 'row',
-    gap: 10,
-    padding: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.background,
-  },
-  modelRowSelected: { borderColor: THEME.accent, backgroundColor: THEME.surface_raised },
-  modelRadio: { color: THEME.accent, fontSize: 14, lineHeight: 18 },
-  modelText: { flex: 1, gap: 3 },
-  modelLabel: { color: THEME.text_primary, fontSize: 14, fontWeight: '600' },
-  modelMeta: { color: THEME.text_secondary, fontSize: 12, lineHeight: 16 },
-  modelNote: { color: THEME.text_muted, fontSize: 11, lineHeight: 15 },
-  modelWarning: { color: THEME.warning, fontSize: 11, lineHeight: 15 },
-  primaryBtn: {
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.accent,
-    marginTop: 4,
-  },
-  primaryBtnText: { color: THEME.accent, fontSize: 15, fontWeight: '600' },
-  dangerBtn: {
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: THEME.danger,
-  },
-  dangerBtnText: { color: THEME.danger, fontSize: 15, fontWeight: '600' },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    card: {
+      gap: 10,
+      padding: 16,
+      borderRadius: 12,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    title: { color: theme.text_primary, fontSize: 15, fontWeight: '600' },
+    subtitle: { color: theme.text_secondary, fontSize: 12, lineHeight: 16 },
+    statusLine: { color: theme.text_primary, fontSize: 13, lineHeight: 18, fontWeight: '600' },
+    statusLineWarning: { color: theme.warning },
+    note: { color: theme.text_secondary, fontSize: 12, lineHeight: 16 },
+    warning: { color: theme.warning, fontSize: 12, lineHeight: 16 },
+    error: { color: theme.danger, fontSize: 12, lineHeight: 16 },
+    rowHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    activeBadge: {
+      color: theme.accent,
+      fontSize: 9,
+      fontWeight: '700',
+      letterSpacing: 0.8,
+      borderWidth: 1,
+      borderColor: theme.accent,
+      borderRadius: 4,
+      paddingHorizontal: 4,
+      paddingVertical: 1,
+      overflow: 'hidden',
+    },
+    sectionLabel: {
+      color: theme.text_muted,
+      fontSize: 10,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+      marginTop: 10,
+      paddingTop: 10,
+      borderTopWidth: 1,
+      borderTopColor: theme.hairline,
+    },
+    input: {
+      height: 44,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.background,
+      color: theme.text_primary,
+      paddingHorizontal: 12,
+      fontSize: 14,
+    },
+    progressBlock: { gap: 6 },
+    progressTrack: {
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: theme.surface_raised,
+      overflow: 'hidden',
+    },
+    progressFill: { height: 6, borderRadius: 3, backgroundColor: theme.accent },
+    fieldLabel: {
+      color: theme.text_muted,
+      fontSize: 10,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+      marginTop: 4,
+    },
+    modelRow: {
+      flexDirection: 'row',
+      gap: 10,
+      padding: 12,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.background,
+    },
+    modelRowSelected: { borderColor: theme.accent, backgroundColor: theme.surface_raised },
+    modelRadio: { color: theme.accent, fontSize: 14, lineHeight: 18 },
+    modelText: { flex: 1, gap: 3 },
+    modelLabel: { color: theme.text_primary, fontSize: 14, fontWeight: '600' },
+    modelMeta: { color: theme.text_secondary, fontSize: 12, lineHeight: 16 },
+    modelNote: { color: theme.text_muted, fontSize: 11, lineHeight: 15 },
+    modelWarning: { color: theme.warning, fontSize: 11, lineHeight: 15 },
+    primaryBtn: {
+      height: 44,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.accent,
+      marginTop: 4,
+    },
+    primaryBtnText: { color: theme.accent, fontSize: 15, fontWeight: '600' },
+    dangerBtn: {
+      height: 44,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: theme.danger,
+    },
+    dangerBtnText: { color: theme.danger, fontSize: 15, fontWeight: '600' },
+    pressed: { opacity: 0.7 },
+  });

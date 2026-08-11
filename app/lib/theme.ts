@@ -1,13 +1,21 @@
 /**
- * @neutronai/app — locked dark palette + typography / spacing / motion
+ * @neutronai/app — the LIGHT and DARK palettes + typography / spacing / motion
  * tokens (P5.0 palette, P5.1 extensions).
  *
- * P5.0 locked the dark color palette so every component reads colors
- * from one source. P5.1 layers typography, spacing, motion, and density
- * tokens on top of that palette so the impeccable design pass has a
- * coherent vocabulary to thread through the chat surface and every
- * primitive that the surface emits for later sprints (P5.2 project view
- * shell, P5.3 launcher, P7.2 inline-comment threads, ...).
+ * P5.0 locked a single dark palette so every component read colors from one
+ * source. That was right about the source and wrong about the count: the owner
+ * asked for light mode, so this module now exports TWO palettes of the SAME
+ * shape ({@link NeutronTheme}) plus the resolution rules that pick between
+ * them. There is no third state and no "legacy dark-only" path — a component
+ * receives whichever palette is active and cannot tell which one it is.
+ *
+ * WHY THERE IS NO `THEME` CONSTANT ANY MORE. There used to be one, frozen, and
+ * every component captured its colors at MODULE LOAD inside
+ * `StyleSheet.create({...})`. A captured color cannot change, so a single such
+ * capture left anywhere is a dark card sitting in a light screen. Removing the
+ * export makes that a COMPILE error rather than a visual bug someone has to
+ * notice on a device — components read the active palette per-render via
+ * `useTheme()` (`lib/theme-context.tsx`) and build their sheets from it.
  *
  * Anti-pattern guard: no `react-native-paper`, no `@shopify/restyle`,
  * no `tailwind-rn`, no `nativewind`. Plain `StyleSheet.create` +
@@ -15,6 +23,15 @@
  * styles are forbidden — every spacing / radius / motion duration
  * MUST come from these tokens. If a new value is needed, add it here
  * first and reference the token from the component.
+ *
+ * CONTRAST IS A TEST, NOT AN INTENTION. Every token below that is drawn as TEXT
+ * clears WCAG AA (4.5:1) against every ground it can land on — `background`,
+ * `surface`, AND `surface_raised` — in BOTH palettes, and the ink on each bubble
+ * fill clears it too. `__tests__/contrast.test.ts` computes those ratios from
+ * these values (and from the web stylesheet's, so the two clients cannot
+ * drift apart) and fails on a regression. Purely decorative tokens — the 1px
+ * usage-meter bars, the rail activity dots, `hairline` — are held to the
+ * non-text bar (3:1, WCAG 1.4.11) and are listed explicitly in that test.
  */
 
 export interface NeutronTheme {
@@ -41,7 +58,8 @@ export interface NeutronTheme {
   /** Link color (markdown links, citation chip text). */
   link: string;
   /**
-   * The OWNER's own chat bubble. Mirror of the web `--user-bubble` (#0a84ff).
+   * The OWNER's own chat bubble. Mirror of the web `--user-bubble` — the SAME hex
+   * in both palettes, asserted in `__tests__/contrast.test.ts`. See NEUTRON_BLUE.
    *
    * A dedicated token rather than reusing `accent`: `accent` paints spinners,
    * active states and focus rings, and repainting all of those is a much broader
@@ -67,6 +85,46 @@ export interface NeutronTheme {
 }
 
 /**
+ * THE NEUTRON BLUE — the outgoing bubble fill, in BOTH palettes.
+ *
+ * Owner decision (2026-08-10): *"in dark mode, keep the white text in blue bubble
+ * for user chat messages it's fine"*. So white ink on blue is the shape in both
+ * themes, exactly as iMessage does it, and the only free variable is WHICH blue.
+ *
+ * It could not stay `#0a84ff`: white on that measures **3.65**, below the 4.5 AA
+ * floor, and the light theme's `#007aff` was no better at 4.02. Honouring the
+ * decision therefore means picking a blue that carries white legibly rather than
+ * overriding the measurement — which is also what Apple does, whose dark bubble
+ * (`#0b84ff`) is a different value from its accents.
+ *
+ * `#1064cc` is the same azure a few steps deeper, and it is the value that
+ * satisfies all FIVE things this one hex has to do at once:
+ *
+ *   white ON it                      5.65   (bubble ink, both themes — AA 4.5)
+ *   it ON light `background` #ffffff  5.65   (light link on the page)
+ *   it ON light `surface` #f5f5f7     5.19   (light link on a card)
+ *   it ON light `surface_raised`      4.66   (light link INSIDE an agent bubble)
+ *   it ON dark `background` #101419   3.27   (the bubble's own edge — non-text 3:1)
+ *
+ * The fourth line is the one that is easy to miss and the reason this is not
+ * `#1069d9` (which measures a failing 4.28 there): `markdown-render.tsx` paints
+ * links with `link`, and markdown renders INSIDE agent bubbles, so a light-theme
+ * link lands on `surface_raised` and not just on the page. The last line pulls
+ * the opposite way — too dark and the owner's own bubble stops separating from
+ * the dark ground — so the value is a genuine intersection, not a maximum.
+ *
+ * ONE hex for both palettes, deliberately: the outgoing bubble is the single
+ * most recognisable object in the product, and a bubble that changed hue with
+ * the theme would read as two different blues rather than one brand.
+ *
+ * The pale `#6cf` / `#5fb6ff` accents are NOT this and never become a fill —
+ * they are dark-mode LINK colors, where their lightness is the whole point
+ * (dark `link` measures 8.47 on `background`). A pale blue behind white ink is
+ * the unreadable combination this token exists to avoid.
+ */
+export const NEUTRON_BLUE = '#1064cc';
+
+/**
  * THE DARK RAMP, LIFTED AND TINTED (owner feedback 2026-08-07).
  *
  * He compared the app to Telegram side by side: *"our colors are too dark, can you
@@ -87,23 +145,25 @@ export interface NeutronTheme {
  * by a comparable amount, so "raised" reads as raised at every level rather than
  * only where the delta happened to be big enough.
  */
-export const THEME: NeutronTheme = Object.freeze({
+export const DARK_THEME: NeutronTheme = Object.freeze({
   background: '#101419',
   surface: '#171d25',
   surface_raised: '#222834',
   // Not pure white: #fff on a dark ground reads as heavier than it is and glares.
   text_primary: '#eceff4',
   text_secondary: '#b6becb',
-  text_muted: '#7c848f',
+  // LIFTED from #7c848f (2026-08-10). The old value measured 4.89 on `background`,
+  // 4.48 on `surface` and 3.91 on `surface_raised` — i.e. it failed AA on two of
+  // the three grounds it actually lands on, which is the "ours is more difficult
+  // to read" the owner reported next to Telegram. Now 6.28 / 5.76 / 5.02.
+  text_muted: '#8f97a5',
   accent: '#e0e0e0',
   hairline: '#2b3240',
   danger: '#ff5c5c',
   warning: '#ffae42',
   link: '#5fb6ff',
-  // The signature blue. Owner: "make messages from me in our signature blue color
-  // not white/grey" — the web chat has rendered his bubbles in exactly this since
-  // it shipped; mobile was painting them with `accent`, a near-white.
-  user_bubble: '#0a84ff',
+  // THE NEUTRON BLUE — see NEUTRON_BLUE.
+  user_bubble: NEUTRON_BLUE,
   user_ink: '#ffffff',
   // THE SELECTED RAIL ROW. Owner: "Make the highlight color of the currently
   // selected project much more obvious. it's VERY hard to see what project is
@@ -127,6 +187,76 @@ export const THEME: NeutronTheme = Object.freeze({
   usage_critical: '#e0553f',
 });
 
+/**
+ * THE LIGHT RAMP (owner request 2026-08-10: *"I want fucking light mode on the
+ * mobile app … for the chat interface model the colors after iMessage but use our
+ * own Neutron blue"*).
+ *
+ * Same shape, same token names, same MEANINGS — only the values invert. The
+ * surfaces are taken from the web chat's light theme (`--bg #ffffff`,
+ * `--surface #f5f5f7`, `--agent-bubble #e9e9eb`) so a phone and a browser
+ * showing light mode look like one product, and `surface_raised` is deliberately
+ * the iMessage incoming-bubble grey — on this client that token IS the agent
+ * bubble, so the two facts want the same value.
+ *
+ * The ramp runs the other way (background is the LIGHTEST step here, the darkest
+ * step in dark) and every text token is chosen for its measured ratio against
+ * all three grounds, not by eye:
+ *
+ *   text_primary  17.01 / 15.63 / 14.03   text_secondary  10.55 / 9.69 / 8.70
+ *   text_muted     5.77 /  5.30 /  4.76   danger           5.55 / 5.09 / 4.57
+ *   warning        5.65 /  5.19 /  4.66   link             5.65 / 5.19 / 4.66
+ *
+ * The `surface_raised` column is the one that does the work here: it is the agent
+ * bubble, markdown renders inside it, so `text_muted` and `link` have to clear AA
+ * on a grey — not merely on white, which is the easy case and the one an eyeball
+ * check would have stopped at.
+ */
+export const LIGHT_THEME: NeutronTheme = Object.freeze({
+  background: '#ffffff',
+  surface: '#f5f5f7',
+  // The iMessage incoming-bubble grey. On this client `surface_raised` IS the
+  // agent bubble, so "one step up from the ground" and "the grey iMessage uses"
+  // are the same requirement.
+  surface_raised: '#e9e9eb',
+  // Not pure black, for the mirror-image reason `text_primary` is not pure white
+  // in dark: #000 on white is harsher than the ink it imitates.
+  text_primary: '#1c1c1e',
+  text_secondary: '#3a3f4a',
+  text_muted: '#62666d',
+  // THE NEUTRAL POLE, mirroring dark's near-white `#e0e0e0`. On this client
+  // `accent` is not the brand blue — it is the high-contrast neutral that
+  // primary buttons fill with and that `background` is drawn ON (see
+  // `lib/button-primitives.tsx`: `btnPrimary` fills with `accent`,
+  // `btnTextPrimary` inks with `background`). Inverting the pole keeps that
+  // pairing correct without touching a single component: white on #14171c
+  // measures 17.96, the mirror of #101419 on #e0e0e0.
+  accent: '#14171c',
+  hairline: '#d1d1d6',
+  danger: '#c9252d',
+  // Amber is the one hue that cannot survive the inversion unchanged: dark's
+  // #ffae42 measures 1.80 on white. This is the same warning, darkened until it
+  // is legible as TEXT (5.65 / 5.19 / 4.66) while still reading amber, not brown.
+  warning: '#8a5f00',
+  link: NEUTRON_BLUE,
+  user_bubble: NEUTRON_BLUE,
+  user_ink: '#ffffff',
+  // Selection by HUE, same principle as dark — a pale blue wash that is
+  // unmistakably not `surface`, carrying `text_primary` at 14.6:1. The dark
+  // theme darkens the blue to separate from a dark ground; light lightens it.
+  rail_selected: '#cfe3ff',
+  work: NEUTRON_BLUE,
+  // DECORATIVE, and deliberately NOT re-derived for contrast. This is a 6px dot.
+  // Owner decision (FIX #345) rejected a darker amber here as "a muddy brown";
+  // the value is his. It measures 2.28 on white, below even the 3:1 non-text bar,
+  // so the contrast test lists it as an explicit documented exemption rather than
+  // silently passing — see `__tests__/contrast.test.ts` DECORATIVE_EXEMPT.
+  attention: '#e0a020',
+  usage_nominal: '#1a7f37',
+  usage_warning: '#b07407',
+  usage_critical: '#c9252d',
+});
+
 /** One phase's tinted-capsule colors: solid foreground + a low-alpha background wash. */
 export interface PhaseColor {
   fg: string;
@@ -135,8 +265,11 @@ export interface PhaseColor {
 
 /**
  * M1 redesign — Work-list row phase colors (dot / tag). Mirror of the web
- * `cwb-tag-*` / `cwb-dot-*` CSS colors (`landing/chat-react/chat-react.html`);
- * mobile is dark-only so these are the literal values, not a light/dark pair.
+ * `--phase-*` CSS tokens in `landing/chat-react.html`, which have had a light
+ * pair since the light theme shipped there; mobile now needs the same pair
+ * rather than one literal set (the docblock here used to say "mobile is
+ * dark-only", which stopped being true on 2026-08-10).
+ *
  * Keyed by the same coarse phase the row derives from `RunStepLabel`
  * (`merge` covers both the live "merging" step and the terminal "done"/merged
  * state — same green, mirroring the web `cwb-tag-merge` class reuse).
@@ -149,13 +282,86 @@ export interface NeutronPhaseColors {
   failed: PhaseColor;
 }
 
-export const PHASE: NeutronPhaseColors = Object.freeze({
+export const DARK_PHASE: NeutronPhaseColors = Object.freeze({
   build: { fg: '#8cc6ff', bg: 'rgba(140,198,255,0.14)' },
   review: { fg: '#a8a2ff', bg: 'rgba(168,162,255,0.14)' },
   fix: { fg: '#ffd27d', bg: 'rgba(255,210,125,0.14)' },
   merge: { fg: '#7ddf9b', bg: 'rgba(125,223,155,0.14)' },
   failed: { fg: '#ff8a8a', bg: 'rgba(255,138,138,0.14)' },
 });
+
+/**
+ * The light pair. A phase tag is TEXT on a low-alpha wash of its own hue, so each
+ * `fg` has to clear AA against the light grounds the wash sits on — the dark set's
+ * pastels measure under 2:1 on white and would be unreadable. `fix` is the amber
+ * again, darkened to `#8a5f00` for the same reason `LIGHT_THEME.warning` is.
+ * Mirrors the web `:root[data-theme="light"]` `--phase-*-fg` values.
+ */
+export const LIGHT_PHASE: NeutronPhaseColors = Object.freeze({
+  build: { fg: '#0b57d0', bg: 'rgba(11,87,208,0.10)' },
+  review: { fg: '#5b4bd6', bg: 'rgba(91,75,214,0.12)' },
+  fix: { fg: '#8a5f00', bg: 'rgba(138,95,0,0.12)' },
+  merge: { fg: '#1a7f37', bg: 'rgba(26,127,55,0.12)' },
+  failed: { fg: '#c9252d', bg: 'rgba(201,37,45,0.10)' },
+});
+
+/**
+ * WHAT THE OWNER PICKED. Mirrors `landing/chat-react/theme.ts` exactly — same
+ * three states, same default, same rule — so the phone and the browser cannot
+ * disagree about what "system" means.
+ */
+export type ThemePreference = 'light' | 'dark' | 'system';
+
+/** The concrete scheme actually painted. `system` never reaches a component. */
+export type ResolvedTheme = 'light' | 'dark';
+
+/** Absent / unrecognised preference follows the OS. */
+export const DEFAULT_PREFERENCE: ThemePreference = 'system';
+
+/** Type guard for a value read back out of storage. */
+export function isThemePreference(v: unknown): v is ThemePreference {
+  return v === 'light' || v === 'dark' || v === 'system';
+}
+
+/**
+ * THE ONE SELECTION RULE. An explicit `light`/`dark` wins outright — it is an
+ * override, so it must NOT be shadowed by the OS scheme; `system` (and anything
+ * unrecognised) follows `osScheme`, and a platform that reports nothing
+ * (`useColorScheme()` returns null before the first native read) is treated as
+ * dark, which is where this app has always started.
+ */
+export function resolveTheme(
+  pref: ThemePreference,
+  osScheme: ResolvedTheme | null,
+): ResolvedTheme {
+  if (pref === 'light') return 'light';
+  if (pref === 'dark') return 'dark';
+  return osScheme === 'light' ? 'light' : 'dark';
+}
+
+/** Everything a resolved scheme carries. One object so a component takes one hook. */
+export interface NeutronPalette {
+  scheme: ResolvedTheme;
+  colors: NeutronTheme;
+  phase: NeutronPhaseColors;
+}
+
+export const DARK_PALETTE: NeutronPalette = Object.freeze({
+  scheme: 'dark' as const,
+  colors: DARK_THEME,
+  phase: DARK_PHASE,
+});
+
+export const LIGHT_PALETTE: NeutronPalette = Object.freeze({
+  scheme: 'light' as const,
+  colors: LIGHT_THEME,
+  phase: LIGHT_PHASE,
+});
+
+/** The palette for a resolved scheme. */
+export function paletteFor(scheme: ResolvedTheme): NeutronPalette {
+  return scheme === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+}
 
 export interface TypographyToken {
   fontSize: number;
@@ -205,15 +411,28 @@ const MONO_FAMILY: string = (() => {
   return 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 })();
 
+/**
+ * THE SCALE, RAISED ONE STEP (owner feedback 2026-08-07, comparing us to Telegram:
+ * its text is *"brighter and more vivid and easier to read"*, ours *"more
+ * difficult"* — he asked for a larger size).
+ *
+ * `body` was 15/22 against Telegram's ~17. Everything moves with it rather than
+ * body alone: a 17px body under a 15px `h4` inverts the hierarchy, and captions
+ * left at 11 would read as fine print next to it. So the whole ramp shifts +2 and
+ * the line-heights go with it, keeping the ~1.45 body / ~1.35 heading rhythm the
+ * P5.1 scale established. The web stylesheet moves the same amount in the same
+ * commit (`landing/chat-react.html` `body { font: 17px/… }`) so the two clients
+ * still agree — that agreement is asserted in `__tests__/type-scale.test.ts`.
+ */
 export const TYPOGRAPHY: NeutronTypography = Object.freeze({
-  h1: { fontSize: 22, lineHeight: 30, fontWeight: '700' as const },
-  h2: { fontSize: 19, lineHeight: 26, fontWeight: '700' as const },
-  h3: { fontSize: 17, lineHeight: 24, fontWeight: '600' as const },
-  h4: { fontSize: 15, lineHeight: 22, fontWeight: '600' as const },
-  body: { fontSize: 15, lineHeight: 22 },
-  body_small: { fontSize: 13, lineHeight: 19 },
-  caption: { fontSize: 11, lineHeight: 16 },
-  mono: { fontSize: 14, lineHeight: 20, fontFamily: MONO_FAMILY },
+  h1: { fontSize: 24, lineHeight: 32, fontWeight: '700' as const },
+  h2: { fontSize: 21, lineHeight: 28, fontWeight: '700' as const },
+  h3: { fontSize: 19, lineHeight: 26, fontWeight: '600' as const },
+  h4: { fontSize: 17, lineHeight: 24, fontWeight: '600' as const },
+  body: { fontSize: 17, lineHeight: 25 },
+  body_small: { fontSize: 15, lineHeight: 21 },
+  caption: { fontSize: 13, lineHeight: 18 },
+  mono: { fontSize: 15, lineHeight: 22, fontFamily: MONO_FAMILY },
 });
 
 export interface NeutronSpacing {

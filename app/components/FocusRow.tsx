@@ -51,7 +51,8 @@ import {
   type PriorityChipKind,
 } from '../lib/focus-row-formatters';
 import { ALPHA_TINTS } from '../lib/task-row-formatters';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 /**
  * Dot diameter in CSS px. Inline literal authorized by brief § 4.8 as
@@ -87,6 +88,8 @@ export interface FocusRowProps {
 }
 
 export function FocusRow({ item, nowMs, onPress }: FocusRowProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const now_ms = nowMs ?? Date.now();
   const dueText = useMemo(
     () => formatDueRelative(item.due_at, now_ms),
@@ -95,7 +98,7 @@ export function FocusRow({ item, nowMs, onPress }: FocusRowProps) {
   const instanceLevel = isInstanceLevel(item);
   const priorityKind = priorityChipKind(item.priority);
   const dueKind = dueChipKind(item.bucket);
-  const dotColor = bucketDotColor(item.bucket);
+  const dotColor = bucketDotColor(item.bucket, theme);
   const kindLabel = kindChipLabel(item);
   const projectLabel = projectChipLabel(item);
 
@@ -154,10 +157,10 @@ export function FocusRow({ item, nowMs, onPress }: FocusRowProps) {
           {/* Priority chip — only when priority is non-null */}
           {priorityKind !== null ? (
             <View
-              style={[styles.chip, priorityChipBg(priorityKind)]}
+              style={[styles.chip, priorityChipBg(priorityKind, styles)]}
               testID="focus-row-priority"
             >
-              <Text style={[styles.chipText, priorityChipText(priorityKind)]}>
+              <Text style={[styles.chipText, priorityChipText(priorityKind, styles)]}>
                 {`P${Math.max(0, item.priority ?? 0)}`}
               </Text>
             </View>
@@ -165,10 +168,10 @@ export function FocusRow({ item, nowMs, onPress }: FocusRowProps) {
           {/* Due chip — only when due_at is non-null AND format produced text */}
           {dueText.length > 0 ? (
             <View
-              style={[styles.chip, dueChipBg(dueKind)]}
+              style={[styles.chip, dueChipBg(dueKind, styles)]}
               testID="focus-row-due"
             >
-              <Text style={[styles.chipText, dueChipText(dueKind)]}>
+              <Text style={[styles.chipText, dueChipText(dueKind, styles)]}>
                 {dueText}
               </Text>
             </View>
@@ -180,108 +183,107 @@ export function FocusRow({ item, nowMs, onPress }: FocusRowProps) {
   );
 }
 
-function priorityChipBg(kind: PriorityChipKind) {
-  if (kind === 'p0') {
-    return { backgroundColor: THEME.danger + ALPHA_TINTS.panel };
-  }
-  if (kind === 'p1') {
-    return { backgroundColor: THEME.warning + ALPHA_TINTS.panel };
-  }
+/** The active sheet is passed in — see the note on TaskRow's identical pickers.
+ *  The danger/warning tints are sheet entries now, not inline concatenations. */
+type FocusRowStyles = ReturnType<typeof makeStyles>;
+
+function priorityChipBg(kind: PriorityChipKind, styles: FocusRowStyles) {
+  if (kind === 'p0') return styles.chipDangerTint;
+  if (kind === 'p1') return styles.chipWarningTint;
   return styles.chipNeutral;
 }
 
-function priorityChipText(kind: PriorityChipKind) {
+function priorityChipText(kind: PriorityChipKind, styles: FocusRowStyles) {
   if (kind === 'p0') return styles.chipTextDanger;
   if (kind === 'p1') return styles.chipTextWarning;
   if (kind === 'p2') return styles.chipTextSecondary;
   return styles.chipTextMuted;
 }
 
-function dueChipBg(kind: DueChipKind) {
-  if (kind === 'overdue') {
-    return { backgroundColor: THEME.danger + ALPHA_TINTS.panel };
-  }
-  if (kind === 'today') {
-    return { backgroundColor: THEME.warning + ALPHA_TINTS.panel };
-  }
+function dueChipBg(kind: DueChipKind, styles: FocusRowStyles) {
+  if (kind === 'overdue') return styles.chipDangerTint;
+  if (kind === 'today') return styles.chipWarningTint;
   return styles.chipNeutral;
 }
 
-function dueChipText(kind: DueChipKind) {
+function dueChipText(kind: DueChipKind, styles: FocusRowStyles) {
   if (kind === 'overdue') return styles.chipTextDanger;
   if (kind === 'today') return styles.chipTextWarning;
   return styles.chipTextMuted;
 }
 
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: SPACING.md,
-    paddingVertical: SPACING.md,
-    paddingHorizontal: SPACING.lg,
-    borderRadius: ROW_RADIUS,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  rowPressed: {
-    opacity: 0.78,
-    borderColor: THEME.text_muted,
-    backgroundColor: THEME.surface_raised,
-  },
-  dot: {
-    width: BUCKET_DOT_SIZE,
-    height: BUCKET_DOT_SIZE,
-    borderRadius: BUCKET_DOT_SIZE / 2,
-    marginTop: SPACING.xs + 2,
-  },
-  body: {
-    flex: 1,
-    gap: SPACING.xs,
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '500',
-  },
-  meta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: SPACING.xs + 2,
-    marginTop: SPACING.xs,
-  },
-  chip: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: DENSITY.chip_radius,
-    maxWidth: 200,
-  },
-  chipNeutral: { backgroundColor: THEME.surface_raised },
-  chipProject: { backgroundColor: THEME.surface_raised },
-  chipInstance: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  chipText: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  chipTextDanger: { color: THEME.danger },
-  chipTextWarning: { color: THEME.warning },
-  chipTextSecondary: { color: THEME.text_secondary },
-  chipTextMuted: { color: THEME.text_muted },
-  chevron: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    marginLeft: SPACING.xs,
-    // The chevron glyph sits flush with the title baseline; the chevron
-    // font has its own optical center so this aligns the visual center.
-    marginTop: SPACING.xs / 2,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: SPACING.md,
+      paddingVertical: SPACING.md,
+      paddingHorizontal: SPACING.lg,
+      borderRadius: ROW_RADIUS,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    rowPressed: {
+      opacity: 0.78,
+      borderColor: theme.text_muted,
+      backgroundColor: theme.surface_raised,
+    },
+    dot: {
+      width: BUCKET_DOT_SIZE,
+      height: BUCKET_DOT_SIZE,
+      borderRadius: BUCKET_DOT_SIZE / 2,
+      marginTop: SPACING.xs + 2,
+    },
+    body: {
+      flex: 1,
+      gap: SPACING.xs,
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '500',
+    },
+    meta: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: SPACING.xs + 2,
+      marginTop: SPACING.xs,
+    },
+    chip: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      borderRadius: DENSITY.chip_radius,
+      maxWidth: 200,
+    },
+    chipNeutral: { backgroundColor: theme.surface_raised },
+    chipDangerTint: { backgroundColor: theme.danger + ALPHA_TINTS.panel },
+    chipWarningTint: { backgroundColor: theme.warning + ALPHA_TINTS.panel },
+    chipProject: { backgroundColor: theme.surface_raised },
+    chipInstance: {
+      backgroundColor: 'transparent',
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    chipText: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    chipTextDanger: { color: theme.danger },
+    chipTextWarning: { color: theme.warning },
+    chipTextSecondary: { color: theme.text_secondary },
+    chipTextMuted: { color: theme.text_muted },
+    chevron: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      marginLeft: SPACING.xs,
+      // The chevron glyph sits flush with the title baseline; the chevron
+      // font has its own optical center so this aligns the visual center.
+      marginTop: SPACING.xs / 2,
+    },
+  });

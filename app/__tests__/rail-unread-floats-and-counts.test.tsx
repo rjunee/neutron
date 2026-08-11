@@ -36,7 +36,9 @@ setHarnessPlatform('ios');
 const { mountScreen } = await import('./support/mount');
 const { ProjectRail } = await import('../components/ProjectRail');
 const { GENERAL_PROJECT_ID } = await import('../lib/project-rail-view');
-const { THEME } = await import('../lib/theme');
+// Mounted without a ThemeProvider, so these render with the context's dark
+// fallback — the palette to assert against is DARK_THEME by name.
+const { DARK_THEME: THEME } = await import('../lib/theme');
 
 interface Fixture {
   id: string;

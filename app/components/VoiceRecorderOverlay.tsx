@@ -22,7 +22,8 @@ import { useEffect, useRef } from 'react';
 import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/composer-constants';
+import { useThemedStyles } from '../lib/theme-context';
 import { type VoiceRecorderValue } from '../lib/use-voice-recorder';
 
 export interface VoiceRecorderOverlayProps {
@@ -38,6 +39,7 @@ export function VoiceRecorderOverlay({ voice }: VoiceRecorderOverlayProps): Reac
 
 /** Recording (and the brief `requesting` / `uploading` states). */
 function VoiceRecordingRow({ voice }: VoiceRecorderOverlayProps): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   const uploading = voice.phase === 'uploading';
   const cancelling = voice.intent === 'cancel';
   const pulse = usePulse(voice.phase === 'recording');
@@ -99,6 +101,7 @@ function VoiceRecordingRow({ voice }: VoiceRecorderOverlayProps): React.ReactEle
 
 /** Tap-mode review: play it back, discard it, or send it. */
 function VoiceReviewRow({ voice }: VoiceRecorderOverlayProps): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   const player = useAudioPlayer(voice.preview_uri ?? undefined);
   const status = useAudioPlayerStatus(player);
   const playing = status.playing;
@@ -153,6 +156,7 @@ function VoiceReviewRow({ voice }: VoiceRecorderOverlayProps): React.ReactElemen
 }
 
 function VoiceErrorRow({ voice }: VoiceRecorderOverlayProps): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.row} accessibilityLabel="Voice message error">
       <Text style={styles.error} numberOfLines={2}>
@@ -205,72 +209,73 @@ function usePulse(active: boolean): Animated.Value {
   return value;
 }
 
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.md,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    backgroundColor: THEME.surface,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: THEME.hairline,
-  },
-  dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: THEME.danger,
-  },
-  dot_cancel: {
-    backgroundColor: THEME.text_muted,
-  },
-  elapsed: {
-    ...TYPOGRAPHY.mono,
-    color: THEME.text_primary,
-    // Tabular-ish: a fixed width stops the row jittering as digits change.
-    minWidth: 48,
-  },
-  hint: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_muted,
-    flexShrink: 1,
-  },
-  hint_cancel: {
-    color: THEME.danger,
-  },
-  spacer: {
-    flex: 1,
-  },
-  icon_button: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  send_button: {
-    backgroundColor: THEME.surface_raised,
-  },
-  icon_cancel: {
-    fontSize: 16,
-    color: THEME.text_muted,
-  },
-  icon_play: {
-    fontSize: 15,
-    color: THEME.text_primary,
-  },
-  icon_stop: {
-    fontSize: 13,
-    color: THEME.danger,
-  },
-  icon_send: {
-    fontSize: 15,
-    color: THEME.text_primary,
-  },
-  error: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.danger,
-    flexShrink: 1,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.md,
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md,
+      backgroundColor: theme.surface,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.hairline,
+    },
+    dot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      backgroundColor: theme.danger,
+    },
+    dot_cancel: {
+      backgroundColor: theme.text_muted,
+    },
+    elapsed: {
+      ...TYPOGRAPHY.mono,
+      color: theme.text_primary,
+      // Tabular-ish: a fixed width stops the row jittering as digits change.
+      minWidth: 48,
+    },
+    hint: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_muted,
+      flexShrink: 1,
+    },
+    hint_cancel: {
+      color: theme.danger,
+    },
+    spacer: {
+      flex: 1,
+    },
+    icon_button: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    send_button: {
+      backgroundColor: theme.surface_raised,
+    },
+    icon_cancel: {
+      fontSize: 16,
+      color: theme.text_muted,
+    },
+    icon_play: {
+      fontSize: 15,
+      color: theme.text_primary,
+    },
+    icon_stop: {
+      fontSize: 13,
+      color: theme.danger,
+    },
+    icon_send: {
+      fontSize: 15,
+      color: theme.text_primary,
+    },
+    error: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.danger,
+      flexShrink: 1,
+    },
+  });

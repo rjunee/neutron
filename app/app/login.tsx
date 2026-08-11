@@ -88,7 +88,8 @@ import {
 import { enablePushForUser } from '../lib/push';
 import { LOCAL_DEV_SUGGESTION } from '../lib/server-url';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { tokenStorage } from '../lib/token-storage';
 
 import type { AuthProvider, AuthUser } from '../lib/auth';
@@ -120,6 +121,8 @@ async function tryEnablePush(base_url: string, token: string): Promise<void> {
 }
 
 export default function LoginScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user, setUser } = useAuthSession();
 
@@ -437,7 +440,7 @@ export default function LoginScreen() {
             accessibilityLabel="Email"
             testID="login-email"
             placeholder="you@example.com"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="email-address"
@@ -455,7 +458,7 @@ export default function LoginScreen() {
             accessibilityLabel="Password"
             testID="login-password"
             placeholder="Password"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             autoCapitalize="none"
             autoCorrect={false}
             secureTextEntry
@@ -477,7 +480,7 @@ export default function LoginScreen() {
             style={({ pressed }) => [styles.button, pressed && styles.pressed]}
           >
             {busy ? (
-              <ActivityIndicator color={THEME.background} />
+              <ActivityIndicator color={theme.background} />
             ) : (
               <Text style={styles.buttonText}>Sign in</Text>
             )}
@@ -497,7 +500,7 @@ export default function LoginScreen() {
       {/* Discovery progress — labelled, so it is never a bare spinner. */}
       {busy ? (
         <View style={styles.statusRow} testID="login-busy">
-          <ActivityIndicator color={THEME.text_secondary} />
+          <ActivityIndicator color={theme.text_secondary} />
           <Text style={styles.statusText}>{stage.label}</Text>
         </View>
       ) : null}
@@ -626,7 +629,7 @@ export default function LoginScreen() {
           accessibilityLabel="Access token"
           testID="login-dev-token"
           placeholder="Paste your access token"
-          placeholderTextColor={THEME.text_muted}
+          placeholderTextColor={theme.text_muted}
           autoCapitalize="none"
           autoCorrect={false}
           value={devToken}
@@ -650,7 +653,7 @@ export default function LoginScreen() {
           style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
         >
           {devBusy ? (
-            <ActivityIndicator color={THEME.text_secondary} />
+            <ActivityIndicator color={theme.text_secondary} />
           ) : (
             <Text style={styles.secondaryBtnText}>Connect directly</Text>
           )}
@@ -665,69 +668,70 @@ export default function LoginScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  scroll: { flex: 1, backgroundColor: THEME.background },
-  container: {
-    paddingHorizontal: 32,
-    paddingTop: 64,
-    paddingBottom: 32,
-    gap: 14,
-  },
-  brand: { alignItems: 'flex-start', marginBottom: 6 },
-  title: {
-    color: THEME.text_primary,
-    fontSize: 44,
-    fontWeight: '700',
-    letterSpacing: -1,
-  },
-  subtitle: { color: THEME.text_muted, fontSize: 17, marginTop: 8 },
-  card: {
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    gap: 10,
-  },
-  heading: { color: THEME.text_primary, fontSize: 16, fontWeight: '600' },
-  sub: { color: THEME.text_muted, fontSize: 13, lineHeight: 18 },
-  input: {
-    color: THEME.text_primary,
-    fontSize: 14,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: THEME.background,
-    fontFamily: 'Menlo',
-  },
-  button: {
-    height: 48,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.text_primary,
-  },
-  buttonText: { color: THEME.background, fontSize: 16, fontWeight: '600' },
-  secondaryBtn: {
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  secondaryBtnText: { color: THEME.text_secondary, fontSize: 15, fontWeight: '600' },
-  divider: {
-    color: THEME.text_muted,
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 4,
-  },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  statusText: { color: THEME.text_secondary, fontSize: 14 },
-  serverUrl: { color: THEME.text_secondary, fontSize: 13, fontFamily: 'Menlo' },
-  errorText: { color: THEME.danger, fontSize: 13, lineHeight: 18 },
-  pressed: { opacity: 0.7 },
-  footnote: { color: THEME.text_muted, fontSize: 12, textAlign: 'center' },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    scroll: { flex: 1, backgroundColor: theme.background },
+    container: {
+      paddingHorizontal: 32,
+      paddingTop: 64,
+      paddingBottom: 32,
+      gap: 14,
+    },
+    brand: { alignItems: 'flex-start', marginBottom: 6 },
+    title: {
+      color: theme.text_primary,
+      fontSize: 44,
+      fontWeight: '700',
+      letterSpacing: -1,
+    },
+    subtitle: { color: theme.text_muted, fontSize: 17, marginTop: 8 },
+    card: {
+      padding: 16,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      gap: 10,
+    },
+    heading: { color: theme.text_primary, fontSize: 16, fontWeight: '600' },
+    sub: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+    input: {
+      color: theme.text_primary,
+      fontSize: 14,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      backgroundColor: theme.background,
+      fontFamily: 'Menlo',
+    },
+    button: {
+      height: 48,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.text_primary,
+    },
+    buttonText: { color: theme.background, fontSize: 16, fontWeight: '600' },
+    secondaryBtn: {
+      height: 44,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    secondaryBtnText: { color: theme.text_secondary, fontSize: 15, fontWeight: '600' },
+    divider: {
+      color: theme.text_muted,
+      fontSize: 12,
+      textAlign: 'center',
+      marginTop: 4,
+    },
+    statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    statusText: { color: theme.text_secondary, fontSize: 14 },
+    serverUrl: { color: theme.text_secondary, fontSize: 13, fontFamily: 'Menlo' },
+    errorText: { color: theme.danger, fontSize: 13, lineHeight: 18 },
+    pressed: { opacity: 0.7 },
+    footnote: { color: theme.text_muted, fontSize: 12, textAlign: 'center' },
+  });

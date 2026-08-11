@@ -34,6 +34,17 @@ export interface MountedScreen {
   press(accessibilityLabel: string): Promise<void>;
   /** Find a node by `testID`. */
   byTestId(testId: string): HTMLElement | null;
+  /**
+   * Re-render the SAME root with a new element tree, then settle.
+   *
+   * For the cases where the thing under test is a change that arrives from
+   * OUTSIDE React — the OS switching colour scheme, a native module answering
+   * differently — and the component's job is to follow it. A fresh `mountScreen`
+   * cannot express that: it is a relaunch, not a change, and a provider that only
+   * read its input once at mount would pass it. Re-rendering in place is what
+   * `Appearance` does on the device.
+   */
+  rerender(element: ReactElement): Promise<void>;
   /** Let queued microtasks + effects settle. */
   settle(): Promise<void>;
   unmount(): void;
@@ -122,6 +133,12 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
     text: () => host.textContent ?? '',
     composer,
     settle,
+    async rerender(next: ReactElement): Promise<void> {
+      await act(async () => {
+        root.render(withComposerDock(next));
+      });
+      await settle();
+    },
     async type(value: string): Promise<void> {
       const input = composer();
       await act(async () => {

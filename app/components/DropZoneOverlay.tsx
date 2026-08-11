@@ -18,7 +18,8 @@
 import React, { useEffect, useRef } from 'react';
 import { Animated, StyleSheet, Text, View } from 'react-native';
 
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 export interface DropZoneOverlayProps {
   /** When false, the overlay is rendered at opacity 0 + pointerEvents none. */
@@ -30,6 +31,7 @@ export interface DropZoneOverlayProps {
 }
 
 export function DropZoneOverlay({ visible, filename, source_label }: DropZoneOverlayProps) {
+  const styles = useThemedStyles(makeStyles);
   const fade = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(fade, {
@@ -61,45 +63,46 @@ export function DropZoneOverlay({ visible, filename, source_label }: DropZoneOve
   );
 }
 
-const styles = StyleSheet.create({
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(10,10,10,0.62)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: SPACING.xl,
-    zIndex: 50,
-  },
-  frame: {
-    width: '100%',
-    maxWidth: 480,
-    borderRadius: 14,
-    borderWidth: 2,
-    borderStyle: 'dashed',
-    borderColor: THEME.accent,
-    backgroundColor: 'rgba(18,18,18,0.92)',
-    paddingHorizontal: SPACING.xl,
-    paddingVertical: SPACING.xl,
-    alignItems: 'center',
-    gap: SPACING.sm,
-  },
-  title: {
-    ...TYPOGRAPHY.h3,
-    color: THEME.text_primary,
-    textAlign: 'center',
-  },
-  filename: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_secondary,
-    textAlign: 'center',
-  },
-  hint: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_muted,
-    textAlign: 'center',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: 'rgba(10,10,10,0.62)',
+      justifyContent: 'center',
+      alignItems: 'center',
+      padding: SPACING.xl,
+      zIndex: 50,
+    },
+    frame: {
+      width: '100%',
+      maxWidth: 480,
+      borderRadius: 14,
+      borderWidth: 2,
+      borderStyle: 'dashed',
+      borderColor: theme.accent,
+      backgroundColor: 'rgba(18,18,18,0.92)',
+      paddingHorizontal: SPACING.xl,
+      paddingVertical: SPACING.xl,
+      alignItems: 'center',
+      gap: SPACING.sm,
+    },
+    title: {
+      ...TYPOGRAPHY.h3,
+      color: theme.text_primary,
+      textAlign: 'center',
+    },
+    filename: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_secondary,
+      textAlign: 'center',
+    },
+    hint: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_muted,
+      textAlign: 'center',
+    },
+  });

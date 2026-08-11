@@ -46,9 +46,12 @@ import {
 } from '../../../lib/reminder-state';
 import type { ReminderItem } from '../../../lib/reminders-client';
 import { useAuthSession } from '../../../lib/session';
-import { SPACING, THEME } from '../../../lib/theme';
+import { SPACING, type NeutronTheme } from '../../../lib/theme';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 
 export default function RemindersTab() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   // ISSUE #38 — read both `id` (project segment) and `reminder_id`
   // (deep-link query param) here. The reminder push payload's
   // `resolvePushRoute` emits `/projects/<id>/reminders?reminder_id=<rid>`
@@ -68,7 +71,7 @@ export default function RemindersTab() {
         style={[styles.container, styles.centered]}
         testID="reminders-bootstrapping"
       >
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -84,6 +87,7 @@ export default function RemindersTab() {
 }
 
 function RemindersTabBody({ highlightReminderId }: { highlightReminderId: string | null }) {
+  const styles = useThemedStyles(makeStyles);
   const {
     reminders,
     loading,
@@ -170,11 +174,12 @@ function RemindersTabBody({ highlightReminderId }: { highlightReminderId: string
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: THEME.background,
-    padding: SPACING.lg,
-  },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.background,
+      padding: SPACING.lg,
+    },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+  });

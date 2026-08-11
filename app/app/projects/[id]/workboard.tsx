@@ -60,7 +60,8 @@ import {
 import { loadAppConfig } from '../../../lib/config';
 import { railIdToScope } from '../../../lib/project-rail-view';
 import { useAuthSession } from '../../../lib/session';
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../../../lib/theme';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 import {
   ACTIVITY_POLL_MS,
   workActivityIndicator,
@@ -85,6 +86,8 @@ function makeDeviceId(): string {
 }
 
 export default function WorkBoardTab() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { id } = useLocalSearchParams<{ id: string }>();
   const railId = typeof id === 'string' ? id : '';
   const { user } = useAuthSession();
@@ -95,7 +98,7 @@ export default function WorkBoardTab() {
   if (user === null || railId.length === 0) {
     return (
       <View style={[styles.container, styles.centered]} testID="workboard-bootstrapping">
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -120,6 +123,8 @@ function WorkBoardBody({
   railId: string;
   token: string;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const config = useMemo(() => loadAppConfig(), []);
   const deviceId = useMemo(() => makeDeviceId(), []);
@@ -315,7 +320,7 @@ function WorkBoardBody({
         <WorkActivityStrip
           label={indicator.label}
           pulse={indicator.pulse}
-          tone={activityState === 'working' ? THEME.work : THEME.attention}
+          tone={activityState === 'working' ? theme.work : theme.attention}
         />
       ) : null}
 
@@ -323,7 +328,7 @@ function WorkBoardBody({
 
       {loading ? (
         <View style={[styles.centered, styles.grow]} testID="workboard-loading">
-          <ActivityIndicator color={THEME.text_secondary} />
+          <ActivityIndicator color={theme.text_secondary} />
         </View>
       ) : listError !== null ? (
         <View style={[styles.centered, styles.grow]} testID="workboard-error">
@@ -418,7 +423,7 @@ function WorkBoardBody({
         <TextInput
           style={styles.addInput}
           placeholder="Add something to do…"
-          placeholderTextColor={THEME.text_muted}
+          placeholderTextColor={theme.text_muted}
           value={newTitle}
           onChangeText={setNewTitle}
           onSubmitEditing={addItem}
@@ -465,6 +470,7 @@ function WorkActivityStrip({
   pulse: boolean;
   tone: string;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const [reduceMotion, setReduceMotion] = useState(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
@@ -528,80 +534,81 @@ function WorkActivityStrip({
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: THEME.background, padding: SPACING.md },
-  statusStrip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingBottom: SPACING.sm,
-  },
-  statusDot: { width: 8, height: 8, borderRadius: 4 },
-  statusText: {
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    letterSpacing: 0.3,
-  },
-  retryBtn: {
-    marginTop: SPACING.md,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    borderRadius: SPACING.sm,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface,
-  },
-  retryBtnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-  grow: { flex: 1 },
-  listContent: { paddingBottom: SPACING.xl },
-  addRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginTop: SPACING.sm },
-  addInput: {
-    flex: 1,
-    color: THEME.text_primary,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    borderRadius: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  addBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    borderRadius: SPACING.sm,
-    backgroundColor: THEME.link,
-  },
-  addBtnDisabled: { opacity: 0.4 },
-  addBtnText: { color: THEME.background, fontWeight: '600', fontSize: TYPOGRAPHY.body_small.fontSize },
-  pressed: { opacity: 0.7 },
-  error: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    marginBottom: SPACING.sm,
-  },
-  empty: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    textAlign: 'center',
-    paddingHorizontal: SPACING.xl,
-  },
-  completed: { marginTop: SPACING.md, borderTopWidth: 1, borderTopColor: THEME.hairline, paddingTop: SPACING.sm },
-  completedToggle: { paddingVertical: SPACING.sm, paddingHorizontal: SPACING.sm },
-  completedToggleText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  completedList: { maxHeight: SPACING.xxl * 8 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background, padding: SPACING.md },
+    statusStrip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      paddingBottom: SPACING.sm,
+    },
+    statusDot: { width: 8, height: 8, borderRadius: 4 },
+    statusText: {
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      letterSpacing: 0.3,
+    },
+    retryBtn: {
+      marginTop: SPACING.md,
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm,
+      borderRadius: SPACING.sm,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.surface,
+    },
+    retryBtnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+    },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+    grow: { flex: 1 },
+    listContent: { paddingBottom: SPACING.xl },
+    addRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginTop: SPACING.sm },
+    addInput: {
+      flex: 1,
+      color: theme.text_primary,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      borderRadius: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    addBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm,
+      borderRadius: SPACING.sm,
+      backgroundColor: theme.link,
+    },
+    addBtnDisabled: { opacity: 0.4 },
+    addBtnText: { color: theme.background, fontWeight: '600', fontSize: TYPOGRAPHY.body_small.fontSize },
+    pressed: { opacity: 0.7 },
+    error: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      marginBottom: SPACING.sm,
+    },
+    empty: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      textAlign: 'center',
+      paddingHorizontal: SPACING.xl,
+    },
+    completed: { marginTop: SPACING.md, borderTopWidth: 1, borderTopColor: theme.hairline, paddingTop: SPACING.sm },
+    completedToggle: { paddingVertical: SPACING.sm, paddingHorizontal: SPACING.sm },
+    completedToggleText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+    },
+    completedList: { maxHeight: SPACING.xxl * 8 },
+  });

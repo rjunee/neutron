@@ -30,7 +30,8 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { formatInviteExpiry, isValidInviteeEmail } from '../lib/invite-helpers';
 
 export interface InviteModalResult {
@@ -67,6 +68,8 @@ export function InviteModal({
   onCopy,
   nowMs,
 }: InviteModalProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [email, setEmail] = useState('');
   const [copied, setCopied] = useState(false);
 
@@ -111,7 +114,7 @@ export function InviteModal({
               <TextInput
                 accessibilityLabel="Invitee email"
                 placeholder="name@example.com"
-                placeholderTextColor={THEME.text_muted}
+                placeholderTextColor={theme.text_muted}
                 value={email}
                 onChangeText={setEmail}
                 style={styles.input}
@@ -152,7 +155,7 @@ export function InviteModal({
                   testID="invite-submit"
                 >
                   {submitting ? (
-                    <ActivityIndicator color={THEME.background} />
+                    <ActivityIndicator color={theme.background} />
                   ) : (
                     <Text style={[styles.btnText, styles.btnTextPrimary]}>Create link</Text>
                   )}
@@ -213,96 +216,97 @@ export function InviteModal({
 
 const LINK_MIN_HEIGHT = 56;
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.xl,
-  },
-  panel: {
-    width: '100%',
-    maxWidth: 380,
-    backgroundColor: THEME.surface,
-    borderRadius: DENSITY.bubble_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.lg,
-    gap: SPACING.sm,
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h2.fontSize,
-    lineHeight: TYPOGRAPHY.h2.lineHeight,
-    fontWeight: TYPOGRAPHY.h2.fontWeight,
-  },
-  subtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  input: {
-    color: THEME.text_primary,
-    backgroundColor: THEME.background,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  error: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  linkBox: {
-    backgroundColor: THEME.background,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    minHeight: LINK_MIN_HEIGHT,
-    justifyContent: 'center',
-  },
-  linkText: {
-    color: THEME.link,
-    fontSize: TYPOGRAPHY.mono.fontSize,
-    lineHeight: TYPOGRAPHY.mono.lineHeight,
-    fontFamily: TYPOGRAPHY.mono.fontFamily,
-  },
-  expiry: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    letterSpacing: 0.3,
-  },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  btn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: DENSITY.bubble_radius - 4,
-    minWidth: 96,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnPressed: { opacity: 0.78 },
-  btnDisabled: { opacity: 0.5 },
-  btnNeutral: { backgroundColor: THEME.surface_raised },
-  btnPrimary: { backgroundColor: THEME.text_primary },
-  btnText: {
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  btnTextNeutral: { color: THEME.text_secondary },
-  btnTextPrimary: { color: THEME.background },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.6)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.xl,
+    },
+    panel: {
+      width: '100%',
+      maxWidth: 380,
+      backgroundColor: theme.surface,
+      borderRadius: DENSITY.bubble_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.lg,
+      gap: SPACING.sm,
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h2.fontSize,
+      lineHeight: TYPOGRAPHY.h2.lineHeight,
+      fontWeight: TYPOGRAPHY.h2.fontWeight,
+    },
+    subtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    input: {
+      color: theme.text_primary,
+      backgroundColor: theme.background,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.composer_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm + 2,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    error: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    linkBox: {
+      backgroundColor: theme.background,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.composer_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm + 2,
+      minHeight: LINK_MIN_HEIGHT,
+      justifyContent: 'center',
+    },
+    linkText: {
+      color: theme.link,
+      fontSize: TYPOGRAPHY.mono.fontSize,
+      lineHeight: TYPOGRAPHY.mono.lineHeight,
+      fontFamily: TYPOGRAPHY.mono.fontFamily,
+    },
+    expiry: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      letterSpacing: 0.3,
+    },
+    actions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    btn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm + 2,
+      borderRadius: DENSITY.bubble_radius - 4,
+      minWidth: 96,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    btnPressed: { opacity: 0.78 },
+    btnDisabled: { opacity: 0.5 },
+    btnNeutral: { backgroundColor: theme.surface_raised },
+    btnPrimary: { backgroundColor: theme.text_primary },
+    btnText: {
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    btnTextNeutral: { color: theme.text_secondary },
+    btnTextPrimary: { color: theme.background },
+  });

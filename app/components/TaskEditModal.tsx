@@ -28,7 +28,8 @@
 import { useEffect, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import type { Task, UpdateTaskInput } from '../lib/tasks-client';
 import { ALPHA_TINTS } from './TaskRow';
 import { normalizeDueDate } from './TaskCreateModal';
@@ -52,6 +53,8 @@ export function TaskEditModal({
   onCancelTask,
   onDelete,
 }: TaskEditModalProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [dueDate, setDueDate] = useState('');
@@ -125,7 +128,7 @@ export function TaskEditModal({
             <TextInput
               accessibilityLabel="Description"
               placeholder="Description"
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               value={description}
               onChangeText={setDescription}
               style={[styles.input, styles.inputMultiline]}
@@ -136,7 +139,7 @@ export function TaskEditModal({
             <TextInput
               accessibilityLabel="Due date"
               placeholder="Due date (YYYY-MM-DD)"
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               value={dueDate}
               onChangeText={setDueDate}
               style={styles.input}
@@ -148,7 +151,7 @@ export function TaskEditModal({
             <TextInput
               accessibilityLabel="Priority"
               placeholder="Priority 0-3"
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               value={priority}
               onChangeText={setPriority}
               style={styles.input}
@@ -245,91 +248,92 @@ export function TaskEditModal({
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.xl,
-  },
-  scroll: { maxHeight: '100%', width: '100%' },
-  scrollContent: { alignItems: 'center', justifyContent: 'center', flexGrow: 1 },
-  panel: {
-    width: '100%',
-    maxWidth: 380,
-    backgroundColor: THEME.surface,
-    borderRadius: DENSITY.bubble_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.lg,
-    gap: SPACING.sm,
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h2.fontSize,
-    lineHeight: TYPOGRAPHY.h2.lineHeight,
-    fontWeight: TYPOGRAPHY.h2.fontWeight,
-  },
-  subtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    letterSpacing: 0.8,
-    fontWeight: '700',
-  },
-  input: {
-    color: THEME.text_primary,
-    backgroundColor: THEME.background,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  inputMultiline: { minHeight: 72, textAlignVertical: 'top' },
-  neutralRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: THEME.hairline,
-    marginVertical: SPACING.sm,
-  },
-  destructiveRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-    justifyContent: 'flex-start',
-  },
-  btn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: DENSITY.bubble_radius - 4,
-    minWidth: 88,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnPressed: { opacity: 0.78 },
-  btnDisabled: { opacity: 0.5 },
-  btnNeutral: { backgroundColor: THEME.surface_raised },
-  btnPrimary: { backgroundColor: THEME.text_primary },
-  btnDestructive: {
-    backgroundColor: THEME.danger + ALPHA_TINTS.light,
-    borderWidth: 1,
-    borderColor: THEME.danger + '5a',
-  },
-  btnText: {
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  btnTextNeutral: { color: THEME.text_secondary },
-  btnTextPrimary: { color: THEME.background },
-  btnTextDestructive: { color: THEME.danger },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.6)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.xl,
+    },
+    scroll: { maxHeight: '100%', width: '100%' },
+    scrollContent: { alignItems: 'center', justifyContent: 'center', flexGrow: 1 },
+    panel: {
+      width: '100%',
+      maxWidth: 380,
+      backgroundColor: theme.surface,
+      borderRadius: DENSITY.bubble_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.lg,
+      gap: SPACING.sm,
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h2.fontSize,
+      lineHeight: TYPOGRAPHY.h2.lineHeight,
+      fontWeight: TYPOGRAPHY.h2.fontWeight,
+    },
+    subtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      letterSpacing: 0.8,
+      fontWeight: '700',
+    },
+    input: {
+      color: theme.text_primary,
+      backgroundColor: theme.background,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.composer_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm + 2,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    inputMultiline: { minHeight: 72, textAlignVertical: 'top' },
+    neutralRow: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    divider: {
+      height: 1,
+      backgroundColor: theme.hairline,
+      marginVertical: SPACING.sm,
+    },
+    destructiveRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.sm,
+      justifyContent: 'flex-start',
+    },
+    btn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm + 2,
+      borderRadius: DENSITY.bubble_radius - 4,
+      minWidth: 88,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    btnPressed: { opacity: 0.78 },
+    btnDisabled: { opacity: 0.5 },
+    btnNeutral: { backgroundColor: theme.surface_raised },
+    btnPrimary: { backgroundColor: theme.text_primary },
+    btnDestructive: {
+      backgroundColor: theme.danger + ALPHA_TINTS.light,
+      borderWidth: 1,
+      borderColor: theme.danger + '5a',
+    },
+    btnText: {
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    btnTextNeutral: { color: theme.text_secondary },
+    btnTextPrimary: { color: theme.background },
+    btnTextDestructive: { color: theme.danger },
+  });

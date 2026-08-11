@@ -56,7 +56,8 @@ import { CodexCredentialClient, type CodexStatus } from '../lib/codex-credential
 const KIMI_SERVICE = 'kimi';
 import { loadAppConfig } from '../lib/config';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import {
   CoresClient,
   CoresClientError,
@@ -72,6 +73,8 @@ import {
 } from '../lib/integrations-view';
 
 export default function IntegrationsScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user, status } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
@@ -403,7 +406,7 @@ export default function IntegrationsScreen() {
   if (loading) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -503,7 +506,7 @@ export default function IntegrationsScreen() {
                   style={styles.keyInput}
                   testID={`integration-apikey-input-${row.id}`}
                   placeholder={row.connected ? 'Paste new key to rotate' : 'Paste API key'}
-                  placeholderTextColor={THEME.text_muted}
+                  placeholderTextColor={theme.text_muted}
                   secureTextEntry
                   autoCapitalize="none"
                   autoCorrect={false}
@@ -604,7 +607,7 @@ export default function IntegrationsScreen() {
                 style={styles.keyInput}
                 testID="codex-auth-input"
                 placeholder="Paste ~/.codex/auth.json"
-                placeholderTextColor={THEME.text_muted}
+                placeholderTextColor={theme.text_muted}
                 secureTextEntry
                 multiline
                 autoCapitalize="none"
@@ -661,7 +664,7 @@ export default function IntegrationsScreen() {
               style={styles.keyInput}
               testID="kimi-key-input"
               placeholder={kimiConnected ? 'Paste a new key to replace it' : 'Paste your Kimi API key'}
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               secureTextEntry
               autoCapitalize="none"
               autoCorrect={false}
@@ -727,7 +730,7 @@ export default function IntegrationsScreen() {
               style={styles.keyInput}
               testID="shared-cred-service"
               placeholder="Service (e.g. openai)"
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               autoCapitalize="none"
               autoCorrect={false}
               editable={!credBusy}
@@ -738,7 +741,7 @@ export default function IntegrationsScreen() {
               style={styles.keyInput}
               testID="shared-cred-token"
               placeholder="Paste the secret"
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               secureTextEntry
               autoCapitalize="none"
               autoCorrect={false}
@@ -750,7 +753,7 @@ export default function IntegrationsScreen() {
               style={styles.keyInput}
               testID="shared-cred-label"
               placeholder="Label (optional)"
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               editable={!credBusy}
               value={credLabel}
               onChangeText={setCredLabel}
@@ -787,120 +790,121 @@ function formatErr(err: unknown): string {
   return String(err);
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-  pressed: { opacity: 0.7 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingBottom: 12,
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  headerIconBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  headerIcon: { color: THEME.accent, fontSize: 18, fontWeight: '600' },
-  headerCenter: { flex: 1, paddingHorizontal: 4 },
-  headerSpacer: { width: 40 },
-  headerOverline: {
-    color: THEME.text_muted,
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  headerTitle: { color: THEME.text_primary, fontSize: 18, fontWeight: '700', marginTop: 1 },
-  body: { padding: 16, gap: 14 },
-  summary: { color: THEME.text_muted, fontSize: 12, fontWeight: '600' },
-  section: {
-    backgroundColor: THEME.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: 14,
-    gap: 12,
-  },
-  sectionTitle: { color: THEME.text_primary, fontSize: 16, fontWeight: '700' },
-  muted: { color: THEME.text_muted, fontSize: 13 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  rowText: { flex: 1, gap: 2 },
-  rowTitle: { color: THEME.text_primary, fontSize: 14, fontWeight: '600' },
-  rowStatus: { color: THEME.text_secondary, fontSize: 12 },
-  rowDetail: { color: THEME.text_muted, fontSize: 11, lineHeight: 15 },
-  // Monospace for the two inline shell/path references in the Codex guidance. A
-  // pasted path is easier to read as code, and `THEME` carries no mono token.
-  mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  requiredTag: { color: THEME.warning, fontSize: 11, fontWeight: '600' },
-  keyBlock: { gap: 10 },
-  keyControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  keyInput: {
-    flex: 1,
-    height: 40,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    color: THEME.text_primary,
-    fontSize: 13,
-  },
-  primaryBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: THEME.text_primary,
-  },
-  primaryBtnText: { color: THEME.background, fontSize: 13, fontWeight: '600' },
-  secondaryBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  secondaryBtnText: { color: THEME.text_secondary, fontSize: 13, fontWeight: '500' },
-  dangerBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.danger,
-  },
-  dangerBtnText: { color: THEME.danger, fontSize: 12, fontWeight: '600' },
-  btnDisabled: { opacity: 0.5 },
-  bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#7f1d1d',
-    fontSize: 12,
-  },
-  footnote: {
-    color: THEME.text_muted,
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 4,
-    lineHeight: 16,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background, paddingTop: 48 },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+    pressed: { opacity: 0.7 },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 8,
+      paddingBottom: 12,
+      gap: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    headerIconBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    headerIcon: { color: theme.accent, fontSize: 18, fontWeight: '600' },
+    headerCenter: { flex: 1, paddingHorizontal: 4 },
+    headerSpacer: { width: 40 },
+    headerOverline: {
+      color: theme.text_muted,
+      fontSize: 10,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+    },
+    headerTitle: { color: theme.text_primary, fontSize: 18, fontWeight: '700', marginTop: 1 },
+    body: { padding: 16, gap: 14 },
+    summary: { color: theme.text_muted, fontSize: 12, fontWeight: '600' },
+    section: {
+      backgroundColor: theme.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: 14,
+      gap: 12,
+    },
+    sectionTitle: { color: theme.text_primary, fontSize: 16, fontWeight: '700' },
+    muted: { color: theme.text_muted, fontSize: 13 },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+    },
+    rowText: { flex: 1, gap: 2 },
+    rowTitle: { color: theme.text_primary, fontSize: 14, fontWeight: '600' },
+    rowStatus: { color: theme.text_secondary, fontSize: 12 },
+    rowDetail: { color: theme.text_muted, fontSize: 11, lineHeight: 15 },
+    // Monospace for the two inline shell/path references in the Codex guidance. A
+    // pasted path is easier to read as code, and `THEME` carries no mono token.
+    mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+    requiredTag: { color: theme.warning, fontSize: 11, fontWeight: '600' },
+    keyBlock: { gap: 10 },
+    keyControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    keyInput: {
+      flex: 1,
+      height: 40,
+      borderRadius: 8,
+      paddingHorizontal: 10,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      color: theme.text_primary,
+      fontSize: 13,
+    },
+    primaryBtn: {
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 10,
+      backgroundColor: theme.text_primary,
+    },
+    primaryBtnText: { color: theme.background, fontSize: 13, fontWeight: '600' },
+    secondaryBtn: {
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 8,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    secondaryBtnText: { color: theme.text_secondary, fontSize: 13, fontWeight: '500' },
+    dangerBtn: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 8,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.danger,
+    },
+    dangerBtnText: { color: theme.danger, fontSize: 12, fontWeight: '600' },
+    btnDisabled: { opacity: 0.5 },
+    bannerError: {
+      backgroundColor: '#3b1212',
+      color: '#fecaca',
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: '#7f1d1d',
+      fontSize: 12,
+    },
+    footnote: {
+      color: theme.text_muted,
+      fontSize: 12,
+      textAlign: 'center',
+      marginTop: 4,
+      lineHeight: 16,
+    },
+  });

@@ -44,7 +44,8 @@
 import { useState } from 'react';
 import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/composer-constants';
+import { useThemedStyles } from '../lib/theme-context';
 
 export interface ProjectHeaderProps {
   /** Display name rendered as the header title. */
@@ -71,6 +72,7 @@ export function ProjectHeader({
   onOpenSettings,
   onInvite,
 }: ProjectHeaderProps) {
+  const styles = useThemedStyles(makeStyles);
   const [menuOpen, setMenuOpen] = useState(false);
   /** Close first, THEN act: the menu must not survive the navigation it triggered. */
   const choose = (run: () => void) => () => {
@@ -209,94 +211,95 @@ const LOGO_SIZE = 26;
  */
 const HEADER_TOP_INSET = 44;
 
-const styles = StyleSheet.create({
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.sm,
-    // Recovered vertical space, half of the owner's ask. The other half was the
-    // overline's whole line, now gone.
-    paddingBottom: SPACING.xs,
-    gap: SPACING.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-    backgroundColor: THEME.background,
-    minHeight: ICON_HIT_SIZE,
-  },
-  iconBtn: {
-    width: ICON_BTN_SIZE,
-    height: ICON_BTN_SIZE,
-    borderRadius: DENSITY.composer_radius,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  iconGlyph: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  invitePill: {
-    height: ICON_BTN_SIZE,
-    paddingHorizontal: SPACING.md,
-    borderRadius: DENSITY.chip_radius,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  inviteLabel: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '600',
-  },
-  logo: {
-    width: LOGO_SIZE,
-    height: LOGO_SIZE,
-    borderRadius: 6,
-  },
-  center: { flex: 1, paddingHorizontal: SPACING.xs },
-  /**
-   * Full-screen dismiss target. Inside the Modal it can simply fill the window —
-   * the previous `bottom: -2000` existed only to escape the header's box, which is
-   * the hack the Modal removes.
-   */
-  scrim: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  menu: {
-    position: 'absolute',
-    // Anchored to the window now, not to the header, so it lands just under the
-    // control. The header's own height plus a hair — kept as a named sum rather
-    // than a magic number so it tracks the button size.
-    top: HEADER_TOP_INSET + ICON_BTN_SIZE + SPACING.xs,
-    right: SPACING.sm,
-    minWidth: 180,
-    borderRadius: DENSITY.composer_radius,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    overflow: 'hidden',
-  },
-  menuRow: {
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-  },
-  menuLabel: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  menuDivider: { height: 1, backgroundColor: THEME.hairline },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.sm,
+      // Recovered vertical space, half of the owner's ask. The other half was the
+      // overline's whole line, now gone.
+      paddingBottom: SPACING.xs,
+      gap: SPACING.sm,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+      backgroundColor: theme.background,
+      minHeight: ICON_HIT_SIZE,
+    },
+    iconBtn: {
+      width: ICON_BTN_SIZE,
+      height: ICON_BTN_SIZE,
+      borderRadius: DENSITY.composer_radius,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    iconGlyph: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    invitePill: {
+      height: ICON_BTN_SIZE,
+      paddingHorizontal: SPACING.md,
+      borderRadius: DENSITY.chip_radius,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    inviteLabel: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '600',
+    },
+    logo: {
+      width: LOGO_SIZE,
+      height: LOGO_SIZE,
+      borderRadius: 6,
+    },
+    center: { flex: 1, paddingHorizontal: SPACING.xs },
+    /**
+     * Full-screen dismiss target. Inside the Modal it can simply fill the window —
+     * the previous `bottom: -2000` existed only to escape the header's box, which is
+     * the hack the Modal removes.
+     */
+    scrim: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    menu: {
+      position: 'absolute',
+      // Anchored to the window now, not to the header, so it lands just under the
+      // control. The header's own height plus a hair — kept as a named sum rather
+      // than a magic number so it tracks the button size.
+      top: HEADER_TOP_INSET + ICON_BTN_SIZE + SPACING.xs,
+      right: SPACING.sm,
+      minWidth: 180,
+      borderRadius: DENSITY.composer_radius,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      overflow: 'hidden',
+    },
+    menuRow: {
+      paddingVertical: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+    },
+    menuLabel: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    menuDivider: { height: 1, backgroundColor: theme.hairline },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    pressed: { opacity: 0.7 },
+  });

@@ -40,7 +40,8 @@ import {
   describeInsecureOrigin,
   normalizeServerUrl,
 } from '../lib/server-url';
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { tokenStorage } from '../lib/token-storage';
 
 export interface ServerSavedResult {
@@ -74,6 +75,8 @@ export function ServerConnectForm({
   onSaved,
   onCancel,
 }: ServerConnectFormProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [url, setUrl] = useState(initialUrl ?? '');
   const [authUrl, setAuthUrl] = useState(initialAuthUrl ?? '');
   const [busy, setBusy] = useState(false);
@@ -124,7 +127,7 @@ export function ServerConnectForm({
         accessibilityLabel="Neutron server address"
         testID="server-connect-url"
         placeholder="https://neutron.example.com"
-        placeholderTextColor={THEME.text_muted}
+        placeholderTextColor={theme.text_muted}
         autoCapitalize="none"
         autoCorrect={false}
         keyboardType="url"
@@ -144,7 +147,7 @@ export function ServerConnectForm({
         accessibilityLabel="Identity service address (optional)"
         testID="server-connect-auth-url"
         placeholder="Identity service (optional)"
-        placeholderTextColor={THEME.text_muted}
+        placeholderTextColor={theme.text_muted}
         autoCapitalize="none"
         autoCorrect={false}
         keyboardType="url"
@@ -177,7 +180,7 @@ export function ServerConnectForm({
         style={({ pressed }) => [styles.button, pressed && styles.pressed]}
       >
         {busy ? (
-          <ActivityIndicator color={THEME.background} />
+          <ActivityIndicator color={theme.background} />
         ) : (
           <Text style={styles.buttonText}>{submitLabel ?? 'Connect'}</Text>
         )}
@@ -199,39 +202,40 @@ export function ServerConnectForm({
   );
 }
 
-const styles = StyleSheet.create({
-  form: { gap: 10 },
-  input: {
-    color: THEME.text_primary,
-    fontSize: 14,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: THEME.background,
-    fontFamily: 'Menlo',
-  },
-  hint: { color: THEME.text_muted, fontSize: 12, lineHeight: 16 },
-  warning: { color: THEME.warning, fontSize: 12, lineHeight: 17 },
-  error: { color: THEME.danger, fontSize: 13, lineHeight: 18 },
-  button: {
-    height: 48,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.text_primary,
-  },
-  buttonText: { color: THEME.background, fontSize: 16, fontWeight: '600' },
-  secondaryButton: {
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  secondaryButtonText: { color: THEME.text_secondary, fontSize: 15, fontWeight: '600' },
-  pressed: { opacity: 0.7 },
-  footnote: { color: THEME.text_muted, fontSize: 12, textAlign: 'center' },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    form: { gap: 10 },
+    input: {
+      color: theme.text_primary,
+      fontSize: 14,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      borderRadius: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      backgroundColor: theme.background,
+      fontFamily: 'Menlo',
+    },
+    hint: { color: theme.text_muted, fontSize: 12, lineHeight: 16 },
+    warning: { color: theme.warning, fontSize: 12, lineHeight: 17 },
+    error: { color: theme.danger, fontSize: 13, lineHeight: 18 },
+    button: {
+      height: 48,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.text_primary,
+    },
+    buttonText: { color: theme.background, fontSize: 16, fontWeight: '600' },
+    secondaryButton: {
+      height: 44,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    secondaryButtonText: { color: theme.text_secondary, fontSize: 15, fontWeight: '600' },
+    pressed: { opacity: 0.7 },
+    footnote: { color: theme.text_muted, fontSize: 12, textAlign: 'center' },
+  });

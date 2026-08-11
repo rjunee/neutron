@@ -45,9 +45,12 @@ import {
   useTaskState,
 } from '../../../lib/task-state';
 import type { Task, UpdateTaskInput } from '../../../lib/tasks-client';
-import { SPACING, THEME } from '../../../lib/theme';
+import { SPACING, type NeutronTheme } from '../../../lib/theme';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 
 export default function TasksTab() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   // Argus r2 BLOCKER B2 (PR #276) — read both `id` (project segment)
   // and `task_id` (deep-link query param) here. The chat
   // `task:open:<id>` postback emits `/projects/<id>/tasks?task_id=<task_id>`;
@@ -62,7 +65,7 @@ export default function TasksTab() {
   if (user === null || project_id.length === 0) {
     return (
       <View style={[styles.container, styles.centered]} testID="tasks-bootstrapping">
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -75,6 +78,7 @@ export default function TasksTab() {
 }
 
 function TasksTabBody({ highlightTaskId }: { highlightTaskId: string | null }) {
+  const styles = useThemedStyles(makeStyles);
   const {
     tasks,
     loading,
@@ -172,11 +176,12 @@ function TasksTabBody({ highlightTaskId }: { highlightTaskId: string | null }) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: THEME.background,
-    padding: SPACING.lg,
-  },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.background,
+      padding: SPACING.lg,
+    },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+  });

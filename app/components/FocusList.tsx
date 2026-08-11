@@ -43,7 +43,8 @@ import type {
   FocusStateError,
 } from '../lib/focus-state-reducer';
 import { ALPHA_TINTS } from '../lib/task-row-formatters';
-import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { BREAKPOINTS, DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { FocusBucketSection } from './FocusBucketSection';
 import { FocusHeroCard } from './FocusHeroCard';
 
@@ -93,6 +94,8 @@ export function FocusList({
   onDismissError,
   onProjectsLink,
 }: FocusListProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { width } = useWindowDimensions();
   const wideWeb = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
   const contentStyle = wideWeb
@@ -108,7 +111,7 @@ export function FocusList({
   if (showInitialLoader) {
     return (
       <View style={styles.centered} testID="focus-loading">
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -168,7 +171,7 @@ export function FocusList({
               <RefreshControl
                 refreshing={refreshing}
                 onRefresh={onRefresh}
-                tintColor={THEME.text_secondary}
+                tintColor={theme.text_secondary}
               />
             )
           }
@@ -215,7 +218,7 @@ export function FocusList({
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onRefresh}
-            tintColor={THEME.text_secondary}
+            tintColor={theme.text_secondary}
           />
         )
       }
@@ -242,115 +245,116 @@ export function FocusList({
   );
 }
 
-const styles = StyleSheet.create({
-  listScroll: { flex: 1 },
-  listContent: {
-    padding: SPACING.lg,
-    gap: SPACING.lg,
-    paddingBottom: SPACING.xxl,
-  },
-  listContentWide: {
-    maxWidth: CONTENT_MAX_WIDTH,
-    alignSelf: 'center',
-    width: '100%',
-  },
-  centered: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  errorWrap: {
-    padding: SPACING.lg,
-  },
-  errorBanner: {
-    padding: SPACING.lg,
-    borderRadius: DENSITY.banner_radius,
-    backgroundColor: THEME.danger + ALPHA_TINTS.light,
-    borderWidth: 1,
-    borderColor: THEME.danger + ALPHA_TINTS.border,
-    gap: SPACING.sm,
-  },
-  errorTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h4.fontSize,
-    lineHeight: TYPOGRAPHY.h4.lineHeight,
-    fontWeight: TYPOGRAPHY.h4.fontWeight,
-  },
-  errorBody: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  errorActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  retryBtn: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: SPACING.md + 2,
-    paddingVertical: SPACING.xs + 2,
-    backgroundColor: THEME.text_primary,
-    borderRadius: DENSITY.banner_radius + 2,
-  },
-  retryBtnText: {
-    color: THEME.background,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '700',
-  },
-  dismissBtn: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: SPACING.md + 2,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: DENSITY.banner_radius + 2,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  dismissBtnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '600',
-  },
-  btnPressed: { opacity: 0.78 },
-  emptyWrap: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING.sm,
-    padding: SPACING.xxl,
-  },
-  emptyTitle: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  emptyBody: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    textAlign: 'center',
-  },
-  emptyLink: {
-    marginTop: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs + 2,
-  },
-  emptyLinkText: {
-    color: THEME.link,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '600',
-  },
-  footnote: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    textAlign: 'center',
-    marginTop: SPACING.lg,
-    paddingHorizontal: SPACING.lg,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    listScroll: { flex: 1 },
+    listContent: {
+      padding: SPACING.lg,
+      gap: SPACING.lg,
+      paddingBottom: SPACING.xxl,
+    },
+    listContentWide: {
+      maxWidth: CONTENT_MAX_WIDTH,
+      alignSelf: 'center',
+      width: '100%',
+    },
+    centered: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    errorWrap: {
+      padding: SPACING.lg,
+    },
+    errorBanner: {
+      padding: SPACING.lg,
+      borderRadius: DENSITY.banner_radius,
+      backgroundColor: theme.danger + ALPHA_TINTS.light,
+      borderWidth: 1,
+      borderColor: theme.danger + ALPHA_TINTS.border,
+      gap: SPACING.sm,
+    },
+    errorTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h4.fontSize,
+      lineHeight: TYPOGRAPHY.h4.lineHeight,
+      fontWeight: TYPOGRAPHY.h4.fontWeight,
+    },
+    errorBody: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    errorActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    retryBtn: {
+      alignSelf: 'flex-start',
+      paddingHorizontal: SPACING.md + 2,
+      paddingVertical: SPACING.xs + 2,
+      backgroundColor: theme.text_primary,
+      borderRadius: DENSITY.banner_radius + 2,
+    },
+    retryBtnText: {
+      color: theme.background,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '700',
+    },
+    dismissBtn: {
+      alignSelf: 'flex-start',
+      paddingHorizontal: SPACING.md + 2,
+      paddingVertical: SPACING.xs + 2,
+      borderRadius: DENSITY.banner_radius + 2,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    dismissBtnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '600',
+    },
+    btnPressed: { opacity: 0.78 },
+    emptyWrap: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: SPACING.sm,
+      padding: SPACING.xxl,
+    },
+    emptyTitle: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    emptyBody: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      textAlign: 'center',
+    },
+    emptyLink: {
+      marginTop: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs + 2,
+    },
+    emptyLinkText: {
+      color: theme.link,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '600',
+    },
+    footnote: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      textAlign: 'center',
+      marginTop: SPACING.lg,
+      paddingHorizontal: SPACING.lg,
+    },
+  });

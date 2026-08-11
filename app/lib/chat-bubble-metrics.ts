@@ -39,7 +39,9 @@
  * doubled cap produced.
  */
 
-import { THEME } from './theme';
+import type { NeutronTheme } from './theme';
+
+
 
 /**
  * The ONE cap, as a number, for arithmetic + assertions.
@@ -191,7 +193,8 @@ export interface BubbleTone {
 }
 
 /**
- * The owner's own bubble: a filled BLUE capsule with white content.
+ * The owner's own bubble: a filled BLUE capsule with white content, in BOTH themes
+ * (owner decision 2026-08-10 — see NEUTRON_BLUE in `lib/theme.ts`).
  *
  * It was `accent` on `background` — a near-white capsule with near-black text,
  * which is what the owner was looking at when he said *"make messages from me in
@@ -204,13 +207,20 @@ export interface BubbleTone {
  * talking — so a saturated fill here is the accent earning its keep by being rare,
  * and it gives the eye an instant anchor for "where did I last speak".
  */
-export const USER_BUBBLE_TONE: BubbleTone = Object.freeze({
-  ground: THEME.user_bubble,
-  ink: THEME.user_ink,
-});
+export function userBubbleTone(theme: NeutronTheme): BubbleTone {
+  return { ground: theme.user_bubble, ink: theme.user_ink };
+}
 
-/** The agent's bubble: a raised dark surface with light content. */
-export const AGENT_BUBBLE_TONE: BubbleTone = Object.freeze({
-  ground: THEME.surface_raised,
-  ink: THEME.text_primary,
-});
+/**
+ * The agent's bubble: the neutral raised surface with primary content — a dark
+ * grey in dark, and iMessage's `#e9e9eb` grey in light.
+ *
+ * A FUNCTION of the palette, not a frozen constant. As constants these two were
+ * captured at import, and the outgoing bubble in particular would then have kept
+ * dark-mode values on a light page — the single most visible object in the
+ * product, wrong. There is no `BubbleTone` that is correct for both themes, so
+ * there is nothing to freeze.
+ */
+export function agentBubbleTone(theme: NeutronTheme): BubbleTone {
+  return { ground: theme.surface_raised, ink: theme.text_primary };
+}

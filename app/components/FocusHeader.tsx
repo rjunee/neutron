@@ -25,7 +25,8 @@
 
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 export interface FocusHeaderProps {
   refreshing: boolean;
@@ -40,6 +41,8 @@ export function FocusHeader({
   onProjectsLink,
   onSignOut,
 }: FocusHeaderProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.header} testID="focus-header">
       <View style={styles.intro}>
@@ -60,7 +63,7 @@ export function FocusHeader({
         >
           {refreshing ? (
             <ActivityIndicator
-              color={THEME.text_secondary}
+              color={theme.text_secondary}
               size="small"
               testID="focus-refresh-busy"
             />
@@ -91,54 +94,55 @@ export function FocusHeader({
   );
 }
 
-const styles = StyleSheet.create({
-  header: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-    gap: SPACING.md,
-  },
-  intro: { flex: 1, gap: SPACING.xs / 2 },
-  overline: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h1.fontSize,
-    lineHeight: TYPOGRAPHY.h1.lineHeight,
-    fontWeight: TYPOGRAPHY.h1.fontWeight,
-  },
-  actions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs,
-  },
-  btn: {
-    paddingHorizontal: SPACING.md - 2,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface_raised,
-    minWidth: 56,
-    minHeight: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnPressed: { opacity: 0.78 },
-  btnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    header: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      paddingHorizontal: SPACING.lg,
+      paddingBottom: SPACING.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+      gap: SPACING.md,
+    },
+    intro: { flex: 1, gap: SPACING.xs / 2 },
+    overline: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h1.fontSize,
+      lineHeight: TYPOGRAPHY.h1.lineHeight,
+      fontWeight: TYPOGRAPHY.h1.fontWeight,
+    },
+    actions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.xs,
+    },
+    btn: {
+      paddingHorizontal: SPACING.md - 2,
+      paddingVertical: SPACING.xs + 2,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.surface_raised,
+      minWidth: 56,
+      minHeight: 32,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    btnPressed: { opacity: 0.78 },
+    btnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+  });

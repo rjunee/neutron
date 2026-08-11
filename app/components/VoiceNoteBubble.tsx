@@ -82,7 +82,8 @@ import { Platform, Pressable, StyleSheet, Text, View, type LayoutChangeEvent } f
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 
 import { resolveAttachmentSource, type AttachmentAuthCtx } from '../lib/attachment-url';
-import { AGENT_BUBBLE_TONE, type BubbleTone } from '../lib/chat-bubble-metrics';
+import { agentBubbleTone, type BubbleTone } from '../lib/chat-bubble-metrics';
+import { useTheme } from '../lib/theme-context';
 import {
   claimVoicePlayback,
   formatClipLength,
@@ -249,8 +250,14 @@ export interface VoiceNoteBubbleProps {
 export function VoiceNoteBubble({
   url,
   auth,
-  tone = AGENT_BUBBLE_TONE,
+  tone,
 }: VoiceNoteBubbleProps): React.ReactElement {
+  // The default is resolved from the ACTIVE palette, so a player rendered without
+  // an explicit tone still matches the bubble it is sitting in after a theme flip.
+  // It cannot be a default PARAMETER any more: that expression is evaluated per
+  // render but read a frozen module constant, which is the capture this removes.
+  const theme = useTheme();
+  const resolvedTone = tone ?? agentBubbleTone(theme);
   const resolved = useMemo(() => resolveAttachmentSource(url, auth), [url, auth]);
   const bearer = resolved.headers?.Authorization;
   // RN-web plays through an <audio> element, which drops per-source headers —
@@ -449,7 +456,7 @@ export function VoiceNoteBubble({
         style={({ pressed }) => [styles.row, pressed && styles.pressed]}
         testID="voice-note-player"
       >
-        <Text style={[styles.failure, { color: tone.ink }]} numberOfLines={1}>
+        <Text style={[styles.failure, { color: resolvedTone.ink }]} numberOfLines={1}>
           ⟳ Voice message unavailable — tap to retry
         </Text>
       </Pressable>
@@ -473,12 +480,12 @@ export function VoiceNoteBubble({
         accessibilityLabel={playbackControlLabel(playing, length_label)}
         style={({ pressed }) => [
           styles.control,
-          { backgroundColor: tone.ink },
+          { backgroundColor: resolvedTone.ink },
           pressed && styles.pressed,
         ]}
         testID="voice-note-toggle"
       >
-        {playing ? <PauseMark color={tone.ground} /> : <PlayMark color={tone.ground} />}
+        {playing ? <PauseMark color={resolvedTone.ground} /> : <PlayMark color={resolvedTone.ground} />}
       </Pressable>
       <Pressable
         onPress={(e) => seek(e.nativeEvent.locationX)}
@@ -490,15 +497,15 @@ export function VoiceNoteBubble({
         style={styles.track_touch}
       >
         <View style={styles.track}>
-          <View style={[styles.track_rest, { backgroundColor: tone.ink }]} />
+          <View style={[styles.track_rest, { backgroundColor: resolvedTone.ink }]} />
           <View
-            style={[styles.track_fill, { backgroundColor: tone.ink, width: `${fraction * 100}%` }]}
+            style={[styles.track_fill, { backgroundColor: resolvedTone.ink, width: `${fraction * 100}%` }]}
             testID="voice-note-progress"
           />
         </View>
       </Pressable>
       <Text
-        style={[styles.time, { color: tone.ink }]}
+        style={[styles.time, { color: resolvedTone.ink }]}
         numberOfLines={1}
         accessibilityLabel={
           length_label === UNKNOWN_LENGTH_LABEL ? 'Voice message length loading' : undefined

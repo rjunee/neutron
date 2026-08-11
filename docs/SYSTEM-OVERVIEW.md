@@ -697,6 +697,67 @@ deletes a forged pack.
   run no tick loop could ever advance. Wiring is pinned end-to-end over a live
   socket by `open/__tests__/open-code-command-wiring.test.ts`.
 
+## Mobile theming — two palettes, one path (`app/lib/theme.ts`, `app/lib/theme-context.tsx`)
+
+The app had ONE frozen palette and every component captured its colours at module
+load, inside `StyleSheet.create({...})`. The owner asked for light mode, so there
+are now two palettes and a live selection seam between them.
+
+**The palettes.** `app/lib/theme.ts` exports `DARK_THEME` and `LIGHT_THEME`, both
+`NeutronTheme`, plus `DARK_PHASE` / `LIGHT_PHASE` for the work-phase tag ramp and
+`paletteFor(scheme)` to pick a `NeutronPalette` (`{ scheme, colors, phase }`). There
+is no `THEME` constant any more — it was DELETED rather than aliased, so a component
+that still tries to capture a fixed palette is a compile error instead of a dark
+card in a light screen. `app/lib/composer-constants.ts` re-exports the
+theme-independent tokens (spacing, radii, motion, type) and deliberately does NOT
+re-export a palette; passing `THEME` through that barrel is how six components ended
+up capturing dark without ever naming `lib/theme` in their imports.
+
+**The seam.** `app/lib/theme-context.tsx` owns `ThemeProvider` + `useTheme()`
+(colours), `usePhase()` (phase ramp), `useThemeState()` (the whole state, for the
+control) and `useThemedStyles(factory)`. A component declares a module-scope
+`const makeStyles = (theme: NeutronTheme) => StyleSheet.create({...})` and calls
+`useThemedStyles(makeStyles)` in its body; the result is memoised per palette
+object, and both palettes are frozen singletons, so each sheet is built at most
+twice for the life of the process. Roughly 70 components follow that shape.
+
+**The preference.** `ThemePreference` is `light | dark | system`, defaulting to
+`system`, persisted under `neutron-theme` (localStorage on web, AsyncStorage on
+native — same key the web chat uses). `resolveTheme(pref, osScheme)` is the one
+rule: an explicit choice is an OVERRIDE and is never shadowed by the OS; `system`
+follows `useColorScheme()`, which is already a subscription, so flipping the OS
+theme re-themes a foregrounded app. `app/app.json`'s long-standing
+`"userInterfaceStyle": "automatic"` is finally true rather than aspirational.
+
+**Boot order.** `RootLayout` renders `DiagnosticsErrorBoundary` → `ThemeProvider` →
+`RootLayoutShell`, and the boot gate waits on `hydrated` (the storage read) as well
+as the server-config hydrate. That is mobile's equivalent of the web's pre-paint
+inline script: without it the first screen paints the OS-resolved theme and snaps to
+the owner's override a frame later. The error boundary is OUTSIDE the provider on
+purpose — it is the one screen that must render when theming is what broke, and
+`useTheme()` answers with the dark palette outside a provider rather than throwing.
+
+**The control.** `app/components/ThemeControl.tsx` is a three-way segmented control
+in Settings (above the navigation rows, because it changes what all of them look
+like). Each segment is a real `Pressable` with an accessible name, so the probe in
+`app/__tests__/theme-preference.test.tsx` PRESSES it and then reads the resolved
+`backgroundColor` a component received — not the tree.
+
+**Contrast is a gate.** `app/__tests__/contrast.test.ts` computes WCAG ratios over
+FOUR surfaces (mobile light/dark from these palettes, web light/dark parsed out of
+`landing/chat-react.html`), for every ground a token can land on, including
+`surface_raised` — the agent bubble, which markdown renders inside. Text tokens
+must clear 4.5:1; dots and meter bars clear the 3:1 non-text bar; `attention` in
+light is the ONE documented exemption (owner decision FIX #345 fixed its hue).
+`contrast-gate-selfcheck.test.ts` feeds the gate the pre-2026-08-10 values and
+asserts it still calls them failures, so the gate cannot rot into a pass-everything.
+`app/__tests__/no-captured-palette.test.ts` is the one-missed-component guard.
+
+**Known gap.** ~300 raw hex literals remain in files that never used the palette at
+all — the admin panes (`app/features/admin/*`), the Cores screens, the docs tab.
+Those surfaces still render dark in light mode. The guard test freezes the count per
+file so it cannot grow, and a fix can only lower it; closing it is a follow-up lane.
+
 ## Mobile app boot + server URL (ISSUES #385) — `app/lib/server-url.ts`, `app/lib/config.ts`
 
 The Expo app is a client of the owner's OWN instance (a box on their LAN, a

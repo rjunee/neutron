@@ -74,9 +74,10 @@ import {
   RenameModal,
   RevertConfirmModal,
   TreeBranch,
-  styles,
+  makeStyles,
 } from '../../../features/docs/docs-ui';
 import { DocHistoryPane, DocViewerPane } from '../../../features/docs/docs-panes';
+import { useThemedStyles } from '../../../lib/theme-context';
 import { useDocTree } from '../../../features/docs/use-doc-tree';
 import { useDocFile } from '../../../features/docs/use-doc-file';
 import { useDocHistory } from '../../../features/docs/use-doc-history';
@@ -84,6 +85,7 @@ import { useDocMutations } from '../../../features/docs/use-doc-mutations';
 import { useDeepLinkAnchor } from '../../../features/docs/use-deep-link-anchor';
 
 export default function DocsTab() {
+  const styles = useThemedStyles(makeStyles);
   const {
     id,
     path: pathParam,

@@ -40,7 +40,8 @@ import {
   View,
 } from 'react-native';
 
-import { MAX_USER_MESSAGE_LEN_CLIENT, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { MAX_USER_MESSAGE_LEN_CLIENT, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/composer-constants';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 export interface ComposerAttachment {
   /** Local URI (file:// on native, blob:/data: on web). */
@@ -301,6 +302,7 @@ const ARROW_ARM_DX_PT = (ARROW_ARM_PT / 2) * Math.sin(ARROW_ANGLE_RAD);
 const ARROW_ARM_DY_PT = (ARROW_ARM_PT / 2) * Math.cos(ARROW_ANGLE_RAD);
 
 function SendArrow({ color }: { color: string }): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.arrowGlyph} testID="composer-send-arrow">
       <View style={[styles.arrowShaft, { backgroundColor: color }]} />
@@ -320,6 +322,7 @@ const PLUS_STROKE_PT = 2;
 const PLUS_ARM_PT = 13.5;
 
 function PlusGlyph({ color }: { color: string }): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.plusGlyph} testID="composer-plus-glyph">
       <View style={[styles.plusBarH, { backgroundColor: color }]} />
@@ -345,6 +348,7 @@ function PlusGlyph({ color }: { color: string }): React.ReactElement {
 const MIC_BOX_PT = 16;
 
 function MicGlyph({ color }: { color: string }): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.micGlyph} testID="composer-mic-glyph">
       <View style={[styles.micHead, { backgroundColor: color }]} />
@@ -422,6 +426,8 @@ export function InputComposer({
   onVoiceHoldMove,
   onVoiceHoldEnd,
 }: InputComposerProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [draft, setDraft] = useState(initial_draft ?? '');
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const inputRef = useRef<TextInput | null>(null);
@@ -761,7 +767,7 @@ export function InputComposer({
           style={({ pressed }) => [styles.leadingBtn, pressed && styles.pressed]}
           testID="composer-attach"
         >
-          <PlusGlyph color={THEME.text_secondary} />
+          <PlusGlyph color={theme.text_secondary} />
         </Pressable>
         {/* THE FIELD — an OUTLINED pill: a hairline stroke over the bar's own
             background, not a filled grey capsule. The action control sits INSIDE
@@ -773,12 +779,12 @@ export function InputComposer({
             accessibilityLabel="Compose message"
             style={styles.input}
             placeholder={placeholder}
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             // The caret takes the app's own accent. `cursorColor` is the Android
             // property; `selectionColor` covers both platforms. NOT iMessage
             // blue — this app's accent is the tint everywhere else in it.
-            selectionColor={THEME.accent}
-            cursorColor={THEME.accent}
+            selectionColor={theme.accent}
+            cursorColor={theme.accent}
             value={draft}
             editable={!disabled && !sending}
             onChangeText={(t) => setDraft(t.slice(0, MAX_USER_MESSAGE_LEN_CLIENT))}
@@ -808,11 +814,11 @@ export function InputComposer({
                   style={({ pressed }) => [styles.sendBtn, pressed && styles.pressed]}
                 >
                   {sending ? (
-                    <ActivityIndicator size="small" color={THEME.background} />
+                    <ActivityIndicator size="small" color={theme.background} />
                   ) : (
                     // The accessibility label stays "Send" — that is what a screen
                     // reader announces and what the device harness presses.
-                    <SendArrow color={THEME.background} />
+                    <SendArrow color={theme.background} />
                   )}
                 </Pressable>
               </Animated.View>
@@ -845,7 +851,7 @@ export function InputComposer({
                   pressed && styles.pressed,
                 ]}
               >
-                <MicGlyph color={holding === null ? THEME.text_muted : THEME.background} />
+                <MicGlyph color={holding === null ? theme.text_muted : theme.background} />
               </Pressable>
             )}
           </View>
@@ -902,241 +908,242 @@ export function InputComposer({
   );
 }
 
-const styles = StyleSheet.create({
-  wrap: {
-    paddingHorizontal: SPACING.sm,
-    paddingTop: SPACING.sm,
-    // `paddingBottom` is supplied per-render (`bottom_inset`) — it is the home
-    // indicator when the keyboard is down and a bare gap when it is up, and a
-    // fixed value here is what buried the send button under the home indicator.
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: THEME.hairline,
-    backgroundColor: THEME.background,
-    gap: SPACING.xs,
-  },
-  attachmentRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.xs + 2,
-  },
-  attachmentTile: {
-    width: 64,
-    height: 64,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface,
-    overflow: 'hidden',
-  },
-  attachmentImage: {
-    width: '100%',
-    height: '100%',
-  },
-  removeAttachment: {
-    position: 'absolute',
-    top: 2,
-    right: 2,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: 'rgba(10,10,10,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  removeAttachmentText: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_primary,
-    fontWeight: '700',
-  },
-  row: {
-    flexDirection: 'row',
-    // BOTTOM-aligned, not centred. Once the field grows past one line the
-    // leading control must track the LAST line; centring it against a grown
-    // field is the tell that the pattern was copied from a single-line
-    // screenshot.
-    alignItems: 'flex-end',
-    // Measured at ~12pt between the `+` circle and the field's leading edge.
-    gap: SPACING.md,
-  },
-  /** iMessage's + — a filled grey circle OUTSIDE the field, on the leading side. */
-  leadingBtn: {
-    height: LEADING_BUTTON_SIZE_PT,
-    width: LEADING_BUTTON_SIZE_PT,
-    borderRadius: LEADING_BUTTON_SIZE_PT / 2,
-    backgroundColor: THEME.surface_raised,
-    justifyContent: 'center',
-    alignItems: 'center',
-    // Centres it against a one-line field, and holds that offset from the last
-    // line once the field grows.
-    marginBottom: (FIELD_MIN_HEIGHT_PT - LEADING_BUTTON_SIZE_PT) / 2,
-  },
-  plusGlyph: {
-    height: PLUS_BOX_PT,
-    width: PLUS_BOX_PT,
-  },
-  plusBarH: {
-    position: 'absolute',
-    left: (PLUS_BOX_PT - PLUS_ARM_PT) / 2,
-    top: (PLUS_BOX_PT - PLUS_STROKE_PT) / 2,
-    width: PLUS_ARM_PT,
-    height: PLUS_STROKE_PT,
-    borderRadius: PLUS_STROKE_PT / 2,
-  },
-  plusBarV: {
-    position: 'absolute',
-    left: (PLUS_BOX_PT - PLUS_STROKE_PT) / 2,
-    top: (PLUS_BOX_PT - PLUS_ARM_PT) / 2,
-    width: PLUS_STROKE_PT,
-    height: PLUS_ARM_PT,
-    borderRadius: PLUS_STROKE_PT / 2,
-  },
-  field: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    // OUTLINED, not filled. The pill is the bar's own background with a hairline
-    // stroke around it — the single most visible difference from the filled grey
-    // capsule this replaces.
-    backgroundColor: 'transparent',
-    borderWidth: FIELD_BORDER_PT,
-    borderColor: THEME.hairline,
-    // A PILL, not a rounded rectangle: half the RESTING height, so one line is
-    // fully round and extra lines grow it into a rounded box.
-    borderRadius: FIELD_MIN_HEIGHT_PT / 2,
-    minHeight: FIELD_MIN_HEIGHT_PT,
-  },
-  input: {
-    flex: 1,
-    color: THEME.text_primary,
-    // Measured at ~15pt from the field's leading edge to the first glyph.
-    paddingLeft: SPACING.lg,
-    // Clears the in-field action button, which occupies the trailing end.
-    paddingRight: SPACING.xs,
-    paddingVertical: FIELD_PADDING_V_PT,
-    ...TYPOGRAPHY.body,
-    minHeight: FIELD_MIN_HEIGHT_PT - FIELD_BORDER_PT * 2,
-    // THE GROWTH CAP. Past this the TextInput scrolls its own content and the
-    // bar stops rising, which is the behaviour the field is supposed to have
-    // and the one most often skipped.
-    maxHeight: FIELD_MAX_HEIGHT_PT,
-  },
-  /** The in-field trailing slot: it fills the pill's inner height, sits just
-   *  inside the stroke at the trailing end, and is bottom-aligned so it stays
-   *  pinned to the LAST line as the field grows upward. */
-  actionSlot: {
-    height: ACTION_BUTTON_SIZE_PT,
-    width: ACTION_BUTTON_SIZE_PT,
-  },
-  actionFill: {
-    height: '100%',
-    width: '100%',
-  },
-  // The resting mic is a BARE GLYPH — no circle behind it — which is how
-  // iOS 17/18 renders the control in this slot, and what makes the swap read: a
-  // quiet mark while empty, a filled accent circle the moment there is something
-  // to send. A filled circle in both states would say nothing by changing.
-  voiceBtn: {
-    height: ACTION_BUTTON_SIZE_PT,
-    width: ACTION_BUTTON_SIZE_PT,
-    borderRadius: ACTION_BUTTON_SIZE_PT / 2,
-    backgroundColor: 'transparent',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  /** Holding: the control fills, so the recording state is unmistakable. */
-  voiceBtnHolding: { backgroundColor: THEME.accent },
-  /** Slid far enough that releasing discards. */
-  voiceBtnCancelling: { backgroundColor: THEME.danger },
-  micGlyph: {
-    height: MIC_BOX_PT,
-    width: MIC_BOX_PT,
-  },
-  micHead: {
-    position: 'absolute',
-    left: 4.5,
-    top: 0,
-    width: 7,
-    height: 10,
-    borderRadius: 3.5,
-  },
-  // A U: a box with its top border removed and its bottom corners rounded.
-  micCradle: {
-    position: 'absolute',
-    left: 1.5,
-    top: 6,
-    width: 13,
-    height: 7,
-    borderWidth: 2,
-    borderBottomLeftRadius: 6.5,
-    borderBottomRightRadius: 6.5,
-  },
-  micStem: {
-    position: 'absolute',
-    left: 7,
-    top: 13,
-    width: 2,
-    height: 3,
-  },
-  sendBtn: {
-    height: ACTION_BUTTON_SIZE_PT,
-    width: ACTION_BUTTON_SIZE_PT,
-    borderRadius: ACTION_BUTTON_SIZE_PT / 2,
-    backgroundColor: THEME.accent,
-    justifyContent: 'center',
-    alignItems: 'center',
-    // The arrow's rotated arms extend past the glyph's layout box; this is the
-    // ancestor that would otherwise clip them.
-    overflow: 'visible',
-  },
-  arrowGlyph: {
-    height: ARROW_BOX_PT,
-    width: ARROW_BOX_PT,
-    // A rotated bar's layout box legitimately extends past this one; nothing
-    // here may clip it.
-    overflow: 'visible',
-  },
-  // The shaft spans the glyph's full measured height, apex to tail.
-  arrowShaft: {
-    position: 'absolute',
-    left: ARROW_APEX_X_PT - ARROW_STROKE_PT / 2,
-    top: 0,
-    width: ARROW_STROKE_PT,
-    height: ARROW_BOX_PT,
-    // Round caps, as the asset has — and what makes the apex join read as one
-    // continuous mark rather than three sticks.
-    borderRadius: ARROW_STROKE_PT / 2,
-  },
-  arrowArm: {
-    position: 'absolute',
-    width: ARROW_STROKE_PT,
-    height: ARROW_ARM_PT,
-    borderRadius: ARROW_STROKE_PT / 2,
-  },
-  // Each arm is the shaft's bar rotated ±ARROW_ANGLE_DEG about its own centre,
-  // so it is POSITIONED by that centre: half its length down the diagonal from
-  // the apex, which sits at the top of the shaft.
-  arrowArmLeft: {
-    left: ARROW_APEX_X_PT - ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
-    top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
-    transform: [{ rotate: `${ARROW_ANGLE_DEG}deg` }],
-  },
-  arrowArmRight: {
-    left: ARROW_APEX_X_PT + ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
-    top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
-    transform: [{ rotate: `-${ARROW_ANGLE_DEG}deg` }],
-  },
-  pressed: { opacity: 0.7 },
-  counter: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_muted,
-    textAlign: 'right',
-  },
-  counterOver: {
-    color: THEME.danger,
-  },
-  hint: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_muted,
-    fontStyle: 'italic',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    wrap: {
+      paddingHorizontal: SPACING.sm,
+      paddingTop: SPACING.sm,
+      // `paddingBottom` is supplied per-render (`bottom_inset`) — it is the home
+      // indicator when the keyboard is down and a bare gap when it is up, and a
+      // fixed value here is what buried the send button under the home indicator.
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.hairline,
+      backgroundColor: theme.background,
+      gap: SPACING.xs,
+    },
+    attachmentRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.xs + 2,
+    },
+    attachmentTile: {
+      width: 64,
+      height: 64,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.surface,
+      overflow: 'hidden',
+    },
+    attachmentImage: {
+      width: '100%',
+      height: '100%',
+    },
+    removeAttachment: {
+      position: 'absolute',
+      top: 2,
+      right: 2,
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: 'rgba(10,10,10,0.7)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    removeAttachmentText: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_primary,
+      fontWeight: '700',
+    },
+    row: {
+      flexDirection: 'row',
+      // BOTTOM-aligned, not centred. Once the field grows past one line the
+      // leading control must track the LAST line; centring it against a grown
+      // field is the tell that the pattern was copied from a single-line
+      // screenshot.
+      alignItems: 'flex-end',
+      // Measured at ~12pt between the `+` circle and the field's leading edge.
+      gap: SPACING.md,
+    },
+    /** iMessage's + — a filled grey circle OUTSIDE the field, on the leading side. */
+    leadingBtn: {
+      height: LEADING_BUTTON_SIZE_PT,
+      width: LEADING_BUTTON_SIZE_PT,
+      borderRadius: LEADING_BUTTON_SIZE_PT / 2,
+      backgroundColor: theme.surface_raised,
+      justifyContent: 'center',
+      alignItems: 'center',
+      // Centres it against a one-line field, and holds that offset from the last
+      // line once the field grows.
+      marginBottom: (FIELD_MIN_HEIGHT_PT - LEADING_BUTTON_SIZE_PT) / 2,
+    },
+    plusGlyph: {
+      height: PLUS_BOX_PT,
+      width: PLUS_BOX_PT,
+    },
+    plusBarH: {
+      position: 'absolute',
+      left: (PLUS_BOX_PT - PLUS_ARM_PT) / 2,
+      top: (PLUS_BOX_PT - PLUS_STROKE_PT) / 2,
+      width: PLUS_ARM_PT,
+      height: PLUS_STROKE_PT,
+      borderRadius: PLUS_STROKE_PT / 2,
+    },
+    plusBarV: {
+      position: 'absolute',
+      left: (PLUS_BOX_PT - PLUS_STROKE_PT) / 2,
+      top: (PLUS_BOX_PT - PLUS_ARM_PT) / 2,
+      width: PLUS_STROKE_PT,
+      height: PLUS_ARM_PT,
+      borderRadius: PLUS_STROKE_PT / 2,
+    },
+    field: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      // OUTLINED, not filled. The pill is the bar's own background with a hairline
+      // stroke around it — the single most visible difference from the filled grey
+      // capsule this replaces.
+      backgroundColor: 'transparent',
+      borderWidth: FIELD_BORDER_PT,
+      borderColor: theme.hairline,
+      // A PILL, not a rounded rectangle: half the RESTING height, so one line is
+      // fully round and extra lines grow it into a rounded box.
+      borderRadius: FIELD_MIN_HEIGHT_PT / 2,
+      minHeight: FIELD_MIN_HEIGHT_PT,
+    },
+    input: {
+      flex: 1,
+      color: theme.text_primary,
+      // Measured at ~15pt from the field's leading edge to the first glyph.
+      paddingLeft: SPACING.lg,
+      // Clears the in-field action button, which occupies the trailing end.
+      paddingRight: SPACING.xs,
+      paddingVertical: FIELD_PADDING_V_PT,
+      ...TYPOGRAPHY.body,
+      minHeight: FIELD_MIN_HEIGHT_PT - FIELD_BORDER_PT * 2,
+      // THE GROWTH CAP. Past this the TextInput scrolls its own content and the
+      // bar stops rising, which is the behaviour the field is supposed to have
+      // and the one most often skipped.
+      maxHeight: FIELD_MAX_HEIGHT_PT,
+    },
+    /** The in-field trailing slot: it fills the pill's inner height, sits just
+     *  inside the stroke at the trailing end, and is bottom-aligned so it stays
+     *  pinned to the LAST line as the field grows upward. */
+    actionSlot: {
+      height: ACTION_BUTTON_SIZE_PT,
+      width: ACTION_BUTTON_SIZE_PT,
+    },
+    actionFill: {
+      height: '100%',
+      width: '100%',
+    },
+    // The resting mic is a BARE GLYPH — no circle behind it — which is how
+    // iOS 17/18 renders the control in this slot, and what makes the swap read: a
+    // quiet mark while empty, a filled accent circle the moment there is something
+    // to send. A filled circle in both states would say nothing by changing.
+    voiceBtn: {
+      height: ACTION_BUTTON_SIZE_PT,
+      width: ACTION_BUTTON_SIZE_PT,
+      borderRadius: ACTION_BUTTON_SIZE_PT / 2,
+      backgroundColor: 'transparent',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    /** Holding: the control fills, so the recording state is unmistakable. */
+    voiceBtnHolding: { backgroundColor: theme.accent },
+    /** Slid far enough that releasing discards. */
+    voiceBtnCancelling: { backgroundColor: theme.danger },
+    micGlyph: {
+      height: MIC_BOX_PT,
+      width: MIC_BOX_PT,
+    },
+    micHead: {
+      position: 'absolute',
+      left: 4.5,
+      top: 0,
+      width: 7,
+      height: 10,
+      borderRadius: 3.5,
+    },
+    // A U: a box with its top border removed and its bottom corners rounded.
+    micCradle: {
+      position: 'absolute',
+      left: 1.5,
+      top: 6,
+      width: 13,
+      height: 7,
+      borderWidth: 2,
+      borderBottomLeftRadius: 6.5,
+      borderBottomRightRadius: 6.5,
+    },
+    micStem: {
+      position: 'absolute',
+      left: 7,
+      top: 13,
+      width: 2,
+      height: 3,
+    },
+    sendBtn: {
+      height: ACTION_BUTTON_SIZE_PT,
+      width: ACTION_BUTTON_SIZE_PT,
+      borderRadius: ACTION_BUTTON_SIZE_PT / 2,
+      backgroundColor: theme.accent,
+      justifyContent: 'center',
+      alignItems: 'center',
+      // The arrow's rotated arms extend past the glyph's layout box; this is the
+      // ancestor that would otherwise clip them.
+      overflow: 'visible',
+    },
+    arrowGlyph: {
+      height: ARROW_BOX_PT,
+      width: ARROW_BOX_PT,
+      // A rotated bar's layout box legitimately extends past this one; nothing
+      // here may clip it.
+      overflow: 'visible',
+    },
+    // The shaft spans the glyph's full measured height, apex to tail.
+    arrowShaft: {
+      position: 'absolute',
+      left: ARROW_APEX_X_PT - ARROW_STROKE_PT / 2,
+      top: 0,
+      width: ARROW_STROKE_PT,
+      height: ARROW_BOX_PT,
+      // Round caps, as the asset has — and what makes the apex join read as one
+      // continuous mark rather than three sticks.
+      borderRadius: ARROW_STROKE_PT / 2,
+    },
+    arrowArm: {
+      position: 'absolute',
+      width: ARROW_STROKE_PT,
+      height: ARROW_ARM_PT,
+      borderRadius: ARROW_STROKE_PT / 2,
+    },
+    // Each arm is the shaft's bar rotated ±ARROW_ANGLE_DEG about its own centre,
+    // so it is POSITIONED by that centre: half its length down the diagonal from
+    // the apex, which sits at the top of the shaft.
+    arrowArmLeft: {
+      left: ARROW_APEX_X_PT - ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
+      top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
+      transform: [{ rotate: `${ARROW_ANGLE_DEG}deg` }],
+    },
+    arrowArmRight: {
+      left: ARROW_APEX_X_PT + ARROW_ARM_DX_PT - ARROW_STROKE_PT / 2,
+      top: ARROW_ARM_DY_PT - ARROW_ARM_PT / 2,
+      transform: [{ rotate: `-${ARROW_ANGLE_DEG}deg` }],
+    },
+    pressed: { opacity: 0.7 },
+    counter: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_muted,
+      textAlign: 'right',
+    },
+    counterOver: {
+      color: theme.danger,
+    },
+    hint: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_muted,
+      fontStyle: 'italic',
+    },
+  });

@@ -34,7 +34,9 @@ const { mountScreen } = await import('./support/mount');
 const { ComposerDock, ComposerDockProvider } = await import('../lib/composer-dock');
 const { UsageMeter } = await import('../components/UsageMeter');
 const { ProjectTabBar } = await import('../components/ProjectTabBar');
-const { THEME } = await import('../lib/theme');
+// Mounted without a ThemeProvider, so these render with the context's dark
+// fallback — the palette to assert against is DARK_THEME by name.
+const { DARK_THEME: THEME } = await import('../lib/theme');
 const { USAGE_UNKNOWN } = await import('../lib/usage-client');
 
 type UsagePayload = import('../lib/usage-client').UsagePayload;
