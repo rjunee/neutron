@@ -191,7 +191,15 @@ export class WorkBoardSpecDocService {
     if (path !== null) {
       try {
         const doc = await this.docs.readDoc(project_slug, path)
-        const content = doc.content.trim()
+        // THE BODY, NOT THE FRONTMATTER. `writeSpecDoc` prepends a YAML block
+        // (`type` / `title` / `created`), and returning the raw content made that
+        // block the builder's FIRST INSTRUCTION. Observed live 2026-08-10 on two
+        // separate email-core runs, whose branches came out
+        // `trident/type-plan-title-p1-email-pipeline-s` — the slug is derived from
+        // the task text, so the metadata leaking in was visible in the branch NAME
+        // while the real damage was invisible: the builder opened its brief on
+        // `type: plan` instead of the scope.
+        const content = stripFrontmatter(doc.content).trim()
         if (content.length > 0) return content
       } catch (err) {
         this.log.warn(
@@ -201,6 +209,41 @@ export class WorkBoardSpecDocService {
     }
     return item.title
   }
+}
+
+/**
+ * Drop a leading YAML frontmatter block, leaving the document body.
+ *
+ * EXPORTED so the behaviour is testable directly rather than only through a doc
+ * round-trip, and because the rules below are easy to get subtly wrong:
+ *
+ *   * The block must OPEN ON LINE 1. A `---` further down a document is a
+ *     horizontal rule or a section divider, and this repo's plan docs use those
+ *     heavily — treating one as a frontmatter fence would silently truncate the
+ *     brief from the top, which is strictly worse than leaving the header on.
+ *   * The fence is a line that is EXACTLY `---` after trimming, not a line that
+ *     merely starts with it (`----` under a heading is setext-ish noise, and
+ *     `--- foo` is prose).
+ *   * An UNCLOSED opener is not frontmatter. A doc starting `---` with no second
+ *     fence is returned untouched; guessing where it ends would discard content.
+ *   * Returns the input unchanged when there is no block, so a doc written by
+ *     hand (or by an older path) is unaffected.
+ *
+ * The caller falls back to the card title when the result is empty, so a doc that
+ * is ONLY frontmatter degrades to the title rather than dispatching a blank brief.
+ */
+export function stripFrontmatter(raw: string): string {
+  const lines = raw.split('\n')
+  // Leading blank lines before the fence are tolerated; anything else means the
+  // document does not open with frontmatter.
+  let start = 0
+  while (start < lines.length && lines[start]?.trim() === '') start += 1
+  if (lines[start]?.trim() !== '---') return raw
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (lines[i]?.trim() === '---') return lines.slice(i + 1).join('\n')
+  }
+  // Opener with no closer: not frontmatter. Leave it alone.
+  return raw
 }
 
 function errText(err: unknown): string {
