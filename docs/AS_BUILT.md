@@ -8798,3 +8798,331 @@ re-read in the code rather than trusted from the brief; the `retireOnIdle` "writ
 remains false and was again left alone.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md` § Round 7.
+
+## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
+
+Observed live: the owner cancelled a running email-core build and the row settled at
+`phase='stopped'` with **`subagent_status='running'`**. The child was already dead — the
+column was asserting something false.
+
+> ⚠️ **"The child was already dead" is WRONG too, and is kept only as the record of what
+> was believed.** Cancelling does NOT kill the detached workflow (#177): it keeps running
+> and keeps checkpointing. This incident held by TIMING — the workflow happened not to
+> checkpoint again before the row was read — not by construction, which is exactly why the
+> fix needs the durability half in `trident/checkpoint.sh`. What is true of EVERY cancel is
+> narrower: the column is wrong about the RUN (nothing will advance it again), not
+> necessarily about the process. Corrected in round 3 below; marked here because the
+> ⚠️ block that follows scopes only the paragraph after it, and a reader who stops at the
+> opening would carry away two false claims rather than one.
+
+`subagent_status` is documented (migration 0077) as the CURRENTLY in-flight subagent, and
+gates key on it: #143's fix widened the harvest/terminal block on
+`subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery read it too. A
+terminal row reading `running` is precisely the stale field those readers can act on, so
+this is not tidiness.
+
+> ⚠️ **That paragraph is WRONG and is kept only as the record of what was believed.** All
+> three named readers are unreachable on a terminal row — `step()` no-ops on
+> `isTerminalPhase` before the harvest gate or orphan recovery run, and the hang watchdog
+> keys on `last_advanced_at`. The reader that is actually load-bearing is `update()`'s crash
+> veto. Corrected in "Two corrections to the round-1 text" ~110 lines below; the correction
+> is repeated here because a reader who stops after the opening rationale would otherwise
+> carry away the false one.
+
+`TridentRunStore.terminalTransition` now clears it **in the same atomic UPDATE** that
+writes the terminal phase:
+
+```sql
+-- as of round 2 the set is IN ('running', 'pending') — see the round-2 note below
+subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END
+```
+
+**Only `'running'` is cleared, and that restriction is the load-bearing half.** Nulling
+unconditionally would erase a `'crashed'` marker whenever anything terminated an
+already-crashed run as `'failed'` — deleting the signal #143 added a gate for, while
+looking like a cleanup. `completed`/`failed`/`crashed` are OUTCOMES worth keeping;
+`running` is the only value that is a live CLAIM, so it is the only one a terminal
+transition has business touching.
+
+`NULL` rather than a new `'cancelled'` enum value because the column carries a CHECK
+constraint (`migrations/0077_code_trident_runs.sql:107-108`) that SQLite cannot alter
+without a table rebuild — heavier than the defect warrants — and `null` already means
+"nothing in flight" here (`trident/orchestrator.ts` writes it on the no-subagent paths).
+The reason for the stop survives in `failure_reason`, so nothing is lost.
+
+**Verification:** 6 cases in `trident/store.test.ts` against a REAL migrated DB, each with
+a non-empty precondition asserting the row actually carried the status first. Two mutants
+killing DIFFERENT tests — dropping the retraction reds the cancel case; nulling
+unconditionally reds the `crashed` AND `completed` cases — so both halves of the CASE are
+proven necessary. A loser transition (second terminate on an already-terminal row) is
+covered too: it must not clear a status on its way past.
+
+📌 **The first draft of these tests went in the wrong file.** `trident/terminate.test.ts`
+uses a FAKE store, so a SQL-level fix is invisible there — the tests would have passed
+without exercising the change at all. Test the SQL where the SQL lives.
+
+**Review pass (3-lane panel) added two cases and corrected one claim above.**
+
+The blast-radius question resolved clean: the only production path into
+`terminalTransition` is `terminate.ts:143`, its four callers read `.phase`/`.failure_reason`
+only, and no reader of `subagent_status` exists outside
+`trident/{orchestrator,state-machine,store,inner-loop-sim}.ts`. The tick loop is a separate
+terminal writer (`saveIfActive`), so the hang watchdog and orphan recovery — which set the
+column explicitly in their outcome — are untouched.
+
+Two gaps the original 6 cases left:
+
+1. **The SHORT `params` branch was unpinned.** Omitting `failure_reason` makes `params` one
+   element shorter, and the board X-cancel (`work-board-surface.ts:531`) and `/code stop`
+   (`code-command.ts:281`) BOTH terminate without a reason — two of the four callers take
+   the branch no test covered. It binds correctly, but nothing held it there. Now pinned
+   column-by-column, killed by a mutant that pushes the parameter unconditionally.
+
+2. **The stated reason the `'running'`-only restriction is load-bearing is not the real
+   one.** The comment credits #143's harvest gate, but `step()` no-ops on an already-terminal
+   phase (`orchestrator.ts:680-683`), so that gate is unreachable once the row is terminal.
+   The path where preserving `'crashed'` actually bites is `update()` — the ONE writer with
+   no `phase NOT IN (terminal)` guard, whose `subagent_status IS NOT 'crashed'` veto
+   (`store.ts:447-449`) is all that latches a crash on a terminal row. Nulling
+   unconditionally would lift that veto. The restriction is right; the justification was
+   aimed at the wrong mechanism, so a future "simplify to NULL" could have cleared the
+   cited-but-unreachable gate and still broken the real one.
+
+Both `'running'`-clearing guards elsewhere are also gated on `phase NOT IN (terminal)`
+(`store.ts:411`, `:638`), so clearing the claim at terminal time makes no guard unreachable:
+`crashRunningByLauncher` could never sweep a terminal row regardless.
+
+📌 **A placeholder/parameter arity mismatch is LOUD, not silent** — sqlite throws, and the
+mutant that introduced one reddened eleven tests. The dangerous shape is a same-count
+REORDER, which is why the new case asserts each column separately instead of just the status.
+
+**Round 2 — the retraction was not DURABLE. `trident/checkpoint.sh` now refuses a terminal row.**
+
+The panel's blocker: the retraction held by TIMING, not by construction. Cancelling a build
+writes the terminal phase but does not kill the detached inner workflow — nothing in the
+cancel path reaps the child. That workflow keeps going, and every per-phase checkpoint pushes
+`subagent_status running` (`trident/inner-workflow.mjs:567`) through `trident/checkpoint.sh`,
+whose UPDATE was `WHERE id='<run-id>'` with no phase predicate. So the sequence `/code stop`
+mid-Build → row goes terminal with the claim retracted → next inner checkpoint → the claim is
+back, on a terminal row, with `branch` and `last_advanced_at` re-stamped. The exact state this
+work exists to remove, recreated by the only writer that had no terminal guard.
+
+The fix is the matching predicate, so the terminal chokepoint and the out-of-band writer agree:
+
+```sql
+UPDATE code_trident_runs SET <fields> WHERE id='<run-id>'
+  AND phase NOT IN ('done', 'failed', 'stopped')
+```
+
+Nothing useful is dropped, because `step()` returns early on `isTerminalPhase`
+(`trident/orchestrator.ts:679-683`): no reader ever consults a value a post-terminal
+checkpoint would have written, `inner_result` included — a terminal row is never harvested. A
+skipped write stays exit-0 (the checkpoint step must never fail a build) but now reports on
+stderr, because a silently-dropped checkpoint is exactly the kind of absence that costs hours;
+`changes()` is read in the same sqlite3 invocation and `tail -1` drops the busy_timeout
+PRAGMA's own echo.
+
+**Two corrections to the round-1 text above.**
+
+1. The docblock in `trident/store.ts` still justified the retraction via #143's harvest gate,
+   the hang watchdog and orphan recovery — all three unreachable on a terminal row (`step()`
+   no-ops first; the watchdog keys on `last_advanced_at`). Round 1 corrected that in this log
+   and left the comment saying it. Now the comment names what is actually load-bearing: the
+   CRASH VETO on the two write paths (`store.ts` `update()` and `saveIfActive()`), plus the
+   human read of a finished row, which is where the false claim was spotted in the first place.
+   Rule 3a shape — a confidently specific wrong rationale is worse than none, because the next
+   reader trusts it.
+2. The loser-transition test could not prove what it claimed. It set the already-terminal row
+   to `'crashed'`, which the CASE preserves anyway, so the assertion passed whether the loser
+   wrote nothing or wrote the preserving CASE. It now puts back `'running'` — the one value the
+   CASE *would* clear — and asserts row state before `won`, so a leaked write cannot hide
+   behind the `won` assertion. Killed by the mutant that drops the terminal predicate.
+
+`'pending'` is cleared too now. No production path writes it (the orchestrator writes only
+running/completed/failed/crashed/null), but it is in the type and in migration 0077's CHECK,
+and it ASSERTS a child just as `'running'` does. The split that matters is claim vs outcome,
+not one enum value.
+
+**Verification:** 613 trident tests green. Five new cases in `trident/checkpoint-sh.test.ts`
+against a real throwaway sqlite db — a per-phase checkpoint against `stopped`/`failed`/`done`
+writes nothing and re-stamps nothing, the terminal-result write is refused too, a non-terminal
+phase is unaffected (the guard is not a blanket refusal). Mutant: deleting the predicate reds
+four of them. That suite needed a `phase` column added to its fixture table, which is its own
+small lesson — a hand-rolled fixture schema silently omits the column your new guard reads.
+
+📌 **A SQL-level guard on the read side is only half a fix when an unreaped process still holds
+a pen.** The question that found this was not "is the write correct?" but "who else can write
+this row after it is terminal, and what stops them?" — and the answer was a shell script three
+directories away that no one had thought of as part of the state machine.
+
+**Round 3 — the freeze was too WIDE, and two of its tests could not fail.**
+
+Round 2's guard was `AND phase NOT IN (terminal)` on the whole UPDATE, which threw away the
+orphan's `branch`/`pr`/`inner_checkpoint`/`inner_result` along with its liveness claim — and the
+comment asserting "nothing useful is dropped" was false in exactly the case this work is about.
+The cancel does not kill the workflow, so it can push a branch and open a PR **after** the
+cancel; those columns are the only trail from the run row to that PR, and `run-progress.ts:188`
+surfaces `pr` to the board. On a first launch this script is the ONLY writer of either — the
+launch persist carries `branch`/`pr` forward but cannot invent them (a fresh run's `branch` is
+null and `detectExistingPr` probes a branch that does not exist yet). Blanket-refusing them left
+an untraceable orphan PR.
+
+The freeze is now SCOPED to the two liveness columns, and nothing else:
+
+```sql
+subagent_status  = CASE WHEN phase IN ('done','failed','stopped') THEN subagent_status ELSE '<new>' END
+last_advanced_at = CASE WHEN phase IN ('done','failed','stopped') THEN last_advanced_at ELSE '<now>' END
+```
+
+`subagent_status` is the claim; `last_advanced_at` is the hang watchdog's heartbeat. Everything
+else lands: inert on a terminal row (`step()` no-ops, so nothing resumes from a checkpoint or
+harvests a result) but readable, which is the point. A cancelled row carrying a stale parseable
+`inner_result` is an ANTICIPATED state rather than one this change introduces —
+`isTridentHarvestTerminal` keys on the durable `harvested_at` marker that `terminalTransition`
+never sets, explicitly so such a row emits no handoff (RC2, `orchestrator.ts:220-235`). The `inner_result_file` path nests both
+guards — terminal freeze outermost, then the original readfile column-consistency CASE. Because
+the freeze now lives in the SET expressions rather than the WHERE clause, a terminal row still
+matches and `changes()` still reports 1, so the stderr report re-reads the phase in the same
+sqlite3 invocation and distinguishes *frozen* from *run not found*.
+
+The un-reaped workflow itself is now filed as **rjunee/neutron#177** and cited from both halves
+of the fix — this PR makes the record honest, it does not stop the orphan.
+
+**Two blockers in the round-2 TESTS — both were assertions that could not fail.**
+
+1. **`checkpoint-sh.test.ts` seeded `phase='Build'` / `'Review'`** — values migration 0077's
+   `CHECK` rejects. The terminal guard was therefore never once exercised against a legal ACTIVE
+   phase: a mutant guard that froze only `('Build','Review')` passed the entire suite while
+   freezing every phase production can actually hold. The throwaway fixture table now carries
+   0077's real `phase` CHECK (so an illegal seed throws — pinned by its own case), the terminal
+   cases iterate `TERMINAL_PHASES`, and the "not a blanket refusal" control iterates **all five**
+   active phases.
+2. **The `subagent_status` matrix omitted `'failed'`** — the fifth and last value the CHECK
+   admits. A mutant clearing `IN ('running','pending','failed')` survived the whole suite while
+   erasing the subagent-level outcome of every failed build. Covered now; the matrix is complete
+   against the CHECK.
+
+Three mutants killed on the scoped freeze: removing it (4 red), applying it to every phase (7
+red), extending it to `branch`/`inner_checkpoint`/`inner_verdict` — i.e. regressing to round 2's
+blanket refusal (4 red).
+
+Two smaller corrections. The store docblock credited `saveIfActive()`'s crash veto as
+load-bearing alongside `update()`'s; it is not — `saveIfActive` also carries
+`phase NOT IN (terminal)`, so on a terminal row it cannot land whatever the column says, and only
+`update()` (the ONE writer with no phase predicate) actually latches a crash there. And the
+short-params test's rationale claimed a shifted parameter "would be silent": a timestamp bound to
+`phase` is rejected loudly by the CHECK — `failure_reason` is the column that shape would quietly
+hit, which is why the case pins each column separately.
+
+The terminal-set literal in `checkpoint.sh` is a fourth copy of `TERMINAL_PHASES`, so
+`inner-workflow.test.ts` — which already asserts that script's SQL as text — now pins the literal
+against the constant and asserts it appears exactly once.
+
+📌 **A test can be green because the code is right, or because the fixture made the wrong answer
+unreachable.** Both blockers here were the second kind, and both were invisible in review until
+someone compared the fixture's values against the production CHECK constraint. When a guard keys
+on an enum, the fixture must carry that enum's constraint — otherwise the test is asserting over
+a value space production never has.
+
+**Round 3 — the docblock's OPENING claim was false, and the fixture was still laxer than
+production in two more columns.**
+
+1. **"The child is dead" contradicted the same docblock's own DURABILITY paragraph.** The
+   comment above `terminalTransition` opened by asserting that after a cancel the child
+   process is dead, while its DURABILITY paragraph — twelve lines below — correctly stated
+   that cancelling does NOT kill the detached workflow, which keeps checkpointing
+   (#177). Both cannot be true. The observed incident held by TIMING, not by
+   construction: the workflow happened not to checkpoint again before the row was read.
+   The opening now claims only what is actually true of every cancel — the column is wrong
+   about the RUN (nothing will advance it again), and explicitly NOT that the process is
+   gone. The same false sentence was corrected in the PR description.
+
+   The round-2 correction of the *reader* rationale (crash veto, not #143's harvest gate)
+   was already in the code at this round's start; only the opening sentence was outstanding.
+
+2. **`last_advanced_at` was declared nullable and seeded NULL — a state production cannot
+   hold** (`migrations/0077_code_trident_runs.sql:118` is `TEXT NOT NULL`, re-stamped on
+   every transition). The fixture also seeded `subagent_status='pending'` in every single
+   case, never NULL — even though NULL is exactly what `terminalTransition` itself leaves
+   on a cancelled row, so it is the value the very next checkpoint after a cancel sees.
+   The throwaway table now carries the NOT NULL and the `subagent_status` CHECK, seeds a
+   real timestamp, and seeds the claim BOTH ways.
+
+Two mutants that the laxer fixture let live, each **executed** rather than reasoned about:
+
+| mutant (one extra AND-clause on the OLD value in `frozen()`) | old fixture | new fixture |
+| --- | --- | --- |
+| (a) freeze `subagent_status` only when it was `'pending'` | survives, 23 pass / 0 fail | dies, **3** red at `expect(r.subagent_status).toBeNull()` |
+| (b) freeze `last_advanced_at` only when it was NULL | survives, 23 pass / 0 fail | dies, 8 red at `expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT)` |
+
+(a) would have written `'running'` straight back onto a row a cancel had just cleared —
+re-creating the exact reported bug through the one writer with no terminal guard. (b) is
+the sharper one: its condition can NEVER hold in production, so the mutant refreshes the
+heartbeat of every real finished run — and under a NULL-seeded fixture the condition always
+held, so the suite stayed green while the guard did nothing.
+
+📌 **The two failure shapes in this PR are the same shape at different altitudes.** A
+fixture laxer than production puts the wrong answer out of the test's reach; a comment that
+justifies a design via a path that cannot execute puts the wrong reason out of the reader's
+reach. Both survive review by looking like the finished article — a green suite, and prose
+that reads as design documentation. The control that catches the first is running the mutant
+against BOTH fixtures and showing it survives one; the control that catches the second is
+grepping for the code that enters the mode the comment describes.
+
+**Round 4 — the mutation EVIDENCE was itself a claim, and one of the two guards has no
+reachable failure on this platform.** Both findings are about the same thing: prose that
+asserts coverage it does not have.
+
+1. **A comment claimed a test killed a mutant that in fact passes it.** The terminal-result
+   case in `trident/checkpoint-sh.test.ts` was annotated "the value mutant (a) would let
+   through here". It would not: that case passes only `inner_result_file` + `inner_verdict`,
+   so its `subagent_status` comes from the freeze arm built INLINE in
+   `trident/checkpoint.sh` (the `inner_result_file` branch), which is a second,
+   hand-written copy of the terminal predicate and does not route through `frozen()` at
+   all. Executed: mutant (a) takes **3** tests red and this is not one of them.
+
+   Re-measuring it also caught a stale number in the round-3 table above: it recorded
+   mutant (a) as "4 red", and the count on that same commit is **3** (the three terminal
+   phases of the already-retracted case). Corrected in place, and in the PR description.
+   The number was wrong when it was written, not made wrong by a later edit — the suite
+   count is unchanged at 27 either side of this round.
+
+   The second copy does need its own mutants, so the comment now names the ones this case
+   actually kills, both executed:
+
+   | mutant on the INLINE readfile freeze arm | result |
+   | --- | --- |
+   | (c) drop the `WHEN phase IN (terminal) THEN subagent_status` arm | dies, 2 red |
+   | (c2) narrow it with `AND subagent_status = 'pending'` | dies, **1** red — ONLY the already-NULL case |
+
+   (c2) is the one that justifies the case existing: its sibling seeds `'pending'`, which
+   the narrowed arm still freezes, so the sibling stays green and a row whose claim a
+   cancel had ALREADY retracted is the only thing that catches it.
+
+2. **A guard was pinned by a test that could not fail, so the test was deleted.** The
+   stderr diagnostics parse sqlite3's list-mode `N|state` line, and the invocation now
+   carries `-init /dev/null -list -separator '|'` so a host rc file cannot mute them. A
+   fixture pointing `HOME` at a hostile `.sqliterc` was written, and then removed after
+   the negative control: measured on sqlite3 3.43.2 (Apple), an rc file changes the format
+   when passed as `-init <file>` (`'c;s\n0;active\n'`) but is NOT picked up from a `HOME`
+   override — so the fixture passed **identically with the pins removed**. Covering it for
+   real would mean writing into a developer's actual home directory. The pins stay as
+   environment hardening for builds that do read an rc; both files now say so, including
+   that no test covers it.
+
+Doc-accuracy fixes in the same pass: the "`update()` is the ONE writer with no terminal
+predicate" claim was false — `save()` has neither the predicate nor the crash veto, and is
+inert only because it has ZERO production callers (production commits go through
+`saveIfActive`, `trident/tick.ts:263`); the claim now says "the only writer REACHABLE on a
+terminal row that both lacks the predicate and carries the veto" and names why each of the
+other two is excluded. `trident/store.test.ts` had also kept the superseded rationale
+attributing the load-bearing veto to `saveIfActive()`, contradicting the same branch's
+docblock two files over. And the opening line of this entry — "the child was already dead"
+— carries its own ⚠️ retraction above, because the existing marker scoped only the
+paragraph after it.
+
+📌 **Mutation evidence decays into folklore the moment it is written down next to the wrong
+test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the failure mode is
+specific: a guard that exists in TWO independently-built copies gets one copy's evidence
+pasted onto the other's test, and the untested copy is then defended by a citation. The
+control is mechanical — run the named mutant and read WHICH tests go red, not how many.
