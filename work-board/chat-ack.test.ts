@@ -212,6 +212,58 @@ describe('boardLabelForProjectId — the ONE board-name mapping', () => {
   })
 })
 
+/**
+ * THE ACK'S OWN CONTRACT: the board it NAMES and the topic it DELIVERS TO are
+ * resolved from ONE normalized scope, so they cannot be different boards.
+ *
+ * This asserts on what `resolve_chat_id` WAS HANDED, not on the topic string it
+ * chose to return. The composer's real router normalizes too, so a test that
+ * only checked the final topic id passes even when the ack forwards the raw
+ * sentinel — the two fixes mask each other and the mutant lives. The boundary
+ * that owns the contract has to assert the contract.
+ */
+describe('buildWorkBoardChatAck — the label and the destination are one scope', () => {
+  test('resolve_chat_id is handed a NORMALIZED scope, never the sentinel', () => {
+    const { ack, resolvedWith, posts } = harness()
+    ack.post({
+      project_id: GENERAL_WORK_BOARD_PROJECT_ID,
+      item_id: 'i1',
+      title: 'Sentinel work',
+      kind: 'card_added',
+    })
+    // The sentinel means General; the router must never see the word itself.
+    expect(resolvedWith).toEqual([null])
+    expect(resolvedWith).not.toContain(GENERAL_WORK_BOARD_PROJECT_ID)
+    expect(posts[0]?.text).toContain('General')
+  })
+
+  test('every spelling of "no project" resolves to the SAME scope and label', () => {
+    for (const pid of [null, '', '   ', GENERAL_WORK_BOARD_PROJECT_ID]) {
+      const { ack, resolvedWith, posts } = harness()
+      ack.post({ project_id: pid as string | null, item_id: 'i1', title: 'w', kind: 'card_added' })
+      expect(resolvedWith).toEqual([null])
+      expect(posts[0]?.chat_id).toBe('chat:general')
+      expect(posts[0]?.text).toContain('General')
+    }
+  })
+
+  test('a real project is passed through untouched — normalization is not collapse', () => {
+    const { ack, resolvedWith, posts } = harness()
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 'w', kind: 'card_added' })
+    expect(resolvedWith).toEqual(['p1'])
+    expect(posts[0]?.chat_id).toBe('chat:p1')
+    expect(posts[0]?.text).toContain('Example Project')
+  })
+
+  // A surrounding-whitespace id is the same project as its trimmed form; naming it
+  // one board and routing it to another (`chat: p1`) would be the same defect.
+  test('a padded project id resolves to the trimmed scope', () => {
+    const { ack, resolvedWith } = harness()
+    ack.post({ project_id: '  p1  ', item_id: 'i1', title: 'w', kind: 'card_added' })
+    expect(resolvedWith).toEqual(['p1'])
+  })
+})
+
 // A project name is validated for LENGTH ONLY at the create surface
 // (`gateway/http/app-projects-surface.ts` handleCreate: trim + 1-128 chars), so an
 // interior newline is a STORABLE name. Every consumer of the label splices it into
@@ -272,6 +324,54 @@ describe('sanitizeBoardLabel — one owner-authored name, exactly one line', () 
 
   test('an ordinary name is returned untouched', () => {
     expect(sanitizeBoardLabel('Example Project')).toBe('Example Project')
+  })
+
+  /**
+   * ZWJ is in `\p{Cf}` with the bidi overrides above, and is the one member of
+   * that class that is CONTENT. Blanket-spacing the class shattered every
+   * multi-codepoint emoji, so a project named with one was acknowledged under a
+   * name that does not match the rail — this PR's own defect, produced by its own
+   * hardening. Emoji names are first-class here (`resolveProjectEmoji`).
+   */
+  test('a ZWJ emoji sequence in a project name survives intact', () => {
+    const zwj = cp(0x200d)
+    // The rendered glyph is one "man technologist"; two code points joined by ZWJ.
+    const name = `👨${zwj}💻 Dev Work`
+    expect(sanitizeBoardLabel(name)).toBe(name)
+    // Specifically: the joiner is still there, so the pair did not become two glyphs.
+    expect(sanitizeBoardLabel(name)).toContain(zwj)
+    expect(sanitizeBoardLabel(name)).not.toBe('👨 💻 Dev Work')
+    // And it reaches the owner-facing label unchanged.
+    expect(boardLabelForProjectId('p9', () => name)).toBe(name)
+  })
+
+  test('keeping ZWJ did not re-admit the rest of the format class', () => {
+    // The guard the exception must not widen: every other `\p{Cf}` char still goes.
+    expect(sanitizeBoardLabel(`A${cp(0x00ad)}B`)).toBe('A B') // SOFT HYPHEN
+    expect(sanitizeBoardLabel(`A${cp(0x2066)}B`)).toBe('A B') // LEFT-TO-RIGHT ISOLATE
+    expect(sanitizeBoardLabel(`A${cp(0x202d)}B`)).toBe('A B') // LEFT-TO-RIGHT OVERRIDE
+    expect(sanitizeBoardLabel(`A${cp(0xfeff)}B`)).toBe('A B') // ZERO WIDTH NO-BREAK SPACE
+  })
+
+  /**
+   * The hole the ZWJ exception opened: a joiner-only name is a NON-EMPTY string
+   * that renders as nothing, so a `length === 0` floor lets it through and the
+   * ack says `· ` — an unnamed board wearing the naming syntax. Emptiness has to
+   * mean "renders as nothing", not "has no characters".
+   */
+  test('a name of nothing but joiners is EMPTY, and floors to the word', () => {
+    const joiners = cp(0x200d).repeat(3)
+    expect(sanitizeBoardLabel(joiners)).toBe('')
+    expect(sanitizeBoardLabel(`  ${joiners}  `)).toBe('')
+    expect(boardLabelForProjectId('p9', () => joiners)).toBe(UNKNOWN_BOARD_LABEL)
+    // Mixed with real whitespace — still nothing a reader can see.
+    expect(boardLabelForProjectId('p9', () => `\n${joiners}\t`)).toBe(UNKNOWN_BOARD_LABEL)
+  })
+
+  test('a joiner ALONGSIDE visible text is kept — the floor is not a ZWJ ban', () => {
+    const zwj = cp(0x200d)
+    expect(sanitizeBoardLabel(`👨${zwj}💻`)).toBe(`👨${zwj}💻`)
+    expect(sanitizeBoardLabel(`A${zwj}B`)).toBe(`A${zwj}B`)
   })
 })
 

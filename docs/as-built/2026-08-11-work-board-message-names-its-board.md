@@ -219,3 +219,168 @@ tests prove the tool hands the ack the right event, but a spy never renders a st
 **it could not have caught an unnamed board, which is the whole defect.** One case asserts
 both halves at once: the row really does land on the slug-keyed General bucket, *and* the
 text the owner reads says `General`.
+
+---
+
+# Round 3 — closing the review findings
+
+Argus's second round returned two blockers and a major. All three were real, and two of
+them were about the same thing: **a guard that cannot fail is indistinguishable from a
+guard that works.**
+
+## Blocker 1 — the ack named the right board and delivered it to the wrong one
+
+`General` arrives at the ack in four spellings, and the live path uses the one nobody
+tested: the literal `'general'` sentinel. It starts at
+`gateway/wiring/build-live-agent-turn.ts:1508` (`turn.project_id ?? 'general'`), rides the
+warm-pool key into the REPL session (`runtime/adapters/claude-code/persistent/spawn.ts:186`),
+and comes back out as the tool call's `project_id`
+(`runtime/adapters/claude-code/persistent/pool-state.ts:214`).
+
+Round 2 normalized that sentinel in the **label** (`boardLabelForProjectId` → `General`,
+correct) but not in the **routing**: `tridentDeliveryChatId` tested
+`projectId !== null && projectId.length > 0`, which the sentinel satisfies, so the ack was
+filed under `app:<owner>:general` — a per-project topic the General surface never
+subscribes to. **Correct label, undeliverable message.** The ack existed to stop a silent
+chat and, on General, produced one wearing an accurate name.
+
+The fix is one normalizer, `normalizeBoardProjectId` (`work-board/store.ts`), applied
+ONCE per ack and threaded to both consumers (`work-board/chat-ack.ts`). `workBoardScopeKey`
+now routes through it too, so the storage key and every owner-facing label agree on which
+ids mean General by construction rather than by three copies of a three-way test.
+
+**The same defect had a second, worse site.** `#339` stamps a board-bound build's
+`chat_id` from `resolve_delivery`, called with the same raw `ctx.project_id`
+(`trident/work-board-build-tool.ts:195,305`). A build started from General announced its
+completion into the phantom topic — a **silent completion**, which is the exact bug `#339`
+exists to prevent. Found only because a mutant survived; see below.
+
+## Blocker 2 — the DB-to-name seam had no behavioural guard
+
+Every existing test of the label supplied its own hand-built `{ id: name }` map, so the
+mutant `project_name: (id) => id` — the composer handing the ack a lookup that echoes the
+INTERNAL ID as the owner's board name, exactly what requirement (c) forbids — passed all of
+them. A test that builds its own lookup tests the resolver; the **wiring** is what shipped
+wrong.
+
+`tests/integration/work-board-ack-names-board.open.test.ts` boots the real composer, the
+real production graph and a real SQLite DB, inserts a real `projects` row, fires the
+production-wired ack the composition exposes, and reads what a reloading client reads: the
+persisted `app_chat_messages` row. That row carries both halves at once — `body` is the
+text the owner sees, `topic_id` is the surface it reached. No ack internals are touched.
+
+## Major — the single-mapping guard pinned a spelling and a count
+
+Argus mutation-tested the guard itself and it lost. Three ways:
+
+* `labelSites.length >= 3` meant a **fourth duplicate mapping made the guard greener**.
+* It matched only the literal `?? 'General'`, so a backtick copy sailed through.
+* Its comment-stripper deleted everything after `//` on any line — including `//` inside a
+  string literal — hiding real code from every assertion.
+
+It now asserts the invariant instead: `readProjectName` may only appear at its own
+definition or as an argument to the shared resolver, so a second mapping is an offender
+line no count can absorb; the General-literal check covers all three quoting styles; and
+the stripper only removes comments that own the whole line (a false positive is visible, a
+false negative is not).
+
+## The two mutants that survived, and what they were hiding
+
+Nine mutants, seven dead on the first pass. The two survivors were the useful ones.
+
+**M2 — reverting `tridentDeliveryChatId` to the bare non-empty check: SURVIVED.** The ack
+normalizes before calling the router, so the router's own bug is invisible from the ack
+tests. That is not redundancy to delete — it is the `#339` delivery path above, reachable
+through `resolve_delivery` with no ack involved. It now has a test at its own seam, and the
+mutant dies.
+
+**M5 — reverting the ack to `resolve_chat_id(input.project_id)`: SURVIVED.** Two correct
+fixes masked each other: either one alone keeps the ack's topic right, so no end-to-end
+assertion can tell them apart. The fix is to assert the **contract at the boundary that
+owns it** — `work-board/chat-ack.test.ts` now checks what `resolve_chat_id` WAS HANDED, not
+the topic string it returned.
+
+📌 **A surviving mutant is not always weak coverage of the thing you were testing — twice
+here it was a second, unguarded copy of the bug in a place the test could not see.**
+
+## Minors, and one hole this round opened itself
+
+* **Emoji names were being shattered.** `sanitizeBoardLabel` mapped all of `\p{Cf}` to a
+  space, and ZWJ is in `\p{Cf}` — so a project named with a joined emoji sequence was
+  acknowledged with that sequence split into two glyphs. Emoji names are first-class
+  (`resolveProjectEmoji`), so the board named back to the owner did not match the rail:
+  this PR's own defect, produced by its own hardening. ZWJ is now preserved; every other
+  format char is still neutralized.
+* **Which opened a hole.** A name of nothing but joiners is a NON-EMPTY string that renders
+  as nothing, so it walked past a `length === 0` floor and produced a naming line with no
+  board named. `sanitizeBoardLabel` now defines empty as "renders as nothing", so both
+  floors catch it. *The exception you add to a guard is where the next gap lives.*
+* **The fragment's missing floor.** `formatWorkBoardFragment` distrusts its caller's label
+  by design but had no floor, so a blank one rendered `SAY WHICH BOARD — this one is .` —
+  an instruction demanding a board name while supplying none. Floored to the same word the
+  ack uses. No live caller reaches it; pinned because the next one will not.
+* **A project named "General" could claim the sentinel.** `slugifyProjectId('General')`
+  returned exactly `general`, so that project's board writes collapsed onto General while
+  its acks read `General` — a truthful-looking name for the wrong board, undetectable.
+  (Duplicate "General" projects are not hypothetical; see the note on
+  `InMemoryProjectSettingsStore.get` in `gateway/http/app-projects-surface.ts`.) The id is
+  now reserved at the one canonical slugifier, which closes every create path at once. The
+  owner's chosen NAME is untouched; only the internal id shifts, and only for that word.
+* **Two overstated as-built claims, narrowed.** `docs/AS_BUILT.md` said every owner-facing
+  confirmation passes through `chat-ack.ts` — the agent also acknowledges in its own voice
+  (`gateway/wiring/operating-doctrine.ts:65`), which no chokepoint constrains; and it said
+  nothing on screen distinguished the scopes, which contradicted its own later paragraph
+  (the panes ARE labelled; the message beside them was not).
+
+## Known gap, stated rather than papered over
+
+The deterministic ack is self-consistent by construction: the scope that picks its label is
+the same `ctx.project_id` that scoped the write (`work-board/agent-tool.ts:218,251`), so it
+cannot name a board other than the one it wrote to. The **agent's own prose** has no such
+guarantee — it is guided by the `<work_board>` block, which is built from the composer's
+`turn.project_id`, and on a pool-registration miss
+(`runtime/adapters/claude-code/persistent/pool-state.ts:214` degrades to `null`) the write
+would land on General while the block named a project. In that case the deterministic ack
+says `General` and sits directly beside the agent's claim, so the disagreement is legible —
+which is this PR's thesis, not an exception to it. Closing it properly means making the
+tool dispatch's project binding unmissable, which is a runtime-seam change and NOT in this
+PR.
+
+## Deliberate tradeoffs
+
+* **Board labels cap at 48 code points** (`MAX_BOARD_LABEL_LEN`) while the create surface
+  allows 128, so a long project name elides in every ack and in `/status`. Chosen: the ack
+  is one chat line and the item title needs the room.
+* **`/status`'s `active_project` is a BOARD label, not a project field.** An id that no
+  longer resolves prints `unknown project` rather than a name — deliberate, and the reason
+  the line no longer carries its own `?? 'General'` fallback, which named the wrong board
+  for an id it merely failed to resolve.
+
+## Round 3 mutation results
+
+**Nine mutants, nine dead** (after the two survivors above got the guards they were
+missing). Each was applied to the production file, run against the real suite, and
+reverted:
+
+| Mutant | Killed by |
+| --- | --- |
+| `project_name: (id) => id` (the blocker-2 mutant) | integration, 3 failures |
+| `tridentDeliveryChatId` back to the bare non-empty check | integration (delivery seam) |
+| `boardLabelForProjectId` skips the normalizer | `chat-ack.test.ts`, 2 failures |
+| slug reservation removed | integration (drift guard) |
+| ack routes the un-normalized id | `chat-ack.test.ts`, 3 failures |
+| ZWJ shattered again | `chat-ack.test.ts`, 2 failures |
+| fragment floor removed | `fragment.test.ts`, 2 failures |
+| `workBoardScopeKey` skips the normalizer | `store.test.ts`, 2 failures |
+| a second General mapping, written with backticks | the rewritten wiring guard |
+
+The last one is the mutant that **survived round 2's guard** and is the reason the guard was
+rewritten to assert an invariant instead of a count.
+
+## UI scope — still message-only, and why
+
+Unchanged from round 2 and reaffirmed: the panes are already labelled
+(`landing/chat-react/ChatApp.tsx:1417-1434`), so the missing information was in the
+MESSAGE, not the panel. A cross-client parity test would pin a scope badge that the
+defect never needed. If the owner wants the Work pane to restate its scope in its empty
+state, that is a separate, additive change.

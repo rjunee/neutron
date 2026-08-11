@@ -449,6 +449,7 @@ import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
 import {
   WorkBoardStore,
+  normalizeBoardProjectId,
   workBoardProjectIdForKey,
   workBoardScopeKey,
   type WorkBoardItem,
@@ -3654,10 +3655,18 @@ export function buildOpenGraphComposer(
     // `chat_id` so terminal-result delivery routes the completion message back to
     // the surface the build came from (board-dispatched runs previously carried a
     // null chat_id → the delivery no-op'd → silent completions).
-    const tridentDeliveryChatId = (projectId: string | null): string =>
-      projectId !== null && projectId.length > 0
-        ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
-        : appWsTopicId(OWNER_USER_ID)
+    //
+    // Through `normalizeBoardProjectId`, NOT a local `!== null && length > 0`
+    // test: General reaches this function as the `'general'` sentinel on the live
+    // path (the warm REPL's `/tool-call` scope — see the normalizer's docblock),
+    // and a bare non-empty check routed that to `app:<owner>:general`, a
+    // per-project topic no client subscribes to. Every message routed through
+    // here — a board-bound build's completion, a clarifying question, a
+    // deterministic board ack — was silently deliverable-to-nobody on General.
+    const tridentDeliveryChatId = (projectId: string | null): string => {
+      const scope = normalizeBoardProjectId(projectId)
+      return scope === null ? appWsTopicId(OWNER_USER_ID) : `${appWsTopicId(OWNER_USER_ID)}:${scope}`
+    }
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT

@@ -68,7 +68,7 @@
  *     it; see its docblock.
  */
 
-import { GENERAL_WORK_BOARD_PROJECT_ID } from './store.ts'
+import { normalizeBoardProjectId } from './store.ts'
 
 /** Which board event the ack speaks to. Distinct dedup identities per item. */
 export type WorkBoardChatAckKind = 'card_added' | 'build_dispatched' | 'inline_started'
@@ -112,14 +112,28 @@ function truncate(text: string, max: number): string {
 }
 
 /**
- * Every char class that can END A LINE or steer a rendered one, mapped to a
- * space before whitespace is collapsed: C0/C1 controls (`\n`, `\r`, `\t`, NEL),
- * LINE/PARAGRAPH SEPARATOR, and the format chars (`\p{Cf}` — zero-width joiners
- * and the bidi overrides, which reorder a rendered label without occupying a
- * visible column). Replaced with a space rather than deleted so `a\nb` reads as
- * two words, not the single word `ab`.
+ * Every char class that can END A LINE or steer a rendered one: C0/C1 controls
+ * (`\n`, `\r`, `\t`, NEL), LINE/PARAGRAPH SEPARATOR, and the format chars
+ * (`\p{Cf}` — the bidi overrides, which reorder a rendered label without
+ * occupying a visible column, plus soft hyphen and the zero-width spaces).
+ * Neutralized to a SPACE rather than deleted so `a\nb` reads as two words, not
+ * the single word `ab`.
  */
 const LINE_BREAKING_OR_INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu
+
+/**
+ * ZERO WIDTH JOINER — in `\p{Cf}` with the bidi overrides, and the ONE member of
+ * that class that is load-bearing content rather than a rendering instruction.
+ * It is what binds a multi-codepoint emoji into one glyph, and emoji project
+ * names are a first-class pattern here (`open/composer.ts` resolveProjectEmoji),
+ * so blanket-spacing `\p{Cf}` shattered them: a project named `👨‍💻 Dev Work`
+ * was acknowledged as `👨 💻 Dev Work` — the board named back to the owner was
+ * not the board he can see in the rail, which is this whole PR's defect in
+ * miniature. Kept verbatim; every other format char is still neutralized. ZWJ
+ * cannot end a line and does not reorder anything, so keeping it costs nothing
+ * the class was defending.
+ */
+const ZERO_WIDTH_JOINER = '\u200D'
 
 /**
  * FLATTEN one owner-authored name into exactly one line, then cap it.
@@ -140,15 +154,32 @@ const LINE_BREAKING_OR_INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu
  * reason — the label had no equivalent, which is what let it through. Capping is
  * by CODE POINTS and happens HERE, before any caller escapes, so a cap can never
  * cut an astral char in half or a `&lt;` entity in the middle.
+ *
+ * Returns `''` for a name with no VISIBLE content, which is what both callers'
+ * floors test. Emptiness is deliberately NOT `length === 0`: {@link
+ * ZERO_WIDTH_JOINER} is preserved (it is content inside an emoji), so a name of
+ * nothing but joiners is a non-empty string that RENDERS AS NOTHING. Left to a
+ * length test it walked straight past both floors and produced `· ` — a
+ * board-naming line with no board named, which is the unnamed ack this PR exists
+ * to remove, reintroduced by the exception that keeps emoji intact.
  */
 export function sanitizeBoardLabel(raw: string): string {
-  return truncate(flattenToOneLine(raw), MAX_BOARD_LABEL_LEN)
+  const flattened = truncate(flattenToOneLine(raw), MAX_BOARD_LABEL_LEN)
+  return hasVisibleContent(flattened) ? flattened : ''
+}
+
+/** Does this label render as anything at all? Joiners are invisible on their own. */
+function hasVisibleContent(label: string): boolean {
+  return label.split(ZERO_WIDTH_JOINER).join('').trim().length > 0
 }
 
 /** {@link sanitizeBoardLabel}'s flatten step without its cap, for the longer
  *  title slot (titles cap at {@link MAX_TITLE_LEN}, labels at 48). */
 function flattenToOneLine(raw: string): string {
-  return raw.replace(LINE_BREAKING_OR_INVISIBLE, ' ').replace(/\s+/g, ' ').trim()
+  return raw
+    .replace(LINE_BREAKING_OR_INVISIBLE, (ch) => (ch === ZERO_WIDTH_JOINER ? ch : ' '))
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 /**
@@ -178,8 +209,8 @@ export function boardLabelForProjectId(
   project_id: string | null | undefined,
   lookup: WorkBoardProjectNameLookup,
 ): string {
-  const pid = typeof project_id === 'string' ? project_id.trim() : ''
-  if (pid.length === 0 || pid === GENERAL_WORK_BOARD_PROJECT_ID) return GENERAL_BOARD_LABEL
+  const pid = normalizeBoardProjectId(project_id)
+  if (pid === null) return GENERAL_BOARD_LABEL
   let found: string | null | undefined
   try {
     found = lookup(pid)
@@ -211,8 +242,11 @@ function textFor(kind: WorkBoardChatAckKind, title: string, board: string): stri
 /**
  * Build the shared ack poster.
  *
- * @param deps.resolve_chat_id  maps the turn's `project_id` (null → General) to
- *   the chat topic id the message lands in — wired to `tridentDeliveryChatId`.
+ * @param deps.resolve_chat_id  maps a NORMALIZED board scope (`null` → General,
+ *   never the `'general'` sentinel — see `normalizeBoardProjectId`) to the chat
+ *   topic id the message lands in — wired to `tridentDeliveryChatId`. It receives
+ *   the SAME normalized value the label is resolved from, which is the invariant
+ *   that keeps the named board and the delivered-to board identical.
  * @param deps.project_name     resolve ONE project id to its rail name, so every
  *   text can NAME its board. Read fresh per ack (a mid-session rename is named
  *   correctly) and NOT called at all on General. REQUIRED: an ack that cannot name
@@ -263,12 +297,21 @@ export function buildWorkBoardChatAck(deps: {
         // `post` throws, the catch swallows it and the stamp is NOT set, so the
         // next fire for this (item,kind) can still land instead of being muted
         // for the whole window with no ack ever delivered.
+        // ONE normalization, threaded to BOTH the label and the destination, so
+        // the board this ack NAMES and the topic it LANDS IN can never be
+        // different boards. They were: the sentinel `'general'` (which is what a
+        // live General turn actually carries — see `normalizeBoardProjectId`)
+        // normalized to `General` in the label and to a per-project topic
+        // `app:<owner>:general` in the routing, so the General surface never
+        // received its own ack. Resolving the scope ONCE here is the fix; passing
+        // `input.project_id` to `resolve_chat_id` is the bug.
         // `boardLabelForProjectId` owns the project read and guards it: a
         // throwing lookup degrades to `unknown project` and this ack still
         // DELIVERS. On General the lookup is never called, so a project-store
         // failure cannot affect a General ack at all.
-        const board = boardLabelForProjectId(input.project_id, deps.project_name)
-        const chatId = deps.resolve_chat_id(input.project_id)
+        const scope = normalizeBoardProjectId(input.project_id)
+        const board = boardLabelForProjectId(scope, deps.project_name)
+        const chatId = deps.resolve_chat_id(scope)
         deps.post(chatId, textFor(input.kind, input.title, board))
         lastPostedAt.set(key, t)
       } catch {

@@ -31,7 +31,7 @@
  * only the flatten removes.
  */
 
-import { sanitizeBoardLabel } from './chat-ack.ts'
+import { sanitizeBoardLabel, UNKNOWN_BOARD_LABEL } from './chat-ack.ts'
 import type { WorkBoardItem, WorkBoardStatus } from './store.ts'
 
 /** Don't let a pathological board blow up the prompt. */
@@ -66,7 +66,15 @@ export function formatWorkBoardFragment(
 ): string {
   // Flatten + cap FIRST, escape SECOND — see the module docblock. Reversing these
   // two calls is the bug, not a style choice.
-  const board = escapeData(sanitizeBoardLabel(boardLabel))
+  //
+  // Then FLOOR it, for the same reason the docblock says the label is re-flattened
+  // rather than trusted. `boardLabelForProjectId` never returns a blank, but this
+  // function declares that it does not trust its caller, and a blank slipping
+  // through produced `SAY WHICH BOARD — this one is .` — an instruction that
+  // silently asks for nothing while looking satisfied, which is worse than the
+  // unnamed block it replaced. The floor is the same word the ack uses.
+  const flattened = sanitizeBoardLabel(boardLabel)
+  const board = escapeData(flattened.length === 0 ? UNKNOWN_BOARD_LABEL : flattened)
   const lines: string[] = []
   lines.push('<work_board>')
   lines.push(

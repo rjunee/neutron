@@ -21,6 +21,7 @@
         "@neutronai/tools": "workspace:*",
         "@neutronai/trident": "workspace:*",
         "@neutronai/watchdog": "workspace:*",
+        "@neutronai/work-board": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "latest",

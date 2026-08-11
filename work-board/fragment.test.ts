@@ -125,6 +125,35 @@ describe('formatWorkBoardFragment — names its board', () => {
     expect(withLabel.split('\n').length).toBe(baseline.split('\n').length)
   })
 
+  /**
+   * This function's docblock says it does not trust its caller's label, and it
+   * re-flattens for exactly that reason — but it had no FLOOR, so a blank label
+   * rendered `SAY WHICH BOARD — this one is .`: an instruction that demands a
+   * board name while supplying none, and a header reading `Work Board for  (`.
+   * The agent is then told to name a board it was never told the name of, which is
+   * how an unnamed confirmation gets back into the chat by the front door.
+   *
+   * No live caller can reach it today (the sole call site resolves through
+   * `boardLabelForProjectId`, which floors), so this is defense in depth — pinned
+   * because the next caller is the one that will not.
+   */
+  test('a blank label floors to a WORD — never an empty board name', () => {
+    for (const blank of ['', '   ', '\n\n\n', '\t']) {
+      const frag = formatWorkBoardFragment([], blank)
+      expect(frag).toContain('this one is unknown project')
+      // The two shapes the missing floor produced.
+      expect(frag).not.toContain('this one is .')
+      expect(frag).not.toContain('Work Board for  (')
+    }
+  })
+
+  test('an invisible-but-nonempty label floors too', () => {
+    // A joiner-only label has characters but renders as nothing; `sanitizeBoardLabel`
+    // treats it as empty so the floor catches it here as well.
+    const frag = formatWorkBoardFragment([], '\u200D\u200D')
+    expect(frag).toContain('this one is unknown project')
+  })
+
   // The cap runs BEFORE the escape. Reversed, a cut at a fixed offset can land
   // inside the `&lt;` the escape just produced, or between the two halves of an
   // astral char's surrogate pair, and emit the broken remainder into the prompt.

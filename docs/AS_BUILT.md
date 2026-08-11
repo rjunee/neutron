@@ -9000,8 +9000,11 @@ panel reading `No work tracked yet.` — and reasonably called it a lie.
 (`work-board/agent-tool.ts:15-25`), the live push is wired
 (`open/composer.ts:3576-3577`), and the HTTP read is correctly scoped per board
 (`gateway/http/work-board-surface.ts:219`). Two boards render side by side, keyed by
-`workBoardScopeKey` (`work-board/store.ts:164-171`), and **nothing on screen distinguished
-them — because the message named the ITEM and never the BOARD.**
+`workBoardScopeKey` (`work-board/store.ts:164-171`), and **the ACKNOWLEDGEMENT carried
+nothing that distinguished them — because it named the ITEM and never the BOARD.** (The
+panes themselves are labelled — the project rail and the Work pane header both show a
+scope, `landing/chat-react/ChatApp.tsx:1417-1434`. It was the message beside them that was
+scope-free, which is the narrower and accurate claim.)
 
 📌 **A true statement that cannot be checked reads exactly like a false one.** The defect
 was a confirmation that under-specified its subject. Fixing it does not require knowing
@@ -9020,8 +9023,11 @@ a miss degrades to General) while the block and pane use `turn.project_id`
 (`gateway/wiring/build-live-agent-turn.ts:1307`) — is **unconfirmed and NOT fixed here.**
 The owner's original report stays open.
 
-**Fixed at the one chokepoint every owner-facing board confirmation passes through**
-(`work-board/chat-ack.ts`). All three texts now carry `· <board>` — `card_added`,
+**Fixed at the one chokepoint every DETERMINISTIC board acknowledgement passes through**
+(`work-board/chat-ack.ts`). Not every confirmation: the agent also acknowledges in its own
+voice at turn end (`gateway/wiring/operating-doctrine.ts:65`), which no chokepoint can
+constrain — that half is addressed by the `<work_board>` block telling it the board's name
+and to use it (`work-board/fragment.ts`). All three texts now carry `· <board>` — `card_added`,
 `build_dispatched`, `inline_started`. (`complete` / `reorder` emit no chat text, so there
 was nothing to name.) The separator is the vocabulary the board UI already uses (`Done · N`).
 
@@ -9086,3 +9092,64 @@ the verifying grep matched the docblock quoting the same prose rather than the c
 meant to mutate. Re-anchored on the `return` statement, both died. The same class as the
 tool-cannot-read-the-format trap: **before believing a negative, make the check prove it
 can return a positive.**
+
+### 2026-08-11 — a board confirmation says WHICH board (round 3: the sentinel, and two guards that could not fail)
+
+Review round 2 found two blockers and a major on the round-2 fix. All three held up, and
+two were the same shape: **a guard that cannot fail looks exactly like a guard that works.**
+
+**The `'general'` sentinel routed to a topic nobody subscribes to.** General reaches the
+board seams in four spellings, and the live one is the literal `'general'` — set at
+`gateway/wiring/build-live-agent-turn.ts:1508`, carried into the warm REPL session
+(`runtime/adapters/claude-code/persistent/spawn.ts:186`) and handed back as the tool call's
+`project_id` (`runtime/adapters/claude-code/persistent/pool-state.ts:214`). Round 2
+normalized it in the LABEL but not in the ROUTING: `tridentDeliveryChatId` tested
+`length > 0`, which the sentinel passes, so a General ack was filed under
+`app:<owner>:general`. **Correct board name, message delivered to nobody** — the silent chat
+the ack exists to prevent, wearing an accurate label. Fixed with one normalizer
+(`normalizeBoardProjectId`, `work-board/store.ts`) resolved ONCE per ack and threaded to
+both the label and the destination; `workBoardScopeKey` routes through it too.
+
+**The same bug had a worse second site**, found only because a mutant survived: `#339`
+stamps a board-bound build's `chat_id` via `resolve_delivery` from the same raw
+`ctx.project_id` (`trident/work-board-build-tool.ts:195,305`), so a build started from
+General announced its completion into the phantom topic. That is a **silent completion**,
+precisely the bug `#339` exists to prevent.
+
+**The DB-to-name seam had no behavioural guard.** Every label test supplied its own
+hand-built `{id: name}` map, so `project_name: (id) => id` — the composer feeding the ack a
+lookup that speaks the INTERNAL ID as the owner's board name — passed all of them.
+`tests/integration/work-board-ack-names-board.open.test.ts` now boots the real composer,
+graph and DB, inserts a real `projects` row, fires the production-wired ack, and asserts on
+the persisted `app_chat_messages` row — whose `body` is the text the owner sees and whose
+`topic_id` is the surface it reached, so one row covers both halves.
+
+**The single-mapping guard pinned a spelling and a count, not the invariant.** It asserted
+`labelSites.length >= 3` (so a fourth duplicate mapping made it GREENER), matched only
+`?? 'General'` (a backtick copy sailed through), and stripped everything after `//` on any
+line — including inside string literals. Rewritten to assert that `readProjectName` is only
+ever consumed by the shared resolver, which a duplicate cannot satisfy by adding to a count.
+
+**Minors:** `sanitizeBoardLabel` mapped all of `\p{Cf}` to a space and ZWJ lives there, so
+joined-emoji project names were shattered into separate glyphs — the board named back to the
+owner stopped matching the rail, this PR's own defect produced by its own hardening; ZWJ is
+now preserved and every other format char still neutralized. That exception opened a hole
+of its own (a joiner-only name is non-empty but renders as nothing, walking past a
+`length === 0` floor), closed by defining empty as "renders as nothing".
+`formatWorkBoardFragment` gained the `unknown project` floor its docblock implied. And
+`slugifyProjectId('General')` returned exactly the sentinel, so such a project's writes
+collapsed onto General while its acks read `General`; the id is now reserved at the one
+canonical slugifier, leaving the owner's chosen NAME untouched.
+
+**Known gap, recorded not papered over:** the deterministic ack cannot mislabel (its label
+and its write scope are the same `ctx.project_id`), but the agent's own prose is guided by
+the `<work_board>` block built from `turn.project_id`, so a pool-registration miss can make
+the two disagree. The ack then sits beside the claim and contradicts it visibly, which is
+this PR's thesis rather than an exception to it; closing it properly is a runtime-seam
+change and is NOT in this PR.
+
+**Mutation-tested: nine mutants, nine dead** — including the backtick-duplicate mapping
+that survived round 2's guard. Two survived the first pass and both were hiding a second
+unguarded copy of the bug rather than weak coverage of the thing under test.
+
+Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
