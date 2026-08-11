@@ -228,7 +228,10 @@ describe('an APPROVED server IS wired, with its values', () => {
     const credentials = new ProjectCredentialStore(db, {
       crypto: new SecretsStore({ data_dir: tmp, db }),
     })
-    await credentials.delete(asOwnerHandle(SLUG), '', 'mcp_env.example-server')
+    // `deleteReserved`: the generic `delete` now REFUSES this namespace, because the
+    // owner-facing CRUD reaching it skipped the `onRevoked` eviction. This test is
+    // simulating the vanished row, so it takes the owning module's own door.
+    await credentials.deleteReserved(asOwnerHandle(SLUG), '', 'mcp_env.example-server')
     expect(await store.resolveApproved()).toEqual([])
     const row = (await store.list())[0]!
     // Reported honestly: approved, but not running.
@@ -933,6 +936,58 @@ describe('a revocation retires what is already running', () => {
     // The grant no longer matches, so the server is not wired...
     expect(await s.resolveApproved()).toEqual([])
     // ...and the child that WAS wired under it has been retired rather than left running.
+    expect(calls).toBe(1)
+  })
+
+  test('an EDIT that FAILS HALFWAY still announces — the spec write is what un-authorizes', async () => {
+    // THE PARTIAL-FAILURE PATH. `install` writes the spec FIRST (deliberately: a fresh
+    // spec hashes differently, so the fail-closed direction is "unapproved"), and that
+    // write is the instant the durable spec stops authorizing what the warm child is
+    // running. Everything after it can throw — the credential write encrypts and hits the
+    // database, `requestApproval` inserts through the same mutex — and a throw there
+    // unwound out of `serialize` without ever reaching the `revoked = true` that used to
+    // sit at the END of the critical section. So the old approved command kept running,
+    // holding its old env, with the durable spec no longer describing it and nothing
+    // scheduled to reap it. The flag is now set immediately after the invalidating write
+    // and announced from a `finally`.
+    //
+    // MUTATION: move `markRevoked()` back below the credential write (or drop the
+    // `finally`) and this fails with calls === 0.
+    let calls = 0
+    class BrokenSecretWrite extends ProjectCredentialStore {
+      override async setReserved(): Promise<never> {
+        throw new Error('credential write failed')
+      }
+    }
+    const s = new OwnerMcpServerStore({
+      db,
+      project_slug: SLUG,
+      credentials: new BrokenSecretWrite(db, {
+        crypto: new SecretsStore({ data_dir: tmp, db }),
+      }),
+      owner_slug: asOwnerHandle(SLUG),
+      approvals: () => approvals,
+      onRevoked: async () => {
+        calls += 1
+      },
+    })
+    // Seed + approve through a HEALTHY store, so the starting state is a server that is
+    // genuinely approved and wired.
+    await store.install(DRAFT)
+    const hash = (await store.list())[0]!.grant_hash
+    expect((await store.decide('example-server', 'approve', hash)).ok).toBe(true)
+    expect(await store.resolveApproved()).not.toEqual([])
+    expect(calls).toBe(0)
+
+    // Now edit through the store whose credential write is broken.
+    await expect(
+      s.install({ ...DRAFT, command: '/usr/local/bin/example-mcp-v2' }),
+    ).rejects.toThrow('credential write failed')
+
+    // The spec write LANDED, so the old grant no longer matches and nothing is wired...
+    expect(await store.resolveApproved()).toEqual([])
+    // ...and the child the old grant started was announced for retirement anyway, which
+    // is the whole point: the failure did not swallow the eviction.
     expect(calls).toBe(1)
   })
 
