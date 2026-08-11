@@ -99,7 +99,11 @@ sql_quote() {
 # #177 leaves the workflow alive. They are inert on a terminal
 # row — `advanceTridentRun`'s `step()` no-ops on it (trident/orchestrator.ts), so
 # nothing resumes from a checkpoint or harvests a result — but they stay readable,
-# and `run-progress.ts` surfaces `pr` to the board.
+# and `run-progress.ts` surfaces `pr` to the board. A cancelled row carrying a
+# stale parseable `inner_result` is already an ANTICIPATED state, not a new one:
+# `isTridentHarvestTerminal` keys on the durable `harvested_at` marker, which
+# `terminalTransition` never sets, precisely so such a row emits no handoff
+# (trident/orchestrator.ts, RC2).
 #
 # `frozen <column> <new-value-sql>` → the new value on an active row, the OLD
 # value on a terminal one.

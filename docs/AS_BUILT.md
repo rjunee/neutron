@@ -8675,7 +8675,10 @@ last_advanced_at = CASE WHEN phase IN ('done','failed','stopped') THEN last_adva
 
 `subagent_status` is the claim; `last_advanced_at` is the hang watchdog's heartbeat. Everything
 else lands: inert on a terminal row (`step()` no-ops, so nothing resumes from a checkpoint or
-harvests a result) but readable, which is the point. The `inner_result_file` path nests both
+harvests a result) but readable, which is the point. A cancelled row carrying a stale parseable
+`inner_result` is an ANTICIPATED state rather than one this change introduces —
+`isTridentHarvestTerminal` keys on the durable `harvested_at` marker that `terminalTransition`
+never sets, explicitly so such a row emits no handoff (RC2, `orchestrator.ts:220-235`). The `inner_result_file` path nests both
 guards — terminal freeze outermost, then the original readfile column-consistency CASE. Because
 the freeze now lives in the SET expressions rather than the WHERE clause, a terminal row still
 matches and `changes()` still reports 1, so the stderr report re-reads the phase in the same
