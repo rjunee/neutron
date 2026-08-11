@@ -803,3 +803,52 @@ the slot-holder test evicts a busy child.
 - **The untrusted substrates.** `cc-import-*` and `cc-trident-*` still receive no owner MCP
   server even when handed the resolver — the second gate in `spawn.ts` is asserted
   independently of the wiring.
+
+## Round 5 — the two the panel found still open
+
+Both were real, both reproduced, and both are the same class: a warm REPL replaced or retired
+without accounting for a turn already committed to it.
+
+### One replacement per pool key
+
+`getOrSpawnSession` was unserialized. The cold path is protected by a documented property —
+nothing suspends between its `pool.get` and its `pool.set`, so a second caller observes the
+first's in-flight promise — but that property covers the COLD path only. The warm-eviction
+path suspends twice on purpose: at `await existing`, and (since the installed-MCP guard
+landed) at `await options.resolveExtraMcpServers()`. So two dispatches arriving after the
+owner installed or revoked a server both awaited the same warm session, both computed
+`freshMcpServers === false`, and both ran evict → terminate → spawn → `pool.set`. The second
+`pool.set` overwrote the first: two `claude` children resuming ONE transcript, the loser
+orphaned outside the pool and therefore invisible to `shutdownAllPersistentRepls`, still
+holding its 0600 MCP config. That breaks the one-REPL-per-key invariant in
+`runtime/adapters/claude-code/AGENTS.md` precisely when the owner touches MCP settings, and
+the same shape was reachable through the credential-rotation guard, which suspends at
+`await existing` alone.
+
+Fixed with a per-key lock (`withGetOrSpawnLock`) around the whole body rather than a re-check
+after each suspend: the awaits are load-bearing — the resolver has to run for the fingerprint
+comparison to exist at all — so a re-check would have to re-derive "is the session I awaited
+still the pool's session" at every one of them, and every future await added there becomes a
+new place to get that wrong. It costs a concurrent caller no latency it was not already
+paying, since it awaited the same spawn promise via `pool.get` before. The uncontended path
+takes no await, so the cold path stays straight-line and its own comment stays true; that
+comment now records that the lock is what guarantees one child per key and the no-suspend
+property is the second line of defence, because leaving it claiming to be the only mechanism
+would be a doc describing a mode the code no longer depends on. Mutant killed — bypass the
+lock and the new test spawns 3 children where it expects 2.
+
+### A queued dispatch is busy too
+
+The round-4 `retireOnIdle` teardown could strand the very turn the poison-instead-of-kill
+branch exists to protect. `turnSlotHeld` was incremented AFTER `await prev`, so a dispatch
+parked in `acquireTurn()` behind the active turn counted for nothing: the active turn's
+release dropped the count to zero, the turn-completion path read the session as idle and
+retired the child, and the queued dispatch then resumed from `await prev` into a dead REPL.
+Reproduced as `drain error: persistent-repl: REPL process exited`.
+
+The count is now taken BEFORE the wait. A queued caller has already passed the freshness
+guards and bound itself to that child, so it is committed work, and the revoked child is
+retired when the QUEUE drains rather than when the active turn ends — the same bargain the
+poison branch already strikes. `turnTail` is only ever resolved, never rejected, so the
+pre-wait increment cannot leak. Mutant killed — move the increment back after `await prev`
+and the queued turn dies mid-flight.
