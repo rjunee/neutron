@@ -9427,8 +9427,8 @@ on them.
 
 1. **"Stamped ONLY when a line is actually sent" was false, in the same sentence that was
    just corrected.** `logger/index.ts` runs `onEmit?.()` — the stamp — *immediately before*
-   `sink(...)`, so the window records an ATTEMPTED delivery. An injected `sink` that THROWS
-   consumes the window and nobody gets a line. Keeping that ordering is right: stamping after
+   `sink(...)`, so the window records an ATTEMPTED delivery. A `sink` that THROWS consumes the
+   window with no guarantee a line reached anyone. Keeping that ordering is right: stamping after
    the sink returned would let a persistently-throwing sink re-attempt on every call, which is
    the un-rate-limited flood these windows exist to prevent. So the CODE stays and all four
    statements of it now say "an attempt that clears both gates", with the throwing-sink case
@@ -9516,9 +9516,7 @@ and this entry. Nothing executable changed; the tests are unchanged in count (10
    per-project DB bounds the scan to one row per USER — which is exactly why the scan projects
    `user_id` and the handler loops (ISSUES #2). Harmless in the single-owner case and harmless
    in code, since the handler already iterates; corrected because the docblock is the thing a
-   future change would reason from. The `rateLimited` contract also now notes that a NaN `ms`
-   suppresses a key permanently — unreachable for all three live callers (all pass literals),
-   recorded as contract precision rather than a defect.
+   future change would reason from.
 
 📌 **Every false claim in this round was a SUMMARY of a correction that was itself correct.**
 The enumerating sentence at the top of the docblock ("with ONE deliberate exception"), the
@@ -9676,10 +9674,9 @@ difference is deliberate and the reason is given below" was itself an exhaustive
 that the non-inventory disclaimer twelve lines later contradicted), and "the tests pin which
 attempts stamp" over-read the suite, whose `rateLimited` cases all use a non-throwing sink.
 
-The move that ends it is to stop characterising coverage and DISCLOSE THE GAP instead. The head
-docblock in `logger/index.ts` names the specific cases the suite has, one by one; both it and
-`logger/AGENTS.md` then say outright that nothing there pins the throwing-sink behaviour and
-that a caller relying on it should read `emit`. A stated gap cannot be an over-claim. (Closing
+The move that ends it is to stop characterising coverage and DISCLOSE THE GAP instead: say
+outright that nothing in the suite pins the throwing-sink behaviour, rather than describing what
+the suite does cover. A stated gap cannot be an over-claim. (Closing
 it with a throwing-sink case is a cheap follow-up and is deliberately not done here — this
 round is documentation only.)
 
@@ -9708,3 +9705,71 @@ unchanged — 10 in `tests/integration/import-running-cron-tick.test.ts` plus th
 case in `logger/__tests__/logger.test.ts`. Executed here: those two files plus the
 scheduler-boot test, 60 pass / 0 fail; `scripts/ci/typecheck-all.sh` exit 0;
 `scripts/ci/lint.sh` exit 0.
+
+**Round 7 — a log entry that quotes a docblock's wording is a mechanism claim of its own (PR
+#174).** Documentation only again; no executable line changed.
+
+The two false claims this round were not in the code's docs at all — they were in the entry
+ABOVE, in the round-5 summary, and both were about the same shared primitive:
+
+* **"The `rateLimited` contract also now notes that a NaN `ms` suppresses a key permanently"** —
+  the note being summarised was deleted by the very commit the summary shipped in. `git grep -n
+  NaN -- logger/` returns nothing (control: `rateLimited` returns hits in the same files, so the
+  empty result is a gap and not a blind tool).
+* **"unreachable for all three live callers (all pass literals)"** — there are NINE
+  (`channels/adapters/app-ws/adapter.ts` ×7, `cron/scheduler.ts`, and the one this PR adds in
+  `onboarding/interview/import-running-cron.ts`), and not one of them passes a literal; they pass
+  `PERSIST_WARN_COOLDOWN_MS`, `FIRE_ERROR_COOLDOWN_MS`, `IDLE_TICK_LOG_INTERVAL_MS`. An
+  exhaustive count, wrong in both the number and the property — a few lines below this entry's
+  own warning that exhaustive counts are the thing this PR keeps getting wrong.
+
+The sentence is deleted rather than corrected: it summarised a note that no longer exists, so
+there is nothing left for it to be right about.
+
+📌 **A chronological log entry that describes the CURRENT WORDING of a docblock is a mechanism
+claim with an extra hazard: the log is append-only, so it is designed never to be revisited, and
+no later edit to the code will ever come back to fix it.** Both false claims here were written to
+record a doc fix, describing a doc that changed in the same PR. The fix is structural — an entry
+records the DECISION and the reason, and where round 6 quoted the docblock's shape ("names the
+specific cases the suite has, one by one") it now states the decision instead. The corollary
+bites the sentence a few paragraphs up: "naming the cases and then naming the gap is the only
+version nobody could falsify" is half wrong. Naming the GAP survives — it is an absence, and the
+code can only close it deliberately. Naming the CASES is an inventory that silently expires the
+next time anyone edits the suite.
+
+Also fixed: `logger/index.ts` still carried "O1 scope: package + tests only — NO call sites adopt
+this yet", written when it was true and left standing while nine sites adopted `rateLimited`
+alone — twenty-five lines from text this PR was rewriting. It now names no count and tells the
+reader to grep. The head docblock drops the case-by-case inventory of the suite and the
+internal-ordering sentences (stamp-before-sink; "the emit re-stamps, so the window self-heals"),
+keeping the two consequences a CALLER has to plan around. `logger/AGENTS.md` stops paraphrasing
+that contract altogether and points at the one docblock that owns it — every false claim of the
+last three rounds shipped in a paraphrase, never at the site that owned the claim, so the third
+copy was pure drift surface.
+
+**What was KEPT was verified BY EXECUTION this round, not by reading the comment next to it**
+(the specific failure of the two rounds before): with NO sink injected and a control line
+delivered first through the default sink, a throwing `console.log` produced one throwing
+invocation and a fully recovered `console.log` was still suppressed inside the window — so the
+bound really is on attempts. A one-hour backward clock step emitted where the forward case
+suppressed. A window-suppressed attempt did not push the next boundary out, and a level-gated
+attempt did not open a window. The disclosed gap is real by the same standard: `grep -n throw`
+over `logger/__tests__/logger.test.ts` returns nothing.
+
+The remaining smaller items are closed with it — the S15 note in the cron handler quoted a
+"> 0 for > 15 min" alarm in the present tense and retracted it twenty lines later, so it now
+quotes it as history where it is first mentioned; and the constant-guard test's rationale is cut
+to the one thing it can claim, that the bound is a budget rather than a derivation.
+
+📌 **A recorded review verdict is a claim about a RUN, and it decays exactly like a claim about
+code.** This PR's body recorded a `codex` APPROVE with an empty findings list against a named
+head; re-run against that same head it did not reproduce, and confirmed false claims were live in
+that tree at the time. The line is removed rather than restated. A verdict is quotable only with
+the head it ran against, and it has to be re-run before it is quoted.
+
+**Verification (round 7):** `logger/__tests__/logger.test.ts`,
+`tests/integration/import-running-cron-tick.test.ts` and
+`tests/integration/import-running-cron-scheduler-boot.test.ts` pass; `scripts/ci/typecheck-all.sh`
+and `scripts/ci/lint.sh` exit 0. Two items carried in as pre-existing were already fixed earlier
+on this branch and were re-checked here rather than assumed: `gateway/composition/build-core-modules.ts`
+no longer states a 15 s poll, and the "at most one row" claim is gone from the cron handler.

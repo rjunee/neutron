@@ -14,24 +14,23 @@
  * the level around individual calls.
  *
  * SUPPRESSION HELPERS — these generalize the three hand-rolled patterns O2
- * will swap onto this package. They are close to those originals but NOT
+ * swaps onto this package. They are close to those originals but NOT
  * bit-for-bit.
  *
- * `logger/__tests__/logger.test.ts` is the place to learn what they actually
- * do. For `rateLimited` its cases pin the window boundary, per-key isolation,
- * sharing across logger instances, that a window-suppressed attempt does not
- * EXTEND an open window, that a level-gated attempt does not START one, and a
- * backward clock step. They all use a non-throwing sink, so NOTHING there pins
- * what a throwing sink does to a window — that behavior is described below from
- * the code, and a reader who needs to rely on it should read `emit` rather than
- * this sentence. Read a case rather than a sentence generally, and when you
- * change the behavior, change a case rather than adding a sentence.
+ * `logger/__tests__/logger.test.ts` is the specification of what they actually
+ * do; this docblock is not. Read a case rather than a sentence, and when you
+ * change the behavior, change a case rather than adding a sentence. One gap is
+ * worth DISCLOSING rather than characterizing: no case there uses a throwing
+ * sink (`grep -n throw logger/__tests__/logger.test.ts` returns nothing, while
+ * the same grep for `rateLimited` over that file returns many hits — so the
+ * empty result is a gap, not a blind tool), which is why the
+ * attempt-vs-delivery note below cites an execution check, not the suite.
  *
- * This docblock states INTENT on purpose: earlier revisions restated the
- * mechanism in prose and enumerated the deviations from the originals, and the
- * restatements and the enumerations are what kept going wrong. A test cannot go
- * stale quietly; a docblock can, so this one deliberately says less than it
- * knows.
+ * This docblock states INTENT on purpose. Earlier revisions restated the
+ * predicate in prose, then enumerated the deviations from the originals, then
+ * enumerated which cases the suite covers — and each enumeration was falsified
+ * by the next reader to grep. A test cannot go stale quietly; a docblock can,
+ * so this one deliberately says less than it knows.
  *
  *   - `once(key)` — the GBrain unavailable latch
  *     (gbrain-memory/GBrainSyncHook.ts `latchIfUnavailable`): the FIRST
@@ -49,34 +48,31 @@
  *   - `rateLimited(key, ms)` — the wedge-alert cooldown
  *     (runtime/…/persistent/dead-repl-detector.ts `decideWedgeAction` +
  *     pool-state.ts `wedgeAlertState`): a throttle for a line that must keep
- *     appearing without flooding. A suppressed or level-gated attempt never
- *     extends the window (the original sets `wedgeAlertState` only inside
- *     `if (action.alert.send)`).
+ *     appearing without flooding. An attempt the WINDOW suppresses does not
+ *     extend it, and an attempt the LEVEL GATE drops does not start one (the
+ *     original sets `wedgeAlertState` only inside `if (action.alert.send)`),
+ *     so a hot loop of suppressed attempts cannot silence the key forever.
  *
- *     Departures from "exactly one line per window" worth knowing about — not
- *     an inventory of every way this differs from the original:
+ *     Two consequences a caller has to plan around. They are the ones looked
+ *     for, not an inventory of every way this differs from the original:
  *
- *     WHY A BACKWARD CLOCK STEP IS NOT SUPPRESSED. `Date.now()` is not
- *     monotonic — an NTP correction or a VM resume can step it back — and a
- *     throttle that trusts it would silence the key for the step plus the
+ *     A BACKWARD CLOCK STEP EMITS rather than suppressing. `Date.now()` is
+ *     not monotonic — an NTP correction or a VM resume can step it back — and
+ *     a throttle that trusts it would silence the key for the step plus the
  *     window. An hour-long step would silence a 10-minute heartbeat for over
  *     an hour, which presents as exactly the "it died" alarm the heartbeat
  *     exists to rule out. A heartbeat's failure mode is going quiet, so this
- *     errs toward an extra line, and the emit re-stamps so the window
- *     self-heals.
+ *     errs toward an extra line.
  *
- *     WHY THE BOUND IS ON ATTEMPTS, NOT DELIVERED LINES. The window is
- *     consumed just BEFORE the sink runs, so a sink that throws consumes it
- *     anyway — and since a throwing sink may have delivered nothing, or
- *     delivered and then thrown, a consumed window is no evidence that a line
- *     reached anyone. Stamping afterwards instead would let a
- *     persistently-throwing sink re-attempt on every single call — precisely
- *     the flood the window exists to prevent — so the ordering stays. This is
- *     reachable with NO sink injected: the default sink calls `console.*`,
- *     which is a mutable global and can throw. A caller that needs a DELIVERY
- *     bound rather than an ATTEMPT bound must make its own sink non-throwing;
- *     this primitive will not do it for them. `ms` is likewise not validated
- *     here — a caller that COMPUTES it should validate it.
+ *     THE BOUND IS ON ATTEMPTS, NOT ON DELIVERED LINES. A consumed window is
+ *     no evidence that a line reached anyone: a sink that throws consumes one
+ *     anyway, and that is reachable with NO sink injected, since the default
+ *     sink calls `console.*` — a mutable global. Erring the other way would
+ *     let a persistently-throwing sink re-attempt on every single call,
+ *     precisely the flood the window exists to prevent. A caller that needs a
+ *     DELIVERY bound must make its own sink non-throwing; this primitive will
+ *     not do it for them. `ms` is likewise not validated here — a caller that
+ *     COMPUTES it should validate it.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -99,7 +95,9 @@
  * `sink`; the clock is injectable via `now` for deterministic
  * `rateLimited` windows.
  *
- * O1 scope: package + tests only — NO call sites adopt this yet (that is O2).
+ * O1 built the package and its tests. Call sites have since started adopting
+ * it (that is O2, in progress) — `grep -rn 'createLogger(' ` for the current
+ * set rather than trusting a count written here.
  *
  * F3 addendum: the sibling module `./fire-and-forget.ts` exports
  * `fireAndForget` + the process-level safety net (`installProcessSafetyNet`),
@@ -144,14 +142,12 @@ export interface Logger extends LogEmitter {
   clearOnce(key: string): void
   /**
    * A view that throttles a key to roughly one line per `ms` window (the
-   * wedge-alert `alertDedupeMs` cooldown). A suppressed or level-gated attempt
-   * never extends the window.
+   * wedge-alert `alertDedupeMs` cooldown).
    *
    * "Roughly" is load-bearing: a backward clock step emits rather than
    * suppressing, and a throwing sink consumes a window with no guarantee that
    * anything was delivered. Both are deliberate — the head docblock gives the
-   * reasons and says which of them `logger/__tests__/logger.test.ts` has a case
-   * for.
+   * reasons, and `logger/__tests__/logger.test.ts` is the specification.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }

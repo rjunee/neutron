@@ -525,19 +525,13 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     // A guard on the constant itself: at 5s sweeps this is the difference between
     // ~17,280 and ~144 lines/day.
     //
-    // Upper bound — DETECTION LATENCY, not the S15 stuck-count window. The throttle
-    // only ever applies to the idle branch, which reports `in_flight_imports=0` by
-    // definition, so it cannot collide with the >0 condition operators watch for; an
-    // earlier version of this comment claimed it could, which was a category error.
-    // What the interval really bounds is how long silence takes to become conclusive:
-    // one interval must pass before "the line stopped appearing" means anything, so
-    // keep it inside a single sitting.
-    //
-    // On the 15-min literal below: it is a DETECTION-LATENCY budget ("an operator
-    // watching the journal should not have to wait longer than a coffee break for
-    // silence to mean something"), and it is only coincidentally the same number as
-    // the stuck-count window the paragraph above retracts. It does not inherit from
-    // it. Any bound in the same ballpark would do; this one is a round quarter-hour.
+    // Both bounds are a BUDGET, not a derivation. Upper: one interval must pass
+    // before "the line stopped appearing" means anything, so keep that inside a
+    // single sitting. The literal is a round quarter-hour and any nearby figure
+    // would serve — it does NOT inherit from the S15 stuck-count window, which the
+    // throttle cannot collide with in the first place, since the throttle applies
+    // only to the idle branch and that branch reports `in_flight_imports=0` by
+    // definition.
     expect(IDLE_TICK_LOG_INTERVAL_MS).toBeLessThan(15 * 60_000)
     // Lower bound — the lines/day ceiling IS the floor (it forces ≳ 2.9 min), so a
     // separate small-ms assertion would be unreachable and would read as covering

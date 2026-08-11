@@ -202,9 +202,11 @@ export function buildImportRunningHandler(
 
     // S15 (2026-05-17) — the tick log proves the cron is actually firing in
     // journald. Pre-S15 the scheduler never started, so this line never
-    // appeared; once it stops appearing in steady-state (or the count stays
-    // > 0 for > 15 min on a single instance), operators have a direct signal
-    // pointing at the cron tier rather than the engine.
+    // appeared; once it stops appearing in steady-state, operators have a
+    // direct signal pointing at the cron tier rather than the engine. (S15
+    // also read a count that stayed > 0 for > 15 min as a stuck signal. That
+    // stopped holding on 2026-06-18 — see below; it is quoted here as history,
+    // not as a live alarm.)
     //
     // ── WHY THIS IS NO LONGER LOGGED UNCONDITIONALLY (2026-08-10) ──────────
     // It was, and on an idle instance that is a tick every 5s forever with
@@ -216,8 +218,8 @@ export function buildImportRunningHandler(
     //
     // Both S15 properties are preserved, deliberately:
     //   * a tick with WORK still logs every time, so whatever the >0 count is
-    //     worth to an operator is untouched by this change — but note the S15
-    //     note above overstates what that is, and did so before this change.
+    //     worth to an operator is untouched by this change — which is less than
+    //     S15 assumed, and was already less before this change.
     //     "> 0 for > 15 min" stopped being an alarm on 2026-06-18, when the
     //     import timeout became progress-aware: the floor is now 30 min
     //     (`IMPORT_RUNNING_HARD_TIMEOUT_MS`), the deadline RESETS on forward
@@ -232,18 +234,19 @@ export function buildImportRunningHandler(
     //   * an IDLE tick still logs, just at most once per
     //     {@link IDLE_TICK_LOG_INTERVAL_MS}, so "the line stopped appearing"
     //     remains a real signal — it is a slower heartbeat, not a silent one.
-    //     ("At most once" is the forward-clock bound: per `rateLimited`'s
-    //     contract a BACKWARD wall-clock step emits an extra line rather than
-    //     going quiet. That errs toward MORE heartbeat, which is the harmless
-    //     direction for the liveness signal this line carries.)
+    //     ("At most once" is the forward-clock bound; `rateLimited`'s contract
+    //     in logger/index.ts states where that bound does not hold, and it is
+    //     the place to read for it rather than this comment. Do not read the
+    //     bound as a guarantee that a line was DELIVERED — it bounds attempts,
+    //     which is the half that matters to a heartbeat.)
     // Silencing idle ticks ENTIRELY would have removed the liveness proof this
     // line exists for, which is the trap: the cheap fix and the correct fix
     // differ, and only the correct one keeps the original guarantee.
     //
     // The throttle is the logger's own `rateLimited` window, not a hand-rolled
-    // one: it stamps the window INSIDE the emit, so there is no check-then-
-    // forget-to-mark seam, and a line dropped by the level gate never consumes
-    // the window. Its clock is this handler's `now`, so the window is
+    // one, so there is no check-then-forget-to-mark seam for this call site to
+    // get wrong; its contract lives on `rateLimited` in logger/index.ts and is
+    // not restated here. Its clock is this handler's `now`, so the window is
     // deterministic under test. The key carries `ctx.owner_slug` so the window is
     // scoped to the same thing the line reports (`project=`) — today's wiring
     // hands one slug per registration (build-core-modules.ts passes
