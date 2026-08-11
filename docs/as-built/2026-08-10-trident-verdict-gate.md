@@ -473,16 +473,120 @@ away WHICH tests went red, so the per-guard claims in this table were prose sitt
 on an aggregate. It prints the failing test names with each mutant now, which is how
 the six rows above were read off the run rather than recalled.
 
+### Round 7 — the comments that documented a guard were satisfying its test
+
+**`ci.yml` was asserted against as TEXT, and its own comments contained the strings.**
+The wiring tests read the raw file and looked for `scripts/ci/trident-verdict.ts`,
+`issues: read` and `pull-requests: read`. All three appear in `ci.yml`'s COMMENTARY —
+the header above the job names the script it introduces, and the `permissions` block
+carries a comment quoting both scopes to explain why `issues` is not redundant with
+`pull-requests`. So two edits that unwire the gate entirely left the suite green: the
+step's body replaced with `run: echo skipped` (a job that succeeds without running the
+gate, which the aggregator then reads as a satisfied verdict), and the `permissions`
+block deleted. This was measurable only from outside, because `ci.yml` had no mutation
+coverage at all — the battery mutated the gate script and the re-run workflow, never the
+file that invokes them, so the one file whose job is to make the gate *run* was the one
+file nothing tried to break.
+
+The tests now assert against comment-stripped YAML, and the stripper is itself
+controlled in both directions: a sentence that appears only in a comment must be gone
+from the stripped text, and a `#` inside a quoted scalar must survive it — there is one
+real line of that shape, `echo "PR #$PR head: …"` in the re-run workflow. A stripper
+that silently returned its input would restore the whole hole while every test still
+passed, which is why its removal is proven positively rather than assumed. Comments are
+truncated and never dropped, so the `indexOf` slicing that isolates one job from the
+file still lands where it did. Four `ci.yml` mutants are in the battery, including the
+two measured above.
+
+**`DISPATCHER_PARSED_FLAGS` was the unguarded half of the redemption filter.** The
+printed command is checked by extracting every `flag=` shape from it and requiring each
+to be in that set; the set itself was asserted nowhere. Widening it and re-adding
+`branch=`/`prNumber=` to the command therefore passed together — the round-2 duplicate-PR
+defect, re-introducible with a green suite. The set is pinned exactly now
+(`['mode', 'repo', 'rounds']`), because it is a claim about a dispatcher grammar that
+lives outside this repository and growing it should be a deliberate edit next to the
+reason.
+
+**The red-exit scan's count floor restated a number nothing fixes.** `>= 8` was there to
+catch "the scan matched nothing", which is what an empty `unredeemed` list also looks
+like. But eight is not a property of the design: a legitimate consolidation to seven red
+exits would have redded a test whose every guard still held. It asserts the thing it
+needs — that the scan saw something — and nothing more.
+
+**And one stale doc line.** `docs/AS_BUILT.md` still said the bypass hatch trusts
+`OWNER`, `MEMBER` or `COLLABORATOR`, contradicting both the code and its own round-6
+paragraph. Round 6 changed the set and never came back for the summary above it.
+
+**The codex cross-model lane finally ran, and it paid for itself.** Owed since round 2
+(the selected model was at capacity), attempted and failed on round 3, run on round 7
+against the whole gate — five real fail-open holes, four of them in exactly the shape
+this round was already about: a guard whose test its own subject could satisfy.
+
+1. **The CLI exit code had no coverage at all.** Every test in the suite reads what
+   `runGate` RETURNS; `process.exit(code)` at the entry point is what turns that into a
+   red check, and nothing reached it. `process.exit(0)` there would have greened every
+   failure in the file with the suite still passing. Now spawned as a real process, with
+   a positive control (`--self-test` must still exit 0) so an unconditional `exit(1)`
+   cannot pass the test either.
+2. **`|| true` defeated the fix made earlier this same round.** The new assertion looked
+   for `run: bun scripts/ci/trident-verdict.ts` as a SUBSTRING, and
+   `bun scripts/ci/trident-verdict.ts || true` contains it — the gate runs, its exit
+   code is discarded, the job is green. Anchored to the whole line now.
+3. **The re-run trigger's predicate could be killed with `false &&`.** Every assertion
+   about it is a substring of one `if:` expression, so a dead predicate satisfied all of
+   them while the workflow could never fire — and a green check would then stand over a
+   verdict that had been edited away, which is precisely the defect round 5 fixed.
+4. **The bypass hatch was still open on a fork head.** The gate reads the PR author's
+   association, and the comment beside it argued that was the right grain because
+   "pushing a commit onto a PR head requires write access to the head branch". True of a
+   branch here; false of a fork, where that access belongs to the fork's owner. A trusted
+   account may open a PR from any fork branch, including one an outsider controls, and
+   the outsider can then push the marker while the association still reads `OWNER`. The
+   hatch is refused when `head.repo.full_name` is not this repository, with an unreadable
+   head repo resolving against the bypass. Fork PRs are otherwise untouched — a recorded
+   verdict still greens them.
+5. **A verdict inside an HTML comment parsed and rendered as nothing.** The comment IS
+   the audit trail, so a block no reader of the thread can see defeats the only reason
+   the record lives in a comment. Stripped before the fence is matched at BOTH call
+   sites, because stripping at one turns a hidden block into a false RED instead of a
+   false green.
+
+Its sixth finding is **vetoed with a citation**: it reported `if: always()` on the
+aggregator as uncovered, and `scripts/ci/ci-workflow.test.ts:186-190` pins it
+(`expect(yml).toMatch(/^ {2}test:[\s\S]*?if: always\(\)/m)`). The lane was pointed at
+five files and that assertion lives in a sixth. Recorded rather than dropped: a discarded
+finding needs the same evidence as an accepted one.
+
+| mutant | test that goes RED |
+| --- | --- |
+| `ci-gate-not-invoked` | ci.yml defines a trident-verdict job that RUNS the gate script |
+| `ci-issues-scope-deleted` | the comments fetch has the scope it needs, not the scope it looks like it needs |
+| `ci-verdict-not-required-by-the-aggregator` | the required `test` aggregator needs it, so the gate is blocking rather than advisory |
+| `ci-aggregator-accepts-a-skipped-verdict` | the aggregator demands success on a PR — a skipped verdict job cannot satisfy it |
+| `dispatcher-flag-set-widened` | the printed command contains NO argument spelling the dispatcher would silently swallow |
+| `cli-exit-code-forced-green` | the CLI turns a failed gate into a NON-ZERO exit — the only thing the job reports |
+| `ci-gate-exit-code-swallowed` | ci.yml defines a trident-verdict job that RUNS the gate script |
+| `rerun-predicate-short-circuited-false` | posting a verdict re-runs the ci run — the gate is not a one-shot read |
+| `bypass-honoured-on-a-fork-head` | a bypass on a FORK head is refused even from a trusted PR author |
+| `hidden-html-comment-verdict-honoured` | a verdict hidden inside an HTML comment is not a record, so it is not a verdict |
+
 ### Verification
 
-* `bun test scripts/ci/trident-verdict.test.ts` — **118 pass, 0 fail**.
-* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **48 applied, 48 caught, 0
+* `bun test scripts/ci/trident-verdict.test.ts` — **128 pass, 0 fail**.
+* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **58 applied, 58 caught, 0
   survived**, reproducible by running it, refusing to report at all unless the
-  unmutated suite is green, and naming the tests each mutant reds.
+  unmutated suite is green, and naming the tests each mutant reds. The ten rows above
+  were read off that run.
 * `bash scripts/ci/typecheck-all.sh` — 51 tsconfigs, all pass. `bash
   scripts/ci/lint.sh` — 0 found across every gate.
-* Still open, and unchanged by this round: the codex cross-model lane did not
-  complete on round 2 (capacity), so that lane's verdict is owed rather than clean.
+* `bash scripts/ci/leak-gate.sh --tree .` and the message scan over this round's
+  commit — silent on every file this branch touches and on its commit message. The
+  tree-wide run does report pre-existing findings from a broader local denylist; the
+  identical run against `main` reports the same ones, so none of them are this branch's.
+* The panel that produced this round: an adversarial lane and a rubric lane on Opus,
+  plus the codex cross-model lane (five findings, all fixed above; one vetoed with a
+  citation). **No kimi lane** — not connected for this run, the owner's K3 quota being
+  exhausted. Any approval here is a three-lane approval, not a four-lane one.
 
 **Managed needs the same gate**, and that is a separate PR in that repository —
 never one change spanning both trees.

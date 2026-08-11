@@ -117,9 +117,10 @@ reaches the default branch, as `issue_comment` always is.
 
 `TRIDENT_BYPASS=<reason>` at column 0 in the head commit message passes the gate and
 records why. It is not satisfiable by an empty, placeholder, or unreadable reason,
-**and it requires write access** — the PR's `author_association` must be OWNER,
-MEMBER or COLLABORATOR. Without that check the hatch was one every fork author held,
-since authors write their own commit messages. A verdict may also not carry a
+**and it requires write access** — the PR's `author_association` must be OWNER or
+COLLABORATOR (MEMBER means org membership, not permission, and was removed for that
+reason — see round 6 below). Without that check the hatch was one every fork author
+held, since authors write their own commit messages. A verdict may also not carry a
 home-directory absolute path: the leak gate covers files and commit messages, a PR
 comment is outside both, and a comment cannot be un-published.
 
@@ -219,6 +220,46 @@ was run" reaches for and names the boundary past that. Re-verified at this head:
 pass / 0 fail, and the battery reports 48 applied, 48 caught, 0 survived — and now
 prints WHICH tests each mutant reds, so the per-guard rows in the detail entry are
 read off the run instead of recalled.
+
+The prose that documents a guard was standing in for the guard (#179, round 7). The
+CI-wiring tests asserted against `ci.yml`'s RAW TEXT, and that file's own comments
+contain the strings they looked for — the header above the job names
+`scripts/ci/trident-verdict.ts`, and the permissions block's comment quotes
+`issues: read` and `pull-requests: read` while explaining why both are needed. So a job
+gutted to `run: echo skipped`, or one with its `permissions` deleted, left the suite
+green, and the aggregator read the gutted job as a satisfied verdict. `ci.yml` carried
+no mutation coverage at all, which is how it stayed hidden: the battery mutated the gate
+script and the re-run workflow, never the file that invokes them. Those tests now read
+comment-stripped YAML, the stripper carries its own control in both directions (a
+sentence that exists only in a comment must be gone; a `#` inside a quoted scalar must
+survive), and four `ci.yml` mutants are in the battery. Two holes of the same shape
+closed with it: `DISPATCHER_PARSED_FLAGS` is what the redemption command is checked
+against and was itself checked against nothing, so WIDENING it re-opened the round-2
+duplicate-PR defect with a green suite — the set is pinned exactly now, with its own
+mutant; and the red-exit scan's `>= 8` count floor restated a number that nothing in the
+design fixes, so a legitimate consolidation to seven red exits would have redded a test
+whose guards all still held — it now asserts what it actually needs, that the scan
+matched something. One stale line went with them: this entry claimed the bypass hatch
+trusts OWNER, MEMBER or COLLABORATOR, which the round-6 paragraph above had already
+contradicted.
+
+And the codex cross-model lane ran for the first time on this branch, having been owed
+since round 2 and failed on round 3 — five more fail-open holes, four of them the same
+shape as the one above. The CLI's `process.exit(code)` had no coverage at all, because
+every test reads what `runGate` RETURNS: forcing that exit to 0 would have greened every
+failure in the suite. `run: bun scripts/ci/trident-verdict.ts || true` satisfied the
+substring assertion written earlier in this very round, so the assertion is anchored to
+the whole line now. The re-run trigger's `if:` could be killed with a leading `false &&`,
+which every substring assertion about it tolerated, leaving a green check standing over a
+verdict edited away. The bypass hatch was still honoured on a FORK head, where write
+access to the head branch belongs to the fork rather than to the PR's author — closed by
+refusing a marker unless `head.repo.full_name` is this repository, with an unreadable head
+repo resolving against the bypass. And a verdict wrapped in `<!-- -->` parsed while
+rendering as nothing, so the audit record could be invisible; HTML comments are now
+stripped at both fence call sites, since stripping at one would turn a hidden block into a
+false red instead of a false green. A sixth finding was vetoed with a citation
+(`if: always()` is pinned at `scripts/ci/ci-workflow.test.ts:186`). Re-verified at this
+head: 128 pass / 0 fail, and the battery reports 58 applied, 58 caught, 0 survived.
 
 Detail: `docs/as-built/2026-08-10-trident-verdict-gate.md`.
 

@@ -96,15 +96,45 @@ import { execFileSync } from 'node:child_process'
  * the reachable outcome is a trusted reviewer shadowing their OWN verdict by
  * quoting it. That is a real footgun and a bounded one, and it is named here
  * rather than papered over: `> `-prefixed and indented copies are covered, a
- * wider fence is not.
+ * wider fence is not. An HTML-COMMENTED block used to be in that list of
+ * uncovered shapes and no longer is — see `visibleBody`, which removes it before
+ * any of this runs, because a block nobody can see is not a record.
  */
 export const VERDICT_FENCE = /^```review-evidence[ \t\r]*\n([\s\S]*?)\n```[ \t\r]*$/m
+
+/**
+ * An HTML comment is INVISIBLE in a rendered thread, so a block inside one is not a
+ * record — and the record is the entire reason the verdict is stored as a comment.
+ *
+ * `<!-- ```review-evidence … ``` -->` parses as a perfectly good verdict and renders
+ * as nothing at all. A trusted author could green a required check with a block that
+ * no human reading the pull request can see, which is the audit trail defeating
+ * itself rather than a privilege escalation. Removed BEFORE matching, so a hidden
+ * block cannot green the gate, cannot red it, and cannot compete for "newest".
+ *
+ * Unterminated `<!--` deliberately swallows the rest of the body, matching how a
+ * renderer treats it: if the text is not visible in the thread, it is not evidence.
+ */
+const HTML_COMMENT = /<!--[\s\S]*?(?:-->|$)/g
+
+/**
+ * The part of a comment body a human reading the thread can actually see.
+ *
+ * Blanks the comment out rather than deleting it, so the surrounding text keeps its
+ * line structure and a block that merely FOLLOWS a hidden one still anchors to
+ * column 0. Applied at BOTH fence call sites — the candidate filter and the parser —
+ * because applying it at only one turns a hidden block into a false RED instead of a
+ * false green, which is the same bug wearing the other sign.
+ */
+export function visibleBody(body: string): string {
+  return body.replace(HTML_COMMENT, (m) => m.replace(/[^\n]/g, ' '))
+}
 
 /** Same pattern, global — used to COUNT blocks in one comment. */
 function fenceMatches(body: string): string[] {
   const re = new RegExp(VERDICT_FENCE.source, 'gm')
   const out: string[] = []
-  for (const m of body.matchAll(re)) out.push(m[1] ?? '')
+  for (const m of visibleBody(body).matchAll(re)) out.push(m[1] ?? '')
   return out
 }
 
@@ -1010,10 +1040,12 @@ async function gate(deps: GateDeps): Promise<number> {
   // use — validating it here would let a malformed count block a legitimate
   // recorded bypass, which is the one path that must stay available.
   const prMeta = (await deps.fetchJson(`repos/${repo}/pulls/${pr}`)) as
-    | { changed_files?: unknown; author_association?: unknown }
+    | { changed_files?: unknown; author_association?: unknown; head?: { repo?: { full_name?: unknown } } }
     | undefined
   const prAuthorAssociation =
     typeof prMeta?.author_association === 'string' ? prMeta.author_association : undefined
+  const headRepo = typeof prMeta?.head?.repo?.full_name === 'string' ? prMeta.head.repo.full_name : undefined
+  const headIsThisRepo = headRepo?.toLowerCase() === repo.toLowerCase()
 
   // The bypass is read EARLY: it is an explicit, recorded decision, and making it
   // wait behind the verdict lookup would only add noise to a merge someone has
@@ -1031,9 +1063,34 @@ async function gate(deps: GateDeps): Promise<number> {
   // the start, for this same abuse class; the hatch was the hole left beside it.
   //
   // The available signal is the PULL REQUEST's `author_association` — the commits
-  // endpoint reports no association for a commit author. That is the right grain
-  // anyway: pushing a commit onto a PR head requires write access to the head
-  // branch, so the PR's author is who is accountable for what its head says.
+  // endpoint reports no association for a commit author.
+  //
+  // THAT SIGNAL IS NOT ENOUGH ON A FORK, and the earlier version of this comment
+  // argued that it was: "pushing a commit onto a PR head requires write access to the
+  // head branch, so the PR's author is who is accountable for what its head says."
+  // True for a branch in THIS repository; false for a fork, where write access to the
+  // head branch belongs to the fork's owner and not to whoever opened the pull
+  // request. A trusted account may open a PR from any fork branch — including one an
+  // outsider controls — and that outsider can then push a commit whose message
+  // carries the marker. The association read here would still say OWNER. So the hatch
+  // is refused outright on a head that lives in another repository: every legitimate
+  // use of it is a branch here, the refusal is fail-closed, and the ordinary verdict
+  // path is untouched on fork PRs. An unreadable head repo counts as "not here" —
+  // a privilege is the one place to resolve an unknown against the request.
+  if (bypass.kind !== 'none' && !headIsThisRepo) {
+    deps.log('trident-verdict: FAIL — a TRIDENT_BYPASS marker on a pull request whose HEAD lives in')
+    deps.log('another repository. It is not honoured.')
+    deps.log('')
+    deps.log(`  head SHA  : ${headSha}`)
+    deps.log(`  head repo : ${headRepo ?? '(not reported)'}`)
+    deps.log(`  this repo : ${repo}`)
+    deps.log('')
+    deps.log('Write access to a fork branch belongs to the fork, not to whoever opened the pull')
+    deps.log('request, so the association reported here says nothing about who wrote that commit')
+    deps.log('message. The hatch is for a branch in this repository; record a verdict instead.')
+    printRedemption(deps, branch, pr)
+    return 1
+  }
   if (bypass.kind !== 'none' && !isTrustedAuthor(prAuthorAssociation)) {
     deps.log('trident-verdict: FAIL — a TRIDENT_BYPASS marker on a pull request opened by an account')
     deps.log('without write access to this repository. It is not honoured.')
@@ -1110,7 +1167,7 @@ async function gate(deps: GateDeps): Promise<number> {
   // not displace the newest real verdict — AND the author must have write access,
   // because this repository is public and a verdict selected by body alone is an
   // approval anyone on the internet can write.
-  const fenced = [...comments].reverse().filter((c) => VERDICT_FENCE.test(c.body ?? ''))
+  const fenced = [...comments].reverse().filter((c) => VERDICT_FENCE.test(visibleBody(c.body ?? '')))
   const candidates = fenced.filter((c) => isTrustedAuthor(c.author_association))
   const untrusted = fenced.length - candidates.length
 

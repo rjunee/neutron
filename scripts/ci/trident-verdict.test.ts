@@ -105,6 +105,11 @@ function harness(opts: {
    * about content, and the author-trust cases set it explicitly.
    */
   prAuthorAssociation?: string | undefined
+  /**
+   * `head.repo.full_name` — the repository the head branch lives in. A fork's name
+   * here disables the bypass hatch; `null` is the deleted-fork shape the API reports.
+   */
+  headRepo?: string | null | undefined
   commitMessage?: string
   env?: Record<string, string | undefined>
   control?: (() => { ok: boolean; detail: string }) | undefined
@@ -142,6 +147,10 @@ function harness(opts: {
         return {
           changed_files: changedFiles,
           author_association: 'prAuthorAssociation' in opts ? opts.prAuthorAssociation : 'OWNER',
+          // Where the HEAD BRANCH lives, which is what decides whether the bypass
+          // hatch is available at all. Defaults to this repository — the ordinary case
+          // and the only one the hatch is for.
+          head: { repo: { full_name: 'headRepo' in opts ? opts.headRepo : 'example-org/example-repo' } },
         }
       }
       if (path.includes('/comments')) return page(commentPages, path)
@@ -257,6 +266,37 @@ describe('a verdict cannot be faked by a hedge or a contradiction', () => {
     const h = harness({ comments: [verdictBlock(HEAD, { 'adversarial.blocking': '2' })] })
     expect(await runGate(h.deps)).toBe(1)
     expect(h.output()).toContain('2 unresolved adversarial P0/P1')
+  })
+
+  test('a verdict hidden inside an HTML comment is not a record, so it is not a verdict', async () => {
+    // A cross-model lane's finding. `<!-- ```review-evidence … ``` -->` parses as a
+    // perfectly good block and renders as NOTHING in the thread, so a trusted author
+    // could green a required check with evidence no human reading the PR can see. The
+    // comment IS the audit trail here; a block nobody can see defeats the only reason
+    // the verdict lives in a comment rather than in the diff.
+    const hidden = `<!--\n${verdictBlock(HEAD)}\n-->`
+    const h = harness({ comments: [hidden] })
+    expect(await runGate(h.deps)).toBe(1)
+    // Ignored ENTIRELY, not treated as malformed: a hidden block must not be able to
+    // red the gate either, which is the same bug wearing the other sign.
+    expect(h.output()).toContain('no trident verdict recorded')
+    expect(h.output()).not.toContain('malformed verdict block')
+  })
+
+  test('a hidden block cannot shadow a real one, in either order', async () => {
+    // Newest-wins reads the LAST fenced comment, so a hidden block posted after a good
+    // verdict would displace it if the filter could see it — and a hidden block in the
+    // same comment as a real one would read as "two blocks", which the parser refuses.
+    const good = verdictBlock(HEAD)
+    const stale = verdictBlock('c'.repeat(40))
+    expect(await runGate(harness({ comments: [good, `<!--\n${stale}\n-->`] }).deps)).toBe(0)
+    expect(await runGate(harness({ comments: [`<!--\n${stale}\n-->\n\n${good}`] }).deps)).toBe(0)
+  })
+
+  test('an unterminated HTML comment hides everything after it, as a renderer does', async () => {
+    const h = harness({ comments: [`<!-- opened and never closed\n${verdictBlock(HEAD)}`] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('no trident verdict recorded')
   })
 
   test('a duplicate key is a contradiction, not an update', () => {
@@ -514,11 +554,13 @@ describe('the failure REDEEMS the branch into a review lane', () => {
       }
       if (!redeemed) unredeemed.push(`line ${i + 1}: ${line.trim()}`)
     })
-    // The count is asserted too: a refactor that deletes every red exit would
-    // otherwise satisfy an emptiness check trivially. The floor is a restated number
-    // and it is a floor for that reason — it exists to catch "the scan found nothing",
-    // not to pin the exact shape of the gate.
-    expect(lines.filter(isRedExit).length).toBeGreaterThanOrEqual(8)
+    // The count is asserted too, because `unredeemed` being empty is also what a scan
+    // that matched NOTHING reports — an emptiness check alone passes a gate with no red
+    // exits left in it at all. What it asserts is exactly that and no more: the scan
+    // saw something. It used to restate a number (`>= 8`), which pinned a count nothing
+    // in the design fixes — a legitimate consolidation down to seven red exits would
+    // have redded this test while every guard it covers still held.
+    expect(lines.filter(isRedExit).length).toBeGreaterThan(0)
     expect(unredeemed).toEqual([])
   })
 
@@ -559,6 +601,14 @@ describe('the failure REDEEMS the branch into a review lane', () => {
     // This assertion is not a restatement of the string: it inspects the string
     // for flag SHAPES and fails on any that is not parsed. Re-adding `branch=`
     // reds it.
+    // THE SET ITSELF IS PINNED, because it is the other half of the filter and it was
+    // the unguarded half. A subset check alone is satisfied by WIDENING the set: add
+    // `branch` and `prNumber` to it, re-add the two flags to the command, and the
+    // round-2 duplicate-PR defect is back with the suite still green — measured
+    // exactly that way. The set is a claim about a dispatcher that lives outside this
+    // repository, so growing it is a claim about that grammar and has to be a
+    // deliberate edit here, next to the reason.
+    expect([...DISPATCHER_PARSED_FLAGS].sort()).toEqual(['mode', 'repo', 'rounds'])
     for (const cmd of [
       redeemCommand({ branch: BRANCH, prNumber: PR }),
       redeemCommand({ branch: null, prNumber: null }),
@@ -1145,6 +1195,72 @@ describe('TRIDENT_BYPASS needs write access, not just a commit message', () => {
     expect(h.output()).toContain('without write access')
   })
 
+  test('a bypass on a FORK head is refused even from a trusted PR author', async () => {
+    // THE HOLE A CROSS-MODEL LANE FOUND, and the reasoning that produced it: the
+    // gate read the PR author's association and the comment beside it argued that
+    // "pushing a commit onto a PR head requires write access to the head branch, so
+    // the PR's author is who is accountable". That is true of a branch HERE and false
+    // of a fork, where write access to the head branch belongs to the fork's owner. An
+    // OWNER may open a PR from any fork branch — including one an outsider controls —
+    // and the outsider can then push a commit carrying the marker, while the
+    // association read here still says OWNER.
+    for (const headRepo of ['someone-else/example-repo', 'example-org/other-repo']) {
+      const h = harness({
+        comments: [],
+        prAuthorAssociation: 'OWNER',
+        headRepo,
+        commitMessage: `fix: thing\n\nTRIDENT_BYPASS=${REASON}\n`,
+      })
+      expect(await runGate(h.deps)).toBe(1)
+      expect(h.output()).toContain('whose HEAD lives in')
+      expect(h.output()).not.toContain('BYPASSED')
+      // And it still hands the branch back rather than just refusing.
+      expect(h.output()).toContain(redeemCommand({ branch: BRANCH, prNumber: PR }))
+    }
+  })
+
+  test('an UNREADABLE head repo is resolved against the bypass, not in its favour', async () => {
+    // A deleted fork reports `head.repo: null`. A privilege is the one place an
+    // unknown must fail closed — `undefined === repo` is false, which is the answer
+    // this needs, and the test is here so a later "tolerate a missing field" cannot
+    // quietly invert it.
+    const h = harness({
+      comments: [],
+      prAuthorAssociation: 'OWNER',
+      headRepo: null,
+      commitMessage: `fix: thing\n\nTRIDENT_BYPASS=${REASON}\n`,
+    })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('(not reported)')
+  })
+
+  test('the case of the repository name does not decide it', async () => {
+    // GitHub treats owner/name case-insensitively, so a differently-cased spelling of
+    // THIS repository is this repository and must not read as a fork.
+    const h = harness({
+      comments: [],
+      prAuthorAssociation: 'OWNER',
+      headRepo: 'Example-Org/Example-Repo',
+      commitMessage: `fix: thing\n\nTRIDENT_BYPASS=${REASON}\n`,
+    })
+    expect(await runGate(h.deps)).toBe(0)
+    expect(h.output()).toContain('BYPASSED')
+  })
+
+  test('a fork PR with no marker is NOT dragged into the bypass path', async () => {
+    // The refusal is about the hatch, not about forks. An ordinary outside
+    // contribution must still get the ordinary "no verdict" answer.
+    const h = harness({ comments: [], prAuthorAssociation: 'NONE', headRepo: 'someone-else/example-repo' })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('no trident verdict recorded')
+    expect(h.output()).not.toContain('whose HEAD lives in')
+  })
+
+  test('a fork PR can still be greened by a recorded VERDICT — only the hatch is closed', async () => {
+    const h = harness({ comments: [verdictBlock(HEAD)], headRepo: 'someone-else/example-repo' })
+    expect(await runGate(h.deps)).toBe(0)
+  })
+
   test('no marker at all is untouched by the author check', async () => {
     // The authorship rule must not turn every outside contribution into a bypass
     // complaint — with no marker there is nothing to refuse, and the ordinary
@@ -1287,12 +1403,74 @@ describe('one sentence in all three mutation fields is not evidence', () => {
 const REPO_ROOT = new URL('../..', import.meta.url)
 const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, REPO_ROOT)), 'utf8')
 
-describe('the gate is actually wired into CI and into the pre-push hook', () => {
-  const ci = read('.github/workflows/ci.yml')
+/**
+ * A workflow's COMMENTS are not its behaviour, and asserting against raw file text
+ * let the comments satisfy the assertion. This is the exact hole a mutation pass
+ * measured: the header comment above the job names `scripts/ci/trident-verdict.ts`
+ * and the permissions block's comment quotes `issues: read` and
+ * `pull-requests: read` while explaining why both are needed. So gutting the job —
+ * `run: echo skipped`, permissions deleted — left the wiring tests GREEN, and the
+ * aggregator read the gutted job as a success. The prose that documents a guard
+ * cannot be allowed to stand in for the guard.
+ *
+ * Line structure is preserved (a comment is truncated, never removed) so slicing
+ * the file by `indexOf` still lands where it did. A `#` opens a comment only at the
+ * start of a line or after whitespace, and never inside a quoted scalar — which is
+ * load-bearing for one real line, `echo "PR #$PR head: …"` in the re-run workflow.
+ */
+const stripYamlComments = (yaml: string): string =>
+  yaml
+    .split('\n')
+    .map((line) => {
+      let quote: string | null = null
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i]!
+        if (quote) {
+          if (ch === quote) quote = null
+          continue
+        }
+        if (ch === '"' || ch === "'") {
+          quote = ch
+          continue
+        }
+        if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]!))) return line.slice(0, i)
+      }
+      return line
+    })
+    .join('\n')
 
-  test('ci.yml defines a trident-verdict job that runs the gate script', () => {
+describe('the gate is actually wired into CI and into the pre-push hook', () => {
+  // Every assertion below reads the CODE, never the commentary around it.
+  const ci = stripYamlComments(read('.github/workflows/ci.yml'))
+
+  test('the comment stripper strips comments and nothing else — the control for every assertion here', () => {
+    // Without this, a stripper that silently returned its input would restore the
+    // hole these tests exist to close, and every one of them would still pass. So
+    // the removal is proven POSITIVELY (a sentence that exists only in a comment is
+    // gone) and the non-removal is proven too (a `#` inside a quoted scalar stays).
+    const raw = read('.github/workflows/ci.yml')
+    expect(raw).toContain('does not need a third wording')
+    expect(ci).not.toContain('does not need a third wording')
+    expect(raw).toContain('is NOT redundant with')
+    expect(ci).not.toContain('is NOT redundant with')
+    const rerunRaw = read('.github/workflows/trident-verdict-rerun.yml')
+    expect(stripYamlComments(rerunRaw)).toContain('echo "PR #$PR head:')
+    // And the stripper truncates lines rather than dropping them, which is what
+    // keeps `indexOf`-based slicing of the file honest.
+    expect(ci.split('\n').length).toBe(raw.split('\n').length)
+  })
+
+  test('ci.yml defines a trident-verdict job that RUNS the gate script', () => {
     expect(ci).toMatch(/^ {2}trident-verdict:\s*$/m)
-    expect(ci).toContain('scripts/ci/trident-verdict.ts')
+    // The invocation itself, not a mention of the path: replacing the step's body
+    // with `echo skipped` leaves a job that succeeds without running the gate,
+    // which the aggregator then reads as a satisfied verdict.
+    //
+    // And the WHOLE LINE, anchored, because a substring check is satisfied by
+    // `bun scripts/ci/trident-verdict.ts || true` — a cross-model lane found exactly
+    // that hole in the first version of this assertion. The gate's exit code is the
+    // only thing the job reports; anything appended to this line discards it.
+    expect(ci).toMatch(/^ +run: bun scripts\/ci\/trident-verdict\.ts[ \t]*$/m)
   })
 
   test('the job only ever runs on a pull_request, so no other event can mint a green one', () => {
@@ -1340,7 +1518,7 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     // comments at the moment it runs, the review lane posts the verdict after that,
     // and no `pull_request` workflow re-triggers on a comment. The check would stay
     // red on a correct branch and every merge would need a hand re-run.
-    const rerun = read('.github/workflows/trident-verdict-rerun.yml')
+    const rerun = stripYamlComments(read('.github/workflows/trident-verdict-rerun.yml'))
     expect(rerun).toContain('issue_comment')
     expect(rerun).toContain('actions: write')
     // A verdict is EDITABLE and DELETABLE after it is posted, so `created` alone
@@ -1359,6 +1537,15 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     for (const assoc of ['OWNER', 'COLLABORATOR']) {
       expect(rerun).toContain(`author_association == '${assoc}'`)
     }
+    // AND THE PREDICATE IS NOT DEAD. Every assertion here is about a SUBSTRING of that
+    // one `if:` expression, so prepending `false &&` to it satisfies all of them while
+    // the workflow can never fire again — a green check would then stand over a verdict
+    // that had been edited away. A cross-model lane found that hole. A literal `false`
+    // has no legitimate place in this condition; `!= null` is how the absent case is
+    // written here.
+    const predicate = /^ {4}if: >-\n((?: {6}.*\n)+)/m.exec(rerun)
+    expect(predicate).not.toBeNull()
+    expect(predicate![1]).not.toMatch(/\bfalse\b/)
     // Value for value with the gate's own set, MEMBER included in the exclusion:
     // a trigger list that is WIDER than the gate's is an account that can spend
     // runner minutes on a check it can never satisfy.
@@ -1373,6 +1560,32 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     expect(needs).not.toBeNull()
     expect(needs![1]).toContain('trident-verdict')
     expect(needs![1]).not.toContain('rerun')
+  })
+
+  test('the CLI turns a failed gate into a NON-ZERO exit — the only thing the job reports', () => {
+    // `runGate` returns a code and every test above reads that RETURN VALUE. The
+    // entry point's `process.exit(code)` is what makes the code a red check, and
+    // nothing reached it: `process.exit(0)` there would have greened every failure
+    // in this file with the suite still passing. Found by a cross-model lane.
+    //
+    // The failing input is a misconfiguration, chosen because it returns before any
+    // network call: GITHUB_REPOSITORY empty is refused outright rather than guessed.
+    // GitHub Actions always sets that variable, so it is overridden explicitly here.
+    const script = 'scripts/ci/trident-verdict.ts'
+    const cwd = fileURLToPath(REPO_ROOT)
+    const red = Bun.spawnSync(['bun', script], {
+      cwd,
+      env: { ...process.env, GITHUB_REPOSITORY: '', PR_NUMBER: '', PR_HEAD_SHA: '', PR_HEAD_REF: '' },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(red.exitCode).toBe(1)
+    // The redemption reaches the real process's stdout too, not just the injected log.
+    expect(new TextDecoder().decode(red.stdout)).toContain('/trident v2 ')
+    // AND THE POSITIVE CONTROL, so an unconditional `process.exit(1)` cannot pass this
+    // test: the self-test path must still exit 0.
+    const green = Bun.spawnSync(['bun', script, '--self-test'], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    expect(green.exitCode).toBe(0)
   })
 
   test('the pre-push hook WARNS with the same command and never blocks the push', () => {

@@ -10,9 +10,9 @@
  * summary. A number nobody can reproduce is not evidence.
  *
  * WHAT IT DOES. For each named mutant it rewrites ONE guard — in
- * `scripts/ci/trident-verdict.ts` or in
- * `.github/workflows/trident-verdict-rerun.yml`, which is executable surface too —
- * into its fail-OPEN direction, runs the suite, and records CAUGHT (the suite
+ * `scripts/ci/trident-verdict.ts`, or in `.github/workflows/trident-verdict-rerun.yml`
+ * and `.github/workflows/ci.yml`, which are executable surface too — into its
+ * fail-OPEN direction, runs the suite, and records CAUGHT (the suite
  * reported failing tests), SURVIVED (it stayed green) or BROKEN (it never reported a
  * result). The original file is restored after every case, including on a crash, and
  * the unmutated suite must be green before any of it is believed.
@@ -20,7 +20,9 @@
  * HOW TO READ A SURVIVOR. A survivor is a hole in the TESTS, never a licence to
  * delete the mutant. It means the guard has code and no coverage: it can be
  * removed by a future refactor and CI will applaud. Every entry below is a
- * direction that makes the gate accept something it exists to refuse.
+ * direction that makes the gate accept something it exists to refuse — or, in the
+ * workflow files, one that UNWIRES it, which is the same permission by a shorter
+ * route: a gate nothing invokes refuses nothing.
  *
  *   bun scripts/ci/trident-verdict-mutation-battery.ts
  *
@@ -35,6 +37,7 @@ import { fileURLToPath } from 'node:url'
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const GATE = fileURLToPath(new URL('trident-verdict.ts', import.meta.url))
 const RERUN_WORKFLOW = fileURLToPath(new URL('../../.github/workflows/trident-verdict-rerun.yml', import.meta.url))
+const CI_WORKFLOW = fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url))
 const TEST = 'scripts/ci/trident-verdict.test.ts'
 
 /** [name, the exact source to replace, the fail-open replacement] */
@@ -97,7 +100,30 @@ const MUTANTS: [string, string, string][] = [
     'const candidates = fenced.filter(() => true)',
   ],
   ['newest-first-dropped', 'const fenced = [...comments].reverse().filter', 'const fenced = [...comments].filter'],
+  [
+    // The other half of the redemption filter. The command was checked against this
+    // set, and the set was checked against nothing — so widening it re-opened the
+    // duplicate-PR defect with the suite still green.
+    'dispatcher-flag-set-widened',
+    "export const DISPATCHER_PARSED_FLAGS = new Set(['repo', 'rounds', 'mode'])",
+    "export const DISPATCHER_PARSED_FLAGS = new Set(['repo', 'rounds', 'mode', 'branch', 'prNumber'])",
+  ],
+  // ---- a hidden record is not a record ----------------------------------------
+  [
+    // `<!-- ```review-evidence … ``` -->` parses and renders as nothing, so a trusted
+    // author could green the check with evidence no reader of the PR can see.
+    'hidden-html-comment-verdict-honoured',
+    '  return body.replace(HTML_COMMENT, (m) => m.replace(/[^\\n]/g, \' \'))',
+    '  return body',
+  ],
   // ---- the escape hatch -------------------------------------------------------
+  [
+    // Write access to a FORK branch belongs to the fork, not to whoever opened the
+    // PR, so the association read here says nothing about who wrote that commit.
+    'bypass-honoured-on-a-fork-head',
+    "if (bypass.kind !== 'none' && !headIsThisRepo) {",
+    'if (false) {',
+  ],
   ['bypass-empty-reason-allowed', '  if (!reason) {', '  if (false) {'],
   ['bypass-letter-floor-lowered', 'if (!/[a-z]{3}/i.test(reason)) {', 'if (!/[a-z]{1}/i.test(reason)) {'],
   ['bypass-two-markers-allowed', 'if (found.length > 1) {', 'if (false) {'],
@@ -214,10 +240,69 @@ const WORKFLOW_MUTANTS: [string, string, string][] = [
   ],
 ]
 
+/**
+ * Mutants of the WIRING, which had code and no coverage at all.
+ *
+ * `ci.yml` was outside this battery entirely, and a mutation pass found out why that
+ * mattered: the wiring tests asserted against the file's RAW TEXT, and the file's own
+ * comments contain the strings they looked for — the header above the job names
+ * `scripts/ci/trident-verdict.ts`, and the permissions block's comment quotes
+ * `issues: read` and `pull-requests: read` while explaining why both are needed. So a
+ * job gutted to `run: echo skipped`, or one with its permissions deleted, left the
+ * suite green, and the aggregator read the gutted job as a satisfied verdict. The
+ * tests now read comment-stripped YAML; these mutants are what proves it.
+ */
+const CI_WORKFLOW_MUTANTS: [string, string, string][] = [
+  ['ci-gate-not-invoked', 'run: bun scripts/ci/trident-verdict.ts', 'run: echo "skipped"'],
+  [
+    'ci-verdict-not-required-by-the-aggregator',
+    'needs: [typecheck, lint, purity, layering, shard, trident-verdict]',
+    'needs: [typecheck, lint, purity, layering, shard]',
+  ],
+  [
+    'ci-aggregator-accepts-a-skipped-verdict',
+    '&& [ "${{ needs.trident-verdict.result }}" != "success" ]; then',
+    '&& [ "${{ needs.trident-verdict.result }}" = "failure" ]; then',
+  ],
+  ['ci-issues-scope-deleted', '      issues: read\n', ''],
+  [
+    // The subtler form of `ci-gate-not-invoked`: the gate still RUNS, and its exit
+    // code — the only thing the job reports — is discarded.
+    'ci-gate-exit-code-swallowed',
+    'run: bun scripts/ci/trident-verdict.ts',
+    'run: bun scripts/ci/trident-verdict.ts || true',
+  ],
+]
+
+/**
+ * Mutants of the ENTRY POINT and the re-run trigger, both reachable only from outside
+ * `runGate`.
+ *
+ * `process.exit(code)` is what turns a returned non-zero into a red check, and every
+ * other test in the suite reads the RETURN VALUE — so forcing that exit to 0 greened
+ * every failure in the file with the suite still passing. The re-run predicate is the
+ * same shape: its assertions are all substrings of one `if:` expression, so a `false &&`
+ * in front of it left them all satisfied over a workflow that can never fire.
+ */
+const ENTRYPOINT_MUTANTS: [string, string, string][] = [
+  ['cli-exit-code-forced-green', 'process.exit(code)', 'process.exit(0)'],
+]
+
+const RERUN_TRIGGER_MUTANTS: [string, string, string][] = [
+  [
+    'rerun-predicate-short-circuited-false',
+    '      github.event.issue.pull_request != null &&',
+    '      false &&\n      github.event.issue.pull_request != null &&',
+  ],
+]
+
 /** Every mutant, paired with the file it rewrites. */
 const CASES: [string, string, string, string][] = [
   ...MUTANTS.map(([n, f, t]) => [GATE, n, f, t] as [string, string, string, string]),
   ...WORKFLOW_MUTANTS.map(([n, f, t]) => [RERUN_WORKFLOW, n, f, t] as [string, string, string, string]),
+  ...CI_WORKFLOW_MUTANTS.map(([n, f, t]) => [CI_WORKFLOW, n, f, t] as [string, string, string, string]),
+  ...ENTRYPOINT_MUTANTS.map(([n, f, t]) => [GATE, n, f, t] as [string, string, string, string]),
+  ...RERUN_TRIGGER_MUTANTS.map(([n, f, t]) => [RERUN_WORKFLOW, n, f, t] as [string, string, string, string]),
 ]
 const originals = new Map(CASES.map(([file]) => [file, readFileSync(file, 'utf8')]))
 

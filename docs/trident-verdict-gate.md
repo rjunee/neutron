@@ -117,6 +117,16 @@ have needed a new producer.
 `verdict.json` would be self-certifying: the author of the change would also be
 the author of its approval.
 
+**And it has to be VISIBLE, because being a record is the whole reason it is a
+comment.** A block wrapped in `<!-- … -->` parses as a perfectly good verdict and
+renders as nothing at all, so a trusted author could green a required check with
+evidence nobody reading the thread can see. HTML comments are removed before the
+fence is matched, at both call sites — the candidate filter and the parser — so a
+hidden block cannot green the gate, cannot *red* it (stripping at only one site
+would turn it into a false red instead of a false green), and cannot compete for
+"newest verdict". An unterminated `<!--` hides everything after it, matching what a
+renderer does with it.
+
 ### …posted by an account with write access
 
 This repository is public, so "a comment containing the block" is not a
@@ -298,10 +308,23 @@ authors write their own commit messages, so a hatch keyed to nothing but a strin
 in one is a hatch every fork author holds — one line would have turned the required
 check green on a change nobody reviewed. The verdict path had filtered on write
 access from the start, for this same abuse class, and the hatch beside it was the
-hole left over. The PR's association is the available signal (the commits endpoint
-reports none for a commit author) and it is the right grain anyway: pushing a
-commit onto a PR head requires write access to the head branch, so the PR's author
-is who is accountable for what its head says.
+hole left over. The PR's association is the available signal — the commits endpoint
+reports none for a commit author.
+
+**And that signal is not enough on a fork, so the hatch is closed there.** An
+earlier version of this paragraph argued the association was "the right grain
+anyway: pushing a commit onto a PR head requires write access to the head branch,
+so the PR's author is who is accountable for what its head says." True of a branch
+in this repository, false of a fork — write access to a fork's branch belongs to
+the fork's owner, not to whoever opened the pull request. A trusted account may
+open a PR from **any** fork branch, including one an outsider controls, and that
+outsider can then push a commit whose message carries the marker while the
+association read here still says `OWNER`. So a bypass is refused outright when
+`head.repo.full_name` is not this repository (an unreadable head repo — a deleted
+fork reports `null` — counts as "not here"; a privilege resolves an unknown against
+the request). Every legitimate use of the hatch is a branch here. A fork PR is
+otherwise untouched: it can still be greened by a recorded verdict, which is the
+route it should take.
 
 ## Operating notes
 
