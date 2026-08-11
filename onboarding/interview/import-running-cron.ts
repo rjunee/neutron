@@ -221,16 +221,14 @@ export function buildImportRunningHandler(
     //     worth to an operator is untouched by this change — which is less than
     //     S15 assumed, and was already less before this change.
     //     "> 0 for > 15 min" stopped being an alarm on 2026-06-18, when the
-    //     import timeout became progress-aware: the floor is now 30 min
-    //     (`IMPORT_RUNNING_HARD_TIMEOUT_MS`), the deadline RESETS on forward
-    //     progress within a 5-min no-progress window
-    //     (`IMPORT_NO_PROGRESS_WINDOW_MS`), and the absolute backstop is 4 h
-    //     (`IMPORT_RUNNING_HARD_TIMEOUT_CEILING_MS`) — all in
-    //     engine-internals.ts. A legitimately-progressing import therefore sits
-    //     at count > 0 for well past 15 min by design, and this line reports
-    //     only the COUNT, never progress, so it cannot tell a slow-healthy
-    //     import from a stuck one. Read >0 as "work is in flight", not as a
-    //     timer. And
+    //     import timeout became progress-aware: the deadline RESETS on forward
+    //     progress, so a legitimately-progressing import sits at count > 0 for
+    //     well past 15 min by design. `evaluateImportTimeout` in
+    //     engine-internals.ts is the rule — read it there rather than trusting
+    //     a set of windows copied out into a comment. Either way this line
+    //     reports only the COUNT, never progress, so it cannot tell a
+    //     slow-healthy import from a stuck one. Read >0 as "work is in
+    //     flight", not as a timer. And
     //   * an IDLE tick still logs, just at most once per
     //     {@link IDLE_TICK_LOG_INTERVAL_MS}, so "the line stopped appearing"
     //     remains a real signal — it is a slower heartbeat, not a silent one.

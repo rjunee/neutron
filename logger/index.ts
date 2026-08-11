@@ -17,14 +17,15 @@
  * swaps onto this package. They are close to those originals but NOT
  * bit-for-bit.
  *
- * `logger/__tests__/logger.test.ts` is the specification of what they actually
- * do; this docblock is not. Read a case rather than a sentence, and when you
- * change the behavior, change a case rather than adding a sentence. One gap is
- * worth DISCLOSING rather than characterizing: no case there uses a throwing
- * sink (`grep -n throw logger/__tests__/logger.test.ts` returns nothing, while
- * the same grep for `rateLimited` over that file returns many hits — so the
- * empty result is a gap, not a blind tool), which is why the
- * attempt-vs-delivery note below cites an execution check, not the suite.
+ * `logger/__tests__/logger.test.ts` is where the behavior is pinned; this
+ * docblock is not. Read a case rather than a sentence, and when you change the
+ * behavior, change a case rather than adding a sentence. It is not a COMPLETE
+ * specification, and one gap is worth DISCLOSING rather than characterizing: no
+ * case there uses a throwing sink (`grep -n throw
+ * logger/__tests__/logger.test.ts` returns nothing, while the same grep for
+ * `rateLimited` over that file returns many hits — so the empty result is a
+ * gap, not a blind tool). The attempt-vs-delivery note below therefore rests on
+ * an execution check recorded in `docs/AS_BUILT.md`, not on the suite.
  *
  * This docblock states INTENT on purpose. Earlier revisions restated the
  * predicate in prose, then enumerated the deviations from the originals, then
@@ -35,8 +36,9 @@
  *   - `once(key)` — the GBrain unavailable latch
  *     (gbrain-memory/GBrainSyncHook.ts `latchIfUnavailable`): the FIRST
  *     passing emit under a key logs and latches; every later emit under that
- *     key is silent for the rest of the process. "Exactly ONE
- *     `gbrain_unavailable` event."
+ *     key is silent until `clearOnce` re-arms it. "Exactly ONE
+ *     `gbrain_unavailable` event" — one ATTEMPT, on the same
+ *     attempts-not-deliveries bound as `rateLimited` below.
  *
  *   - `clearOnce(key)` — the falling edge of an EDGE-TRIGGERED latch
  *     (runtime/adapters/claude-code/persistent/rate-limit-banner.ts head
@@ -50,11 +52,10 @@
  *     pool-state.ts `wedgeAlertState`): a throttle for a line that must keep
  *     appearing without flooding. An attempt the WINDOW suppresses does not
  *     extend it, and an attempt the LEVEL GATE drops does not start one (the
- *     original sets `wedgeAlertState` only inside `if (action.alert.send)`),
- *     so a hot loop of suppressed attempts cannot silence the key forever.
+ *     original sets `wedgeAlertState` only inside `if (action.alert.send)`).
  *
- *     Two consequences a caller has to plan around. They are the ones looked
- *     for, not an inventory of every way this differs from the original:
+ *     Two consequences that are easy to get wrong — not the whole caller-facing
+ *     contract, and not an inventory of how this differs from the original:
  *
  *     A CLOCK READING BEHIND THE LAST STAMP EMITS rather than suppressing —
  *     what a backward step produces once it lands behind the stamp, not what
@@ -73,8 +74,9 @@
  *     let a persistently-throwing sink re-attempt on every single call,
  *     precisely the flood the window exists to prevent. A caller that needs a
  *     DELIVERY bound must make its own sink non-throwing; this primitive will
- *     not do it for them. `ms` is likewise not validated here — a caller that
- *     COMPUTES it should validate it.
+ *     not do it for them. `ms` is likewise not validated here, and a NaN `ms`
+ *     suppresses the key for the life of the process (verified by execution),
+ *     so a caller that COMPUTES `ms` must validate it.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -149,8 +151,8 @@ export interface Logger extends LogEmitter {
    * "Roughly" is load-bearing: a clock reading behind the last stamp emits
    * rather than suppressing, and a throwing sink consumes a window with no
    * guarantee that anything was delivered. Both are deliberate — the head
-   * docblock gives the reasons, and `logger/__tests__/logger.test.ts` is the
-   * specification.
+   * docblock gives the reasons and the rest of the caller-facing contract, and
+   * `logger/__tests__/logger.test.ts` holds the pinned cases.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }

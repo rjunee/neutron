@@ -9272,6 +9272,11 @@ failed, so this is not a four-lane APPROVE and should not be read as one.
 
 ## 2026-08-10 — the import-running cron stops flooding the journal, without going silent
 
+> ⚠️ **Every round below that describes what a docblock or comment SAYS describes it as of
+> that round.** Rounds 5–7 rewrote the same `logger/index.ts` docblock repeatedly, so those
+> sentences are a record of a decision, not a quotable description of the file. Read the file.
+> That an append-only log cannot keep such a sentence true is itself the Round 7 finding.
+
 `onboarding/interview/import-running-cron.ts` logged its tick unconditionally. On an
 idle install that is one line every **5 s** forever with `in_flight_imports=0` —
 **~17,280 lines/day**, measured on the owner's box, where it did real harm: diagnosing a
@@ -9399,7 +9404,8 @@ per `ms` window per key" with no exception. With `last = 3_600_000`, `now = 0`,
 because `rateLimited` is SHARED — `cron/scheduler.ts` plus seven sites in
 `channels/adapters/app-ws/adapter.ts` — and any of them reasoning about their own
 suppression from the written predicate would be reasoning from a false one. Both statements
-now read `0 <= now - last < ms` and name the backward-step exception, with the reason and the
+were changed AT THE TIME to read `0 <= now - last < ms` and to name the backward-step
+exception — wording Round 7 later deleted — with the reason and the
 caller-facing consequence ("at most one line per window" holds under a forward-only clock,
 not across a backward step). The CODE did not change: it was reviewed across three rounds
 and it is right.
@@ -9430,9 +9436,9 @@ on them.
    `sink(...)`, so the window records an ATTEMPTED delivery. A `sink` that THROWS consumes the
    window with no guarantee a line reached anyone. Keeping that ordering is right: stamping after
    the sink returned would let a persistently-throwing sink re-attempt on every call, which is
-   the un-rate-limited flood these windows exist to prevent. So the CODE stays and all four
-   statements of it now say "an attempt that clears both gates", with the throwing-sink case
-   named.
+   the un-rate-limited flood these windows exist to prevent. So the CODE stays, and the four
+   statements of it were changed AT THE TIME to say "an attempt that clears both gates", with
+   the throwing-sink case named — wording Round 7 later deleted.
 2. **"The count stayed > 0 for > 15 min" is a stale alarm, and this change re-asserted it as
    "unchanged".** It was true when S15 wrote it (2026-05-17) and stopped being true on
    2026-06-18, when the import timeout became progress-aware: a 30-min floor
@@ -9541,9 +9547,10 @@ I would defend hardest.** All four are now fixed; the code still has not changed
   test makes it under a counter-style injected clock. A first pass at this correction called it
   "does not change suppression semantics", which the same lane rejected: it shifts boundaries,
   and "semantics vs timing" was a distinction doing work the sentence had not earned. The
-  docblock now separates "differences that change which rule applies" (two) from that one, and —
-  **says outright that the list is the set of differences LOOKED FOR, not a proof no fourth
-  exists.** 📌 Replacing "ONE deliberate exception" with "TWO deliberate ways" repeated the
+  docblock was changed AT THE TIME to separate "differences that change which rule applies"
+  (two) from that one, and — **to say outright that the list was the set of differences LOOKED
+  FOR, not a proof no fourth exists.** (Round 7 deleted that separation with the rest of the
+  enumerations.) 📌 Replacing "ONE deliberate exception" with "TWO deliberate ways" repeated the
   error at a larger number. The defect was never the number; it was asserting completeness
   about a thing discovered by reading.
 * **"The spec never specified a cadence at all" rested on a grep over a file that does not
@@ -9709,8 +9716,8 @@ scheduler-boot test, 60 pass / 0 fail; `scripts/ci/typecheck-all.sh` exit 0;
 **Round 7 — a log entry that quotes a docblock's wording is a mechanism claim of its own (PR
 #174).** Documentation only again; no executable line changed.
 
-The two false claims this round were not in the code's docs at all — they were in the entry
-ABOVE, in the round-5 summary, and both were about the same shared primitive:
+The false claims that OPENED this round were not in the code's docs at all — they were in the
+entry ABOVE, in the round-5 summary, about the same shared primitive. Two of them:
 
 * **"The `rateLimited` contract also now notes that a NaN `ms` suppresses a key permanently"** —
   the note being summarised was deleted by the very commit the summary shipped in. `git grep -n
@@ -9724,7 +9731,9 @@ ABOVE, in the round-5 summary, and both were about the same shared primitive:
   own warning that exhaustive counts are the thing this PR keeps getting wrong.
 
 The sentence is deleted rather than corrected: it summarised a note that no longer exists, so
-there is nothing left for it to be right about.
+there is nothing left for it to be right about. A third claim in the same block — a throwing
+sink "consumes the window and nobody gets a line" — is narrowed to what is knowable, since a
+sink may deliver and then throw.
 
 📌 **A chronological log entry that describes the CURRENT WORDING of a docblock is a mechanism
 claim with an extra hazard: the log is append-only, so it is designed never to be revisited, and
@@ -9757,13 +9766,16 @@ attempt did not open a window. The disclosed gap is real by the same standard: `
 over `logger/__tests__/logger.test.ts` returns nothing.
 
 One surviving claim was over-general and is narrowed here rather than kept: every round so far
-wrote "a BACKWARD clock step emits". The predicate is `elapsed < 0 || elapsed >= ms`
-(`logger/index.ts`), so what emits is a clock reading BEHIND THE LAST STAMP — a backward step
-smaller than the elapsed time leaves the reading ahead of the stamp and is still suppressed.
+wrote "a BACKWARD clock step emits". What emits is a clock reading BEHIND THE LAST STAMP — a
+backward step smaller than the elapsed time leaves the reading ahead of the stamp and is still
+suppressed. Confirmed by execution: stamp at 100, clock forward to 200, step back to 150,
+`ms=100` → suppressed. (The condition itself is in `rateLimited`; read it there.) Sentences in
+the rounds above still say "a backward step", and the banner at the top of this section covers
+them.
 📌 **A consequence named by its CAUSE ("a backward step") quantifies over more inputs than the
 code tests; named by the CONDITION the code actually tests, it cannot.** This survived six rounds
-of review of the sentence right next to the predicate, because the cause is the interesting part
-of the story and the condition is the true part.
+of review of a sentence sitting directly above the condition, because the cause is the
+interesting half of the story and the condition is the true half.
 
 The remaining smaller items are closed with it — the S15 note in the cron handler quoted a
 "> 0 for > 15 min" alarm in the present tense and retracted it twenty lines later, so it now
@@ -9773,8 +9785,56 @@ to the one thing it can claim, that the bound is a budget rather than a derivati
 📌 **A recorded review verdict is a claim about a RUN, and it decays exactly like a claim about
 code.** This PR's body recorded a `codex` APPROVE with an empty findings list against a named
 head; re-run against that same head it did not reproduce, and confirmed false claims were live in
-that tree at the time. The line is removed rather than restated. A verdict is quotable only with
+that tree at the time. The row is replaced in the PR description by the round-7 lane result and
+its head, not restated. A verdict is quotable only with
 the head it ran against, and it has to be re-run before it is quoted.
+
+**The codex lane then found eight more in this round's own draft, and the shape repeats one
+altitude up.** All are fixed here; the code still has not changed.
+
+* **"A hot loop of suppressed attempts cannot silence the key forever" is false, because `ms` is
+  not validated.** A probe called `rateLimited('k', NaN)` 100,001 times with the clock advancing
+  and got exactly one line — `NaN` fails both halves of the comparison, so the key is suppressed
+  for the life of the process. The clause is deleted and the consequence is stated where a caller
+  will meet it. Note what this means about the sentence deleted at the top of this entry: the NaN
+  BEHAVIOUR was real, and what was false was the claim about which file documented it and how
+  many callers could reach it. **Deleting a false sentence can delete a true fact riding along
+  inside it** — this round put the fact back, in the contract, verified by execution.
+* **"`logger/__tests__/logger.test.ts` is the specification of what they actually do"** is a
+  completeness claim about a suite whose gap the NEXT sentence discloses. Now: it is where the
+  behavior is pinned, explicitly not a complete specification.
+* **"One line per key" for `once`** describes an attempt bound as a delivery bound — a throwing
+  sink burns the latch and delivers nothing (probe: `{"sink_calls":1,"delivered":[]}`). Both
+  helpers now say ATTEMPT.
+* **"The two consequences a caller has to plan around" is a total**, and the same contract
+  carries more caller obligations (validate a computed `ms`; latch state is shared across
+  `createLogger` calls by `subsystem × key`). Now "two consequences that are easy to get wrong",
+  explicitly not the whole contract.
+* **"This file does not restate them" appeared in the sentence that restated them.**
+* **"Every false claim of the last three rounds shipped in a paraphrase, never at the site that
+  owned the claim" is false** — "ONE deliberate exception" shipped in the `logger/index.ts` head
+  docblock itself, as this log records a few entries up. A generalisation drawn from this PR's own
+  history, contradicted by this PR's own history.
+* **"The absolute backstop is 4 h" in the cron handler** — the rate-limit statuses return "don't
+  fire" BEFORE the ceiling test, which round 5 had already recorded one entry earlier. The
+  enumeration is replaced by a pointer to `evaluateImportTimeout`.
+* **This entry quoted the suppression predicate** while the round above records that the prose
+  stopped quoting predicates. The quote is gone; the condition is named in words.
+
+📌 **Four of those eight are the SAME defect as this round's thesis, committed while writing the
+fix for it**: a total, a completeness claim, a self-refuting summary, and an over-general
+induction from this PR's own history. The thesis was right and the sentences carrying it had the
+shape of the ones it condemned. **An over-claiming habit does not get fixed by the prose that
+announces the fix.** What held, again, was the sentence that named a GAP or scoped itself to what
+had actually been read — which is why the durable devices in this round are a disclosed gap, a
+dated banner, and a pointer, not a better description.
+
+**Review panel for round 7:** adversarial + rubric lanes, plus an independent `codex` lane
+(codex-cli 0.147.0, read-only), which produced the eight items above. The kimi lane was
+deliberately not run (owner's K3 quota exhausted) — **absent, not failed**, so this is a
+three-lane round. The codex sandbox could not create temp files, so it verified the unit suite
+and the 51-project typecheck itself and marked the integration-test and lint results UNVERIFIED
+from its side; those were run unsandboxed here.
 
 **Verification (round 7):** `logger/__tests__/logger.test.ts`,
 `tests/integration/import-running-cron-tick.test.ts` and
