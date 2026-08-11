@@ -501,14 +501,19 @@ export class TridentRunStore {
       // and orphan recovery are both UNREACHABLE on a terminal row: `step()` returns
       // early on `isTerminalPhase(run.phase)` before either one. The hang watchdog
       // keys on `last_advanced_at`, not on this column. What IS load-bearing is
-      // `update()`'s CRASH VETO (`AND subagent_status IS NOT 'crashed'`, above) —
-      // `update()` is the ONE writer with no `phase NOT IN (terminal)` predicate, so
-      // on a terminal row its veto is the only thing latching a crash. NOT
-      // `saveIfActive()`'s equivalent veto (below): that statement already carries
-      // `phase NOT IN (terminal)`, so it cannot land on a terminal row whatever this
-      // column says, and its veto is unreachable here. Beyond `update()`, the readers
-      // that matter are every human or tool read of a finished row, which is where
-      // the false claim was first spotted.
+      // `update()`'s CRASH VETO (`AND subagent_status IS NOT 'crashed'`, above): on a
+      // terminal row it is the only thing latching a crash, because `update()` is the
+      // only writer REACHABLE on such a row that both lacks a
+      // `phase NOT IN (terminal)` predicate and carries the veto. The other two writers
+      // are each excluded for their own reason, and it is worth naming which:
+      // `saveIfActive()` (below) has the identical veto but ALSO the phase predicate, so
+      // it cannot land on a terminal row whatever this column says — its veto is
+      // unreachable here. `save()` (below) likewise has no phase predicate AND no veto
+      // at all, so it would clobber a 'crashed' latch outright — it is harmless only
+      // because it has ZERO production callers (every production commit goes through
+      // `saveIfActive`, `trident/tick.ts:263`); if one is ever added it needs the
+      // predicate. Beyond `update()`, the readers that matter are every human or tool
+      // read of a finished row, which is where the false claim was first spotted.
       //
       // ONLY A LIVE CLAIM IS CLEARED ('running' / 'pending'), and that restriction is
       // load-bearing: nulling unconditionally would erase a 'crashed' marker whenever

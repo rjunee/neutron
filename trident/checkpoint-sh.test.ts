@@ -40,11 +40,26 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TERMINAL_PHASES } from './state-machine.ts'
+import type { TridentPhase } from './store.ts'
 
 const SCRIPT = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 
-/** Migration 0077's phase CHECK set, verbatim. */
-const ALL_PHASES = ['forge-init', 'ralph-plan', 'ralph-task', 'argus', 'forge-fix', 'done', 'failed', 'stopped'] as const
+/**
+ * Migration 0077's phase CHECK set, verbatim (`0077_code_trident_runs.sql:88-95`).
+ * TYPED against `TridentPhase` on purpose: this is a hand-copy of that CHECK, and the
+ * annotation is what makes a typo here a typecheck failure instead of a silently
+ * narrower fixture.
+ */
+const ALL_PHASES: readonly TridentPhase[] = [
+  'forge-init',
+  'ralph-plan',
+  'ralph-task',
+  'argus',
+  'forge-fix',
+  'done',
+  'failed',
+  'stopped',
+]
 const ACTIVE_PHASES = ALL_PHASES.filter((p) => !(TERMINAL_PHASES as readonly string[]).includes(p))
 
 /**
@@ -303,7 +318,17 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
 
     expect(sh([dbPath, 'run-1', 'inner_result_file', tmp, 'inner_verdict', 'APPROVE']).code).toBe(0)
 
-    // The readfile CASE's 'completed' is the value mutant (a) would let through here.
+    // WHY THIS CASE EXISTS, precisely — the sibling test above looks like it already
+    // covers the readfile path, and it does not cover the same mutant. This branch does
+    // NOT route through `frozen()`: `inner_result_file` builds its own copy of the
+    // terminal predicate inline (checkpoint.sh:147), so mutant (a) — which narrows
+    // `frozen()` — cannot reach here at all and this test passes under it (executed:
+    // (a) takes 3 tests red, none of them this one). What the SECOND copy needs is its
+    // own mutants, and this row's already-NULL claim is what kills the (a)-shaped one:
+    // adding `AND subagent_status = 'pending'` to that inline freeze arm leaves the
+    // sibling above green (it seeds 'pending', which the narrowed arm still freezes) and
+    // reddens ONLY this case — 1 fail, verified by execution. Dropping the arm outright
+    // reddens both.
     expect(row('run-1')).toMatchObject({
       subagent_status: null,
       last_advanced_at: SEEDED_HEARTBEAT,
@@ -323,6 +348,16 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
     },
   )
 
+  // NOT TESTED HERE, deliberately, and worth saying why rather than leaving a gap that
+  // looks like an oversight: the stderr branches parse sqlite3's list-mode 'N|state'
+  // line, so the script pins `-init /dev/null -list -separator '|'` to stop a host
+  // `~/.sqliterc` muting them. A fixture for it was written and then DELETED because it
+  // could not fail — measured on sqlite3 3.43.2 (Apple), a `.sqliterc` is honoured when
+  // passed as `-init <file>` (output becomes 'c;s\n0;active\n') but is NOT picked up
+  // from a `HOME` override, so the hostile-rc test passed identically with the pins
+  // removed. A test that cannot fail is zero coverage wearing a green tick. Covering it
+  // for real would mean writing into the developer's actual home directory, which no
+  // test may do; the pins stay as environment hardening for CLI builds that DO read it.
   test('an unknown run id reports the skip rather than passing silently', () => {
     const res = sh([dbPath, 'no-such-run', 'inner_checkpoint', 'forge-done'])
     expect(res.code).toBe(0)

@@ -8514,6 +8514,16 @@ Observed live: the owner cancelled a running email-core build and the row settle
 `phase='stopped'` with **`subagent_status='running'`**. The child was already dead — the
 column was asserting something false.
 
+> ⚠️ **"The child was already dead" is WRONG too, and is kept only as the record of what
+> was believed.** Cancelling does NOT kill the detached workflow (#177): it keeps running
+> and keeps checkpointing. This incident held by TIMING — the workflow happened not to
+> checkpoint again before the row was read — not by construction, which is exactly why the
+> fix needs the durability half in `trident/checkpoint.sh`. What is true of EVERY cancel is
+> narrower: the column is wrong about the RUN (nothing will advance it again), not
+> necessarily about the process. Corrected in round 3 below; marked here because the
+> ⚠️ block that follows scopes only the paragraph after it, and a reader who stops at the
+> opening would carry away two false claims rather than one.
+
 `subagent_status` is documented (migration 0077) as the CURRENTLY in-flight subagent, and
 gates key on it: #143's fix widened the harvest/terminal block on
 `subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery read it too. A
@@ -8751,7 +8761,7 @@ Two mutants that the laxer fixture let live, each **executed** rather than reaso
 
 | mutant (one extra AND-clause on the OLD value in `frozen()`) | old fixture | new fixture |
 | --- | --- | --- |
-| (a) freeze `subagent_status` only when it was `'pending'` | survives, 23 pass / 0 fail | dies, 4 red at `expect(r.subagent_status).toBeNull()` |
+| (a) freeze `subagent_status` only when it was `'pending'` | survives, 23 pass / 0 fail | dies, **3** red at `expect(r.subagent_status).toBeNull()` |
 | (b) freeze `last_advanced_at` only when it was NULL | survives, 23 pass / 0 fail | dies, 8 red at `expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT)` |
 
 (a) would have written `'running'` straight back onto a row a cancel had just cleared —
@@ -8767,3 +8777,61 @@ reach. Both survive review by looking like the finished article — a green suit
 that reads as design documentation. The control that catches the first is running the mutant
 against BOTH fixtures and showing it survives one; the control that catches the second is
 grepping for the code that enters the mode the comment describes.
+
+**Round 4 — the mutation EVIDENCE was itself a claim, and one of the two guards has no
+reachable failure on this platform.** Both findings are about the same thing: prose that
+asserts coverage it does not have.
+
+1. **A comment claimed a test killed a mutant that in fact passes it.** The terminal-result
+   case in `trident/checkpoint-sh.test.ts` was annotated "the value mutant (a) would let
+   through here". It would not: that case passes only `inner_result_file` + `inner_verdict`,
+   so its `subagent_status` comes from the freeze arm built INLINE in
+   `trident/checkpoint.sh` (the `inner_result_file` branch), which is a second,
+   hand-written copy of the terminal predicate and does not route through `frozen()` at
+   all. Executed: mutant (a) takes **3** tests red and this is not one of them.
+
+   Re-measuring it also caught a stale number in the round-3 table above: it recorded
+   mutant (a) as "4 red", and the count on that same commit is **3** (the three terminal
+   phases of the already-retracted case). Corrected in place, and in the PR description.
+   The number was wrong when it was written, not made wrong by a later edit — the suite
+   count is unchanged at 27 either side of this round.
+
+   The second copy does need its own mutants, so the comment now names the ones this case
+   actually kills, both executed:
+
+   | mutant on the INLINE readfile freeze arm | result |
+   | --- | --- |
+   | (c) drop the `WHEN phase IN (terminal) THEN subagent_status` arm | dies, 2 red |
+   | (c2) narrow it with `AND subagent_status = 'pending'` | dies, **1** red — ONLY the already-NULL case |
+
+   (c2) is the one that justifies the case existing: its sibling seeds `'pending'`, which
+   the narrowed arm still freezes, so the sibling stays green and a row whose claim a
+   cancel had ALREADY retracted is the only thing that catches it.
+
+2. **A guard was pinned by a test that could not fail, so the test was deleted.** The
+   stderr diagnostics parse sqlite3's list-mode `N|state` line, and the invocation now
+   carries `-init /dev/null -list -separator '|'` so a host rc file cannot mute them. A
+   fixture pointing `HOME` at a hostile `.sqliterc` was written, and then removed after
+   the negative control: measured on sqlite3 3.43.2 (Apple), an rc file changes the format
+   when passed as `-init <file>` (`'c;s\n0;active\n'`) but is NOT picked up from a `HOME`
+   override — so the fixture passed **identically with the pins removed**. Covering it for
+   real would mean writing into a developer's actual home directory. The pins stay as
+   environment hardening for builds that do read an rc; both files now say so, including
+   that no test covers it.
+
+Doc-accuracy fixes in the same pass: the "`update()` is the ONE writer with no terminal
+predicate" claim was false — `save()` has neither the predicate nor the crash veto, and is
+inert only because it has ZERO production callers (production commits go through
+`saveIfActive`, `trident/tick.ts:263`); the claim now says "the only writer REACHABLE on a
+terminal row that both lacks the predicate and carries the veto" and names why each of the
+other two is excluded. `trident/store.test.ts` had also kept the superseded rationale
+attributing the load-bearing veto to `saveIfActive()`, contradicting the same branch's
+docblock two files over. And the opening line of this entry — "the child was already dead"
+— carries its own ⚠️ retraction above, because the existing marker scoped only the
+paragraph after it.
+
+📌 **Mutation evidence decays into folklore the moment it is written down next to the wrong
+test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the failure mode is
+specific: a guard that exists in TWO independently-built copies gets one copy's evidence
+pasted onto the other's test, and the untested copy is then defended by a citation. The
+control is mechanical — run the named mutant and read WHICH tests go red, not how many.

@@ -169,11 +169,28 @@ quoted_run="$(sql_quote "$run")"
 # expressions, not the WHERE clause, so a terminal row still matches and reports
 # 1 change. Hence the second column, which re-reads the row's phase.
 #
+# The phase re-read is a SEPARATE statement from the UPDATE with no
+# `BEGIN IMMEDIATE` around the pair, so a `terminalTransition` landing in between can
+# make this print FROZEN for a checkpoint that actually applied. Left as-is
+# deliberately: the two branches are stderr diagnostics only — the UPDATE itself is a
+# single atomic statement whose outcome does not depend on this SELECT — and wrapping
+# them would take a write lock for the whole read on the hot checkpoint path.
+#
 # busy_timeout is a per-connection PRAGMA: it MUST run in the SAME sqlite3
 # invocation as the UPDATE (';'-separated), not as a separate process — `tail -1`
 # drops that PRAGMA's own "5000" echo and keeps only the final SELECT. Errors
 # still reach stderr and fail the script (set -e + pipefail).
-outcome="$(sqlite3 "$db" "PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET $set_clause WHERE id='$quoted_run'; SELECT changes(), COALESCE((SELECT CASE WHEN phase IN $terminal_phases THEN 'terminal' ELSE 'active' END FROM code_trident_runs WHERE id='$quoted_run'), 'gone')" | tail -1)"
+#
+# `-init /dev/null -list -separator '|'` pins the OUTPUT FORMAT the `case` below
+# parses: an rc file setting `.mode`/`.separator`/`.output` makes both branches fall
+# through silently, so a frozen or missing write would stop being reported on the one
+# host where someone customised their CLI. Environment hardening, NOT a fix for a
+# reproduced bug, and the difference is worth recording: on the sqlite3 this was
+# measured against (3.43.2, Apple) an rc file changes the format when passed as
+# `-init <file>`, but a `HOME` override does not make the CLI pick one up — so the
+# failure is unreachable there and untestable without writing to a real home dir
+# (see the note in trident/checkpoint-sh.test.ts). Other builds do read it.
+outcome="$(sqlite3 -init /dev/null -list -separator '|' "$db" "PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET $set_clause WHERE id='$quoted_run'; SELECT changes(), COALESCE((SELECT CASE WHEN phase IN $terminal_phases THEN 'terminal' ELSE 'active' END FROM code_trident_runs WHERE id='$quoted_run'), 'gone')" | tail -1)"
 case "$outcome" in
   0'|'*)
     echo "checkpoint.sh: run '$run' not found — checkpoint NOT applied" >&2

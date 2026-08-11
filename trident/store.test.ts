@@ -427,9 +427,11 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 
   test('a CRASHED marker SURVIVES — this restriction is load-bearing, not incidental', async () => {
     // Nulling unconditionally would erase 'crashed' whenever anything terminated an
-    // already-crashed run as 'failed', silently disarming the crash veto in `update()`
-    // / `saveIfActive()` while looking like a cleanup. 'running'/'pending' are live
-    // CLAIMS; the others are OUTCOMES.
+    // already-crashed run as 'failed', silently disarming `update()`'s crash veto while
+    // looking like a cleanup. NOT `saveIfActive()`'s identical veto — that statement also
+    // carries `phase NOT IN (terminal)`, so on the row this test produces it cannot land
+    // at all and its veto is unreachable (see the docblock over `terminalTransition`).
+    // 'running'/'pending' are live CLAIMS; the others are OUTCOMES.
     const { store, id } = await runAt('crashed')
 
     await store.terminalTransition(id, { phase: 'failed', failure_reason: 'reaped' })
@@ -517,11 +519,13 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
     // The tempting justification for keeping 'crashed' is #143's harvest gate, and it
     // is wrong: `step()` no-ops on an already-terminal phase
     // (`orchestrator.ts:678-683`), so that gate is unreachable once the row is
-    // terminal. This is the path where preserving it still bites: `update()` is the
-    // ONE writer with no `phase NOT IN (terminal)`
-    // guard, so its `subagent_status IS NOT 'crashed'` veto (`store.ts:447-449`) is
-    // all that latches a crash on a terminal row. Nulling unconditionally would lift
-    // that veto — which is the real reason a future "simplify to NULL" must not land.
+    // terminal. This is the path where preserving it still bites: of the writers that
+    // can reach a terminal row, `update()` is the only one that both lacks a
+    // `phase NOT IN (terminal)` guard and carries the `subagent_status IS NOT 'crashed'`
+    // veto (`store.ts:447-449`), so that veto is all that latches a crash there.
+    // (`saveIfActive` has the veto but also the phase predicate; `save` has neither, and
+    // is inert only because nothing in production calls it.) Nulling unconditionally
+    // would lift the veto — the real reason a future "simplify to NULL" must not land.
     const { store, id } = await runAt('crashed')
 
     await store.terminalTransition(id, { phase: 'failed' })
