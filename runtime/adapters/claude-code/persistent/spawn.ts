@@ -873,7 +873,75 @@ function resolveResumeDirective(
   return undefined
 }
 
+/**
+ * In-flight get-or-spawn per pool key. See {@link getOrSpawnSession}.
+ *
+ * Entries are removed as soon as nobody is queued behind them, so this does not
+ * accumulate one permanent entry per session key for the life of the process.
+ */
+const getOrSpawnLocks = new Map<string, Promise<void>>()
+
+/**
+ * ONE REPLACEMENT PER KEY. Serializes {@link getOrSpawnSessionLocked} so two
+ * concurrent dispatches on one pool key cannot both replace the same warm session.
+ *
+ * The cold path's "nothing suspends between `pool.get` and `pool.set`" property
+ * (documented at that `pool.get`) de-duplicates two concurrent COLD dispatches. It
+ * says nothing about the WARM-EVICTION path, which suspends twice on purpose: at
+ * `await existing`, and — since the installed-MCP-server guard landed — at
+ * `await options.resolveExtraMcpServers()`. So two dispatches arriving after the owner
+ * changed the installed set both awaited the same warm session, both computed
+ * `freshMcpServers === false`, and both ran the whole delete → terminate → spawn →
+ * `pool.set` sequence. The second `pool.set` overwrote the first, leaving TWO `claude`
+ * children resuming ONE transcript, one of them orphaned outside the pool and therefore
+ * invisible to `shutdownAllPersistentRepls`. That breaks the one-REPL-per-key invariant
+ * (`runtime/adapters/claude-code/AGENTS.md`) precisely when the owner touches MCP
+ * settings — and the same shape was reachable through the credential-rotation guard,
+ * which suspends at `await existing` alone.
+ *
+ * A LOCK RATHER THAN A RE-CHECK AFTER EACH SUSPEND. The awaits are load-bearing — the
+ * resolver has to run for the fingerprint comparison to exist at all — so a re-check
+ * would have to re-derive "is the session I awaited still the pool's session" at every
+ * one of them, and every future await added to this function becomes a new place to get
+ * that wrong. Serializing the body makes the question not arise. It costs a concurrent
+ * caller no latency it was not already paying: before this, it awaited the very same
+ * spawn promise via `pool.get`.
+ */
+async function withGetOrSpawnLock<T>(sessionKey: string, body: () => Promise<T>): Promise<T> {
+  const prev = getOrSpawnLocks.get(sessionKey)
+  let release: () => void = () => {}
+  const mine = new Promise<void>((res) => {
+    release = res
+  })
+  getOrSpawnLocks.set(sessionKey, mine)
+  // Skipped entirely when uncontended, so the FIRST caller still runs `body` in the
+  // same microtask it was called in — the cold path stays straight-line from its
+  // `pool.get` to its `pool.set`, exactly as its own comment claims.
+  if (prev !== undefined) await prev
+  try {
+    return await body()
+  } finally {
+    release()
+    if (getOrSpawnLocks.get(sessionKey) === mine) getOrSpawnLocks.delete(sessionKey)
+  }
+}
+
 export async function getOrSpawnSession(
+  sessionKey: string,
+  options: PersistentReplSubstrateOptions,
+  spec: AgentSpec,
+  forceResume?: ResumeDirective,
+): Promise<ReplSession> {
+  return await withGetOrSpawnLock(sessionKey, () =>
+    getOrSpawnSessionLocked(sessionKey, options, spec, forceResume),
+  )
+}
+
+/**
+ * {@link getOrSpawnSession}'s body. Runs INSIDE {@link withGetOrSpawnLock} — never call
+ * it directly, or two dispatches can replace one warm session concurrently.
+ */
+async function getOrSpawnSessionLocked(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
   spec: AgentSpec,
@@ -889,10 +957,19 @@ export async function getOrSpawnSession(
   const requestedToolBridge =
     options.enableToolBridge === true && replToolBridgeRef.current !== undefined
   // ── THE COLD PATH MUST NOT SUSPEND, AND "READ FIRST" IS NOT ENOUGH ──────────
-  // Two concurrent dispatches on one key de-duplicate onto a single spawn only
-  // because NOTHING SUSPENDS between this read and the `pool.set` at the end of the
-  // function: the second caller's `pool.get` observes the first's in-flight promise
-  // and awaits it. That is a property of the WHOLE cold path, not of the read's
+  // SECOND LINE OF DEFENCE NOW. `withGetOrSpawnLock` serializes this whole function
+  // per key, so two concurrent dispatches can no longer both reach this read — that
+  // lock, not the property below, is what now guarantees one child per key, and it
+  // covers the warm-eviction path (which suspends on purpose) as well as the cold one.
+  // The no-suspend property is kept, and kept documented, because it is what makes the
+  // UNCONTENDED path allocate exactly one spawn without depending on the lock's
+  // fairness, and because re-introducing an await here would silently make the lock
+  // load-bearing for a case it should never have to carry.
+  //
+  // Two concurrent dispatches on one key de-duplicate onto a single spawn (absent the
+  // lock) only because NOTHING SUSPENDS between this read and the `pool.set` at the end
+  // of the function: the second caller's `pool.get` observes the first's in-flight
+  // promise and awaits it. That is a property of the WHOLE cold path, not of the read's
   // position — an `await` placed after this line and before the `pool.set` reopens
   // the window just as widely, because the second caller then reads a pool the first
   // has not written yet and both spawn.

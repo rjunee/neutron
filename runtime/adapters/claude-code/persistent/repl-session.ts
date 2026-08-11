@@ -49,7 +49,8 @@ export class ReplSession {
    *  REPL's in-context memory. */
   poisoned = false
   /**
-   * How many callers currently hold this session's turn slot (see {@link acquireTurn}).
+   * How many callers hold this session's turn slot OR are queued for it (see
+   * {@link acquireTurn}). Zero means no committed turn is left on this session.
    *
    * BUSY STARTS HERE, NOT AT `activeTurn`. A dispatch takes the slot and only later
    * assigns `activeTurn` — and between the two it does real async work: `await ready`,
@@ -391,11 +392,21 @@ export class ReplSession {
     this.turnTail = new Promise<void>((res) => {
       release = res
     })
-    await prev
-    // COUNTED FROM HERE — after the wait, so a caller still queued behind another turn
-    // is not counted as holding the slot. See {@link turnSlotHeld} for why `activeTurn`
-    // alone is not a sufficient answer to "is this session busy".
+    // COUNTED FROM BEFORE THE WAIT, deliberately. A caller QUEUED behind the active
+    // turn is already committed work on this session: it has passed
+    // `getOrSpawnSession`'s freshness guards and bound itself to THIS child. Counting
+    // only post-wait holders made the count read zero the instant the last active turn
+    // released — so the turn-completion path's `retireOnIdle` check saw an idle session
+    // and killed the child, and the queued caller then resumed from `await prev` into a
+    // dead REPL. That is the stranded turn `evictWarmReplsForMcpSurfaceChange` is
+    // documented as refusing to cause, arriving by the other door.
+    //
+    // The revoked child is therefore retired when the QUEUE drains rather than when the
+    // active turn ends. That is the same bargain the poison-instead-of-kill branch
+    // already strikes: a turn admitted under a grant that was in force runs to
+    // completion, and the teardown happens the moment no committed turn is left.
     this.turnSlotHeld += 1
+    await prev
     let released = false
     return () => {
       // IDEMPOTENT. Several of `start`'s early-return paths call the release they were
