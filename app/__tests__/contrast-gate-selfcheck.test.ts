@@ -36,6 +36,32 @@ const REGRESSIONS: ReadonlyArray<readonly [string, string, string, number]> = [
   // dark accent, which is what "keep white text on the blue bubble" would have
   // meant if `#6cf` had been used as the fill.
   ['white ink on the pale dark accent #6cf', '#ffffff', '#66ccff', 1.8],
+  // ── THE SIX THE AGENT-BUBBLE GROUND EXPOSED (round 2) ──────────────────────
+  // None of these could be seen from `--bg` or `--surface`: each one CLEARED AA on
+  // both page grounds and failed only on `--agent-bubble`, which is the ground
+  // markdown, meta text and status text actually land on inside a bubble. They are
+  // recorded here for the same reason as the rest — so the gate's ability to reject
+  // them survives the values being fixed.
+  ['web dark --faint on the agent bubble', '#7d838f', '#1d2026', 4.29],
+  ['web dark --danger on the agent bubble', '#e5534b', '#1d2026', 4.41],
+  ['web light --faint on the agent bubble', '#6c6c70', '#e9e9eb', 4.31],
+  ['web light --danger on the agent bubble', '#d70015', '#e9e9eb', 4.44],
+  ['web light --success-fg on the agent bubble', '#1a7f37', '#e9e9eb', 4.19],
+  // And the mobile mirror of the same mistake: the obvious green for light
+  // `success` was `usage_nominal`'s value, which fails on a raised card.
+  ['mobile light success #1a7f37 on surface_raised', '#1a7f37', '#e9e9eb', 4.19],
+  // The pastels the backup diff viewer painted added / deleted / changed lines
+  // with. They are the clearest example of why a pinned colour is not merely
+  // off-theme: on a white page the line is not dim, it is gone.
+  ['diff "added" pastel #bbf7d0 on white', '#bbf7d0', '#ffffff', 1.21],
+  ['diff "deleted" pastel #fecaca on white', '#fecaca', '#ffffff', 1.45],
+  ['diff "changed" pastel #bfdbfe on white', '#bfdbfe', '#ffffff', 1.42],
+  // The markdown renderer's default ink, on the themed white page the docs viewer
+  // draws. The single worst pair in the whole change.
+  ['markdown default ink #f4f4f4 on a white page', '#f4f4f4', '#ffffff', 1.1],
+  ['docs viewer title #fafafa on a white page', '#fafafa', '#ffffff', 1.04],
+  // Every loading spinner in the app, in light mode.
+  ['spinner #cfcfcf on a white page', '#cfcfcf', '#ffffff', 1.56],
 ];
 
 describe('the contrast gate still rejects the values it was built to reject', () => {
@@ -55,9 +81,14 @@ describe('the contrast gate still rejects the values it was built to reject', ()
     // and a ratio function returning 1 for everything would fail everything here.
     expect(contrastRatio('#ffffff', '#1064cc')).toBeGreaterThanOrEqual(AA_TEXT);
     expect(contrastRatio('#8f97a5', '#222834')).toBeGreaterThanOrEqual(AA_TEXT);
-    expect(contrastRatio('#7d838f', '#16181d')).toBeGreaterThanOrEqual(AA_TEXT);
     expect(contrastRatio('#57575b', '#f5f5f7')).toBeGreaterThanOrEqual(AA_TEXT);
-    expect(contrastRatio('#6c6c70', '#f5f5f7')).toBeGreaterThanOrEqual(AA_TEXT);
+    // The round-2 replacements, each on the AGENT BUBBLE — the ground that failed.
+    // Asserting them on `--bg` would repeat the original mistake in the proof.
+    expect(contrastRatio('#848a96', '#1d2026')).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio('#e85f57', '#1d2026')).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio('#66666a', '#e9e9eb')).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio('#c9252d', '#e9e9eb')).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio('#146c2e', '#e9e9eb')).toBeGreaterThanOrEqual(AA_TEXT);
   });
 
   it('anchors the arithmetic on the two ratios that cannot be wrong', () => {

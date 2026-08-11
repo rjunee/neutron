@@ -45,6 +45,16 @@ export interface MountedScreen {
    * `Appearance` does on the device.
    */
   rerender(element: ReactElement): Promise<void>;
+  /**
+   * Run a mutation that originates OUTSIDE React — the OS reporting a new colour
+   * scheme, a native module firing a listener — inside `act`, then settle.
+   *
+   * `rerender` is the wrong tool for these: it hands the tree a NEW element, so a
+   * component that merely re-read a prop would pass. This changes nothing about
+   * the tree and lets the component's own subscription do the work, which is the
+   * only way to tell "subscribed" from "read once at mount".
+   */
+  act(mutate: () => void): Promise<void>;
   /** Let queued microtasks + effects settle. */
   settle(): Promise<void>;
   unmount(): void;
@@ -203,8 +213,22 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       // the call site, where the risk is visible.
       return host.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
     },
+    async act(mutate: () => void): Promise<void> {
+      await act(async () => {
+        mutate();
+      });
+      await settle();
+    },
     unmount(): void {
-      root.unmount();
+      // WRAPPED IN `act`. Unmounting runs cleanup effects, which are React work,
+      // so calling `root.unmount()` bare made React log an unwrapped-act warning
+      // on every test that tore its screen down — dozens of them, in a suite that
+      // was otherwise passing. Noise like that is not cosmetic: it is what a real
+      // warning has to be spotted among, and this suite is where the next real one
+      // will show up.
+      act(() => {
+        root.unmount();
+      });
       host.remove();
     },
   };

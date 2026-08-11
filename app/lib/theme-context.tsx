@@ -111,6 +111,43 @@ export async function readStoredPreference(
   }
 }
 
+/**
+ * THE PRE-PAINT READ — the same answer, taken synchronously, where the platform
+ * has a synchronous store.
+ *
+ * `readStoredPreference` above is the async path and is correct; the problem is
+ * WHEN it answers. It resolves after the first render, so the first painted frame
+ * shows the OS-resolved theme and the owner's override lands a frame later — an
+ * explicit `light` choice on a dark-OS phone flashes dark and then snaps. The web
+ * client has never had that, because its pre-paint inline script
+ * (`landing/chat-react.html`) reads `localStorage` BEFORE the stylesheet applies.
+ * This is that script's mobile counterpart.
+ *
+ * `undefined` means "this backing cannot answer synchronously" — which is a
+ * different fact from `null`/absent, and the distinction is the whole point:
+ * absent means "use the default", unanswerable means "wait for the async read".
+ * `window.localStorage` answers; AsyncStorage returns a Promise and does not, so
+ * on native the boot gate in `app/_layout.tsx` remains the mechanism.
+ *
+ * The residual, stated rather than glossed: the NATIVE SPLASH renders before any
+ * JavaScript exists to consult, so it follows the OS scheme (`splash.dark` in
+ * `app.json`) and cannot follow a stored override. No JS-side change can reach
+ * it.
+ */
+export function readStoredPreferenceSync(
+  backing: ThemeBacking | null,
+): ThemePreference | undefined {
+  if (backing === null) return undefined;
+  try {
+    const raw = backing.getItem(THEME_STORAGE_KEY);
+    // A thenable is the async backing; do not block on it here.
+    if (raw !== null && typeof raw === 'object' && 'then' in raw) return undefined;
+    return isThemePreference(raw) ? raw : DEFAULT_PREFERENCE;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Persist the choice — including `system`, so returning to "follow the OS" is a
  *  recorded decision and not merely the absence of one. Never throws. */
 export async function writeStoredPreference(
@@ -238,10 +275,18 @@ export function ThemeProvider({
     [backing],
   );
 
-  const [preference, setPreferenceState] = useState<ThemePreference>(DEFAULT_PREFERENCE);
-  const [hydrated, setHydrated] = useState(false);
+  // Seeded from the SYNCHRONOUS read where one exists, so the very first render
+  // already has the owner's choice and there is no wrong-theme frame at all. Where
+  // it does not (native), `seeded` is undefined and the async effect below is the
+  // path — with `hydrated` false meanwhile, which the app shell gates on.
+  const seeded = readStoredPreferenceSync(store);
+  const [preference, setPreferenceState] = useState<ThemePreference>(
+    seeded ?? DEFAULT_PREFERENCE,
+  );
+  const [hydrated, setHydrated] = useState(seeded !== undefined);
 
   useEffect(() => {
+    if (hydrated) return;
     let cancelled = false;
     void readStoredPreference(store).then((pref) => {
       if (cancelled) return;
@@ -251,6 +296,10 @@ export function ThemeProvider({
     return () => {
       cancelled = true;
     };
+    // `hydrated` is deliberately NOT a dependency: it is a latch, and re-running
+    // this on the transition to true would re-read the store for no reason. The
+    // store IS a dependency, because a new backing is a new answer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store]);
 
   const setPreference = useCallback(
@@ -292,9 +341,65 @@ export function ThemeProvider({
  * FALLBACK is. Throwing would turn a missing provider into a blank screen, and a
  * blank screen carrying no information is a failure mode this app has already paid
  * for once.
+ *
+ * ═══ AND THE CASE WHERE THERE IS NO DISPATCHER AT ALL ═══
+ *
+ * `?? FALLBACK` covers a stub whose `useContext` RETURNS `undefined`. It does not
+ * cover the other shape those tests take: invoking a component from plain
+ * JavaScript, outside any React render, with its own hooks supplied through the
+ * `HookRuntime` DI seam (`lib/hook-runtime.ts`). React then has no current
+ * dispatcher, and `useContext` throws `TypeError: null is not an object` from
+ * inside React itself before this function's `??` is ever reached.
+ *
+ * That is not hypothetical and it is not a test-only concern about test-only code:
+ * closing the hardcoded-colour budget converted `DiagnosticsPane` and the docs
+ * panes, and the moment they took a theming hook, EIGHT tests about diagnostics and
+ * document rendering — none of them about theming — died in `useThemedStyles`. The
+ * components were fine. `HookRuntime` deliberately does not carry `useContext`
+ * (only "the dispatcher hooks a unit needs substituted"), and threading a palette
+ * through ~70 call sites to satisfy it would be a large change for no product
+ * benefit.
+ *
+ * So the totality above is extended: no provider, no context value, AND no
+ * dispatcher all resolve to a legible palette. It is the same judgement in a third
+ * position — a palette must never be the reason a render fails.
+ *
+ * Only `TypeError` is swallowed, and only around the context read, so a genuine
+ * fault anywhere else still propagates. The exposure this accepts is narrow: any
+ * component that really did violate the rules of hooks calls its OTHER hooks
+ * through the same absent dispatcher and fails loudly on one of those instead —
+ * `useThemedStyles` is simply the first one a themed component reaches.
+ *
+ * KNOWN COSMETIC COST: React logs its own "Invalid hook call" warning from inside
+ * `resolveDispatcher()` BEFORE throwing, so those tests print it even though they
+ * pass. Silencing it would mean reading React's internal current-dispatcher field to
+ * decide whether to call the hook at all — internal-API coupling that a React upgrade
+ * can break silently, traded against console noise in eight test files. The catch is
+ * the version-stable choice; the noise is the price and is recorded here so it is not
+ * mistaken for a real fault.
  */
+interface ThemeRead {
+  state: ThemeState;
+  /**
+   * Whether React answered — i.e. whether we are inside a render with a live hook
+   * dispatcher. `false` means no further hook may be called in this pass, which is
+   * the fact {@link useThemedStyles} needs and cannot recover on its own: it calls
+   * `useMemo` AFTER this, and that would throw for exactly the same reason.
+   */
+  live: boolean;
+}
+
+function themeRead(): ThemeRead {
+  try {
+    return { state: useContext(ThemeContext) ?? FALLBACK, live: true };
+  } catch (err) {
+    if (err instanceof TypeError) return { state: FALLBACK, live: false };
+    throw err;
+  }
+}
+
 function themeState(): ThemeState {
-  return useContext(ThemeContext) ?? FALLBACK;
+  return themeRead().state;
 }
 
 /** The whole theme state — for the settings control and the app shell. */
@@ -324,11 +429,25 @@ export function usePhase(): NeutronPhaseColors {
  * argument. One signature rather than an overload pair: the alternative had every
  * phase-using component remember to pass `usePhase()` back in at the call site,
  * which is a thing to get wrong for no benefit.
+ *
+ * MEMOISATION IS SKIPPED WHEN THERE IS NO DISPATCHER. See `themeRead` — a component
+ * invoked from plain JavaScript through the `HookRuntime` DI seam has no live React
+ * dispatcher, so `useMemo` would throw the same `TypeError` the context read just
+ * absorbed. Building the sheet directly is the correct degradation and costs nothing
+ * that matters: the memo is a performance optimisation over a pure function of the
+ * palette, so calling it is always semantically identical to reading the cache.
  */
 export function useThemedStyles<T>(
   factory: (theme: NeutronTheme, phase: NeutronPhaseColors) => T,
 ): T {
-  const palette = themeState().palette;
+  const { state, live } = themeRead();
+  const palette = state.palette;
+  // `live` is constant for a given call context — either this code is running inside
+  // a React render or it is not — so the conditional hook below cannot vary between
+  // renders of the same component, which is the property the rule protects.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  if (!live) return factory(palette.colors, palette.phase);
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   return useMemo(() => factory(palette.colors, palette.phase), [factory, palette]);
 }
 

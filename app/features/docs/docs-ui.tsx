@@ -20,7 +20,7 @@ import {
 } from 'react-native';
 
 import { type NeutronTheme } from '../../lib/theme';
-import { useThemedStyles } from '../../lib/theme-context';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 import { type CommitSummary, type DocTreeNode } from '../../lib/docs-client';
 import { formatBytes, formatHistoryDate, treeIconFor } from './docs-shared';
 
@@ -351,6 +351,7 @@ interface NewFileModalProps {
 }
 
 export function NewFileModal({ visible, onClose, onCreate }: NewFileModalProps) {
+  const theme = useTheme();
   const styles = useThemedStyles(makeStyles);
   const [folder, setFolder] = useState('');
   const [filename, setFilename] = useState('');
@@ -373,7 +374,7 @@ export function NewFileModal({ visible, onClose, onCreate }: NewFileModalProps) 
             value={folder}
             onChangeText={setFolder}
             placeholder="notes (leave blank for project root)"
-            placeholderTextColor="#5a5a5a"
+            placeholderTextColor={theme.text_muted}
             testID="docs-new-file-folder"
             autoCapitalize="none"
             autoCorrect={false}
@@ -384,7 +385,7 @@ export function NewFileModal({ visible, onClose, onCreate }: NewFileModalProps) 
             value={filename}
             onChangeText={setFilename}
             placeholder="my-note (.md added automatically)"
-            placeholderTextColor="#5a5a5a"
+            placeholderTextColor={theme.text_muted}
             testID="docs-new-file-filename"
             autoCapitalize="none"
             autoCorrect={false}
@@ -499,6 +500,7 @@ interface RenameModalProps {
 }
 
 export function RenameModal({ node, onClose, onRename }: RenameModalProps) {
+  const theme = useTheme();
   const styles = useThemedStyles(makeStyles);
   const [next, setNext] = useState(node.path);
 
@@ -513,7 +515,7 @@ export function RenameModal({ node, onClose, onRename }: RenameModalProps) {
             value={next}
             onChangeText={setNext}
             placeholder="folder/new-name.md"
-            placeholderTextColor="#5a5a5a"
+            placeholderTextColor={theme.text_muted}
             testID="docs-rename-input"
             autoCapitalize="none"
             autoCorrect={false}
@@ -548,32 +550,32 @@ export const makeStyles = (theme: NeutronTheme) =>
       paddingHorizontal: 16,
       paddingVertical: 12,
       borderBottomWidth: 1,
-      borderBottomColor: '#1c1c1c',
+      borderBottomColor: theme.hairline,
     },
     intro: { flexShrink: 1 },
     backRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-    backChevron: { color: '#cfcfcf', fontSize: 26, marginTop: -2 },
-    title: { color: '#fafafa', fontSize: 20, fontWeight: '700' },
-    subtitle: { color: '#9a9a9a', fontSize: 12, lineHeight: 16 },
+    backChevron: { color: theme.text_secondary, fontSize: 26, marginTop: -2 },
+    title: { color: theme.text_primary, fontSize: 20, fontWeight: '700' },
+    subtitle: { color: theme.text_muted, fontSize: 12, lineHeight: 16 },
     headerActions: { flexDirection: 'row', gap: 8 },
     newBtn: {
-      backgroundColor: '#1f2937',
+      backgroundColor: theme.surface_raised,
       borderRadius: 8,
       paddingHorizontal: 12,
       paddingVertical: 8,
     },
-    newBtnText: { color: '#fafafa', fontWeight: '600', fontSize: 13 },
+    newBtnText: { color: theme.text_primary, fontWeight: '600', fontSize: 13 },
     binaryUploadWrap: { flexDirection: 'row', alignItems: 'center' },
     dropTarget: { flex: 1 },
     uploadBtn: {
-      backgroundColor: '#1c2735',
+      backgroundColor: theme.rail_selected,
       borderRadius: 8,
       paddingHorizontal: 12,
       paddingVertical: 8,
       borderWidth: 1,
-      borderColor: '#2c3e50',
+      borderColor: theme.info_border,
     },
-    uploadBtnText: { color: '#cfcfcf', fontWeight: '600', fontSize: 13 },
+    uploadBtnText: { color: theme.text_secondary, fontWeight: '600', fontSize: 13 },
     binaryPreviewWrap: {
       flex: 1,
       padding: 24,
@@ -584,16 +586,16 @@ export const makeStyles = (theme: NeutronTheme) =>
       width: '100%',
       maxWidth: 800,
       aspectRatio: 4 / 3,
-      backgroundColor: '#1c1c1c',
+      backgroundColor: theme.surface,
       borderRadius: 8,
     },
     binaryMeta: {
-      color: '#7a7a7a',
+      color: theme.text_muted,
       fontSize: 11,
       marginTop: 12,
     },
     binaryDownloadCard: {
-      backgroundColor: '#1c1c1c',
+      backgroundColor: theme.surface,
       borderRadius: 12,
       padding: 24,
       alignItems: 'center',
@@ -601,8 +603,8 @@ export const makeStyles = (theme: NeutronTheme) =>
       minWidth: 280,
     },
     binaryDownloadIcon: { fontSize: 40 },
-    binaryDownloadName: { color: '#fafafa', fontSize: 15, fontWeight: '600', textAlign: 'center' },
-    binaryDownloadMeta: { color: '#7a7a7a', fontSize: 11 },
+    binaryDownloadName: { color: theme.text_primary, fontSize: 15, fontWeight: '600', textAlign: 'center' },
+    binaryDownloadMeta: { color: theme.text_muted, fontSize: 11 },
     pressed: { opacity: 0.7 },
     disabled: { opacity: 0.5 },
 
@@ -611,14 +613,14 @@ export const makeStyles = (theme: NeutronTheme) =>
     bodyWide: { flexDirection: 'row' },
     bodyNarrow: { flexDirection: 'column' },
     treePane: {
-      backgroundColor: '#0d0d0d',
+      backgroundColor: theme.background,
       borderRightWidth: 1,
-      borderRightColor: '#1c1c1c',
+      borderRightColor: theme.hairline,
     },
     treePaneWide: { width: 260, flexShrink: 0 },
-    treePaneNarrow: { borderBottomWidth: 1, borderBottomColor: '#1c1c1c', maxHeight: 220 },
+    treePaneNarrow: { borderBottomWidth: 1, borderBottomColor: theme.hairline, maxHeight: 220 },
     treeScroll: { paddingVertical: 8 },
-    treeEmpty: { color: '#5a5a5a', fontSize: 12, padding: 16 },
+    treeEmpty: { color: theme.text_muted, fontSize: 12, padding: 16 },
 
     treeRow: {
       flexDirection: 'row',
@@ -627,15 +629,15 @@ export const makeStyles = (theme: NeutronTheme) =>
       paddingRight: 12,
       gap: 8,
     },
-    treeRowSelected: { backgroundColor: '#1c2735' },
+    treeRowSelected: { backgroundColor: theme.rail_selected },
     treeIcon: { fontSize: 14 },
-    treeLabel: { color: '#cfcfcf', fontSize: 13, fontWeight: '500', flex: 1 },
+    treeLabel: { color: theme.text_secondary, fontSize: 13, fontWeight: '500', flex: 1 },
 
     viewerPane: { backgroundColor: theme.background },
     viewerPaneWide: { flex: 1 },
     viewerPaneNarrow: { flex: 1 },
     viewerEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-    viewerEmptyText: { color: '#5a5a5a', fontSize: 13, textAlign: 'center' },
+    viewerEmptyText: { color: theme.text_muted, fontSize: 13, textAlign: 'center' },
     viewerInner: { flex: 1 },
     viewerHeader: {
       flexDirection: 'row',
@@ -644,27 +646,27 @@ export const makeStyles = (theme: NeutronTheme) =>
       paddingHorizontal: 16,
       paddingVertical: 12,
       borderBottomWidth: 1,
-      borderBottomColor: '#1c1c1c',
+      borderBottomColor: theme.hairline,
       gap: 12,
     },
-    viewerPath: { color: '#cfcfcf', fontSize: 13, fontWeight: '600', flex: 1 },
+    viewerPath: { color: theme.text_secondary, fontSize: 13, fontWeight: '600', flex: 1 },
     viewerActions: { flexDirection: 'row', gap: 8 },
     actionBtn: {
-      backgroundColor: '#1f2937',
+      backgroundColor: theme.surface_raised,
       borderRadius: 8,
       paddingHorizontal: 12,
       paddingVertical: 6,
     },
-    actionBtnText: { color: '#fafafa', fontWeight: '600', fontSize: 12 },
+    actionBtnText: { color: theme.text_primary, fontWeight: '600', fontSize: 12 },
     actionBtnGhost: {
       backgroundColor: 'transparent',
       borderRadius: 8,
       paddingHorizontal: 12,
       paddingVertical: 6,
       borderWidth: 1,
-      borderColor: '#2c2c2c',
+      borderColor: theme.hairline,
     },
-    actionBtnGhostText: { color: '#cfcfcf', fontWeight: '500', fontSize: 12 },
+    actionBtnGhostText: { color: theme.text_secondary, fontWeight: '500', fontSize: 12 },
 
     markdownScroll: { padding: 16, paddingBottom: 32 },
 
@@ -692,7 +694,7 @@ export const makeStyles = (theme: NeutronTheme) =>
     mobileToggle: {
       flexDirection: 'row',
       borderBottomWidth: 1,
-      borderBottomColor: '#1c1c1c',
+      borderBottomColor: theme.hairline,
     },
     mobileToggleBtn: {
       flex: 1,
@@ -700,13 +702,13 @@ export const makeStyles = (theme: NeutronTheme) =>
       alignItems: 'center',
     },
     mobileToggleBtnActive: {
-      backgroundColor: '#1c2735',
+      backgroundColor: theme.rail_selected,
     },
-    mobileToggleText: { color: '#cfcfcf', fontSize: 12, fontWeight: '600' },
+    mobileToggleText: { color: theme.text_secondary, fontSize: 12, fontWeight: '600' },
 
     editor: {
       flex: 1,
-      color: '#fafafa',
+      color: theme.text_primary,
       backgroundColor: theme.background,
       fontSize: 13,
       lineHeight: 20,
@@ -717,13 +719,13 @@ export const makeStyles = (theme: NeutronTheme) =>
     preview: {
       flex: 1,
       borderLeftWidth: 1,
-      borderLeftColor: '#1c1c1c',
-      backgroundColor: '#0d0d0d',
+      borderLeftColor: theme.hairline,
+      backgroundColor: theme.background,
     },
 
     errorBanner: {
-      backgroundColor: '#3f1d1d',
-      borderColor: '#7a2c2c',
+      backgroundColor: theme.danger_surface,
+      borderColor: theme.danger_border,
       borderWidth: 1,
       flexDirection: 'row',
       alignItems: 'center',
@@ -732,12 +734,12 @@ export const makeStyles = (theme: NeutronTheme) =>
       margin: 12,
       borderRadius: 8,
     },
-    errorText: { color: '#fca5a5', flex: 1, fontSize: 12 },
-    errorDismiss: { color: '#fca5a5', fontWeight: '600', fontSize: 12 },
+    errorText: { color: theme.danger, flex: 1, fontSize: 12 },
+    errorDismiss: { color: theme.danger, fontWeight: '600', fontSize: 12 },
 
     conflictBanner: {
-      backgroundColor: '#3a2a13',
-      borderColor: '#7a5b1f',
+      backgroundColor: theme.warning_surface,
+      borderColor: theme.warning_border,
       borderWidth: 1,
       flexDirection: 'row',
       alignItems: 'center',
@@ -747,48 +749,48 @@ export const makeStyles = (theme: NeutronTheme) =>
       borderRadius: 8,
       gap: 12,
     },
-    conflictText: { color: '#fcd34d', flex: 1, fontSize: 12, lineHeight: 16 },
+    conflictText: { color: theme.warning, flex: 1, fontSize: 12, lineHeight: 16 },
     conflictBtn: {
-      backgroundColor: '#7a5b1f',
+      backgroundColor: theme.warning_border,
       paddingHorizontal: 12,
       paddingVertical: 6,
       borderRadius: 6,
     },
-    conflictBtnText: { color: '#fff7ed', fontWeight: '600', fontSize: 12 },
+    conflictBtnText: { color: theme.warning, fontWeight: '600', fontSize: 12 },
 
     modalBackdrop: {
       flex: 1,
-      backgroundColor: 'rgba(0,0,0,0.6)',
+      backgroundColor: theme.scrim,
       alignItems: 'center',
       justifyContent: 'center',
       padding: 16,
     },
     modalCard: {
-      backgroundColor: '#0f0f0f',
+      backgroundColor: theme.background,
       borderRadius: 12,
       borderWidth: 1,
-      borderColor: '#2c2c2c',
+      borderColor: theme.hairline,
       padding: 16,
       width: '100%',
       maxWidth: 480,
       gap: 8,
     },
-    modalTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700', marginBottom: 4 },
+    modalTitle: { color: theme.text_primary, fontSize: 16, fontWeight: '700', marginBottom: 4 },
     modalLabel: {
-      color: '#9a9a9a',
+      color: theme.text_muted,
       fontSize: 11,
       textTransform: 'uppercase',
       letterSpacing: 0.5,
       marginTop: 4,
     },
     modalInput: {
-      color: '#fafafa',
-      backgroundColor: '#121212',
+      color: theme.text_primary,
+      backgroundColor: theme.background,
       borderRadius: 8,
       paddingHorizontal: 12,
       paddingVertical: 10,
       borderWidth: 1,
-      borderColor: '#2c2c2c',
+      borderColor: theme.hairline,
       fontSize: 13,
     },
     modalActions: {
@@ -798,47 +800,47 @@ export const makeStyles = (theme: NeutronTheme) =>
       marginTop: 12,
     },
     modalCancel: { paddingHorizontal: 14, paddingVertical: 10 },
-    modalCancelText: { color: '#cfcfcf', fontSize: 13, fontWeight: '500' },
+    modalCancelText: { color: theme.text_secondary, fontSize: 13, fontWeight: '500' },
     modalConfirm: {
-      backgroundColor: '#1f2937',
+      backgroundColor: theme.surface_raised,
       borderRadius: 8,
       paddingHorizontal: 14,
       paddingVertical: 10,
     },
-    modalConfirmText: { color: '#fafafa', fontSize: 13, fontWeight: '600' },
-    fileExistsBody: { color: '#cfcfcf', fontSize: 13, lineHeight: 18, marginTop: 6 },
+    modalConfirmText: { color: theme.text_primary, fontSize: 13, fontWeight: '600' },
+    fileExistsBody: { color: theme.text_secondary, fontSize: 13, lineHeight: 18, marginTop: 6 },
 
     actionSheetBtn: {
       paddingVertical: 12,
       paddingHorizontal: 8,
       borderTopWidth: 1,
-      borderTopColor: '#1c1c1c',
+      borderTopColor: theme.hairline,
     },
-    actionSheetText: { color: '#cfcfcf', fontSize: 14 },
-    actionSheetDelete: { borderTopColor: '#1c1c1c' },
-    actionSheetDeleteText: { color: '#fca5a5' },
+    actionSheetText: { color: theme.text_secondary, fontSize: 14 },
+    actionSheetDelete: { borderTopColor: theme.hairline },
+    actionSheetDeleteText: { color: theme.danger },
     actionSheetCancel: {
       marginTop: 8,
       paddingVertical: 10,
       alignItems: 'center',
-      backgroundColor: '#1f2937',
+      backgroundColor: theme.surface_raised,
       borderRadius: 8,
     },
-    actionSheetCancelText: { color: '#fafafa', fontWeight: '600', fontSize: 13 },
+    actionSheetCancelText: { color: theme.text_primary, fontWeight: '600', fontSize: 13 },
 
     /* ─── P7.4 history pane + version badge + preview overlay ─── */
-    actionBtnGhostActive: { backgroundColor: '#1c2735', borderColor: '#395071' },
-    versionBadge: { color: '#9a9a9a', fontWeight: '500' },
-    historyPane: { backgroundColor: '#0d0d0d' },
+    actionBtnGhostActive: { backgroundColor: theme.rail_selected, borderColor: theme.info_border },
+    versionBadge: { color: theme.text_muted, fontWeight: '500' },
+    historyPane: { backgroundColor: theme.background },
     historyPaneWide: {
       width: 280,
       borderLeftWidth: 1,
-      borderLeftColor: '#1c1c1c',
+      borderLeftColor: theme.hairline,
       flexShrink: 0,
     },
     historyPaneNarrow: {
       borderTopWidth: 1,
-      borderTopColor: '#1c1c1c',
+      borderTopColor: theme.hairline,
       maxHeight: 280,
     },
     historyHeader: {
@@ -848,10 +850,10 @@ export const makeStyles = (theme: NeutronTheme) =>
       paddingHorizontal: 12,
       paddingVertical: 10,
       borderBottomWidth: 1,
-      borderBottomColor: '#1c1c1c',
+      borderBottomColor: theme.hairline,
     },
-    historyTitle: { color: '#fafafa', fontSize: 14, fontWeight: '700' },
-    historyEmpty: { color: '#5a5a5a', fontSize: 12, padding: 16 },
+    historyTitle: { color: theme.text_primary, fontSize: 14, fontWeight: '700' },
+    historyEmpty: { color: theme.text_muted, fontSize: 12, padding: 16 },
     historyScroll: { padding: 8, paddingBottom: 32 },
     historyRow: {
       flexDirection: 'row',
@@ -859,27 +861,27 @@ export const makeStyles = (theme: NeutronTheme) =>
       paddingVertical: 8,
       paddingHorizontal: 8,
       borderBottomWidth: 1,
-      borderBottomColor: '#1c1c1c',
+      borderBottomColor: theme.hairline,
       gap: 8,
     },
     historyRowMain: { flex: 1 },
-    historyMessage: { color: '#cfcfcf', fontSize: 13, fontWeight: '500' },
-    historyMeta: { color: '#7a7a7a', fontSize: 11, marginTop: 2 },
+    historyMessage: { color: theme.text_secondary, fontSize: 13, fontWeight: '500' },
+    historyMeta: { color: theme.text_muted, fontSize: 11, marginTop: 2 },
     historyRevertBtn: {
-      backgroundColor: '#1f2937',
+      backgroundColor: theme.surface_raised,
       borderRadius: 6,
       paddingHorizontal: 10,
       paddingVertical: 6,
     },
-    historyRevertText: { color: '#fafafa', fontWeight: '600', fontSize: 11 },
+    historyRevertText: { color: theme.text_primary, fontWeight: '600', fontSize: 11 },
     historyLoadMore: {
-      backgroundColor: '#121212',
+      backgroundColor: theme.background,
       borderRadius: 8,
       paddingVertical: 10,
       marginTop: 8,
       alignItems: 'center',
     },
-    historyLoadMoreText: { color: '#cfcfcf', fontSize: 12, fontWeight: '600' },
+    historyLoadMoreText: { color: theme.text_secondary, fontSize: 12, fontWeight: '600' },
 
     previewOverlay: {
       flex: 1,
@@ -892,9 +894,9 @@ export const makeStyles = (theme: NeutronTheme) =>
       paddingHorizontal: 16,
       paddingVertical: 10,
       borderBottomWidth: 1,
-      borderBottomColor: '#1c1c1c',
-      backgroundColor: '#0d1622',
+      borderBottomColor: theme.hairline,
+      backgroundColor: theme.info_surface,
       gap: 12,
     },
-    previewTitle: { color: '#cfcfcf', fontSize: 12, fontWeight: '600', flex: 1 },
+    previewTitle: { color: theme.text_secondary, fontSize: 12, fontWeight: '600', flex: 1 },
   });

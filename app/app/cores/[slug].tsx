@@ -41,8 +41,12 @@ import {
   type CoreSummary,
   type OAuthStatusLabel,
 } from '../../lib/cores-client';
+import type { NeutronTheme } from '../../lib/theme';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 
 export default function CoreScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
@@ -187,7 +191,7 @@ export default function CoreScreen() {
   if (loading) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -376,8 +380,9 @@ function formatErr(err: unknown): string {
   return String(err);
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a', paddingTop: 48 },
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: theme.background, paddingTop: 48 },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.7 },
   header: {
@@ -387,7 +392,7 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: theme.hairline,
   },
   headerIconBtn: {
     width: 40,
@@ -395,42 +400,42 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
   },
-  headerIcon: { color: '#e0e0e0', fontSize: 18, fontWeight: '600' },
+  headerIcon: { color: theme.accent, fontSize: 18, fontWeight: '600' },
   headerCenter: { flex: 1, paddingHorizontal: 4 },
   headerOverline: {
-    color: '#7a7a7a',
+    color: theme.text_muted,
     fontSize: 10,
     fontWeight: '600',
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
-  headerTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginTop: 1 },
+  headerTitle: { color: theme.text_primary, fontSize: 18, fontWeight: '700', marginTop: 1 },
   scroll: { padding: 16, gap: 14 },
   section: {
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 14,
     gap: 10,
   },
-  sectionTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700' },
-  body: { color: '#bdbdbd', fontSize: 13, lineHeight: 18 },
-  meta: { color: '#7a7a7a', fontSize: 12 },
-  muted: { color: '#7a7a7a', fontSize: 13 },
-  errorBody: { color: '#fecaca', fontSize: 12, fontFamily: 'Menlo' },
+  sectionTitle: { color: theme.text_primary, fontSize: 16, fontWeight: '700' },
+  body: { color: theme.text_secondary, fontSize: 13, lineHeight: 18 },
+  meta: { color: theme.text_muted, fontSize: 12 },
+  muted: { color: theme.text_muted, fontSize: 13 },
+  errorBody: { color: theme.danger, fontSize: 12, fontFamily: 'Menlo' },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
   oauthRow: {
@@ -441,37 +446,37 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   oauthRowLabel: { flex: 1, gap: 2 },
-  oauthLabelTitle: { color: '#e0e0e0', fontSize: 13, fontWeight: '600' },
-  oauthLabelMeta: { color: '#9a9a9a', fontSize: 11 },
+  oauthLabelTitle: { color: theme.accent, fontSize: 13, fontWeight: '600' },
+  oauthLabelMeta: { color: theme.text_muted, fontSize: 11 },
   primaryBtn: {
     paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: theme.accent,
     alignSelf: 'flex-start',
   },
-  primaryBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '600' },
+  primaryBtnText: { color: theme.background, fontSize: 14, fontWeight: '600' },
   secondaryBtn: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 10,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
     alignSelf: 'flex-start',
   },
-  secondaryBtnText: { color: '#e0e0e0', fontSize: 13, fontWeight: '500' },
+  secondaryBtnText: { color: theme.accent, fontSize: 13, fontWeight: '500' },
   dangerBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#7f1d1d',
+    backgroundColor: theme.danger_fill,
   },
-  dangerBtnText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  dangerBtnText: { color: theme.danger_ink, fontSize: 12, fontWeight: '600' },
   btnDisabled: { opacity: 0.5 },
   toolRow: { gap: 2, paddingVertical: 4 },
-  toolName: { color: '#e0e0e0', fontSize: 13, fontWeight: '600' },
-  toolDescription: { color: '#9a9a9a', fontSize: 12, lineHeight: 16 },
-  toolMeta: { color: '#7a7a7a', fontSize: 11, fontFamily: 'Menlo' },
+  toolName: { color: theme.accent, fontSize: 13, fontWeight: '600' },
+  toolDescription: { color: theme.text_muted, fontSize: 12, lineHeight: 16 },
+  toolMeta: { color: theme.text_muted, fontSize: 11, fontFamily: 'Menlo' },
   installRow: { flexDirection: 'row', gap: 8 },
 });

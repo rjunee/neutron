@@ -51,6 +51,11 @@ const { ThemeProvider, useThemedStyles, __resetThemeBackingForTests, THEME_STORA
   await import('../lib/theme-context');
 const { DARK_THEME, LIGHT_THEME } = await import('../lib/theme');
 const { StyleSheet, Text, View } = await import('react-native');
+// The harness's driveable OS-scheme seam. `react-native-web` implements no
+// `useColorScheme`, so the stub provides one — see its docblock.
+const { setHarnessColorScheme, colorSchemeListenerCount } = await import(
+  './support/stubs/react-native'
+);
 
 beforeAll(installNativeHarness);
 afterAll(() => {
@@ -245,6 +250,104 @@ describe('the choice survives a relaunch', () => {
     const screen = await mountThemed({ backing: broken, osScheme: 'dark' });
     await screen.press('Theme Light');
     expect(paintedBackground(screen)).toBe(LIGHT_THEME.background);
+    screen.unmount();
+  });
+});
+
+describe('the PRODUCTION OS seam, with no test-only prop in the way', () => {
+  // Everything above hands the provider an `osScheme` prop. That proves the
+  // resolution RULE and, on its own, proves nothing about whether the app is
+  // subscribed to the device at all: with the prop as the only seam, deleting
+  // `useOsColorScheme()` from the provider leaves all ten of those tests green.
+  //
+  // So these mount with NO `osScheme` at all, which forces the provider down its
+  // real path — `require('react-native').useColorScheme`, resolved at module
+  // scope. The harness's `react-native` stub implements that hook as a genuine
+  // subscription (react-native-web does not implement it at all), so the thing
+  // under test here is the wiring, not the arithmetic.
+
+  function productionTree(backing: ThemeBacking) {
+    // No `osScheme` key AT ALL — not `osScheme: null`, which is a value the
+    // provider would prefer over the hook and would put the prop back in the path.
+    return createElement(ThemeProvider, {
+      backing,
+      children: [createElement(ThemeControl, { key: 'control' }), createElement(Probe, { key: 'probe' })],
+    });
+  }
+
+  it('the provider SUBSCRIBES to the OS scheme', async () => {
+    // The wiring assertion, stated as a count rather than as an appearance. A
+    // provider that read the scheme once at launch, or not at all, leaves this 0
+    // while still painting a perfectly plausible theme.
+    expect(colorSchemeListenerCount()).toBe(0);
+    setHarnessColorScheme('dark');
+    const backing = new MemoryBacking();
+    const screen = await mountScreen(productionTree(backing));
+    expect(colorSchemeListenerCount()).toBeGreaterThan(0);
+    screen.unmount();
+    // ...and unsubscribes, so the subscription is not a leak per mount.
+    expect(colorSchemeListenerCount()).toBe(0);
+  });
+
+  it('`system` paints what the OS reports, through the real hook', async () => {
+    setHarnessColorScheme('light');
+    const backing = new MemoryBacking('system');
+    const screen = await mountScreen(productionTree(backing));
+    expect(paintedBackground(screen)).toBe(LIGHT_THEME.background);
+    screen.unmount();
+
+    setHarnessColorScheme('dark');
+    const second = await mountScreen(productionTree(backing));
+    expect(paintedBackground(second)).toBe(DARK_THEME.background);
+    second.unmount();
+  });
+
+  it('a LIVE OS flip re-themes the running app', async () => {
+    // The requirement the brief called out: `system` must track the OS while the
+    // app is FOREGROUNDED, not only at launch. Nothing re-renders here except the
+    // OS notification itself.
+    setHarnessColorScheme('light');
+    const backing = new MemoryBacking('system');
+    const screen = await mountScreen(productionTree(backing));
+    expect(paintedBackground(screen)).toBe(LIGHT_THEME.background);
+
+    await screen.act(() => {
+      setHarnessColorScheme('dark');
+    });
+    expect(paintedBackground(screen)).toBe(DARK_THEME.background);
+
+    await screen.act(() => {
+      setHarnessColorScheme('light');
+    });
+    expect(paintedBackground(screen)).toBe(LIGHT_THEME.background);
+    screen.unmount();
+  });
+
+  it('an explicit choice still wins over the real hook', async () => {
+    // The override, on the production path this time. A provider that resolved
+    // from the OS hook unconditionally passes every `system` test above and fails
+    // exactly here.
+    setHarnessColorScheme('dark');
+    const backing = new MemoryBacking();
+    const screen = await mountScreen(productionTree(backing));
+    expect(paintedBackground(screen)).toBe(DARK_THEME.background);
+
+    await screen.press('Theme Light');
+    expect(paintedBackground(screen)).toBe(LIGHT_THEME.background);
+
+    // The OS flips again; the override holds.
+    await screen.act(() => {
+      setHarnessColorScheme('dark');
+    });
+    expect(paintedBackground(screen)).toBe(LIGHT_THEME.background);
+    screen.unmount();
+  });
+
+  it('an OS that reports NOTHING resolves to dark rather than to a guess', async () => {
+    setHarnessColorScheme(null);
+    const backing = new MemoryBacking('system');
+    const screen = await mountScreen(productionTree(backing));
+    expect(paintedBackground(screen)).toBe(DARK_THEME.background);
     screen.unmount();
   });
 });

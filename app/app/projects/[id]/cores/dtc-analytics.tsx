@@ -40,6 +40,8 @@ import {
   TextInput,
   View,
 } from 'react-native'
+import type { NeutronTheme } from '../../../../lib/theme';
+import { useThemedStyles } from '../../../../lib/theme-context';
 
 interface DailySnapshotRow {
   date: string
@@ -138,6 +140,7 @@ interface SparklineProps {
 }
 
 function Sparkline({ values, width, height }: SparklineProps) {
+  const styles = useThemedStyles(makeStyles);
   // Render a simple polyline + filled area inside a fixed-size View
   // using nested Views as "bars" — RNW renders Views, not SVG, so we
   // avoid pulling in `react-native-svg`. Each bar represents one day's
@@ -164,6 +167,7 @@ function Sparkline({ values, width, height }: SparklineProps) {
 }
 
 export default function DtcAnalyticsDashboard() {
+  const styles = useThemedStyles(makeStyles);
   const { id } = useLocalSearchParams<{ id: string }>()
   const projectId = typeof id === 'string' ? id : 'unknown'
 
@@ -284,6 +288,7 @@ export default function DtcAnalyticsDashboard() {
 }
 
 function StatCard({ label, value }: { label: string; value: string }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.statCard}>
       <Text style={styles.statLabel}>{label}</Text>
@@ -292,58 +297,59 @@ function StatCard({ label, value }: { label: string; value: string }) {
   )
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: theme.background },
   content: { padding: 16, gap: 16 },
   headerBlock: { gap: 4 },
   overline: {
-    color: '#7a7a7a',
+    color: theme.text_muted,
     fontSize: 10,
     fontWeight: '600',
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
-  title: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  subtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
-  subtitleEmph: { color: '#e0e0e0', fontWeight: '600' },
+  title: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  subtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+  subtitleEmph: { color: theme.accent, fontWeight: '600' },
   statRow: { flexDirection: 'row', gap: 8 },
   statCard: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 12,
     gap: 4,
   },
   statLabel: {
-    color: '#7a7a7a',
+    color: theme.text_muted,
     fontSize: 10,
     fontWeight: '600',
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
-  statValue: { color: '#fafafa', fontSize: 16, fontWeight: '700' },
+  statValue: { color: theme.text_primary, fontSize: 16, fontWeight: '700' },
   card: {
-    backgroundColor: '#0f0f0f',
+    backgroundColor: theme.background,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 14,
     gap: 8,
   },
   cardLabel: {
-    color: '#9a9a9a',
+    color: theme.text_muted,
     fontSize: 12,
     fontWeight: '600',
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
-  cardFootnote: { color: '#5a5a5a', fontSize: 11, fontStyle: 'italic' },
+  cardFootnote: { color: theme.text_muted, fontSize: 11, fontStyle: 'italic' },
   tableHeader: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: theme.hairline,
     paddingBottom: 6,
     marginTop: 4,
   },
@@ -351,11 +357,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: theme.hairline,
   },
-  cell: { color: '#cfcfcf', fontSize: 12 },
+  cell: { color: theme.text_secondary, fontSize: 12 },
   cellHeader: {
-    color: '#7a7a7a',
+    color: theme.text_muted,
     fontWeight: '600',
     letterSpacing: 0.4,
     textTransform: 'uppercase',
@@ -363,7 +369,7 @@ const styles = StyleSheet.create({
   cellDate: { flex: 1.4 },
   cellNum: { flex: 1, textAlign: 'right' },
   emptyTable: {
-    color: '#6a6a6a',
+    color: theme.text_muted,
     fontSize: 12,
     fontStyle: 'italic',
     paddingVertical: 12,
@@ -371,48 +377,48 @@ const styles = StyleSheet.create({
   },
   csvInput: {
     minHeight: 140,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: theme.background,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     borderRadius: 8,
     padding: 10,
-    color: '#e0e0e0',
+    color: theme.accent,
     fontSize: 12,
     fontFamily: 'monospace',
     textAlignVertical: 'top',
   },
   actionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' },
   primaryBtn: {
-    backgroundColor: '#fafafa',
+    backgroundColor: theme.accent,
     paddingHorizontal: 18,
     paddingVertical: 10,
     borderRadius: 10,
   },
-  primaryBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '700' },
+  primaryBtnText: { color: theme.background, fontSize: 14, fontWeight: '700' },
   pressed: { opacity: 0.7 },
-  statusOk: { color: '#7ad27a', fontSize: 12 },
-  statusErr: { color: '#e07070', fontSize: 12 },
+  statusOk: { color: theme.success, fontSize: 12 },
+  statusErr: { color: theme.danger, fontSize: 12 },
   sparkRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 4,
   },
   sparkBar: {
-    backgroundColor: '#7a8cff',
+    backgroundColor: theme.info,
     borderRadius: 2,
   },
   sparkEmpty: {
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     borderRadius: 6,
     borderStyle: 'dashed',
   },
-  sparkEmptyText: { color: '#6a6a6a', fontSize: 11 },
-  mono: { fontFamily: 'monospace', color: '#cfcfcf' },
+  sparkEmptyText: { color: theme.text_muted, fontSize: 11 },
+  mono: { fontFamily: 'monospace', color: theme.text_secondary },
   footnote: {
-    color: '#5a5a5a',
+    color: theme.text_muted,
     fontSize: 11,
     fontStyle: 'italic',
     marginTop: 4,

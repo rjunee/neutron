@@ -304,7 +304,7 @@ const makeStyles = (theme: NeutronTheme) =>
   StyleSheet.create({
     scrim: {
       flex: 1,
-      backgroundColor: 'rgba(10,10,10,0.72)',
+      backgroundColor: theme.scrim,
       justifyContent: 'center',
       alignItems: 'center',
       paddingHorizontal: SPACING.lg,
@@ -365,7 +365,7 @@ const makeStyles = (theme: NeutronTheme) =>
       borderColor: theme.accent,
     },
     phaseChipDone: {
-      backgroundColor: 'rgba(224,224,224,0.10)',
+      backgroundColor: theme.surface_raised,
     },
     phaseChipError: {
       borderColor: theme.danger,

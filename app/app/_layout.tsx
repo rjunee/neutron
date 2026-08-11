@@ -1,5 +1,6 @@
 import { Stack, useRouter } from 'expo-router';
 import * as Linking from 'expo-linking';
+import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
@@ -16,7 +17,7 @@ import { installDiagnostics, setDiagnosticsOrigin } from '../lib/diagnostics';
 import { AuthSessionProvider } from '../lib/session';
 import { docLinkToRouterPath, parseDocLink } from '../lib/doc-links';
 import { installPushTapHandler } from '../lib/push';
-import { type NeutronTheme } from '../lib/theme';
+import { type NeutronTheme, type ResolvedTheme } from '../lib/theme';
 import { ThemeProvider, useTheme, useThemeState, useThemedStyles } from '../lib/theme-context';
 
 /**
@@ -187,10 +188,27 @@ export default function RootLayout() {
   );
 }
 
+/**
+ * NATIVE SYSTEM CHROME follows the RESOLVED scheme, not the OS.
+ *
+ * `app.json` sets `userInterfaceStyle: "automatic"`, which hands the status-bar
+ * icon styling to the OS. That is right for a preference of `system` and WRONG
+ * for an explicit override: an owner who picks Light on a dark-OS phone got a
+ * light app under light-on-dark status-bar icons, i.e. invisible time and battery.
+ * The whole point of an override is that it overrides.
+ *
+ * `style` names the CONTENT: `light` = light icons, for a dark ground. So it is
+ * the inverse of the scheme name, which reads backwards and is why it is spelled
+ * out here.
+ */
+function NeutronStatusBar({ scheme }: { scheme: ResolvedTheme }) {
+  return <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />;
+}
+
 function RootLayoutShell() {
   const theme = useTheme();
   const styles = useThemedStyles(makeStyles);
-  const { hydrated: themeHydrated } = useThemeState();
+  const { hydrated: themeHydrated, scheme } = useThemeState();
   const [phase, setPhase] = useState<BootPhase>('hydrating');
   const serverEpoch = useServerConfigEpoch();
   // Read fresh on every render, deliberately NOT memoised. `loadAppConfig()`
@@ -232,6 +250,7 @@ function RootLayoutShell() {
   if (phase === 'hydrating' || !themeHydrated) {
     return (
       <View style={styles.booting}>
+        <NeutronStatusBar scheme={scheme} />
         <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
@@ -239,6 +258,7 @@ function RootLayoutShell() {
 
   return (
     <>
+      <NeutronStatusBar scheme={scheme} />
       {/* `key` = the server epoch: changing the server rebuilds the entire
           tree so no mounted screen keeps a `useMemo`-frozen config pointing
           at the old host (Argus r2 MAJOR). */}

@@ -891,13 +891,13 @@ const makeStyles = (theme: NeutronTheme) =>
     dangerBtnText: { color: theme.danger, fontSize: 12, fontWeight: '600' },
     btnDisabled: { opacity: 0.5 },
     bannerError: {
-      backgroundColor: '#3b1212',
-      color: '#fecaca',
+      backgroundColor: theme.danger_surface,
+      color: theme.danger,
       paddingHorizontal: 12,
       paddingVertical: 8,
       borderRadius: 8,
       borderWidth: 1,
-      borderColor: '#7f1d1d',
+      borderColor: theme.danger_border,
       fontSize: 12,
     },
     footnote: {

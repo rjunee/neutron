@@ -106,7 +106,8 @@ including `surface_raised`. It asserts ratios, never hex strings: a test that pi
 the new hexes would have zero contrast coverage, because a hex is only equal to
 itself and such a test passes against a straight revert.
 
-Mutation-tested rather than assumed. Restoring `text_muted: '#7c848f'` reds it with
+The contrast gate specifically IS mutation-tested, and only that claim is made here:
+restoring `text_muted: '#7c848f'` reds it with
 `dark text_muted #7c848f on #222834 = 3.91 is below AA 4.5`.
 `contrast-gate-selfcheck.test.ts` holds all nine pre-existing failing pairs and
 asserts the measurement still calls them failures, plus the two anchors that cannot
@@ -125,8 +126,9 @@ while looking like it measured something.
 
 `app/__tests__/no-captured-palette.test.ts` is the one-missed-component guard: no
 palette export exists, no component imports one, no module-scope stylesheet contains
-a colour, and the hex-literal population cannot grow. Mutation-tested — adding one
-module-scope coloured sheet reds three independent assertions.
+a colour, and **no colour literal exists anywhere outside the palette module**. The
+per-file budget it originally carried is gone — see the round-2 section below for why
+that budget was the worst part of the first pass.
 
 Markdown was CHECKED rather than assumed, because the owner asked. Mobile: all 13
 kinds `markdown-grammar.ts` parses have a render case in `markdown-render.tsx` —
@@ -137,17 +139,19 @@ invented.
 
 ### What is NOT covered
 
-**~300 raw hex literals remain, in files that never used the palette at all** — the
-admin panes (`app/features/admin/*`), the Cores screens
-(`app/app/cores/[slug].tsx`, `dtc-analytics.tsx`), and the docs tab
-(`app/features/docs/docs-ui.tsx`, 78 of them). **Those surfaces still render dark in
-light mode.** They were invisible to this conversion by construction: they never
-imported `THEME`, so deleting it produced no compile error pointing at them, and
-they were found only by scanning for hex literals after the conversion was already
-green. The guard test freezes the count per file — it cannot grow, and a fix can only
-lower it — so the gap is finite and visible rather than ambient. Closing it is a
-follow-up lane of comparable size, and interleaving it here would have made both
-harder to review.
+**RESOLVED in round 2 — see the section below.** This slot originally recorded ~300
+remaining hex literals as a deferred lane and asserted that *"those surfaces still
+render dark in light mode."* That sentence was **wrong**, and wrong in the direction
+that matters: three of the named files were HYBRIDS whose containers were already
+themed while their text was not, so the failure mode was not a dark card on a light
+page — it was **invisible text on a correctly-themed page**. The docs viewer drew
+#f4f4f4 body text on white (1.10:1) and a #fafafa title on it (1.04:1).
+
+That is the aspirational-doc shape `CLAUDE.md` rule 3a warns about, written by me
+about my own change: the sentence described the failure I EXPECTED from a
+half-converted file rather than the one the code actually produced, and it was
+confidently specific enough to read as a diagnosis. Anyone triaging from it would
+have gone looking for the wrong symptom.
 
 `attention` in light (`#e0a020`, 2.28 on white) is left alone and recorded as the
 one documented exemption in the contrast gate. It is a 6px dot whose hue the owner
@@ -159,3 +163,147 @@ Nothing here has been seen on a device. The harness renders react-native-web, so
 cannot see native layout — every visual claim is UNVERIFIED until it runs on a
 phone, and iMessage bubble SHAPE in particular (radii, tails, run spacing) is
 existing behaviour this change re-themed rather than re-measured.
+
+---
+
+## Round 2 (2026-08-11) — the deferred lane, closed; and what the deferral cost
+
+Review found two blockers that were really one: light mode shipped with surfaces
+whose text was invisible, and the guard test that should have caught them **listed
+those exact files as exempt**.
+
+### The budget was the bug
+
+The first pass converted ~70 components and then recorded the remaining ~380
+literals as a per-file numeric budget in `app/__tests__/no-captured-palette.test.ts`
+— "the number cannot go up, a fix can only lower it". The reasoning sounded like
+control and was not, for a reason worth keeping:
+
+> **A ratchet over a defect is a decision to ship the defect.** The exemption list
+> named `app/features/docs/docs-ui.tsx` and `app/lib/markdown-render.tsx`, which is
+> where the single worst pair in the change lived (1.10:1 body text). The file that
+> needs a budget is *by construction* the file with the most colour logic — i.e. the
+> one most likely to be wrong — so a per-file budget systematically excuses exactly
+> the files a reviewer most wants checked. And because the test stayed green, nothing
+> ever forced the follow-up.
+
+All 19 files are converted (~400 literals) and the budget is **deleted**. The
+invariant is now absolute: zero colour literals outside `app/lib/theme.ts` and
+`app/lib/theme-context.tsx`.
+
+### The matcher could not see a whole syntactic class
+
+The old regex was single-quoted-hex only. It therefore never saw 25 real defects
+that had been in the tree the whole time, all of them double-quoted JSX attributes:
+`<ActivityIndicator color="#cfcfcf" />` — **1.56:1 on a white page, so every loading
+state in light mode was a blank screen** — and `placeholderTextColor="#5a5a5a"`.
+
+The guard now enumerates the four syntactic classes a colour can take and feeds each
+one a known positive, asserting it is caught (`the matcher can see every class of
+colour literal`). An absence claim is only worth the tool's proven ability to report
+a presence; this is that control, made permanent rather than done once by hand.
+
+### New palette tokens
+
+Converting the admin panes, the Cores screens, the docs tab and the backup diff
+viewer needed vocabulary the palette did not have, because those files had never
+imported it. Added to `NeutronTheme`, both palettes: `success` / `success_surface` /
+`success_border`, `danger_surface` / `danger_border` / `danger_fill` / `danger_ink`,
+`info` / `info_surface` / `info_border`, `warning_surface` / `warning_border`,
+`shadow`, and the two deliberately theme-INVARIANT fills `scrim` / `veil` /
+`veil_ink` (a modal dim darkens in both themes; a strip over a thumbnail cannot
+follow a palette, because an image is not one of its grounds).
+
+`veil_ink` exists because `button-primitives.tsx` inked a caption on that dark strip
+with `text_primary`, which is near-black in light mode — the light theme would have
+erased a caption dark mode rendered fine.
+
+### Grounds the gates were not measuring
+
+- **Web gained `--agent-bubble` as a ground.** The mobile gate had always included
+  its equivalent (`surface_raised`) with an explicit "this IS the agent bubble"
+  rationale; web measured only `--bg` and `--surface`. Adding it went red on six
+  pairs that CLEARED AA on both page grounds and failed only inside a bubble: dark
+  `--faint` 4.29 and `--danger` 4.41; light `--faint` 4.31, `--danger` 4.44,
+  `--success-fg` 4.19, `--phase-merged-fg` 4.19. All six fixed.
+- **Each status ink is measured on its OWN WASH.** A wash introduced by the same
+  commit as its ink has no "before" in which the pair was wrong, so nothing prompts
+  you to measure it. This caught light `success`: the obvious value (`#1a7f37`,
+  already in the palette as `usage_nominal`) measures 4.19 on `surface_raised`. It
+  is `#146c2e`.
+- **`rail_selected` is measured against the two inks actually drawn on it**
+  (`text_primary`, `text_secondary` — the docs tree draws its label with the second).
+  Deliberately not added to the global ground list: muted, danger, warning and link
+  are never drawn on a selected row, and a gate that fails on pairs the product
+  cannot render gets weakened rather than fixed.
+
+### The OS subscription is now testable, so it is now tested
+
+Every round-1 theme test injected the OS scheme through the provider's test-only
+`osScheme` prop, which means **deleting `useOsColorScheme()` from the provider left
+all ten of them green**. They proved the resolution rule and said nothing about
+whether the app is subscribed to the device.
+
+`react-native-web` implements no `useColorScheme` at all, which is why the prop
+existed. The harness's `react-native` stub now provides one as a real subscription —
+the same treatment `Keyboard` already gets there, and for the same reason (RNW's
+listeners never fire, so subscribing to the real one is vacuously green). Five new
+tests mount with **no `osScheme` prop at all** and drive the production path;
+breaking the hook now fails three of them.
+
+### "Wired" is now asserted for the toggle itself
+
+`theme-preference.test.tsx` mounts `ThemeControl` directly, so deleting the
+`<ThemeControl />` call site in `app/settings.tsx` left the whole suite green — the
+persona-gen shape. `app/__tests__/theme-control-reachable-in-settings.test.tsx`
+mounts the REAL Settings route and presses the segmented control through it. Removing
+the call site fails it while the direct-mount suite stays 15/15 green, which is the
+proof that the two tests cover different things.
+
+### Also fixed
+
+- **Pre-paint resolution.** The preference is now seeded from a SYNCHRONOUS store
+  read where the platform has one (`localStorage`), so there is no wrong-theme frame
+  at all on web — the mobile counterpart of the pre-paint script at
+  `landing/chat-react.html:21-39`. Native keeps the boot gate, because AsyncStorage
+  is a bridge round-trip. `app.json` gains a `splash.dark` variant so the pre-JS
+  frame is no longer unconditionally black. **Stated limit:** the native splash
+  renders before any JS exists to consult, so it follows the OS and cannot follow a
+  stored override.
+- **Native system chrome.** `expo-status-bar` is now wired to the RESOLVED scheme.
+  `userInterfaceStyle: "automatic"` left icon styling to the OS, so an explicit Light
+  choice on a dark-OS phone gave a light app with light-on-dark status-bar icons.
+- **Chat leading.** `.car-md p` / `.car-text` pinned `line-height: 1.4`, overriding
+  `--body-line` on the one surface the owner was complaining about — so the type work
+  raised leading everywhere EXCEPT the transcript. Now `--chat-line` (1.5 dark / 1.45
+  light): tighter than prose, looser than the old pin.
+- **Code sizes.** Web inline code `.9em` → `.95em`, `pre code` `.85em` → `.9em`;
+  mobile `inlineCode` was a literal `fontSize: 14` against a 17px body and now takes
+  `TYPOGRAPHY.mono.fontSize`. Keeping `.9em` while the body grew carried the old
+  problem forward.
+- **`h5` / `h6` / `del` are styled on web.** `remark-gfm` emits them and the
+  stylesheet handled only `h1`-`h4`, so `#####` fell through to the UA's `.83em` and
+  rendered SMALLER than the body it introduced. (The round-1 note claiming web
+  markdown was complete was checked against the elements the docs happened to use.)
+- **`html { font-size: 17px }` → `106.25%`.** Both compute to 17px against a 16px
+  default, but a percentage scales with whatever base the reader set; the px value
+  discarded it, overriding the very readers the size bump was for.
+- **Backup diff viewer.** Added/deleted/changed lines were pinned pastels
+  (`#bbf7d0` 1.21, `#fecaca` 1.45, `#bfdbfe` 1.42 on white) — gone, not dim. Now the
+  `success` / `danger` / `info` tokens.
+- **Unwrapped-act warnings.** `MountedScreen.unmount()` called `root.unmount()`
+  outside `act`, logging a warning on every teardown. Noise like that is what a real
+  warning has to be spotted among.
+- **A stale comment.** The web light-theme block said it used Apple's `#007AFF`; the
+  code has never used it here (`#1064cc`), and `#007AFF` would fail AA under white
+  ink at 4.02.
+
+### Still not covered
+
+`attention` in light is unchanged and still the one documented exemption — it needs
+the owner's ruling, not a unilateral fix.
+
+**Nothing here has been seen on a device.** The harness renders react-native-web, so
+it cannot see native layout. Every visual claim is UNVERIFIED until it runs on a
+phone; the contrast numbers are arithmetic over the palettes and are as good as
+arithmetic gets, which is not the same as "looks right".

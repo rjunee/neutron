@@ -11,6 +11,8 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 
 import { CoresClient, type CoreSummary } from '../../lib/cores-client';
 import { formatCoresError } from './format';
+import type { NeutronTheme } from '../../lib/theme';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 
 export function CoresPane({
   client,
@@ -19,6 +21,8 @@ export function CoresPane({
   client: CoresClient;
   router: ReturnType<typeof useRouter>;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [cores, setCores] = useState<CoreSummary[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +85,7 @@ export function CoresPane({
   if (loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -129,6 +133,7 @@ function CoreRow({
   onUninstall: () => void;
   onOpen: () => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const isInstalled = core.install_state === 'installed';
   const isFailed =
     core.install_state === 'failed' ||
@@ -220,6 +225,7 @@ function CoreRow({
 }
 
 function CoreStateBadge({ state }: { state: CoreSummary['install_state'] }) {
+  const styles = useThemedStyles(makeStyles);
   const label = stateLabel(state);
   const style =
     state === 'installed'
@@ -247,28 +253,29 @@ function stateLabel(state: CoreSummary['install_state']): string {
   }
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   paneScroll: { padding: 16, gap: 12 },
   intro: { gap: 6, marginBottom: 8 },
-  paneTitle: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  paneSubtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
+  paneTitle: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  paneSubtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
-  muted: { color: '#7a7a7a', fontSize: 13 },
+  muted: { color: theme.text_muted, fontSize: 13 },
   coreCard: {
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 14,
     gap: 8,
   },
@@ -278,35 +285,35 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 8,
   },
-  coreTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700' },
-  coreDescription: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
-  coreError: { color: '#fecaca', fontSize: 11, fontFamily: 'Menlo' },
+  coreTitle: { color: theme.text_primary, fontSize: 16, fontWeight: '700' },
+  coreDescription: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+  coreError: { color: theme.danger, fontSize: 11, fontFamily: 'Menlo' },
   coreActionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
   primaryActionBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#ffffff',
+    backgroundColor: theme.accent,
   },
-  primaryActionBtnText: { color: '#0a0a0a', fontSize: 13, fontWeight: '600' },
+  primaryActionBtnText: { color: theme.background, fontSize: 13, fontWeight: '600' },
   secondaryActionBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  secondaryActionBtnText: { color: '#e0e0e0', fontSize: 13, fontWeight: '500' },
+  secondaryActionBtnText: { color: theme.accent, fontSize: 13, fontWeight: '500' },
   tertiaryActionBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
     backgroundColor: 'transparent',
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  tertiaryActionBtnText: { color: '#9a9a9a', fontSize: 13, fontWeight: '500' },
+  tertiaryActionBtnText: { color: theme.text_muted, fontSize: 13, fontWeight: '500' },
   actionBtnDisabled: { opacity: 0.5 },
   coreBadge: {
     fontSize: 10,
@@ -318,8 +325,8 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     overflow: 'hidden',
   },
-  coreBadgeOk: { color: '#bbf7d0', backgroundColor: '#0f2418' },
-  coreBadgeNeutral: { color: '#bdbdbd', backgroundColor: '#1f1f1f' },
-  coreBadgeWarn: { color: '#fed7aa', backgroundColor: '#3b1d12' },
+  coreBadgeOk: { color: theme.success, backgroundColor: theme.success_surface },
+  coreBadgeNeutral: { color: theme.text_secondary, backgroundColor: theme.surface },
+  coreBadgeWarn: { color: theme.warning, backgroundColor: theme.warning_surface },
   pressed: { opacity: 0.7 },
 });

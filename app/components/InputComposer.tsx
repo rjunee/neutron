@@ -946,7 +946,7 @@ const makeStyles = (theme: NeutronTheme) =>
       width: 20,
       height: 20,
       borderRadius: 10,
-      backgroundColor: 'rgba(10,10,10,0.7)',
+      backgroundColor: theme.veil,
       justifyContent: 'center',
       alignItems: 'center',
     },

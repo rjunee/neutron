@@ -82,6 +82,81 @@ export interface NeutronTheme {
   usage_warning: string;
   /** Usage meter, 95% and up. Mirror of the web `--usage-critical`. */
   usage_critical: string;
+
+  // ── STATUS FAMILIES ───────────────────────────────────────────────────────
+  //
+  // Each family is a TRIPLE: ink + a low-contrast wash it is drawn on + the
+  // border of that wash. They exist because the admin panes, the Cores screens,
+  // the docs tab and the backup diff viewer all draw status callouts, and every
+  // one of them had written its own dark hex inline — `#3b1212` for a danger
+  // wash, `#0f2418` for a success one, `#bfdbfe` for info ink. Those are the
+  // literals the theme conversion could not see (they never imported the
+  // palette) and they are why those surfaces were unreadable in light mode.
+  //
+  // The INK tokens are TEXT and clear AA against `background`, `surface`,
+  // `surface_raised` AND against their own wash — the wash is a ground, and it
+  // is the ground most easily forgotten because it is the one introduced by the
+  // same commit. `__tests__/contrast.test.ts` asserts all four.
+
+  /** Success / healthy ink (a passing check, an "added" diff line). */
+  success: string;
+  /** The wash `success` is drawn on (callout card fill). */
+  success_surface: string;
+  /** Border of a `success_surface` card. */
+  success_border: string;
+  /** The wash `danger` is drawn on (error callout fill). */
+  danger_surface: string;
+  /** Border of a `danger_surface` card. */
+  danger_border: string;
+  /** A destructive BUTTON's fill — saturated, carries `danger_ink`. */
+  danger_fill: string;
+  /** Content drawn ON `danger_fill`. */
+  danger_ink: string;
+  /** Informational ink (a "changed" diff line, a hint callout). */
+  info: string;
+  /** The wash `info` is drawn on. */
+  info_surface: string;
+  /** Border of an `info_surface` card. */
+  info_border: string;
+  /** The wash `warning` is drawn on. */
+  warning_surface: string;
+  /** Border of a `warning_surface` card. */
+  warning_border: string;
+  /**
+   * Drop-shadow colour. Black in both palettes — a shadow is an absence of
+   * light, not a hue, and it is the one colour that legitimately does not
+   * invert. It is a token anyway so that `shadowColor` stops being the single
+   * exception a hardcoded-literal guard has to carve out.
+   */
+  shadow: string;
+
+  // ── THE TWO DELIBERATELY THEME-INVARIANT FILLS ────────────────────────────
+  //
+  // Both are the SAME value in both palettes, and that is a decision rather than
+  // an oversight, so each says why. They are tokens — not the inline `rgba(...)`
+  // literals they replace — because "this one does not change" and "someone
+  // forgot this one" are indistinguishable when the value is written at the call
+  // site, and 20 call sites of the second kind is how the dark-only app got here.
+
+  /**
+   * Modal dim. A scrim's job is to push the page back, and it does that by
+   * DARKENING in both themes — iOS dims a light sheet's backdrop with black too.
+   * A light scrim over a light page would be invisible and a light scrim over a
+   * dark one would flash.
+   */
+  scrim: string;
+  /**
+   * A dark veil over MEDIA — an image caption strip, a badge over a thumbnail.
+   * An image is not one of this palette's grounds: its content is arbitrary, so
+   * the only safe ink is light-on-dark regardless of theme.
+   */
+  veil: string;
+  /**
+   * Ink on `veil`. Fixed light in both palettes, for the reason above — reading
+   * `text_primary` here was a real light-mode defect, because it is near-black in
+   * light and the veil under it is not.
+   */
+  veil_ink: string;
 }
 
 /**
@@ -185,6 +260,26 @@ export const DARK_THEME: NeutronTheme = Object.freeze({
   usage_nominal: '#4bbf73',
   usage_warning: '#e0a832',
   usage_critical: '#e0553f',
+  // Status families. Inks measured against background / surface / surface_raised
+  // / own wash: success 11.35 / 10.41 / 9.08 / 9.88, info 10.24 / 9.39 / 8.19 /
+  // 8.91, warning (reuses `warning` above) 10.02 / 9.19 / 8.01 / 8.53, danger
+  // (reuses `danger`) 6.11 / 5.60 / 4.88 / 5.65.
+  success: '#7ddf9b',
+  success_surface: '#12251a',
+  success_border: '#1f5133',
+  danger_surface: '#2e1416',
+  danger_border: '#7a2c2c',
+  danger_fill: '#8f2222',
+  danger_ink: '#ffffff',
+  info: '#8cc6ff',
+  info_surface: '#132234',
+  info_border: '#2a4a70',
+  warning_surface: '#2c2113',
+  warning_border: '#5f4a1f',
+  shadow: '#000000',
+  scrim: 'rgba(0,0,0,0.6)',
+  veil: 'rgba(0,0,0,0.7)',
+  veil_ink: '#ffffff',
 });
 
 /**
@@ -255,6 +350,32 @@ export const LIGHT_THEME: NeutronTheme = Object.freeze({
   usage_nominal: '#1a7f37',
   usage_warning: '#b07407',
   usage_critical: '#c9252d',
+  // Status families, light. Inks measured against background / surface /
+  // surface_raised / own wash: success 6.53 / 5.99 / 5.39 / 5.79, info 6.39 /
+  // 5.87 / 5.27 / 5.57, warning 5.65 / 5.19 / 4.66 / 5.13, danger 5.55 / 5.09 /
+  // 4.57 / 4.79.
+  //
+  // `success` is NOT `usage_nominal`'s #1a7f37, which is the one value that
+  // looked obviously fine and was not: it measures 4.19 on `surface_raised`, so
+  // an "added" diff line inside a raised card would have failed AA. Darkened
+  // until it clears every ground, which is a step the eye does not take.
+  success: '#146c2e',
+  success_surface: '#e3f6e8',
+  success_border: '#a6ddb5',
+  danger_surface: '#fdeaea',
+  danger_border: '#f0b4b4',
+  danger_fill: '#c9252d',
+  danger_ink: '#ffffff',
+  info: '#0b57d0',
+  info_surface: '#e8f0fe',
+  info_border: '#adc9f5',
+  warning_surface: '#fdf3e0',
+  warning_border: '#e3c68a',
+  shadow: '#000000',
+  // Same values as dark, deliberately — see the token docs.
+  scrim: 'rgba(0,0,0,0.6)',
+  veil: 'rgba(0,0,0,0.7)',
+  veil_ink: '#ffffff',
 });
 
 /** One phase's tinted-capsule colors: solid foreground + a low-alpha background wash. */

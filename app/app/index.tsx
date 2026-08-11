@@ -67,8 +67,12 @@ import { resolveEntryRoute } from '../lib/entry-route';
 import { renewInstanceSession } from '../lib/identity-client';
 import { useAuthSession } from '../lib/session';
 import { tokenStorage } from '../lib/token-storage';
+import type { NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 export default function RootRedirect() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user, status, setUser, clear } = useAuthSession();
   const config = loadAppConfig();
@@ -133,7 +137,7 @@ export default function RootRedirect() {
 
   return (
     <View style={styles.container}>
-      <ActivityIndicator color="#cfcfcf" />
+      <ActivityIndicator color={theme.text_secondary} />
     </View>
   );
 }
@@ -200,10 +204,11 @@ async function renewSession(
   }
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: theme.background,
     alignItems: 'center',
     justifyContent: 'center',
   },

@@ -55,6 +55,11 @@ const MOBILE_TEXT_TOKENS = [
   'danger',
   'warning',
   'link',
+  // The status-family inks, added with the tokens themselves. Every one replaced a
+  // hardcoded pastel in an admin pane, a Cores screen or the backup diff viewer —
+  // e.g. `#bbf7d0` for an added diff line, which measures 1.21 on white.
+  'success',
+  'info',
 ] as const;
 
 /**
@@ -147,6 +152,82 @@ describe('mobile palettes clear AA on every ground', () => {
       );
     });
 
+    it(`${name}: each status ink clears AA on ITS OWN WASH`, () => {
+      // The wash is a GROUND, and it is the ground most easily missed because the
+      // same commit introduces both — so there is no "before" in which the pair
+      // was ever wrong, and nothing prompts you to measure it. A status callout is
+      // exactly `<Text color=ink>` inside `<View backgroundColor=wash>`.
+      //
+      // This pair is what caught light `success`: the obvious value was
+      // `usage_nominal`'s #1a7f37, which measures 4.19 on `surface_raised` and 4.50
+      // on its own wash — i.e. it fails on a raised card and sits one hundredth
+      // above the floor on the wash. It is #146c2e for that reason.
+      const pairs: ReadonlyArray<readonly [keyof typeof c, keyof typeof c]> = [
+        ['success', 'success_surface'],
+        ['danger', 'danger_surface'],
+        ['info', 'info_surface'],
+        ['warning', 'warning_surface'],
+      ];
+      for (const [ink, wash] of pairs) {
+        const ratio = contrastRatio(c[ink], c[wash]);
+        expect(ratio, `${name} ${String(ink)} on ${String(wash)} ${report(c[ink], c[wash])}`).toBeGreaterThanOrEqual(
+          AA_TEXT,
+        );
+      }
+    });
+
+    it(`${name}: body text inside a status callout clears AA on every wash`, () => {
+      // A callout is not only its heading: `text_primary`/`text_secondary` carry the
+      // sentence under it, on the same wash.
+      for (const wash of ['success_surface', 'danger_surface', 'info_surface', 'warning_surface'] as const) {
+        for (const ink of ['text_primary', 'text_secondary'] as const) {
+          const ratio = contrastRatio(c[ink], c[wash]);
+          expect(ratio, `${name} ${ink} on ${wash} ${report(c[ink], c[wash])}`).toBeGreaterThanOrEqual(
+            AA_TEXT,
+          );
+        }
+      }
+    });
+
+    it(`${name}: ink on a destructive button clears AA`, () => {
+      // `danger_fill` is the saturated fill a Delete button takes; `danger_ink` is
+      // what is written on it. Separate tokens from `danger` (the ink used ON a
+      // page) precisely because one is a fill and one is ink, and reusing `danger`
+      // for both is how you end up with mid-red on mid-red.
+      const ratio = contrastRatio(c.danger_ink, c.danger_fill);
+      expect(ratio, `${name} ${report(c.danger_ink, c.danger_fill)}`).toBeGreaterThanOrEqual(AA_TEXT);
+    });
+
+    it(`${name}: the SELECTED row still carries the two inks drawn on it`, () => {
+      // `rail_selected` is a text-bearing fill and was previously asserted only
+      // against `text_primary`. The docs tree draws its label with `text_secondary`
+      // on the same fill (`features/docs/docs-ui.tsx` treeLabel over
+      // treeRowSelected), so that pair is a real ground/ink pair too.
+      //
+      // Scoped to these TWO inks on purpose rather than added to MOBILE_GROUNDS:
+      // muted, danger, warning and link are never drawn on a selected row, and
+      // asserting them there would fail on pairs the product does not render —
+      // a gate that fails on something that cannot happen gets weakened, not fixed.
+      for (const ink of ['text_primary', 'text_secondary'] as const) {
+        const ratio = contrastRatio(c[ink], c.rail_selected);
+        expect(ratio, `${name} ${ink} on rail_selected ${report(c[ink], c.rail_selected)}`).toBeGreaterThanOrEqual(
+          AA_TEXT,
+        );
+      }
+    });
+
+    it(`${name}: ink on the media VEIL clears AA, and does not follow the theme`, () => {
+      // `veil` is a dark strip over a thumbnail. Its ink is fixed light in both
+      // palettes because an image is not one of this palette's grounds — and the
+      // reason this assertion exists is that the caption originally read
+      // `text_primary`, which is near-black in light mode, i.e. the light theme
+      // would have erased a caption that dark mode rendered fine.
+      const ratio = contrastRatio(c.veil_ink, '#000000');
+      expect(ratio, `${name} veil ink ${report(c.veil_ink, '#000000')}`).toBeGreaterThanOrEqual(
+        AA_TEXT,
+      );
+    });
+
     it(`${name}: every work-phase tag label clears AA on its ground`, () => {
       // The tag's fill is a low-alpha wash of its own hue over `surface`, so it
       // is the ground that matters. The dark set's pastels measure under 2:1 on
@@ -203,8 +284,26 @@ describe('the web stylesheet clears AA on every ground', () => {
 
   for (const name of ['dark', 'light'] as const) {
     const t: ColorSurface = themes[name];
+    /**
+     * WEB GROUNDS — three, not two.
+     *
+     * `--agent-bubble` was missing while the MOBILE gate had always included its
+     * equivalent (`surface_raised`, with the explicit "this IS the agent bubble"
+     * rationale above). That asymmetry was the gap: markdown, meta lines, status
+     * text and phase tags all render INSIDE an agent bubble on the web too, so a
+     * token measured only against `--bg` and `--surface` was measured on two of
+     * the three grounds it lands on, and the third is the lightest one in dark
+     * mode and the darkest one in light — i.e. the worst case in both themes.
+     *
+     * Adding it went red on SIX pairs, none of which any page-level measurement
+     * could have shown: dark `--faint` 4.29 and `--danger` 4.41; light `--faint`
+     * 4.31, `--danger` 4.44, `--success-fg` 4.19 and `--phase-merged-fg` 4.19.
+     * All six are fixed in the stylesheet in this commit.
+     */
+    const WEB_GROUNDS = ['bg', 'surface', 'agent-bubble'] as const;
+
     for (const token of WEB_TEXT_TOKENS) {
-      for (const ground of ['bg', 'surface'] as const) {
+      for (const ground of WEB_GROUNDS) {
         it(`web ${name}: --${token} on --${ground}`, () => {
           const fg = t[token];
           const bg = t[ground];

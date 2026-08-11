@@ -252,7 +252,7 @@ const makeStyles = (theme: NeutronTheme) =>
   StyleSheet.create({
     backdrop: {
       flex: 1,
-      backgroundColor: 'rgba(0,0,0,0.6)',
+      backgroundColor: theme.scrim,
       alignItems: 'center',
       justifyContent: 'center',
       padding: SPACING.xl,

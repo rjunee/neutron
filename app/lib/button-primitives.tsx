@@ -295,11 +295,15 @@ const makeStyles = (theme: NeutronTheme) =>
       bottom: 0,
       paddingHorizontal: SPACING.sm,
       paddingVertical: SPACING.xs,
-      backgroundColor: 'rgba(10, 10, 10, 0.7)',
+      backgroundColor: theme.veil,
     },
     galleryLabel: {
       ...TYPOGRAPHY.caption,
-      color: theme.text_primary,
+      // `veil_ink`, NOT `text_primary`: this label sits on `veil`, a dark strip
+      // over a thumbnail, and `text_primary` is near-black in light mode — so the
+      // caption would have vanished into its own backing exactly when the rest of
+      // the app started looking right.
+      color: theme.veil_ink,
       fontWeight: '600',
     },
   });

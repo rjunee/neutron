@@ -34,6 +34,8 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { AdminClient, AdminClientError } from '../../lib/admin-client';
 import { formatError } from './format';
+import type { NeutronTheme } from '../../lib/theme';
+import { useThemedStyles } from '../../lib/theme-context';
 
 interface MaxAccountState {
   switching: boolean;
@@ -46,6 +48,7 @@ function freshMaxAccountState(): MaxAccountState {
 }
 
 export function MaxAccountPane({ client }: { client: AdminClient }): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   const [state, setState] = useState<MaxAccountState>(() => freshMaxAccountState());
 
   const handleSwitch = useCallback(async () => {
@@ -154,64 +157,65 @@ export function MaxAccountPane({ client }: { client: AdminClient }): React.React
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   paneScroll: { padding: 16, gap: 12 },
   intro: { gap: 6, marginBottom: 8 },
-  paneTitle: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  paneSubtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
-  code: { color: '#cfcfcf', fontFamily: 'Menlo', fontSize: 12 },
+  paneTitle: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  paneSubtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+  code: { color: theme.text_secondary, fontFamily: 'Menlo', fontSize: 12 },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
   managedCard: {
-    backgroundColor: '#0f1c2e',
+    backgroundColor: theme.info_surface,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1e40af',
+    borderColor: theme.info_border,
     padding: 14,
     gap: 10,
   },
   managedBadgeRow: { flexDirection: 'row' },
   managedBadge: {
-    color: '#bfdbfe',
+    color: theme.info,
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.6,
     textTransform: 'uppercase',
-    backgroundColor: '#1e40af',
+    backgroundColor: theme.info_surface,
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 999,
     overflow: 'hidden',
   },
-  managedBody: { color: '#dbeafe', fontSize: 13, lineHeight: 18 },
-  managedHint: { color: '#8aa8d6', fontSize: 11, fontStyle: 'italic' },
+  managedBody: { color: theme.info, fontSize: 13, lineHeight: 18 },
+  managedHint: { color: theme.info, fontSize: 11, fontStyle: 'italic' },
   coreActionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
   primaryBtn: {
     marginTop: 12,
     paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: theme.accent,
     alignSelf: 'flex-start',
   },
   primaryBtnDisabled: { opacity: 0.5 },
-  primaryBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '600' },
+  primaryBtnText: { color: theme.background, fontSize: 14, fontWeight: '600' },
   secondaryBtn: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 10,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  secondaryBtnText: { color: '#e0e0e0', fontSize: 13, fontWeight: '500' },
+  secondaryBtnText: { color: theme.accent, fontSize: 13, fontWeight: '500' },
   pressed: { opacity: 0.7 },
 });

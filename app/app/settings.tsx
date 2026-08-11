@@ -515,7 +515,10 @@ function initial(name: string): string {
   return trimmed.slice(0, 1).toUpperCase();
 }
 
-const makeStyles = (theme: NeutronTheme) =>
+/** Exported so `__tests__/theme-control-reachable-in-settings.test.tsx` can build
+ *  this screen's sheet from BOTH palettes and assert its colours actually differ —
+ *  the screen carrying the appearance toggle is the one that must not stay dark. */
+export const makeStyles = (theme: NeutronTheme) =>
   StyleSheet.create({
     container: { flex: 1, backgroundColor: theme.background, paddingTop: 48 },
     centered: { alignItems: 'center', justifyContent: 'center' },

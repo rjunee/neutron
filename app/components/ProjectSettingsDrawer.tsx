@@ -1011,7 +1011,7 @@ const makeStyles = (theme: NeutronTheme) =>
     },
     backdrop: {
       ...StyleSheet.absoluteFillObject,
-      backgroundColor: 'rgba(0,0,0,0.55)',
+      backgroundColor: theme.scrim,
     },
     backdropPressable: {
       ...StyleSheet.absoluteFillObject,
@@ -1024,7 +1024,7 @@ const makeStyles = (theme: NeutronTheme) =>
       backgroundColor: theme.surface,
       borderLeftWidth: 1,
       borderLeftColor: theme.hairline,
-      shadowColor: '#000000',
+      shadowColor: theme.shadow,
       shadowOpacity: 0.35,
       shadowOffset: { width: -4, height: 0 },
       shadowRadius: 16,

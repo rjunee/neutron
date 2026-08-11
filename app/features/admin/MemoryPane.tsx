@@ -10,8 +10,12 @@ import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-nat
 
 import { AdminClient, type MemorySummary } from '../../lib/admin-client';
 import { formatError, formatBytes } from './format';
+import type { NeutronTheme } from '../../lib/theme';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 
 export function MemoryPane({ client }: { client: AdminClient }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [data, setData] = useState<MemorySummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +40,7 @@ export function MemoryPane({ client }: { client: AdminClient }) {
   if (loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -90,34 +94,35 @@ export function MemoryPane({ client }: { client: AdminClient }) {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   paneScroll: { padding: 16, gap: 12 },
   intro: { gap: 6, marginBottom: 8 },
-  paneTitle: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  paneSubtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
+  paneTitle: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  paneSubtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
   bannerInfo: {
-    backgroundColor: '#0f1c2e',
-    color: '#bfdbfe',
+    backgroundColor: theme.info_surface,
+    color: theme.info,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1e40af',
+    borderColor: theme.info_border,
     fontSize: 12,
   },
   label: {
-    color: '#6a6a6a',
+    color: theme.text_muted,
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0.5,
@@ -125,25 +130,25 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   statsCard: {
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 12,
     gap: 6,
   },
   statsRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  statsLabel: { color: '#7a7a7a', fontSize: 12 },
-  statsValue: { color: '#fafafa', fontSize: 13, fontWeight: '600' },
+  statsLabel: { color: theme.text_muted, fontSize: 12 },
+  statsValue: { color: theme.text_primary, fontSize: 13, fontWeight: '600' },
   entryCard: {
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 12,
     gap: 4,
   },
-  entryPreview: { color: '#e0e0e0', fontSize: 13, lineHeight: 18 },
-  entryMeta: { color: '#6a6a6a', fontSize: 11 },
-  muted: { color: '#7a7a7a', fontSize: 13 },
+  entryPreview: { color: theme.accent, fontSize: 13, lineHeight: 18 },
+  entryMeta: { color: theme.text_muted, fontSize: 11 },
+  muted: { color: theme.text_muted, fontSize: 13 },
 });

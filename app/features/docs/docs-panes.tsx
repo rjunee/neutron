@@ -30,7 +30,7 @@ import {
   type MobilePane,
 } from './docs-shared';
 import { BinaryPreview, EditorDropTarget, makeStyles } from './docs-ui';
-import { useThemedStyles } from '../../lib/theme-context';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 import { type UseDocFile } from './use-doc-file';
 import { type UseDocHistory } from './use-doc-history';
 import { type UseDocMutations } from './use-doc-mutations';
@@ -65,6 +65,7 @@ export function DocViewerPane({
   mobilePane,
   setMobilePane,
 }: DocViewerPaneProps) {
+  const theme = useTheme();
   const styles = useThemedStyles(makeStyles);
   const { file, selectedPath, mode, draftContent, conflict, setDraftContent, setMode, handleReload, resolveBinary } =
     docFile;
@@ -272,7 +273,7 @@ export function DocViewerPane({
                   }
                   style={styles.editor}
                   placeholder="Start writing markdown…"
-                  placeholderTextColor="#5a5a5a"
+                  placeholderTextColor={theme.text_muted}
                   testID="docs-editor-input"
                 />
               </EditorDropTarget>
@@ -349,7 +350,7 @@ export function DocViewerPane({
                     }
                     style={styles.editor}
                     placeholder="Start writing markdown…"
-                    placeholderTextColor="#5a5a5a"
+                    placeholderTextColor={theme.text_muted}
                     testID="docs-editor-input"
                   />
                 </EditorDropTarget>
@@ -396,6 +397,7 @@ interface DocHistoryPaneProps {
 }
 
 export function DocHistoryPane({ docHistory, file, wideViewport }: DocHistoryPaneProps) {
+  const theme = useTheme();
   const styles = useThemedStyles(makeStyles);
   const {
     historyUnavailable,
@@ -436,7 +438,7 @@ export function DocHistoryPane({ docHistory, file, wideViewport }: DocHistoryPan
           but no history is kept.
         </Text>
       ) : historyLoading && historyEntries.length === 0 ? (
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       ) : historyEntries.length === 0 ? (
         <Text style={styles.historyEmpty}>
           This file has no version history yet.

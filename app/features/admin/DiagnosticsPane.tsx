@@ -22,6 +22,8 @@ import {
   str,
 } from '../../lib/diagnostics-pane-helpers';
 import { formatError } from './format';
+import type { NeutronTheme } from '../../lib/theme';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 
 function fmtTime(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return '—';
@@ -43,6 +45,7 @@ function Section({
   note?: string;
   children?: React.ReactNode;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.card} testID={`admin-diagnostics-${title.toLowerCase().replace(/\W+/g, '-')}`}>
       <View style={styles.cardHead}>
@@ -58,6 +61,7 @@ function Section({
 }
 
 function Row({ label, value }: { label: string; value: string }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.row}>
       <Text style={styles.rowLabel}>{label}</Text>
@@ -77,6 +81,10 @@ export function DiagnosticsPane({
   client: AdminClient;
   hooks?: HookRuntime;
 }) {
+  const styles = useThemedStyles(makeStyles);
+  // The palette itself, as well as the sheet: `ActivityIndicator`'s colour is a
+  // PROP, not a stylesheet entry, so `useThemedStyles` alone cannot supply it.
+  const theme = useTheme();
   const { useCallback, useEffect, useReducer } = hooks;
   const [{ data, loading, error }, dispatch] = useReducer(
     diagnosticsReducer,
@@ -101,7 +109,7 @@ export function DiagnosticsPane({
   if (shouldShowFullScreenLoader({ data, loading, error })) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -268,59 +276,60 @@ export function DiagnosticsPane({
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   paneScroll: { padding: 16, gap: 12 },
   intro: { gap: 6, marginBottom: 4 },
-  paneTitle: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  paneSubtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
-  generated: { color: '#6a6a6a', fontSize: 11 },
+  paneTitle: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  paneSubtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+  generated: { color: theme.text_muted, fontSize: 11 },
   refreshBtn: {
     alignSelf: 'flex-start',
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
     paddingHorizontal: 14,
     paddingVertical: 7,
   },
-  refreshLabel: { color: '#d0d0d0', fontSize: 12, fontWeight: '600' },
+  refreshLabel: { color: theme.text_secondary, fontSize: 12, fontWeight: '600' },
   pressed: { opacity: 0.7 },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
   card: {
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 12,
     gap: 6,
   },
   cardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  cardTitle: { color: '#fafafa', fontSize: 14, fontWeight: '700' },
+  cardTitle: { color: theme.text_primary, fontSize: 14, fontWeight: '700' },
   dot: { width: 8, height: 8, borderRadius: 4 },
-  dotOk: { backgroundColor: '#22c55e' },
-  dotOff: { backgroundColor: '#525252' },
+  dotOk: { backgroundColor: theme.success },
+  dotOff: { backgroundColor: theme.text_muted },
   row: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
-  rowLabel: { color: '#7a7a7a', fontSize: 12 },
-  rowValue: { color: '#e0e0e0', fontSize: 12, fontWeight: '500', flexShrink: 1, textAlign: 'right' },
+  rowLabel: { color: theme.text_muted, fontSize: 12 },
+  rowValue: { color: theme.accent, fontSize: 12, fontWeight: '500', flexShrink: 1, textAlign: 'right' },
   subCard: {
-    backgroundColor: '#0e0e0e',
+    backgroundColor: theme.background,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1c1c1c',
+    borderColor: theme.hairline,
     padding: 8,
     gap: 3,
   },
-  subTitle: { color: '#cfcfcf', fontSize: 12, fontWeight: '600', marginBottom: 2 },
-  eventLine: { color: '#9a9a9a', fontSize: 11, lineHeight: 16 },
-  muted: { color: '#7a7a7a', fontSize: 13 },
+  subTitle: { color: theme.text_secondary, fontSize: 12, fontWeight: '600', marginBottom: 2 },
+  eventLine: { color: theme.text_muted, fontSize: 11, lineHeight: 16 },
+  muted: { color: theme.text_muted, fontSize: 13 },
 });

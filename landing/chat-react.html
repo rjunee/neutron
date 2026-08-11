@@ -62,6 +62,9 @@
     --accent: #6cf;
     /* Body leading. Dark gets MORE than light on purpose — see the note above. */
     --body-line: 1.55;
+    /* Transcript leading — see `.car-md p`. Tighter than prose, looser than the
+       1.4 the bubbles used to pin. */
+    --chat-line: 1.5;
     /* Text/icon drawn ON an accent-filled surface (primary buttons, badges). */
     --on-accent: #04121f;
     /* M1 UX REDESIGN — rail work-activity dot + secondary text ramp (Telegram
@@ -70,7 +73,12 @@
     --work: #6cf;
     --attention: #ffd27d;
     --fg-2: #c7ccd6;
-    --faint: #7d838f;
+    /* Lifted again (from #7d838f) once `--agent-bubble` was added to the grounds
+       the contrast gate measures. It cleared AA on `--bg` and `--surface` and
+       measured 4.29 on the agent bubble — and meta text DOES land inside a
+       bubble, so it was a real sub-AA pair that two page-level grounds hid.
+       Now 5.61 / 5.27 / 4.71. */
+    --faint: #848a96;
     /* Chat bubbles */
     --user-bubble: #1064cc;
     --user-fg: #ffffff;
@@ -91,7 +99,8 @@
     --code-bg: rgba(255,255,255,.08);
     --code-block-bg: #0c0e12;
     /* Status: danger/error, warn, info, success */
-    --danger: #e5534b;
+    /* 4.41 on `--agent-bubble` before this; brightened one step to 4.82. */
+    --danger: #e85f57;
     --error-fg: #ff8a8a;
     --error-border: rgba(255,138,138,.4);
     --warn-fg: #ffd27d;
@@ -138,12 +147,17 @@
     --pane-width: 340px;
     --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
   }
-  /* LIGHT — iMessage-on-iPhone palette: white chat surface, the #007AFF iMessage
-     blue for the user bubble, ~#E9E9EB grey agent bubbles with near-black text,
-     subtle iOS separators. Same vars, so every surface reskins. */
+  /* LIGHT — iMessage-on-iPhone SHAPE with Neutron's own blue: white chat surface,
+     `--user-bubble` #1064cc for the owner's bubble, ~#E9E9EB grey agent bubbles
+     with near-black text, subtle iOS separators. Same vars, so every surface
+     reskins.
+     This comment used to say "#007AFF", Apple's blue, which the code has never
+     used here — the owner asked for iMessage's COLOUR MODEL, explicitly not its
+     colours, and #007AFF would also fail AA under white ink (4.02). */
   :root[data-theme="light"] {
     --bg: #ffffff;
     --body-line: 1.5;
+    --chat-line: 1.45;
     --surface: #f5f5f7;
     --border: #d1d1d6;
     --fg: #1c1c1e;
@@ -156,7 +170,8 @@
        the build-blue (--phase-build-fg) and the failed-red (--phase-failed-fg). */
     --attention: #e0a020;
     --fg-2: #3a3f4a;
-    --faint: #6c6c70;
+    /* Darkened from #6c6c70, which measured 4.31 on `--agent-bubble`. 5.72 / 5.25 / 4.71. */
+    --faint: #66666a;
     --user-bubble: #1064cc;
     --user-fg: #ffffff;
     --agent-bubble: #e9e9eb;
@@ -172,7 +187,9 @@
     --accent-border: rgba(16,100,204,.4);
     --code-bg: rgba(0,0,0,.06);
     --code-block-bg: #f5f5f7;
-    --danger: #d70015;
+    /* Darkened from Apple's #d70015 (4.44 on `--agent-bubble`) to the same red
+       `--error-fg` already uses, which clears it at 4.57. */
+    --danger: #c9252d;
     --error-fg: #c9252d;
     --error-border: rgba(201,37,45,.4);
     --warn-fg: #8a5f00;
@@ -181,14 +198,17 @@
     --info-border: rgba(11,87,208,.35);
     --info-track: rgba(11,87,208,.14);
     --info-ring: rgba(11,87,208,.25);
-    --success-fg: #1a7f37;
-    --success-border: rgba(26,127,55,.35);
+    /* 4.19 on `--agent-bubble` before this — the worst of the six the new ground
+       exposed. Darkened to the same green `lib/theme.ts` LIGHT_THEME.success
+       uses, so the two clients still agree: 6.53 / 5.99 / 5.39. */
+    --success-fg: #146c2e;
+    --success-border: rgba(20,108,46,.35);
     /* M1 UX REDESIGN — Work-list phase tokens, light variants (per the prototype).
        Darker fg for AA contrast on white; lighter tint bg. */
     --phase-build-fg: #0b57d0;   --phase-build-bg: rgba(11,87,208,.10);
     --phase-review-fg: #5b4bd6;  --phase-review-bg: rgba(91,75,214,.12);
     --phase-fix-fg: #8a5f00;     --phase-fix-bg: rgba(138,95,0,.12);
-    --phase-merged-fg: #1a7f37;  --phase-merged-bg: rgba(26,127,55,.12);
+    --phase-merged-fg: #146c2e;  --phase-merged-bg: rgba(20,108,46,.12);
     --phase-failed-fg: #c9252d;  --phase-failed-bg: rgba(201,37,45,.10);
     /* Darkened for contrast against the white stage — the dark-theme greens and
        ambers wash out on a light background at one pixel tall. */
@@ -212,7 +232,13 @@
      below states its size in `rem` against it, so this ONE number moves the
      whole UI and no control is left pinned at an absolute px that would read
      oddly small next to a 17px body. */
-  html { font-size: 17px; }
+     Expressed as a PERCENTAGE, not `17px`. Both compute to 17px against the 16px
+     default, but a percentage scales with whatever base the reader has actually
+     set — a px value discards it, so a reader who had raised their browser font
+     size to compensate for our old 15px body would have been silently overridden
+     by the fix meant to help them (WCAG 1.4.4 is satisfied either way, since the
+     page zooms; this is about honouring a stated preference). */
+  html { font-size: 106.25%; }
   html, body { height: 100%; }
   body {
     margin: 0;
@@ -524,7 +550,15 @@
   .car-md { color: inherit; overflow-wrap: anywhere; }
   .car-md > :first-child { margin-top: 0; }
   .car-md > :last-child { margin-bottom: 0; }
-  .car-md p { margin: 0 0 8px; line-height: 1.4; }
+  /* CHAT LEADING. This was a flat 1.4, which quietly overrode `--body-line`
+     (1.55 dark / 1.5 light) on the ONE surface the owner was complaining about:
+     he compared our chat to Telegram's, so raising the leading everywhere EXCEPT
+     the transcript fixed the least important half of the page. 1.4 was not
+     arbitrary either — a chat bubble should hug its text — so this is a token
+     that sits between the two rather than a straight adoption of body leading,
+     and it carries dark's extra step for the same reason `--body-line` does
+     (light ink on a dark ground reads lighter and needs more room). */
+  .car-md p { margin: 0 0 8px; line-height: var(--chat-line); }
   /* User-message bubble body (ChatApp `TextPart`, role=user) is a bare <p
      class="car-text">; without this rule it inherits the UA default
      margin-block:1em, which stacked on the 5px bubble padding rendered a
@@ -532,9 +566,23 @@
      only .car-bubble + .car-md p — the agent path — never this one). Zero the
      margin and match the agent paragraph line-height so a single-line message
      hugs its text. */
-  .car-text { margin: 0; line-height: 1.4; }
-  .car-md h1, .car-md h2, .car-md h3, .car-md h4 { margin: 14px 0 6px; line-height: 1.25; font-weight: 700; }
+  .car-text { margin: 0; line-height: var(--chat-line); }
+  /* SIX heading levels, not four. `remark-gfm` + react-markdown emit whatever the
+     source contains, and `##### `/`###### ` produce <h5>/<h6> — which fell through
+     to the UA stylesheet at .83em and .67em WITH its own large margin-block, so a
+     deep heading rendered SMALLER than the body text it introduced and broke the
+     bubble's vertical rhythm. Nothing declared them because nothing had looked for
+     them: the rule was written from the headings the docs happened to use. */
+  .car-md h1, .car-md h2, .car-md h3, .car-md h4, .car-md h5, .car-md h6 { margin: 14px 0 6px; line-height: 1.25; font-weight: 700; }
   .car-md h1 { font-size: 1.4em; } .car-md h2 { font-size: 1.25em; } .car-md h3 { font-size: 1.1em; }
+  /* h4-h6 stay at body size and separate by WEIGHT and colour rather than by
+     shrinking below it — going smaller is the thing that made them unreadable. */
+  .car-md h4, .car-md h5 { font-size: 1em; }
+  .car-md h6 { font-size: 1em; color: var(--fg-2); }
+  /* Strikethrough (`~~text~~`, gfm). The UA gives it a line-through and nothing
+     else; dimming it is what makes "this was struck out" read as a state rather
+     than as damaged text. */
+  .car-md del { text-decoration: line-through; color: var(--muted); }
   .car-md ul, .car-md ol { margin: 0 0 8px; padding-left: 20px; }
   /* FIX #358 — list items read as too loose (visible gap per bullet); a list is
      "one paragraph split into lines", so tighten toward that rhythm: no
@@ -546,15 +594,21 @@
   .car-md a { color: var(--accent); text-decoration: underline; }
   .car-md strong { font-weight: 700; }
   .car-md em { font-style: italic; }
+  /* CODE SIZE. A monospace face at the same nominal size looks smaller than the
+     proportional body around it, so a step down is right — but `.9em` of a 15px
+     body was 13.5px, and keeping `.9em` when the body moved to 17px only carried
+     the old problem forward at 15.3px. `.95em` (16.15px) keeps code visibly
+     distinct without making it the least legible text on the page, which is what
+     the owner was reporting when he said inline code read dim. */
   .car-md code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .95em;
     background: var(--code-bg); border-radius: 4px; padding: 1px 5px;
   }
   .car-md pre {
     background: var(--code-block-bg); border: 1px solid var(--border); border-radius: 8px;
     padding: 10px 12px; overflow-x: auto; margin: 0 0 8px;
   }
-  .car-md pre code { background: none; padding: 0; font-size: .85em; }
+  .car-md pre code { background: none; padding: 0; font-size: .9em; }
   /* FIX #359 — Telegram-style one-tap copy button, top-right of the code
      block. Hidden until hover/focus so it stays non-intrusive; `(hover: none)`
      (touch devices) keeps it always visible since there's no hover to reveal

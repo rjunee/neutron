@@ -57,6 +57,23 @@ export type BinarySourceResolver = (relPath: string) =>
 
 export interface RenderMarkdownProps {
   source: string;
+  /**
+   * Ink for the body runs. OMIT IT and the active palette's `text_primary` is
+   * used, which is what almost every caller wants.
+   *
+   * It used to default to a literal `'#f4f4f4'`. That is the exact defect this
+   * whole change exists to remove, and it survived the first pass because a
+   * DEFAULT PARAMETER is not a stylesheet — the sheet here was converted to a
+   * factory and looked done, while the ink went on being a hardcoded near-white.
+   * The docs viewer renders markdown without passing this prop, so in light mode
+   * it drew #f4f4f4 body text on a themed white page: 1.10:1, i.e. the document
+   * was invisible rather than merely low-contrast. Only the chat surface passed a
+   * theme-derived value (`ChatSyncSurface`), so only the chat surface was right.
+   *
+   * Pass it explicitly ONLY to override the ink deliberately — the bubble
+   * renderer does, because ink on the owner's blue bubble is `user_ink`, not the
+   * page's primary text.
+   */
   textColor?: string;
   /** Used to resolve relative `image` tokens. */
   binarySource?: BinarySourceResolver;
@@ -70,12 +87,14 @@ function safeOpenUrl(url: string): void {
   Linking.openURL(url).catch(() => undefined);
 }
 
-export function RenderMarkdown({ source, textColor = '#f4f4f4', binarySource }: RenderMarkdownProps) {
+export function RenderMarkdown({ source, textColor, binarySource }: RenderMarkdownProps) {
   const styles = useThemedStyles(makeStyles);
+  const theme = useTheme();
+  const ink = textColor ?? theme.text_primary;
   const blocks = parseBlocks(source);
   return (
     <View>
-      {blocks.map((block, idx) => renderBlock(block, idx, textColor, binarySource, styles))}
+      {blocks.map((block, idx) => renderBlock(block, idx, ink, binarySource, styles))}
     </View>
   );
 }
@@ -527,7 +546,12 @@ const makeStyles = (theme: NeutronTheme) =>
     strike: { textDecorationLine: 'line-through' },
     inlineCode: {
       fontFamily: TYPOGRAPHY.mono.fontFamily,
-      fontSize: 14,
+      // `TYPOGRAPHY.mono`, not a literal 14. This was the last magic size left after
+      // the scale moved: body went 15 → 17 and inline code stayed at 14, so the gap
+      // between prose and code WIDENED in the change meant to make code more
+      // legible. `mono` is 15, which tracks the ramp — and the module docblock in
+      // `lib/theme.ts` already forbids inline sizes for exactly this reason.
+      fontSize: TYPOGRAPHY.mono.fontSize,
       backgroundColor: theme.surface_raised,
       color: theme.text_secondary,
       paddingHorizontal: SPACING.xs,

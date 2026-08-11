@@ -50,6 +50,26 @@ describe('DARK_THEME', () => {
       usage_nominal: '#4bbf73',
       usage_warning: '#e0a832',
       usage_critical: '#e0553f',
+      // STATUS FAMILIES (2026-08-11). Added when the admin panes, the Cores
+      // screens, the docs tab and the backup diff viewer were converted off their
+      // own inline hexes — those files never imported the palette, so nothing had
+      // ever needed a token for "the wash a warning sits on".
+      success: '#7ddf9b',
+      success_surface: '#12251a',
+      success_border: '#1f5133',
+      danger_surface: '#2e1416',
+      danger_border: '#7a2c2c',
+      danger_fill: '#8f2222',
+      danger_ink: '#ffffff',
+      info: '#8cc6ff',
+      info_surface: '#132234',
+      info_border: '#2a4a70',
+      warning_surface: '#2c2113',
+      warning_border: '#5f4a1f',
+      shadow: '#000000',
+      scrim: 'rgba(0,0,0,0.6)',
+      veil: 'rgba(0,0,0,0.7)',
+      veil_ink: '#ffffff',
     });
   });
 

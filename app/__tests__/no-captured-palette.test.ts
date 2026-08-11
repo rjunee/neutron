@@ -13,11 +13,51 @@
  *   1. the captured palette no longer EXISTS to be imported;
  *   2. no stylesheet is built at module scope — every one is a factory of the
  *      active palette;
- *   3. the population of raw hex literals cannot GROW.
+ *   3. NO colour literal appears anywhere in the app outside the theme module.
  *
- * Invariant 3 is a ratchet, not a clean bill of health. See the note on
- * HARDCODED_HEX_BUDGET: there is a real, pre-existing, still-unfixed gap here and
- * this test's job is to state its exact size rather than to imply it is closed.
+ * ═══ WHAT THIS FILE USED TO DO, AND WHY IT WAS WORSE THAN NOTHING ═══
+ *
+ * Invariant 3 was a per-file BUDGET: a frozen count of hardcoded literals per
+ * file, ~380 of them across 19 files, which could only go down. The reasoning was
+ * that fixing them was a second lane and freezing the number made the gap
+ * "finite and visible instead of ambient".
+ *
+ * That was wrong in a specific and instructive way. The budget's exemption list
+ * named `app/features/docs/docs-ui.tsx` and `app/lib/markdown-render.tsx` — and
+ * those two files were where the WORST light-mode defect in the change lived: the
+ * docs viewer drew #f4f4f4 body text on a themed white page (1.10:1) and a #fafafa
+ * title on it (1.04:1). The document was not low-contrast, it was INVISIBLE. So
+ * the guard was not merely tolerating a known gap; it was holding open the exact
+ * hole through which the change's headline bug shipped, and the two files it
+ * excused were the two a reviewer would most want it to check.
+ *
+ * The general lesson, worth more than the fix: A RATCHET OVER A DEFECT IS A
+ * DECISION TO SHIP THE DEFECT. "The number cannot go up" sounds like control, and
+ * reads in review like diligence, but it converts a bug into a budget line — and a
+ * budget line does not get fixed, because the test is green. Worse, the file that
+ * needs a budget is by construction the file with the most colour logic, i.e. the
+ * one most likely to be wrong. The counts also made the test LOOK rigorous while
+ * measuring the one thing that does not matter: a literal that happens to equal
+ * the active palette's value is counted, and a literal that makes text invisible
+ * is counted the same.
+ *
+ * All 19 files are now converted (~400 literals) and the budget is DELETED. The
+ * invariant is absolute, which is also what makes it cheap to state.
+ *
+ * ═══ AND THE MATCHER NOW PROVES IT CAN SEE ═══
+ *
+ * The old matcher was `/'#(?:[0-9a-f]{3}|[0-9a-f]{6})'/` — single quotes only, no
+ * alpha hex, `rgb()` only inside a module-scope sheet. It therefore could not see
+ * 25 real defects that were sitting in the tree the whole time, all of them
+ * DOUBLE-quoted JSX attributes: `<ActivityIndicator color="#cfcfcf" />` (1.6:1 on
+ * a white page — every loading state in light mode was a blank screen) and
+ * `placeholderTextColor="#5a5a5a"`. A guard that cannot see a whole syntactic class
+ * returns a green that means "I did not look there".
+ *
+ * So `LITERAL_CLASSES` below enumerates the classes, and
+ * `the matcher can see every class of colour literal` feeds each one a KNOWN
+ * POSITIVE and asserts it is caught. That is the control: an absence claim is only
+ * as good as the tool's proven ability to report a presence.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -102,46 +142,55 @@ function isTest(path: string): boolean {
 }
 
 /**
- * RAW HEX LITERALS, PER FILE — A RATCHET OVER A KNOWN GAP.
+ * EVERY SYNTACTIC FORM A COLOUR CAN TAKE — each with a known-positive sample the
+ * test below feeds it, because a class the matcher cannot see is a class the
+ * codebase can hide a defect in. The old single-quote-only matcher hid 25.
  *
- * These are colours written directly into a component instead of taken from the
- * palette, so they do NOT change with the theme. Every entry below is a screen
- * that will still look dark in light mode, and none of it is new: these files
- * never imported the palette at all, which is exactly why the theme conversion
- * did not touch them and why no compiler error pointed at them. They were found by
- * scanning for hex literals after the conversion was already green.
- *
- * The count is frozen rather than fixed because fixing it is a second lane of
- * comparable size to the first (~300 literals across the admin panes, the Cores
- * screens and the docs tab), and shipping a half-converted admin surface inside
- * this change would make both harder to review. Filed as a known gap; see
- * `AS-BUILT.md` and the PR body.
- *
- * WHAT THIS TEST BUYS: the number cannot go UP. A new component cannot hardcode a
- * colour, and a fix can only lower an entry. That makes the gap finite and
- * visible instead of ambient.
+ * `transparent` is NOT here and is deliberately allowed: it is the absence of a
+ * colour, identical in both palettes, and tokenising it would buy nothing.
  */
-const HARDCODED_HEX_BUDGET: Readonly<Record<string, number>> = {
-  'app/app/admin.tsx': 11,
-  'app/app/cores/[slug].tsx': 29,
-  'app/app/index.tsx': 1,
-  'app/app/integrations.tsx': 3,
-  'app/app/projects/[id]/backups.tsx': 20,
-  'app/app/projects/[id]/cores/dtc-analytics.tsx': 30,
-  'app/components/ActivityInspectorDrawer.tsx': 1,
-  'app/components/CommentsSidePane.tsx': 1,
-  'app/components/DocsDrillList.tsx': 6,
-  'app/components/ProjectSettingsDrawer.tsx': 1,
-  'app/features/admin/BackupPane.tsx': 43,
-  'app/features/admin/CoresPane.tsx': 24,
-  'app/features/admin/DiagnosticsPane.tsx': 21,
-  'app/features/admin/GatewayPane.tsx': 17,
-  'app/features/admin/MaxAccountPane.tsx': 17,
-  'app/features/admin/MemoryPane.tsx': 18,
-  'app/features/admin/PersonalityPane.tsx': 36,
-  'app/features/docs/docs-ui.tsx': 78,
-  'app/lib/markdown-render.tsx': 1,
-};
+const LITERAL_CLASSES: ReadonlyArray<{ name: string; re: RegExp; positive: string }> = [
+  {
+    name: "single-quoted hex",
+    re: /'#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})'/g,
+    positive: "backgroundColor: '#101419',",
+  },
+  {
+    // The class that hid the invisible spinners: a JSX attribute is double-quoted
+    // by convention and is not inside a stylesheet at all.
+    name: 'double-quoted hex (JSX attribute)',
+    re: /"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"/g,
+    positive: '<ActivityIndicator color="#cfcfcf" />',
+  },
+  {
+    // Anywhere, not just inside a module-scope sheet — the old matcher only
+    // looked there, so an `rgba(...)` inside a factory was unchecked.
+    //
+    // LITERAL channel values only. `withAlpha(theme.link, .4)` builds
+    // `` `rgba(${r},${g},${b},${alpha})` `` from a palette colour it was HANDED,
+    // which follows the theme perfectly and is the correct way to get a tint; a
+    // matcher that flagged it would be pushing people back toward writing the
+    // wash out by hand.
+    name: 'rgb()/rgba() literal, anywhere',
+    re: /['"`]rgba?\(\s*[\d.\s,%]+\)/g,
+    positive: "backgroundColor: 'rgba(0,0,0,0.6)',",
+  },
+  {
+    // Never used in this tree today, and that is worth locking in rather than
+    // discovering later: a named colour follows no palette at all.
+    name: 'CSS named colour in a colour position',
+    re: /(?:[Cc]olor\s*[:=]\s*\{?\s*|[Cc]olor=)['"](?:red|green|blue|black|white|gray|grey|yellow|orange|purple|pink|cyan|magenta|silver|gold|navy|teal|olive|maroon|lime|aqua|fuchsia)['"]/g,
+    positive: 'placeholderTextColor="grey"',
+  },
+];
+
+function colourLiterals(code: string): string[] {
+  const hits: string[] = [];
+  for (const { re } of LITERAL_CLASSES) {
+    for (const m of code.matchAll(re)) hits.push(m[0]);
+  }
+  return hits;
+}
 
 describe('the guard can see the source it is guarding', () => {
   it('found the app tree, with comments stripped and strings intact', () => {
@@ -156,6 +205,22 @@ describe('the guard can see the source it is guarding', () => {
     expect(theme!.code).toContain("'#101419'");
     // ...and a docblock does not.
     expect(theme!.code).not.toContain('THE NEUTRON BLUE');
+  });
+
+  it('the matcher can see every class of colour literal', () => {
+    // The control for the matcher itself, not for the walker. Each class is fed a
+    // sample that IS a violation; a class that reports nothing here is a class the
+    // absence assertions below cannot speak for. This exists because the previous
+    // matcher silently omitted double-quoted hex and let 25 real defects through
+    // while reading as a passing guard.
+    for (const { name, re, positive } of LITERAL_CLASSES) {
+      expect(colourLiterals(positive).length, `${name}: sample not matched`).toBeGreaterThan(0);
+      expect([...positive.matchAll(re)].length, `${name}: own regex missed its sample`).toBe(1);
+    }
+    // ...and the allowed value is NOT flagged, so the guard is not simply
+    // matching everything.
+    expect(colourLiterals("backgroundColor: 'transparent',")).toEqual([]);
+    expect(colourLiterals('backgroundColor: theme.background,')).toEqual([]);
   });
 });
 
@@ -211,13 +276,14 @@ describe('no COLOUR is resolved at module load', () => {
     // is nothing theme-dependent in either, so requiring them to become factories
     // would be churn that buys no correctness. The rule is about colour, not about
     // where a sheet lives.
+    //
+    // No file is skipped any more. The `.filter(f => !(f.path in BUDGET))` that
+    // used to sit here is why 19 files were never checked at all.
     const offenders = FILES.filter((f) => !isTest(f.path) && !PALETTE_HOME.includes(f.path))
-      .filter((f) => !(f.path in HARDCODED_HEX_BUDGET))
       .filter((f) => {
         const m = /^(?:export\s+)?const\s+\w*styles\w*\s*=\s*StyleSheet\.create\(/im.exec(f.code);
         if (m === null) return false;
-        const body = f.code.slice(m.index);
-        return /'#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})'|rgba?\(/.test(body);
+        return colourLiterals(f.code.slice(m.index)).length > 0;
       })
       .map((f) => f.path);
     expect(
@@ -234,43 +300,37 @@ describe('no COLOUR is resolved at module load', () => {
   });
 });
 
-
-describe('raw hex literals cannot spread', () => {
-  const HEX = /'#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})'/g;
-
-  function hexCount(code: string): number {
-    return (code.match(HEX) ?? []).length;
-  }
-
+describe('no colour literal exists outside the theme module', () => {
   const counted = FILES.filter((f) => !isTest(f.path) && !PALETTE_HOME.includes(f.path))
-    .map((f) => [f.path, hexCount(f.code)] as const)
-    .filter(([, n]) => n > 0);
+    .map((f) => [f.path, colourLiterals(f.code)] as const)
+    .filter(([, hits]) => hits.length > 0);
 
-  it('no file hardcodes MORE colours than its recorded budget', () => {
-    const grown = counted
-      .filter(([path, n]) => n > (HARDCODED_HEX_BUDGET[path] ?? 0))
-      .map(([path, n]) => `${path}: ${n} (budget ${HARDCODED_HEX_BUDGET[path] ?? 0})`);
+  it('ZERO, with no per-file budget and no exempt files', () => {
+    // The whole invariant, in one assertion, because there is nothing left to
+    // qualify. Every colour a component draws comes from `useTheme()` /
+    // `useThemedStyles`, so flipping the palette flips the component — which is
+    // the property "light mode works" actually reduces to.
+    //
+    // If this fails: do not add the file to a list. Take the colour from the
+    // palette, and if the palette has no token for what you mean, add one there
+    // first (`lib/theme.ts` names the two deliberately theme-INVARIANT ones,
+    // `scrim` and `veil`, so "this genuinely does not change" already has a home
+    // that is not a hardcoded literal).
+    const offenders = counted.map(([path, hits]) => `${path}: ${hits.join(' ')}`);
     expect(
-      grown,
-      `these gained hardcoded colours — take them from useTheme() instead:\n${grown.join('\n')}`,
+      offenders,
+      `these hardcode colours — take them from useTheme() instead:\n${offenders.join('\n')}`,
     ).toEqual([]);
   });
 
-  it('no file outside the recorded set hardcodes a colour at all', () => {
-    const fresh = counted.filter(([path]) => !(path in HARDCODED_HEX_BUDGET)).map(([p, n]) => `${p}: ${n}`);
-    expect(
-      fresh,
-      `new files must read colours from the palette:\n${fresh.join('\n')}`,
-    ).toEqual([]);
-  });
-
-  it('the budget has no stale entries, so a fix must lower the number', () => {
-    // Without this, a file could be fully fixed and its budget left behind,
-    // and the ratchet would silently allow the hardcoding to come back.
-    const live = new Map(counted);
-    const stale = Object.entries(HARDCODED_HEX_BUDGET)
-      .filter(([path, n]) => (live.get(path) ?? 0) !== n)
-      .map(([path, n]) => `${path}: budget ${n}, actual ${live.get(path) ?? 0}`);
-    expect(stale, `update the budget to match reality:\n${stale.join('\n')}`).toEqual([]);
+  it('and the two files that DO hold literals are the palette itself', () => {
+    // The complement, so "zero" cannot be passing because the scan found nothing
+    // anywhere. The colours have to live SOMEWHERE, and this names where.
+    for (const home of PALETTE_HOME) {
+      const f = FILES.find((x) => x.path === home);
+      expect(f, `${home} must exist`).toBeDefined();
+    }
+    const themeFile = FILES.find((f) => f.path === 'app/lib/theme.ts')!;
+    expect(colourLiterals(themeFile.code).length).toBeGreaterThan(60);
   });
 });

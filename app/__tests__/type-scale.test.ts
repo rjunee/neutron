@@ -69,11 +69,39 @@ describe('mobile type scale', () => {
   });
 });
 
+/**
+ * The `html` rem base, in px, read from a PERCENTAGE declaration.
+ *
+ * It used to be `font-size: 17px` and is now `106.25%`. Both compute to 17px against
+ * the 16px default every browser ships — but a percentage SCALES with whatever base
+ * the reader has actually configured, and a px value discards it. That distinction is
+ * the whole point of the change: a reader who had raised their browser font size to
+ * cope with our old 15px body would have been silently overridden by the fix meant to
+ * help them.
+ *
+ * So this test resolves the percentage against the 16px reference rather than reading
+ * a px literal. Asserting the literal `106.25%` string instead would be the
+ * zero-coverage shape the contrast gate's docblock warns about — it would pass
+ * against any value at all, including a revert to a pinned px.
+ */
+const CSS_DEFAULT_BASE_PX = 16;
+
+function webRemBasePx(): number {
+  const pct = /html \{ font-size: ([\d.]+)%; \}/.exec(WEB_CSS);
+  if (pct !== null) return (Number(pct[1]) / 100) * CSS_DEFAULT_BASE_PX;
+  throw new Error('the stylesheet must set a PERCENTAGE rem base on html');
+}
+
 describe('web type scale', () => {
-  it('the rem BASE is the new body size', () => {
-    const m = /html \{ font-size: (\d+)px; \}/.exec(WEB_CSS);
-    expect(m, 'the stylesheet must set an explicit rem base on html').not.toBeNull();
-    expect(Number(m![1])).toBeGreaterThanOrEqual(TELEGRAM_BODY_PX);
+  it('the rem BASE is the new body size, and is reader-relative', () => {
+    // Both halves. The first is the size; the second is that it is expressed in a
+    // form that respects a configured base — a `px` here would satisfy the size
+    // assertion and quietly break the preference.
+    expect(webRemBasePx()).toBeGreaterThanOrEqual(TELEGRAM_BODY_PX);
+    expect(WEB_CSS, 'the rem base must be a percentage, not px').toMatch(
+      /html \{ font-size: [\d.]+%; \}/,
+    );
+    expect(WEB_CSS).not.toMatch(/html \{ font-size: [\d.]+px; \}/);
   });
 
   it('body uses the base and a themed line-height', () => {
@@ -93,11 +121,10 @@ describe('web type scale', () => {
     // one base above moves the whole UI.
     const style = WEB_CSS.slice(WEB_CSS.indexOf('<style>'), WEB_CSS.indexOf('</style>'));
     const pinned = [...style.matchAll(/font-size: ([\d.]+)px/g)].map((m) => m[0]);
-    // The html base is the ONE legitimate px font-size: it is what rem resolves
-    // against, so it cannot itself be relative.
-    expect(pinned, `these are still pinned to absolute px:\n${pinned.join('\n')}`).toEqual([
-      'font-size: 17px',
-    ]);
+    // ZERO now, with no exception. The html base used to be the one legitimate px
+    // font-size; expressing it as a percentage removes even that, so the rule has no
+    // carve-out left to hide behind.
+    expect(pinned, `these are still pinned to absolute px:\n${pinned.join('\n')}`).toEqual([]);
   });
 
   it('and there are many rem sizes, so the rule was applied not deleted', () => {
@@ -113,7 +140,35 @@ describe('the two clients agree', () => {
     // Two clients drifting apart on type size is what produced "ours is more
     // difficult to read" in the first place, and nothing relates a TS token to a
     // CSS declaration except this assertion.
-    const base = Number(/html \{ font-size: (\d+)px; \}/.exec(WEB_CSS)![1]);
-    expect(TYPOGRAPHY.body.fontSize).toBe(base);
+    expect(TYPOGRAPHY.body.fontSize).toBe(webRemBasePx());
+  });
+
+  it('the chat transcript is not tighter-leaded than the prose it sits beside', () => {
+    // `.car-md p` and `.car-text` used to pin `line-height: 1.4`, which OVERRODE
+    // `--body-line` on the one surface the owner was actually complaining about — so
+    // the leading fix reached every part of the page except the chat. `--chat-line`
+    // is deliberately tighter than body (a bubble should hug its text) and no longer
+    // tighter than the old pin.
+    for (const sel of ['.car-md p', '.car-text']) {
+      const rule = new RegExp(`\\${sel.replace('.', '.')}[^}]*line-height: var\\(--chat-line\\)`);
+      expect(WEB_CSS, `${sel} must take its leading from --chat-line`).toMatch(rule);
+    }
+    const dark = /:root \{[\s\S]*?--chat-line: ([\d.]+);/.exec(WEB_CSS);
+    const light = /:root\[data-theme="light"\] \{[\s\S]*?--chat-line: ([\d.]+);/.exec(WEB_CSS);
+    expect(dark, 'dark must declare --chat-line').not.toBeNull();
+    expect(light, 'light must declare --chat-line').not.toBeNull();
+    // Same relationship as --body-line, for the same reason.
+    expect(Number(dark![1])).toBeGreaterThan(Number(light![1]));
+    // And strictly looser than the 1.4 it replaced.
+    expect(Number(light![1])).toBeGreaterThan(1.4);
+  });
+
+  it('inline code is sized off the mono token, not a literal', () => {
+    // `markdown-render.tsx` pinned `fontSize: 14` while body moved 15 → 17, so the
+    // gap between prose and code WIDENED in the change meant to make code legible.
+    expect(TYPOGRAPHY.mono.fontSize).toBeGreaterThanOrEqual(15);
+    // Code is allowed to be a step below body — a monospace face reads larger at the
+    // same nominal size — but not by more than one step of the ramp.
+    expect(TYPOGRAPHY.body.fontSize - TYPOGRAPHY.mono.fontSize).toBeLessThanOrEqual(2);
   });
 });
