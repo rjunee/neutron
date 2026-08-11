@@ -43,6 +43,8 @@ import type { ResolvedOwnerMcpServer } from '../../../../mcp-servers.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from '../pty-host.ts'
+import { pool } from '../pool-state.ts'
+import type { ReplSession } from '../repl-session.ts'
 import {
   createPersistentReplSubstrate,
   evictWarmReplsForMcpSurfaceChange,
@@ -67,7 +69,12 @@ const EXAMPLE: ResolvedOwnerMcpServer = {
 }
 
 /** Echo host capturing every spawn's argv + env (mirrors `tool-bridge.test.ts`). */
-function makeCapturingHost(): {
+function makeCapturingHost(
+  /** Awaited before the fake child posts its reply, so a test can hold a turn IN FLIGHT
+   *  and observe what happens to a session that is genuinely busy. Omitted ⇒ the reply
+   *  goes out immediately, which is what every other test in this file wants. */
+  replyGate?: () => Promise<void>,
+): {
   host: PtyHost
   argvs: string[][]
   envs: Array<Record<string, string | undefined>>
@@ -109,8 +116,12 @@ function makeCapturingHost(): {
           if (url.pathname === '/health') return Response.json({ ok: true })
           if (req.method === 'POST' && url.pathname === '/message') {
             const body = (await req.json()) as { text: string; turn_id?: string }
-            void post('/reply', { session_id: sid, text: `ok=${seen} ${body.text}`, turn_id: body.turn_id })
+            const n = seen
             seen += 1
+            void (async () => {
+              if (replyGate !== undefined) await replyGate()
+              await post('/reply', { session_id: sid, text: `ok=${n} ${body.text}`, turn_id: body.turn_id })
+            })()
             return Response.json({ status: 'delivered' })
           }
           return new Response('nf', { status: 404 })
@@ -698,5 +709,93 @@ describe('revoking a server retires the warm child that was spawned under the ol
     // difference is not observable here and is not claimed to be.
     expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 1, poisoned: 0 })
     expect(kills.n).toBe(1)
+  })
+
+  it('treats a session that merely HOLDS THE TURN SLOT as busy, and does not kill its child', async () => {
+    // The window `session.activeTurn` cannot see. A dispatch wins the turn mutex at
+    // `acquireTurn()` and only assigns `activeTurn` much later — `await session.ready` sits
+    // between them, and on the import path so does the whole `/clear` context-reset
+    // interstitial, which itself awaits the REPL going idle. A revocation landing in there
+    // read the session as IDLE and terminated the child a COMMITTED dispatch was about to
+    // inject into, stranding the turn — precisely what this function documents itself as
+    // refusing to do for a busy session.
+    setReplToolBridge(bridge())
+    const { host, kills } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    await drain(sub.start(spec('hi')))
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 0))
+
+    // Reach into the pool and take the slot WITHOUT ever setting `activeTurn` — which is
+    // exactly the state a real dispatch is in for the length of that window.
+    const session = await [...pool.values()][0]!
+    expect(session.activeTurn).toBeUndefined()
+    const release = await session.acquireTurn()
+    expect(session.turnSlotHeld).toBe(1)
+
+    // POISONED, NOT EVICTED, and the child is untouched.
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+    expect(kills.n).toBe(0)
+    expect(session.poisoned).toBe(true)
+    // And it is marked for teardown rather than merely for respawn — see the next test.
+    expect(session.retireOnIdle).toBe(true)
+
+    release()
+    expect(session.turnSlotHeld).toBe(0)
+    // Idempotent: several of `start`'s early-return paths release the slot they were
+    // handed, and a double decrement would read as "idle" to the check above.
+    release()
+    expect(session.turnSlotHeld).toBe(0)
+  })
+
+  it('retires a session poisoned mid-turn AS SOON AS that turn ends, not at some next dispatch', async () => {
+    // The residual the poison left behind. A child that was BUSY when the grant was
+    // revoked cannot be killed on the spot — that would strand a turn which is, correctly,
+    // running under a grant that WAS in force. So it is poisoned, and `getOrSpawnSession`
+    // respawns it cleanly at the NEXT DISPATCH. But nothing in this build reaps an idle
+    // warm session, so "the next dispatch" is not a bound: if the owner never sends
+    // another message, the revoked server's stdio child keeps running, holding the env it
+    // was handed, for as long as the process lives. Unbounded, on the exact secret the
+    // revocation was meant to retire.
+    //
+    // The turn is held IN FLIGHT by gating the fake child's reply, so the revocation lands
+    // while the session is genuinely busy — the real ordering, not a hand-set flag.
+    setReplToolBridge(bridge())
+    let openTheGate: () => void = () => {}
+    const gate = new Promise<void>((res) => {
+      openTheGate = res
+    })
+    const { host, kills } = makeCapturingHost(() => gate)
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    const inFlight = drain(sub.start(spec('hi')))
+
+    // Wait until the turn is genuinely in flight (the session is pooled and mid-turn).
+    let session: ReplSession | undefined
+    for (let i = 0; i < 400 && session === undefined; i += 1) {
+      const first = [...pool.values()][0]
+      if (first !== undefined) {
+        const s = await first
+        if (s.activeTurn !== undefined || s.turnSlotHeld > 0) session = s
+      }
+      if (session === undefined) await new Promise((r) => setTimeout(r, 5))
+    }
+    expect(session).toBeDefined()
+
+    // Revoked mid-turn: poisoned, child still alive, turn undisturbed.
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+    expect(kills.n).toBe(0)
+
+    // Let the turn finish. It must still deliver — killing it was never the goal.
+    openTheGate()
+    expect(await inFlight).toContain('ok=0')
+
+    // THE ASSERTION THAT FAILS WITHOUT THE FIX: the child is dead by the time the turn
+    // settles, with no second dispatch anywhere in this test.
+    for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 0))
+    expect(kills.n).toBe(1)
+    expect(pool.size).toBe(0)
   })
 })

@@ -48,6 +48,41 @@ export class ReplSession {
    *  explicitly (`buildReadPrompt` runningProjects/runningPeople), not only the
    *  REPL's in-context memory. */
   poisoned = false
+  /**
+   * How many callers currently hold this session's turn slot (see {@link acquireTurn}).
+   *
+   * BUSY STARTS HERE, NOT AT `activeTurn`. A dispatch takes the slot and only later
+   * assigns `activeTurn` — and between the two it does real async work: `await ready`,
+   * and on the import path the whole `/clear` context-reset interstitial, which itself
+   * awaits the REPL going idle. Anything reading ONLY `activeTurn` therefore sees an
+   * idle session during a window that can be seconds long and belongs to a COMMITTED
+   * turn. {@link evictWarmReplsForMcpSurfaceChange} read exactly that, so a revocation
+   * landing in the window terminated the child a dispatch was about to inject into —
+   * stranding the turn, which is the one thing that eviction path is documented as
+   * refusing to do.
+   *
+   * A COUNTER, not a boolean, because `acquireTurn` is a queue: releases are not
+   * strictly nested and a boolean would be cleared by whichever caller finished first.
+   * The release is idempotent so a double-release cannot drive it negative.
+   */
+  turnSlotHeld = 0
+  /**
+   * Set when this session must be torn down as soon as it stops being busy, rather than
+   * merely respawned at the next dispatch.
+   *
+   * DISTINCT FROM `poisoned` ON PURPOSE. `poisoned` says "the next dispatch must not reuse
+   * this child"; it is satisfied lazily and correctly by the abandon-poison paths, where
+   * the child is merely unfit for REUSE and there is no harm in it idling until then. This
+   * flag says "this child must not keep RUNNING", which is a different claim and the one an
+   * MCP revocation makes: the process holds env values under a grant the owner has just
+   * withdrawn. Nothing in this build reaps an idle warm session, so left to the next
+   * dispatch a revoked child survives for as long as the owner stays quiet — unbounded.
+   *
+   * Only {@link evictWarmReplsForMcpSurfaceChange} sets it, and only for a session it found
+   * BUSY (an idle one it retires on the spot). Keeping it separate from `poisoned` is what
+   * stops the abandon-poison paths from acquiring an eager teardown they never asked for.
+   */
+  retireOnIdle = false
   /** Timestamp of the last byte the REPL's PTY emitted. Used to gate the NEXT
    *  turn's inject on the REPL going idle — injecting a channel notification
    *  while claude is still finishing the prior turn drops the notification
@@ -357,7 +392,21 @@ export class ReplSession {
       release = res
     })
     await prev
-    return release
+    // COUNTED FROM HERE — after the wait, so a caller still queued behind another turn
+    // is not counted as holding the slot. See {@link turnSlotHeld} for why `activeTurn`
+    // alone is not a sufficient answer to "is this session busy".
+    this.turnSlotHeld += 1
+    let released = false
+    return () => {
+      // IDEMPOTENT. Several of `start`'s early-return paths call the release they were
+      // handed, and a plain `res()` tolerated being called twice because re-resolving a
+      // promise is a no-op — a bare decrement would not, and would drive the count
+      // negative, which reads as "idle" to the evictor.
+      if (released) return
+      released = true
+      this.turnSlotHeld -= 1
+      release()
+    }
   }
 }
 

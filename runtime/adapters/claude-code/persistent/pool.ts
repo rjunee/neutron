@@ -774,6 +774,24 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         }
         if (session.activeTurn === turn) session.activeTurn = undefined
         if (release) release()
+        // A REVOKED-SURFACE SESSION IS RETIRED HERE, now that it is idle. It was BUSY when
+        // the revocation landed, so `evictWarmReplsForMcpSurfaceChange` could only poison
+        // it — killing it mid-turn would have stranded a turn running under a grant that
+        // WAS in force. That turn has now ended, and waiting for the next dispatch to
+        // respawn is not good enough: nothing reaps an idle warm session, so a child whose
+        // MCP grant was withdrawn would keep its env resident for as long as the owner
+        // stayed quiet. Checked AFTER `release()` so `turnSlotHeld` has already dropped.
+        //
+        // Ephemeral sessions are skipped — the `finally` below disposes them outright.
+        if (
+          !ephemeral &&
+          session.retireOnIdle &&
+          session.activeTurn === undefined &&
+          session.turnSlotHeld === 0 &&
+          childByKey.get(sessionKey) === session.child
+        ) {
+          await retireWarmSession(sessionKey, session)
+        }
        } finally {
          // LEAK PREVENTION (the crux). Settle the watchdog's outstanding-turn
          // marker on EVERY exit path — normal completion, early return, thrown
@@ -913,24 +931,53 @@ export async function evictWarmReplsForMcpSurfaceChange(): Promise<{
     // evict issued on the same tick `drain` returns, when `activeTurn` has legitimately
     // not been cleared yet. That is this function answering correctly about a session
     // that is still, for one more tick, mid-turn.
-    if (session.activeTurn !== undefined) {
+    //
+    // BUSY ALSO MEANS "HOLDS THE TURN SLOT". `session.activeTurn` is assigned well after
+    // `acquireTurn()` returns — `await session.ready` sits between them, and on the import
+    // path so does the entire `/clear` context-reset interstitial, which awaits the REPL
+    // going idle. A revocation landing in that window read the session as idle and killed
+    // the child a COMMITTED dispatch was about to inject into, stranding the turn: exactly
+    // the outcome the paragraph above says this function refuses. `turnSlotHeld` is taken
+    // the instant the slot is won, so it covers the gap.
+    if (session.activeTurn !== undefined || session.turnSlotHeld > 0) {
       session.poisoned = true
+      // AND RETIRED THE MOMENT THE TURN ENDS, not merely at the next dispatch. `poisoned`
+      // alone is a promise the NEXT dispatch will respawn cleanly — and nothing in this
+      // build reaps an idle warm session, so if no next message ever arrives there is no
+      // next dispatch and the child outlives the grant indefinitely, still holding the env
+      // it was handed. That is the very hazard this function exists to close, merely
+      // narrowed to the sessions that happened to be busy at revocation time. The turn's
+      // own completion path honours this flag once the session is genuinely idle.
+      session.retireOnIdle = true
       poisoned += 1
       continue
     }
-    pool.delete(key)
-    if (childByKey.get(key) === session.child) childByKey.delete(key)
-    try {
-      session.sizeWatchdog?.stop()
-      if (!session.hasChildExited()) await terminateChild(session.child)
-      sink.unregister(session.sessionId)
-      unlinkSessionConfigs(session)
-    } catch {
-      // ignore — best effort, and the entry is already out of the pool
-    }
+    await retireWarmSession(key, session)
     evicted += 1
   }
   return { evicted, poisoned }
+}
+
+/**
+ * Tear one warm session out of the pool and kill its child. Best effort; never throws.
+ *
+ * Extracted so {@link evictWarmReplsForMcpSurfaceChange} and the turn-completion path's
+ * `retireOnIdle` check cannot drift into two different notions of "retired" — the second
+ * caller exists precisely because a session that was BUSY at revocation time still has to
+ * be torn down, and doing that with a copy of this teardown is how the two come to
+ * disagree about, say, unregistering the reply sink.
+ */
+async function retireWarmSession(key: string, session: ReplSession): Promise<void> {
+  pool.delete(key)
+  if (childByKey.get(key) === session.child) childByKey.delete(key)
+  try {
+    session.sizeWatchdog?.stop()
+    if (!session.hasChildExited()) await terminateChild(session.child)
+    sink.unregister(session.sessionId)
+    unlinkSessionConfigs(session)
+  } catch {
+    // ignore — best effort, and the entry is already out of the pool
+  }
 }
 
 /** Test/operator helper: SIGTERM every warm REPL and clear the pool. */
