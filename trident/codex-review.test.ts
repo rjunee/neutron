@@ -7,19 +7,23 @@
  *   0   connected      — codex ran, verdict on stdout
  *   10  not_connected  — no CODEX_HOME / no auth.json (graceful → Claude-only)
  *   11  not_connected  — codex CLI absent
- *   3   deferred       — configured but auth precheck failed (never silent-approve)
+ *   3   deferred       — configured but the review could not be performed: auth
+ *                        precheck failed, or the diff was EMPTY (never silent-approve)
  *   5   deferred       — configured + authed but the review call failed
  */
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-review.sh')
+// Spawn bash by ABSOLUTE path: the CLI-absent case runs with a PATH that contains
+// nothing at all, so `bash` could not be resolved from it.
+const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
 
 interface RunOpts {
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
@@ -28,10 +32,17 @@ interface RunOpts {
   noCodexHome?: boolean
   /** Put a mock `codex` on PATH whose `login status` exits with this code. */
   codexLoginExit?: number | null
-  /** Write this content to a diff file and point NEUTRON_CODEX_DIFF_FILE at it. */
-  diffFileContent?: string
+  /**
+   * Write this content to a diff file and point NEUTRON_CODEX_DIFF_FILE at it.
+   * Omitted → a small non-empty diff (an empty diff is now DEFERRED, so a test
+   * about anything else must hand the script something to review). `null` → no
+   * diff file at all, so the script falls back to `git diff` in cwd.
+   */
+  diffFileContent?: string | null
   env?: Record<string, string>
 }
+
+const DEFAULT_DIFF = 'diff --git a/x b/x\n--- a/x\n+++ b/x\n+change\n'
 
 function run(opts: RunOpts = {}): {
   status: number | null
@@ -39,24 +50,33 @@ function run(opts: RunOpts = {}): {
   stdout: string
   /** argv the mock `codex` received on its review invocation ('' if never run). */
   codexArgv: string
+  /** the PROMPT the mock `codex` received on stdin ('' if never run). */
+  codexStdin: string
 } {
   const dir = mkdtempSync(join(tmpdir(), 'trident-codex-'))
   const codexHome = join(dir, 'codexhome')
   mkdirSync(codexHome, { recursive: true })
   if (opts.authed === true) writeFileSync(join(codexHome, 'auth.json'), '{"token":"x"}\n')
 
-  // Base PATH excludes any real codex (so codexLoginExit===null → CLI missing).
   const bin = join(dir, 'bin')
   mkdirSync(bin, { recursive: true })
-  let path = `${bin}${delimiter}/usr/bin${delimiter}/bin`
+  // codexLoginExit===null means "no codex CLI anywhere", so PATH is the EMPTY mock
+  // bin ONLY — a machine with a real `codex` installed in /usr/bin would otherwise
+  // satisfy `command -v codex` and the CLI-absent branch would never be exercised.
+  const path =
+    opts.codexLoginExit === null
+      ? bin
+      : `${bin}${delimiter}/usr/bin${delimiter}/bin`
   if (opts.codexLoginExit !== null && opts.codexLoginExit !== undefined) {
     // Mock codex: `login status` → the given exit; anything else → exit 0.
     const mock = join(bin, 'codex')
     // Records the argv of the non-login invocation so the review MODEL flag is
     // observable — an unpinned review is otherwise invisible from the exit code.
+    // Also records the PROMPT it was piped on stdin, so the truncation disclosure
+    // is observable — a silently-truncated diff is invisible from the exit code.
     writeFileSync(
       mock,
-      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\nexit 0\n`,
+      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\nexit 0\n`,
     )
     chmodSync(mock, 0o755)
   }
@@ -66,21 +86,29 @@ function run(opts: RunOpts = {}): {
     ...(opts.env ?? {}),
   }
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
-  if (opts.diffFileContent !== undefined) {
+  const diffFileContent = opts.diffFileContent === undefined ? DEFAULT_DIFF : opts.diffFileContent
+  if (diffFileContent !== null) {
     const df = join(dir, 'forge.diff')
-    writeFileSync(df, opts.diffFileContent)
+    writeFileSync(df, diffFileContent)
     env['NEUTRON_CODEX_DIFF_FILE'] = df
   }
-  // Run inside a git repo so `git diff` doesn't error — the temp dir is fine (no
-  // repo → empty diff, which the script tolerates).
-  const res = spawnSync('bash', [SCRIPT, 'main'], { cwd: dir, encoding: 'utf8', env })
-  let codexArgv = ''
-  try {
-    codexArgv = readFileSync(join(dir, 'codex-argv.txt'), 'utf8')
-  } catch {
-    codexArgv = ''
+  // The cwd is a bare temp dir, NOT a git repo — so the `git diff` fallback yields
+  // nothing and every test that needs a diff must hand one over explicitly.
+  const res = spawnSync(BASH, [SCRIPT, 'main'], { cwd: dir, encoding: 'utf8', env })
+  const readOr = (name: string): string => {
+    try {
+      return readFileSync(join(dir, name), 'utf8')
+    } catch {
+      return ''
+    }
   }
-  return { status: res.status, stderr: res.stderr ?? '', stdout: res.stdout ?? '', codexArgv }
+  return {
+    status: res.status,
+    stderr: res.stderr ?? '',
+    stdout: res.stdout ?? '',
+    codexArgv: readOr('codex-argv.txt'),
+    codexStdin: readOr('codex-stdin.txt'),
+  }
 }
 
 describe('trident/codex-review.sh — exit-code contract', () => {
@@ -162,6 +190,123 @@ describe('trident/codex-review.sh — exit-code contract', () => {
     expect(status).toBe(5)
     expect(stderr).toContain('CODEX_REVIEW_CALL_FAILED')
     expect(stderr).toContain('DEFERRED')
+  })
+})
+
+describe('trident/codex-review.sh — an EMPTY diff is DEFERRED, never an approval', () => {
+  // The seat used to WARN and PROCEED: codex was handed a prompt whose DIFF section
+  // was blank and cheerfully answered 'VERDICT: APPROVE' about NOTHING, which the
+  // bridge recorded as codexStatus='connected' — a confident cross-model approval of
+  // a change nobody read. The open kimi lane already defers here
+  // (trident/kimi-review.ts: empty diff → status 'deferred'); this lane must match.
+  test('an EMPTY diff FILE → exit 3 (DEFERRED), and codex is never invoked', () => {
+    const { status, stderr, codexArgv, codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: '',
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
+    expect(stderr).toContain('DEFERRED')
+    // Nothing was sent to the model at all — no answer to mistake for a verdict.
+    expect(codexArgv).toBe('')
+    expect(codexStdin).toBe('')
+  })
+
+  test('a MISSING diff file with no git diff to fall back on → exit 3 (DEFERRED)', () => {
+    // The failure this guards: the diff file failed to write, or the base ref
+    // resolved wrong, so `git diff base..HEAD` in a non-repo cwd yields nothing.
+    const { status, stderr } = run({ authed: true, codexLoginExit: 0, diffFileContent: null })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
+  })
+
+  test('a WHITESPACE-ONLY diff file is empty too → exit 3, not a blank-prompt approval', () => {
+    const { status, stderr } = run({ authed: true, codexLoginExit: 0, diffFileContent: '\n\n\n' })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
+  })
+
+  test('an empty diff does NOT reach the exec seam either (no exit-0 approval path)', () => {
+    // With the test seam configured to APPROVE unconditionally, the ONLY thing that
+    // can keep this from exiting 0 is the empty-diff guard firing before it.
+    const { status, stdout } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: '',
+      env: { NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; echo "VERDICT: APPROVE"' },
+    })
+    expect(status).toBe(3)
+    expect(stdout).not.toContain('VERDICT: APPROVE')
+  })
+})
+
+describe('trident/codex-review.sh — TRUNCATION is disclosed to the model', () => {
+  /** A diff of `n` numbered lines; line k is uniquely greppable as `+line-k`. */
+  const numberedDiff = (n: number): string =>
+    `diff --git a/x b/x\n${Array.from({ length: n - 1 }, (_, i) => `+line-${i + 1}`).join('\n')}\n`
+
+  test('an over-limit diff announces the truncation and the line counts in the PROMPT', () => {
+    // 20-line diff, limit 5. Silently, codex would scope a verdict to "the diff"
+    // having read a quarter of it — an 11k-line PR approved on its first 3000 lines.
+    const { status, codexStdin, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: numberedDiff(20),
+      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+    })
+    expect(status).toBe(0)
+    expect(codexStdin).toContain('TRUNCATED DIFF')
+    // The ACTUAL numbers, not a vague hedge: 5 of 20 shown, 15 withheld.
+    expect(codexStdin).toContain('FIRST 5 lines of a 20-line diff')
+    expect(codexStdin).toContain('remaining 15 lines were NOT provided')
+    // …and the verdict is explicitly re-scoped to what was read.
+    expect(codexStdin).toContain('SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ')
+    expect(codexStdin).toContain('reviewed only the first 5 of 20 lines')
+    // The truncation is also visible to the operator in the wrapper's stderr.
+    expect(stderr).toContain('CODEX_REVIEW_DIFF_TRUNCATED')
+    // Truncation still actually happens: line 4 is in, line 6 is out.
+    expect(codexStdin).toContain('+line-4')
+    expect(codexStdin).not.toContain('+line-6')
+  })
+
+  test('a diff AT the limit is not truncated and carries NO truncation notice', () => {
+    // Off-by-one guard: exactly DIFF_LINE_LIMIT lines are fully shown, so claiming
+    // truncation here would teach the model to hedge a review it read in full.
+    const { status, codexStdin, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: numberedDiff(5),
+      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+    })
+    expect(status).toBe(0)
+    expect(codexStdin).toContain('+line-4')
+    expect(codexStdin).not.toContain('TRUNCATED')
+    expect(codexStdin).not.toContain('SCOPE YOUR VERDICT')
+    expect(stderr).not.toContain('CODEX_REVIEW_DIFF_TRUNCATED')
+  })
+
+  test('an UNDER-limit diff carries no truncation notice', () => {
+    const { codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: numberedDiff(3),
+      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+    })
+    expect(codexStdin).not.toContain('TRUNCATED')
+  })
+
+  test('the last line counts even without a trailing newline (wc -l would drop it)', () => {
+    // 6 lines, the 6th unterminated, limit 5 → truncated. `wc -l` reports 5 here and
+    // the disclosure would vanish for exactly the diff shape git produces with
+    // "\\ No newline at end of file".
+    const { codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: 'diff --git a/x b/x\n+line-1\n+line-2\n+line-3\n+line-4\n+line-5',
+      env: { NEUTRON_CODEX_DIFF_LINE_LIMIT: '5' },
+    })
+    expect(codexStdin).toContain('FIRST 5 lines of a 6-line diff')
   })
 })
 

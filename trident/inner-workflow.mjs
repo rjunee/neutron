@@ -1207,7 +1207,7 @@ Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT bac
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.
-- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
+- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, or the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
 

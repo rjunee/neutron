@@ -17,8 +17,10 @@
 #   exit 10  NOT_CONNECTED — no CODEX_HOME / no auth.json. GRACEFUL: the review
 #                          falls back to Claude-only + a "codex not connected" note.
 #   exit 11  NOT_CONNECTED — codex CLI not on PATH (best-effort install skipped).
-#   exit 3   DEFERRED    — configured (auth.json present) but `codex login status`
-#                          failed after retries → auth expired/unreachable.
+#   exit 3   DEFERRED    — configured (auth.json present) but the review could not
+#                          be PERFORMED: `codex login status` failed after retries
+#                          (auth expired/unreachable), or there was NOTHING to
+#                          review (empty diff — see CODEX_REVIEW_EMPTY_DIFF below).
 #   exit 5   DEFERRED    — configured + authed, but the review call itself failed.
 #
 # DEFERRED (3/5) means "configured but the call FAILED" → the synthesis must
@@ -88,17 +90,39 @@ fi
 # here would see an EMPTY/stale diff and codex could "approve" without reviewing
 # the actual change. Every trident reviewer reviews that diff file; so does codex.
 # Fall back to `git diff base..HEAD` for standalone use (the legacy harness-style).
+# DIFF_TOTAL_LINES is the FULL size before truncation — `awk END{print NR}` counts
+# a final unterminated line too, which `wc -l` would drop.
 if [ -n "${NEUTRON_CODEX_DIFF_FILE:-}" ] && [ -f "$NEUTRON_CODEX_DIFF_FILE" ]; then
   DIFF=$(head -n "$DIFF_LINE_LIMIT" "$NEUTRON_CODEX_DIFF_FILE")
+  DIFF_TOTAL_LINES=$(awk 'END { print NR }' "$NEUTRON_CODEX_DIFF_FILE")
   DIFF_SRC="$NEUTRON_CODEX_DIFF_FILE"
 else
-  DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null | head -n "$DIFF_LINE_LIMIT")
+  FULL_DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null)
+  DIFF=$(printf '%s' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")
+  DIFF_TOTAL_LINES=$(printf '%s' "$FULL_DIFF" | awk 'END { print NR }')
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
 if [ -z "$DIFF" ]; then
-  # No diff to review (empty branch / bad base / missing diff file) — surface it
-  # but don't fail hard; the reviewer treats an empty codex verdict as no-blocker.
-  echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${DIFF_SRC}." >&2
+  # NOTHING TO REVIEW — the diff file failed to write, the base ref resolved wrong,
+  # or the branch is empty. This is DEFERRED, never an approval: a reviewer handed
+  # nothing to review must not answer, or the cross-model seat returns a confident
+  # APPROVE about nothing and the bridge records it as connected. Mirrors the kimi
+  # lane (trident/kimi-review.ts — empty diff → status 'deferred').
+  echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${DIFF_SRC} — nothing to review. DEFERRED — do NOT treat as an approval." >&2
+  exit 3
+fi
+
+# ── TRUNCATION DISCLOSURE ─────────────────────────────────────────────────────
+# The diff is capped at DIFF_LINE_LIMIT lines above. Told nothing, the model scopes
+# its verdict to "the diff" and APPROVEs an 11k-line change on the strength of its
+# first 3000 lines. So when we truncate, SAY SO in the prompt and make the verdict
+# scope itself to what was actually read.
+TRUNCATION_NOTICE=""
+if [ "$DIFF_TOTAL_LINES" -gt "$DIFF_LINE_LIMIT" ]; then
+  echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} diff lines to codex." >&2
+  TRUNCATION_NOTICE="!! TRUNCATED DIFF — YOU ARE NOT SEEING THE WHOLE CHANGE. You have ONLY the FIRST ${DIFF_LINE_LIMIT} lines of a ${DIFF_TOTAL_LINES}-line diff; the remaining $((DIFF_TOTAL_LINES - DIFF_LINE_LIMIT)) lines were NOT provided and you cannot request them.
+SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ: say in your findings that you reviewed only the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} lines, and NEVER claim the change as a whole is correct or complete. APPROVE means only 'no blocker in the portion I read'.
+"
 fi
 
 PROMPT="You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
@@ -107,7 +131,7 @@ Respond with your findings, then END with a SINGLE final line, exactly one of:
   VERDICT: APPROVE
   VERDICT: REQUEST_CHANGES
 Use REQUEST_CHANGES if there is any evidence-backed blocker.
-
+${TRUNCATION_NOTICE}
 DIFF (${DIFF_SRC}):
 ${DIFF}"
 
