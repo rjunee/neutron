@@ -291,6 +291,14 @@ describe('what the screen shows, and what it never shows', () => {
     const status = byTestId('mcp-example-server-status')!.textContent ?? '';
     expect(status).toContain('next session');
     expect(status.toLowerCase()).not.toContain('running');
+    // ASSERTED ON THE WHOLE CARD, not just the status line. This test's comment already
+    // said NOT "running" and it still shipped: the badge beside the server name rendered
+    // exactly that word while the status line underneath said "next session", and reading
+    // only the status element could not see it. The word is `approved`, matching the web
+    // surface's badge for the same `active` field.
+    const card = byTestId('mcp-example-server')!.textContent ?? '';
+    expect(card.toLowerCase()).not.toContain('running');
+    expect(byTestId('mcp-example-server-active')!.textContent).toBe('approved');
   });
 
   it('an approved server with a MISSING secret is not reported as usable', async () => {
