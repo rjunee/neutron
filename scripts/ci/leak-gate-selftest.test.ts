@@ -686,6 +686,10 @@ function pushFixture(denylistEntries: string[] | null): {
   install: () => { code: number; out: string }
   push: () => { code: number; out: string }
   pushWithoutDenylist: () => { code: number; out: string }
+  /** Raw git, for the branch/merge topology the merge-window case needs. */
+  git: (...a: string[]) => string
+  /** Push an arbitrary ref, optionally with extra flags (e.g. `--no-verify`). */
+  pushRef: (ref: string, extra?: string[]) => { code: number; out: string }
   cleanup: () => void
 } {
   const sandbox = mkdtempSync(join(tmpdir(), 'leak-gate-prepush-'))
@@ -757,6 +761,8 @@ function pushFixture(denylistEntries: string[] | null): {
       }
     },
     push: () => run(['push', 'origin', 'main']),
+    git: (...a: string[]) => git(...a),
+    pushRef: (ref: string, extra: string[] = []) => run(['push', ...extra, 'origin', ref]),
     /** Push with the denylist pointed somewhere else — "the list went missing". */
     pushWithoutDenylist: () =>
       run(['push', 'origin', 'main'], gateEnv({ LEAK_GATE_PII_DENYLIST_FILE: join(sandbox, 'gone') })),
@@ -827,6 +833,72 @@ describe('pre-push hook — the control fires before anything is published', () 
         encoding: 'utf8',
       })
       expect(cfg.trim()).toBe('')
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('ALLOWS a push that MERGED MAINLINE carrying a denylisted message in its history', () => {
+    // THE MANDATORY PATH, not an exotic one. A pull request that goes conflicting
+    // produces no merge ref, so no `pull_request` workflow fires and CI cannot run
+    // on it at all — integrating main is the only way forward. Before the fix the
+    // window was `remote_sha..local_sha`, which after a merge contains every commit
+    // the merge brought with it: mainline's own published messages, including the
+    // `Co-authored-by: <owner>` trailers GitHub stamps onto squash merges. The push
+    // was refused over history the author cannot rewrite. Hit 2026-08-11 on #172.
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      expect(fx.install().code).toBe(0)
+
+      // A feature branch, pushed clean, so the remote has a tip for it.
+      fx.git('switch', '-q', '-c', 'feature')
+      fx.commit('feat: something entirely clean')
+      expect(fx.pushRef('feature').code).toBe(0)
+
+      // Mainline gains a commit whose MESSAGE carries the denylisted term, and it
+      // is published. `--no-verify` is the honest simulation: this is history that
+      // is ALREADY public, which is precisely why it cannot be reworded now.
+      fx.git('switch', '-q', 'main')
+      fx.commit(`fix: the ${LOCAL_TERM} path`)
+      expect(fx.pushRef('main', ['--no-verify']).code).toBe(0)
+      fx.git('fetch', '-q', 'origin')
+
+      // Integrate mainline, then push the branch. Mainline's message is in the
+      // range but is not this push's to answer for.
+      fx.git('switch', '-q', 'feature')
+      fx.git('merge', '-q', '--no-edit', 'origin/main')
+      const { code, out } = fx.pushRef('feature')
+      expect(out).not.toContain('PUSH BLOCKED')
+      expect(code).toBe(0)
+    } finally {
+      fx.cleanup()
+    }
+  }, 60_000)
+
+  test('…and STILL BLOCKS a NEW denylisted message on top of that merge', () => {
+    // The other half, and the one that matters: widening the exclusion to mainline
+    // must not buy the case above by going blind. A leak the author IS responsible
+    // for — a fresh commit, after the merge — has to still be refused, or the fix
+    // traded a false positive for a false negative.
+    const fx = pushFixture(['# neutral test list', LOCAL_TERM])
+    try {
+      expect(fx.install().code).toBe(0)
+      fx.git('switch', '-q', '-c', 'feature')
+      fx.commit('feat: something entirely clean')
+      expect(fx.pushRef('feature').code).toBe(0)
+
+      fx.git('switch', '-q', 'main')
+      fx.commit(`fix: the ${LOCAL_TERM} path`)
+      expect(fx.pushRef('main', ['--no-verify']).code).toBe(0)
+      fx.git('fetch', '-q', 'origin')
+
+      fx.git('switch', '-q', 'feature')
+      fx.git('merge', '-q', '--no-edit', 'origin/main')
+      fx.commit(`chore: rename the ${LOCAL_TERM} fixture`)
+      const { code, out } = fx.pushRef('feature')
+      expect(out).toContain('[pii-denylist-msg]')
+      expect(out).toContain('PUSH BLOCKED')
+      expect(code).not.toBe(0)
     } finally {
       fx.cleanup()
     }
