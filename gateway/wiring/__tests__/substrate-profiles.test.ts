@@ -38,6 +38,12 @@ import {
   PROFILE_WARM_FIRE,
   type SubstrateProfile,
 } from '../substrate-profiles.ts'
+// The two pool defaults the fire window is bracketed against — imported from the
+// real constants rather than restated, so a change to either is caught here.
+import {
+  DEFAULT_TURN_ABSOLUTE_CEILING_MS,
+  DEFAULT_TURN_INACTIVITY_MS,
+} from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { newCredentialPool, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
@@ -128,13 +134,34 @@ const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> =
   { name: 'PROFILE_WARM_FIRE', profile: PROFILE_WARM_FIRE },
 ]
 
-test('every profile encodes exactly { skip_permissions: true } (no reserved field wired yet)', () => {
+test('every profile encodes exactly { skip_permissions: true } — except the ONE that deliberately wires a window', () => {
   for (const { name, profile } of ALL_PROFILES) {
     // Byte-for-byte: skip_permissions true and NOTHING else. This is the guard
     // that catches an accidental early-wire of permission_mode / claude_config_dir
     // / extra_env / sandbox before the migration phase that is meant to set them.
+    //
+    // PROFILE_WARM_FIRE is the single deliberate exception. It is enumerated BY
+    // NAME rather than the assertion being relaxed for everyone, so a SECOND
+    // profile that starts wiring a field still fails this test — which is the
+    // whole reason the test exists.
+    if (name === 'PROFILE_WARM_FIRE') {
+      expect({ ...profile }, name).toEqual({
+        skip_permissions: true,
+        turn_inactivity_ms: 30 * 60_000,
+      })
+      continue
+    }
     expect({ ...profile }, name).toEqual({ skip_permissions: true })
   }
+})
+
+test('the fire window is BELOW the absolute ceiling, so the ceiling stays the terminal authority', () => {
+  // A window at or above the ceiling would make the ceiling unreachable and a
+  // wedged launcher effectively immortal — the failure this fix must not cause
+  // while removing the one it does.
+  expect(PROFILE_WARM_FIRE.turn_inactivity_ms).toBeLessThan(DEFAULT_TURN_ABSOLUTE_CEILING_MS)
+  // ...and comfortably ABOVE the default, or it would not fix anything.
+  expect(PROFILE_WARM_FIRE.turn_inactivity_ms).toBeGreaterThan(DEFAULT_TURN_INACTIVITY_MS)
 })
 
 // ---------------------------------------------------------------------------
@@ -206,7 +233,20 @@ for (const { site, profile, extra } of SITES) {
     expect(viaInline.skip_permissions).toBe(true)
     // ...and the WHOLE resolved option bag is identical (env holds the scrubbed
     // credential, identical for both since the same pool/cred is selected).
-    expect(viaProfile).toEqual(viaInline)
+    //
+    // THE FIRE SITE IS THE ONE DELIBERATE DIVERGENCE, and it is asserted as a
+    // difference of EXACTLY ONE NAMED KEY rather than by loosening the equality.
+    // A second unintended field on that profile still fails here.
+    if (profile === PROFILE_WARM_FIRE) {
+      expect(viaProfile.turn_inactivity_ms).toBe(30 * 60_000)
+      expect(viaInline.turn_inactivity_ms).toBeUndefined()
+      const { turn_inactivity_ms, ...rest } = viaProfile
+      expect(rest).toEqual(viaInline)
+    } else {
+      expect(viaProfile).toEqual(viaInline)
+      // Every OTHER site must be untouched by the new field.
+      expect(viaProfile.turn_inactivity_ms).toBeUndefined()
+    }
     // Explicit: the reserved fields never leaked onto the resolved options.
     expect('permission_mode' in viaProfile).toBe(false)
     expect('sandbox' in viaProfile).toBe(false)

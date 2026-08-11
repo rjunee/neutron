@@ -695,6 +695,12 @@ export function buildLlmCallSubstrate(
         const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
         const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
         const effectiveExtraEnv = input.profile?.extra_env ?? input.extra_env
+        // The one profile field that is APPLIED rather than reserved. A profile
+        // hosting detached work (`PROFILE_WARM_FIRE`) must not be judged by PTY
+        // chatter — see that profile's docblock for the two builds this killed.
+        // Absent ⇒ the pool's own DEFAULT_TURN_INACTIVITY_MS, so every other
+        // profile is byte-for-byte unaffected.
+        const effectiveTurnInactivityMs = input.profile?.turn_inactivity_ms
         // Layer the optional `extra_env` overlay AFTER the auth-scrub env so
         // per-substrate spawn knobs (e.g. a `MAX_THINKING_TOKENS=0` classifier
         // knob) win over inherited vars without disturbing the auth scrubbing. The
@@ -716,6 +722,9 @@ export function buildLlmCallSubstrate(
         if (effectiveClaudeConfigDir !== undefined) opts.claude_config_dir = effectiveClaudeConfigDir
         if (input.claude_bin !== undefined) opts.claude_bin = input.claude_bin
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
+        if (effectiveTurnInactivityMs !== undefined) {
+          opts.turn_inactivity_ms = effectiveTurnInactivityMs
+        }
         // S3 §2 — fold the SELECTED credential id (#104) + the conversational
         // identity into the warm-pool key. `cred.id` is the `PooledCredential.id`
         // (never the secret); a rotation changes it → re-keys to a fresh REPL under
