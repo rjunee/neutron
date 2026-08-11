@@ -8872,3 +8872,32 @@ spelled out in prose drifts silently, and a writer trusting the stale line would
 digest the reader rejects with no symptom but missing labels. Writers import the function.
 
 Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the sidecar contract drifted in the DOCS, which are its only interface
+
+The scrypt change corrected the algorithm in `open/credential-label.ts` and left both
+writer-facing docs stating a recipe the reader silently rejects: the as-built detail file's
+§ The sidecar still printed `sha256(token)`, and
+`docs/plans/2026-08-09-model-usage-dashboard.md` Tier 1 still described a bare
+`{"label": "acct-2"}` with no fingerprint at all.
+
+Half of this contract runs in ANOTHER PROCESS and has nothing but the docs, so a stale
+sentence there is a defect in the feature, not a typo. Proven by following each documented
+recipe literally against the real reader: sha256 slice → null, bare label → null,
+`credentialFingerprint` → `"acct-2"`. The symptom of getting it wrong is that labels never
+appear, which is indistinguishable from the ordinary unlabelled case — so nobody would have
+found it from the outside.
+
+Both docs now point at the function instead of restating an algorithm, and a test pins the
+CONTRACT statements — the fenced JSON block and the Tier-1 bullet — rather than the prose,
+because the as-built file legitimately discusses SHA-256 and scrypt in its history section
+and a guard tripping on that would be a false positive on the document it protects. Each
+stale form was restored as a mutant and killed the test.
+
+📌 **The 📌 note recording a lesson is not exempt from the lesson.** This drifted a second
+time inside the very change that wrote "a cross-process contract described in prose will
+drift", and it survived in the MORE load-bearing of the two places: a rotator author reads
+the sidecar doc, not the module header. Fixing the code and leaving the doc is not half a
+fix — where the only consumer is an external writer, the doc IS the interface.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
