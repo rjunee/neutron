@@ -3492,7 +3492,11 @@ export function buildOpenGraphComposer(
           t.terminate(id, phase, { ...(reason !== undefined ? { reason } : {}) }),
         )
         // No terminator bound (board-less / observer-less boot): the bare
-        // unconditional update always writes — pre-F6a behaviour → report won.
+        // unconditional update always writes — pre-F6a behaviour → report won. It
+        // also does NOT retract a stale `subagent_status='running'` (only
+        // `terminalTransition` does), so such a boot can leave a cancelled run
+        // reading as in-flight. Unreachable here in practice: the holder below is
+        // bound unconditionally.
         if (pending === undefined) {
           await boardRunStore.update(id, { phase })
           return { won: true }

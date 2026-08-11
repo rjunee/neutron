@@ -531,6 +531,12 @@ async function handleDelete(
           const { won } = await trident_runs.terminate(runId, 'stopped')
           if (won) cancelled_run = runId
         } else {
+          // Bare `update` does NOT retract a stale `subagent_status='running'` the
+          // way `terminalTransition` does, so a run cancelled on a board-less boot
+          // can still read as in-flight. Accepted: unreachable in a normal boot
+          // (`open/composer.ts` binds the terminator unconditionally), and passing
+          // `subagent_status: null` here would trip `update()`'s crash veto and
+          // refuse the phase write outright on an already-crashed row.
           await trident_runs.update(runId, { phase: 'stopped' })
           cancelled_run = runId
         }

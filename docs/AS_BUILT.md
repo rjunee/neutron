@@ -8520,10 +8520,19 @@ gates key on it: #143's fix widened the harvest/terminal block on
 terminal row reading `running` is precisely the stale field those readers can act on, so
 this is not tidiness.
 
+> ⚠️ **That paragraph is WRONG and is kept only as the record of what was believed.** All
+> three named readers are unreachable on a terminal row — `step()` no-ops on
+> `isTerminalPhase` before the harvest gate or orphan recovery run, and the hang watchdog
+> keys on `last_advanced_at`. The reader that is actually load-bearing is `update()`'s crash
+> veto. Corrected in "Two corrections to the round-1 text" ~110 lines below; the correction
+> is repeated here because a reader who stops after the opening rationale would otherwise
+> carry away the false one.
+
 `TridentRunStore.terminalTransition` now clears it **in the same atomic UPDATE** that
 writes the terminal phase:
 
 ```sql
+-- as of round 2 the set is IN ('running', 'pending') — see the round-2 note below
 subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END
 ```
 
@@ -8644,3 +8653,69 @@ small lesson — a hand-rolled fixture schema silently omits the column your new
 a pen.** The question that found this was not "is the write correct?" but "who else can write
 this row after it is terminal, and what stops them?" — and the answer was a shell script three
 directories away that no one had thought of as part of the state machine.
+
+**Round 3 — the freeze was too WIDE, and two of its tests could not fail.**
+
+Round 2's guard was `AND phase NOT IN (terminal)` on the whole UPDATE, which threw away the
+orphan's `branch`/`pr`/`inner_checkpoint`/`inner_result` along with its liveness claim — and the
+comment asserting "nothing useful is dropped" was false in exactly the case this work is about.
+The cancel does not kill the workflow, so it can push a branch and open a PR **after** the
+cancel; those columns are the only trail from the run row to that PR, and `run-progress.ts:188`
+surfaces `pr` to the board. On a first launch this script is the ONLY writer of either — the
+launch persist carries `branch`/`pr` forward but cannot invent them (a fresh run's `branch` is
+null and `detectExistingPr` probes a branch that does not exist yet). Blanket-refusing them left
+an untraceable orphan PR.
+
+The freeze is now SCOPED to the two liveness columns, and nothing else:
+
+```sql
+subagent_status  = CASE WHEN phase IN ('done','failed','stopped') THEN subagent_status ELSE '<new>' END
+last_advanced_at = CASE WHEN phase IN ('done','failed','stopped') THEN last_advanced_at ELSE '<now>' END
+```
+
+`subagent_status` is the claim; `last_advanced_at` is the hang watchdog's heartbeat. Everything
+else lands: inert on a terminal row (`step()` no-ops, so nothing resumes from a checkpoint or
+harvests a result) but readable, which is the point. The `inner_result_file` path nests both
+guards — terminal freeze outermost, then the original readfile column-consistency CASE. Because
+the freeze now lives in the SET expressions rather than the WHERE clause, a terminal row still
+matches and `changes()` still reports 1, so the stderr report re-reads the phase in the same
+sqlite3 invocation and distinguishes *frozen* from *run not found*.
+
+The un-reaped workflow itself is now filed as **rjunee/neutron#177** and cited from both halves
+of the fix — this PR makes the record honest, it does not stop the orphan.
+
+**Two blockers in the round-2 TESTS — both were assertions that could not fail.**
+
+1. **`checkpoint-sh.test.ts` seeded `phase='Build'` / `'Review'`** — values migration 0077's
+   `CHECK` rejects. The terminal guard was therefore never once exercised against a legal ACTIVE
+   phase: a mutant guard that froze only `('Build','Review')` passed the entire suite while
+   freezing every phase production can actually hold. The throwaway fixture table now carries
+   0077's real `phase` CHECK (so an illegal seed throws — pinned by its own case), the terminal
+   cases iterate `TERMINAL_PHASES`, and the "not a blanket refusal" control iterates **all five**
+   active phases.
+2. **The `subagent_status` matrix omitted `'failed'`** — the fifth and last value the CHECK
+   admits. A mutant clearing `IN ('running','pending','failed')` survived the whole suite while
+   erasing the subagent-level outcome of every failed build. Covered now; the matrix is complete
+   against the CHECK.
+
+Three mutants killed on the scoped freeze: removing it (4 red), applying it to every phase (7
+red), extending it to `branch`/`inner_checkpoint`/`inner_verdict` — i.e. regressing to round 2's
+blanket refusal (4 red).
+
+Two smaller corrections. The store docblock credited `saveIfActive()`'s crash veto as
+load-bearing alongside `update()`'s; it is not — `saveIfActive` also carries
+`phase NOT IN (terminal)`, so on a terminal row it cannot land whatever the column says, and only
+`update()` (the ONE writer with no phase predicate) actually latches a crash there. And the
+short-params test's rationale claimed a shifted parameter "would be silent": a timestamp bound to
+`phase` is rejected loudly by the CHECK — `failure_reason` is the column that shape would quietly
+hit, which is why the case pins each column separately.
+
+The terminal-set literal in `checkpoint.sh` is a fourth copy of `TERMINAL_PHASES`, so
+`inner-workflow.test.ts` — which already asserts that script's SQL as text — now pins the literal
+against the constant and asserts it appears exactly once.
+
+📌 **A test can be green because the code is right, or because the fixture made the wrong answer
+unreachable.** Both blockers here were the second kind, and both were invisible in review until
+someone compared the fixture's values against the production CHECK constraint. When a guard keys
+on an enum, the fixture must carry that enum's constraint — otherwise the test is asserting over
+a value space production never has.

@@ -371,11 +371,16 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
   // Not cosmetic, but not for the reason it is tempting to write down either: #143's
   // harvest gate and orphan recovery never see a terminal row (`step()` returns early
   // on `isTerminalPhase`), and the hang watchdog keys on `last_advanced_at`. The
-  // reader that IS load-bearing is the CRASH VETO on the write paths — `update()`'s
-  // `AND subagent_status IS NOT 'crashed'` and `saveIfActive()`'s equivalent — which
-  // is why the 'crashed'-survives case below is the one that must never regress.
+  // reader that IS load-bearing is the CRASH VETO on `update()` — the ONE writer
+  // with no `phase NOT IN (terminal)` predicate, so its `AND subagent_status IS NOT
+  // 'crashed'` is all that latches a crash on a terminal row (`saveIfActive()` has
+  // the same veto but also the phase predicate, so on a terminal row it is
+  // unreachable). Hence the 'crashed'-survives cases below must never regress.
 
-  async function runAt(status: 'running' | 'pending' | 'crashed' | 'completed' | null) {
+  // Every value migration 0077's `subagent_status` CHECK admits, plus null. The
+  // matrix below covers ALL of them: a case-by-case CASE is exactly the kind of
+  // code where one unlisted value silently takes the wrong branch.
+  async function runAt(status: 'running' | 'pending' | 'completed' | 'failed' | 'crashed' | null) {
     const store = new TridentRunStore(db)
     const run = await store.create({
       slug: 'email-core-p1',
@@ -438,6 +443,18 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
     expect(store.get(id)?.subagent_status).toBe('completed')
   })
 
+  test("a FAILED outcome survives too — the last value the CHECK admits, and the one most easily forgotten", async () => {
+    // 'failed' is the fifth and last value in migration 0077's subagent_status
+    // CHECK, and the only one this matrix originally missed. Without it a mutant
+    // that ALSO cleared 'failed' (`IN ('running','pending','failed')`) passed the
+    // whole suite while erasing the subagent-level outcome of every failed build.
+    const { store, id } = await runAt('failed')
+
+    await store.terminalTransition(id, { phase: 'failed', failure_reason: 'the build failed' })
+
+    expect(store.get(id)?.subagent_status).toBe('failed')
+  })
+
   test('a run with no subagent status stays null', async () => {
     const { store, id } = await runAt(null)
 
@@ -473,9 +490,11 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
     // clauses that DO. Omitting `failure_reason` makes `params` one shorter, and
     // this is not a rare shape: the board X-cancel (`work-board-surface.ts`) and
     // `/code stop` (`code-command.ts`) BOTH terminate without a reason, so two of
-    // the four production callers take this branch. An off-by-one here would be
-    // silent — the timestamp would land in `phase`, or the phase in a column
-    // nothing asserts on — so pin the columns individually, not just the status.
+    // the four production callers take this branch. An off-by-one would either
+    // fail LOUDLY (a timestamp bound to `phase` violates 0077's phase CHECK) or
+    // land QUIETLY in a column nothing asserts on — `failure_reason` being the one
+    // this shape would actually hit — so pin the columns individually rather than
+    // trusting the status assertion plus the CHECK to catch every shift.
     const { store, id } = await runAt('running')
     await store.update(id, { failure_reason: 'pre-existing reason' })
     const before = store.get(id)!.last_advanced_at

@@ -495,16 +495,20 @@ export class TridentRunStore {
       // rationale here. #143's harvest/terminal gate (`orchestrator.ts` step (1)/(1a))
       // and orphan recovery are both UNREACHABLE on a terminal row: `step()` returns
       // early on `isTerminalPhase(run.phase)` before either one. The hang watchdog
-      // keys on `last_advanced_at`, not on this column. What IS load-bearing is the
-      // CRASH VETO on the two write paths — `update()`'s `AND subagent_status IS NOT
-      // 'crashed'` (above) and `saveIfActive()`'s `AND (subagent_status IS NOT
-      // 'crashed' OR ? = 'crashed')` (below) — plus every human or tool read of a
-      // finished row, which is where the false claim was first spotted.
+      // keys on `last_advanced_at`, not on this column. What IS load-bearing is
+      // `update()`'s CRASH VETO (`AND subagent_status IS NOT 'crashed'`, above) —
+      // `update()` is the ONE writer with no `phase NOT IN (terminal)` predicate, so
+      // on a terminal row its veto is the only thing latching a crash. NOT
+      // `saveIfActive()`'s equivalent veto (below): that statement already carries
+      // `phase NOT IN (terminal)`, so it cannot land on a terminal row whatever this
+      // column says, and its veto is unreachable here. Beyond `update()`, the readers
+      // that matter are every human or tool read of a finished row, which is where
+      // the false claim was first spotted.
       //
       // ONLY A LIVE CLAIM IS CLEARED ('running' / 'pending'), and that restriction is
       // load-bearing: nulling unconditionally would erase a 'crashed' marker whenever
       // anything terminated an already-crashed run as 'failed', silently disarming
-      // both crash vetoes above while looking like a cleanup.
+      // `update()`'s veto while looking like a cleanup.
       // 'completed'/'failed'/'crashed' are OUTCOMES worth keeping; 'running' and
       // 'pending' are the only values that ASSERT a child is in flight, so they are
       // the only ones a terminal transition has any business touching.
@@ -519,9 +523,12 @@ export class TridentRunStore {
       // `/code stop` and board-cancel supply no reason at all.
       //
       // DURABILITY: this write alone is not enough. Cancelling does not kill the
-      // detached workflow, whose next checkpoint would put 'running' straight back —
-      // so `trident/checkpoint.sh` carries the matching `phase NOT IN (terminal)`
-      // guard, and the two halves must stay in sync.
+      // detached workflow (rjunee/neutron#177 — it keeps running to completion),
+      // whose next checkpoint would put 'running' straight back — so
+      // `trident/checkpoint.sh` freezes the same two liveness columns on a terminal
+      // row, and the two halves must stay in sync. It freezes ONLY those two: the
+      // orphan's branch/pr/result still land there, because while #177 stands they
+      // are the only trail back to a PR it opened after the cancel.
       sets.push(
         `subagent_status = CASE WHEN subagent_status IN ('running', 'pending') THEN NULL ELSE subagent_status END`,
       )
