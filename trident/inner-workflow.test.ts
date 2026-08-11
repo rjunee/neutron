@@ -347,7 +347,10 @@ function loadRealGate(): {
   enforceCrossModelGate: (
     s: unknown,
     peers: unknown[],
-  ) => { verdict: string; findings: Array<{ kind?: string; title?: string }> } | null
+  ) => {
+    verdict: string
+    findings: Array<{ kind?: string; title?: string; severity?: string; evidence?: string }>
+  } | null
   deferredCrossModelPeers: (statuses: unknown) => Peer[]
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
