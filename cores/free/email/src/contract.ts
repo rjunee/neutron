@@ -220,6 +220,47 @@ export interface GmailThreadModifyResult {
 }
 
 /**
+ * MESSAGE-label mutation input (Gmail's `users.messages.modify`). Distinct
+ * from `GmailThreadModifyInput` on purpose: the pipeline archives / labels ONE
+ * message, and applying that to the whole thread would archive a conversation
+ * because one of its messages was bulk mail.
+ *
+ * `account_id` names WHICH connected account owns the message — a merged inbox
+ * has no other way to route a write, since Gmail ids are per-account. Ignored
+ * by single-account clients.
+ */
+export interface GmailMessageModifyInput {
+  message_id: string
+  add_label_ids: readonly string[]
+  remove_label_ids?: readonly string[]
+  account_id?: string
+}
+
+export interface GmailMessageModifyResult {
+  message_id: string
+  /** Final label set on the message after the modify call. */
+  label_ids: string[]
+}
+
+/**
+ * Generalized label-ensure input: any label NAME, not just the per-project
+ * `Neutron/<project_id>` shape `ensureProjectLabel` mints. The pipeline's
+ * processed label (`Neutron/processed`) is instance-level and belongs to no
+ * project.
+ */
+export interface GmailEnsureLabelInput {
+  name: string
+  account_id?: string
+}
+
+/**
+ * The label the pipeline stamps on every message it has handled. Instance-
+ * level (no project segment) — it marks "Neutron has seen this", which is a
+ * property of the mailbox, not of a project.
+ */
+export const PROCESSED_LABEL_NAME = 'Neutron/processed'
+
+/**
  * Backend contract every GmailClient implementation satisfies. The
  * shape mirrors the MCP tool inputs the manifest declares (list /
  * read / search / draft / send) — `summarize` is implemented at the
@@ -269,11 +310,24 @@ export interface GmailClient {
    */
   ensureProjectLabel(input: GmailLabelEnsureInput): Promise<GmailLabelEnsureResult>
   /**
+   * Ensure an ARBITRARY Gmail user-label exists, by name. Same create-first /
+   * list-and-match idempotency `ensureProjectLabel` has (which now delegates
+   * here); `label_name` in the result echoes `input.name`. The pipeline uses
+   * it for the instance-level `Neutron/processed` label.
+   */
+  ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult>
+  /**
    * Apply / remove labels on a Gmail thread. Used by the draft-policy
    * layer to atomically add `INBOX + IMPORTANT + UNREAD` (+ optionally
    * `Neutron/<project_id>`) to a freshly-created draft's thread.
    */
   modifyThread(input: GmailThreadModifyInput): Promise<GmailThreadModifyResult>
+  /**
+   * Apply / remove labels on a single MESSAGE (`users.messages.modify`). The
+   * pipeline's archive step is `add Neutron/processed, remove INBOX` on the
+   * one message — never on its thread.
+   */
+  modifyMessage(input: GmailMessageModifyInput): Promise<GmailMessageModifyResult>
   /**
    * `listMessages`, plus the per-account outcome of the read. Present ONLY on
    * the fan-out client — a single-backend client has nothing to report.

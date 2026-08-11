@@ -2,6 +2,99 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-11 — an important email now reaches the owner's chat within five minutes
+
+Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation
+P1 (SPEC.md § "Email Core consolidation"; plan
+`docs/plans/2026-08-06-email-core-consolidation-plan.md` § 5-6).
+
+**The composition seam is `open/composer.ts`.** A new
+`CompositionInput.email_pipeline` bundle is assembled next to `tasks:
+tasksConfig` and turned into a cron job + handler on the shared registries by
+`gateway/composition/build-core-modules.ts` (tasksModule init, immediately after
+the proactive block), through the new `gateway/cores/email-pipeline-wiring.ts`.
+The bundle is where the four things the Core cannot reach for itself are
+threaded: `deliver` (the ONE out-of-turn chat seam), the `PushDispatcher`,
+`readOwnerTimezone`, and the substrate one-shot LLM. Registration is the
+`registerIdleNudgeSweepCron` shape verbatim — `email-pipeline-poll`,
+`{kind:'interval_ms', interval_ms:300000}`, `skip_if_running:true`.
+
+**Chat is the guaranteed surface; push is alongside, never instead.**
+Escalations post through `deliver(topic_id, {durability:'reply'})` onto
+`appWsTopicId(OWNER_USER_ID)` — the owner's BARE app topic, the one topic the
+client both binds and hydrates. That is the exact discipline the PR #105
+deliver-to-nobody incident produced, and it is what makes the escalation
+survive an offline device: the durable row is written before any live push is
+attempted. `PushDispatcher.pushAll` is then fired in its own try/catch, and its
+outcome NEVER touches `escalated_at`. Marking an escalation delivered because a
+push returned would silently swallow every escalation on a box with zero
+registered devices — which, until PR #114's self-heal, was every box.
+
+**Most mail classifies with no model at all.** `src/pipeline/classify.ts` is a
+deterministic-first cascade: owner `sender_rules` (exact address beats domain,
+`protected` rules are important and immune to everything below), then three
+importance patterns (authentication code / billing action / deadline), then the
+mass-mailer downgrade (an `unsubscribe` affordance or `CATEGORY_PROMOTIONS`
+forces `newsletter`, not-important), then the learned `sender_cache`, then the
+LLM, then a plain default. The ordering is load-bearing twice: a "payment
+failed" notice with a marketing footer stays important, and bulk mail — the bulk
+of an inbox — never reaches the model. The LLM seam is the substrate one-shot
+caller ONLY (`buildOneShotSubstrateLlm`, now exported); there is no provider
+dependency and no new secret. A `null` LLM or a throwing one falls through to
+the default, so an LLM-less box degrades instead of failing a tick.
+
+**Turning it on does not escalate a decade of backlog.** The first tick stamps
+the `go_live_after` checkpoint. Mail older than it is archived (processed label
+added, `INBOX` removed) and recorded with `category NULL` — the classifier is
+never invoked on it, which is why the pre-cutoff row has no verdict to report.
+An escalated message deliberately KEEPS `INBOX` (the owner still has to act on
+it in their mail client), so the label set cannot double as "handled"; the row
+in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
+failed chat delivery increments `escalation_attempts`, records `last_error`, and
+is retried by the next tick's resume step under an attempt cap.
+
+**The sidecar is instance-level, with its own migration tree.**
+`<owner_home>/email/pipeline.db`, opened `openSidecar` +
+`applyProjectScopedMigrations` exactly like `cache.ts:328-329` but with no
+`project_id` and no `ProjectSidecarResolver` — the inbox is instance-scoped
+because the multi-account client merges accounts into one stream. The tree is
+`cores/free/email/migrations-pipeline/0001_email_pipeline.sql` and it starts at
+0001, not 0002: a migration namespace is per-DB-FILE
+(`migrations/runner.ts:58-63`), and reusing the per-project cache tree would
+drag `triage_cache` into the pipeline DB. `sender_rules` ships EMPTY — there is
+no seed row anywhere in the tree, because every rule is owner data and lands at
+runtime only (P2.5's survey/interview, or the P4 importer).
+
+**Contract additions.** `modifyMessage` (`users.messages.modify`) and a
+generalized `ensureLabel({name})` on both Gmail backends and the multi-account
+router. `modifyMessage` is deliberately message-scoped rather than
+thread-scoped: archiving a whole conversation because one of its messages was
+bulk mail is a data-loss-shaped bug. The router honours the `account_id` the
+fan-out already stamps on every row, so a write derived from a read addresses
+the mailbox the message actually lives in; without an id it falls back to the
+same by-id probe `getMessage` uses. The former private
+`ensureLabelImpl(project_id)` is now `ensureLabelByName(name)` and
+`ensureProjectLabel` delegates to it — one mechanism, two callers.
+
+**Tests + mutation results.** Four named mutations, each verified red by hand
+and reverted: inverting the `has_unsubscribe` downgrade reds two
+`pipeline-classify.test.ts` arms; an escalation that fires but says nothing
+(boilerplate body) reds two arms across `pipeline-poller` / `pipeline-dedup`;
+removing the `hasEmail` skip reds three dedup arms and removing the
+`escalated_at IS NULL` guard reds the resume arm; dropping the `go_live_after`
+check reds six poller arms. The producer side is pinned too:
+`open/__tests__/open-email-pipeline-wiring.test.ts` boots the REAL composer and
+reads `composition.email_pipeline`, so deleting the composer block reds rather
+than shipping a declared capability nobody wires (the ISSUES #439/#440 lesson).
+Every fixture address is `*.example.com`. Incidental: the
+`open-composition-fields-characterization` expected-key list was already stale
+for `cores_oauth_broker_surface` on `main`; that one line is fixed here so the
+guard is green again.
+
+**Out of scope, deliberately:** the twice-daily brief/digest, the
+`email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
+fan-out migration. Those are P2/P3.
+
 ## 2026-08-06 — push registration self-heals on foreground, so a signed-in device stops going dark
 
 Branch `fix/push-registration-self-heal`. ISSUES #487 (the residual its

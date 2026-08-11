@@ -132,10 +132,20 @@ const EXPECTED_COMPOSITION_KEYS = [
   // (`connect/surface-gate.ts`) — see `open-connect-served.test.ts`.
   'connect_api',
   'cores',
+  // PRE-EXISTING INVENTORY DRIFT, fixed here: the composer has set this field
+  // since the Cores OAuth broker landed, but the expected-key list was never
+  // updated, so this characterization was already red on `main` before the
+  // email pipeline touched it.
+  'cores_oauth_broker_surface',
   'create_project',
   'cron_jobs',
   'db',
   'doc_search',
+  // Email Core consolidation P1 — the email pipeline's deps bundle. Its
+  // presence HERE is what proves the cron is actually registered on a real
+  // boot: without the field, `build-core-modules.ts` skips registration and
+  // nothing ever polls the inbox.
+  'email_pipeline',
   'heartbeat_tracker',
   'import_resume_handler',
   'import_upload_handler',

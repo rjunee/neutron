@@ -336,6 +336,7 @@ import {
 import {
   GOOGLE_CLIENT_ID_ENV,
   GOOGLE_CLIENT_SECRET_ENV,
+  buildOneShotSubstrateLlm,
 } from '@neutronai/gateway/cores/mount-open-cores.ts'
 import { ensureKey } from '@neutronai/auth/secrets-store.ts'
 import { createAppLauncherSurface } from '@neutronai/gateway/http/app-launcher-surface.ts'
@@ -5258,6 +5259,37 @@ export function buildOpenGraphComposer(
       ...(init_ritual_planner !== undefined ? { init_ritual_planner } : {}),
       // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
       tasks: tasksConfig,
+      // Email Core consolidation P1 — THE COMPOSITION SEAM for the email
+      // pipeline. `build-core-modules.ts` (tasksModule init) turns this bundle
+      // into the `email-pipeline-poll` cron job + handler on the shared
+      // registries. Everything the Core cannot reach for itself is threaded
+      // here, and ONLY here:
+      //   - `deliver` (:2385) — the ONE out-of-turn chat seam. Escalations post
+      //     with durability 'reply' onto `reminderGeneralTopic` (:2436), the
+      //     owner's BARE `app:<user>` topic: the exact topic discipline the
+      //     PR #105 deliver-to-nobody incident produced. Chat is the GUARANTEED
+      //     surface.
+      //   - `push_dispatcher` (:3092) — best-effort mobile push ALONGSIDE chat,
+      //     never instead of it. A zero-device box still gets the chat post.
+      //   - the substrate one-shot LLM — the ONLY model seam (no provider dep,
+      //     no new secret). Null on an LLM-less box, where the cascade
+      //     classifies deterministically instead of crashing.
+      //   - `readOwnerTimezone` — accepted now for P2's owner-local brief
+      //     windows; the P1 tick body is event-driven and does not read it.
+      email_pipeline: {
+        gmail: coresWiring.gmailClient,
+        owner_home,
+        project_slug,
+        deliver,
+        escalation_topic_id: reminderGeneralTopic,
+        push: push_dispatcher,
+        llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
+        resolveTimezone: (slug: string): string | undefined =>
+          readOwnerTimezone(db, slug) ?? undefined,
+        register_cleanup: (fn: () => void): void => {
+          realmodeCleanups.push(fn)
+        },
+      },
       // F4 — real heartbeat source (pulsed by the gateway tick via
       // `on_gateway_tick`), replacing the never-stale `() => Date.now()` stub.
       heartbeat_tracker: heartbeatPulse,

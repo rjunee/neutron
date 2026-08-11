@@ -53,6 +53,7 @@ import {
   type GmailClient,
   type GmailDraftInput,
   type GmailDraftResult,
+  type GmailEnsureLabelInput,
   type GmailGetInput,
   type GmailLabelEnsureInput,
   type GmailLabelEnsureResult,
@@ -61,6 +62,8 @@ import {
   type GmailListResult,
   type GmailMessageFull,
   type GmailMessageMeta,
+  type GmailMessageModifyInput,
+  type GmailMessageModifyResult,
   type GmailSearchInput,
   type GmailSendInput,
   type GmailSendResult,
@@ -161,6 +164,19 @@ export function buildMultiAccountGmailClient(
     const accounts = await accountsOrThrow()
     // Non-null: accountsOrThrow guarantees a non-empty list.
     return buildClient(accounts[0] as GmailAccountDescriptor)
+  }
+
+  /**
+   * The client for a NAMED account, or null when no connected account carries
+   * that id. The pipeline stamps `account_id` onto every row it reads, so a
+   * write derived from a read can address the account the message actually
+   * lives in — writing it to the primary would label (or archive) nothing, or
+   * worse, the wrong mailbox's message with a colliding id.
+   */
+  async function byAccountId(account_id: string): Promise<GmailClient | null> {
+    const accounts = await accountsOrThrow()
+    const match = accounts.find((a) => a.account_id === account_id)
+    return match === undefined ? null : buildClient(match)
   }
 
   /** The account-tag fields for one account. */
@@ -335,10 +351,29 @@ export function buildMultiAccountGmailClient(
     ): Promise<GmailLabelEnsureResult> {
       return await (await primary()).ensureProjectLabel(input)
     },
+    async ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult> {
+      // A label id is per-account, so the pipeline ensures the processed label
+      // once PER ACCOUNT and passes the account it is about to write to.
+      const targeted =
+        input.account_id !== undefined ? await byAccountId(input.account_id) : null
+      return await (targeted ?? (await primary())).ensureLabel(input)
+    },
     async modifyThread(
       input: GmailThreadModifyInput,
     ): Promise<GmailThreadModifyResult> {
       return await (await primary()).modifyThread(input)
+    },
+    async modifyMessage(
+      input: GmailMessageModifyInput,
+    ): Promise<GmailMessageModifyResult> {
+      const targeted =
+        input.account_id !== undefined ? await byAccountId(input.account_id) : null
+      if (targeted !== null) return await targeted.modifyMessage(input)
+      // No account named (or an id no longer connected): fall back to the
+      // by-id probe — the same walk `getMessage` uses, so a message in the
+      // third account is still labelled rather than 404-ing against the first.
+      const { value } = await byId((client) => client.modifyMessage(input))
+      return value
     },
   }
 }
