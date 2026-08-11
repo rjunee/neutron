@@ -135,6 +135,20 @@ recorded" — a distinct outcome, still red. Run it on its own:
 bun scripts/ci/trident-verdict.ts --self-test
 ```
 
+## Three failure vocabularies, deliberately distinct
+
+The gate can be red for three different reasons and says which:
+
+| output | means |
+|---|---|
+| `no trident verdict recorded` | the PR genuinely has no verdict for this head |
+| `THE LOOKUP IS BROKEN` | the parser failed its own control; nothing was concluded |
+| `could not READ this PR` | the GitHub API call failed; nothing was concluded |
+
+Collapsing any two of these is how "my reader is broken" gets acted on as "your
+branch is unreviewed". All three exit 1 — *"I could not check"* must never be
+worth more than a failed check — and all three print the redeeming command.
+
 ## The bypass: `TRIDENT_BYPASS`
 
 Put a line at **column 0** in the head commit's message:

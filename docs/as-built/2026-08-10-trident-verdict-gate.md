@@ -69,13 +69,27 @@ same reason — the gate's own hint prints it indented and placeholder-shaped.
 site, with the GitHub API faked at its `fetchJson` seam. Testing only the pure
 parser would have stayed green through three of the mutants below.
 
-**Ten mutants applied to the gate, each caught, source restored byte-identical:**
+**Seventeen mutants applied to the gate, each caught, source restored
+byte-identical.** The first ten:
 accepting a PR with no verdict · keying the verdict off anything but the head SHA
 · reading a hedge (`ran: yes (backgrounded)`) as `true` · last-line-wins on a
 duplicate key · dropping the redeeming command from the failure output · letting
 an empty bypass reason through · believing a negative from a broken lookup ·
 accepting a partial head SHA · failing open when the PR number is absent ·
-never requiring mutation evidence.
+never requiring mutation evidence. And seven more: an indented or quoted fence
+counting as a verdict · an indented bypass marker arming the hatch · oldest
+verdict winning instead of newest · accepting a `<...>` placeholder value · the
+re-run hint forgetting which run to re-run · an unreadable API reading as a
+verdict result · an API failure echoing a stack instead of a message.
+
+**One mutant SURVIVED the first battery, and that is the most useful line in this
+entry.** Placeholder rejection had no test: the "own FAIL output pasted back"
+test could not reach it, because the printed template is indented and dies on the
+fence check first. The hole it left was specific — every scalar has a type rule
+that catches a placeholder (a non-40-hex `commit`, a non-integer count) but
+**mutation entry values are free text**, so a template pasted at column 0 would
+have satisfied the mutation clause with three `<...>` strings. Two tests were
+added for exactly that case.
 
 **Live positive control against the real producer.** The verdict format is
 already emitted by the review loop on another repository, so a real comment was
@@ -83,6 +97,16 @@ fetched from the live API and pushed through this parser: it parsed, cleared the
 bar against its own SHA, and failed against a different SHA. That sample is
 deliberately NOT committed as a fixture — it carries another repository's
 internals — so the in-tree control is a structurally equivalent neutral fixture.
+
+**The live run found a real defect the fixtures could not.** Pointed at a real PR
+with a head SHA the API does not have, `gh` exited 422, the throw escaped the
+entry point, and the gate printed a stack trace with **no redeeming command** —
+the one output it must never produce, since a red check whose message an author
+cannot act on is how a gate earns a bypass habit. The throw is now caught, named
+as "could not READ this PR" rather than "no verdict recorded" (two different
+facts, two different messages), reduced to the error's first line, and it still
+redeems. Still exit 1: "I could not check" must never be worth more than a failed
+check. Two further mutants cover it.
 
 **Behaviour probe on the hook**, not a text assertion: the hook was run with a
 real ref line on stdin. It prints the redeeming command with the live branch name
