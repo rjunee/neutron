@@ -216,16 +216,59 @@ describe('mobile palettes clear AA on every ground', () => {
       }
     });
 
-    it(`${name}: ink on the media VEIL clears AA, and does not follow the theme`, () => {
-      // `veil` is a dark strip over a thumbnail. Its ink is fixed light in both
-      // palettes because an image is not one of this palette's grounds — and the
-      // reason this assertion exists is that the caption originally read
-      // `text_primary`, which is near-black in light mode, i.e. the light theme
-      // would have erased a caption that dark mode rendered fine.
-      const ratio = contrastRatio(c.veil_ink, '#000000');
-      expect(ratio, `${name} veil ink ${report(c.veil_ink, '#000000')}`).toBeGreaterThanOrEqual(
-        AA_TEXT,
+    it(`${name}: ink on the media VEIL clears AA over the WORST image behind it`, () => {
+      // `veil` is a dark strip over a thumbnail, and a thumbnail can be any colour —
+      // so the ground is the veil COMPOSITED over the lightest possible image, which
+      // is the worst case for light ink and the only honest thing to measure.
+      // `rgba(0,0,0,0.7)` over white composites to #4d4d4d.
+      //
+      // Measuring against pure black instead would be the best case dressed up as a
+      // test: it would pass for any light ink and could never fail.
+      const VEIL_OVER_WHITE = '#4d4d4d';
+      expect(c.veil, 'the veil must be a 0.7-alpha black for that composite to hold').toBe(
+        'rgba(0,0,0,0.7)',
       );
+
+      const ratio = contrastRatio(c.veil_ink, VEIL_OVER_WHITE);
+      expect(
+        ratio,
+        `${name} veil ink ${report(c.veil_ink, VEIL_OVER_WHITE)}`,
+      ).toBeGreaterThanOrEqual(AA_TEXT);
+
+      // AND the negative half, which is the whole reason the token exists: the ink
+      // this REPLACED fails there. `button-primitives.tsx` inked the caption with
+      // `text_primary`, which is near-black in light mode — 2.01 on that composite,
+      // so the light theme would have erased a caption dark mode rendered fine.
+      if (palette.scheme === 'light') {
+        expect(
+          contrastRatio(c.text_primary, VEIL_OVER_WHITE),
+          'text_primary on a veil should FAIL — that is why veil_ink exists',
+        ).toBeLessThan(AA_TEXT);
+      }
+    });
+
+    it(`${name}: the two theme-INVARIANT fills really are invariant`, () => {
+      // `scrim` and `veil` are the same value in both palettes on purpose, and a
+      // token that is "the same by accident" is indistinguishable from one that is
+      // the same by decision. This is what records the decision mechanically, so a
+      // later edit to one palette only has to fail here rather than be noticed.
+      expect(DARK_PALETTE.colors.scrim).toBe(LIGHT_PALETTE.colors.scrim);
+      expect(DARK_PALETTE.colors.veil).toBe(LIGHT_PALETTE.colors.veil);
+      expect(DARK_PALETTE.colors.veil_ink).toBe(LIGHT_PALETTE.colors.veil_ink);
+      // ...and every OTHER colour token differs, so "invariant" is a short list and
+      // not a creeping habit.
+      const invariant = (Object.keys(DARK_PALETTE.colors) as Array<keyof typeof c>).filter(
+        (k) => DARK_PALETTE.colors[k] === LIGHT_PALETTE.colors[k],
+      );
+      expect(invariant.sort()).toEqual([
+        'danger_ink',
+        'scrim',
+        'shadow',
+        'user_bubble',
+        'user_ink',
+        'veil',
+        'veil_ink',
+      ]);
     });
 
     it(`${name}: every work-phase tag label clears AA on its ground`, () => {
