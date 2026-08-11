@@ -21,9 +21,12 @@
  *     refills faster than it drains, so there is nothing to project. The line is
  *     omitted entirely rather than shown empty, because an empty "caps at" row
  *     reads as a failure to compute.
- *   - `account_label: null` — nothing on this box can name which account the
- *     reading belongs to, because the credential is swapped by a process outside
- *     it. Renders as "active credential". It must NEVER guess a name.
+ *   - `account_label: null` — no sidecar names the account behind this reading, or
+ *     the one on disk describes a token the box is not holding. Renders as "active
+ *     credential". It must NEVER guess a name. (This used to say the box *cannot*
+ *     name the account at all; it can, when whatever swaps the credential writes a
+ *     sidecar next to it — see `open/credential-label.ts`. Null is now the unlabelled
+ *     and the REFUSED case, and the two are deliberately indistinguishable here.)
  *
  * A rejected fetch resolves to "unreachable", never to an empty series: an older
  * gateway does not mount the route, and a client that drew "0% used" from a 404

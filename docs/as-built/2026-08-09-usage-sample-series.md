@@ -51,6 +51,14 @@ gains the dimension without a migration if the rotator ever writes a label; unti
 the card says "active credential". **An inferred account name shown as a measurement
 would be worse than no name at all.**
 
+> **Superseded on 2026-08-10** — the "if the rotator ever writes a label" half is now
+> built: `open/credential-label.ts` reads a `.credentials.meta.json` sidecar and fills the
+> column, using the label only when its fingerprint matches the token actually resolved.
+> The paragraph above stands as the state on 2026-08-09 and is left as written, but do not
+> read it as current: an instance *can* name the account now, when something names it for
+> the instance. The last sentence is the part that did not change, and is the whole reason
+> the fingerprint exists. See `docs/as-built/2026-08-09-credential-account-label.md`.
+
 A sample with nothing measurable in it is not written: all-null rows would make "no
 data" indistinguishable from "we measured nothing", which are different facts. And a
 failed or unauthorized probe writes nothing, because it learned nothing about

@@ -8835,3 +8835,157 @@ test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the fail
 specific: a guard that exists in TWO independently-built copies gets one copy's evidence
 pasted onto the other's test, and the untested copy is then defended by a citation. The
 control is mechanical — run the named mutant and read WHICH tests go red, not how many.
+
+## 2026-08-09 — Naming the account behind a usage reading
+
+The `account_label` column has been null on every row since it was created. This reads an
+optional `.credentials.meta.json` sidecar beside the credential, written by whatever swaps
+it, and uses the label ONLY when its fingerprint matches the token actually resolved.
+
+A missing label is harmless — it renders "active credential". A STALE one is not: it would
+attach the previous account's name to the current account's reading and send the owner to
+move quota away from an account that was never under load. Mismatch degrades to null.
+
+Token and label come from ONE `resolveActiveCredential` call, so a swap landing between two
+calls cannot pair one account's reading with another's name.
+
+The instructive mutant: dropping the fingerprint check fails immediately, but making the
+MONITOR persist a null label while the resolver stayed correct passed everything — "resolved
+but never carried", one layer along from "built but never wired". Now covered.
+
+Nothing writes a sidecar yet, so every label is still null and behaviour is unchanged.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the credential fingerprint is scrypt (CodeQL `js/insufficient-password-hash`)
+
+`credentialFingerprint` hashed the live OAuth token with a bare SHA-256; CodeQL flagged it
+and, being a required check on Open's `main`, blocked the PR. The finding is right in form
+— a bare digest of a credential is one dictionary from reversible — and while it is not
+exploitable here (long random tokens, 0600 sidecar beside the credentials file), that
+rests on three facts a later change could remove. Now `scryptSync` at `N=4096, r=8, p=1`,
+output shape unchanged at 12 hex. The salt is fixed because two processes must derive the
+same value sharing only the token; it buys domain separation and nothing more, and says so.
+
+The header's prose description of the algorithm was deleted: a cross-process contract
+spelled out in prose drifts silently, and a writer trusting the stale line would produce a
+digest the reader rejects with no symptom but missing labels. Writers import the function.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the sidecar contract drifted in the DOCS, which are its only interface
+
+The scrypt change corrected the algorithm in `open/credential-label.ts` and left both
+writer-facing docs stating a recipe the reader silently rejects: the as-built detail file's
+§ The sidecar still printed `sha256(token)`, and
+`docs/plans/2026-08-09-model-usage-dashboard.md` Tier 1 still described a bare
+`{"label": "acct-2"}` with no fingerprint at all.
+
+Half of this contract runs in ANOTHER PROCESS and has nothing but the docs, so a stale
+sentence there is a defect in the feature, not a typo. Proven by following each documented
+recipe literally against the real reader: sha256 slice → null, bare label → null,
+`credentialFingerprint` → `"acct-2"`. The symptom of getting it wrong is that labels never
+appear, which is indistinguishable from the ordinary unlabelled case — so nobody would have
+found it from the outside.
+
+Both docs now point at the function instead of restating an algorithm, and a test pins the
+CONTRACT statements — the fenced JSON block and the Tier-1 bullet — rather than the prose,
+because the as-built file legitimately discusses SHA-256 and scrypt in its history section
+and a guard tripping on that would be a false positive on the document it protects. Each
+stale form was restored as a mutant and killed the test.
+
+📌 **The 📌 note recording a lesson is not exempt from the lesson.** This drifted a second
+time inside the very change that wrote "a cross-process contract described in prose will
+drift", and it survived in the MORE load-bearing of the two places: a rotator author reads
+the sidecar doc, not the module header. Fixing the code and leaving the doc is not half a
+fix — where the only consumer is an external writer, the doc IS the interface.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the label reached the monitor and stopped there: the PRODUCTION sink was unpinned
+
+Review round on the account-label reader. Three defects, none of them in the refusal itself
+— that part holds: deleting the fingerprint check fails
+`REFUSES a label whose fingerprint describes a different token` immediately.
+
+**The surviving mutant was one layer past the one the feature was proud of catching.** The
+commit message records that "the MONITOR persists a null label" passed the whole suite and
+is now killed. It is. But the tests that prove the label is *carried* supply their OWN
+`onSample`, so they pin the monitor and say nothing about the sink that actually runs.
+Rewriting `open/composer.ts` to name columns one at a time —
+`record({ pool, ts, session, weekly })` instead of `record({ pool, ...reading })` — dropped
+`account_label` on every production row and passed **36/36** tests across all three of the
+feature's files. Repo-wide: only `open/__tests__/usage-sample-persistence.test.ts` covers
+that wiring at all. Its composer guard asserted `usageSamplesStore.record(` was *present*,
+never that the reading rode along whole. Now it asserts the spread, and the mutant dies.
+
+📌 **A test that supplies its own seam proves the layer above the seam, not the seam.** Both
+mutants here are the same "resolved but never carried" shape; killing it at the monitor made
+the next copy of it downstream *look* covered, because the assertion that died was about a
+sink the test wrote itself.
+
+**`slice(at, -1)` is not a failure, it is a silent widening.** The doc-drift guard added to
+stop the sidecar contract rotting a third time scoped itself with
+`doc.slice(at, doc.indexOf(to, …))` and checked only that the START was found. Renaming the
+plan's Tier-2 heading made the terminator unfindable, `indexOf` returned -1, and the
+"Tier 1 bullet" grew from **982 to 11328 characters** — the rest of the document — with all
+three assertions still green. Verified both ways: the mutant passes 15/15 against the
+original helper and fails against the guarded one. Same pattern fixed at both composer-block
+slice sites.
+
+**The scrypt cost docblock described a system that does not exist.** It claimed N=4096 stayed
+"invisible on the tick" and that ~100 ms was what the *default* N would have cost. Measured
+under bun: **~73 ms steady-state, ~280 ms on the first call, synchronous, on the event
+loop**; the default N=16384 is ~534 ms, and N=1024 is the setting that would cost the "few
+milliseconds" the comment implied. What actually bounds the cost is placement, not size —
+the fingerprint is computed only after a sidecar is found and parsed, so no box pays it
+today. Left at N=4096 deliberately rather than changing a security parameter inside a review
+round; the comment now carries the real numbers so whoever ships the writer decides with
+them. Behaviour unchanged: comments and tests only.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-11 — the account-label reader's REAL path had no positive test (review round 2)
+
+Every positive test for the sidecar injected its own reader. That left the two things which
+can only ever be wrong in production asserted by nothing: WHERE the sidecar is looked for,
+and whether the default reader is wired to look there at all. The one test that used the
+default reader pointed at a directory that does not exist and expected null — an assertion a
+completely wrong path satisfies exactly as well as a correct one.
+
+Two tests now write real files into a temp dir and pass no deps: one proves a good sidecar is
+found and used, one proves a STALE sidecar is refused *through the same wiring that accepts
+the good one*. The refusal is the whole value of the feature, and until now it was only ever
+proven against a stub.
+
+Mutants run, not asserted: renaming the sidecar basename (dies), looking for it inside the
+credentials path instead of beside it (dies), and replacing the fingerprint comparison with a
+check that only rejects an empty string — the refusal replaced by a guess — which now dies at
+BOTH layers instead of only against the injected reader.
+
+**The 0600 sidecar permission was a security argument that asked nothing of anyone.** The case
+for scrypt over a bare digest cites a mode-0600 sidecar as one of three facts making a weak
+digest unexploitable, while the writer-facing contract required no permission at all. The
+reader cannot check the mode, and refusing a loose one would drop the label silently — the one
+failure mode this feature is arranged to avoid — so the requirement now lives in the contract
+where a writer reads it, and a doc guard asserts it stays there. Mutant: softening the
+requirement to prose fails the guard.
+
+**The label limit was 64 with no test at 64.** A 200-character rejection is satisfied by any
+off-by-one version of the check. Boundary covered; the `>` → `>=` mutant now dies.
+
+**Three current-state docs claimed the feature was impossible.** `docs/as-built/…-usage-sample-series.md`
+said the column is "always null today" and the instance "genuinely cannot name the account";
+both dashboard clients' docblocks said nothing on the box can name it. All true before this
+branch and false after it — the aspirational-docblock hazard in reverse. The dated entries keep
+their text with a superseded note (they are a log, not current state); the live docblocks now
+say null means *nothing named it, or the name on disk described a different token*, which is
+what the code does.
+
+Behaviour unchanged in this round: tests, comments and docs only.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
+(adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
+failed, so this is not a four-lane APPROVE and should not be read as one.

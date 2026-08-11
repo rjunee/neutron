@@ -48,6 +48,45 @@ describe('the monitor actually writes to it — the wiring, not the store', () =
    * sink, and only on a successful probe) and one on the composer's source (it supplies
    * a sink at all).
    */
+  test('THE ACCOUNT LABEL RIDES WITH THE READING, and lands on the row', async () => {
+    // The column existed and was null on every row for a release. A label that
+    // resolves correctly and is then dropped on the way to the sink is the exact
+    // "built but never carried" shape — so this asserts the value ARRIVES, not that
+    // the resolver works (which has its own tests).
+    const samples: Array<Record<string, unknown>> = []
+    const monitor = new CredentialUsageMonitor({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'tok' } as never,
+      now: () => NOW,
+      credentialDeps: { readLabel: () => 'acct-2' },
+      probe: async () => ({ kind: 'ok', reading: { session: 0.4, weekly: 0.2 } }) as never,
+      onSample: async (reading) => {
+        samples.push(reading as unknown as Record<string, unknown>)
+        await store.record({ pool: 'anthropic', ...reading })
+      },
+    })
+    await monitor.measureOnce()
+    expect(samples[0]?.['account_label']).toBe('acct-2')
+    // And on the row, because the sink writing it somewhere else would be the same
+    // defect one layer down.
+    expect(store.latest('anthropic')?.account_label).toBe('acct-2')
+  })
+
+  test('an UNLABELLED credential still records, with a null label', async () => {
+    // The ordinary case. It must not become a row that fails to write, or a label
+    // invented to fill the column.
+    const monitor = new CredentialUsageMonitor({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'tok' } as never,
+      now: () => NOW,
+      credentialDeps: { readLabel: () => null },
+      probe: async () => ({ kind: 'ok', reading: { session: 0.4, weekly: 0.2 } }) as never,
+      onSample: async (reading) => {
+        await store.record({ pool: 'anthropic', ...reading })
+      },
+    })
+    await monitor.measureOnce()
+    expect(store.latest('anthropic')?.account_label).toBeNull()
+  })
+
   test('a SUCCESSFUL probe reaches the sink, and lands in the series', async () => {
     const samples: unknown[] = []
     const monitor = new CredentialUsageMonitor({
@@ -116,10 +155,24 @@ describe('the monitor actually writes to it — the wiring, not the store', () =
       .join('\n')
     const at = code.indexOf('new CredentialUsageMonitor({')
     expect(at).toBeGreaterThan(-1)
-    const block = code.slice(at, code.indexOf('\n    })', at))
+    const end = code.indexOf('\n    })', at)
+    expect(end).toBeGreaterThan(at)
+    const block = code.slice(at, end)
     expect(block.includes('onSample:')).toBe(true)
     expect(block.includes('usageSamplesStore.record(')).toBe(true)
     expect(block.includes('usageSamplesStore.prune()')).toBe(true)
+    // AND that the real sink hands the WHOLE reading to the store instead of naming
+    // columns one at a time. `account_label` rides ON the reading, so a sink that
+    // cherry-picks `ts`/`session`/`weekly` drops it — and the label tests above use
+    // their OWN `onSample`, which means they prove the MONITOR carries the label and
+    // say nothing about the sink that runs in production. Stripping the spread out of
+    // the composer passed all 36 tests in this feature's three files before this line
+    // existed: "resolved but never carried", one layer further along than the mutant
+    // the monitor test was written to kill.
+    const recordAt = block.indexOf('usageSamplesStore.record(')
+    const recordEnd = block.indexOf('\n', recordAt)
+    expect(recordEnd).toBeGreaterThan(recordAt)
+    expect(block.slice(recordAt, recordEnd)).toContain('...reading')
   })
 
   test('the COMPOSER also gives the usage surface a way to READ the series', async () => {
@@ -137,7 +190,13 @@ describe('the monitor actually writes to it — the wiring, not the store', () =
       .join('\n')
     const at = code.indexOf('createAppUsageSurface({')
     expect(at).toBeGreaterThan(-1)
-    const block = code.slice(at, code.indexOf('\n    })', at))
+    // The terminator has to be FOUND, not just searched for — see the note on the
+    // same pattern in `credential-label.test.ts`: an unfound `indexOf` returns -1 and
+    // `slice(at, -1)` widens the block to the rest of the file, where these two
+    // strings are trivially present and the check stops checking anything.
+    const end = code.indexOf('\n    })', at)
+    expect(end).toBeGreaterThan(at)
+    const block = code.slice(at, end)
     // Scoped to the CONSTRUCT, not to an argument list or a variable name: this
     // has to survive the surface gaining another dependency.
     expect(block.includes('dashboard:')).toBe(true)

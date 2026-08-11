@@ -33,9 +33,12 @@ three are places where the wrong choice still renders and still looks plausible:
 - **`exhausts_at: null`** → the row is OMITTED. Null is the common, GOOD case, and
   a permanent "Caps out in —" trains the eye to hunt for a warning that is
   normally absent.
-- **`account_label: null`** → "active credential". The credential is swapped by a
-  process outside this instance, so nothing here can know which account a reading
-  belongs to. It never guesses.
+- **`account_label: null`** → "active credential". It never guesses. (As of
+  2026-08-10 null no longer means "unknowable": a sidecar beside the credential can
+  name the account, and null is now either *nothing named it* or *the name on disk
+  described a different token* — see
+  `docs/as-built/2026-08-09-credential-account-label.md`. The rendering is unchanged,
+  which is why the card needed no edit.)
 
 Band colours come from `@neutronai/contracts/credential-usage.ts`, the same three
 tokens the 2px divider meter uses, so the card and the hairline above it cannot

@@ -166,10 +166,17 @@ deciding where to send work must not contain a guessed measurement.
 singular display, unchanged):
 
 - **Tier 1 — a label.** The rotator writes `<CLAUDE_CONFIG_DIR>/.credentials.meta.json`
-  — `{"label": "acct-2"}` — atomically with each swap. An opaque owner-chosen string,
-  never an email. Open reads it on the same tick it reads the token and stamps
-  `account_label` onto pool samples. Cost to the rotator: a few lines. Buys: per-account
-  gauge chips and honest "acct-2 is the one that's nearly capped".
+  — `{"label": "acct-2", "fingerprint": "…"}` — atomically with each swap. An opaque
+  owner-chosen string, never an email. Open reads it on the same tick it reads the token
+  and stamps `account_label` onto pool samples. Cost to the rotator: a few lines. Buys:
+  per-account gauge chips and honest "acct-2 is the one that's nearly capped".
+  **The `fingerprint` is REQUIRED and is not optional politeness:** the label is used only
+  when it demonstrably describes the token in hand, so a sidecar left behind by the
+  previous swap degrades to null instead of naming the wrong account. It must be produced
+  by calling `credentialFingerprint` (`open/credential-label.ts`, importable through
+  `vendor/neutron`) — never reimplemented from prose, which is how this bullet came to
+  describe a sidecar the reader silently rejects. As built:
+  `docs/as-built/2026-08-09-credential-account-label.md`.
 - **Tier 2 — the fleet feed.** The rotator already probes every account on its own tick
   to decide rotation; if it also appends
   `{ts, label, session, weekly, session_reset_at, weekly_reset_at}` as JSON lines to
