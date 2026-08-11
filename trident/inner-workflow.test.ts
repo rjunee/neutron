@@ -12,6 +12,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { TERMINAL_PHASES } from './state-machine.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -167,11 +168,28 @@ describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
     // invocation with the UPDATE, so writes retry under lock (was 0 → a lost
     // terminal write meant no harvest until the 25m reaper).
     expect(CHECKPOINT_SH).toContain('PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET')
-    expect(CHECKPOINT_SH).toContain("WHERE id='$(sql_quote \"$run\")'")
+    // Row selection is still WHERE id — the terminal freeze lives in the SET
+    // expressions, so it never narrows which row the UPDATE addresses.
+    expect(CHECKPOINT_SH).toContain('quoted_run="$(sql_quote "$run")"')
+    expect(CHECKPOINT_SH).toContain("WHERE id='$quoted_run'")
     // Timestamps computed IN the script (Date.now unavailable in workflows);
     // both legacy inline UPDATEs unconditionally stamped last_advanced_at.
     expect(CHECKPOINT_SH).toContain('$(date -u +%FT%TZ)')
     expect(CHECKPOINT_SH).toContain('last_advanced_at=')
+  })
+
+  test("checkpoint.sh's terminal-phase set is the SAME set as state-machine.ts TERMINAL_PHASES", () => {
+    // The script is shell, so it cannot import the constant — it carries a fourth
+    // copy of the literal (store.ts TERMINAL_PHASE_SQL and run-progress.ts hold the
+    // other two). Pin it against the source of truth here, in the suite that already
+    // asserts this script's SQL as text, so the copies cannot drift: a phase added to
+    // TERMINAL_PHASES and not to the script would leave the terminal freeze blind to
+    // it, and the divergence would be invisible at runtime.
+    const literal = `('${TERMINAL_PHASES.join("', '")}')`
+    expect(literal).toBe("('done', 'failed', 'stopped')") // guards the join shape itself
+    expect(CHECKPOINT_SH).toContain(`terminal_phases="${literal}"`)
+    // ...and it is the ONLY terminal-set literal in the script (no second, stale copy).
+    expect(CHECKPOINT_SH.match(/'done'/g)?.length).toBe(1)
   })
 
   test('checkpoints forge-done, argus-approved/argus-request-changes, and fix-round-N', () => {
@@ -462,8 +480,11 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
     // 'completed' ONLY when the SAME readfile() yields non-empty text).
     expect(SRC).toContain('inner_result_file ${shSingleQuote(tmp)}')
     expect(CHECKPOINT_SH).toContain("inner_result=CAST(readfile('$f') AS TEXT)")
+    // Two nested guards, terminal freeze OUTERMOST: a cancelled run's surviving
+    // workflow records its result but never flips the liveness column to
+    // 'completed' (the result is inert on a terminal row — nothing harvests it).
     expect(CHECKPOINT_SH).toContain(
-      "subagent_status=CASE WHEN length(CAST(readfile('$f') AS TEXT)) > 0 THEN 'completed' ELSE subagent_status END",
+      "subagent_status=CASE WHEN phase IN $terminal_phases THEN subagent_status WHEN length(CAST(readfile('$f') AS TEXT)) > 0 THEN 'completed' ELSE subagent_status END",
     )
     // The harvest-ready signal is written on the SUCCESS path before returning.
     expect(SRC).toContain('await writeTerminalResult(terminalResult)')

@@ -362,3 +362,177 @@ describe('TridentRunStore', () => {
     })
   })
 })
+
+describe('terminalTransition retracts a stale in-flight claim', () => {
+  // Observed live 2026-08-10: the owner cancelled a running build and the row sat at
+  // `phase='stopped'` with `subagent_status='running'` — a finished run still
+  // presenting itself as working. Whether the child process was still alive is a
+  // separate question (usually it is — #177), and it is why the fix
+  // needs a durability half in `trident/checkpoint.sh` as well as this write.
+  //
+  // Not cosmetic, but not for the reason it is tempting to write down either: #143's
+  // harvest gate and orphan recovery never see a terminal row (`step()` returns early
+  // on `isTerminalPhase`), and the hang watchdog keys on `last_advanced_at`. The
+  // reader that IS load-bearing is the CRASH VETO on `update()` — the ONE writer
+  // with no `phase NOT IN (terminal)` predicate, so its `AND subagent_status IS NOT
+  // 'crashed'` is all that latches a crash on a terminal row (`saveIfActive()` has
+  // the same veto but also the phase predicate, so on a terminal row it is
+  // unreachable). Hence the 'crashed'-survives cases below must never regress.
+
+  // Every value migration 0077's `subagent_status` CHECK admits, plus null. The
+  // matrix below covers ALL of them: a case-by-case CASE is exactly the kind of
+  // code where one unlisted value silently takes the wrong branch.
+  async function runAt(status: 'running' | 'pending' | 'completed' | 'failed' | 'crashed' | null) {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'email-core-p1',
+      project_slug: 'neutron-open',
+      repo_path: '/repos/neutron-open',
+      task: 'build the email core',
+    })
+    if (status !== null) await store.update(run.id, { subagent_status: status })
+    // Non-empty precondition: without this the assertions below could pass on a row
+    // that never carried the claim in the first place.
+    expect(store.get(run.id)?.subagent_status).toBe(status)
+    return { store, id: run.id }
+  }
+
+  test('cancelling a RUNNING build clears the running claim, and keeps the reason', async () => {
+    const { store, id } = await runAt('running')
+
+    const { won } = await store.terminalTransition(id, {
+      phase: 'stopped',
+      failure_reason: 'cancelled via codegen_cancel',
+    })
+
+    expect(won).toBe(true)
+    const after = store.get(id)
+    expect(after?.phase).toBe('stopped')
+    expect(after?.subagent_status).toBeNull()
+    // The reason survives, so nulling the status loses no information.
+    expect(after?.failure_reason).toBe('cancelled via codegen_cancel')
+  })
+
+  test("a PENDING claim is retracted too — 'pending' asserts a child just as 'running' does", async () => {
+    // Not currently written by any production path (the orchestrator writes only
+    // running/completed/failed/crashed/null), but it is in the type and in migration
+    // 0077's CHECK, and it means "about to be in flight" — a claim, not an outcome. If
+    // a writer ever appears, a cancelled run must not be left asserting it.
+    const { store, id } = await runAt('pending')
+
+    await store.terminalTransition(id, { phase: 'stopped', failure_reason: 'cancelled' })
+
+    expect(store.get(id)?.subagent_status).toBeNull()
+  })
+
+  test('a CRASHED marker SURVIVES — this restriction is load-bearing, not incidental', async () => {
+    // Nulling unconditionally would erase 'crashed' whenever anything terminated an
+    // already-crashed run as 'failed', silently disarming `update()`'s crash veto while
+    // looking like a cleanup. NOT `saveIfActive()`'s identical veto — that statement also
+    // carries `phase NOT IN (terminal)`, so on the row this test produces it cannot land
+    // at all and its veto is unreachable (see the docblock over `terminalTransition`).
+    // 'running'/'pending' are live CLAIMS; the others are OUTCOMES.
+    const { store, id } = await runAt('crashed')
+
+    await store.terminalTransition(id, { phase: 'failed', failure_reason: 'reaped' })
+
+    expect(store.get(id)?.subagent_status).toBe('crashed')
+  })
+
+  test('a COMPLETED outcome also survives', async () => {
+    const { store, id } = await runAt('completed')
+
+    await store.terminalTransition(id, { phase: 'done', failure_reason: null })
+
+    expect(store.get(id)?.subagent_status).toBe('completed')
+  })
+
+  test("a FAILED outcome survives too — the last value the CHECK admits, and the one most easily forgotten", async () => {
+    // 'failed' is the fifth and last value in migration 0077's subagent_status
+    // CHECK, and the only one this matrix originally missed. Without it a mutant
+    // that ALSO cleared 'failed' (`IN ('running','pending','failed')`) passed the
+    // whole suite while erasing the subagent-level outcome of every failed build.
+    const { store, id } = await runAt('failed')
+
+    await store.terminalTransition(id, { phase: 'failed', failure_reason: 'the build failed' })
+
+    expect(store.get(id)?.subagent_status).toBe('failed')
+  })
+
+  test('a run with no subagent status stays null', async () => {
+    const { store, id } = await runAt(null)
+
+    await store.terminalTransition(id, { phase: 'stopped', failure_reason: 'cancelled' })
+
+    expect(store.get(id)?.subagent_status).toBeNull()
+  })
+
+  test('a LOSER transition writes NOTHING — not even a status the CASE would have cleared', async () => {
+    // The atomic guard means a second terminate finds the row already terminal and
+    // writes nothing at all. Pinning that with a 'crashed' status could not prove it:
+    // the CASE preserves 'crashed' anyway, so the assertion would pass whether the
+    // loser wrote nothing or wrote the preserving CASE. Put back the one value the
+    // CASE *would* clear — if the loser's UPDATE landed, this goes null.
+    const { store, id } = await runAt('running')
+    await store.terminalTransition(id, { phase: 'stopped', failure_reason: 'first' })
+    expect(store.get(id)?.subagent_status).toBeNull() // the winner retracted it
+    await store.update(id, { subagent_status: 'running' })
+    expect(store.get(id)?.subagent_status).toBe('running')
+
+    const second = await store.terminalTransition(id, { phase: 'failed', failure_reason: 'second' })
+
+    // Row state FIRST, deliberately: asserting `won` first would short-circuit the
+    // failure and hide which part of the loser's write leaked.
+    expect(store.get(id)?.subagent_status).toBe('running')
+    expect(store.get(id)?.phase).toBe('stopped')
+    expect(store.get(id)?.failure_reason).toBe('first')
+    expect(second.won).toBe(false)
+  })
+
+  test('with NO failure_reason — the SHORT params branch — binding is still correct', async () => {
+    // The CASE takes no bound parameter, so it sits in the SET list between two
+    // clauses that DO. Omitting `failure_reason` makes `params` one shorter, and
+    // this is not a rare shape: the board X-cancel (`work-board-surface.ts`) and
+    // `/code stop` (`code-command.ts`) BOTH terminate without a reason, so two of
+    // the four production callers take this branch. An off-by-one would either
+    // fail LOUDLY (a timestamp bound to `phase` violates 0077's phase CHECK) or
+    // land QUIETLY in a column nothing asserts on — `failure_reason` being the one
+    // this shape would actually hit — so pin the columns individually rather than
+    // trusting the status assertion plus the CHECK to catch every shift.
+    const { store, id } = await runAt('running')
+    await store.update(id, { failure_reason: 'pre-existing reason' })
+    const before = store.get(id)!.last_advanced_at
+
+    const { won } = await store.terminalTransition(id, { phase: 'failed' })
+
+    expect(won).toBe(true)
+    const after = store.get(id)!
+    expect(after.phase).toBe('failed') // not a timestamp
+    expect(after.subagent_status).toBeNull()
+    // An untouched column, so a stray bound value would show up here.
+    expect(after.failure_reason).toBe('pre-existing reason')
+    expect(Number.isFinite(Date.parse(after.last_advanced_at))).toBe(true)
+    expect(after.last_advanced_at >= before).toBe(true)
+  })
+
+  test('a preserved CRASHED latch still vetoes a later update() — the restriction is load-bearing HERE', async () => {
+    // The tempting justification for keeping 'crashed' is #143's harvest gate, and it
+    // is wrong: `step()` no-ops on an already-terminal phase
+    // (`orchestrator.ts:678-683`), so that gate is unreachable once the row is
+    // terminal. This is the path where preserving it still bites: of the writers that
+    // can reach a terminal row, `update()` is the only one that both lacks a
+    // `phase NOT IN (terminal)` guard and carries the `subagent_status IS NOT 'crashed'`
+    // veto (`store.ts:447-449`), so that veto is all that latches a crash there.
+    // (`saveIfActive` has the veto but also the phase predicate; `save` has neither, and
+    // is inert only because nothing in production calls it.) Nulling unconditionally
+    // would lift the veto — the real reason a future "simplify to NULL" must not land.
+    const { store, id } = await runAt('crashed')
+
+    await store.terminalTransition(id, { phase: 'failed' })
+    expect(store.get(id)?.subagent_status).toBe('crashed')
+
+    await store.update(id, { subagent_status: 'completed' })
+
+    expect(store.get(id)?.subagent_status).toBe('crashed')
+  })
+})

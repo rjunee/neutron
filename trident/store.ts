@@ -483,6 +483,65 @@ export class TridentRunStore {
         sets.push('failure_reason = ?')
         params.push(patch.failure_reason)
       }
+      // RETRACT A STALE IN-FLIGHT CLAIM. `subagent_status` is documented as the
+      // CURRENTLY in-flight subagent (migration 0077), so a terminal row that still
+      // says 'running' asserts something false about THIS RUN: the run is over —
+      // nothing will advance it again — and the column still presents it as working.
+      // Observed live on 2026-08-10: a cancelled run sat at `phase='stopped'` with
+      // `subagent_status='running'`.
+      //
+      // Note what is deliberately NOT claimed: that the child process is dead. It
+      // very often is not (see DURABILITY below). The column is wrong about the RUN,
+      // not necessarily about the process — which is why the fix is two-part rather
+      // than a one-line write here.
+      //
+      // WHICH READERS THIS PROTECTS — the honest list, because the obvious
+      // candidates do NOT apply and it would be easy to write a confident wrong
+      // rationale here. #143's harvest/terminal gate (`orchestrator.ts` step (1)/(1a))
+      // and orphan recovery are both UNREACHABLE on a terminal row: `step()` returns
+      // early on `isTerminalPhase(run.phase)` before either one. The hang watchdog
+      // keys on `last_advanced_at`, not on this column. What IS load-bearing is
+      // `update()`'s CRASH VETO (`AND subagent_status IS NOT 'crashed'`, above): on a
+      // terminal row it is the only thing latching a crash, because `update()` is the
+      // only writer REACHABLE on such a row that both lacks a
+      // `phase NOT IN (terminal)` predicate and carries the veto. The other two writers
+      // are each excluded for their own reason, and it is worth naming which:
+      // `saveIfActive()` (below) has the identical veto but ALSO the phase predicate, so
+      // it cannot land on a terminal row whatever this column says — its veto is
+      // unreachable here. `save()` (below) likewise has no phase predicate AND no veto
+      // at all, so it would clobber a 'crashed' latch outright — it is harmless only
+      // because it has ZERO production callers (every production commit goes through
+      // `saveIfActive`, `trident/tick.ts:263`); if one is ever added it needs the
+      // predicate. Beyond `update()`, the readers that matter are every human or tool
+      // read of a finished row, which is where the false claim was first spotted.
+      //
+      // ONLY A LIVE CLAIM IS CLEARED ('running' / 'pending'), and that restriction is
+      // load-bearing: nulling unconditionally would erase a 'crashed' marker whenever
+      // anything terminated an already-crashed run as 'failed', silently disarming
+      // `update()`'s veto while looking like a cleanup.
+      // 'completed'/'failed'/'crashed' are OUTCOMES worth keeping; 'running' and
+      // 'pending' are the only values that ASSERT a child is in flight, so they are
+      // the only ones a terminal transition has any business touching.
+      //
+      // NULL rather than a new 'cancelled' enum value: the column carries a CHECK
+      // constraint (migration 0077:107-108) that SQLite cannot alter without a table
+      // rebuild, and `null` already means "nothing in flight" here
+      // (`trident/orchestrator.ts` writes it on the no-subagent paths). No
+      // information is lost — the reason for the stop lives in `failure_reason`, and
+      // `subagent_run_id` is deliberately NOT cleared, so "was a child in flight when
+      // this run was cancelled?" stays answerable structurally. That matters because
+      // `/code stop` and board-cancel supply no reason at all.
+      //
+      // DURABILITY: this write alone is not enough. Cancelling does not kill the
+      // detached workflow (rjunee/neutron#177 — it keeps running to completion),
+      // whose next checkpoint would put 'running' straight back — so
+      // `trident/checkpoint.sh` freezes the same two liveness columns on a terminal
+      // row, and the two halves must stay in sync. It freezes ONLY those two: the
+      // orphan's branch/pr/result still land there, because while #177 stands they
+      // are the only trail back to a PR it opened after the cancel.
+      sets.push(
+        `subagent_status = CASE WHEN subagent_status IN ('running', 'pending') THEN NULL ELSE subagent_status END`,
+      )
       sets.push('last_advanced_at = ?')
       params.push(this.now())
       params.push(id)
