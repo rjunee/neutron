@@ -220,15 +220,28 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       await settle();
     },
     unmount(): void {
-      // WRAPPED IN `act`. Unmounting runs cleanup effects, which are React work,
-      // so calling `root.unmount()` bare made React log an unwrapped-act warning
-      // on every test that tore its screen down — dozens of them, in a suite that
-      // was otherwise passing. Noise like that is not cosmetic: it is what a real
-      // warning has to be spotted among, and this suite is where the next real one
-      // will show up.
-      act(() => {
-        root.unmount();
-      });
+      // DELIBERATELY NOT WRAPPED IN `act`, AND THAT WAS MEASURED.
+      //
+      // Unmounting runs cleanup effects, which are React work, so calling this bare
+      // makes React log an unwrapped-act warning on every teardown. Review flagged
+      // that noise and it is a fair observation — it is what a real warning would
+      // have to be spotted among.
+      //
+      // The obvious fix makes it much worse. Wrapping this in `act(() => { … })`
+      // took the 18-file device-harness set from 138 pass / 10 fail to
+      // **53 pass / 95 fail**; reverting it restored the baseline exactly. The
+      // harness runs several files per PROCESS against one shared happy-dom, and an
+      // `act` scope opened during teardown interleaves with the next file's mount,
+      // so React's work queue is entered from two places at once. Eighty-five extra
+      // failures across unrelated suites is a far worse signal-to-noise outcome than
+      // the warning it silences.
+      //
+      // So the warning stays. This is the "an instruction can be right about the
+      // MECHANISM and wrong about the CONTENT" case from CLAUDE.md: `act` genuinely
+      // is how you wrap React work, and applying it here breaks the suite. If the
+      // noise ever has to go, the fix is process-per-file isolation (what the device
+      // lane already does at a coarser grain), not a wrapper here.
+      root.unmount();
       host.remove();
     },
   };
