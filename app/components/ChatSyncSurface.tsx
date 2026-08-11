@@ -604,21 +604,38 @@ export function ChatSyncSurface({
   // can resolve the id. If it never syncs, nothing moves.
   //
   // LEAVING THE DEEP-LINKED ROUTE RELEASES THE LATCH, and that release is what makes
-  // "once per target" mean "once per tap" instead of "once per app run". This surface
-  // is NOT remounted by a project switch: the shell is a single root-stack screen
-  // named `projects/[id]`, and expo-router only diverges on a route named exactly
-  // `[id]`, so a rail tap re-renders this component rather than replacing it
-  // (`app/projects/[id]/_layout.tsx` — the device-instrumented note). FlashList has
-  // no `key` here either, so it keeps `isInitialScrollComplete` latched across the
-  // switch and the frozen anchor above cannot act on the way back.
+  // "once per target" mean "once per tap" instead of "once per app run". Without it:
+  // tap the notification for X (honoured, X latched), rail-tap to another project
+  // (`/projects/<other>/chat`, no query ⇒ no target), then tap the SAME notification
+  // again — it is still sitting in the shade — and the equality check below swallowed
+  // it. The target is a PER-VISIT instruction, so a visit without one must not leave a
+  // spent instruction behind.
   //
-  // So without this release: tap the notification for X (honoured), rail-tap to
-  // another project (`/projects/<other>/chat`, no query ⇒ no target), then tap the
-  // SAME notification again — it is still sitting in the shade — and the equality
-  // check below swallowed it forever. The chat opened in the right project and did
-  // not move, which is the owner's original complaint arriving by a third route.
-  // Clearing on the no-target render is the whole fix: the target is a per-visit
-  // instruction, so a visit without one cannot leave a spent instruction behind.
+  // WHAT SURVIVES A PROJECT SWITCH AND WHAT DOES NOT, stated exactly, because the two
+  // halves point opposite ways and an earlier version of this comment got the second
+  // one backwards:
+  //
+  //   * THIS COMPONENT survives, so this ref does. The shell is a single root-stack
+  //     screen named `projects/[id]`, and expo-router only diverges on a route named
+  //     exactly `[id]`, so a rail tap RE-RENDERS the chat screen rather than replacing
+  //     it (`app/app/projects/[id]/_layout.tsx` carries the device-instrumented note).
+  //     The latch is therefore the longest-lived piece of state here — which is what
+  //     made the missing release matter at all.
+  //   * THE LIST DOES NOT survive. `useMobileChat`'s attach effect is keyed on
+  //     `projectId` and its cleanup sets `ready` false
+  //     (`app/lib/chat-core/use-mobile-chat.ts:447`), and this surface renders
+  //     `!ready ? <spinner> : <FlashList/>` — so every scope change unmounts the list
+  //     and it comes back with a FRESH `isInitialScrollComplete`. The frozen anchor
+  //     above CAN therefore act on the way back, if `anchorRef` is populated before the
+  //     new list's first paint.
+  //
+  // So the honest scope of this fix: the latch was a state machine with no exit, which
+  // is a defect by inspection and one line to close. Whether the owner could SEE it on
+  // the rail-switch path depends on the frozen anchor winning that repaint race, and
+  // that is a device claim not made here. The imperative seam is the only path when the
+  // list is NOT remounted — a target arriving while the scope holds steady — and that
+  // is the sequence the sixth arm of
+  // `app/__tests__/chat-push-tap-lands-on-the-message.test.tsx` drives and mutation-kills.
   const honouredDeepLink = useRef<string | null>(null);
   useEffect(() => {
     if (deepLinkTarget.length === 0) {

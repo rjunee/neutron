@@ -9209,11 +9209,16 @@ notification for a message, rail-tap to another project (a chat route with no
 until dismissed — and the transcript did not move: the equality check had already spent the
 target.
 
-Nothing is remounted along that path, which is why the frozen render-path anchor could not
-cover for it. The shell is a single root-stack screen named `projects/[id]` and expo-router
-only diverges on a route named exactly `[id]`, so a rail tap re-renders this component; and
-FlashList carries no `key`, so it keeps `isInitialScrollComplete` latched across the switch.
-The imperative seam was the only thing that could move the transcript.
+The COMPONENT is not remounted along that path — the shell is a single root-stack screen
+named `projects/[id]` and expo-router only diverges on a route named exactly `[id]`, so a
+rail tap re-renders it and the ref outlives the switch. The LIST is remounted, though:
+`useMobileChat`'s attach effect is keyed on `projectId` and its cleanup drops `ready`
+(`app/lib/chat-core/use-mobile-chat.ts:447`), and the surface renders
+`!ready ? <spinner> : <FlashList/>`, so `isInitialScrollComplete` comes back fresh and the
+frozen anchor can act on the way back if it is populated in time. So: a latch with no exit
+is a defect by inspection and one line to close; whether it was owner-VISIBLE on the
+rail-switch path rests on that repaint race and is not claimed here. The imperative seam is
+the only path when the list is not remounted, which is what the new arm drives.
 
 A render with no target now clears the latch. Mutation-verified: restoring the bare
 early-return reds the new sixth arm of

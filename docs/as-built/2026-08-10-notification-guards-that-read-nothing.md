@@ -307,13 +307,22 @@ latched), rail-tap to another project — `/projects/<other>/chat`, no query, so
 then tap the SAME notification again, which is still sitting in the shade. The equality
 check swallowed it and the transcript did not move.
 
-**It survives the project switch because nothing here is remounted.** The shell is a single
-root-stack screen named `projects/[id]`, and expo-router only diverges on a route named
-exactly `[id]`, so a rail tap RE-RENDERS this component rather than replacing it
-(`app/app/projects/[id]/_layout.tsx` carries the device-instrumented note). FlashList has
-no `key` either, so it keeps `isInitialScrollComplete` latched across the switch and the
-frozen render-path anchor cannot act on the way back. The imperative seam was the only
-thing that could move the transcript, and it had disqualified itself.
+**The latch survives the switch because this COMPONENT is not remounted.** The shell is a
+single root-stack screen named `projects/[id]`, and expo-router only diverges on a route
+named exactly `[id]`, so a rail tap RE-RENDERS this component rather than replacing it
+(`app/app/projects/[id]/_layout.tsx` carries the device-instrumented note) — the ref is the
+longest-lived state on this surface.
+
+**The list, however, DOES get remounted, and the first version of this note said the
+opposite.** `useMobileChat`'s attach effect is keyed on `projectId` and its cleanup sets
+`ready` false (`app/lib/chat-core/use-mobile-chat.ts:447`), and the surface renders
+`!ready ? <spinner> : <FlashList/>` — so a scope change unmounts the list and it returns
+with a fresh `isInitialScrollComplete`, which means the frozen anchor CAN act on the way
+back if it is populated before the new list's first paint. So the honest scope of this fix
+is: a latch with no exit is a defect by inspection, and whether the owner could SEE it on
+the rail-switch path depends on the frozen anchor winning that repaint race — a device
+claim not made here. The imperative seam is the only path when the list is NOT remounted,
+which is the sequence the new arm drives.
 
 The fix is that the target is a PER-VISIT instruction: a render with no target clears the
 latch, so a visit without one cannot leave a spent instruction behind. Mutation-verified —
