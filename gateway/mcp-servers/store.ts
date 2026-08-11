@@ -261,10 +261,16 @@ export class OwnerMcpServerStore {
    *     set for a different command. That is the one outcome worth engineering
    *     against, so the order that cannot produce it is the one used.
    *
-   * A replace does not touch the old approval row at all. It does not need to: the
+   * A replace does not touch the old approval ROW at all. It does not need to: the
    * new spec hashes differently, so the old grant stops matching and the server
    * drops out of `resolveApproved` on the very next spawn. Deleting the old row
    * would also destroy the record that the owner once approved that command.
+   *
+   * It does, however, retire the old PROCESS. Un-approving by rewriting the spec governs
+   * what the next spawn wires; it says nothing about the child already running under the
+   * previous grant, which keeps its command and its copied env until something evicts it.
+   * So a replace whose grant hash actually changed announces the revocation, exactly as
+   * {@link remove} and a deny do — see the call at the end of the critical section.
    *
    * Runs inside {@link serialize}, and re-reads the installed list in there, so two
    * concurrent installs cannot both rewrite a list they read before the other wrote.
@@ -284,6 +290,7 @@ export class OwnerMcpServerStore {
         }
       }
 
+      const previous = existing.find((s) => s.name === spec.name)
       const next = isNew
         ? [...existing, spec]
         : existing.map((s) => (s.name === spec.name ? spec : s))
@@ -303,6 +310,27 @@ export class OwnerMcpServerStore {
       }
 
       await this.requestApproval(spec)
+      // AN EDIT RETIRES WHAT THE OLD ANSWER STARTED, for the same reason a deny and an
+      // uninstall do. Rewriting the spec silently un-approves the server — the new bytes
+      // hash differently, so `resolveApproved` drops it — but that only governs what the
+      // NEXT spawn wires. A warm child started under the OLD grant keeps running the old
+      // command, with the old env values still resident in it, and nothing evicts it until
+      // some later dispatch happens to re-check the surface. For an idle session that is
+      // hours. Editing a server is the owner changing his answer about what may run, so
+      // the process started under the previous answer has to go the same way the grant
+      // did.
+      //
+      // GATED ON THE GRANT HASH, not on `isNew`: a re-install of a byte-identical spec
+      // leaves the grant matching and the running child correct, so evicting there would
+      // cost a cold respawn to change nothing. A hash change is exactly the condition
+      // under which the old approval stops applying.
+      //
+      // Env VALUE-only edits are deliberately NOT covered here — the hash does not cover
+      // values, and they are already the spawn path's `freshCredential` guard's job. This
+      // is scoped to the case where the GRANT itself stops being in force.
+      if (previous !== undefined && computeMcpServerGrantHash(previous) !== computeMcpServerGrantHash(spec)) {
+        await this.announceRevocation()
+      }
       return { ok: true, errors: [], servers: await this.list() }
     })
   }

@@ -898,6 +898,60 @@ describe('a revocation retires what is already running', () => {
     await store.install(DRAFT)
     expect((await store.remove('example-server')).removed).toBe(true)
   })
+
+  test('EDITING an approved server announces it — the un-approval is not what stops the process', async () => {
+    // The third way a grant stops being in force, and the one that was missed. A deny and
+    // an uninstall both revoke a row; an EDIT just rewrites the spec, and the new bytes
+    // hash differently, so `resolveApproved` drops the server with no row touched at all.
+    // That is correct about WIRING and silent about the PROCESS: the child spawned under
+    // the old command keeps running it, holding the env values it was handed, until some
+    // later dispatch re-checks the surface — hours, for an idle session. Editing is the
+    // owner changing his answer about what may run, so it retires the old answer's child.
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    await s.install(DRAFT)
+    const hash = (await s.list())[0]!.grant_hash
+    expect((await s.decide('example-server', 'approve', hash)).ok).toBe(true)
+    expect(calls).toBe(0)
+
+    const edited = await s.install({ ...DRAFT, command: '/usr/local/bin/example-mcp-v2' })
+    expect(edited.ok).toBe(true)
+    // The grant no longer matches, so the server is not wired...
+    expect(await s.resolveApproved()).toEqual([])
+    // ...and the child that WAS wired under it has been retired rather than left running.
+    expect(calls).toBe(1)
+  })
+
+  test('a re-install of the IDENTICAL spec announces nothing — the grant still holds', async () => {
+    // Gated on the grant hash, not on "is this an edit". A byte-identical re-install leaves
+    // the approval matching and the running child correct, so evicting would buy a cold
+    // respawn and change nothing. This is what stops the fix above from becoming a
+    // pool-thrash on every settings save.
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    await s.install(DRAFT)
+    const hash = (await s.list())[0]!.grant_hash
+    expect((await s.decide('example-server', 'approve', hash)).ok).toBe(true)
+    expect(await s.resolveApproved()).not.toEqual([])
+
+    expect((await s.install(DRAFT)).ok).toBe(true)
+    expect(calls).toBe(0)
+    // Still approved, still wired — the re-install was a no-op to the grant.
+    expect(await s.resolveApproved()).not.toEqual([])
+  })
+
+  test('a FIRST install announces nothing — there is no previous answer to retire', async () => {
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    expect((await s.install(DRAFT)).ok).toBe(true)
+    expect(calls).toBe(0)
+  })
 })
 
 describe('THE REPLY DESCRIBES THE GRANT IT JUST MINTED', () => {
