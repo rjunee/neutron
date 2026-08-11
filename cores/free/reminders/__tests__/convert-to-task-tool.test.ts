@@ -123,6 +123,73 @@ describe('reminders_convert_to_task', () => {
     expect(task?.project_id).toBe('proj-X')
   })
 
+  // The General scope is NOT a project. `~general` is the app rail's spelling of
+  // the no-project scope and `~` is outside the gateway's project-id alphabet, so
+  // letting it reach `taskStore.create` writes a task whose project_id names a
+  // project that cannot exist — and the projection then mkdirs
+  // `Projects/~general/`. The task store does not re-validate the id, so the
+  // Core is the only thing standing between the sentinel and the filesystem.
+  //
+  // THREE paths carry it here and each is asserted separately: the explicit
+  // override, the `app-project:~general` topic the app's reminders surface
+  // writes, and the bare `~general` the Core's own create path stores raw.
+  describe('the General sentinel never becomes a task project_id', () => {
+    test('explicit project_id override of ~general lands in the no-project bucket', async () => {
+      const tools = makeTools({ withTaskStore: true })
+      const future = Math.floor(Date.now() / 1000) + 3600
+      const create = await tools.reminders_create({
+        message: 'general override',
+        fire_at: future,
+      })
+      const result = await tools.reminders_convert_to_task({
+        id: create.id,
+        project_id: '~general',
+      })
+      expect(taskStore.get(result.task_id)?.project_id).toBe('')
+    })
+
+    test('an app-project:~general topic lands in the no-project bucket', async () => {
+      // Exactly what `gateway/http/app-reminders-surface.ts` persists for a
+      // reminder created on the General scope.
+      const future = Math.floor(Date.now() / 1000) + 3600
+      const row = await reminderStore.create({
+        owner_slug: OWNER,
+        topic_id: 'app-project:~general',
+        fire_at: future,
+        message: 'created on the General scope',
+      })
+      const tools = makeTools({ withTaskStore: true })
+      const result = await tools.reminders_convert_to_task({ id: row.id })
+      expect(taskStore.get(result.task_id)?.project_id).toBe('')
+    })
+
+    test('a bare ~general topic lands in the no-project bucket', async () => {
+      const tools = makeTools({ withTaskStore: true })
+      const future = Math.floor(Date.now() / 1000) + 3600
+      const create = await tools.reminders_create({
+        message: 'bare sentinel topic',
+        fire_at: future,
+        project_id: '~general',
+      })
+      const result = await tools.reminders_convert_to_task({ id: create.id })
+      expect(taskStore.get(result.task_id)?.project_id).toBe('')
+    })
+
+    test('a real project whose id merely starts with the sentinel is untouched', async () => {
+      // The match is exact, never a prefix — the same property the client-side
+      // mapper guarantees.
+      const tools = makeTools({ withTaskStore: true })
+      const future = Math.floor(Date.now() / 1000) + 3600
+      const create = await tools.reminders_create({
+        message: 'not the sentinel',
+        fire_at: future,
+        project_id: 'general',
+      })
+      const result = await tools.reminders_convert_to_task({ id: create.id })
+      expect(taskStore.get(result.task_id)?.project_id).toBe('general')
+    })
+  })
+
   test('unknown reminder id surfaces an error', async () => {
     const tools = makeTools({ withTaskStore: true })
     await expect(

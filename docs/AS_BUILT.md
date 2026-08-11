@@ -9358,9 +9358,30 @@ fix had to come from outside the alphabet. `gateway/http/app-reminders-surface.t
 prefix: that string reuses the one shape every existing topic reader already decodes, and what they
 decode it back to (`~general`) is the rail id, which is the right answer for each of them —
 `push-deep-link-dispatch` builds `/projects/~general/reminders`, which is exactly where a General
-tap belongs. `reminders/dispatcher.ts` `deriveReminderProjectId` needed the one addition: the
+tap belongs. `reminders/dispatcher.ts` `deriveReminderProjectId` needed one addition: the
 sentinel resolves to `owner_slug`, as its `web:<user_id>` General twin already did, or the context
 source would go looking for a `Projects/~general/STATUS.md` that cannot exist.
+
+**TWO readers needed the sentinel, not one — corrected in round 3, and the sentence above said "the
+one addition" until it was.** Reserving a segment does not just create a new topic to decode; it
+creates a value that every consumer of `topic_id` must now recognise, and the second one was missed
+because it is a WRITE on a different substrate. `cores/free/reminders/src/backend.ts`
+`resolveTaskProjectId` — the convert-to-task path — resolved `~general` to itself, so promoting a
+General reminder would have created a task whose `project_id` is the sentinel and made
+`tasks/projection/write.ts` `mkdirSync` a `Projects/~general/` directory for a project that cannot
+exist. `tasks/store.ts` `create` does not re-validate the id, so the Core was the only guard.
+Normalised to `NO_PROJECT` (`''`) at a single exit rather than inline, because THREE paths carry the
+sentinel there: the caller's explicit override, the `app-project:~general` topic this entry's own
+change introduced, and the bare `~general` the Core's create path stores raw. `NO_PROJECT` rather
+than `owner_slug` because the destination differs — General IS the unprojected bucket, which is the
+bucket the General Tasks tab lists, whereas the dispatcher's consumer needs a real directory.
+
+Not reachable from the app today and fixed anyway: `open/composer.ts` leaves `convertReminderToTask`
+unwired so the HTTP route answers 501, but the Core's own `reminders_convert_to_task` tool reaches
+it, and this branch is what put the sentinel on that path. **`gateway/http/app-tasks-surface.ts`
+still gates on `sanitizeProjectId` and therefore still answers 400 for `~general`** — the tasks
+surface has NOT learned the reserved segment the way reminders has. That is the same shape as #183
+and is left to it rather than widened into a push fix.
 
 Client side, `httpScopeSegment` / `httpScopeSegmentEncoded` sit beside `httpProjectSegment` rather
 than replacing it. Two functions, not a flag: a server that has not learned the reservation answers
