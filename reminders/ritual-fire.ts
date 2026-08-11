@@ -79,6 +79,7 @@ import {
   formatRitualCompletionFallback,
   formatRitualEscalationNotice,
   formatRitualFailureNotice,
+  formatRitualUnplannableNotice,
   shouldEscalate,
 } from './ritual-delivery.ts'
 
@@ -167,11 +168,17 @@ function mintId(mint: (() => string) | undefined): string {
  * The one non-'nudge' path a ritual takes, as a plan the dispatcher executes.
  *
  * A NULL planner is not offered and there is no permissive default anywhere in
- * this module: a composition that wires no planner gets ritual rows dispatched as
- * ORDINARY nudges, which is safe (a nudge composes the row's own `message`, and
- * a ritual row's message is its human label) and is the same fail-closed posture
- * the old `validateRitualFire` contract had — an unapproved ritual prompt is
- * never composed.
+ * this module. What a composition that wires NO planner does with a ritual row is
+ * the dispatcher's decision, and it used to be the wrong one: it dispatched the row
+ * as an ORDINARY NUDGE on the reasoning — written here, and wrong — that "a ritual
+ * row's message is its human label". It is not. It is the dispatch token
+ * `ritual:<id>` (`reminders/ritual-registration.ts`), so the nudge path composed
+ * that token as literal intent and the owner's lock screen read `ritual:kaizen`.
+ * The prompt was indeed never composed, which is what made the claim sound safe;
+ * the NOTIFICATION was the unprotected half. The dispatcher now refuses such a row
+ * outright, keyed on the `ritual_id` COLUMN, and tells the owner the occurrence was
+ * skipped ({@link formatRitualUnplannableNotice}) rather than consuming it in
+ * silence.
  */
 export function buildRitualFirePlanner(deps: RitualFirePlannerDeps): RitualFirePlanner {
   const now = deps.now ?? Date.now
@@ -365,8 +372,12 @@ export function buildRitualFirePlanner(deps: RitualFirePlannerDeps): RitualFireP
 }
 
 /**
- * The body posted when an approved ritual composes successfully but returns
- * nothing. Re-exported through this module so the dispatcher has ONE import for
- * everything ritual-fire-shaped.
+ * Notice bodies the DISPATCHER posts directly (as opposed to the ones a `settle`
+ * hook returns): the success line for an approved ritual that composed nothing,
+ * and the line for a row that could not be planned at all because no planner is
+ * wired. Re-exported through this module so the dispatcher keeps ONE import for
+ * everything ritual-shaped and no new `dispatcher → ritual-delivery` graph edge is
+ * introduced (`ritual-delivery.ts` imports this dispatcher's `ReminderOutbound`
+ * type, and the cycle gate in `.dependency-cruiser.cjs` allows none).
  */
-export { formatRitualCompletionFallback }
+export { formatRitualCompletionFallback, formatRitualUnplannableNotice }

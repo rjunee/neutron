@@ -38,14 +38,25 @@ export const EXPO_PUSH_BATCH_SIZE = 100
 export interface ExpoPushMessage {
   /** The opaque `ExponentPushToken[...]` minted by the Expo client. */
   to: string
-  /** Notification title — usually the project / agent name. */
+  /** Notification title — the destination chat's name (`General`, or the project). */
   title?: string
-  /** Body text — the reminder's stored `message` for v1. */
+  /**
+   * Body text — an excerpt of the DELIVERED message, never a stored row field.
+   * This docblock used to say "the reminder's stored `message`", which is precisely
+   * the bug the owner reported: a ritual row's stored message is the dispatch token
+   * `ritual:<id>`, so his lock screen read `ritual:kaizen`.
+   */
   body: string
   /**
-   * Opaque payload delivered to the client's notification handler.
-   * For v1 we ship `{ kind: 'reminder', reminder_id, project_slug }`
-   * so the client can deep-link in a follow-up sprint.
+   * Opaque payload delivered to the client's notification handler. Every `kind` the
+   * gateway may put here is enumerated in `wire-types/push-kind.ts`, which the
+   * senders and the mobile tap resolver both import so neither can drift from the
+   * other. A chat post (agent turn, fired reminder, ritual) ships
+   * `{ kind: 'agent_message', message_id, project_id }`.
+   *
+   * The retired `{ kind: 'reminder', reminder_id, project_slug }` shape that this
+   * docblock used to name has had no sender since 2026-08-09 and is gone from both
+   * the kind list and the resolver — see that file's history section for why.
    */
   data?: Record<string, unknown>
   /** Optional system sound. 'default' is the conventional opt-in. */

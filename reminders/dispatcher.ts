@@ -32,6 +32,7 @@ import type { Reminder } from './store.ts'
 import type { ReminderDispatcher } from './tick.ts'
 import { RITUAL_TIMEOUT_MS } from './rituals.ts'
 import {
+  formatRitualUnplannableNotice,
   RITUAL_MAX_TOKENS,
   type RitualFireDecision,
   type RitualFirePlan,
@@ -206,11 +207,17 @@ export interface BuildReminderDispatcherInput {
   tool_names?: ReadonlyArray<string>
   /**
    * Ritual fire planner (ISSUES #504). Answers "what should this due row compose
-   * from, and what must be recorded about it?" — see
-   * `reminders/ritual-fire.ts`. Absent → every row composes as an ordinary nudge
-   * from its own stored `message`, which is what an LLM-less box or a test wants
-   * and is fail-closed (a ritual's approved PROMPT is never composed without a
-   * planner to validate its approval).
+   * from, and what must be recorded about it?" — see `reminders/ritual-fire.ts`.
+   *
+   * Absent → an ordinary NUDGE row composes from its own stored `message`, which is
+   * what a test or an instance with no model credential wants. A row carrying a
+   * `ritual_id` is a different case and is NOT dispatched as a nudge: it composes
+   * nothing, logs at error level, and posts one plain-language notice
+   * ({@link formatRitualUnplannableNotice}) — see `dispatch` below for why. This
+   * docblock previously claimed EVERY row fell through to the nudge path and called
+   * that fail-closed; it was true of the approved PROMPT and false of the
+   * NOTIFICATION, because a ritual row's stored `message` is the dispatch token
+   * `ritual:<id>` and composing it put that token on the owner's lock screen.
    */
   ritual_planner?: RitualFirePlanner
   /**
@@ -475,10 +482,49 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
       // Keyed on `reminder.ritual_id` (`reminders/store.ts:59`), not on the shape of
       // the message text — the column is what makes the row a ritual, and a prefix
       // test would also swallow a plain reminder the owner happened to word that way.
+      //
+      // ⚠️ REFUSING TO COMPOSE IS ONLY HALF OF IT: THE OCCURRENCE IS CONSUMED HERE.
+      // Returning normally leaves the tick loop's pre-dispatch claim standing, so
+      // `markFired`/`advanceRecurrence` retires this occurrence — and the first
+      // version of this guard did that with a `log()` that defaults to DEBUG and
+      // nothing else. That is the ISSUES #506 shape exactly: a scheduled ritual
+      // vanished with no post, no ledger row, no journal line at the default level,
+      // and no way for the owner to tell it apart from a ritual he never scheduled.
+      // `reminders/AGENTS.md` states the contract the other way round — for a
+      // ritual, "a failure is recorded + noticed instead". So both happen here.
+      //
+      // WHY CONSUME RATHER THAN THROW. Throwing would revert the claim and retry
+      // next tick, which on an instance with no model credential means every 30 s
+      // forever for a condition that cannot resolve without an operator. That is
+      // the same reasoning the planner's own `skipped` branch above is built on.
+      //
+      // WHY NO `code_ritual_runs` ROW. The ledger writer and the run-id mint both
+      // live inside the planner, which is the thing that is absent, and 'skipped'
+      // rows are constrained to a fixed `skip_reason` set at the schema level
+      // (`migrations/0106_ritual_schema.sql`) that has no member for this state.
+      // The record is therefore the error-level log line, and the notice is what
+      // reaches the owner — the "answerable from the logs OR the ledger" bar
+      // `fireRitual` states below, met on the log side.
       if (reminder.ritual_id !== null && reminder.ritual_id.length > 0) {
-        log(
-          `reminder ${reminder.id} is ritual ${reminder.ritual_id} but no ritual planner is available — posting nothing`,
+        dispatcherLog.error('ritual_unplannable', {
+          reminder: reminder.id,
+          ritual_id: reminder.ritual_id,
+          reason: 'no ritual planner is wired on this instance',
+        })
+        const notice_topic_id = topicFor(reminder, reminder.topic_id ?? null)
+        const noticed = await post(
+          reminder,
+          notice_topic_id,
+          formatRitualUnplannableNotice({ ritual_id: reminder.ritual_id }),
         )
+        // A rejected notice means the owner learned nothing, so the occurrence must
+        // NOT be consumed — same posture as the two sibling post sites, and the
+        // #319 contract holds (this throws before any successful delivery).
+        if (!noticed) {
+          throw new Error(
+            `reminder ${reminder.id} ritual ${reminder.ritual_id} unplannable notice rejected for topic ${notice_topic_id} — left pending for retry`,
+          )
+        }
         return
       }
 

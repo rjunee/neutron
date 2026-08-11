@@ -105,6 +105,28 @@ describe('chatPushExcerpt', () => {
     expect(chatPushExcerpt('7')).toBe('7')
   })
 
+  test('a FLAG is an emoji too — and it is not `Extended_Pictographic`', () => {
+    // A regional-indicator pair carries neither `\p{L}`, `\p{N}` nor
+    // `\p{Extended_Pictographic}`, so a flag-only body read as EMPTY and sent no
+    // notification at all while `✅` (a pictograph) sent one. The docblock claimed
+    // emoji-only posts count; for this class it was not true.
+    expect(chatPushExcerpt('🇺🇸')).toBe('🇺🇸')
+    expect(chatPushExcerpt('🇺🇸 landed')).toBe('🇺🇸 landed')
+    // The pictographs that always worked, as the control — this widened the class, it
+    // did not move it.
+    expect(chatPushExcerpt('✅')).toBe('✅')
+    expect(chatPushExcerpt('❤️')).toBe('❤️')
+  })
+
+  test('a BARE SYMBOL is still silence, so the widening did not become "anything goes"', () => {
+    // The deliberate other side of the boundary, asserted so a later reader does not
+    // "finish the job" by admitting every `\p{S}`. Unicode does not call these emoji,
+    // and a shade whose entire body is one arrow says only that something happened.
+    for (const body of ['→', '✓', '★', '•', '±', '§']) {
+      expect(chatPushExcerpt(body)).toBe('')
+    }
+  })
+
   test('a zero-width character does not eat the budget of a real message', () => {
     // Stripped before the budget is measured, not merely trimmed at the ends —
     // otherwise an invisible character mid-body would displace a visible one.
@@ -117,6 +139,19 @@ describe('chatPushExcerpt', () => {
     // invariant is checked on the way out for exactly this case.
     expect(chatPushExcerpt('... hello', 3)).toBe('')
     expect(chatPushExcerpt('... hello', 20)).toBe('... hello')
+  })
+
+  test('a clip that strips down to NOTHING is silence, not a bare ellipsis', () => {
+    // The path the in-code comment used to deny existed. At budget 1 a leading emoji
+    // clips to a lone high surrogate, `dropDanglingSurrogate` removes it, and the
+    // untrimmed-clip fallback — documented as "cannot be empty" — is the empty string.
+    // Only the OUTPUT check stands between that and a `…` on the lock screen, so this
+    // test is what makes deleting that check red.
+    expect(chatPushExcerpt('😀 hello', 1)).toBe('')
+    expect(chatPushExcerpt('😀', 1)).toBe('')
+    // Budget 2 fits the pair, so the emoji survives — the boundary is the surrogate,
+    // not the emoji.
+    expect(chatPushExcerpt('😀 hello', 2)).toBe('😀…')
   })
 
   test('never splits an emoji in half at the clip boundary', () => {

@@ -137,7 +137,7 @@ interface ExpoMessage {
  * (below) uses the REAL `ApprovalManager` path, so the fail-closed behaviour is
  * still exercised against the real thing.
  */
-function buildChain(opts: { approved: boolean; planner?: boolean }): {
+function buildChain(opts: { approved: boolean; planner?: boolean; rejectPost?: boolean }): {
   dispatch: (r: Reminder) => Promise<void>
   expo: ExpoMessage[]
   composeCalls: () => number
@@ -195,7 +195,14 @@ function buildChain(opts: { approved: boolean; planner?: boolean }): {
         })
 
   const dispatcher = buildReminderDispatcher({
-    outbound: buildButtonStoreReminderOutbound({ deliver }),
+    // The production outbound, except in the one arm that needs a REJECTED post.
+    // Rejection is an outbound-level answer (`ReminderOutbound.post` → false), so a
+    // two-line stub states it exactly; driving `deliver` into failing instead would
+    // assert deliver's internals rather than the dispatcher's response to a refusal.
+    outbound:
+      opts.rejectPost === true
+        ? { post: async (): Promise<boolean> => false }
+        : buildButtonStoreReminderOutbound({ deliver }),
     llm,
     resolveTopicId: () => OWNER_TOPIC,
     ...(planner !== undefined ? { ritual_planner: planner } : {}),
@@ -293,8 +300,8 @@ describe('an ordinary NUDGE reaches the identical notification shape', () => {
   })
 })
 
-describe('a ritual row with NO PLANNER reaches the owner with nothing at all', () => {
-  test('the `ritual:<id>` token never becomes a notification on an LLM-less box', async () => {
+describe('a ritual row with NO PLANNER is refused, and the owner is TOLD', () => {
+  test('the `ritual:<id>` token never becomes a notification on an instance with no model', async () => {
     // THE SECOND ROUTE TO THE REPORTED SYMPTOM, and the one the first fix left open.
     // `ritual_planner` is null whenever `init_ritual_planner` does not run — an
     // LLM-less box (`open/composer.ts`). The dispatcher's decision then read
@@ -310,12 +317,50 @@ describe('a ritual row with NO PLANNER reaches the owner with nothing at all', (
 
     await chain.dispatch(await ritualRow('kaizen'))
 
-    // EMPTINESS IS THE ASSERTION, stated as such. This file's own docblock records
-    // the trap: an earlier arm looped `not.toContain('ritual:')` over an empty
-    // collection and passed on zero notifications. So assert the count, and assert
-    // the compose turn never ran either — a nudge fall-through would have spent one.
-    expect(chain.expo).toEqual([])
+    // NO COMPOSE TURN. This is the assertion that pins the refusal itself: a nudge
+    // fall-through would have spent one, and its text would have been the token.
     expect(chain.composeCalls()).toBe(0)
+
+    // AND EXACTLY ONE NOTIFICATION, whose body is a sentence rather than a token.
+    //
+    // The first version of this arm asserted `toEqual([])` here, and the review round
+    // after it found what that emptiness was hiding: the dispatcher returns NORMALLY,
+    // so the tick loop's pre-dispatch claim stands and the occurrence is retired. An
+    // empty `expo` therefore did not mean "nothing bad reached him", it meant "a
+    // scheduled ritual was consumed and he was never told" — which is the ISSUES #506
+    // class this lane exists inside, and which `reminders/AGENTS.md` forbids: for a
+    // ritual, a failure is recorded AND noticed. So the count is 1, not 0.
+    expect(chain.expo).toHaveLength(1)
+    const body = chain.expo[0]?.body ?? ''
+    // The reported defect, still: the notice must not carry the dispatch token.
+    expect(body).not.toContain('ritual:')
+    expect(body).toContain("Ritual 'kaizen' did not run")
+    expect(body.length).toBeGreaterThan(0)
+    // It is an ordinary chat message, so it routes like one.
+    expect(chain.expo[0]?.data?.kind).toBe('agent_message')
+  })
+
+  test('the occurrence is CONSUMED, not thrown back for a 30s retry loop', async () => {
+    // The deliberate half of the posture, asserted so it cannot be "fixed" into a
+    // hot loop by a later reader. An instance with no model credential cannot plan
+    // this row on the next tick either, so throwing (which reverts the tick's claim,
+    // `reminders/tick.ts`) would re-fire it every 30 s until an operator intervenes.
+    // The occurrence is retired and the owner is told instead.
+    const chain = buildChain({ approved: true, planner: false })
+
+    await expect(chain.dispatch(await ritualRow('kaizen'))).resolves.toBeUndefined()
+  })
+
+  test('a REJECTED notice throws, so the occurrence is not consumed in silence', async () => {
+    // The other half: consuming the occurrence is only acceptable because the owner
+    // was told. If the notice never landed, the row must stay pending — the same
+    // contract the nudge and ritual post sites hold (#319: the dispatcher only ever
+    // throws BEFORE a successful delivery).
+    const chain = buildChain({ approved: true, planner: false, rejectPost: true })
+
+    await expect(chain.dispatch(await ritualRow('kaizen'))).rejects.toThrow(
+      /unplannable notice rejected/,
+    )
   })
 
   test('a PLAIN reminder still fires normally with no planner — the guard is keyed on the row, not the box', async () => {

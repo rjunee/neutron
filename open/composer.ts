@@ -2544,8 +2544,15 @@ export function buildOpenGraphComposer(
       tool_names: LIVE_AGENT_TOOL_NAMES,
       // ISSUES #504 — the ritual fire planner, DEREFERENCED PER FIRE so the
       // late-bound `ritualPlanner` (installed once the graph's ApprovalManager
-      // exists) reaches the dispatcher that was built before it. Null planner ⇒
-      // 'nudge' ⇒ the row composes from its own stored message.
+      // exists) reaches the dispatcher that was built before it.
+      //
+      // A null planner answers 'nudge', and the dispatcher applies that answer ONLY
+      // to a row with no `ritual_id`. A RITUAL row is refused there instead: it
+      // composes nothing and the owner gets one plain-language notice saying the
+      // occurrence was skipped. This comment used to stop at "⇒ the row composes
+      // from its own stored message", which was the defect stated as if it were the
+      // design — a ritual row's stored message IS `ritual:<id>`, so that is exactly
+      // how the token reached his lock screen. See `reminders/dispatcher.ts`.
       ritual_planner: {
         plan: async (reminder) =>
           ritualPlanner !== null ? ritualPlanner.plan(reminder) : { kind: 'nudge' as const },

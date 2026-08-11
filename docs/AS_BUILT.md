@@ -9166,3 +9166,36 @@ is the dispatch token, and the owner's lock screen read `ritual:kaizen` by a sec
 The dispatcher now refuses a ritual row it cannot plan, keyed on `reminder.ritual_id`.
 
 Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — refusing to compose is only half of a refusal
+
+The round-3 refusal above stopped the dispatch token reaching the owner and then returned
+normally with one debug-level line. `reminders/tick.ts` claims an occurrence BEFORE
+dispatch and reverts only in its `catch`, so a normal return RETIRES it: a scheduled
+ritual on an instance whose model credential expired vanished with no post, no ledger
+row, and no journal line at the default level, which `reminders/AGENTS.md` forbids for a
+ritual (a failure is recorded AND noticed). `reminders/dispatcher.ts` now logs at error
+level and posts one plain-language notice (`formatRitualUnplannableNotice`,
+`reminders/ritual-delivery.ts`) — and THROWS if that notice is refused, because consuming
+the occurrence is only defensible when the owner was told. It deliberately does not throw
+on the ordinary path (a missing credential cannot resolve by the next tick, so that would
+re-fire every 30 s) and writes no `code_ritual_runs` row (the ledger writer and run-id
+mint live inside the absent planner, and `skip_reason` is a closed set in
+`migrations/0106_ritual_schema.sql`).
+
+`gateway/push/chat-message-push.ts` `hasVisibleContent` claimed emoji-only posts count,
+but a regional-indicator pair carries no `\p{L}`, `\p{N}` or `\p{Extended_Pictographic}`
+— so a flag-only body sent NO notification while `✅` sent one. `\p{Regional_Indicator}`
+joins the class; bare symbols (`→`, `✓`, `★`) stay deliberately silent.
+
+Four comments that a reader would have been right to trust were corrected rather than
+left: the "untrimmed clip cannot be empty" invariant (it can, at budget 1 behind a
+dropped surrogate), the `ritual_planner` docblock and `ritual-fire.ts` header that still
+described the nudge fall-through as the design, and `gateway/push/expo-push-client.ts`,
+which still documented the retired `{ kind: 'reminder' }` payload and "the reminder's
+stored `message`" as the notification body — the exact sentence the reported defect was.
+`gateway/http/deliver.ts`'s 3 s bound still does not CANCEL the send; that is named in
+place as a possible duplicate buzz, not silently.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`
+(§ Round-4 review fixes).

@@ -94,12 +94,23 @@ const INVISIBLE_CHARS = new RegExp(
  * Does this string contain anything a human would SEE and read as content?
  *
  * Letters and digits in ANY script (`\p{L}`/`\p{N}`, so a CJK- or Cyrillic-only
- * message counts, which `\w` would have wrongly rejected) or a pictograph (an
- * emoji-only post is terse but it is real information the owner sent himself).
- * Whitespace, zero-width formatting and punctuation alone are not content.
+ * message counts, which `\w` would have wrongly rejected), a pictograph (an
+ * emoji-only post is terse but it is real information the owner sent himself), or
+ * a REGIONAL INDICATOR — `\p{Extended_Pictographic}` does not cover those, so
+ * `🇺🇸` alone read as an empty body until this class named them. A flag is an emoji
+ * like any other, and this predicate decides whether the owner gets a buzz at all.
+ *
+ * WHAT IS DELIBERATELY STILL NOT CONTENT, stated because the boundary is not
+ * self-evident and a reader will otherwise assume the omissions are the same bug:
+ * whitespace, zero-width formatting, punctuation, and BARE SYMBOLS that are not
+ * pictographs — `→`, `✓`, `★`, `•`. Unicode does not classify those as emoji, and a
+ * notification whose whole body is one arrow tells the owner only that something
+ * happened, which is exactly the buzz {@link chatPushExcerpt} exists to withhold.
+ * (`✅` and `❤️` ARE pictographs and do count; that asymmetry is Unicode's, not
+ * ours.)
  */
 function hasVisibleContent(s: string): boolean {
-  return /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(s)
+  return /[\p{L}\p{N}\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(s)
 }
 
 /**
@@ -141,8 +152,17 @@ export function chatPushExcerpt(body: string, max: number = CHAT_PUSH_BODY_MAX):
   const trimmed = head.replace(/[\s,;:.!?-]+$/, '')
   // A head that is ENTIRELY trailing punctuation strips to nothing, and `…` alone
   // is a buzz with no words. It also survives the sink's `length === 0` check, so
-  // the guard has to be here rather than there. Fall back to the untrimmed clip,
-  // which cannot be empty because `flat.length > budget >= 1`.
+  // the guard has to be here rather than there. Fall back to the untrimmed clip.
+  //
+  // THAT FALLBACK CAN ITSELF BE EMPTY, and this line used to claim it could not
+  // ("`flat.length > budget >= 1`"). It can: at budget 1 a leading emoji clips to a
+  // LONE HIGH SURROGATE, which `dropDanglingSurrogate` strips, leaving `clipped`
+  // empty — `chatPushExcerpt('😀 hello', 1)` walks straight through here. Nothing is
+  // wrong with the output, because the invariant is not held by this line at all: it
+  // is held by the `hasVisibleContent(kept)` check below, which is the only thing
+  // between an empty `kept` and a bare `…` on the owner's lock screen. Recorded
+  // because a reader trusting the old claim would think that check was redundant and
+  // could delete it.
   const kept = trimmed.length > 0 ? trimmed : clipped
   // THE OUTPUT CHECK. The source had words, but the budget may have landed before
   // the first one (`"... hello"` at budget 3 clips to `"..."`), and `"...…"` is the

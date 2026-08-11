@@ -200,3 +200,97 @@ much worse unreported one.
 signal that was weaker than the thing it was taken to prove.** `ok` was read as
 "delivered"; "no prompt was read" was read as "nothing leaked". In each case the
 narrower true statement was sitting right next to the broader false one.
+
+---
+
+## Round-4 review fixes — refusing to compose is only half of a refusal
+
+### 1. The refused occurrence was consumed in silence
+
+The round-3 fix above stopped a ritual row from composing its dispatch token when no
+planner is wired. It then returned normally with a single `log()` line — and the next
+review round found what that hid.
+
+`reminders/tick.ts` claims an occurrence BEFORE dispatch (`markFired` /
+`advanceRecurrence`) and reverts only in its `catch`. A normal return therefore RETIRES
+the occurrence. And the `log` seam defaults to `dispatcherLog.debug`, which
+`open/composer.ts` does not override. So a scheduled ritual on an instance with no model
+credential vanished completely: no post, no ledger row, no journal line at the default
+level, and nothing to distinguish it from a ritual that was never scheduled. That is the
+ISSUES #506 shape, and `reminders/AGENTS.md` states the contract the other way round —
+for a ritual, a failure is **recorded and noticed**.
+
+Reachable without any exotic state: `init_ritual_planner` is gated on `llmPool !== null`
+(`open/composer.ts`), so an expired or removed model credential is enough, and the
+rituals keep firing into a null planner meanwhile.
+
+Both halves now happen:
+
+- **Recorded** — `dispatcherLog.error('ritual_unplannable', { reminder, ritual_id, reason })`,
+  at a level nothing has to opt into.
+- **Noticed** — one plain-language chat post, `formatRitualUnplannableNotice`
+  (`reminders/ritual-delivery.ts`): *"Ritual 'x' did not run: this instance has no model
+  configured, so its approved prompt could not be checked or composed. This occurrence
+  was skipped, not retried."*
+- **And if the notice itself is refused, the dispatcher THROWS**, which reverts the tick's
+  claim and leaves the row pending. Consuming the occurrence is only defensible because
+  the owner was told; if he was not told, it must not be consumed. Same posture as the two
+  sibling post sites, and the #319 contract holds because the throw is before any
+  successful delivery.
+
+**Three deliberate non-choices, recorded so they are not mistaken for oversights.**
+*It does not throw on the ordinary path*: a missing credential cannot resolve by the next
+tick, so throwing would re-fire the row every 30 s until an operator intervened — the
+same reasoning the planner's own `skipped` branch rests on. *It writes no
+`code_ritual_runs` row*: the ledger writer and the run-id mint both live inside the
+planner, which is the absent thing, and `skip_reason` is a closed set at the schema level
+(`migrations/0106_ritual_schema.sql`) with no member for this state — so the record is the
+error log and the notice is what reaches the owner. *The notice cites no run id*, because
+a fabricated one would send him to `rituals_status` hunting a run that was never written.
+
+**Tests** (`gateway/push/__tests__/ritual-post-notifies-as-a-chat-message.test.ts`). The
+arm that used to assert `expect(chain.expo).toEqual([])` now asserts exactly ONE
+notification whose body is a sentence and not the token — the old emptiness was the bug,
+not the proof. Two arms beside it pin the deliberate halves: the occurrence resolves
+rather than throwing on the ordinary path, and a REJECTED notice rejects. Mutation-
+verified: replacing the post with `const noticed = true` reds 2, and neutering the
+`if (!noticed)` throw reds 1.
+
+### 2. Two comments that a reader would have been right to trust
+
+Both in `gateway/push/chat-message-push.ts`, both found by probing the claim rather than
+reading it — and one of them was hiding a real behaviour gap.
+
+- **"the untrimmed clip … cannot be empty because `flat.length > budget >= 1`".** It can.
+  At budget 1 a leading emoji clips to a lone high surrogate, `dropDanglingSurrogate`
+  removes it, and the fallback is `''`: `chatPushExcerpt('😀 hello', 1)` walks that path.
+  The output is right, but the invariant is held by the `hasVisibleContent(kept)` check
+  below — not by this line — and a reader trusting the old claim would have thought that
+  check redundant and deleted it. Comment corrected, and a test now makes deleting it red.
+- **`hasVisibleContent` claimed emoji-only posts count; flags did not.** A regional-
+  indicator pair carries no `\p{L}`, `\p{N}` or `\p{Extended_Pictographic}`, so a `🇺🇸`
+  body read as EMPTY and sent no notification at all, while `✅` (a pictograph) sent one.
+  This one is a real defect rather than a wrong comment: `\p{Regional_Indicator}` joins the
+  class. Mutation-verified by removing it. The boundary that is still deliberate — `→`,
+  `✓`, `★`, `•` are NOT content, because Unicode does not call them emoji and a shade
+  containing one arrow says only that something happened — now has both a docblock naming
+  it and a test asserting it, so the next reader does not "finish the job" by admitting
+  every `\p{S}`.
+
+### 3. And one seam named rather than closed
+
+`withTimeout` in `gateway/http/deliver.ts` bounds the notification at 3 s but does not
+CANCEL it. If Expo answers at 3.1 s the buzz still goes out, while the call already
+reported not-sent and left the row unstamped — so the next idempotent re-emit buzzes
+again: one message, two banners. Left as is and documented in place. Cancellation means
+threading an `AbortSignal` through `ChatMessagePushSink` into the Expo client, and what it
+buys back is a duplicate notification of a message that is correct and present in the
+transcript either way. The opposite default — treating a timeout as sent — is the one that
+loses information, and it is the defect this document opens with.
+
+📌 **The round-3 fix and the first comment above are the same error at different scales:
+a guard was written, and the question "what happens on the path it now takes?" was not
+asked.** Refusing to compose the token was correct and left the occurrence consumed;
+falling back to the untrimmed clip was correct and left the string possibly empty. In both
+cases the code after the guard was doing work the guard's author had stopped thinking
+about.

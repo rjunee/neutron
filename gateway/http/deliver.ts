@@ -205,6 +205,18 @@ const errMsg = (err: unknown): string => (err instanceof Error ? err.message : S
  * behind on every delivery. The abandoned promise is left to settle on its own with
  * a no-op catch attached: dropping the reference without one would surface an Expo
  * outage as an unhandled rejection AFTER we had already reported not-sent.
+ *
+ * IT DOES NOT CANCEL `work`, AND THAT COSTS A POSSIBLE DUPLICATE BUZZ. If Expo
+ * answers at 3.1 s the notification still goes out, but this call already reported
+ * not-sent, so the row was left unstamped and the next idempotent re-emit of the same
+ * key buzzes again — one message, two banners. Named rather than fixed, deliberately:
+ * cancellation would mean threading an `AbortSignal` through `ChatMessagePushSink`
+ * into the Expo client, and the failure it would buy back is a duplicate NOTIFICATION
+ * of a message that is correct and present in the transcript either way. The opposite
+ * default — treating a timeout as sent — is the one that loses information, because it
+ * stamps the row for a buzz that may never arrive and silences every retry (see
+ * `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`). Revisit only
+ * if the duplicate is ever observed, not on the strength of this paragraph.
  */
 async function withTimeout(work: Promise<boolean>, budget_ms: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined
