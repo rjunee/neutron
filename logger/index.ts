@@ -31,9 +31,8 @@
  * predicate in prose, then enumerated the deviations from the originals, then
  * enumerated which cases the suite covers — and each enumeration was falsified
  * by the next reader to grep. A docblock goes stale in silence; a test at least
- * has to be kept green — though only a test on the WIRED path proves anything,
- * and this refactor's round 1 shipped 41 green ones that did not. So this
- * docblock deliberately says less than it knows.
+ * has to be kept green — though only a test on the WIRED path proves anything.
+ * So this docblock deliberately says less than it knows.
  *
  *   - `once(key)` — the GBrain unavailable latch
  *     (gbrain-memory/GBrainSyncHook.ts `latchIfUnavailable`): the FIRST
@@ -59,27 +58,26 @@
  *     Two consequences that are easy to get wrong — not the whole caller-facing
  *     contract, and not an inventory of how this differs from the original:
  *
- *     A CLOCK READING BEHIND THE LAST STAMP EMITS rather than suppressing —
- *     what a backward step produces once it lands behind the stamp, not what
- *     any backward step produces. `Date.now()` is not monotonic (an NTP
- *     correction, a VM resume), and a throttle that trusted the reading would
- *     silence the key for the step plus the window: an hour-long step would
- *     silence a 10-minute heartbeat for over an hour, which presents as
- *     exactly the "it died" alarm the heartbeat exists to rule out. A
- *     heartbeat's failure mode is going quiet, so this errs toward an extra
- *     line.
+ *     A CLOCK JUMP MUST NOT BE ABLE TO SILENCE THE KEY FOR THE JUMP PLUS THE
+ *     WINDOW. `Date.now()` can jump backward (an NTP correction, a VM resume),
+ *     and a throttle that trusted the reading would stay silent for the jump
+ *     AND then the window on top: an hour-long jump would silence a 10-minute
+ *     heartbeat for over an hour, which presents as exactly the "it died"
+ *     alarm the heartbeat exists to rule out. That is the failure this guards
+ *     against, and it is the whole of what it promises — a jump can still move
+ *     an individual attempt either way, so `ms` is a rough period and not a
+ *     guaranteed one. WHICH readings emit is decided by the condition in
+ *     `rateLimited` below; read it there. Prose restatements of it have shipped
+ *     false in three consecutive rounds, so this docblock carries none.
  *
- *     THE BOUND IS ON ATTEMPTS, NOT ON DELIVERED LINES. A consumed window is
- *     no evidence that a line reached anyone: a sink that throws consumes one
- *     anyway, and that is reachable with NO sink injected, since the default
- *     sink calls `console.*` — a mutable global. Erring the other way would
+ *     THE BOUND IS ON ATTEMPTS, NOT ON DELIVERED LINES. State is stamped
+ *     before the sink runs (see `emit`), so a sink that throws consumes a
+ *     window with nothing necessarily delivered. Erring the other way would
  *     let a persistently-throwing sink re-attempt on every single call,
  *     precisely the flood the window exists to prevent. A caller that needs a
  *     DELIVERY bound must make its own sink non-throwing; this primitive will
- *     not do it for them. `ms` is likewise not validated here: a NaN `ms`
- *     suppresses the key for as long as the clock keeps moving forward — only a
- *     reading behind the last stamp gets through (verified by execution) — so a
- *     caller that COMPUTES `ms` must validate it.
+ *     not do it for them. `ms` is likewise not validated here, so a caller
+ *     that COMPUTES `ms` must validate it.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -151,12 +149,13 @@ export interface Logger extends LogEmitter {
    * A view that throttles a key to roughly one line per `ms` window (the
    * wedge-alert `alertDedupeMs` cooldown).
    *
-   * "Roughly" is load-bearing: a clock reading behind the last stamp emits
-   * rather than suppressing, and a throwing sink consumes a window with no
+   * "Roughly" is load-bearing: a clock jump can move an individual attempt in
+   * either direction, and a throwing sink consumes a window with no
    * guarantee that anything was delivered. Both are deliberate — the head
-   * docblock gives the reasons, and `logger/__tests__/logger.test.ts` holds the
-   * pinned cases — not including the throwing-sink half, which is the gap the
-   * head docblock discloses.
+   * docblock gives the reasons, the condition itself is in the implementation
+   * below, and `logger/__tests__/logger.test.ts` holds the pinned cases — not
+   * including the throwing-sink half, which is the gap the head docblock
+   * discloses.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }
@@ -360,14 +359,13 @@ export function createLogger(subsystem: string, options?: LoggerOptions): Logger
           const last = rateLimitState.get(subsystem)?.get(key)
           if (last === undefined) return true
           const elapsed = clock() - last
-          // A backward clock step (`Date.now()` is not monotonic — NTP, a VM
-          // resume) can land the reading BEHIND `last`, making `elapsed`
-          // negative, and a plain `>= ms` would then suppress the line for
-          // step+ms. For a rate-limited heartbeat that silence reads as "the
-          // thing died", so treat a reading behind the stamp as due now: the
-          // window re-stamps on this emit and self-heals. (A smaller step that
-          // leaves the reading ahead of `last` is still suppressed — the
-          // condition is the sign of `elapsed`, not the step.)
+          // `Date.now()` is not monotonic (NTP, a VM resume), so the reading
+          // can land BEHIND `last` and a plain `>= ms` would then suppress the
+          // line for the jump plus the window. For a rate-limited heartbeat
+          // that silence reads as "the thing died", so a reading behind the
+          // stamp counts as due now. The condition on the next line is the
+          // whole rule; this comment deliberately does not restate it, because
+          // the rounds that tried kept getting some input wrong.
           return elapsed < 0 || elapsed >= ms
         },
         () => {

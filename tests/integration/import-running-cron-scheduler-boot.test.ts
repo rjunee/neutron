@@ -14,14 +14,15 @@
  *
  * Spec-vs-current diff (mirrors the S15 brief):
  *
- *   SPEC § 3.4 + § S5: an import_running cron-tick polls on an interval and
- *   advances phase when ImportJobRunner reaches a terminal status. (An earlier
- *   revision of this header attributed a specific "every 15s" cadence to the
- *   spec. The live cadence is `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` in
- *   `onboarding/interview/import-running-cron.ts` — read it there, and take the
- *   constant as the authority on cadence. The referenced spec document is not
- *   part of this repository, so the § numbers above are a pointer for whoever
- *   has it rather than a quote a reader here can check.)
+ *   INTENDED CONTRACT, as this file pins it: an import_running cron-tick polls
+ *   on an interval and advances phase when ImportJobRunner reaches a terminal
+ *   status. The cadence is `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` in
+ *   `onboarding/interview/import-running-cron.ts` — that constant is the
+ *   authority, and no figure is restated here. (The spec that originally
+ *   specified this, `docs/plans/P2-onboarding-v2.md` § 3.4 + § S5, is not part
+ *   of this repository. It is named as a pointer for whoever holds it; no
+ *   sentence here is attributed to it, after an earlier revision credited the
+ *   spec with an "every 15s" cadence a reader here could not check.)
  *
  *   CURRENT WIRING (pre-S15): handler + job registered, but scheduler
  *   never started. cron_state empty.

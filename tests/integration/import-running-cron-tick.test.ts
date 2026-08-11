@@ -533,11 +533,13 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     //
     // Both bounds are a BUDGET, not a derivation. Upper: one interval must pass
     // before "the line stopped appearing" means anything, so keep that inside a
-    // single sitting. The literal is a round quarter-hour and any nearby figure
-    // would serve — it does NOT inherit from the S15 stuck-count window, which the
-    // throttle cannot collide with in the first place, since the throttle applies
-    // only to the idle branch and that branch reports `in_flight_imports=0` by
-    // definition.
+    // single sitting. The quarter-hour is CHOSEN, not derived — it does NOT
+    // inherit from the S15 stuck-count window, which the throttle cannot collide
+    // with in the first place, since the throttle applies only to the idle branch
+    // and that branch reports `in_flight_imports=0` by definition. Being chosen
+    // does not make it negotiable in passing: moving the constant past it should
+    // be a deliberate change that moves this bound with it, which is the whole
+    // job of a guard on a chosen budget.
     expect(IDLE_TICK_LOG_INTERVAL_MS).toBeLessThan(15 * 60_000)
     // Lower bound — the lines/day ceiling IS the floor (it forces ≳ 2.9 min), so a
     // separate small-ms assertion would be unreachable and would read as covering

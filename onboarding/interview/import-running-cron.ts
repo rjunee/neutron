@@ -1,10 +1,15 @@
 /**
  * @neutronai/onboarding — import-running cron-tick (S12, 2026-05-16).
  *
- * Per docs/plans/P2-onboarding-v2.md § 3.4 + § S5: `import_running` is a
- * transit phase that advances to `import_analysis_presented` the moment
- * the `ImportJobRunner` reaches `completed` (or `budget-exceeded` /
- * `failed` / `cancelled` / hard-timeout). The original wiring polled the
+ * The contract this module implements — checkable against the code and the
+ * tests below, not quoted from a document: `import_running` is a transit phase
+ * that advances to `import_analysis_presented` the moment the
+ * `ImportJobRunner` reaches `completed` (or `budget-exceeded` / `failed` /
+ * `cancelled` / hard-timeout). (`docs/plans/P2-onboarding-v2.md` § 3.4 + § S5
+ * is where it was originally specified. That file is not in this repository, so
+ * the § numbers are a pointer for whoever holds it; nothing here is a quote,
+ * and the authority for the behaviour is
+ * `tests/integration/import-running-cron-tick.test.ts`.) The original wiring polled the
  * runner exactly ONCE — inside `engine.notifyImportUpload`, immediately
  * after `runner.start(...)`. At that moment the runner is still in
  * `queued` / `pass1-running`, so the engine emits the live status body
@@ -43,30 +48,24 @@
  *     which none of the patterns aimed at "every 15s" could see.
  *
  * A few-second cadence matches the user's perceived "the agent is still
- * thinking" window. The engine's hard-timeout backstop bounds how long the
- * cron stays relevant per import, but that bound is NOT a flat tick count.
- * Since 2026-06-18 the timeout is progress-aware, and it has more than one
- * window — see `evaluateImportTimeout` in `engine-internals.ts` for the live
- * rule; the shape is a floor (`IMPORT_RUNNING_HARD_TIMEOUT_MS`), a
- * no-progress window that DIFFERS by phase (`IMPORT_NO_PROGRESS_WINDOW_MS`
- * while reading, `IMPORT_CONSOLIDATE_NO_PROGRESS_WINDOW_MS` once Pass-1 is
- * complete), and an absolute ceiling
- * (`IMPORT_RUNNING_HARD_TIMEOUT_CEILING_MS`). Two consequences for anyone
- * reasoning about tick cost: a healthy slow import can legitimately be ticked
- * for hours, and the ceiling is NOT a universal cap — the rate-limit statuses
- * (`rate_limit_cooling_off` / `rate_limit_paused`) return "don't fire" before
- * the ceiling test, because that pause is owned by the resume/degrade
- * machinery, so those imports keep being ticked past it. Don't restate any of
- * these figures here; read the function. (An earlier revision of this header
- * said "15 min" and "at most 60 ticks per import", both predating the
- * redesign, and its replacement listed three windows as if they were the whole
- * rule.)
+ * thinking" window. How long the cron stays relevant for a given import is
+ * decided by the engine's timeout rule, NOT by anything in this file and not
+ * by a flat tick count. Since 2026-06-18 that rule is progress-aware — read
+ * `evaluateImportTimeout` in `engine-internals.ts`. Do not plan tick cost off a
+ * summary of it, including this one: what matters here is only that this file
+ * imposes no bound of its own, so a slow import can legitimately be ticked for
+ * a long time. (Successive revisions of this header stated the bound as "15
+ * min", then "at most 60 ticks per import", then an enumeration of the rule's
+ * windows, then a per-import ceiling — each one either predating a redesign or
+ * contradicted by a short-circuit in the same function. The reason this
+ * paragraph states no bound is that the attempts to state one kept being wrong.)
  *
  * Spec-vs-current diff (the brief's mandatory section):
  *
  *   Intended contract: import_running is a transit phase that advances
  *   to import_analysis_presented when the ImportJobRunner completes.
- *   Detection mechanism: cron-tick polling per § S5.
+ *   Detection mechanism: cron-tick polling (§ S5 in the unavailable spec
+ *   above — the mechanism is pinned by the tests, not by that reference).
  *
  *   CURRENT WIRING (pre-S12): engine.notifyImportUpload polls once. No
  *   periodic poll.

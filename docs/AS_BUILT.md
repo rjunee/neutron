@@ -9484,10 +9484,10 @@ and this entry. Nothing executable changed; the tests are unchanged in count (10
    the previous wording implied one exception to one bound.
 2. **"The default sink is a `console` method, so it only bites an injected one" was false, and
    it was the sentence that made the throwing-sink hazard sound theoretical.** `defaultSink`
-   dispatches to `console.error/warn/log/debug` — mutable globals that throw for real on
-   `EPIPE` (the pipe's read end is GONE — a killed journal reader; a merely FULL pipe blocks or
-   yields `EAGAIN` and does not raise `EPIPE`) and, far more commonly, under
-   a test that replaces `console.log` with a throwing mock. Executed with NO sink injected, and
+   dispatches to `console.error/warn/log/debug` — mutable globals, and a test that replaces
+   `console.log` with a throwing mock reaches the hazard with no sink injected. (This entry
+   originally also claimed those globals "throw for real on `EPIPE`". Round 8 refuted it by
+   execution — see that entry.) Executed with NO sink injected, and
    control-checked by first observing a delivered line: one throwing attempt consumed a 600 s
    window and a fully recovered `console.log` was still suppressed. The claim appeared in three
    places (`logger/index.ts`, `logger/AGENTS.md`, and this entry) and is removed from all three.
@@ -9772,12 +9772,12 @@ attempt did not open a window. The disclosed gap is real by the same standard: `
 over `logger/__tests__/logger.test.ts` returns nothing.
 
 One surviving claim was over-general and is narrowed here rather than kept: every round so far
-wrote "a BACKWARD clock step emits". What emits is a clock reading BEHIND THE LAST STAMP — a
-backward step smaller than the elapsed time leaves the reading ahead of the stamp and is still
-suppressed. Confirmed by execution: stamp at 100, clock forward to 200, step back to 150,
-`ms=100` → suppressed. (The condition itself is in `rateLimited`; read it there.) Sentences in
-the rounds above still say "a backward step", and the banner at the top of this section covers
-them.
+wrote "a BACKWARD clock step emits", which quantifies over inputs the condition does not treat
+alike. Confirmed by execution: stamp at 100, clock forward to 200, step back to 150, `ms=100` →
+suppressed. (Round 8 then refuted the *replacement* rule this entry first offered — being ahead
+of the stamp is not sufficient for suppression either. The condition in `rateLimited` is the
+only correct statement of it and this log no longer carries a rival one.) Sentences in the
+rounds above still say "a backward step", and the banner at the top of this section covers them.
 📌 **A consequence named by its CAUSE ("a backward step") quantifies over more inputs than the
 code tests; named by the CONDITION the code actually tests, it cannot.** This survived six rounds
 of review of a sentence sitting directly above the condition, because the cause is the
@@ -9859,7 +9859,8 @@ sentence twice.** "A NaN `ms` suppresses the key for the life of the process" an
 comment's "a backward clock step makes `elapsed` negative" are both the CAUSE-shaped
 over-generalisation this round exists to remove — one written into the sentence that FIXED it for
 the backward step, the other left standing in the code comment three lines above the condition
-itself. Both are narrowed to the sign of `elapsed`. The rest: "the head docblock gives … the rest
+itself. Both were narrowed to the sign of `elapsed` — which round 8 found is still only half the
+condition, and deleted in favour of pointing at it. The rest: "the head docblock gives … the rest
 of the caller-facing contract" contradicted the head docblock's own "not the whole caller-facing
 contract"; "a throwing sink … delivers nothing" ignores a sink that delivers and then throws;
 "a test cannot go stale quietly" had a counterexample in this very PR (round 1's 41 green tests
@@ -9890,3 +9891,98 @@ from its side; those were run unsandboxed here.
 and `scripts/ci/lint.sh` exit 0. Two items carried in as pre-existing were already fixed earlier
 on this branch and were re-checked here rather than assumed: `gateway/composition/build-core-modules.ts`
 no longer states a 15 s poll, and the "at most one row" claim is gone from the cron handler.
+
+**Round 8 — the replacement rule was wrong too, so the prose stopped stating a rule (PR #174).**
+Documentation only; no executable line changed.
+
+Round 7 replaced "a BACKWARD clock step emits" with "a clock reading BEHIND THE LAST STAMP
+emits — a smaller step that leaves the reading ahead of the stamp is still suppressed", shipped
+that sentence into three files, and recorded it as the fix. It is false. Being ahead of the
+stamp is necessary for suppression, not sufficient: the window also has to be unexpired.
+Executed here — stamp at 100, `ms=100`, clock reads 250, a backward step of 50 that leaves the
+reading 150 ms AHEAD of the stamp: **two lines**, where the sentence predicts one. Control, the
+in-window case the sentence generalised from: stamp 100, reading 150, `ms=100` → one line.
+Control for the other direction: a reading behind the stamp → two lines.
+
+Round after round the sentence SUMMARISING this condition has shipped false, and more than once
+the false sentence was written while fixing the previous one. So this round does not write
+another. `logger/index.ts`, `logger/AGENTS.md` and the `Logger.rateLimited` signature now state
+what the throttle PROMISES — that a clock jump cannot silence a key for the jump plus the window,
+because an hour-long jump silencing a 10-minute heartbeat presents as exactly the "it died" alarm
+the heartbeat exists to rule out — and say that WHICH readings emit is decided by the condition in
+the implementation. The inline comment above that condition no longer paraphrases it either. The
+condition is one line and sits in the one place that cannot drift from itself.
+
+📌 **A prose rule about a shared primitive is falsified by the inputs the author did not think
+of, and the author of a CORRECTION is thinking about the input that produced the correction.**
+Round 7 reasoned from the case in front of it (a small backward step, in-window) and wrote the
+general rule that case suggested; the case one step outside it breaks the rule. Both halves of
+the condition were on screen, three lines below the sentence, in every round. **The durable form
+is not a more careful rule — it is no rule, plus a pointer to the executable one.**
+
+**And this round's own first draft did it a fourth time, in the sentence replacing the third.**
+The replacement read "a non-monotonic clock can produce an extra line rather than a missing one",
+and it went into all three files before being probed. It is false: stamp at 100, `ms=100`, true
+time 250 (which emits), clock jumps back to 150 → **suppressed**, one line where the unjumped
+clock gives two. A backward jump can absolutely cost a line. Caught by probing the draft instead
+of the code it described, and the wording is now the only claim that survives probing — that a
+jump cannot silence a key for the jump PLUS the window, which is what the `elapsed < 0` arm buys,
+with an explicit note that an individual attempt can still move either way. 📌 **"Errs toward an
+extra line" is a claim about a DIRECTION, and a direction is a quantifier over all inputs wearing
+a modest-sounding hat.** Three rounds reached for it. The honest form names the guarantee and
+concedes the rest is rough.
+
+Three more, each an over-claim rather than a mechanism error:
+
+* **"The engine's hard-timeout backstop bounds how long the cron stays relevant per import"** in
+  the cron handler was contradicted eight lines later by the same docblock's note that the
+  rate-limit statuses (`rate_limit_cooling_off` / `rate_limit_paused`) return "don't fire"
+  before the ceiling test — so for those imports the backstop bounds nothing. The header now
+  states that this file imposes no bound of its own and sends the reader to
+  `evaluateImportTimeout`; it enumerates none of that function's windows, which the same
+  docblock's own instruction ("read the function") had already asked for while restating them.
+* **"`console.error/warn/log/debug` … throw for real on `EPIPE`"** in the round-5 entry. Refuted
+  by execution on the CI-pinned bun 1.3.9: 20,000 `console.log` calls with stdout's read end
+  closed produced **0** synchronous throws, while a positive control on the same broken pipe
+  reported 19,791 EPIPE write-callback errors — so the pipe was genuinely broken and EPIPE
+  simply does not surface as a synchronous `console.*` throw. The clause was an unexecuted rider
+  inside a paragraph whose other half WAS executed, which is how it survived a round that
+  claimed everything kept had been verified by execution. 📌 **A verified paragraph confers
+  nothing on the unverified clause someone appended to it for colour.** The throwing-mock path
+  it was decorating is real and is what the probe actually exercised.
+* **The `import_running` contract was attributed to `docs/plans/P2-onboarding-v2.md` § 3.4 /
+  § S5**, which is not in this repository, in both the cron handler and the scheduler-boot test.
+  Round 7 marked the § numbers as an unquotable pointer and left the sentence attributed to the
+  document anyway. Both now attribute the contract to what a reader here can check — the code
+  and `tests/integration/import-running-cron-tick.test.ts` — and name the spec only as a pointer
+  for whoever holds it.
+
+Two smaller ones: the head docblock credited "this refactor's round 1" with a specific green-test
+count, which the review traced to a different change and could not reach from this branch's
+history — the count is deleted rather than corrected, because it was decoration on a point that
+stands without it, and a count already carried forward once is not worth carrying again — and the
+constant-guard test disclaimed its own quarter-hour bound as one "any nearby figure would serve"
+while asserting it, which invites the next reader to move the constant past it in passing; the
+bound is now stated as CHOSEN and the guard's job is stated as holding a chosen budget.
+
+One fact was deleted along with a sentence, deliberately, and is recorded here instead of in the
+contract: an unvalidated `ms` of `NaN` fails both halves of the comparison, so a NaN window holds
+for as long as the clock keeps moving forward. Round 7 put that mechanism into the docblock; this
+round takes it back out, because it is one more prose model of the condition, and keeps the
+caller obligation it exists to justify — a caller that COMPUTES `ms` must validate it. 📌 **The
+log is the right home for a mechanism, and the contract is the right home for the obligation it
+implies.** A log entry is dated and nobody reads it as current; a contract is read as current by
+everyone and is exactly what goes stale.
+
+**Review panel for round 8:** the kimi lane is ABSENT BY DESIGN (owner's K3 quota exhausted) —
+absent, not failed — so no verdict on this round may be read as four-lane. This entry records no
+APPROVE. Every claim kept in this round's prose was executed here rather than read off an
+adjacent comment: the three clock cases above, the attempts-not-deliveries bound (a throwing
+sink produced one sink call, nothing delivered, and a fully recovered sink was still suppressed
+inside the window), a level-gated attempt not opening a window, and the EPIPE probe with its
+positive control.
+
+**Verification (round 8):** `logger/__tests__/logger.test.ts`,
+`tests/integration/import-running-cron-tick.test.ts` and
+`tests/integration/import-running-cron-scheduler-boot.test.ts` pass; `scripts/ci/typecheck-all.sh`
+and `scripts/ci/lint.sh` exit 0. Test count unchanged.
