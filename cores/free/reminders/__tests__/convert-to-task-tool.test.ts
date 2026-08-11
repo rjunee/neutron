@@ -175,9 +175,12 @@ describe('reminders_convert_to_task', () => {
       expect(taskStore.get(result.task_id)?.project_id).toBe('')
     })
 
-    test('a real project whose id merely starts with the sentinel is untouched', async () => {
-      // The match is exact, never a prefix — the same property the client-side
-      // mapper guarantees.
+    test('the sentinel name WITHOUT its sigil is a real project and is untouched', async () => {
+      // `general` is a legal project id and an instance can have one (#183). It
+      // is not the sentinel and must not be collapsed. NOTE: this case would
+      // also pass before the fix — it is here to pin that the fix did not
+      // over-reach, not to prove the match is exact. The prefix case below does
+      // that.
       const tools = makeTools({ withTaskStore: true })
       const future = Math.floor(Date.now() / 1000) + 3600
       const create = await tools.reminders_create({
@@ -187,6 +190,24 @@ describe('reminders_convert_to_task', () => {
       })
       const result = await tools.reminders_convert_to_task({ id: create.id })
       expect(taskStore.get(result.task_id)?.project_id).toBe('general')
+    })
+
+    test('a value that merely STARTS WITH the sentinel is not collapsed', async () => {
+      // This is what pins the comparison to `===` rather than `startsWith`. It
+      // has to come through the override, because the sigil is outside the
+      // server's project-id alphabet so no reminders_create project_id could
+      // carry it — but the override is an arbitrary caller-supplied string.
+      const tools = makeTools({ withTaskStore: true })
+      const future = Math.floor(Date.now() / 1000) + 3600
+      const create = await tools.reminders_create({
+        message: 'prefix, not the sentinel',
+        fire_at: future,
+      })
+      const result = await tools.reminders_convert_to_task({
+        id: create.id,
+        project_id: '~generalish',
+      })
+      expect(taskStore.get(result.task_id)?.project_id).toBe('~generalish')
     })
   })
 
