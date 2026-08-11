@@ -47,9 +47,17 @@ constants. So did all 21 tests. A mutation makes the point sharpest — `CORE_RA
 
 One set of constants, a green suite, and an icon worse than the one 08-10 replaced.
 
-Fixed by centring the stroke in `render_master` (grow the bbox by `stroke/2`), which
-makes the raster a true mirror of the vector and makes `CORE_ORBIT_GAP` and
-`MARK_EXTENT` true statements about pixels rather than about arithmetic.
+Fixed by centring the stroke in `render_master` (grow the bbox by `stroke/2`), which puts
+the raster band where the vector's is **at the four axis ends** and makes `CORE_ORBIT_GAP`
+and `MARK_EXTENT` true statements about pixels rather than about arithmetic.
+
+Not "a true mirror of the vector", which is what this entry claimed until it was measured.
+Pillow grows the ellipse's *bounding box*, so it paints the region between two concentric
+ellipses, while SVG strokes a constant width normal to the path. Those agree exactly where
+the curve is axis-parallel and diverge in between: band width **2.600 at both axis ends,
+2.436 at t≈45°** — 6.3% thinner at mid-arc. Every measurement in the pipeline samples the
+axes, so nothing here is wrong; the point is that the equivalence is local, and a future
+check that samples mid-arc has to expect the difference rather than treat it as drift.
 
 ### 2. It read as a flower, not an atom
 
@@ -116,7 +124,7 @@ sliver count, which is what picked 2.60.
 The 08-10 round deleted the rejected teal drawing from `landing/logo.svg` and added a
 guard. **The guard read two SVG text files.** It passed green while
 `landing/apple-touch-icon.png` — 180×180, dominant `#6fe3d4`, the old `r=48/112/176`
-ring geometry, i.e. *literally the drawing Ryan rejected* — was served as the iOS
+ring geometry, i.e. *literally the rejected drawing* — was served as the iOS
 home-screen icon from `landing/boot-impl.ts` and `landing/server.ts`, declared in
 `landing/site.webmanifest`, and asserted present by `landing/__tests__/mobile-route.test.ts`.
 
@@ -214,10 +222,11 @@ it was written for:
 
 ## 2026-08-10 — the ⚛ mark: give the nucleus room, and delete the rejected logo
 
-Ryan: *"I just want the icon looking better, and I gave you a reference inspiration,
-don't fucking copy it"* — the reference was an atom motif, and only the SYMBOL was
-the reference. Neutron's palette (`#0b0e14` tile, `#4da3ff` accent) and its tile
-style are unchanged; no fifth accent hue was introduced.
+The brief, paraphrased: make the icon look better, treat the supplied reference as
+inspiration rather than something to copy, and take only the SYMBOL from it — not its
+squircle and not its navy. So the reference contributed an atom motif and nothing else.
+Neutron's palette (`#0b0e14` tile, `#4da3ff` accent) and its tile style are unchanged;
+no fifth accent hue was introduced.
 
 ### What was actually wrong — it was measurable, not a matter of taste
 
@@ -327,7 +336,7 @@ actual rail numbers and the reason a tile needs different ones.
 
 ### `landing/logo.svg` — the rejected drawing was still live
 
-It still held teal `#6fe3d4` concentric rings with a satellite dot: the drawing Ryan
+It still held teal `#6fe3d4` concentric rings with a satellite dot: the drawing the owner
 rejected on installing the APK (2026-07-30, *"make the app icon the same as our
 favicon. What is this weird icon you made"*). The app icons were regenerated from the
 ⚛ mark that day, but this file was left behind — and it is **not dead code**. It is

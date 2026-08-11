@@ -13,14 +13,23 @@
          core dia/stroke= 4.6 / 2.6          =  1.77x
          outer extent   = rx + stroke/2      =  12.70 of 16 → 3.30u margin a side
 
-       THE GAP separates "nucleus with orbits around it" from a blob. THE ASPECT
-       separates orbits from a six-lobed rosette: three ellipses at 60° cross in a
-       small central region when they are flat, and pile into a fat hexagonal void
-       when they are round. The 2026-08-10 pass fixed the gap and left the aspect at
-       1.85, so the mark stopped being a blob and became a flower — legible, and still
-       not an atom. This pass takes ry 6.2 → 5.4 and the core 2.8 → 2.3, which lifts
-       the aspect to 2.11 (the rail icon sits at 2.33) and lengthens the six petals
-       instead of fattening them. Twenty-two candidate geometries were rendered and
+       THE GAP separates "nucleus with orbits around it" from a blob, and it is the
+       one that carried this mark: at 0.40 units the core and all three orbits fused
+       and no nucleus was visible at any size. THE ASPECT governs whether the six
+       petals lengthen or fatten, because three ellipses at 60° cross in a small
+       central region when they are flat and pile into a fat hexagonal void when they
+       are round. This pass takes ry 6.2 → 5.4 and the core 2.8 → 2.3, lifting the
+       aspect from 1.85 to 2.11 (the rail icon sits at 2.33).
+
+       HOW MUCH THE ASPECT BUYS, measured rather than asserted, because the 2026-08-10
+       docblock read it as "stopped being a rosette, became an atom" and that was never
+       measured. Accent coverage inside the mark's own painted extent, every candidate
+       rendered through the corrected stroke-centred renderer so only geometry varies:
+       1.85 gives 68.1%, 2.11 gives 66.1%, and the much lighter rail icon gives 51.9%
+       at 2.33. Two points. Flattening the orbits is worth doing and it moves the tile
+       toward the rail, but it is a nudge to the silhouette, not a redesign of it. The
+       defects this mark really had were the fused nucleus and, on 2026-08-10, a raster
+       that did not match its own vector. Twenty-two candidate geometries were rendered and
        compared AS PIXELS at 16/24/32/96/256 px, with the small sizes magnified so the
        real tab-slot pixels were visible rather than guessed at. Two constraints did the
        rejecting: the ones that read best at 256 px (rx 12.4) broke the tile-margin

@@ -26,7 +26,7 @@ is the tab-slot floor talking, not drift.
 WHY THIS MODULE EXISTS. It did not, and the copies drifted. `landing/favicon.ico`
 had a committed generator pinned to the SVG's coordinates, while the MOBILE app
 icon was a completely unrelated drawing — teal concentric rings with a satellite
-dot — that no source in this repo produces. Ryan, installing the APK
+dot — that no source in this repo produces. The owner, installing the APK
 (2026-07-30): "make the app icon the same as our favicon. What is this weird icon
 you made". A mark that exists as N hand-placed binaries is a mark that is N
 different marks. So the geometry lives here once, and every generator renders
@@ -97,11 +97,20 @@ MIN_ORBIT_STROKE = 1.2 / (16 / VIEWBOX)
 #: MEASURES the render rather than trusting this line.
 CORE_ORBIT_GAP = ORBIT_RY - ORBIT_STROKE / 2 - CORE_RADIUS
 
-#: Ellipse eccentricity. Three ellipses at 60° read as ORBITS when they are flat
-#: enough to cross in a small central region and as a six-lobed rosette — a flower,
-#: or a cog — when they are not. At 1.85 (the 2026-08-10 numbers) the central void
-#: was a fat hexagon and the mark read as a flower at 256px+; the rail-header icon
-#: this is a family with sits at 2.33.
+#: Ellipse eccentricity. Three ellipses at 60° cross in a SMALL central region when they
+#: are flat and pile into a fat hexagonal void when they are round, so this ratio governs
+#: whether the six petals lengthen or fatten. At 1.85 (the 2026-08-10 numbers) the central
+#: void was a fat hexagon; the rail-header icon this is a family with sits at 2.33.
+#:
+#: HOW MUCH THIS ACTUALLY BUYS, since the number is easy to over-read. It is a real
+#: geometric property and it is pinned, but it is NOT a perceptual verdict: measured as
+#: accent coverage inside the mark's own painted extent, all rendered through this module's
+#: corrected renderer so only the geometry varies, 1.85 gives 68.1% and 2.11 gives 66.1%,
+#: against the rail icon's 51.9% at 2.33. Two points. The 2026-08-10 entry read a change of
+#: that size as "stopped being a rosette and became an atom", which the measurement does
+#: not support — the defect that pass really fixed was the nucleus clearance, and this one's
+#: is the shipped raster matching the vector. Flattening the orbits is worth doing and it
+#: moves the tile toward the rail; it is not a redesign of the silhouette.
 ORBIT_ASPECT = ORBIT_RX / ORBIT_RY
 
 #: The mark's full painted extent, in viewBox units (widest orbit + its stroke).
@@ -194,11 +203,19 @@ def render_master(
     cx = cy = n / 2
     # SVG centres a stroke on its path; Pillow strokes INSIDE the bounding box. So the
     # bbox is grown by half the stroke, which puts the painted band on
-    # [r - ORBIT_STROKE/2, r + ORBIT_STROKE/2] — where SVG puts it, and where
-    # CORE_ORBIT_GAP and MARK_EXTENT both assume it is. Without this the raster mark
-    # is a half-stroke tighter than the vector one everywhere, which is how the
-    # 2026-08-10 icons shipped with a 0.90-unit nucleus gap while every assert and
-    # every test agreed it was 2.15.
+    # [r - ORBIT_STROKE/2, r + ORBIT_STROKE/2] AT THE FOUR AXIS ENDS — which is where
+    # CORE_ORBIT_GAP and MARK_EXTENT are measured, and where the 2026-08-10 icons were
+    # a half-stroke tight (a 0.90-unit nucleus gap while every assert and every test
+    # agreed it was 2.15).
+    #
+    # IT MATCHES AT THE AXES, NOT EVERYWHERE. Pillow grows the ellipse's bounding box,
+    # so the band it paints is the region between two CONCENTRIC ELLIPSES; SVG strokes a
+    # constant width normal to the path. Those agree exactly where the curve is
+    # axis-parallel and diverge in between — measured on this geometry, band width 2.600
+    # at both axis ends and 2.436 at t≈45°, i.e. 6.3% thinner at mid-arc. That is below
+    # the threshold anything here asserts on and invisible at every shipped size, but it
+    # is the reason this is "the same band at the axes" and not "a true mirror of the
+    # vector": if a future check ever samples mid-arc, it has to expect the difference.
     grow = ORBIT_STROKE / 2
     for angle in ORBIT_ROTATIONS:
         # Each orbit goes on its own transparent layer, rotated about the centre
@@ -269,7 +286,58 @@ def measure_core_orbit_gap(n: int = 640) -> float:
     return (core_edge - y) / (n / VIEWBOX)
 
 
-def count_background_slivers(n: int = 1024, max_sliver_units: float = 5.0) -> tuple[int, float]:
+def measure_petal_void(n: int = 640, angle_deg: float = 30.0) -> float:
+    """The widest background void BETWEEN the petals, in viewBox units.
+
+    Walks a ray out of the centre at `angle_deg` — 30° runs between two orbit long axes,
+    straight through one of the six voids the crossing ellipses leave — and returns the
+    widest background run found beyond the central hexagon. If the three bands ever grow
+    heavy enough to close those voids, the mark stops being three orbits and becomes a
+    solid lozenge, and this number goes to zero.
+
+    THIS EXISTS BECAUSE THE RATIO THAT USED TO STAND IN FOR IT MOVED THE WRONG WAY.
+    `ORBIT_STROKE / ORBIT_RY <= 0.42` was asserted as "no ring quality left / the six
+    outer voids pinch shut", but lowering `ORBIT_RY` RAISES that ratio while making both
+    of those properties visibly better — so the 2026-08-11 geometry could only satisfy it
+    by loosening the bound to 0.5, which is not a guard, it is a rubber stamp. A ratio
+    that has to be relaxed to admit an improvement was never measuring the property. This
+    measures it.
+    """
+    import math
+
+    image = render_master(n, background=BG)
+    px = image.load()
+    unit = n / VIEWBOX
+    cx = cy = n / 2
+    dx = math.cos(math.radians(angle_deg))
+    dy = -math.sin(math.radians(angle_deg))
+
+    def is_accent(x: int, y: int) -> bool:
+        r, g, b, _ = px[x, y]
+        return abs(r - ACCENT[0]) + abs(g - ACCENT[1]) + abs(b - ACCENT[2]) < 200
+
+    # Runs of accent/background along the ray. Index 0 is the nucleus and 1 the central
+    # ring; the crossing pattern — and the six voids — start after those.
+    runs: list[tuple[bool, float]] = []
+    step = 0.25
+    extent = ORBIT_RX + ORBIT_STROKE / 2
+    r = 0.0
+    while r <= extent * unit:
+        x, y = round(cx + dx * r), round(cy + dy * r)
+        if not (0 <= x < n and 0 <= y < n):
+            break
+        accent = is_accent(x, y)
+        if runs and runs[-1][0] == accent:
+            runs[-1] = (accent, runs[-1][1] + step / unit)
+        else:
+            runs.append((accent, step / unit))
+        r += step
+    return max((width for accent, width in runs[2:] if not accent), default=0.0)
+
+
+def count_background_slivers(
+    n: int = 1024, max_sliver_units: float = 5.0, min_sliver_units: float = 0.005
+) -> tuple[int, float]:
     """Isolated background islands too small to be a real void — (count, worst area).
 
     The mark's legitimate holes are the central hexagon and the six voids between the
@@ -288,9 +356,21 @@ def count_background_slivers(n: int = 1024, max_sliver_units: float = 5.0) -> tu
     `n` DEFAULTS TO 1024 BECAUSE THE MEASUREMENT NEEDS THE RESOLUTION. At 400 px a
     viewBox unit is 12.5 px, so a real 0.039-unit sliver and a single stray pixel of
     rotation-resampling noise both round to roughly one cell and the check cannot tell
-    a defect from the rasteriser breathing. At 1024 px the real slivers measure ~40x the
-    noise, and the correct geometry scores exactly zero — which is why this asserts on
-    zero rather than on a tolerance.
+    a defect from the rasteriser breathing.
+
+    `min_sliver_units` IS A NOISE FLOOR, AND IT IS NOT DECORATIVE. Until it existed this
+    returned a raw island count and `verify_raster_invariants()` asserted that count was
+    exactly zero, i.e. it asserted that BICUBIC rotation resampling leaves not one stray
+    background pixel anywhere inside the accent. It happens to hold at n=1024 with this
+    Pillow, and it does NOT hold one resolution over: measured on Pillow 12.1.0 at this
+    geometry, n=1024 → 0 islands, n=1200 → 4 islands of 0.000711 sq units, n=1400 → 0,
+    n=1600 → 1 of 0.000400. Those are single-pixel artefacts of the rotate, not nicks in
+    the artwork. Since both generators call the assert before writing anything, a Pillow
+    resample change of that size would not have degraded an icon — it would have made the
+    whole pipeline unrunnable. So an island only counts as a sliver at >= 0.005 sq units:
+    7x the largest noise island measured above, and 2x below the smallest REAL nick this
+    check was written to catch (0.010 at stroke 2.50). The floor separates the two
+    populations rather than splitting either.
     """
     from collections import deque
 
@@ -331,7 +411,7 @@ def count_background_slivers(n: int = 1024, max_sliver_units: float = 5.0) -> tu
             if touches_border:
                 continue  # the tile around the mark, not a hole in it
             area = cells / (unit * unit)
-            if area < max_sliver_units:
+            if min_sliver_units <= area < max_sliver_units:
                 count += 1
                 worst = max(worst, area)
     return count, worst
@@ -354,6 +434,11 @@ def verify_raster_invariants() -> None:
     assert abs(measured - CORE_ORBIT_GAP) <= 0.25, (
         f"raster gap {measured:.2f} disagrees with CORE_ORBIT_GAP {CORE_ORBIT_GAP:.2f} — "
         "the renderer is not placing its stroke where the geometry says it does"
+    )
+    void = measure_petal_void()
+    assert void >= 1.0, (
+        f"the widest void between the petals measures {void:.2f} viewBox units — below ~1.0 "
+        "the three bands have fused and the mark reads as a solid lozenge, not as orbits"
     )
     slivers, worst = count_background_slivers()
     assert slivers == 0, (

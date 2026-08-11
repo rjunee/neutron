@@ -17,7 +17,7 @@ landing/favicon.svg changes:
 Requires Pillow (dev-only; not a runtime dependency of the server).
 
 WHY APPLE-TOUCH-ICON IS HERE. Until 2026-08-11 it was the LAST hand-placed copy of
-the mark, and it still held the drawing Ryan rejected on 2026-07-30 — teal #6fe3d4
+the mark, and it still held the drawing the owner rejected on 2026-07-30 — teal #6fe3d4
 concentric rings with a satellite dot — while being served as the iOS home-screen
 icon from landing/boot-impl.ts and declared in landing/site.webmanifest. The
 2026-08-10 pass deleted that artwork from landing/logo.svg and added a guard, but the

@@ -6,7 +6,7 @@
  * cannot be diffed by eye in review, so a copy that stops matching is invisible
  * until someone installs the app — which is exactly how the mobile icon came to be
  * teal concentric rings with a satellite dot, a drawing no source in this repo
- * produces (Ryan, 2026-07-30: "make the app icon the same as our favicon. What is
+ * produces (the owner, 2026-07-30: "make the app icon the same as our favicon. What is
  * this weird icon you made"). Every raster is now rendered from ONE set of numbers
  * in `scripts/lib/atom_mark.py`; this test pins those numbers to the SVG so a
  * change to one without the other fails here instead of on a phone.
@@ -90,13 +90,12 @@ interface Pixels {
 }
 
 /**
- * Decode a committed PNG to pixels. Handles 8-bit greyscale/RGB/RGBA — everything the
+ * Decode a PNG buffer to pixels. Handles 8-bit greyscale/RGB/RGBA — everything the
  * Pillow generators emit — and throws on anything else rather than guessing, because a
  * decoder that silently mis-reads a format turns every assertion below into a
  * false negative that looks exactly like a pass.
  */
-function readPng(...parts: string[]): Pixels {
-  const buf = readFileSync(join(ROOT, ...parts));
+function decodePng(buf: Buffer): Pixels {
   expect(buf.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a'); // PNG magic
   let width = 0;
   let height = 0;
@@ -177,6 +176,64 @@ function readPng(...parts: string[]): Pixels {
   };
 }
 
+/**
+ * A committed PNG, decoded ONCE and on first use.
+ *
+ * LAZY, for the same reason `geometry()` below is: a `readFileSync` + `expect` at
+ * describe-body scope runs while the block is being collected, so one bad file aborts
+ * the WHOLE describe — reporting "1 error, N tests never ran" instead of naming which
+ * assertion about which asset failed. That is precisely the failure this file already
+ * documents for the mutation harness, and the first version of this block reintroduced
+ * it for the seven PNG reads. Memoised because several tests read the same 1024px
+ * asset and un-filtering it is not free.
+ */
+const pngCache = new Map<string, Pixels>();
+function png(...parts: string[]): Pixels {
+  const key = parts.join('/');
+  let hit = pngCache.get(key);
+  if (hit === undefined) {
+    hit = decodePng(readFileSync(join(ROOT, ...parts)));
+    pngCache.set(key, hit);
+  }
+  return hit;
+}
+
+/**
+ * Every frame of a committed .ico, decoded — `[size, pixels]` pairs.
+ *
+ * WHY THIS EXISTS. `landing/favicon.ico` is a raster mirror of the mark like any other,
+ * and it was the one the 'carries the rejected teal in NO committed icon' guard did not
+ * read while claiming "NO committed icon" — the same overstatement, one format over,
+ * that let the 2026-08-10 guard pass green over `landing/apple-touch-icon.png`. A guard
+ * whose name generalises over every icon has to actually open every icon.
+ *
+ * `gen-favicon-ico.py` writes every frame PNG-encoded (verified: all six frames of the
+ * committed file carry the PNG magic), so the ICO container is a 6-byte ICONDIR plus
+ * 16-byte entries pointing at complete PNGs, and the decoder above handles the rest.
+ * A frame that is a BMP-encoded DIB instead throws rather than being skipped — silently
+ * skipping is how a guard comes to cover less than it says.
+ */
+function icoFrames(...parts: string[]): [number, Pixels][] {
+  const buf = readFileSync(join(ROOT, ...parts));
+  expect(buf.readUInt16LE(0), 'ICO reserved field').toBe(0);
+  expect(buf.readUInt16LE(2), 'ICO type (1 = icon)').toBe(1);
+  const count = buf.readUInt16LE(4);
+  expect(count).toBeGreaterThan(0);
+  const frames: [number, Pixels][] = [];
+  for (let i = 0; i < count; i++) {
+    const entry = 6 + i * 16;
+    const size = buf.readUInt8(entry) || 256; // 0 means 256, per the format
+    const length = buf.readUInt32LE(entry + 8);
+    const offset = buf.readUInt32LE(entry + 12);
+    const frame = buf.subarray(offset, offset + length);
+    if (frame.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
+      throw new Error(`favicon.ico frame ${size}px is not PNG-encoded — decoder needs BMP`);
+    }
+    frames.push([size, decodePng(frame)]);
+  }
+  return frames;
+}
+
 /** Is this pixel painted at all (i.e. not fully transparent)? */
 function painted(px: [number, number, number, number]): boolean {
   return px[3] > 8;
@@ -215,12 +272,44 @@ describe('the atom mark geometry mirrors landing/favicon.svg', () => {
     expect(pyNumber('CORE_RADIUS')).toBe(Number(m?.[1]));
   });
 
-  it('uses the same orbit ellipse + stroke', () => {
-    const ellipse = /<ellipse cx="16" cy="16" rx="([0-9.]+)" ry="([0-9.]+)" \/>/.exec(svg);
-    expect(ellipse).not.toBeNull();
-    expect([Number(ellipse?.[1]), Number(ellipse?.[2])]).toEqual([11.4, 5.4]);
-    expect(pyNumber('ORBIT_RX')).toBe(Number(ellipse?.[1]));
-    expect(pyNumber('ORBIT_RY')).toBe(Number(ellipse?.[2]));
+  /**
+   * Every `<ellipse>` in a source, as `[rx, ry]` — matched WITHOUT requiring the tag to
+   * end at `/>`, so a rotated orbit (which carries a `transform=`) is matched too.
+   *
+   * ALL THREE, NOT THE FIRST. The previous pattern was anchored on ` />` and therefore
+   * only ever saw the un-rotated ellipse; the rotation test beside it read only the
+   * ANGLE out of the other two. So `rx`/`ry` on both rotated orbits were pinned by
+   * nothing at all: rewriting them in landing/favicon.svg AND landing/logo.svg together
+   * leaves the whole suite green (the byte-identity check compares the two files to each
+   * other, not to the python module), and nothing in this repo rasterises the SVG — the
+   * PNG assertions read Pillow's output, which comes from the python constants. Two
+   * orbits could have degenerated into slivers in the file the browser actually serves
+   * while every raster mirror stayed perfect. That is exactly the drift this file exists
+   * to prevent, so the match COUNT is asserted first.
+   */
+  function ellipses(source: string): [number, number][] {
+    return [...source.matchAll(/<ellipse cx="16" cy="16" rx="([0-9.]+)" ry="([0-9.]+)"/g)].map(
+      (m) => [Number(m[1]), Number(m[2])],
+    );
+  }
+
+  it('uses the same orbit ellipse + stroke, on ALL THREE orbits', () => {
+    const pyRx = pyNumber('ORBIT_RX');
+    const pyRy = pyNumber('ORBIT_RY');
+    expect([pyRx, pyRy], 'the geometry module orbit').toEqual([11.4, 5.4]);
+
+    // Compared as WHOLE ARRAYS, which asserts the count and all three pairs in one go —
+    // a two-ellipse file and a three-ellipse file with one orbit rewritten both fail
+    // here. landing/logo.svg is checked byte-identical to the favicon further down, but
+    // that compares the two files to EACH OTHER and a matched edit to both passes it, so
+    // the logo is pinned to the python module too.
+    const expected: [number, number][] = [
+      [pyRx, pyRy],
+      [pyRx, pyRy],
+      [pyRx, pyRy],
+    ];
+    expect(ellipses(svg), 'landing/favicon.svg orbits').toEqual(expected);
+    expect(ellipses(logo), 'landing/logo.svg orbits').toEqual(expected);
 
     const stroke = /stroke-width="([0-9.]+)"/.exec(svg);
     expect(stroke).not.toBeNull();
@@ -305,15 +394,23 @@ describe('the nucleus reads as a nucleus', () => {
     expect(pyNumber('ORBIT_RX') / pyNumber('ORBIT_RY')).toBeGreaterThanOrEqual(2.0);
   });
 
-  it('keeps the orbits reading as strokes, not lozenges', () => {
-    // A WEAK proxy, kept only for the degenerate case, and deliberately loosened from
-    // the 0.42 it used to assert. That bound was set against the old ry and claimed to
-    // measure "no ring quality left / the six outer voids pinch shut" — but this pass
-    // lowered ry, which RAISES stroke/ry to 0.45 while making both of those properties
-    // visibly better. A ratio that moves the wrong way against the thing it purports
-    // to measure is not the guard; the real ones are the aspect above and the measured
-    // outer void in the committed-PNG block. Past ~0.5 the ellipse fills solid.
-    expect(pyNumber('ORBIT_STROKE') / pyNumber('ORBIT_RY')).toBeLessThanOrEqual(0.5);
+  it('measures the void between the petals rather than proxying it with a ratio', () => {
+    // WHAT USED TO BE HERE, AND WHY IT IS GONE. `ORBIT_STROKE / ORBIT_RY <= 0.42`,
+    // asserted as "no ring quality left / the six outer voids pinch shut". But lowering
+    // ORBIT_RY RAISES that ratio while making both of those properties visibly better,
+    // so this pass could only satisfy it by relaxing the bound to 0.5 — and a guard
+    // relaxed to admit the change it is meant to police is not a guard, it is a rubber
+    // stamp that still reads like coverage in a diff. Deleting it is the honest move,
+    // but only once the property it named is measured somewhere, which is the point of
+    // `measure_petal_void()`: it walks a 30° ray through one of the six voids on a real
+    // render and `verify_raster_invariants()` asserts it, so every generator run checks
+    // it before writing. The committed PNGs are checked the same way below.
+    expect(py).toContain('def measure_petal_void(');
+    expect(py).toContain('assert void >= 1.0');
+    // ...and the ratio is not silently unbounded now: at stroke >= ry the ellipse fills
+    // solid, and the nucleus-clearance assert above (>= 1.5 units) already forbids that
+    // long before it happens, since the gap is ry - stroke/2 - core.
+    expect(pyNumber('ORBIT_STROKE')).toBeLessThan(pyNumber('ORBIT_RY'));
   });
 
   it('keeps the orbits above the 16px tab-slot floor the serving test already sets', () => {
@@ -333,6 +430,17 @@ describe('the nucleus reads as a nucleus', () => {
     expect(floor).not.toBeNull();
     const devicePxFloor = Number(floor?.[1]);
     expect(devicePxFloor).toBeGreaterThan(1.067); // above the value known to fail
+
+    // WHAT THE FLOOR STILL MEASURES, now that the mark it was set for is gone. The
+    // 2026-07-18 failure had TWO causes: a 1.067 px stroke, and a transparent
+    // stroke-only mark compositing onto Chrome's near-black tab strip. The second is
+    // fixed structurally — the mark sits on an opaque #0b0e14 tile, and the serving
+    // test asserts that separately — so this floor is now doing one job rather than
+    // two: keeping the STROKE ITSELF above a hairline at 16px, a legibility bound
+    // that is independent of what it sits on. Worth stating because a floor whose
+    // original justification has been engineered away is exactly the kind of number
+    // that gets "cleaned up" by someone who reads only its comment. It is still the
+    // binding constraint on how flat these ellipses may go at a given weight.
 
     // WHAT IS AND IS NOT SHARED HERE, stated precisely, because the comment this
     // replaces claimed the floor was "DERIVED, not retyped, so there is one number in
@@ -394,6 +502,21 @@ function raySegments(
   return segments;
 }
 
+/**
+ * Bun's default per-test timeout is 5s, and the full-resolution scans below need more:
+ * decoding eight committed assets (five of them 1024px) and walking every pixel of each
+ * is ~20s for the block, and the FIRST test to touch a 1024px file pays its ~2.5s decode.
+ *
+ * DELIBERATELY A TIMEOUT RATHER THAN A FASTER DECODER. The un-filter loop reads every
+ * byte through `readUInt8` so a truncated file throws instead of feeding `undefined` into
+ * the arithmetic; a typed-array rewrite would be several times quicker and would put a
+ * hand-rolled decoder — the one component whose failure mode is a SILENT false green on
+ * every assertion in this block — on the critical path of a performance change. Twenty
+ * seconds of CI is the cheaper side of that trade. It is also not the sampling stride's
+ * fault: the strided versions of these scans were the defect, not the cost.
+ */
+const PIXEL_SCAN_TIMEOUT_MS = 60_000;
+
 describe('the COMMITTED icons look like the mark, not merely cite it', () => {
   /**
    * This block exists because the source-only version of this file gave a green run to
@@ -402,13 +525,13 @@ describe('the COMMITTED icons look like the mark, not merely cite it', () => {
    * change, these fail — which is the point: `python3 scripts/gen-app-icons.py` and
    * `python3 scripts/gen-favicon-ico.py` are part of the change, not a follow-up.
    */
-  const ios = readPng('app', 'assets', 'images', 'icon.png');
-  const splash = readPng('app', 'assets', 'images', 'splash-icon.png');
-  const foreground = readPng('app', 'assets', 'images', 'android-icon-foreground.png');
-  const monochrome = readPng('app', 'assets', 'images', 'android-icon-monochrome.png');
-  const androidBackground = readPng('app', 'assets', 'images', 'android-icon-background.png');
-  const expoFavicon = readPng('app', 'assets', 'images', 'favicon.png');
-  const appleTouch = readPng('landing', 'apple-touch-icon.png');
+  const ios = () => png('app', 'assets', 'images', 'icon.png');
+  const splash = () => png('app', 'assets', 'images', 'splash-icon.png');
+  const foreground = () => png('app', 'assets', 'images', 'android-icon-foreground.png');
+  const monochrome = () => png('app', 'assets', 'images', 'android-icon-monochrome.png');
+  const androidBackground = () => png('app', 'assets', 'images', 'android-icon-background.png');
+  const expoFavicon = () => png('app', 'assets', 'images', 'favicon.png');
+  const appleTouch = () => png('landing', 'apple-touch-icon.png');
 
   /**
    * The geometry DERIVED from the python module rather than retyped from the SVG — the
@@ -443,9 +566,9 @@ describe('the COMMITTED icons look like the mark, not merely cite it', () => {
     // rasteriser's stroke placement lands here.
     const { expectedGap, safeScale } = geometry();
     for (const [label, image, scale] of [
-      ['icon.png', ios, 1],
-      ['splash-icon.png', splash, 1],
-      ['android foreground', foreground, safeScale],
+      ['icon.png', ios(), 1],
+      ['splash-icon.png', splash(), 1],
+      ['android foreground', foreground(), safeScale],
     ] as const) {
       const gap = measureCoreOrbitGap(image, scale);
       expect(gap, `${label} nucleus gap`).toBeGreaterThanOrEqual(1.5);
@@ -454,22 +577,35 @@ describe('the COMMITTED icons look like the mark, not merely cite it', () => {
       // exactly the hole the 2026-08-10 icons went through.
       expect(Math.abs(gap - expectedGap), `${label} gap vs algebra`).toBeLessThanOrEqual(0.3);
     }
-  });
+  }, PIXEL_SCAN_TIMEOUT_MS);
 
-  it('SHIPS open voids between the petals, so the mark is not a solid rosette', () => {
+  it('SHIPS open voids between the petals, so the three bands have not fused', () => {
     // The property `stroke/ry <= 0.42` claimed to measure and could not. At 30° the ray
     // runs between two orbit long axes, straight through one of the six voids.
+    //
+    // WHAT THIS DOES AND DOES NOT CLAIM. It proves the bands are separated — that the
+    // mark is three crossing ellipses rather than one solid lozenge. It does NOT prove
+    // the mark "reads as an atom rather than a rosette" to a human eye, and nothing in
+    // this file does. Measured as accent coverage inside the mark's own painted extent,
+    // with all three rendered through the same corrected renderer so only the geometry
+    // varies: old constants 68.1%, these constants 66.1%, the lighter rail-header icon
+    // 51.9%. Two points is a nudge, so the honest claim for this pass is the one the
+    // numbers support — the nucleus is visible at every size, the dark nicks are gone,
+    // one drawing feeds every mirror — and NOT that the silhouette reads differently.
+    // Stated here because the aspect-ratio argument in scripts/lib/atom_mark.py is a
+    // real geometric property that is easy to mistake for a perceptual verdict it does
+    // not deliver.
     for (const [label, image] of [
-      ['icon.png', ios],
-      ['splash-icon.png', splash],
+      ['icon.png', ios()],
+      ['splash-icon.png', splash()],
     ] as const) {
       const beyondCentre = raySegments(image, 30).slice(2);
       const widestVoid = Math.max(...beyondCentre.filter((s) => !s.accent).map((s) => s.units), 0);
       expect(widestVoid, `${label} widest void between petals`).toBeGreaterThanOrEqual(1.0);
     }
-  });
+  }, PIXEL_SCAN_TIMEOUT_MS);
 
-  it('carries the rejected teal in NO committed icon', () => {
+  it('carries the rejected teal in NO committed icon — every pixel of every one', () => {
     // The 2026-08-10 guard for this read two SVG text files and passed green while
     // landing/apple-touch-icon.png — the iOS home-screen icon, served from
     // landing/boot-impl.ts and declared in landing/site.webmanifest — still WAS the
@@ -481,46 +617,86 @@ describe('the COMMITTED icons look like the mark, not merely cite it', () => {
     // always leads green, and the monochrome layer is neutral (r=g=b). The rejected
     // teal (#6fe3d4) is the other way round — green leads blue by 15. Nothing on our
     // ramp can produce that, so any such pixel is foreign artwork.
-    for (const [label, image] of [
-      ['icon.png', ios],
-      ['splash-icon.png', splash],
-      ['android foreground', foreground],
-      ['android monochrome', monochrome],
-      ['android background', androidBackground],
-      ['expo favicon', expoFavicon],
-      ['apple-touch-icon.png', appleTouch],
-    ] as const) {
+    //
+    // TWO COVERAGE HOLES CLOSED, both of the same shape as the original defect — a
+    // guard whose NAME generalises further than its BODY reaches:
+    //
+    //   1. IT SAMPLED EVERY OTHER PIXEL IN EACH AXIS while asserting exactly zero. A
+    //      stride-2 scan reads a quarter of the image, so a foreign artefact confined
+    //      to odd rows and columns — an 8px logotype, a stray glyph — was invisible to
+    //      a check whose whole assertion is "not one pixel". Cheap, too: seven 1024px
+    //      images at full resolution is ~7M reads and runs in well under a second.
+    //   2. IT SKIPPED landing/favicon.ico ENTIRELY. Six frames, all raster mirrors of
+    //      the mark, none of them read — while the test name said "NO committed icon".
+    //      That is verbatim the 08-10 mistake (a guard covering the formats the author
+    //      happened to be editing) reproduced one round later, and the .ico is the
+    //      single most-served icon in the product.
+    const assets: [string, Pixels][] = [
+      ['icon.png', ios()],
+      ['splash-icon.png', splash()],
+      ['android foreground', foreground()],
+      ['android monochrome', monochrome()],
+      ['android background', androidBackground()],
+      ['expo favicon', expoFavicon()],
+      ['apple-touch-icon.png', appleTouch()],
+      ...icoFrames('landing', 'favicon.ico').map(
+        ([size, pixels]): [string, Pixels] => [`favicon.ico ${size}px frame`, pixels],
+      ),
+    ];
+    // The .ico is six frames, so this must not silently shrink to "the PNGs I remembered".
+    expect(assets.length, 'assets scanned').toBe(13);
+
+    for (const [label, image] of assets) {
       let greenLeadingBlue = 0;
-      for (let y = 0; y < image.height; y += 2) {
-        for (let x = 0; x < image.width; x += 2) {
-          const [r, g, b, a] = image.at(x, y);
+      for (let y = 0; y < image.height; y++) {
+        for (let x = 0; x < image.width; x++) {
+          const [, g, b, a] = image.at(x, y);
           if (a > 8 && g > b + 8 && g > 90) greenLeadingBlue++;
         }
       }
       expect(greenLeadingBlue, `${label} teal-family pixels`).toBe(0);
     }
-  });
+  }, PIXEL_SCAN_TIMEOUT_MS);
 
   it('ships the iOS and apple-touch icons FULL-BLEED and opaque', () => {
     // iOS rejects alpha and applies its own corner mask. A transparent home-screen
     // icon renders on black, and a baked corner gets rounded twice.
+    //
+    // FOUR CORNERS DID NOT TEST "FULL-BLEED AND OPAQUE". It tested four pixels. A baked
+    // corner radius — the actual mistake this guards, since every other asset in the set
+    // is deliberately rounded and copy-paste between them is one line — clips an ARC,
+    // and all four sampled points sit at the extreme corner where a modest radius still
+    // leaves them... transparent, as it happens, but a radius small enough to spare the
+    // exact corner pixel and still visibly round the tile would have passed. The honest
+    // form of "opaque" is every pixel, and the honest form of "full-bleed" is that the
+    // whole border ring is tile-coloured rather than clipped.
     for (const [label, image] of [
-      ['icon.png', ios],
-      ['apple-touch-icon.png', appleTouch],
+      ['icon.png', ios()],
+      ['apple-touch-icon.png', appleTouch()],
     ] as const) {
-      for (const [x, y] of [
-        [0, 0],
-        [image.width - 1, 0],
-        [0, image.height - 1],
-        [image.width - 1, image.height - 1],
-      ] as const) {
-        const [r, g, b, a] = image.at(x, y);
-        expect(a, `${label} corner alpha`).toBe(255);
-        expect([r, g, b], `${label} corner is the tile`).toEqual([0x0b, 0x0e, 0x14]);
+      let transparent = 0;
+      for (let y = 0; y < image.height; y++) {
+        for (let x = 0; x < image.width; x++) {
+          if (image.at(x, y)[3] !== 255) transparent++;
+        }
+      }
+      expect(transparent, `${label} pixels that are not fully opaque`).toBe(0);
+
+      // Full-bleed: the entire border ring is the flat tile, so nothing is clipped.
+      for (let i = 0; i < image.width; i++) {
+        for (const [x, y] of [
+          [i, 0],
+          [i, image.height - 1],
+          [0, i],
+          [image.width - 1, i],
+        ] as const) {
+          const [r, g, b] = image.at(x, y);
+          expect(`${label} (${x},${y})=${r},${g},${b}`).toBe(`${label} (${x},${y})=11,14,20`);
+        }
       }
       expect(isAccent(image.at(image.width / 2, image.height / 2)), `${label} centre`).toBe(true);
     }
-  });
+  }, PIXEL_SCAN_TIMEOUT_MS);
 
   it('insets both Android layers inside the 66/108 safe circle, in pixels', () => {
     // Asserted on the artefact and not just on `mark_scale=SAFE_SCALE` in the
@@ -531,62 +707,84 @@ describe('the COMMITTED icons look like the mark, not merely cite it', () => {
     // put 3 painted pixels past the line. Hence `ANDROID_SAFE_MARGIN`. Note the bound is
     // `radius + 1`, not `radius` — one pixel of slack for the edge itself, which is a
     // rasterisation fact, while 3 pixels at 2% over is a geometry fact.
+    //
+    // FULL RESOLUTION, because the thing being counted is the OUTERMOST painted pixel and
+    // a stride-2 scan can only ever find it by luck: the four orbit tips are the extreme
+    // points of the whole figure, they are a few pixels wide, and half of them fall on
+    // odd coordinates. The margin is 2% of a 1024px layer — ~10px — so this is not a
+    // theoretical gap. It also reports the worst radius rather than a bare count, so a
+    // failure says how far over the line the mark went instead of how many pixels agreed
+    // that it did.
     for (const [label, image] of [
-      ['android foreground', foreground],
-      ['android monochrome', monochrome],
+      ['android foreground', foreground()],
+      ['android monochrome', monochrome()],
     ] as const) {
       const radius = ((66 / 108) * image.width) / 2;
-      let outside = 0;
-      for (let y = 0; y < image.height; y += 2) {
-        for (let x = 0; x < image.width; x += 2) {
+      let worst = 0;
+      for (let y = 0; y < image.height; y++) {
+        for (let x = 0; x < image.width; x++) {
           if (!painted(image.at(x, y))) continue;
-          const dx = x - image.width / 2;
-          const dy = y - image.height / 2;
-          if (Math.hypot(dx, dy) > radius + 1) outside++;
+          worst = Math.max(worst, Math.hypot(x - image.width / 2, y - image.height / 2));
         }
       }
-      expect(outside, `${label} painted px outside the safe circle`).toBe(0);
+      expect(
+        worst,
+        `${label} outermost painted px at r=${worst.toFixed(1)}, safe radius ${radius.toFixed(1)}`,
+      ).toBeLessThanOrEqual(radius + 1);
       expect(image.at(0, 0)[3], `${label} corner must stay transparent`).toBe(0);
     }
-  });
+  }, PIXEL_SCAN_TIMEOUT_MS);
 
   it('ships the monochrome layer as a WHITE silhouette on transparency', () => {
     // Android 13+ re-tints this layer from white. Shipping the blue accent makes the
     // themed icon a blue-on-blue smudge on exactly the launchers that opted in.
+    //
+    // Full resolution: a stray tinted pixel is exactly what a stride-2 scan misses, and
+    // the assertion is again an exact zero. Counted rather than asserted per pixel so a
+    // failure reports how much of the layer is wrong, not just the first offender.
+    const mono = monochrome();
     let opaque = 0;
-    for (let y = 0; y < monochrome.height; y += 2) {
-      for (let x = 0; x < monochrome.width; x += 2) {
-        const [r, g, b, a] = monochrome.at(x, y);
+    let tinted = 0;
+    for (let y = 0; y < mono.height; y++) {
+      for (let x = 0; x < mono.width; x++) {
+        const [r, g, b, a] = mono.at(x, y);
         if (a < 250) continue;
         opaque++;
-        expect([r, g, b]).toEqual([255, 255, 255]);
+        if (r !== 255 || g !== 255 || b !== 255) tinted++;
       }
     }
+    expect(tinted, 'opaque monochrome pixels that are not pure white').toBe(0);
     expect(opaque).toBeGreaterThan(1000); // the silhouette is actually there
-  });
+  }, PIXEL_SCAN_TIMEOUT_MS);
 
   it('ships the Expo web favicon as the ROUNDED tile', () => {
     // This one is landing/favicon.svg verbatim, corner radius included — unlike the
     // iOS icon, nothing masks it for us.
-    expect(expoFavicon.at(0, 0)[3]).toBe(0); // corner clipped away
-    const [, , , centreAlpha] = expoFavicon.at(expoFavicon.width / 2, 4);
+    const favicon = expoFavicon();
+    expect(favicon.at(0, 0)[3]).toBe(0); // corner clipped away
+    const [, , , centreAlpha] = favicon.at(favicon.width / 2, 4);
     expect(centreAlpha).toBe(255); // mid-edge is inside the radius
-  });
+  }, PIXEL_SCAN_TIMEOUT_MS);
 
-  it('ships the Android background layer as the flat tile', () => {
-    for (const [x, y] of [
-      [0, 0],
-      [androidBackground.width - 1, androidBackground.height - 1],
-      [androidBackground.width / 2, androidBackground.height / 2],
-    ] as const) {
-      expect(androidBackground.at(x, y)).toEqual([0x0b, 0x0e, 0x14, 255]);
+  it('ships the Android background layer as the flat tile, everywhere', () => {
+    // Every pixel, not three of them: this layer's entire job is to be ONE colour, so
+    // "three sampled points are the right colour" is a strictly weaker statement than
+    // the thing being claimed, and the full scan costs a millisecond.
+    const tile = androidBackground();
+    let wrong = 0;
+    for (let y = 0; y < tile.height; y++) {
+      for (let x = 0; x < tile.width; x++) {
+        const [r, g, b, a] = tile.at(x, y);
+        if (r !== 0x0b || g !== 0x0e || b !== 0x14 || a !== 255) wrong++;
+      }
     }
-  });
+    expect(wrong, 'android background pixels that are not the flat tile').toBe(0);
+  }, PIXEL_SCAN_TIMEOUT_MS);
 });
 
 describe('landing/logo.svg is the same mark, not a second one', () => {
   /**
-   * It held the drawing Ryan rejected on 2026-07-30 — teal #6fe3d4 concentric rings
+   * It held the drawing the owner rejected on 2026-07-30 — teal #6fe3d4 concentric rings
    * with a satellite dot — for eleven days AFTER the app icons were regenerated
    * from the ⚛ mark, live the whole time on the onboarding page. A rejected design
    * left in the tree is the likeliest thing for the next change to pick up.
@@ -679,12 +877,36 @@ describe('app.json points at the generated icon set', () => {
     expect(landing).toContain('render_atom(APPLE_TOUCH_PX, background=BG)');
   });
 
-  it('measures a real render in EVERY generator before writing', () => {
+  it('CALLS the render check in every generator, before the first write', () => {
     // The algebra was self-consistent and green while the binaries were wrong, so each
     // generator calls the pixel check. A generator that skips it can ship a blob again.
+    //
+    // THIS USED TO SEARCH FOR THE IDENTIFIER, which both scripts also carry in their
+    // `from lib.atom_mark import (...)` block — so deleting the actual call from `main()`
+    // left this green, in both files, while the check no longer ran. Presence of an import
+    // is not evidence of a call; it is evidence of an import. So: match the CALL
+    // statement, and require it to appear before the first `write(`/`.save(` — a check
+    // that runs after the artefacts are on disk has not gated anything.
     for (const script of ['gen-app-icons.py', 'gen-favicon-ico.py']) {
-      const source = readFileSync(join(ROOT, 'scripts', script), 'utf8');
-      expect(source, script).toContain('verify_raster_invariants');
+      const whole = readFileSync(join(ROOT, 'scripts', script), 'utf8');
+      // Scoped to main()'s BODY. Searching the whole file would compare against the
+      // `image.save(...)` inside gen-app-icons.py's own `write()` helper, which is
+      // defined above main() and so precedes every call in it — an ordering assertion
+      // that fails on correct code is as useless as one that passes on broken code.
+      const mainAt = whole.indexOf('def main()');
+      expect(mainAt, `${script} must define main()`).toBeGreaterThan(-1);
+      const body = whole.slice(mainAt);
+
+      const call = /^\s+verify_raster_invariants\(\)\s*$/m.exec(body);
+      expect(call, `${script} must CALL verify_raster_invariants() inside main()`).not.toBeNull();
+
+      const writes = [/^\s+write\(/m.exec(body)?.index, /\.save\(/.exec(body)?.index].filter(
+        (n): n is number => n !== undefined,
+      );
+      expect(writes.length, `${script} must write something`).toBeGreaterThan(0);
+      expect(call?.index ?? -1, `${script} verifies before it writes`).toBeLessThan(
+        Math.min(...writes),
+      );
     }
     expect(py).toContain('def verify_raster_invariants()');
     expect(py).toContain('def measure_core_orbit_gap(');
@@ -693,5 +915,11 @@ describe('app.json points at the generated icon set', () => {
     // pinned to the SVG above — so it cannot be dodged by editing the constants alone.
     expect(py).toContain('def count_background_slivers(');
     expect(py).toContain('assert slivers == 0');
+    // ...and the zero is only meaningful with a NOISE FLOOR under it. Without one the
+    // assert reads "BICUBIC rotation resampling leaves no stray background pixel", which
+    // is false one resolution over (4 islands of 0.0007 sq units at n=1200) and would
+    // hard-block BOTH generators rather than degrade an icon. See the docstring.
+    expect(py).toContain('min_sliver_units: float = 0.005');
+    expect(py).toContain('if min_sliver_units <= area < max_sliver_units:');
   });
 });
