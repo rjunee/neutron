@@ -50,7 +50,11 @@ function grab(name: string): string {
   throw new Error(`could not brace-match ${name}`)
 }
 
-function loadReal(): { enforceSeverityGate: (v: Verdict | null) => Verdict | null } {
+function loadReal(): {
+  // `undefined` is in the domain deliberately: the gate is fed a synthesis result
+  // that can be absent, and the pass-through for it is asserted below.
+  enforceSeverityGate: (v: Verdict | null | undefined) => Verdict | null | undefined
+} {
   // The severity set is a const the function closes over, so it must come along.
   const at = SRC.indexOf('const NON_BLOCKING_SEVERITIES')
   if (at === -1) throw new Error('NON_BLOCKING_SEVERITIES is missing from inner-workflow.mjs')
@@ -161,7 +165,7 @@ describe('it never touches anything that is not a REQUEST_CHANGES', () => {
   test('null / undefined pass through untouched', () => {
     const { enforceSeverityGate } = loadReal()
     expect(enforceSeverityGate(null)).toBe(null)
-    expect(enforceSeverityGate(undefined as unknown as Verdict)).toBe(undefined)
+    expect(enforceSeverityGate(undefined)).toBeUndefined()
   })
 })
 
