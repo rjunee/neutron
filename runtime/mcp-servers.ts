@@ -153,30 +153,51 @@ export function isReservedMcpServerName(name: string): boolean {
  * prompt makes is that the owner can SEE what he is approving, and a difference he
  * cannot see is a difference he cannot check.
  *
- * Added, every one of them zero-advance or line-breaking: the C1 CONTROLS
- * (U+0080-U+009F), SOFT HYPHEN (U+00AD), COMBINING GRAPHEME JOINER (U+034F), ARABIC
- * LETTER MARK (U+061C), the MONGOLIAN FREE VARIATION SELECTORS and VOWEL SEPARATOR
- * (U+180B-U+180F), LINE and PARAGRAPH SEPARATOR (U+2028-U+2029), the whole
- * U+2060-U+206F block (WORD JOINER, the invisible math operators, the bidi isolates
- * already listed, and the deprecated format controls — taken as one range rather than
- * three, so an unassigned code point in the middle of it cannot be the one gap), the
- * VARIATION SELECTORS (U+FE00-U+FE0F), the interlinear annotation marks
- * (U+FFF9-U+FFFB), and U+E0000-U+E01EF — the TAG block, whose characters are invisible
- * by design and are the tag-smuggling vector, together with the VARIATION SELECTORS
- * SUPPLEMENT (U+E0100-U+E01EF) and the unassigned span between them, taken as ONE range
- * for the reason U+2060-U+206F is. The `u` flag is what lets that last range be written
- * as a code point instead of a surrogate pair.
+ * ── THE ENUMERATION WAS THE BUG; THE UNICODE PROPERTIES ARE THE FIX ─────────
+ * This set was hand-extended FIVE times, and every revision closed the code points the
+ * previous reviewer had probed and left the next batch open: the bidi controls, then the
+ * C1 block, then the TAG block, then the VARIATION SELECTORS SUPPLEMENT its own argument
+ * had predicted, then twenty-five more (the Arabic and Indic number signs, the Egyptian
+ * Hieroglyph and Duployan shorthand and musical format controls, the Khmer inherent
+ * vowels) — and after those, the U+E01F0-U+E0FFF tail of the very block the revision
+ * before had claimed to take "whole". Five probes, five supersets, and each revision read
+ * as though it were finished. The pattern is the finding: a set defined by how it RENDERS
+ * cannot be enumerated by hand, so it is no longer enumerated.
  *
- * THE VARIATION SELECTORS WERE THE GAP THE TAG BLOCK'S OWN ARGUMENT PREDICTED. An
- * earlier revision banned U+E0000-U+E007F and stopped, leaving U+E0100-U+E01EF — the
- * other half of the same default-ignorable family, 0x80 code points further on —
- * accepted, alongside their BMP counterparts U+FE00-U+FE0F. Probed against this very
- * regex, fourteen zero-advance code points were accepted while the four positive
- * controls (U+200B, U+2060, U+0085, U+00AD) were refused, so two specs the grant hash
- * correctly distinguishes still printed identically. Also added for the same reason,
- * being blank rather than merely narrow: BRAILLE PATTERN BLANK (U+2800) and the HANGUL
- * FILLERS (U+115F, U+1160, U+3164, U+FFA0), none of which has a legitimate place in a
- * path, an argument or an env-var name.
+ * It is now stated by the properties Unicode itself keeps the answer in:
+ *   `\p{Cc}` — the C0 and C1 controls, DEL included.
+ *   `\p{Cf}` — every FORMAT character: the bidi controls, the zero-widths, SOFT HYPHEN,
+ *              the Arabic and Indic number signs, the hieroglyph and musical and
+ *              shorthand format controls, the TAG block's assigned members, the
+ *              interlinear annotation marks.
+ *   `\p{Zl}`, `\p{Zp}` — LINE and PARAGRAPH SEPARATOR, the two Z's that are not spaces.
+ *   `\p{Default_Ignorable_Code_Point}` — the property that closes the class the
+ *              enumeration kept missing: everything a conforming renderer is REQUIRED to
+ *              draw as nothing, INCLUDING the code points RESERVED for that and not yet
+ *              assigned (U+2065, U+FFF0-U+FFF8, U+E0002-U+E001F, U+E0080-U+E00FF,
+ *              U+E01F0-U+E0FFF). That reservation is what the earlier "take the block
+ *              whole" hand-ranges were reaching for and kept undershooting: an unassigned
+ *              code point matches no general category, which is why the enumeration
+ *              needed ranges at all — and why its ranges kept ending too early.
+ *
+ * ONE CODE POINT STILL NEEDS NAMING. BRAILLE PATTERN BLANK (U+2800) is `So` and is NOT
+ * default-ignorable — a renderer draws it; it simply has no raised dots — so no property
+ * reaches it, and it renders as blank in every font that ships it. Everything else the
+ * previous revision listed by hand (U+034F, the HANGUL FILLERS, the Khmer inherent
+ * vowels, the VARIATION SELECTORS and their supplement, the Mongolian FVS block,
+ * U+2060-U+206F) is default-ignorable and is now covered by property rather than by name.
+ * The `u` flag is what makes the property escapes legal.
+ *
+ * MUTATION-TESTED AGAINST ITS PREDECESSOR, not merely against the new cases. Swept over
+ * all 0x110000 code points: every one of the 665 the enumerated regex refused is STILL
+ * refused — the union is a strict superset, 4274 in total, so 3609 newly closed and none
+ * lost — the positive controls (U+200B, U+2060, U+0085, U+00AD, U+2800) are still
+ * refused, and paths and arguments in Cyrillic, Japanese, Arabic and accented Latin are
+ * still ACCEPTED, as are the whitespace confusables the paragraph below deliberately
+ * leaves alone. So this closed a hole without breaking a working server. The superset
+ * property is pinned by a test that carries the OLD regex literal and re-sweeps it, which
+ * is the guard that makes narrowing this class fail rather than silently re-open 3609
+ * code points.
  *
  * ── WHAT THIS DENYLIST DOES NOT CLOSE, STATED RATHER THAN IMPLIED ───────────
  * WHITESPACE CONFUSABLES ARE OUT OF SCOPE AND STILL ACCEPTED: NO-BREAK SPACE (U+00A0),
@@ -191,21 +212,12 @@ export function isReservedMcpServerName(name: string): boolean {
  * and requiring a fresh one. This paragraph exists so the next reader does not mistake
  * the set below for a completeness claim it does not make.
  *
- * C1 IS A RANGE FOR THE REASON U+2060-U+206F IS. An earlier revision banned only NEL
- * (U+0085) out of that block, next to a DEL (U+007F) it also banned — so U+0080-U+0084
- * and U+0086-U+009F were the gap, accepted by the validator and rendered as nothing by
- * a browser. Two specs differing only by one of them hash differently (correctly) and
- * printed identically, which is precisely the legibility hole the paragraph above
- * exists to close; the block is contiguous with U+007F and no argv or path legitimately
- * carries one, so it is taken whole rather than code point by code point.
- *
  * Deliberately a DENYLIST of invisibles rather than an allowlist of printable ASCII: a
  * path or an argument can legitimately carry non-ASCII text, and refusing all of it
  * would break working servers to close a rendering hole.
  */
-// eslint-disable-next-line no-control-regex
 export const MCP_SERVER_BANNED_CHARS_RE =
-  /[\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u180B-\u180F\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\u2800\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF9-\uFFFB\u{E0000}-\u{E01EF}]/u
+  /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u2800]/u
 
 /**
  * One installed MCP server, as stored and as displayed. Never carries a secret:
