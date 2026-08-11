@@ -9871,13 +9871,14 @@ the defect in the fix. The only wordings that have never had to be corrected are
 a dated banner and a pointer, which is why those are what this round leaves behind.
 
 **Review panel for round 7:** adversarial + rubric lanes, plus an independent `codex` lane
-(codex-cli 0.147.0, read-only) run three times — on the draft, on the fix, and on the fix to the
-fix, producing eleven items, then seven, then eleven again at falling severity (the last pass
-returned one P1 pair and nine P2/P3s). The lane's verdict on the head it last saw was
-REQUEST_CHANGES. Each pass's items were worked in the commit that followed it — and the next pass
-kept finding that some had survived in a copy it had not cited, which is recorded above rather
-than smoothed over. This entry does NOT record an APPROVE, because no lane has returned one
-against the current head. The kimi lane was
+(codex-cli 0.147.0, read-only) run on the draft and again on each fix, at falling severity —
+blockers, then majors, then P2/P3s. Each pass's items were worked in the commit that followed it,
+and the NEXT pass kept finding that some had survived in a copy it had not cited: the second pass
+found four survivors of eleven, the fourth found three of eleven, every one of them a duplicate of
+a sentence that had been corrected at the site the reviewer quoted. 📌 **A review comment names one
+site; a claim lives at as many as somebody copied it to. Discharging a finding is a grep, not an
+edit.** The lane's last verdict on a head it saw was REQUEST_CHANGES, and this entry does NOT
+record an APPROVE, because no lane has returned one against the current head. The kimi lane was
 deliberately not run (owner's K3 quota exhausted) — **absent, not failed**, so this is a
 three-lane round. The codex sandbox could not create temp files, so it verified the unit suite
 and the 51-project typecheck itself and marked the integration-test and lint results UNVERIFIED
