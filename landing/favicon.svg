@@ -1,33 +1,51 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Neutron">
-  <!-- The ⚛ atom mark — geometry from landing/chat-react/ChatApp.tsx AtomMark()
-       (the rail-header icon): a center dot + 3 rotated electron-orbit ellipses.
+  <!-- THE Neutron ⚛ mark, and the source every raster copy is generated from:
+       an opaque tile, a solid nucleus, and three electron orbits at 0°/60°/120°.
+       Same family as AtomMark() in landing/chat-react/ChatApp.tsx (the rail-header
+       icon), tuned for a tile rather than for bare text-adjacent use.
 
-       FAVICON-LEGIBILITY (2026-07-18, ISSUES: "no favicon on the chat tab").
-       The 2026-07-03 rewrite (233e0c1b) dropped the opaque background tile the
-       ORIGINAL favicon carried and drew the atom as a transparent, stroke-only
-       outline in the fixed light-theme accent #007aff at stroke-width 1.6 on a
-       0 0 24 24 viewBox. Rendered into a 16px tab slot that stroke lands at
-       ~1.07 device px of mid-blue on TRANSPARENT — against Chrome's near-black
-       dark tab strip it is effectively invisible, which is why the tab read as
-       "no favicon" even though /favicon.svg served 200. Three changes fix it:
+       PROPORTIONS (2026-08-10). The nucleus must FLOAT: there is a ring of tile
+       background between the core and the orbits' inner edge, and it is what makes
+       the mark read as "nucleus with orbits around it" rather than as a lump. The
+       numbers that own that reading, all in viewBox units:
 
-         1. Opaque rounded-rect tile (#0b0e14 — the shell's theme-color) so the
-            mark never composites onto an unknown tab-strip colour. This is what
-            the pre-233e0c1b icon did and why it "used to work fine".
-         2. Accent lifted #007aff → #4da3ff. Same blue family as the rail header,
-            but enough luminance over #0b0e14 to survive 16px downsampling.
-         3. 0 0 32 32 viewBox + stroke-width 2.6 → ~1.3 device px at 16px, and a
-            solid r=3.2 core. The core carries recognition at small sizes; the
-            orbits are texture (identical trade to the original's solid r=6 core).
+         core→orbit gap = ry - stroke/2 - r  =  6.2 - 1.25 - 2.8  =  2.15
+         stroke/ry      = 2.5 / 6.2          =  40%   (orbits read as orbits)
+         core dia/stroke= 5.6 / 2.5          =  2.24x (nucleus dominates)
+         outer extent   = rx + stroke/2      =  12.75 → 10.2% tile margin
 
-       A favicon can't read page CSS vars, so the accent is a FIXED hex.
-       landing/favicon.ico is the raster fallback, generated from THIS geometry —
-       regenerate it (scripts/gen-favicon-ico.py) whenever this file changes. -->
+       Before this pass the gap was 0.40 units — at a 16px favicon that is 0.2
+       device px, so the core and all three orbits fused into one blob with no
+       nucleus visible at ANY size, right up to the 1024px launcher, and the mark
+       read as a fat six-petal asterisk. The fix trades stroke weight (2.6 → 2.5)
+       and core radius (3.2 → 2.8) for a much taller minor radius (4.9 → 6.2),
+       which opens both the centre ring and the six outer voids. Six candidate
+       geometries were rendered side by side at 16/32/48/256 px before this one.
+
+       SMALL SIZES ARE A HARD FLOOR, NOT A JUDGEMENT CALL. stroke must resolve to
+       >= 1.2 device px in a 16px tab slot; landing/__tests__/favicon-serving.test.ts
+       asserts it, because the icon that shipped broken on 2026-07-18 drew 1.067 px
+       (#007aff at stroke 1.6 on a 0 0 24 24 viewBox) on TRANSPARENT and was
+       invisible against Chrome's near-black tab strip. 16/32 = 0.5, so stroke 2.5
+       lands at 1.25 px — above the floor with margin rather than exactly on it.
+       That floor is what caps how light the orbits can go, and therefore how flat
+       the ellipse can be at a given weight. The other two halves of that fix still
+       stand and must not be undone: the opaque #0b0e14 tile, so the mark never
+       composites onto an unknown tab-strip colour, and the lifted #4da3ff accent.
+       Verified by rendering at 16/32/48/512 px and LOOKING at the output.
+
+       A favicon cannot read page CSS vars, so the accent is a FIXED hex.
+       REGENERATE EVERY RASTER MIRROR whenever this file changes:
+         python3 scripts/gen-favicon-ico.py   → landing/favicon.ico
+         python3 scripts/gen-app-icons.py     → app/assets/images/*.png
+       Geometry is mirrored by hand into scripts/lib/atom_mark.py; landing/logo.svg
+       is this same drawing at 512px. scripts/__tests__/atom-mark-geometry.test.ts
+       pins all three together. -->
   <rect width="32" height="32" rx="7" fill="#0b0e14" />
-  <circle cx="16" cy="16" r="3.2" fill="#4da3ff" />
-  <g fill="none" stroke="#4da3ff" stroke-width="2.6">
-    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" />
-    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" transform="rotate(60 16 16)" />
-    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" transform="rotate(120 16 16)" />
+  <g fill="none" stroke="#4da3ff" stroke-width="2.5">
+    <ellipse cx="16" cy="16" rx="11.5" ry="6.2" />
+    <ellipse cx="16" cy="16" rx="11.5" ry="6.2" transform="rotate(60 16 16)" />
+    <ellipse cx="16" cy="16" rx="11.5" ry="6.2" transform="rotate(120 16 16)" />
   </g>
+  <circle cx="16" cy="16" r="2.8" fill="#4da3ff" />
 </svg>

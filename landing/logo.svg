@@ -1,9 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Neutron">
-  <rect width="512" height="512" rx="96" fill="#0b0e14"/>
-  <g transform="translate(256 256)">
-    <circle r="176" fill="none" stroke="#6fe3d4" stroke-width="10" opacity="0.55"/>
-    <circle r="112" fill="none" stroke="#6fe3d4" stroke-width="10" opacity="0.85"/>
-    <circle r="48" fill="#6fe3d4"/>
-    <circle cx="176" r="16" fill="#6fe3d4"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="512" height="512" role="img" aria-label="Neutron">
+  <!-- The Neutron ⚛ mark at 512px, for anywhere that wants the logo at a size
+       rather than as a favicon. Served as /logo.svg (landing/boot-impl.ts) and
+       worn at 56px by landing/onboarding-telegram.html.
+
+       THIS IS landing/favicon.svg's DRAWING, VERBATIM — same 0 0 32 32 viewBox,
+       same numbers, only width/height differ. Keep it that way: SVG scales, so
+       there is no reason for a second set of coordinates to exist, and
+       scripts/__tests__/atom-mark-geometry.test.ts asserts the two files' drawing
+       bodies are byte-identical.
+
+       WHY THAT ASSERTION EXISTS. Until 2026-08-10 this file held a completely
+       different drawing — teal (#6fe3d4) concentric rings with a satellite dot,
+       sharing neither the geometry nor the palette of the ⚛ mark the rest of the
+       product wears. That drawing is the one Ryan rejected on installing the APK
+       (2026-07-30): "make the app icon the same as our favicon. What is this weird
+       icon you made". The app icons were regenerated from the ⚛ mark at the time,
+       but the rejected artwork was left sitting here — still live on the
+       onboarding page, and still the nearest thing to hand for the next change
+       that needed "the logo". A rejected design left in the tree is not inert; it
+       is the most likely thing to get picked up by mistake, exactly as it was the
+       first time. So it is gone, and the test keeps it gone. -->
+  <rect width="32" height="32" rx="7" fill="#0b0e14" />
+  <g fill="none" stroke="#4da3ff" stroke-width="2.5">
+    <ellipse cx="16" cy="16" rx="11.5" ry="6.2" />
+    <ellipse cx="16" cy="16" rx="11.5" ry="6.2" transform="rotate(60 16 16)" />
+    <ellipse cx="16" cy="16" rx="11.5" ry="6.2" transform="rotate(120 16 16)" />
   </g>
+  <circle cx="16" cy="16" r="2.8" fill="#4da3ff" />
 </svg>
