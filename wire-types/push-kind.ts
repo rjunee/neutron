@@ -39,8 +39,16 @@
  * A fired reminder is a chat message, so it now sends the SAME
  * `agent_message` every other agent post will: composed from the delivered text,
  * carrying the durable row id, routing to the chat that holds it
- * (`gateway/push/chat-message-push.ts`). `reminder` has no sender left and is
- * gone from this list and from the resolver.
+ * (`gateway/push/chat-message-push.ts`). `reminder` has no sender left and is gone
+ * from this list.
+ *
+ * IT IS NOT GONE FROM THE RESOLVER, and that is deliberate: a DECODE-ONLY branch
+ * stays in `app/lib/push-deep-link-dispatch.ts` so taps keep working on
+ * notifications already delivered to a device and on a gateway a self-hoster has not
+ * upgraded. Being absent HERE is what matters — this list is what the system SENDS,
+ * and the exhaustiveness test beside it must not be paddable by a kind nothing emits.
+ * (Said explicitly because this sentence read "gone from this list and from the
+ * resolver", which a reader could act on by deleting a live compatibility path.)
  *
  * `agent_message` was the reverse defect — a resolver branch with no sender,
  * kept OUT of this list precisely so the exhaustiveness test could not be padded

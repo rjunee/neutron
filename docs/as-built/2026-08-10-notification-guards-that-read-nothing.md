@@ -368,3 +368,53 @@ one is deliberate: the owner sent the message that caused it, so it is in-turn.
 📌 **A comment that says EVERY is making a claim about a whole surface from inside one
 seam.** The fix for that is not a hedge, it is naming the exceptions — a reader can check a
 named exception and cannot check an absent one.
+
+## Round 7 — the rubric lane found one real defect that is not this change's, and five comments that lie
+
+The codex RUBRIC lane (a different prompt on the same model as the codex review lane) ran to
+a verdict and returned REQUEST_CHANGES on one MAJOR plus a cluster of contradicting comments.
+Adjudicated as follows.
+
+### The MAJOR is real and PRE-EXISTING: the anchor freeze can read the previous scope's rows
+
+`projectId` arrives as a PROP, so the render that first sees a new scope still holds the OLD
+scope's `rows` and `selfDeviceId` in state — `useMobileChat` clears those in its effect
+CLEANUP, which runs after that render (`app/lib/chat-core/use-mobile-chat.ts:447-451`). The
+clear-and-recompute in `ChatSyncSurface` therefore drops project A's anchor and immediately
+re-freezes A's index under B's key. Cleanup then drops `ready`, the list unmounts, and the
+remount for B consumes that stale index — so opening B can land at a position computed from
+A's transcript.
+
+**Not introduced or widened here.** `git show main:app/components/ChatSyncSurface.tsx` carries
+the identical clear-and-recompute at lines 540-543, keyed on scope alone; adding `target` to
+the key changes nothing when there is no target, which is every ordinary project switch.
+
+**Deliberately not fixed in this change.** The fix looks like one line — refuse to freeze
+while `ready` is false, which is exactly the re-attach window and, verified, is not entered on
+a background/foreground transition — but it belongs with a mounted regression test that drives
+`projectId`, `ready` and a real list remount. This is the ISSUES #505/#511 hot path, and an
+untested anchor change is precisely how the original defect shipped. Named at the site and
+raised as a P1 follow-up.
+
+### Five comments asserted things the code does not do
+
+Each one is the same failure the round-3 and round-6 notes describe, and two of them were
+copies of a sentence already corrected elsewhere in this very branch:
+
+* `gateway/composition/build-core-modules.ts` opened the reminders module by describing the
+  push dispatcher being attached as the tick's `on_fired` hook, and then said "what is NOT
+  here any more: a reminder-fired PUSH hook" twenty-five lines later. One file, both claims.
+* the same file, and `gateway/composition/input/notifier-input.ts`, both still said an
+  LLM-less box makes EVERY row compose as an ordinary nudge "which is fail-closed" — the
+  claim this branch refuted in `reminders/dispatcher.ts` and `open/composer.ts`. The prompt
+  is protected either way; the NOTIFICATION was not, and a ritual row's stored message IS
+  `ritual:<id>`. Third and fourth copies of one sentence.
+* `wire-types/push-kind.ts` said `reminder` is "gone from this list and from the resolver".
+  It is gone from the list; the resolver keeps a DECODE-ONLY branch on purpose, so taps
+  survive on already-delivered notifications and un-upgraded gateways. A reader could have
+  acted on that sentence by deleting a live compatibility path.
+* `ChatSyncSurface` said the latch is set "after a successful jump". It is set when the jump
+  is ISSUED, and is deliberately retained when the promise rejects.
+
+📌 **A sentence corrected in one file is not corrected. Grep for the claim, not the file** —
+this branch fixed the nudge/fail-closed sentence twice and shipped two more copies of it.

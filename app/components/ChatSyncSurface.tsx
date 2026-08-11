@@ -554,6 +554,31 @@ export function ChatSyncSurface({
   // fresh anchor even when the scope did not change — and `chatDeepLinkAnchor` is
   // the SAME function the imperative re-anchor below uses, so a cold open cannot
   // have the two land in different places.
+  //
+  // ⚠️ KNOWN, PRE-EXISTING, AND NOT FIXED HERE: THE FREEZE CAN READ THE PREVIOUS
+  // SCOPE'S ROWS. `projectId` arrives as a PROP, so the render that first sees the new
+  // scope still has the OLD scope's `rows` and `selfDeviceId` in state —
+  // `useMobileChat` clears them in its effect CLEANUP, which runs after that render
+  // (`app/lib/chat-core/use-mobile-chat.ts:447-451`). The clear-and-recompute above
+  // therefore drops project A's anchor and immediately re-freezes A's index under B's
+  // key. Cleanup then drops `ready`, the list unmounts, and when it remounts for B it
+  // consumes that stale index — so opening B can land at a position computed from A's
+  // transcript. With no deep-link target the imperative path only clears its latch and
+  // cannot correct it.
+  //
+  // Byte-identical to `main` on this path (`git show main:app/components/ChatSyncSurface.tsx`
+  // lines 540-543 — the same clear-and-recompute, keyed on scope alone), so this change
+  // neither introduces nor widens it: adding `target` to the key alters nothing when
+  // there is no target, which is every ordinary project switch.
+  //
+  // Left for its own change ON PURPOSE. The fix is small — refuse to freeze while
+  // `ready` is false, which is exactly the re-attach window and, verified, is NOT
+  // entered on a background/foreground transition (that path only toggles cache
+  // activity, `use-mobile-chat.ts` AppState effect) — but it belongs with a mounted
+  // regression test that actually drives `projectId`, `ready` and a list remount, and
+  // this is the ISSUES #505/#511 hot path where an untested anchor change is how the
+  // original defect got shipped. Reported as a P1 follow-up rather than smuggled in
+  // behind a green CI run about something else.
   const deepLinkTarget = targetMessageId ?? '';
   const anchorRef = useRef<{ scope: string; target: string; anchor: ChatInitialAnchor } | null>(
     null,
@@ -596,12 +621,17 @@ export function ChatSyncSurface({
   // `chatDeepLinkAnchor` the same question the render path asks, so on a cold open
   // both agree and neither has to win a race.
   //
-  // ONCE PER TARGET, AND ONCE PER VISIT. The ref latches the id after a successful
-  // jump, so a later `rows` change (a receipt landing, the resume replay appending)
-  // cannot yank the transcript back after the owner has started scrolling. And it
-  // only latches once the row is actually PRESENT: a push arrives before the message
-  // syncs, so the effect re-runs on each `rows` update and jumps the first time it
-  // can resolve the id. If it never syncs, nothing moves.
+  // ONCE PER TARGET, AND ONCE PER VISIT. The ref latches the id at the moment the
+  // jump is ISSUED — not after it completes — so a later `rows` change (a receipt
+  // landing, the resume replay appending) cannot yank the transcript back after the
+  // owner has started scrolling. And it only latches once the row is actually
+  // PRESENT and the list ref exists: a push arrives before the message syncs, so the
+  // effect re-runs on each `rows` update and jumps the first time it can resolve the
+  // id. If it never syncs, nothing moves.
+  //
+  // "Issued", not "succeeded", is the precise word and the difference is deliberate:
+  // the scroll is awaited by nobody and a REJECTED jump keeps the latch spent. See
+  // the note at the call below for why re-arming on a rejection would be worse.
   //
   // LEAVING THE DEEP-LINKED ROUTE RELEASES THE LATCH, and that release is what makes
   // "once per target" mean "once per tap" instead of "once per app run". Without it:

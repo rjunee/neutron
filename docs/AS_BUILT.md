@@ -9234,3 +9234,33 @@ the owner was placed in correctly.
 Found by the cross-model (codex) review lane, in this change's own new code.
 
 Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — five comments that asserted things the code does not do, and one P1 named not fixed
+
+Comment-only follow-up on the push-notification change, from the rubric review lane.
+
+Two of the five were COPIES of a sentence this branch had already corrected elsewhere:
+`gateway/composition/build-core-modules.ts` and `gateway/composition/input/notifier-input.ts`
+both still said an LLM-less box makes every reminder row compose as an ordinary nudge "which
+is fail-closed", the exact claim `reminders/dispatcher.ts` and `open/composer.ts` were fixed
+for — a ritual row's stored `message` IS the dispatch token, so nudging it is how that token
+reached the owner's lock screen. The same file also opened by describing the push dispatcher
+attached as the tick's `on_fired` hook and then said that hook was gone twenty-five lines
+later. `wire-types/push-kind.ts` said the legacy `reminder` kind was "gone from this list and
+from the resolver" — it is gone from the list, while the resolver keeps a decode-only branch
+deliberately, so a reader could have acted on that sentence by deleting a live compatibility
+path. And `ChatSyncSurface` said its deep-link latch is set after a successful jump when it is
+set when the jump is issued.
+
+Also NAMED AND DELIBERATELY NOT FIXED, at the site a reader hits it: the initial-anchor freeze
+can read the PREVIOUS scope's rows. `projectId` arrives as a prop, so the first render under a
+new scope still holds the old scope's `rows`/`selfDeviceId` — those are cleared in
+`useMobileChat`'s effect cleanup, which runs later (`app/lib/chat-core/use-mobile-chat.ts:447-451`)
+— so the freeze re-computes the OLD project's index under the NEW project's key, and the list
+remount consumes it. Byte-identical to `main` on this path, so this change neither introduces
+nor widens it. The fix is small (refuse to freeze while `ready` is false — verified not to be
+entered on a background/foreground transition) but belongs with a mounted test that drives
+`projectId`, `ready` and a real list remount, in the ISSUES #505/#511 hot path. Raised as a P1
+follow-up.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
