@@ -59,6 +59,15 @@
  *   - an internal PROJECT ID. A `project_id` that no longer resolves to a rail
  *     project (deleted mid-turn) degrades to {@link UNKNOWN_BOARD_LABEL}, never
  *     to the raw id.
+ *   - AMBIGUOUS BETWEEN TWO BOARDS. A label that two boards answer to is not a
+ *     name; it is the defect wearing one. `general` is both the no-project
+ *     sentinel and a legal project id, and the owner's box already has a project
+ *     called `General` — so General and that project used to produce the SAME
+ *     label, and the rail showed two rows with one name. {@link
+ *     disambiguateProjectBoardLabel} qualifies the project side. The 48-char cap
+ *     was a second route to the same place (two names sharing a long prefix capped
+ *     to one label); {@link truncate} elides the MIDDLE so the distinguishing tail
+ *     survives.
  *   - MORE THAN ONE LINE. Project names are owner-authored free text and are
  *     validated for length only, so `\n` survives into `projects.name`. Both
  *     consumers of this label splice it into a line-oriented medium — a chat
@@ -100,15 +109,54 @@ export interface WorkBoardChatAck {
 const DEFAULT_DEDUP_WINDOW_MS = 30_000
 const MAX_TITLE_LEN = 96
 /** Board labels are owner-authored project names — cap them like a title. */
-const MAX_BOARD_LABEL_LEN = 48
+export const MAX_BOARD_LABEL_LEN = 48
 
+/** The elision mark {@link truncate} splices in. One grapheme, always visible. */
+const ELLIPSIS = '…'
+
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+/**
+ * Split into USER-PERCEIVED CHARACTERS (grapheme clusters), not code points.
+ *
+ * A code-point split is what shattered the emoji this module is specifically
+ * hardened to keep whole: `👨‍💻` is THREE code points joined by a ZWJ, so a
+ * code-point slice landing inside it emits a bare `👨` and drops the rest — the
+ * board named back to the owner is not the board in his rail, which is the defect
+ * {@link ZERO_WIDTH_JOINER} exists to prevent, reintroduced one layer down. A
+ * grapheme split cuts only BETWEEN glyphs, so no sequence can be cut in half.
+ */
+function graphemes(text: string): string[] {
+  return Array.from(GRAPHEME_SEGMENTER.segment(text), (s) => s.segment)
+}
+
+/**
+ * Cap `text` to `max` GRAPHEMES, eliding the MIDDLE and keeping the tail.
+ *
+ * WHY THE MIDDLE AND NOT THE TAIL. A head-only cap makes two DIFFERENT names
+ * render as ONE label whenever they share a long prefix, and owner-authored names
+ * are overwhelmingly prefix-shared with the distinguishing part at the END
+ * (`… Review — Phase 1` / `… Phase 2`, `… — v1` / `… — v2`). Both used to cap to
+ * the byte-identical `Q3 Financial Reporting and Compliance Review — …`, so the
+ * ack named a board the owner could not tell from its sibling — this PR's defect
+ * exactly, arriving through the length cap instead of through the mapping.
+ * Keeping both ends makes that class distinguishable.
+ *
+ * NOT a uniqueness GUARANTEE, and deliberately not: two names differing ONLY
+ * inside the elided middle still collapse. A guarantee needs a hash or an id
+ * suffix, and neither is the owner's vocabulary — which is the requirement this
+ * label exists to satisfy. The residual is recorded in the as-built note.
+ */
 function truncate(text: string, max: number): string {
-  // Measure + slice by CODE POINTS, not UTF-16 code units: a raw `.slice` on a
-  // string whose astral char (emoji, etc.) straddles the cut index yields a lone
-  // surrogate → mojibake before the ellipsis. `Array.from` iterates code points.
-  const chars = Array.from(text)
-  if (chars.length <= max) return text
-  return `${chars.slice(0, max - 1).join('')}…`
+  const g = graphemes(text)
+  if (g.length <= max) return text
+  // One grapheme is spent on the ellipsis; split the rest head-heavy so an odd
+  // budget favours the beginning (where the name's subject usually is).
+  const keep = max - 1
+  const tail = Math.floor(keep / 2)
+  const head = keep - tail
+  const headText = g.slice(0, head).join('')
+  return tail === 0 ? `${headText}${ELLIPSIS}` : `${headText}${ELLIPSIS}${g.slice(g.length - tail).join('')}`
 }
 
 /**
@@ -164,8 +212,56 @@ const ZERO_WIDTH_JOINER = '\u200D'
  * to remove, reintroduced by the exception that keeps emoji intact.
  */
 export function sanitizeBoardLabel(raw: string): string {
-  const flattened = truncate(flattenToOneLine(raw), MAX_BOARD_LABEL_LEN)
-  return hasVisibleContent(flattened) ? flattened : ''
+  // FLOOR BEFORE CAP, and that order is the guard. `truncate` splices in a
+  // VISIBLE ellipsis, so flooring the capped string asks "does this render as
+  // anything?" of a string the cap just guaranteed renders as at least `…`: a name
+  // of 47+ joiners passed the floor with visible content of exactly `"…"` and was
+  // published as a board name. Flooring the FLATTENED-but-uncapped string asks the
+  // question of the owner's actual name, which is what the floor is for.
+  const flattened = flattenToOneLine(raw)
+  if (!hasVisibleContent(flattened)) return ''
+  return truncate(flattened, MAX_BOARD_LABEL_LEN)
+}
+
+/** Appended to a project name that would otherwise read as the General board. */
+export const PROJECT_BOARD_SUFFIX = '(project)'
+
+/**
+ * Make a PROJECT's owner-facing name distinguishable from the General board.
+ *
+ * THE DEFECT THIS CLOSES. `general` is both the reserved no-project sentinel AND
+ * a legal project id, and the owner's instance already has a real project called
+ * `General` (`app/lib/project-rail-view.ts` records `GET /api/app/projects`
+ * returning `id: 'general'` on his box). Reserving the SLUG — this PR's
+ * `onboarding/wow-moment/project-identity.ts` — stops a NEW project minting that
+ * id; it does nothing about the NAME, and the name is the whole owner-facing
+ * problem. Before this, the General board and a project named `General` produced
+ * the byte-identical label `General` from `boardLabelForProjectId`, and the two
+ * rail rows read identically too. So the ack named a board, the owner looked at
+ * the rail, and two rows answered to the name — which is indistinguishable from
+ * the ack naming the wrong board.
+ *
+ * The PROJECT is disambiguated rather than General because General is the fixed,
+ * unnameable board every instance has, and the project is the one the owner
+ * chose the name of — so the qualifier lands on the thing that has an alternative.
+ *
+ * ONE rule, applied SERVER-SIDE at both seams that produce an owner-facing board
+ * name — {@link boardLabelForProjectId} (the acks, the `<work_board>` block, the
+ * `/status` line) and the project rail's `label` (`open/composer.ts`
+ * `readProjectRows`, which BOTH the web and the mobile rail render verbatim). The
+ * rail label is server-computed, so there is no client copy of this rule to drift
+ * and no second spelling to keep in parity.
+ *
+ * Case- and whitespace-insensitive, on the FLATTENED name: `general`, `General `
+ * and `General\n` all read as `General` to the owner, so all three collide. A
+ * non-colliding name is returned UNTOUCHED (no flatten, no cap) — the rail shows
+ * full names and this function must not quietly become a second cap.
+ */
+export function disambiguateProjectBoardLabel(name: string): string {
+  const flattened = flattenToOneLine(name)
+  return flattened.toLowerCase() === GENERAL_BOARD_LABEL.toLowerCase()
+    ? `${name} ${PROJECT_BOARD_SUFFIX}`
+    : name
 }
 
 /** Does this label render as anything at all? Joiners are invisible on their own. */
@@ -201,9 +297,16 @@ export type WorkBoardProjectNameLookup = (project_id: string) => string | null |
  * General (`null` / blank / the `general` sentinel) short-circuits to
  * {@link GENERAL_BOARD_LABEL} and `lookup` IS NOT CALLED: General's storage key
  * is the instance slug and must never surface, and there is no rail row to find.
- * A real project resolves to its rail name, flattened + capped by
+ * A real project resolves to its rail name, DISAMBIGUATED against the General
+ * board by {@link disambiguateProjectBoardLabel} then flattened + capped by
  * {@link sanitizeBoardLabel}; a miss, a blank name, or a THROWING lookup degrades
  * to {@link UNKNOWN_BOARD_LABEL}, never the raw id.
+ *
+ * The value it returns is UNIQUE PER BOARD for the two cases the owner actually
+ * hits — General vs a project named `General`, and two long names that differ at
+ * the end — which is what makes an ack checkable against the rail. It is not
+ * unique in general; see {@link truncate} for the residual and why closing it
+ * would cost the owner's vocabulary.
  */
 export function boardLabelForProjectId(
   project_id: string | null | undefined,
@@ -220,7 +323,12 @@ export function boardLabelForProjectId(
     // exists to prevent.
     found = null
   }
-  const label = sanitizeBoardLabel(typeof found === 'string' ? found : '')
+  // Disambiguate BEFORE sanitizing: the collision test needs the owner's whole
+  // name, and the suffix must be inside the cap's budget so a colliding name can
+  // never be capped back down to the bare `General` it was distinguished from.
+  const label = sanitizeBoardLabel(
+    disambiguateProjectBoardLabel(typeof found === 'string' ? found : ''),
+  )
   return label.length === 0 ? UNKNOWN_BOARD_LABEL : label
 }
 

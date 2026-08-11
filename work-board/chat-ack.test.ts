@@ -2,13 +2,32 @@ import { describe, expect, test } from 'bun:test'
 import {
   boardLabelForProjectId,
   buildWorkBoardChatAck,
+  disambiguateProjectBoardLabel,
   GENERAL_BOARD_LABEL,
+  MAX_BOARD_LABEL_LEN,
   sanitizeBoardLabel,
   UNKNOWN_BOARD_LABEL,
   type WorkBoardChatAckKind,
   type WorkBoardProjectNameLookup,
 } from './chat-ack.ts'
 import { GENERAL_WORK_BOARD_PROJECT_ID } from './store.ts'
+
+/** ZERO WIDTH JOINER — content inside an emoji, invisible on its own. */
+const ZWJ = '‍'
+
+const SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+/**
+ * USER-PERCEIVED characters. The label's cap is a grapheme cap, so a test that
+ * counts code points measures the wrong unit and passes a ZWJ-shattering cap.
+ */
+function graphemeList(text: string): string[] {
+  return Array.from(SEGMENTER.segment(text), (s) => s.segment)
+}
+
+function countGraphemes(text: string): number {
+  return graphemeList(text).length
+}
 
 interface Posted {
   chat_id: string
@@ -102,13 +121,18 @@ describe('buildWorkBoardChatAck — exact texts', () => {
     )
   })
 
-  test('title longer than 96 chars truncates to 95 + ellipsis', () => {
+  test('title longer than 96 chars is capped to 96 graphemes with an elision mark', () => {
     const { ack, posts } = harness()
     const long = 'x'.repeat(200)
     ack.post({ project_id: 'p1', item_id: 'i1', title: long, kind: 'card_added' })
-    const expectedTitle = `${'x'.repeat(95)}…`
-    expect(expectedTitle.length).toBe(96)
-    expect(posts[0]?.text).toBe(`▸ On the Work Board · Example Project: "${expectedTitle}"`)
+    // Assert the PROPERTY (capped, marked as elided), not a hand-built copy of
+    // the truncation arithmetic — a literal here just restates the implementation
+    // and goes green against any cap that happens to produce the same string.
+    const quoted = /"([^"]*)"$/.exec(posts[0]?.text ?? '')?.[1] ?? ''
+    expect(countGraphemes(quoted)).toBe(96)
+    expect(quoted).toContain('…')
+    expect(quoted.startsWith('x')).toBe(true)
+    expect(quoted.endsWith('x')).toBe(true)
   })
 
   test('title exactly 96 chars is NOT truncated', () => {
@@ -119,19 +143,21 @@ describe('buildWorkBoardChatAck — exact texts', () => {
   })
 
   // Argus r2 nit: truncation must land on a code-POINT boundary, never split an
-  // astral pair into a lone surrogate. An emoji straddling the 95/96 cut must be
+  // astral pair into a lone surrogate. An emoji straddling the cut must be
   // dropped whole, not halved into mojibake.
   test('truncation of an astral-heavy title yields no lone surrogate', () => {
     const { ack, posts } = harness()
-    // 100 astral chars (each is a surrogate pair) — over MAX_TITLE_LEN (96) by code
-    // points; a naive UTF-16 slice at unit index 95 would cut mid-pair.
+    // 100 astral chars (each is a surrogate pair) — over MAX_TITLE_LEN (96); a
+    // naive UTF-16 slice at unit index 95 would cut mid-pair.
     const title = '😀'.repeat(100)
     ack.post({ project_id: 'p1', item_id: 'i1', title, kind: 'card_added' })
     const text = posts[0]!.text
     // No unpaired surrogate survived (each code point round-trips).
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)).toBe(false)
-    // 95 whole emoji + the ellipsis (MAX_TITLE_LEN - 1 code points, then '…').
-    expect(text).toBe(`▸ On the Work Board · Example Project: "${'😀'.repeat(95)}…"`)
+    const quoted = /"([^"]*)"$/.exec(text)?.[1] ?? ''
+    expect(countGraphemes(quoted)).toBe(96)
+    // Every grapheme is a whole emoji or the elision mark — nothing halved.
+    expect(new Set(graphemeList(quoted))).toEqual(new Set(['😀', '…']))
   })
 })
 
@@ -205,10 +231,99 @@ describe('boardLabelForProjectId — the ONE board-name mapping', () => {
     expect(boardLabelForProjectId('p9', () => '  Example Project  ')).toBe('Example Project')
   })
 
-  test('a pathologically long project name is capped at 48 code points', () => {
+  test('a pathologically long project name is capped at 48 graphemes', () => {
     const label = boardLabelForProjectId('p9', () => 'z'.repeat(200))
-    expect(label).toBe(`${'z'.repeat(47)}…`)
-    expect(Array.from(label).length).toBe(48)
+    expect(countGraphemes(label)).toBe(MAX_BOARD_LABEL_LEN)
+    expect(label).toContain('…')
+  })
+
+  /**
+   * THE CAP MUST NOT BECOME A SECOND WAY TO MAKE TWO BOARDS ONE NAME. The whole
+   * point of the label is that the owner can check an ack against his rail, and
+   * `projects.name` allows 1-128 chars against a 48-char label — so two names
+   * sharing a 47-char prefix used to produce the byte-identical label. Owner names
+   * are overwhelmingly prefix-shared with the distinguishing part at the END
+   * (`… Phase 1` / `… Phase 2`), which is exactly the case a head-only cap
+   * destroys. Nothing asserted this before: the sibling test above pinned the
+   * cap's LENGTH, which a colliding cap satisfies perfectly.
+   */
+  test('two long names differing only at the END yield two DIFFERENT labels', () => {
+    const stem = 'Q3 Financial Reporting and Compliance Review — Phase '
+    const one = boardLabelForProjectId('p9', () => `${stem}1`)
+    const two = boardLabelForProjectId('p9', () => `${stem}2`)
+    // Both really are over the cap — otherwise this test proves nothing.
+    expect(countGraphemes(`${stem}1`)).toBeGreaterThan(MAX_BOARD_LABEL_LEN)
+    expect(countGraphemes(one)).toBe(MAX_BOARD_LABEL_LEN)
+    expect(countGraphemes(two)).toBe(MAX_BOARD_LABEL_LEN)
+    expect(one).not.toBe(two)
+  })
+
+  /**
+   * The cap must not shatter the ZWJ sequences `sanitizeBoardLabel` was hardened
+   * to PRESERVE. Keeping the joiner through the flatten and then slicing by code
+   * point is a contradiction: `👨‍💻` is three code points, so a code-point cut
+   * inside it published a bare `👨` — a board name that is not the rail's name,
+   * which is this PR's defect one layer down from where it was fixed.
+   */
+  test('the cap never cuts inside a ZWJ emoji sequence', () => {
+    const name = `${'A'.repeat(46)}👨‍💻 Dev`
+    const label = boardLabelForProjectId('p9', () => name)
+    expect(countGraphemes(label)).toBe(MAX_BOARD_LABEL_LEN)
+    // The glyph survives WHOLE — both halves and the joiner that binds them.
+    expect(label).toContain('👨‍💻')
+    // …and no bare half is left anywhere in the label.
+    expect(graphemeList(label)).not.toContain('👨')
+    expect(graphemeList(label)).not.toContain('💻')
+  })
+
+  /**
+   * The `renders as nothing` FLOOR ran AFTER the cap, and the cap splices in a
+   * VISIBLE `…` — so a name of 47+ joiners walked the floor with visible content
+   * of exactly `"…"` and was published as a board name. That is precisely the
+   * `· <nothing>` ack the floor exists to prevent, delivered by the guard.
+   */
+  test('a name of nothing but joiners degrades to the word, not to an ellipsis', () => {
+    const label = boardLabelForProjectId('p9', () => ZWJ.repeat(60))
+    expect(label).toBe(UNKNOWN_BOARD_LABEL)
+    expect(label).not.toContain('…')
+  })
+})
+
+/**
+ * `general` is BOTH the reserved no-project sentinel and a legal project id, and
+ * the owner's instance already has a real project called `General`
+ * (`app/lib/project-rail-view.ts` records `GET /api/app/projects` returning
+ * `id: 'general'` on his box). This PR reserved the SLUG so no NEW project can
+ * mint that id — which does nothing for the one that already exists, and nothing
+ * at all about the NAME. The name is the whole owner-facing problem: an ack names
+ * a board, he looks at the rail, and TWO rows answer to that name.
+ */
+describe('disambiguateProjectBoardLabel — General and a project called General', () => {
+  test('the General board and a project named General are DIFFERENT labels', () => {
+    const general = boardLabelForProjectId(null, () => null)
+    const project = boardLabelForProjectId('general-project', () => 'General')
+    expect(general).toBe(GENERAL_BOARD_LABEL)
+    expect(project).not.toBe(general)
+    // The project keeps the owner's own word — it is qualified, not renamed.
+    expect(project).toContain(GENERAL_BOARD_LABEL)
+  })
+
+  test('the collision is case- and whitespace-insensitive (the owner reads it, not the bytes)', () => {
+    for (const name of ['general', 'GENERAL', ' General ', 'General\n']) {
+      expect(boardLabelForProjectId('p9', () => name)).not.toBe(GENERAL_BOARD_LABEL)
+    }
+  })
+
+  test('a NON-colliding name is returned untouched — this is not a second cap', () => {
+    expect(disambiguateProjectBoardLabel('Example Project')).toBe('Example Project')
+    expect(disambiguateProjectBoardLabel('General Ledger')).toBe('General Ledger')
+    expect(disambiguateProjectBoardLabel('x'.repeat(120))).toBe('x'.repeat(120))
+  })
+
+  test('the qualified label still fits the cap, so it can never cap back to General', () => {
+    const project = boardLabelForProjectId('general-project', () => 'General')
+    expect(countGraphemes(project)).toBeLessThanOrEqual(MAX_BOARD_LABEL_LEN)
+    expect(project).not.toBe(GENERAL_BOARD_LABEL)
   })
 })
 

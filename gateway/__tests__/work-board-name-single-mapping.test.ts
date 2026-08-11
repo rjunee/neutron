@@ -145,4 +145,33 @@ describe('every owner-facing board name resolves through ONE mapping', () => {
     // The hand-rolled test this replaced, which the sentinel walked straight past.
     expect(body).not.toContain('.length > 0')
   })
+
+  /**
+   * THE RAIL IS A LABEL SITE TOO, and it is the one the ack is CHECKED AGAINST.
+   *
+   * An ack that names `General (project)` while the rail still says `General` is
+   * worse than the ambiguity it replaced: it names a board the owner cannot find.
+   * So the rail's `label` must apply the SAME disambiguation, and it must apply it
+   * HERE — `readProjectRows` is the single server-side producer of the string that
+   * BOTH the web rail (`landing/chat-react/ChatApp.tsx` `p.label`) and the mobile
+   * rail render verbatim, so one rule here replaces two client copies that would
+   * have to be held in parity.
+   *
+   * Asserted as "the label field must not be a bare column read", which a
+   * regression to `label: r.name` fails and which no additional mapping can
+   * satisfy by adding a line.
+   */
+  test('the project rail label applies the shared General disambiguation', () => {
+    const idx = codeLines.findIndex((line) => line.includes('const readProjectRows ='))
+    expect(idx).toBeGreaterThan(-1)
+    // The window holds the reader's return TYPE (`label: string`) as well as the
+    // row mapping, so select the VALUE assignment — the one that ends in a comma.
+    const body = codeLines.slice(idx, idx + 40)
+    const labelValues = body.filter((line) => /^\s*label:.*,\s*$/.test(line))
+    expect(labelValues.length).toBe(1)
+    // The regression this kills: `label: r.name,` — the raw column handed straight
+    // to both clients, which is what made the rail as ambiguous as the ack.
+    expect(labelValues[0]).toContain('disambiguateProjectBoardLabel(')
+    expect(composer).toContain('disambiguateProjectBoardLabel')
+  })
 })

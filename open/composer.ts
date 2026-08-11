@@ -435,6 +435,7 @@ import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-class
 import {
   boardLabelForProjectId,
   buildWorkBoardChatAck,
+  disambiguateProjectBoardLabel,
   GENERAL_BOARD_LABEL,
 } from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
@@ -2298,7 +2299,13 @@ export function buildOpenGraphComposer(
           .all()
           .map((r) => ({
             id: r.id,
-            label: r.name,
+            // The rail name goes through the SAME disambiguation the acks and the
+            // `<work_board>` block use, so a project called `General` does not read
+            // identically to the General board the rail also lists. Server-side on
+            // purpose: BOTH the web rail (`ChatApp.tsx` `p.label`) and the mobile
+            // rail render this string verbatim, so one rule here beats two client
+            // copies that have to be kept in parity.
+            label: disambiguateProjectBoardLabel(r.name),
             emoji: resolveProjectEmoji(r.emoji, r.name),
             unread: readProjectUnread(r.id),
             last_activity_at: r.last_activity_at ?? r.updated_at,

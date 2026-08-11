@@ -79,6 +79,8 @@ interface Harness {
   bodiesOn(topic_id: string): string[]
   /** Every persisted agent message, whatever the topic. */
   allRows(): Array<{ topic_id: string; body: string }>
+  /** Add another REAL rail row, so a test can set up a second board. */
+  insertProject(id: string, name: string): void
   close(): Promise<void>
 }
 
@@ -187,6 +189,15 @@ async function boot(): Promise<Harness> {
       allRows()
         .filter((r) => r.topic_id === topic_id)
         .map((r) => r.body),
+    insertProject: (id: string, name: string): void => {
+      const at = Date.now()
+      db.raw().run(
+        `INSERT INTO projects (id, name, description, persona, emoji, privacy_mode,
+                               billing_mode, created_at, updated_at, last_activity_at)
+         VALUES (?, ?, '', NULL, NULL, 'private', 'personal', ?, ?, ?)`,
+        [id, name, at, at, at],
+      )
+    },
     close: async () => {
       await server.stop(true)
       for (const cleanup of composition.realmode_cleanups ?? []) {
@@ -225,6 +236,19 @@ async function waitForRows(h: Harness, count: number): Promise<Array<{ topic_id:
   }
 }
 
+/**
+ * EXPLICIT per-test budget for every test that boots a real graph.
+ *
+ * Bun's default is 5000 ms, and a boot (~3 s) plus {@link waitForRows}'s 5 s poll
+ * ceiling exceeds it — so a developer running this file directly
+ * (`bun test <file>`) got a TIMEOUT, which reads exactly like broken ack wiring
+ * and sends you hunting a bug that is not there. CI passes `--timeout=15000` and
+ * was always green, which is what let the trap sit here: the failure was visible
+ * only to a human debugging one file. Pinned per test so the file is honest on its
+ * own, independent of the runner's flags.
+ */
+const BOOT_TEST_TIMEOUT_MS = 15_000
+
 /** The app-ws topic a General client subscribes to (no project suffix). */
 const generalTopic = `app:${OWNER_SLUG}`
 /** The app-ws topic a project client subscribes to. */
@@ -251,7 +275,7 @@ describe('a board ack names its board — through the real composer wiring', () 
     expect(body).not.toContain(PROJECT_ID)
     // And requirement (b): the storage key (the instance slug) is not a board name.
     expect(body).not.toContain(OWNER_SLUG)
-  })
+  }, BOOT_TEST_TIMEOUT_MS)
 
   test('a General ack says General and lands on the topic General subscribes to', async () => {
     const h = await boot()
@@ -263,7 +287,7 @@ describe('a board ack names its board — through the real composer wiring', () 
     expect(bodies[0]!).toContain('General')
     // (b) + (c): never the storage key, which for General IS the instance slug.
     expect(bodies[0]!).not.toContain(OWNER_SLUG)
-  })
+  }, BOOT_TEST_TIMEOUT_MS)
 
   /**
    * THE ROUTING REGRESSION. This is the shape the live path actually produces,
@@ -285,7 +309,7 @@ describe('a board ack names its board — through the real composer wiring', () 
     // …and NOT to the per-project topic the un-normalized id produced.
     expect(rows[0]!.topic_id).not.toBe(`app:${OWNER_SLUG}:${GENERAL_WORK_BOARD_PROJECT_ID}`)
     expect(rows[0]!.body).toContain('General')
-  })
+  }, BOOT_TEST_TIMEOUT_MS)
 
   test('the sentinel and null are the SAME board, named and routed alike', async () => {
     const h = await boot()
@@ -302,7 +326,7 @@ describe('a board ack names its board — through the real composer wiring', () 
     expect(new Set(rows.map((r) => r.topic_id))).toEqual(new Set([generalTopic]))
     const labels = rows.map((r) => r.body.includes('General'))
     expect(labels).toEqual([true, true])
-  })
+  }, BOOT_TEST_TIMEOUT_MS)
 
   test('an unresolvable project degrades to a WORD, never the raw id', async () => {
     const h = await boot()
@@ -319,7 +343,7 @@ describe('a board ack names its board — through the real composer wiring', () 
     expect(rows[0]!.body).not.toContain(GHOST_PROJECT_ID)
     // It still routes to that project's own topic; the NAME degraded, not the scope.
     expect(rows[0]!.topic_id).toBe(`app:${OWNER_SLUG}:${GHOST_PROJECT_ID}`)
-  })
+  }, BOOT_TEST_TIMEOUT_MS)
 
   test('every ack kind names the board, not just the add', async () => {
     const h = await boot()
@@ -343,7 +367,7 @@ describe('a board ack names its board — through the real composer wiring', () 
       expect(body).toContain(PROJECT_NAME)
       expect(body).not.toContain(PROJECT_ID)
     }
-  })
+  }, BOOT_TEST_TIMEOUT_MS)
 
   /**
    * The SAME sentinel defect, one seam over, and the one that is not merely
@@ -368,7 +392,7 @@ describe('a board ack names its board — through the real composer wiring', () 
     // A real project still gets its own topic — the normalization is about the
     // sentinel, and must not collapse everything onto General.
     expect(h.resolveDelivery(PROJECT_ID).chat_id).toBe(projectTopic)
-  })
+  }, BOOT_TEST_TIMEOUT_MS)
 
   /**
    * Drift guard for the ONE word that is declared in two places on purpose: the
@@ -390,4 +414,41 @@ describe('a board ack names its board — through the real composer wiring', () 
     expect(slugifyProjectId('Example Project')).toBe('example-project')
     expect(slugifyProjectId('General Ledger')).toBe('general-ledger')
   })
+
+  /**
+   * The reservation above closes the STORAGE collision for a project minted from
+   * now on. It does NOT close the one the owner actually sees: a project he NAMED
+   * `General` keeps that name, so the ack for it and the ack for the General board
+   * used to be the byte-identical `· General`. He then has an ack naming a board
+   * and a rail with two rows answering to the name — indistinguishable, from his
+   * seat, from the ack naming the wrong board.
+   *
+   * Asserted through the REAL composer wiring (`project_name` reads the live
+   * `projects` row), not against the pure resolver: the unit test proves the rule,
+   * this proves the rule is the one the shipped ack applies.
+   */
+  test('an ack for a project NAMED General is distinguishable from a General ack', async () => {
+    const h = await boot()
+    // A project the owner named "General". Its id is the reserved-suffixed slug —
+    // exactly what `slugifyProjectId` mints today.
+    const collidingId = slugifyProjectId('General')
+    h.insertProject(collidingId, 'General')
+
+    h.ack.post({ project_id: collidingId, item_id: 'item-c', title: 'Colliding work', kind: 'card_added' })
+    h.ack.post({ project_id: null, item_id: 'item-g', title: 'General work', kind: 'card_added' })
+    await waitForRows(h, 2)
+
+    const onProject = h.bodiesOn(`${generalTopic}:${collidingId}`)
+    const onGeneral = h.bodiesOn(generalTopic)
+    expect(onProject.length).toBe(1)
+    expect(onGeneral.length).toBe(1)
+    // Both name a board; the two names are NOT the same string.
+    const projectBoard = onProject[0]!.replace('Colliding work', '')
+    const generalBoard = onGeneral[0]!.replace('General work', '')
+    expect(projectBoard).not.toBe(generalBoard)
+    // The project keeps the owner's own word — qualified, not renamed away.
+    expect(onProject[0]!).toContain('General')
+    // And the qualifier is never the internal id.
+    expect(onProject[0]!).not.toContain(collidingId)
+  }, BOOT_TEST_TIMEOUT_MS)
 })

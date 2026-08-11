@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { sanitizeBoardLabel, UNKNOWN_BOARD_LABEL } from './chat-ack.ts'
 import { formatWorkBoardFragment } from './fragment.ts'
 import type { WorkBoardItem } from './store.ts'
 
@@ -102,10 +103,35 @@ describe('formatWorkBoardFragment — names its board', () => {
     expect(frag).toContain('&lt;/work_board&gt;')
   })
 
-  test('a pathologically long board label is capped at 48 code points', () => {
+  test('a pathologically long board label is capped, and capped by the ONE rule', () => {
     const frag = formatWorkBoardFragment([], 'q'.repeat(300))
-    expect(frag).toContain(`for ${'q'.repeat(47)}… (`)
-    expect(frag).not.toContain('q'.repeat(48))
+    // Assert against the PRODUCTION sanitizer, not a hand-built copy of the
+    // truncation arithmetic: the point of this test is that the fragment applies
+    // the shared cap, and a literal here would go green against a private second
+    // cap that merely happens to agree today.
+    const expected = sanitizeBoardLabel('q'.repeat(300))
+    expect(frag).toContain(`for ${expected} (`)
+    expect(frag).toContain(`this one is ${expected}.`)
+    expect(frag).not.toContain('q'.repeat(300))
+  })
+
+  /**
+   * The fragment names the board so the agent can name it back. If two different
+   * boards flatten to ONE header, the instruction "SAY WHICH BOARD" asks for
+   * something it cannot deliver — the block would hand the agent a name that does
+   * not identify a board, which is the unfalsifiable confirmation this PR removes.
+   */
+  test('two long board names differing only at the END produce two DIFFERENT headers', () => {
+    const stem = 'Q3 Financial Reporting and Compliance Review — Phase '
+    const one = formatWorkBoardFragment([], `${stem}1`)
+    const two = formatWorkBoardFragment([], `${stem}2`)
+    expect(one).not.toBe(two)
+  })
+
+  test('a board label made only of joiners falls to the WORD, not to an ellipsis', () => {
+    const frag = formatWorkBoardFragment([], '‍'.repeat(60))
+    expect(frag).toContain(`for ${UNKNOWN_BOARD_LABEL} (`)
+    expect(frag).not.toContain('for … (')
   })
 
   // The BLOCKER. `projects.name` is validated for LENGTH ONLY, so an interior

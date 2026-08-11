@@ -9153,3 +9153,67 @@ that survived round 2's guard. Two survived the first pass and both were hiding 
 unguarded copy of the bug rather than weak coverage of the thing under test.
 
 Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
+
+### 2026-08-11 — round 4: a board name that names ONE board, and an honest "still undiagnosed"
+
+Round 3 made every board confirmation carry a name. Round 4 established that the name did
+not yet IDENTIFY a board, and fixed the three routes to an ambiguous label — each one
+demonstrated by RUNNING the shipped resolver, not reasoned about.
+
+`general` is both the reserved no-project sentinel and a legal project id, and the owner's
+instance already has a real project called `General` (`app/lib/project-rail-view.ts:37-41`
+records `GET /api/app/projects` returning `id: 'general'` there). Reserving the SLUG in
+round 3 stopped a NEW project minting that id; it did nothing about the NAME. So
+`boardLabelForProjectId(null, …)` and `boardLabelForProjectId('general-project', () =>
+'General')` both returned the byte-identical `General`, and the rail was equally ambiguous
+(`landing/chat-react/ChatApp.tsx:1420` labels the General surface `General`, `:1432` renders
+`p.label`). An ack named a board, the owner looked at his rail, and two rows answered.
+`disambiguateProjectBoardLabel` now qualifies the PROJECT side — the side that has an
+alternative — to `General (project)`, case- and whitespace-insensitively on the flattened
+name. Applied server-side at BOTH producers: `boardLabelForProjectId` and the rail's `label`
+in `open/composer.ts` `readProjectRows`. **The rail label is server-computed and both
+clients render it verbatim**, so one rule replaces the two client copies a parity test would
+otherwise have to hold together — the useful check was finding where the string is PRODUCED,
+not where it is drawn.
+
+The 48-char cap was a second route to one name for two boards: `projects.name` allows 1-128,
+so any two names sharing a 47-char prefix rendered identically, and owner names are
+overwhelmingly prefix-shared with the distinguishing part at the END. `truncate` now elides
+the MIDDLE. Explicitly **not a uniqueness guarantee** — two names differing only inside the
+elided middle still collapse, and closing that needs a hash or an id suffix, neither of
+which is the owner's vocabulary. The old test pinned the cap's LENGTH, which a colliding cap
+satisfies perfectly.
+
+Two guards were defeating themselves. The cap sliced by CODE POINT while the sanitizer
+deliberately preserves the ZWJ, so `'A'.repeat(46) + '👨‍💻 Dev'` published a bare `👨` — the
+cap is now grapheme-aware (`Intl.Segmenter`). And the "renders as nothing" floor ran AFTER
+the cap, which splices in a VISIBLE `…`, so a name of 47+ joiners passed with visible content
+of exactly `"…"`; the floor now runs on the flattened-but-uncapped name.
+
+Doc correction: the round-3 detail note claimed the slug reservation was UNFIXED and out of
+the blast radius **in the same commit that shipped it** (`project-identity.ts:82`, asserted
+at `tests/integration/work-board-ack-names-board.open.test.ts:387-388`) — the folklore
+failure class, committed alongside its own refutation. Corrected, and the genuinely-open
+remainder stated: the reservation guards future MINTING only, and a project that already
+holds the id keeps sharing General's bucket because at
+`gateway/wiring/build-live-agent-turn.ts:1508` the sentinel and that id are the same string.
+
+**The owner's original report is still NOT closed, and this says so.** The zero-row pane was
+not reproduced. Eliminated with reads: an error rendering as empty (both clients have a
+distinct error branch ahead of the zero-row branch — `WorkBoardTab.tsx:657`,
+`app/app/projects/[id]/workboard.tsx:328`); a wrongly-scoped live push (a board-dispatched
+run's `project_slug` IS the board scope key, `open/composer.ts:2000`); the bearer's owner
+slug diverging from the agent's (the app-ws resolver returns the gateway's own configured
+slug on every path, `channels/adapters/app-ws/auth.ts:233,293,323`); a stale client key at
+mount (one shared General normaliser per client, refetch on every `projectId` change).
+**Not eliminated:** the warm REPL's `/tool-call` sink resolves the write scope from the
+pool's session REGISTRATION and a miss degrades to General by its own comment
+(`runtime/adapters/claude-code/persistent/pool-state.ts:214`) while the pane derives from
+`turn.project_id`. Still a hypothesis — no miss was reproduced.
+
+Also fixed a trap the file set for its next reader: the integration test false-red under a
+bare `bun test <file>` because boot plus the 5 s ack poll exceeds bun's 5000 ms default. CI
+passes `--timeout=15000`, so it was green and the trap was invisible to CI — now pinned
+per test.
+
+Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.

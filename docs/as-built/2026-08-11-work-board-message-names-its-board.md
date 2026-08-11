@@ -144,6 +144,50 @@ or between the two halves of an astral char's surrogate pair, and emit the broke
 remainder into the prompt. An ASCII-only cap test cannot see either failure, so the tests
 cover both.
 
+### 5. A label that two boards answer to is not a name (round 4)
+
+Naming the board is worthless if the name does not pick out ONE board. Three routes to an
+ambiguous label were open after round 3, all of them demonstrated by running the shipped
+resolver rather than reasoned about:
+
+* **General vs a project called `General`.** `boardLabelForProjectId(null, …)` and
+  `boardLabelForProjectId('general-project', () => 'General')` both returned the
+  byte-identical `"General"`, and the rail was equally ambiguous — `ChatApp.tsx:1420`
+  labels the General surface `General` while `:1432` renders `p.label`. So the ack named a
+  board, the owner looked at his rail, and two rows answered. `disambiguateProjectBoardLabel`
+  qualifies the PROJECT side to `General (project)` — the project is the side with an
+  alternative, General being the fixed board every instance has. Case- and
+  whitespace-insensitive on the flattened name, so `general`, `GENERAL ` and `General\n`
+  all collide.
+
+  Applied **server-side at both seams** — `boardLabelForProjectId` (acks, `<work_board>`
+  block, `/status`) and the rail's `label` in `open/composer.ts` `readProjectRows`. The rail
+  label is server-computed and BOTH clients render it verbatim, so there is no client copy
+  of the rule and no cross-client parity to maintain. That is why this fix needs no web/
+  mobile change: the check was to find where the string is produced, not where it is drawn.
+
+* **The 48-char cap collapsing two long names into one.** `projects.name` allows 1-128
+  chars, so a head-only cap made any two names sharing a 47-char prefix render identically
+  — and owner names are overwhelmingly prefix-shared with the distinguishing part at the
+  END. `Q3 Financial Reporting and Compliance Review — Phase 1` and `… Phase 2` both capped
+  to `Q3 Financial Reporting and Compliance Review — …`. `truncate` now elides the MIDDLE
+  and keeps the tail. **Not a uniqueness guarantee, deliberately**: two names differing only
+  inside the elided middle still collapse, and closing that needs a hash or an id suffix —
+  neither of which is the owner's vocabulary, which is the requirement the label exists to
+  satisfy. The old test pinned the cap's LENGTH, which a colliding cap satisfies perfectly;
+  the new one asserts two long names yield two different labels.
+
+* **The cap shattering the ZWJ emoji the sanitizer preserves.** Keeping the joiner through
+  the flatten and then slicing by CODE POINT is a contradiction: `👨‍💻` is three code
+  points, so `sanitizeBoardLabel('A'.repeat(46) + '👨‍💻 Dev')` published a bare `👨`. The
+  cap is now grapheme-aware (`Intl.Segmenter`), so it can only cut BETWEEN glyphs.
+
+* **The `renders as nothing` floor, defeated by its own guard.** The floor ran AFTER the
+  cap and the cap splices in a VISIBLE `…`, so a name of 47+ joiners passed with visible
+  content of exactly `"…"` and shipped as a board name — the `· <nothing>` ack the floor
+  exists to prevent, delivered by the floor. Flooring the flattened-but-uncapped string
+  asks the question of the owner's actual name.
+
 ## The panel deliberately did NOT change
 
 Considered and declined, because the redundancy is not worth the diff:
@@ -164,21 +208,66 @@ Considered and declined, because the redundancy is not worth the diff:
 
 ## Known, unfixed, and deliberately out of scope
 
-* **The scope divergence hypothesis above.** The prompt block's board name derives from
-  `turn.project_id`; the agent's board WRITE derives from the pool's session registration.
-  They agree whenever the session is registered, and a miss sends the write to General
-  while the block names the project. The deterministic ack is unaffected — it derives from
-  the same `ctx.project_id` the write used, so it always names where the row actually
-  landed, and it is the authoritative line. Closing the divergence itself means threading
-  the pool's resolved scope back into the prompt composition, which is a larger change than
-  this fix and needs its own PR.
-* **A project name that slugifies to `general`.** `slugifyProjectId` can mint the id
-  `general` (`onboarding/wow-moment/project-identity.ts:44`), which `workBoardScopeKey`
-  collapses onto the General bucket, so such a project silently shares General's board.
-  Pre-existing, and **not a mislabel**: the ack calls it `General`, which is exactly where
-  the row lands, so the confirmation stays truthful. Containment belongs in the canonical
-  slugifier (reject or uniquify the sentinel), which is shared identity machinery with its
-  own drift-guard test — out of this fix's blast radius.
+* **The zero-row pane is STILL not explained.** Round 4 spent its diagnosis budget here
+  and did not reproduce it. What it did do is narrow the field, so the next attempt starts
+  further along. **Eliminated, each with a read:**
+
+  * *An error rendering as empty.* Both clients have a DISTINCT error branch ahead of the
+    zero-row branch — `landing/chat-react/WorkBoardTab.tsx:657` and
+    `app/app/projects/[id]/workboard.tsx:328` (`testID="workboard-error"`, with a Retry).
+    A failed list cannot render as "No work tracked yet" on either surface. The one
+    swallowing path is a QUIET background poll, and it deliberately leaves the existing
+    rows in place (`WorkBoardTab.tsx:355-359`) — it cannot zero a populated board.
+  * *A wrongly-scoped live push zeroing the pane.* `fanWorkBoardChanged(run.project_slug)`
+    looked like it was handing a trident-run identifier to a work-board keyed function, but
+    a board-dispatched run's `project_slug` IS the board scope key —
+    `open/composer.ts:2000` sets it to `workBoardScopeKey(project_slug, input.project_id)`.
+    Writer and fan agree by construction.
+  * *The bearer's owner slug diverging from the agent's.* The HTTP surface keys on
+    `resolveBearer(...).project_slug`, and the app-ws resolver returns the GATEWAY's own
+    configured slug on every path (`channels/adapters/app-ws/auth.ts:233,293,323`) — the
+    same `project_slug` binding the composer hands `McpServer`. They cannot differ.
+  * *A stale client-derived key at mount.* Both clients normalize every spelling of General
+    through ONE shared module before it reaches a URL (`landing/chat-react/general-scope.ts`,
+    `app/lib/general-scope.ts`), and the tab refetches on every `projectId` change
+    (`WorkBoardTab.tsx:368-378`).
+
+  **NOT eliminated — the one mechanism the code still supports.** The warm REPL's
+  `/tool-call` sink resolves the write scope from the pool's session REGISTRATION
+  (`runtime/adapters/claude-code/persistent/pool-state.ts:214`), and a lookup miss
+  `?? null` degrades to the owner slug = General **by its own comment**, while the pane and
+  the prompt block both derive from `turn.project_id`
+  (`gateway/wiring/build-live-agent-turn.ts:1508`). A registration miss therefore writes to
+  General while the owner watches a project pane. That remains a hypothesis: nothing here
+  reproduced a miss. Closing it means threading the pool's resolved scope back into prompt
+  composition, or asserting the two derivations agree — larger than this PR either way.
+
+  There is also a mechanism this PR **cannot** rule out from code at all: the model
+  claiming "added to the work board" in PROSE without calling `work_board_add`, in which
+  case nothing was written anywhere and the pane is correctly empty. After this PR that
+  case is at least DISTINGUISHABLE — a real write always emits a deterministic
+  `▸ On the Work Board · <board>:` line from the tool layer, and prose alone emits none.
+* **A project whose id ALREADY is `general`.** This bullet previously claimed the
+  sentinel reservation was unfixed and out of the blast radius. **That was wrong, and it
+  was wrong in the same commit that shipped the fix**: `slugifyProjectId` returns
+  `general-project` for a name that would mint the sentinel
+  (`onboarding/wow-moment/project-identity.ts:82`) and
+  `tests/integration/work-board-ack-names-board.open.test.ts:387-388` asserts it. The doc
+  described the state before the fix as though it were the state after — the folklore
+  failure class this repo already has a record of, committed alongside its own refutation.
+
+  What is genuinely **still open** is the part the reservation cannot reach: it guards
+  future MINTING only. A project that already holds the id `general` keeps it, and
+  `normalizeBoardProjectId` still collapses it onto the General bucket, so the two share
+  one board. This is not hypothetical on the owner's box —
+  `app/lib/project-rail-view.ts:37-41` records `GET /api/app/projects` returning
+  `id: 'general'` there. The deep cause is that `general` is simultaneously the
+  no-project SENTINEL (`build-live-agent-turn.ts:1508` sets `turn.project_id ?? 'general'`)
+  and a legal project id, so at that seam the two are the same string and no normalizer
+  can tell them apart. Fixing the storage collapse means changing the SENTINEL, not the
+  normalizer — a larger change than this PR, and one that would undo the sentinel handling
+  this PR just got right. **The owner-facing half IS fixed here**: the two boards no longer
+  share a NAME (see below).
 
 ## Mutation results
 
