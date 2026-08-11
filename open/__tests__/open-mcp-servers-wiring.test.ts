@@ -36,6 +36,12 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import type { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
+import {
+  childByKey,
+  pool,
+} from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import type { Reminder } from '@neutronai/reminders/store.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
@@ -260,6 +266,71 @@ describe('the production composer wires installable MCP servers end to end', () 
       expect(wired[0]!.name).toBe('example-server')
       expect(wired[0]!.env).toEqual({ EXAMPLE_API_KEY: SECRET })
     } finally {
+      b.cleanup()
+    }
+  })
+
+  test('REVOKING through the real surface retires a warm child — the composer wires `onRevoked`', async () => {
+    // The seam this pins is one line in `open/composer.ts` and nothing else in the suite
+    // touches it. The store is persistence-layer and cannot import the REPL pool, so it
+    // announces a revocation through an `onRevoked` callback the composer supplies; delete
+    // that property and every store test still passes (they construct their own store with
+    // their own spy), every pool test still passes (they call the evictor directly), and a
+    // revoked server's stdio child keeps running with the environment it was handed until
+    // some later dispatch happens to evict it. Built-but-never-wired, in the one place
+    // where the consequence is a live subprocess outliving its grant.
+    //
+    // Asserted through the real HTTP surface and against the real module-level pool — the
+    // composer imports the evictor from the same `pool-state` graph this test does, so a
+    // pool entry planted here is one the production callback can actually see. A test
+    // double for the callback would prove only that a double was called.
+    const b = await boot()
+    try {
+      const installed = await b.api('POST', '/api/app/mcp-servers', {
+        name: 'example-server',
+        command: '/usr/local/bin/example-mcp',
+        args: ['--stdio'],
+        env: { EXAMPLE_API_KEY: SECRET },
+      })
+      expect(installed.status).toBe(200)
+
+      // A warm IDLE session, hand-built rather than spawned: this test is about the
+      // composer's wiring, and standing up a real pty child would make it a pool test
+      // that happens to boot a composer. `hasChildExited` reports the kill so the
+      // assertion is that the CHILD DIED, not merely that a map entry moved.
+      let killed = false
+      const child = {
+        hasExited: (): boolean => killed,
+        kill: (): void => {
+          killed = true
+        },
+        exited: Promise.resolve(0),
+      }
+      const session = {
+        sessionId: 'wiring-probe',
+        child,
+        activeTurn: undefined,
+        turnSlotHeld: 0,
+        poisoned: false,
+        retireOnIdle: false,
+        configPaths: [] as string[],
+        configDir: '',
+        hasChildExited: (): boolean => killed,
+      }
+      const KEY = 'mcp-wiring-probe'
+      pool.set(KEY, Promise.resolve(session as unknown as ReplSession))
+      childByKey.set(KEY, child as unknown as PtyChild)
+
+      // Uninstall — a revocation, which is what has to reach the pool.
+      const removed = await b.api('DELETE', '/api/app/mcp-servers?name=example-server')
+      expect(removed.status).toBe(200)
+      // The callback is awaited inside `remove()`, so by here it has run.
+      expect(killed).toBe(true)
+      expect(pool.has(KEY)).toBe(false)
+      expect(childByKey.has(KEY)).toBe(false)
+    } finally {
+      pool.delete('mcp-wiring-probe')
+      childByKey.delete('mcp-wiring-probe')
       b.cleanup()
     }
   })
