@@ -94,11 +94,12 @@ describe('the extraction itself works (a gate that cannot load is a gate that ca
 })
 
 describe('it downgrades ONLY an all-non-blocking rejection', () => {
-  test('nits and minors alone → APPROVE, and the findings SURVIVE as comments', () => {
+  test('nits and minors alone → APPROVE, and the findings SURVIVE on the verdict', () => {
     const { enforceSeverityGate } = loadReal()
     const out = enforceSeverityGate(reject(f('nit'), f('minor'), f('nit')))
     expect(out?.verdict).toBe('APPROVE')
-    // The whole point is that they are surfaced, not discarded.
+    // The whole point is that THIS gate does not drop them — it hands them on to
+    // the gates after it. Nothing downstream posts them to the PR.
     expect((out?.findings as Finding[]).length).toBe(3)
   })
 

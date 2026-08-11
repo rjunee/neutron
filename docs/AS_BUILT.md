@@ -40,7 +40,10 @@ keeping it while the factory silently stops threading it fails two.
 deterministically what the synthesis prompt has always merely asserted: a
 non-blocking finding does not block a merge on its own. A `REQUEST_CHANGES` is
 downgraded to `APPROVE` only when every finding is explicitly `minor` or `nit`,
-and the findings survive on the verdict so they reach the PR as comments.
+and the findings survive on the returned verdict. Nothing posts them to the PR:
+they reach the next round's fix prompt if a later gate re-blocks, and on a clean
+downgrade they are dropped, since the APPROVE-path terminal result carries no
+findings.
 
 The rule had no enforcement, so it held only as far as one model's obedience.
 It did not hold: PR #171 saw a reviewer seat return APPROVE with four MINOR/NIT
@@ -54,8 +57,7 @@ is ambiguous. It enumerates the NON-blocking severities rather than the blocking
 ones, which makes an unknown, absent or misspelled severity block rather than
 pass; a rejection carrying no findings at all is left untouched; and it runs
 first in the chain so the CI gate and the cross-model gate both retain the last
-word. `blocker` and `major` still veto, as does red CI, a deferred reviewer, and
-the mutation-prover phase.
+word. `blocker` and `major` still veto, as do red CI and a deferred reviewer.
 
 Tested against the real function extracted from the `.mjs` and evaluated rather
 than a hand-copied duplicate. 13 tests, 38 assertions, mutation-verified:

@@ -660,10 +660,19 @@ function normalizeVerdict(v) {
 //     get the last word and can re-block anything it let through. A gate that
 //     forces REQUEST_CHANGES must never be undoable by this one.
 //
-// The findings are NOT discarded — they ride along on the verdict and reach the
-// PR as comments. The quality floor is unchanged: any blocker or major still
-// vetoes, red CI still vetoes, a deferred reviewer still vetoes, and the
-// mutation-prover phase still stands between APPROVE and merge.
+// This gate does NOT discard the findings — it returns them on the verdict, and
+// the two gates after it spread `findings` forward, so a downgraded round's nits
+// reach the round-N+1 fix prompt if a later gate re-blocks. They go no further
+// than that: NOTHING in this repo posts findings to the PR, and the APPROVE-path
+// `terminalResult` carries no `findings` key — so on a clean downgrade they are
+// seen by no one. That is a real gap, not a safeguard; do not cite it as one.
+//
+// The quality floor is unchanged, and each of these is IMPLEMENTED HERE — a
+// claim in this block must name the code that enforces it:
+//   • any blocker or major still vetoes — `NON_BLOCKING_SEVERITIES` below.
+//   • red CI still vetoes — the `ci.status === 'red'` branch in
+//     `reviewAndSynthesize` forces REQUEST_CHANGES after this gate runs.
+//   • a deferred reviewer still vetoes — `enforceCrossModelGate` below.
 const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
 
 function enforceSeverityGate(synthesis) {
