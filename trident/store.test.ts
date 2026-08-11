@@ -365,8 +365,10 @@ describe('TridentRunStore', () => {
 
 describe('terminalTransition retracts a stale in-flight claim', () => {
   // Observed live 2026-08-10: the owner cancelled a running build and the row sat at
-  // `phase='stopped'` with `subagent_status='running'`. The child was already dead and
-  // the column still claimed it was working.
+  // `phase='stopped'` with `subagent_status='running'` — a finished run still
+  // presenting itself as working. Whether the child process was still alive is a
+  // separate question (usually it is — #177), and it is why the fix
+  // needs a durability half in `trident/checkpoint.sh` as well as this write.
   //
   // Not cosmetic, but not for the reason it is tempting to write down either: #143's
   // harvest gate and orphan recovery never see a terminal row (`step()` returns early
@@ -512,10 +514,11 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
   })
 
   test('a preserved CRASHED latch still vetoes a later update() — the restriction is load-bearing HERE', async () => {
-    // The comment justifies keeping 'crashed' by #143's harvest gate, but `step()`
-    // no-ops on an already-terminal phase (`orchestrator.ts:680-683`), so that gate
-    // is unreachable once the row is terminal. This is the path where preserving it
-    // still bites: `update()` is the ONE writer with no `phase NOT IN (terminal)`
+    // The tempting justification for keeping 'crashed' is #143's harvest gate, and it
+    // is wrong: `step()` no-ops on an already-terminal phase
+    // (`orchestrator.ts:678-683`), so that gate is unreachable once the row is
+    // terminal. This is the path where preserving it still bites: `update()` is the
+    // ONE writer with no `phase NOT IN (terminal)`
     // guard, so its `subagent_status IS NOT 'crashed'` veto (`store.ts:447-449`) is
     // all that latches a crash on a terminal row. Nulling unconditionally would lift
     // that veto — which is the real reason a future "simplify to NULL" must not land.

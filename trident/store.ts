@@ -485,10 +485,15 @@ export class TridentRunStore {
       }
       // RETRACT A STALE IN-FLIGHT CLAIM. `subagent_status` is documented as the
       // CURRENTLY in-flight subagent (migration 0077), so a terminal row that still
-      // says 'running' is asserting something false: the owner cancelled the build,
-      // the child is dead, and the column still claims it is working. Observed live
-      // on 2026-08-10 — a cancelled run sat at `phase='stopped'` with
+      // says 'running' asserts something false about THIS RUN: the run is over —
+      // nothing will advance it again — and the column still presents it as working.
+      // Observed live on 2026-08-10: a cancelled run sat at `phase='stopped'` with
       // `subagent_status='running'`.
+      //
+      // Note what is deliberately NOT claimed: that the child process is dead. It
+      // very often is not (see DURABILITY below). The column is wrong about the RUN,
+      // not necessarily about the process — which is why the fix is two-part rather
+      // than a one-line write here.
       //
       // WHICH READERS THIS PROTECTS — the honest list, because the obvious
       // candidates do NOT apply and it would be easy to write a confident wrong

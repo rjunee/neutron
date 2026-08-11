@@ -8722,3 +8722,48 @@ unreachable.** Both blockers here were the second kind, and both were invisible 
 someone compared the fixture's values against the production CHECK constraint. When a guard keys
 on an enum, the fixture must carry that enum's constraint — otherwise the test is asserting over
 a value space production never has.
+
+**Round 3 — the docblock's OPENING claim was false, and the fixture was still laxer than
+production in two more columns.**
+
+1. **"The child is dead" contradicted the same docblock's own DURABILITY paragraph.** The
+   comment above `terminalTransition` opened by asserting that after a cancel the child
+   process is dead, while its DURABILITY paragraph — twelve lines below — correctly stated
+   that cancelling does NOT kill the detached workflow, which keeps checkpointing
+   (#177). Both cannot be true. The observed incident held by TIMING, not by
+   construction: the workflow happened not to checkpoint again before the row was read.
+   The opening now claims only what is actually true of every cancel — the column is wrong
+   about the RUN (nothing will advance it again), and explicitly NOT that the process is
+   gone. The same false sentence was corrected in the PR description.
+
+   The round-2 correction of the *reader* rationale (crash veto, not #143's harvest gate)
+   was already in the code at this round's start; only the opening sentence was outstanding.
+
+2. **`last_advanced_at` was declared nullable and seeded NULL — a state production cannot
+   hold** (`migrations/0077_code_trident_runs.sql:118` is `TEXT NOT NULL`, re-stamped on
+   every transition). The fixture also seeded `subagent_status='pending'` in every single
+   case, never NULL — even though NULL is exactly what `terminalTransition` itself leaves
+   on a cancelled row, so it is the value the very next checkpoint after a cancel sees.
+   The throwaway table now carries the NOT NULL and the `subagent_status` CHECK, seeds a
+   real timestamp, and seeds the claim BOTH ways.
+
+Two mutants that the laxer fixture let live, each **executed** rather than reasoned about:
+
+| mutant (one extra AND-clause on the OLD value in `frozen()`) | old fixture | new fixture |
+| --- | --- | --- |
+| (a) freeze `subagent_status` only when it was `'pending'` | survives, 23 pass / 0 fail | dies, 4 red at `expect(r.subagent_status).toBeNull()` |
+| (b) freeze `last_advanced_at` only when it was NULL | survives, 23 pass / 0 fail | dies, 8 red at `expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT)` |
+
+(a) would have written `'running'` straight back onto a row a cancel had just cleared —
+re-creating the exact reported bug through the one writer with no terminal guard. (b) is
+the sharper one: its condition can NEVER hold in production, so the mutant refreshes the
+heartbeat of every real finished run — and under a NULL-seeded fixture the condition always
+held, so the suite stayed green while the guard did nothing.
+
+📌 **The two failure shapes in this PR are the same shape at different altitudes.** A
+fixture laxer than production puts the wrong answer out of the test's reach; a comment that
+justifies a design via a path that cannot execute puts the wrong reason out of the reader's
+reach. Both survive review by looking like the finished article — a green suite, and prose
+that reads as design documentation. The control that catches the first is running the mutant
+against BOTH fixtures and showing it survives one; the control that catches the second is
+grepping for the code that enters the mode the comment describes.

@@ -18,10 +18,19 @@
  *      claim (or a fresh heartbeat) back onto a cancelled/reaped run, while its
  *      branch/pr/checkpoint/result still land so the orphan stays traceable.
  *
- * The throwaway table carries migration 0077's REAL `phase` CHECK, so a test can
- * only ever seed a phase production can actually hold. An earlier revision of
- * this suite seeded 'Build'/'Review' — values the CHECK rejects — which meant the
- * terminal guard was never once exercised against a legal active phase.
+ * THE THROWAWAY SCHEMA MIRRORS PRODUCTION'S CONSTRAINTS, because a fixture that
+ * is laxer than the real table lets a mutant live:
+ *   * migration 0077's REAL `phase` CHECK, so a test can only ever seed a phase
+ *     production can actually hold. An earlier revision seeded 'Build'/'Review' —
+ *     values the CHECK rejects — which meant the terminal guard was never once
+ *     exercised against a legal active phase.
+ *   * `last_advanced_at TEXT NOT NULL` (migration 0077:118), seeded non-null. An
+ *     earlier revision declared it nullable and seeded NULL, a state production
+ *     cannot hold — so "freeze the heartbeat only when the old value is NULL"
+ *     passed the whole suite.
+ *   * `subagent_status`'s nullability, seeded BOTH ways: 'pending' (a fresh run)
+ *     and NULL (exactly what `terminalTransition` leaves on a cancelled row) — so
+ *     "freeze the status only when the old value is 'pending'" cannot pass either.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -37,6 +46,13 @@ const SCRIPT = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 /** Migration 0077's phase CHECK set, verbatim. */
 const ALL_PHASES = ['forge-init', 'ralph-plan', 'ralph-task', 'argus', 'forge-fix', 'done', 'failed', 'stopped'] as const
 const ACTIVE_PHASES = ALL_PHASES.filter((p) => !(TERMINAL_PHASES as readonly string[]).includes(p))
+
+/**
+ * The seeded heartbeat. Production's `last_advanced_at` is NOT NULL and is
+ * re-stamped on every transition, so every row carries one — the freeze has to
+ * hold a REAL timestamp stable, not merely decline to fill in a NULL.
+ */
+const SEEDED_HEARTBEAT = '2026-01-01T00:00:00Z'
 
 let dir: string
 let dbPath: string
@@ -54,12 +70,16 @@ beforeEach(() => {
     inner_checkpoint TEXT,
     inner_verdict TEXT,
     inner_result TEXT,
-    subagent_status TEXT,
-    last_advanced_at TEXT
+    subagent_status TEXT
+      CHECK (subagent_status IS NULL OR subagent_status IN (
+        'pending', 'running', 'completed', 'failed', 'crashed'
+      )),
+    last_advanced_at TEXT NOT NULL
   )`)
   db.exec(
-    `INSERT INTO code_trident_runs (id, phase, subagent_status)
-     VALUES ('run-1', 'forge-init', 'pending'), ('run-other', 'forge-init', 'pending')`,
+    `INSERT INTO code_trident_runs (id, phase, subagent_status, last_advanced_at)
+     VALUES ('run-1', 'forge-init', 'pending', '${SEEDED_HEARTBEAT}'),
+            ('run-other', 'forge-init', 'pending', '${SEEDED_HEARTBEAT}')`,
   )
   db.close()
 })
@@ -198,7 +218,7 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
       expect(row('run-1')).toMatchObject({
         phase,
         subagent_status: 'pending',
-        last_advanced_at: null,
+        last_advanced_at: SEEDED_HEARTBEAT,
         branch: null,
         pr: null,
         inner_checkpoint: null,
@@ -212,7 +232,7 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
       const r = row('run-1')
       // FROZEN — the two liveness columns.
       expect(r.subagent_status).toBe('pending') // NOT resurrected to 'running'
-      expect(r.last_advanced_at).toBeNull() // heartbeat not re-stamped on a finished run
+      expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT) // heartbeat HELD, not re-stamped
       expect(r.phase).toBe(phase)
       // RECORDED — everything else, so the orphan stays traceable from the row.
       expect(r.pr).toBe(55)
@@ -237,7 +257,57 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
       branch: 'b',
       // The readfile CASE would have written 'completed'; the terminal freeze wins.
       subagent_status: 'pending',
-      last_advanced_at: null,
+      last_advanced_at: SEEDED_HEARTBEAT,
+    })
+  })
+
+  // THE TWO MUTANTS THESE CASES EXIST TO KILL. Both narrow `frozen()`
+  // (trident/checkpoint.sh) by one extra AND-clause on the OLD column value, and
+  // both were RUN: each survives the earlier, laxer fixture and dies under this one.
+  //
+  //   (a) freeze `subagent_status` only when the OLD value is 'pending'. Every
+  //       other case above seeds 'pending', so the mutant passed them all. The
+  //       state it breaks is the one `terminalTransition` itself creates: it NULLs
+  //       a live claim, so the very next checkpoint after a cancel sees NULL — and
+  //       the mutant would write 'running' back, re-creating the exact bug.
+  //   (b) freeze `last_advanced_at` only when the OLD value is NULL. Production's
+  //       column is NOT NULL, so that condition can never hold there; under the
+  //       old NULL-seeded fixture it always held, and the mutant refreshed the
+  //       heartbeat of every real finished run while the suite stayed green.
+  test.each([...TERMINAL_PHASES])(
+    'a %s run whose live claim was ALREADY retracted keeps subagent_status NULL and holds its heartbeat',
+    (phase) => {
+      const db = new Database(dbPath)
+      // Exactly the row `terminalTransition` leaves behind: terminal phase, claim
+      // NULLed, heartbeat stamped at the moment of the cancel.
+      db.run(`UPDATE code_trident_runs SET phase = ?, subagent_status = NULL WHERE id = 'run-1'`, [phase])
+      db.close()
+      expect(row('run-1')).toMatchObject({ phase, subagent_status: null, last_advanced_at: SEEDED_HEARTBEAT })
+
+      const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'forge-done', 'subagent_status', 'running'])
+
+      expect(res.code).toBe(0)
+      const r = row('run-1')
+      expect(r.subagent_status).toBeNull() // kills mutant (a)
+      expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT) // kills mutant (b)
+      expect(r.inner_checkpoint).toBe('forge-done') // the trail still lands
+    },
+  )
+
+  test('the TERMINAL-RESULT write also holds an already-NULL claim and a real heartbeat', () => {
+    const tmp = join(dir, 'terminal.json')
+    writeFileSync(tmp, '{"ok":true,"verdict":"APPROVE"}')
+    const db = new Database(dbPath)
+    db.run(`UPDATE code_trident_runs SET phase = 'stopped', subagent_status = NULL WHERE id = 'run-1'`)
+    db.close()
+
+    expect(sh([dbPath, 'run-1', 'inner_result_file', tmp, 'inner_verdict', 'APPROVE']).code).toBe(0)
+
+    // The readfile CASE's 'completed' is the value mutant (a) would let through here.
+    expect(row('run-1')).toMatchObject({
+      subagent_status: null,
+      last_advanced_at: SEEDED_HEARTBEAT,
+      inner_result: '{"ok":true,"verdict":"APPROVE"}',
     })
   })
 
