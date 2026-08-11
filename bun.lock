@@ -12,6 +12,7 @@
         "@neutronai/gateway": "workspace:*",
         "@neutronai/github": "workspace:*",
         "@neutronai/jwt-validator": "workspace:*",
+        "@neutronai/logger": "workspace:*",
         "@neutronai/migrations": "workspace:*",
         "@neutronai/onboarding": "workspace:*",
         "@neutronai/open": "workspace:*",

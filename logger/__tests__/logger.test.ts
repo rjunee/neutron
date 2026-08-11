@@ -357,7 +357,7 @@ describe('once', () => {
 // ---------------------------------------------------------------------------
 
 describe('rateLimited', () => {
-  test('logs at most once per window per key', () => {
+  test('logs at most once per window per key — under a forward-only clock', () => {
     let now = 1_000_000
     const { sink, lines } = capture()
     const log = createLogger('wedge', { sink, now: () => now })
@@ -404,6 +404,28 @@ describe('rateLimited', () => {
     process.env['NEUTRON_LOG_LEVEL'] = 'info'
     log.rateLimited('k', 60_000).info('shown') // window never started → fires
     expect(lines.map((l) => l.line)).toEqual(['[wedge] event=shown'])
+  })
+
+  test('a BACKWARD clock step does not silence the window for step+ms', () => {
+    // `Date.now()` is not monotonic (NTP correction, VM resume). Without the
+    // negative-elapsed guard a one-hour backward step would suppress a 10-min
+    // rate-limited heartbeat for 70 min — which reads to an operator as "the
+    // thing died", the exact failure a heartbeat exists to rule out.
+    let now = 3_600_000
+    const { sink, lines } = capture()
+    const log = createLogger('backstep', { sink, now: () => now })
+    log.rateLimited('k', 600_000).info('first') // stamps at t=3_600_000
+    now = 0 // clock steps back one hour
+    log.rateLimited('k', 600_000).info('after_step') // due now, and re-stamps
+    now = 599_999
+    log.rateLimited('k', 600_000).info('deduped') // window restarted at t=0
+    now = 600_000
+    log.rateLimited('k', 600_000).info('third')
+    expect(lines.map((l) => l.line)).toEqual([
+      '[backstep] event=first',
+      '[backstep] event=after_step',
+      '[backstep] event=third',
+    ])
   })
 
   test('the window is shared per-process across logger instances', () => {

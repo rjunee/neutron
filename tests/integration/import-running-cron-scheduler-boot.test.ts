@@ -14,8 +14,14 @@
  *
  * Spec-vs-current diff (mirrors the S15 brief):
  *
- *   SPEC § 3.4 + § S5: import_running cron-tick polls every 15s and
- *   advances phase when ImportJobRunner reaches a terminal status.
+ *   SPEC § 3.4 + § S5: an import_running cron-tick polls on an interval and
+ *   advances phase when ImportJobRunner reaches a terminal status. (An earlier
+ *   revision of this header attributed a specific "every 15s" cadence to the
+ *   spec. The live cadence is `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` in
+ *   `onboarding/interview/import-running-cron.ts` — read it there, and take the
+ *   constant as the authority on cadence. The referenced spec document is not
+ *   part of this repository, so the § numbers above are a pointer for whoever
+ *   has it rather than a quote a reader here can check.)
  *
  *   CURRENT WIRING (pre-S15): handler + job registered, but scheduler
  *   never started. cron_state empty.
@@ -39,8 +45,9 @@
  * `ok` ONLY on the tick that detects the terminal status; subsequent
  * ticks (with the phase already advanced past `import_running`) return
  * `skipped`, which would overwrite `cron_state.last_run_status` and
- * mask the 'ok' that proves the advance. Production 15 s cadence is
- * exercised by other tests; this one pins the boot-shell wiring.
+ * mask the 'ok' that proves the advance. The production cadence
+ * (`DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS`) is exercised by other tests;
+ * this one pins the boot-shell wiring.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -181,8 +188,9 @@ describe('S15 — composeProductionGraph boots the cron scheduler', () => {
       platform: STUB_PLATFORM,
       onboarding_import_running_cron: {
         engine,
-        // 50 ms tick — tests must not block on the 15 s production
-        // cadence. The first setInterval fire lands at +interval_ms;
+        // Short tick — tests must not block on the production cadence
+        // (`DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS`). The first setInterval
+        // fire lands at +interval_ms;
         // the wait window below clears it with margin.
         interval_ms: 200,
       },

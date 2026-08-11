@@ -8786,6 +8786,7 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+
 ## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
 
 Observed live: the owner cancelled a running email-core build and the row settled at
@@ -9114,6 +9115,7 @@ specific: a guard that exists in TWO independently-built copies gets one copy's 
 pasted onto the other's test, and the untested copy is then defended by a citation. The
 control is mechanical — run the named mutant and read WHICH tests go red, not how many.
 
+
 ## 2026-08-09 — Naming the account behind a usage reading
 
 The `account_label` column has been null on every row since it was created. This reads an
@@ -9267,3 +9269,362 @@ Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
+
+## 2026-08-10 — the import-running cron stops flooding the journal, without going silent
+
+`onboarding/interview/import-running-cron.ts` logged its tick unconditionally. On an
+idle install that is one line every **5 s** forever with `in_flight_imports=0` —
+**~17,280 lines/day**, measured on the owner's box, where it did real harm: diagnosing a
+live chat turn meant first *discovering* the flood and filtering it out, and until then
+the turn's own activity was invisible. A log that hides the signal sitting next to it has
+negative information value, however cheap the line is.
+
+**The cheap fix and the correct fix differ here, and that is the point.** That line exists
+for a reason (S15, 2026-05-17): it proves the cron is firing, so "the line stopped
+appearing" is a real operator signal. (The S15 note also called "the count stayed > 0 for
+> 15 min" a signal; that half was already stale before this change — see the correction
+below — and this change neither relies on it nor preserves it as an alarm.) Silencing
+idle ticks would have deleted the liveness proof. So:
+
+* a tick **with work** logs every time — the >0 signal is untouched;
+* an **idle** tick still logs, at most once per `IDLE_TICK_LOG_INTERVAL_MS` (10 min) —
+  ~144 lines/day instead of ~17,280. A slower heartbeat, not a missing one. ("At most once" is
+  the forward-clock bound; a backward wall-clock step emits an extra line, per `rateLimited`'s
+  contract — the harmless direction for a liveness signal.)
+
+The mechanism is `log.rateLimited(key, ms)` — the logger's own suppression primitive
+(`logger/index.ts`), already live in `cron/scheduler.ts` and the app-ws adapter. The
+window key carries the slug the line reports (`project=`), and the clock is the handler's
+injected `now`, so the window is deterministic under test. It is in-memory on purpose — a
+restart *should* log immediately, since "did it come back up?" is exactly what a heartbeat
+answers.
+
+📌 **The first draft hand-rolled the throttle it already owned.** ~43 lines and three new
+exports (an exported pure predicate + a separate mark call + a test-reset hook)
+reimplemented `rateLimited`'s exact contract — same "never logged ⇒ due", same
+stamp-only-on-emit. The justification written down for building it was *"a test that
+asserts on log output would couple to the logger's transport"*, and that was false as a
+reason to reimplement the primitive — `createLogger` takes an injectable `sink` and `now`,
+so the coupling was avoidable in principle. **A wrong reason for a decision is worse than
+no reason — it reads as evidence the alternative was considered.** The reviewer's spot-check
+found the primitive in one grep. Two lines now.
+
+To be exact about what the tests then did with that freedom: they *accept* the coupling on
+purpose. The handler builds its own logger, so there is no sink to inject at that seam, and
+the cases assert through a `spyOn(console, 'log')` — precisely, they replace `console.log` with
+a mock, so what they cover is the real logger→`console` routing the default sink performs, NOT
+a write to the process's actual stdout. That is the trade being made deliberately — coupling to
+the real transport is what buys coverage of the real wiring, and the alternative (inject a sink,
+and with it a fake handler) is exactly the shape that produced zero coverage in round 1.
+
+The reuse also removed the misuse seam that the hand-rolled shape created: a predicate you
+check and a mark you must remember to call. `rateLimited` stamps the window INSIDE the
+emit, so "check and forget to mark" is unrepresentable — and deleting that mark call was
+exactly the mutation the first round of tests could not see.
+
+One fix landed in the primitive itself: `rateLimited` compared `now - last >= ms` against a
+**non-monotonic** clock, so a backward wall-clock step (NTP correction, VM resume) suppressed
+the key for step + window — an hour-long step silences a 10-min heartbeat for 70 min, which
+presents as the "it died" alarm the heartbeat exists to rule out. Negative elapsed now counts
+as due, and the emit re-stamps, so the window self-heals. Every `rateLimited` caller gets it.
+
+**Verification:** 7 new cases — 6 in `tests/integration/import-running-cron-tick.test.ts`
+(file total 4 → 10) plus 1 in `logger/__tests__/logger.test.ts` — driving the REAL handler
+and asserting on the REAL emitted line, including the boundary (one ms short of the interval,
+then exactly at it) and a guard on the constant. **Six** mutants, each killed, and each with a
+DISTINCT red set — which is a weaker claim than "each by a different case", and the weaker one
+is the true one; see the note under the table:
+
+| mutant | red |
+|---|---|
+| log unconditionally (drop the throttle) | 2 — the flood case + the boundary case |
+| rate-limit *every* tick, not just idle | 1 — the with-work case |
+| one global window key instead of per-slug | 1 — the per-slug case |
+| drop the `{ now }` clock seam | 1 — the boundary case |
+| widen the interval to 20 min | 1 — the constant guard |
+| revert the `elapsed < 0` guard in `rateLimited` | 1 — the backward-step case |
+
+📌 **The red sets are distinct but NOT disjoint, and the earlier wording ("each killed by a
+DIFFERENT case") claimed disjoint.** Re-run in this round: dropping the throttle gives exactly
+2 red — `the NEXT idle tick 5s later does NOT log` and `an idle tick logs again once the
+interval elapses`; dropping the `{ now }` clock seam gives exactly 1 red — *the second of
+those same two*. So the interval-elapsed case kills two different mutants, and no case is the
+sole executioner of more than one. That is still real discrimination (no two mutants produce
+the same failure set, so no single case is doing all the work), but it is not a bijection, and
+"a different case" reads as one. **A coverage claim should state the weakest thing that is
+true, because the stronger phrasing is what a later reader will rely on** — and the whole
+reason this table exists is that the previous revision's numbers were trusted and wrong.
+
+The counts are re-derived, not remembered: an earlier revision of this entry said "5 new
+cases (4 → 9)" and "five mutants", and put the global-key mutant at 3 red. The first two
+were simply wrong. The third was *true at the time* and stopped being true when the cases
+were made idempotent (below): re-running that mutant with the reset removed reproduces
+exactly 3 red, and with the reset in place it is 1. Under a leaking window the global-key
+mutant took two unrelated cases down with it — which read as strong coverage and was
+actually cross-contamination.
+📌 **A mutation count is a measurement, so it goes stale the moment the suite changes; re-run
+it in the round that touches the tests rather than carrying the number forward.**
+
+📌 **The round-1 tests were zero coverage of the fix and looked identical to real coverage.**
+All 41 stayed green with the mark call deleted and the flood fully restored, because every
+one of them called the exported predicate rather than the handler. **A test that never
+invokes the wired thing cannot see the wiring break, however precisely it pins the helper's
+arithmetic.** Third occurrence in this log; the rewrite drives the handler and reads the
+line that actually reaches the sink.
+
+📌 **"Every case uses its own key" made the cases independent of EACH OTHER and not of
+THEMSELVES.** The `rateLimited` window is process-global state that outlives a test, so a
+second pass in the same process (`bun test --rerun-each 2`) reused the first pass's stamps
+and 3 of the 6 went red — while a single pass stayed green, which is how it survived two
+review rounds. Worse, the comment explaining why no reset was needed cited a constraint that
+does not exist ("without a test-only reset hook in production code"): `resetLoggerStateForTests()`
+is exported from `logger/index.ts` and is already what `logger/__tests__` uses. One
+`beforeEach` fixed it — `--rerun-each 2` is now 20/20 — and the root `package.json` gained
+the `@neutronai/logger` workspace dep the root-level suite needed to import it. **A
+per-case-unique key HIDES shared state instead of removing it, and only running the file
+twice in one process can tell the two apart.**
+
+📌 **A fresh worktree needs `bun install` before its tests mean anything.** Three runs
+failed with `Export named '<symbol>' not found` while resolving `@neutronai/onboarding` to
+the **main checkout** rather than the worktree. The error names a symbol, so it reads as a
+missing export; it was a missing workspace link.
+
+📌 **The contract for the shared primitive documented the OPPOSITE of the guard, and that
+was the last thing wrong with this branch.** `logger/index.ts` returns
+`elapsed < 0 || elapsed >= ms`, so a backward step EMITS — but the two places a caller
+actually reads the contract from, `logger/AGENTS.md` and the `rateLimited` docblock, both
+said "suppressed while `now - last < ms`", and the interface docblock promised "at most once
+per `ms` window per key" with no exception. With `last = 3_600_000`, `now = 0`,
+`ms = 600_000` the documented predicate says SUPPRESS and the code EMITS. This is not a nit
+because `rateLimited` is SHARED — `cron/scheduler.ts` plus seven sites in
+`channels/adapters/app-ws/adapter.ts` — and any of them reasoning about their own
+suppression from the written predicate would be reasoning from a false one. Both statements
+now read `0 <= now - last < ms` and name the backward-step exception, with the reason and the
+caller-facing consequence ("at most one line per window" holds under a forward-only clock,
+not across a backward step). The CODE did not change: it was reviewed across three rounds
+and it is right.
+📌 **This is the usual doc-rot failure INVERTED. The known trap is a doc describing a mode
+the code never enters; here the code had a behaviour the doc denied.** Same defect class —
+a doc that reads as authoritative and is wrong — and the inverted form is the harder one to
+catch, because the sentence describes real, long-standing behaviour and only the newly
+added branch falsifies it. **When a change adds a branch to a shared primitive, the diff is
+not done until the primitive's written contract has been re-read against the new predicate**
+— the guard shipped with a correct inline comment three lines above two contract statements
+it contradicted, and the inline comment is what made it look documented.
+
+📌 **The paragraph fixing an over-claim opened with an over-claim of its own: it said "eight
+sites in `channels/adapters/app-ws/adapter.ts`". There are SEVEN** (`adapter.ts:276,453,512,
+552,669,730,853`). The number came from the brief that commissioned the fix and was written
+down without being counted — inside a paragraph whose entire subject is a claim that was
+trusted rather than checked, and in the same round that corrected two other miscounts. A
+cross-model reviewer counted it in one grep. **A number arriving from an upstream brief feels
+like a given rather than a claim, which is exactly what exempts it from the check.** It is a
+claim. `grep -c` costs nothing.
+
+**A second cross-model lane then found three more, and the pattern in them is the finding.**
+None was introduced by this change; all three are claims this change RE-ENDORSED by building
+on them.
+
+1. **"Stamped ONLY when a line is actually sent" was false, in the same sentence that was
+   just corrected.** `logger/index.ts` runs `onEmit?.()` — the stamp — *immediately before*
+   `sink(...)`, so the window records an ATTEMPTED delivery. An injected `sink` that THROWS
+   consumes the window and nobody gets a line. Keeping that ordering is right: stamping after
+   the sink returned would let a persistently-throwing sink re-attempt on every call, which is
+   the un-rate-limited flood these windows exist to prevent. So the CODE stays and all four
+   statements of it now say "an attempt that clears both gates", with the throwing-sink case
+   named.
+2. **"The count stayed > 0 for > 15 min" is a stale alarm, and this change re-asserted it as
+   "unchanged".** It was true when S15 wrote it (2026-05-17) and stopped being true on
+   2026-06-18, when the import timeout became progress-aware: a 30-min floor
+   (`IMPORT_RUNNING_HARD_TIMEOUT_MS`), a deadline that RESETS on forward progress inside a
+   5-min no-progress window, and a 4-hour absolute ceiling — all in `engine-internals.ts`. A
+   healthy slow import therefore sits at count > 0 far past 15 min BY DESIGN, and the tick
+   line carries only the count, never progress, so it cannot separate slow-healthy from stuck.
+   An operator following the sentence would have misdiagnosed working imports.
+3. `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` has been **5 s since 2026-05-21**, while the
+   module header and the test header still described a 15 s cadence — a stale number sitting
+   nine lines above the constant that contradicts it.
+
+📌 **Every miss in this round was a claim INHERITED rather than authored — from the S15 note,
+from an earlier revision of this entry, from the brief that commissioned the fix.** Authored
+sentences got checked, because writing one is when you look at the code. Inherited ones were
+load-bearing and unexamined, and two of them ("> 15 min", "eight sites") were quoted while
+CORRECTING a different false claim in the same paragraph. **The act of fixing a doc is when
+you are least likely to audit the sentences you are building the fix on top of, because they
+are the ground you are standing on to see the error.** Cheap countermeasure: when a change
+cites a neighbouring claim as still-true, that citation is a claim of its own — date it
+against the code, especially where the neighbour is older than the subsystem's last redesign.
+
+**Final round — documentation only, no behaviour change. The correction pass introduced its
+own false claims, and each one was a SUMMARY of a correction made correctly one paragraph
+away.** The diff in this round is comments, docblocks, `logger/AGENTS.md`, two test comments
+and this entry. Nothing executable changed; the tests are unchanged in count (10) and green.
+
+1. **"ONE deliberate exception" was wrong the moment the throwing-sink paragraph was added —
+   in the same docblock.** The `logger/index.ts` head said `rateLimited`'s semantics match the
+   wedge-alert original "exactly, with ONE deliberate exception" (the backward clock step),
+   and thirty lines later documented stamp-before-sink. Stamp-before-sink is a second
+   behavioural deviation: the original stamps AFTER its delivery call returns
+   (`runtime/adapters/claude-code/persistent/supervision.ts` — `postAlert?.()` then
+   `wedgeAlertState.set(...)`), so a throwing alert leaves the ORIGINAL's window open while a
+   throwing sink consumes OURS. Same input, different suppression outcome. Both are now
+   enumerated at the top and cross-referenced, and — the part that is worth more than the
+   count — **they break DIFFERENT halves of "exactly one line per window"**: a backward step
+   can yield MORE than one line (no upper bound across the step), a throwing sink can yield
+   ZERO while still consuming the window (no lower bound at all). A caller needs both halves;
+   the previous wording implied one exception to one bound.
+2. **"The default sink is a `console` method, so it only bites an injected one" was false, and
+   it was the sentence that made the throwing-sink hazard sound theoretical.** `defaultSink`
+   dispatches to `console.error/warn/log/debug` — mutable globals that throw for real on
+   `EPIPE` (the pipe's read end is GONE — a killed journal reader; a merely FULL pipe blocks or
+   yields `EAGAIN` and does not raise `EPIPE`) and, far more commonly, under
+   a test that replaces `console.log` with a throwing mock. Executed with NO sink injected, and
+   control-checked by first observing a delivered line: one throwing attempt consumed a 600 s
+   window and a fully recovered `console.log` was still suppressed. The claim appeared in three
+   places (`logger/index.ts`, `logger/AGENTS.md`, and this entry) and is removed from all three.
+   📌 **A hazard note that ends with "but this can't happen to you in practice" is the part most
+   likely to be wrong, because it is the part nobody re-derives.** It was appended to an
+   otherwise-correct correction as reassurance, and reassurance is not a finding.
+3. **The cron header's cadence and its timeout arithmetic were stale in four files, and the
+   previous round recorded them as fixed.** The header carried a hedge saying 5 s is live, then
+   stated the wiring shape as `interval_ms: 15s default` — the hedge did not reach the line a
+   reader would quote. It also derived "at most 60 ticks per import" from a flat 15-min timeout
+   that stopped existing on 2026-06-18. Now: the wiring shape names
+   `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` instead of restating a number that has already
+   moved once, and the tick-count claim is replaced by the real progress-aware bound (30-min
+   floor, deadline resets inside a 5-min no-progress window, 4-h ceiling). Two further sites
+   the previous round missed are fixed with it — `onboarding/interview/engine.ts` and
+   `gateway/composition/build-core-modules.ts` — and a fourth turned out to be worse than
+   stale: `tests/integration/import-running-cron-scheduler-boot.test.ts` attributed "polls
+   every 15s" to **SPEC § 3.4 + § S5**, and the spec never specified a cadence at all
+   (`grep` over `docs/plans/P2-onboarding-v2.md` returns nothing). 15 s was this module's own
+   first shipped default, laundered into a spec citation.
+   📌 **A number given a spec citation stops being audited, so a misattribution outlives the
+   number it protects.** The fix names the constant rather than any figure.
+4. **A new test comment re-asserted the very alarm this PR retracts, ~200 lines from the
+   retraction.** The with-work case was named "logs EVERY time — the S15 stuck-count signal"
+   and explained that the count "has to be visible on every tick for `count stayed > 0 for
+   > 15 min` to be an alarm" — which the handler comment in the same PR documents as false
+   since 2026-06-18. Renamed to what it actually pins (a with-work tick is never throttled),
+   with the retraction restated and a scope note: the body drives TWO ticks, so "EVERY" was
+   also more than the case exercises. The constant guard's `15 * 60_000` bound now states its
+   real provenance (detection latency) instead of silently sharing a number with the retracted
+   stuck-count window.
+5. **Pre-existing, in a docblock this PR edits: "the result set is at most one row" contradicted
+   the row-shape comment 100 lines above it.** `onboarding_state`'s primary key is
+   `(project_slug, user_id)` (`migrations/0043_onboarding_state_wow_pushed_at.sql`), so a
+   per-project DB bounds the scan to one row per USER — which is exactly why the scan projects
+   `user_id` and the handler loops (ISSUES #2). Harmless in the single-owner case and harmless
+   in code, since the handler already iterates; corrected because the docblock is the thing a
+   future change would reason from. The `rateLimited` contract also now notes that a NaN `ms`
+   suppresses a key permanently — unreachable for all three live callers (all pass literals),
+   recorded as contract precision rather than a defect.
+
+📌 **Every false claim in this round was a SUMMARY of a correction that was itself correct.**
+The enumerating sentence at the top of the docblock ("with ONE deliberate exception"), the
+reassuring clause at the end of a hazard note ("only bites an injected sink"), the round-up in
+this log ("the module header and the test header still described a 15 s cadence" — two of four
+sites), the test name compressing a two-tick case into "EVERY time". The detailed paragraphs
+were right in each case; the headline, the count, and the closing reassurance were wrong.
+**Summaries are written last, from the text rather than the code, and they are what a later
+reader actually quotes** — so they need the same grounding pass as the body, and a count in one
+needs re-deriving after every edit to what it counts.
+
+**A cross-model lane then found four more in the correction ABOVE, and the worst one is the one
+I would defend hardest.** All four are now fixed; the code still has not changed.
+
+* **"TWO deliberate ways" was an exhaustive count, and exhaustive counts are the specific thing
+  this PR keeps getting wrong.** There is a THIRD difference from the original: this
+  gate and the stamp call `clock()` SEPARATELY (the gate's read is skipped on a key's first
+  emit, which short-circuits before reading) while the original captures a single `now` and
+  reuses it for both (`runtime/adapters/claude-code/persistent/supervision.ts`). The anchor
+  written is therefore a later reading than the one eligibility was decided on, which pushes
+  the next boundary out by the gap between the reads — negligible on a real clock, whatever the
+  test makes it under a counter-style injected clock. A first pass at this correction called it
+  "does not change suppression semantics", which the same lane rejected: it shifts boundaries,
+  and "semantics vs timing" was a distinction doing work the sentence had not earned. The
+  docblock now separates "differences that change which rule applies" (two) from that one, and —
+  **says outright that the list is the set of differences LOOKED FOR, not a proof no fourth
+  exists.** 📌 Replacing "ONE deliberate exception" with "TWO deliberate ways" repeated the
+  error at a larger number. The defect was never the number; it was asserting completeness
+  about a thing discovered by reading.
+* **"The spec never specified a cadence at all" rested on a grep over a file that does not
+  exist.** The entry cited `docs/plans/P2-onboarding-v2.md` returning no matches — and that
+  path is not in this repository and never has been. The empty grep meant "no such file", not
+  "the spec is silent", and I published it as a finding, then escalated it into an accusation
+  that 15 s had been "laundered into a spec citation" — an accusation resting on an empty result
+  from a path that cannot produce a non-empty one. The header was stale, not fabricated. The fix
+  went through two passes: the first replaced the false negative with a positive claim about what
+  the spec *does* record, which the same lane rejected on the same grounds — that document is not
+  in this repository, so no claim about its contents is checkable from this tree either. The
+  header now makes no cadence claim on the spec's behalf, names the constant as the authority on
+  cadence, and marks the retained § numbers as a pointer for whoever holds that document rather
+  than a quote a reader here can check. 📌 **This is the repo's own tool-negative rule, violated
+  inside a commit
+  whose entire subject is unverified claims: before believing a negative, make the tool prove it
+  can return a POSITIVE on the same input.** One `ls` would have caught it. The accusation was
+  the tell — an empty result licensed a stronger claim than a full one would have.
+* **The timeout summary listed three windows as though they were the whole rule.** It omitted
+  that the no-progress window DIFFERS by phase (`IMPORT_CONSOLIDATE_NO_PROGRESS_WINDOW_MS` once
+  Pass-1 completes, not `IMPORT_NO_PROGRESS_WINDOW_MS`), and — the part that made the summary
+  actively wrong — it said tick cost is "bounded by the ceiling", while the rate-limit statuses
+  return "don't fire" BEFORE the ceiling test, so those imports keep being ticked past it. The
+  header now describes the shape, names `evaluateImportTimeout` as the live rule, and instructs
+  the reader not to restate the figures. 📌 **Correcting a stale number by substituting a fresh
+  number reproduces the original defect one revision later. The durable fix points at the
+  function.** The sites this PR actually edited now name the constant instead of a figure: this
+  module's header, `onboarding/interview/engine.ts`,
+  `gateway/composition/build-core-modules.ts`, and the scheduler-boot test in three places. Two
+  of those three were only found by grepping again AFTER the first fix claimed the sweep was
+  done — a prose header and an inline comment still said "the 15 s production cadence", and the
+  same inline comment described itself as a "50 ms tick" while passing `interval_ms: 200`.
+
+  📌 **The cadence claim was rewritten SIX times and was wrong the first five, each time because
+  the sentence quantified over the tree rather than over what had been read.** In order: "the
+  module header and the test header" (two of four sites); "all four sites" (six); "the figure now
+  lives only on the constant" (three more sites stated it); "descriptions of the SCHEDULE name
+  the constant" (a constant-guard test plus `gateway/upload/import-resume-handler.ts` and
+  `gateway/wiring/build-landing-stack.ts` describe it numerically); "the remaining sites are
+  ACCURATE" — and that one was not a miscount but a live wrong statement, because
+  `gateway/composition/input/onboarding-input.ts` and
+  `open/__tests__/composition-field-coverage-inventory.ts` BOTH still said 15 s. Those two are
+  fixed here; they are the last stale ones found, which is not a claim that they are the last.
+
+  📌 **The mechanism behind the whole sequence was a PHRASE-SHAPED GREP.** Every sweep searched
+  `every 15s` / `15s default` / `every 15 s`, so it could not see `15s sweep`, `15 seconds`, or
+  `the 15s sweep that advances…`. The searches kept returning short, clean, plausible result sets
+  and each one read as completion. **When you are de-duplicating a VALUE, grep the value; a
+  pattern built from the phrasing you remember can only find the sites you were already
+  thinking of** — which is why five successive "that's all of them" claims each survived its own
+  verification step.
+
+  **The rule that finally holds quantifies over nothing:** this docblock names the constant,
+  other sites are neither authoritative nor reliably current, and anyone changing the constant is
+  told to grep the OLD NUMBER rather than trust any inventory — so none is given.
+  📌 **A completeness claim is free to write and expensive to verify, so it gets written at the
+  moment of least verification — the summary — every time. "All", "only", "exactly", "never" and
+  "every" in a summary are load-bearing assertions about code nobody re-read.** Six rounds of
+  evidence here; the scoped sentences ("the sites this PR edited", "the differences looked for")
+  held on first writing every time.
+  📌 **The first attempt at that pointer named a function that does not exist.** It said
+  `decideImportTimeout`; the export is `evaluateImportTimeout`. A cross-reference is a claim, and
+  it went in unchecked *in the very edit whose thesis was "point at the code instead of copying
+  numbers out of it"* — the pointer felt like a gesture rather than an assertion. `grep` costs
+  nothing; a plausible-sounding symbol name is exactly as unverified as a plausible-sounding
+  number.
+* **The with-work test still overstated itself after being renamed to stop overstating itself.**
+  "logs EVERY time" became "is never throttled" — still a universal claim from a two-tick body.
+  Renamed to what it pins: two back-to-back ticks with work both log, which is what
+  discriminates "throttle the idle branch only" from "throttle everything".
+
+📌 **Three of those four were introduced by the fix for the previous three, and each one kept the
+rhetorical SHAPE of the claim it replaced while swapping the content** — one exception became two
+exceptions, a stale figure became a fresh figure, "EVERY time" became "never". **A correction
+that preserves the form of an overclaim tends to preserve the overclaim.** The one that was not
+a reshaping — the grep over a missing file — is the one that produced a false accusation rather
+than merely a false count, and it came from treating an empty tool result as evidence.
+
+**Review panel for this round:** adversarial lane + rubric lane + an independent `codex` lane
+(codex-cli 0.146.0, read-only). The kimi lane was deliberately not run. The codex lane is the
+one that found all four items above, having failed to return a verdict in the prior round —
+which is the argument for not counting a lane's silence as its assent.
