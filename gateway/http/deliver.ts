@@ -451,6 +451,23 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       // `delivered_at`. Revisit if a key ever needs an alert guarantee STRONGER than
       // the transcript, because that is a different contract and wants a different
       // field, not a tweak to this condition.
+      //
+      // THE `notified` ARM HAS THE MIRROR-IMAGE SEAM, and "it is in the transcript"
+      // is the assumption that carries it. `routedPush` answers a BOOLEAN, so it
+      // collapses the app adapter's two not-delivered markers into one `false`:
+      // `app-ws:dropped:*` (persisted, no live socket) and `app-ws:lost:*` (the
+      // chat_log append FAILED, captured nowhere) — the distinction
+      // `recovered-reply-store.ts` keeps and this seam discards. On a `lost`, a
+      // successful device notification stamps the row, so the re-emit goes quiet for
+      // a message that hydration cannot show
+      // (`open/wiring/app-ws.ts` rebuilds the transcript from exactly those rows).
+      //
+      // Accepted on the same reasoning and with the same limit: the owner DID get the
+      // body in the notification, the ButtonStore row still resolves its buttons, and
+      // it needs a chat_log write failure to reach at all. Recovering it properly
+      // means widening `DeliverPushTargets.app` from `boolean` to the tri-state the
+      // markers already carry, which is an API change across `open/composer.ts` and
+      // the app-ws wiring — a separate lane, not a condition tweak here.
       if (durability === 'reply' && (notified || delivered)) await stampDelivered(prompt_id)
     }
     return { prompt_id, persisted: true, delivered_live: delivered }

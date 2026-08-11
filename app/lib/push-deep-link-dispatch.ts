@@ -175,6 +175,23 @@ export function resolvePushRoute(
       warn('legacy reminder payload has no reminder_id', { project_id });
       return null;
     }
+    // GENERAL IS THE FALLBACK, AND THE ROW MAY NOT BE IN THE LIST THAT OPENS.
+    // Settled rather than left as a question, because it looks like a mis-anchor:
+    // the tab lists `app-project:<segment>` rows and admits the tapped
+    // `include_id` only when its `topic_id` matches EXACTLY
+    // (`gateway/http/app-reminders-surface.ts` `handleList`). A General reminder
+    // the APP created carries `app-project:general` and lands correctly. One
+    // created through the Reminders Core or Telegram carries that channel's
+    // topic, so it is filtered out and the tab opens without the row.
+    //
+    // NOT CHANGED, because the alternative is worse and this kind is decode-only:
+    // the only other option is `return null`, i.e. the app opens and nothing
+    // routes — the exact complaint (#520) this resolver exists to end. Landing on
+    // the owner's reminders with the target unhighlighted still puts him one screen
+    // from it. And nothing SENDS this kind any more (a fired reminder is an
+    // `agent_message` now, anchored on the durable chat row), so the population is
+    // notifications already on a device plus un-upgraded gateways — finite and
+    // shrinking, never growing.
     const target = project_id ?? GENERAL_PROJECT_ID;
     return (
       `/projects/${encodeURIComponent(target)}/reminders` +

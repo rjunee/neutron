@@ -518,8 +518,20 @@ export function buildReminderDispatcher(input: BuildReminderDispatcherInput): Re
           formatRitualUnplannableNotice({ ritual_id: reminder.ritual_id }),
         )
         // A rejected notice means the owner learned nothing, so the occurrence must
-        // NOT be consumed — same posture as the two sibling post sites, and the
-        // #319 contract holds (this throws before any successful delivery).
+        // NOT be consumed, and the #319 contract holds (this throws before any
+        // successful delivery).
+        //
+        // WHICH SITES THIS MATCHES, NAMED — the earlier wording ("the two sibling
+        // post sites") was read by review as claiming parity with ALL of them, which
+        // is false and worth being exact about. It matches the two DELIVERABLE
+        // posts: the nudge body below, and `fireRitual`'s ritual body. It does NOT
+        // match the SETTLE-NOTICE loops in `fireRitual`, which discard `post`'s
+        // boolean — so a rejected settle notice still retires the occurrence with
+        // neither output nor notice, which is the ISSUES #506 shape surviving in one
+        // corner. That is pre-existing behaviour and a separate fix (the loops need
+        // to collect their rejections without losing the ledger write that must
+        // precede them); it is not what this guard changed, and this comment no
+        // longer implies otherwise.
         if (!noticed) {
           throw new Error(
             `reminder ${reminder.id} ritual ${reminder.ritual_id} unplannable notice rejected for topic ${notice_topic_id} — left pending for retry`,

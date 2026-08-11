@@ -74,9 +74,37 @@ export const PUSH_KINDS = [
    * end. See `gateway/push/chat-message-push.ts`, which is the sender.
    */
   'agent_message',
-  /** The Calendar Core's pre-meeting brief. Carries `event_id` + `project_id`. */
+  /**
+   * The Calendar Core's pre-meeting brief. Carries `event_id` + `project_id`.
+   *
+   * ⚠️ HAS A SENDER, BUT NOTHING CURRENTLY REACHES IT — see the note under
+   * `email_daily_triage`, which is in the identical state.
+   */
   'calendar_pre_meeting_brief',
-  /** The Email Core's daily triage. Carries `project_id`. */
+  /**
+   * The Email Core's daily triage. Carries `project_id`.
+   *
+   * ⚠️ THE SAME WIRING GAP, AND IT QUALIFIES THE INVARIANT ABOVE. This list is
+   * documented as "what the system SENDS", and these two entries do not currently
+   * send: both call sites are gated on `input.pushDispatcher !== null`
+   * (`gateway/cores/calendar-wiring.ts`, `gateway/cores/email-managed-wiring.ts`)
+   * and the ONLY places that supply the field pass `null`
+   * (`gateway/cores/mount-cores-scribe-fan-out.ts` — grep-verified repo-wide
+   * 2026-08-10: two assignment sites, both `null`). So the sender code exists, is
+   * typed, and is unreachable.
+   *
+   * They are LISTED ANYWAY, deliberately, and the distinction matters: unlike
+   * `wow_fired` (no sender code at all) these have a real sender awaiting a real
+   * dispatcher, so the resolver must keep handling them or wiring the dispatcher
+   * would silently reintroduce the disjoint-lists defect this file exists to
+   * prevent. The exhaustiveness test beside it is therefore doing something
+   * narrower than it looks for these two: it proves the RESOLVER is ready, not
+   * that a notification is being sent.
+   *
+   * Closing the gap is a Cores wiring change, not a change here. Recorded rather
+   * than left for a reader to trip over, because "it is in PUSH_KINDS" reads as
+   * "it is live" and for these two it is not.
+   */
   'email_daily_triage',
 ] as const
 

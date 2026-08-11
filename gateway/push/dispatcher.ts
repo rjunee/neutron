@@ -183,18 +183,34 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
             error: ticket.details?.error ?? ticket.message ?? 'unknown',
           })
         }
-        // PRUNE the tokens Expo says are dead. Tickets come back in submission
-        // order (`expo-push-client.ts:173` appends per chunk in order, and the
-        // chunks are POSTed sequentially), so index i identifies message i's
-        // recipient.
+        // PRUNE the tokens Expo says are dead — BY INDEX, WHICH IS ONLY VALID WHEN
+        // THE TWO LISTS ARE THE SAME LENGTH. `pruneUnregistered` reads
+        // `messages[i]` for ticket `i`, and this comment used to justify that with
+        // "tickets come back in submission order, so index i identifies message i's
+        // recipient". Submission order is true and NOT sufficient: the client
+        // appends only the tickets Expo actually RETURNED, per chunk
+        // (`expo-push-client.ts` `for (const t of data) tickets.push(t)`), and the
+        // tally twenty lines up exists precisely because a chunk can come back
+        // SHORT. One short chunk shifts every later ticket left, so a
+        // `DeviceNotRegistered` for chunk 2's token deletes a chunk-1 token that is
+        // alive. The two comments contradicted each other and this one was the
+        // wrong half.
         //
-        // Without this the table only ever grows: every app reinstall or OS
-        // token rotation leaves a `DeviceNotRegistered` row behind, and each one
+        // So the alignment is now CHECKED rather than assumed, inside
+        // `pruneUnregistered`: a mismatch prunes NOTHING and says so. That is the
+        // fail-closed direction for the same reason the `delivered` count is —
+        // keeping a dead token costs quota and a warning line, while deleting a
+        // live one ends push for a real device until it next re-registers.
+        //
+        // Without pruning at all the table only ever grows: every app reinstall or
+        // OS token rotation leaves a `DeviceNotRegistered` row behind, and each one
         // is re-sent on EVERY subsequent reminder, forever, burning Expo quota
         // and emitting a warning line per fire. Expo's contract is to stop
-        // sending to these tokens; the client re-registers on every sign-in
-        // (`app/lib/push.ts:143`), so a wrongly-pruned live device heals itself
-        // at the next launch — which makes deleting strictly safer than keeping.
+        // sending to these tokens; the client re-registers on sign-in and on every
+        // return to the foreground (`app/lib/push-registration-sync.ts`
+        // `cameToForeground`), so a pruned live device does recover — but not until
+        // the owner next brings the app forward, which is why a wrong prune is not
+        // free.
         //
         // Only `DeviceNotRegistered` prunes. `MessageRateExceeded`,
         // `MessageTooBig`, `InvalidCredentials` and friends are transient or
@@ -254,12 +270,35 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
    * still attempted, because a pruning failure must never turn into a thrown
    * push (the reminder tick's `on_fired` catch would swallow it, but the
    * dispatch result would wrongly read as a network failure).
+   *
+   * THE INDEX IS THE WHOLE MECHANISM, SO IT IS CHECKED BEFORE IT IS USED. Ticket
+   * `i` names message `i` only while Expo returned exactly one ticket per message.
+   * The client appends what came back rather than padding the gaps
+   * (`expo-push-client.ts`), so a short chunk shifts every later ticket left by
+   * one and the identification silently becomes wrong — a `DeviceNotRegistered`
+   * for one owner's device deletes a DIFFERENT device's live token.
+   *
+   * On a mismatch, prune NOTHING and log it. There is no way to recover which
+   * token a ticket belonged to once the lists differ in length, and the two
+   * mistakes are not symmetric: a dead token left behind costs Expo quota and one
+   * warning line per fire, while a live token deleted ends notifications for a
+   * real device until it next re-registers. The short batch is already visible in
+   * the tally as `delivered + errored < attempted`; this line names the
+   * consequence.
    */
   async function pruneUnregistered(
     project_slug: string,
     messages: readonly ExpoPushMessage[],
     tickets: readonly ExpoPushTicket[],
   ): Promise<void> {
+    if (tickets.length !== messages.length) {
+      logger.warn('expo push ticket count does not match messages — skipping token prune', {
+        project_slug,
+        messages: messages.length,
+        tickets: tickets.length,
+      })
+      return
+    }
     for (let i = 0; i < tickets.length; i += 1) {
       const ticket = tickets[i]
       if (ticket === undefined || ticket.status !== 'error') continue

@@ -62,8 +62,33 @@ export const GENERAL_HTTP_ID = 'general';
  *
  * Every client-side spelling of General (`null`, `undefined`, `''`, `'~general'`)
  * collapses to `'general'`. Anything else is a project id and passes through
- * UNTOUCHED — including a project literally named `general`, and including one
- * that merely STARTS with the sentinel (the match is exact, never a prefix).
+ * UNTOUCHED — including one that merely STARTS with the sentinel (the match is
+ * exact, never a prefix).
+ *
+ * ⚠️ A PROJECT LITERALLY NAMED `general` THEREFORE PRODUCES THE SAME SEGMENT AS
+ * THE SCOPE, AND THIS MAPPING CANNOT TELL THEM APART. The `~` sentinel is
+ * collision-proof on the CLIENT — that is what ISSUES #410 bought, and the
+ * docblock above says so — but the segment it maps to is a legal project id, and
+ * the owner's own instance has a project whose id is exactly `general`
+ * (`project-rail-view.ts`, which records #410). So the rail's two entries — the
+ * General scope and that project — address one server-side scope: on the
+ * reminders surface both derive `app-project:general`
+ * (`gateway/http/app-reminders-surface.ts`), and the docs store roots both at
+ * `<owner_home>/Projects/general/docs`.
+ *
+ * Pre-existing and NOT introduced here: every project-scoped client already
+ * shares this mapping. What is new is that reminders is the first MUTATING
+ * surface to adopt it, so create/snooze/cancel now cross the same seam the reads
+ * already did. Adopting it was still right — the alternative live on this path
+ * was a hard `invalid_project_id` 400 where General's reminders belong — but a
+ * wrong-scope write is quieter than a 400, and quieter is worse.
+ *
+ * Closing it properly needs a SERVER change, which is why it is not done here: a
+ * distinct route for the no-project scope, or `general` reserved as a project id.
+ * Either one is a migration (General's existing rows live under
+ * `app-project:general` today), so it wants its own lane rather than a rider on a
+ * push fix. Do NOT "fix" it by changing the constant below — that orphans every
+ * row already written.
  *
  * Not percent-encoded here: encoding is the caller's job, because a caller
  * interpolating into a URL needs `encodeURIComponent` and a caller comparing

@@ -9264,3 +9264,58 @@ entered on a background/foreground transition) but belongs with a mounted test t
 follow-up.
 
 Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
+
+## 2026-08-10 — the token prune was an index join nobody checked the index of
+
+Review round 2 on the notification lane. The two guards under review held on the tip, and
+re-deriving them found a third thing in the same file that did not.
+
+`PushDispatcher.dispatch` prunes the tokens Expo reports `DeviceNotRegistered`, by INDEX:
+ticket `i` names `messages[i]`. Its comment justified that with "tickets come back in
+submission order". True, and not sufficient — `ExpoPushClient` appends only the tickets Expo
+actually **returned** (`for (const t of data) tickets.push(t)`), so a chunk that comes back
+short shifts every later ticket left by one and the join silently identifies the wrong
+device. A `DeviceNotRegistered` for one token then deletes a **live** one, and push for that
+device stays dark until it next re-registers.
+
+The two comments in the file **contradicted each other**, which is how it surfaced: fifty
+lines up, the `delivered` tally had just been rewritten *because* a short response is real
+("a short batch now shows up honestly as `delivered + errored < attempted`"). One file, one
+mechanism, two opposite beliefs about it — and the prune held the wrong half.
+
+`pruneUnregistered` now checks `tickets.length === messages.length` before it trusts an
+index, prunes nothing on a mismatch, and logs the counts. Fail-closed in the same direction
+as the `delivered >= 1` guard beside it, and for the same asymmetry: a dead token left behind
+costs quota and one warning line per fire; a live token deleted costs the owner his
+notifications.
+
+Mutation-tested. Guard removed → exactly the new test reds (28 pass / 1 fail), and it reds on
+the assertion that BOTH tokens survive, asserted by name rather than by order because
+`listByProject` promises none.
+
+**Pre-existing gaps NAMED but deliberately not fixed here**, each because the honest fix is a
+migration or an API change rather than a rider on a push fix:
+
+* **`httpProjectSegment` maps the General sentinel onto a legal project id.** `~general` is
+  collision-proof on the client (#410); the segment it produces, `general`, is not — and the
+  owner's instance has a project whose id is exactly that. Both rail entries address one
+  server scope. Reads already shared it; this lane made reminders the first MUTATING surface
+  to. Closing it needs a distinct server route or `general` reserved, both migrations.
+* **Two `PUSH_KINDS` entries have a sender but no dispatcher.** `calendar_pre_meeting_brief`
+  and `email_daily_triage` are gated on `pushDispatcher !== null` and the only two assignment
+  sites in the repo pass `null`. They stay listed on purpose — the resolver must remain ready
+  or wiring the dispatcher would re-open the disjoint-lists defect — but the exhaustiveness
+  test proves the resolver is ready, not that anything is sent.
+* **`routedPush` collapses `app-ws:lost:*` and `app-ws:dropped:*` into one `false`**, so a
+  failed chat_log append plus a successful notification stamps `delivered_at` for a message
+  hydration cannot show. Needs the app target widened from `boolean` to the tri-state the
+  markers already carry.
+* **`fireRitual`'s settle-notice loops discard `post`'s boolean**, so a rejected settle notice
+  retires the occurrence with neither output nor notice (#506's shape, in one corner). The
+  unplannable guard added here does check its post; its comment no longer claims the loops do.
+
+📌 **Two comments in one file that contradict each other are a bug report already written
+down.** The reachable defect here was not found by hunting for it — it was found because the
+same file asserted "Expo can return fewer tickets than messages" in one place and "index i
+identifies message i's recipient" in another. When a diff teaches a file something new about
+its own failure mode, the next question is which OTHER paragraph was built on the old belief.

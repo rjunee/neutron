@@ -295,6 +295,47 @@ describe('PushDispatcher — the Expo transport', () => {
     expect(store.getByDeviceToken('t1', 'tok-1')).not.toBeNull()
   })
 
+  test('a SHORT ticket list prunes NOTHING — index i no longer names message i', async () => {
+    // THE PRUNE IS AN INDEX JOIN, AND A SHORT RESPONSE BREAKS THE JOIN. The client
+    // appends the tickets Expo returned rather than padding the gaps, so one
+    // missing ticket shifts every later one left by one — and a
+    // `DeviceNotRegistered` then names a token that is alive. Two devices, ONE
+    // returned ticket, and it is an error: the old code read `messages[0].to` and
+    // deleted whichever token the query happened to return first.
+    //
+    // ASSERTED BY NAME, NOT BY ORDER, for the same reason the prune test above is:
+    // `listByProject` promises no ordering, so "the wrong one was deleted" is only
+    // checkable as "NEITHER was deleted". That also makes this the assertion that
+    // dies when the length guard is removed — with the guard gone exactly one of
+    // these two lookups goes null, whichever one the tie-break picked.
+    for (const device_token of ['tok-1', 'tok-2']) {
+      await store.register({ project_slug: 't1', user_id: 'u', device_token, platform: 'ios' })
+    }
+    const client = fakeClient([
+      { status: 'error', message: 'gone', details: { error: 'DeviceNotRegistered' } },
+    ])
+    const { logger, entries } = recordingLogger()
+    const dispatcher = createPushDispatcher({ store, client, logger })
+    const result = await dispatcher.pushAll('t1', CHAT_PUSH)
+    // The shortfall is VISIBLE in the tally, which is what makes it diagnosable:
+    // two attempted, one ticket back, so `delivered + errored < attempted`.
+    expect(result.attempted).toBe(2)
+    expect(result.delivered).toBe(0)
+    expect(result.errored).toBe(1)
+    expect(result.ok).toBe(true)
+    expect(store.getByDeviceToken('t1', 'tok-1')).not.toBeNull()
+    expect(store.getByDeviceToken('t1', 'tok-2')).not.toBeNull()
+    // And it is SAID OUT LOUD — a silent skip would leave a growing token table
+    // with nothing in the journal to explain why pruning stopped.
+    expect(entries.map((e) => e.message)).toEqual([
+      'expo push ticket error',
+      'expo push ticket count does not match messages — skipping token prune',
+    ])
+    const skip = entries[1]
+    expect(skip?.meta?.['messages']).toBe(2)
+    expect(skip?.meta?.['tickets']).toBe(1)
+  })
+
   test('Expo throws ExpoPushError → result.ok=false, no exception escapes', async () => {
     await store.register({
       project_slug: 't1',
