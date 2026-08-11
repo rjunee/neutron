@@ -1078,25 +1078,29 @@ rejects is a spawn failure, which the spawn's own `catch` already un-pools and l
 
 The five MCP suites run 160/160, and the pool suite 31/31.
 
-A single local `bun test` is not the suite: it was SIGKILLed at exit 137 partway through,
-which is why CI shards across four runners. Run the same way locally — four shards,
-sequentially on one box — three files failed, and every one was attributed rather than
-waved through:
+**CI is 13/13 green on the rebased tip** — typecheck, lint, purity, layering, all four test
+shards, the `test` aggregator, and the three CodeQL analyses. That is the authoritative
+full-suite result.
 
-* `tests/integration/orphan-survival.test.ts` (SIGTERM cleanup / WAL) — fails at
-  `origin/main` too. Pre-existing.
-* `open/__tests__/open-projects-changed-wiring.test.ts` — fails at `origin/main` too.
-  Pre-existing.
-* `migrations/runner.test.ts` (explicit db-path arg) — passes in isolation on this branch.
-  It needs ~15 s alone against a 15 s per-file limit, so four shards plus a typecheck on
-  one box is enough to tip it. Contention, not a defect.
+It is recorded second because the local attempt to get there is worth writing down. A single
+local `bun test` is not the suite: it was SIGKILLed at exit 137 partway through, which is why
+CI shards across four runners in the first place. Sharded the same way locally — but four
+shards sequentially on one already-loaded box — three files failed:
+`tests/integration/orphan-survival.test.ts` (SIGTERM cleanup / WAL),
+`open/__tests__/open-projects-changed-wiring.test.ts`, and `migrations/runner.test.ts`
+(explicit db-path arg).
 
-None is in a file this round touches, and both pre-existing ones were confirmed by running
-them against `origin/main` in a separate worktree rather than by asserting it.
+None is in a file this round touches, and none is a defect. The first two were reproduced at
+`origin/main` in a separate worktree — so not this branch's — and the third passes in
+isolation here, needing ~15 s alone against a 15 s per-file limit. CI then ran all four
+shards green, which resolves what the local run could only bound: these are failures of a
+contended box, not of `main`. Worth stating plainly, because "fails on main too" is the kind
+of true-but-misleading line that would send the next reader to debug `main`.
 
-CI note, recorded because it would otherwise look like a skipped gate: the `ci` workflow did
-not fire for this branch's push. GitHub Actions stalled repo-wide for ~45 minutes (no `ci`
-run for ANY commit in that window) and the PR's mergeability was left stuck reporting
-CONFLICTING — while `git merge-tree` against `origin/main` merges clean and `origin/main` is
-an ancestor of the branch head. `pull_request` cannot build a merge ref it believes is
-conflicted, so no run was queued.
+CI note, recorded because it would otherwise read as a skipped gate: the `ci` workflow did
+not fire for the first push of this round at all. Actions stalled repo-wide for ~45 minutes —
+no `ci` run for ANY commit in that window — and the PR was left stuck reporting CONFLICTING,
+which is why nothing queued: `pull_request` will not build a merge ref it believes is
+conflicted. The branch was genuinely clean against `main` throughout (`git merge-tree`
+merged with no conflict, and `origin/main` was an ancestor of the head). A rebase onto
+current `main` cleared the stale status and the checks ran.
