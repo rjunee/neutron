@@ -17,6 +17,14 @@ self-hoster's cron. Same reasoning as reading `.credentials.json` itself: requir
 an HTTP call would mean the rotator has to know this instance's port, bearer token
 and readiness to deliver one string.
 
+**A writer MUST create it mode 0600**, like the credentials file it sits beside. This
+was previously stated as an observed fact in the security note below and required of
+nobody, which is how a security argument turns into a wish: the reader cannot make a
+writer do it, so the requirement has to live here, in the contract, or it does not
+exist. The reader deliberately does NOT enforce it — refusing a loosely-permissioned
+sidecar would drop the label silently, and a silent drop is the one failure mode this
+whole feature is arranged to avoid.
+
 **The fingerprint has exactly one definition, and it is the function** —
 `credentialFingerprint` in `open/credential-label.ts`. A writer must call it
 (Managed's rotator imports it through `vendor/neutron`), never reimplement it from a
@@ -72,10 +80,12 @@ check, so the PR could not merge.
 
 **The finding is correct in form.** The input is a credential, and a bare digest of a
 credential is one dictionary away from being reversible. It is not exploitable *here*:
-these tokens are long and random, the sidecar is mode 0600 beside the credentials file it
-describes, and anyone who can read it can already read the token itself. But that is a
-property held up by three surrounding facts, each of which a later change could quietly
-remove — and it is a strictly worse thing to depend on than a correct primitive.
+these tokens are long and random, the sidecar is *required* to be mode 0600 beside the
+credentials file it describes (§ The sidecar — a requirement on writers, not something this
+reader can check), and anyone who can read it can already read the token itself. But that
+is a property held up by three surrounding facts, each of which a later change could
+quietly remove — one of them by a writer simply not honouring a contract — and it is a
+strictly worse thing to depend on than a correct primitive.
 
 Arguing it down was the alternative, and it would have left a permanently red REQUIRED
 check on a public repo. A standing red gate trains everyone to merge past it, and it hides
@@ -92,9 +102,22 @@ token, so a random salt is impossible. It buys domain separation and nothing mor
 docblock says exactly that rather than implying per-write uniqueness.
 
 **Cost was chosen against the call pattern, not copied from a password-storage example.**
-This runs once per usage reading, a minute apart. `N=4096` is far above a bare SHA-256 per
-guess and invisible on the tick; the default `N=16384` would burn ~100 ms of CPU every
-minute forever to render a label.
+This runs once per usage reading, a minute apart, and `N=4096` is far above a bare SHA-256
+per guess.
+
+It is **not** "invisible on the tick", which is what both this section and the code docblock
+originally claimed while also attributing a ~100 ms figure to the default `N`. Both halves
+were wrong. MEASURED under bun 1.3.9, `scryptSync` at these parameters: **~73 ms
+steady-state, ~280 ms on the first call**, synchronously, on the event loop. The default
+`N=16384` is ~534 ms; `N=1024` (~5 ms) is the setting that would actually cost "a few
+milliseconds".
+
+What bounds the cost today is WHERE it is paid, not how small it is: the fingerprint is
+reached only after a sidecar has been found, read, parsed and found to carry a plausible
+label, so a box with no sidecar — every box, until something writes one — never calls it.
+The stall becomes real on the first tick after a writer ships, and it arrives **without this
+file changing**. Whoever lands that writer decides then whether to lower `N` or memoise per
+token, on these numbers rather than on a comment that said there was nothing to weigh.
 
 📌 **A cross-process contract described in prose will drift, and the drift is silent.** The
 file header spelled out "first 12 hex of sha256(token)" — a writer trusting that line would

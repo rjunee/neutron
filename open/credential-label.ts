@@ -21,6 +21,13 @@
  * call that function (Managed's rotator can import it through `vendor/neutron`)
  * rather than reimplement it from a prose description.
  *
+ * A writer must also create the sidecar MODE 0600, like the credentials file beside
+ * it. That is a requirement on writers and not a check performed here: refusing a
+ * loosely-permissioned sidecar would drop the label silently, which is the one failure
+ * mode this design works hardest to avoid. See the note on scrypt below — the security
+ * argument for the fingerprint leans on this permission, so it has to be something
+ * asked of writers rather than something assumed of them.
+ *
  * ── THE FINGERPRINT IS THE WHOLE DESIGN ──────────────────────────────────────
  * The label is used ONLY when its fingerprint matches the token actually resolved.
  * Without that check a sidecar left behind by a previous swap would attach the
@@ -102,9 +109,9 @@ const FINGERPRINT_COST = { N: 4096, r: 8, p: 1 } as const
  * This was a bare SHA-256 digest, and CodeQL's `js/insufficient-password-hash`
  * was right to flag it: the input is a live credential, and a bare digest of a
  * credential is one dictionary away from being reversible. It is not exploitable
- * HERE — these tokens are long and random, the sidecar sits mode 0600 next to the
- * credentials file it describes, and anyone who can read it can already read the
- * token — but "not exploitable given three surrounding facts" is a worse property
+ * HERE — these tokens are long and random, the sidecar is REQUIRED to be mode 0600
+ * next to the credentials file it describes, and anyone who can read it can already
+ * read the token — but "not exploitable given three surrounding facts" is a worse property
  * to depend on than "the primitive is correct", and every one of those facts is a
  * thing a later change could quietly remove.
  *

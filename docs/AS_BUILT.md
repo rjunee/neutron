@@ -8944,3 +8944,44 @@ round; the comment now carries the real numbers so whoever ships the writer deci
 them. Behaviour unchanged: comments and tests only.
 
 Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-11 — the account-label reader's REAL path had no positive test (review round 2)
+
+Every positive test for the sidecar injected its own reader. That left the two things which
+can only ever be wrong in production asserted by nothing: WHERE the sidecar is looked for,
+and whether the default reader is wired to look there at all. The one test that used the
+default reader pointed at a directory that does not exist and expected null — an assertion a
+completely wrong path satisfies exactly as well as a correct one.
+
+Two tests now write real files into a temp dir and pass no deps: one proves a good sidecar is
+found and used, one proves a STALE sidecar is refused *through the same wiring that accepts
+the good one*. The refusal is the whole value of the feature, and until now it was only ever
+proven against a stub.
+
+Mutants run, not asserted: renaming the sidecar basename (dies), looking for it inside the
+credentials path instead of beside it (dies), and replacing the fingerprint comparison with a
+check that only rejects an empty string — the refusal replaced by a guess — which now dies at
+BOTH layers instead of only against the injected reader.
+
+**The 0600 sidecar permission was a security argument that asked nothing of anyone.** The case
+for scrypt over a bare digest cites a mode-0600 sidecar as one of three facts making a weak
+digest unexploitable, while the writer-facing contract required no permission at all. The
+reader cannot check the mode, and refusing a loose one would drop the label silently — the one
+failure mode this feature is arranged to avoid — so the requirement now lives in the contract
+where a writer reads it, and a doc guard asserts it stays there. Mutant: softening the
+requirement to prose fails the guard.
+
+**The label limit was 64 with no test at 64.** A 200-character rejection is satisfied by any
+off-by-one version of the check. Boundary covered; the `>` → `>=` mutant now dies.
+
+**Three current-state docs claimed the feature was impossible.** `docs/as-built/…-usage-sample-series.md`
+said the column is "always null today" and the instance "genuinely cannot name the account";
+both dashboard clients' docblocks said nothing on the box can name it. All true before this
+branch and false after it — the aspirational-docblock hazard in reverse. The dated entries keep
+their text with a superseded note (they are a log, not current state); the live docblocks now
+say null means *nothing named it, or the name on disk described a different token*, which is
+what the code does.
+
+Behaviour unchanged in this round: tests, comments and docs only.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.

@@ -18,7 +18,9 @@
 
 import { describe, expect, it } from 'bun:test'
 
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   credentialFingerprint,
@@ -113,6 +115,75 @@ describe('readCredentialLabel', () => {
       readCredentialLabel(CREDS, TOKEN, sidecar({ label: 'x'.repeat(200), fingerprint: fp })),
     ).toBeNull()
   })
+
+  it('accepts exactly 64 characters and refuses 65 — the boundary, not a round number', () => {
+    // 200 characters is rejected by any off-by-one version of the check, so it proved
+    // only that SOME limit exists. Where the limit falls is the part a later edit can
+    // move without any test noticing.
+    const fp = credentialFingerprint(TOKEN)
+    expect(readCredentialLabel(CREDS, TOKEN, sidecar({ label: 'x'.repeat(64), fingerprint: fp }))).toBe(
+      'x'.repeat(64),
+    )
+    expect(
+      readCredentialLabel(CREDS, TOKEN, sidecar({ label: 'x'.repeat(65), fingerprint: fp })),
+    ).toBeNull()
+  })
+})
+
+describe('the real path, on a real filesystem — no injected reader', () => {
+  /**
+   * WHY THIS BLOCK EXISTS, given everything above already passes.
+   *
+   * Every positive test above injects `readFile`/`readLabel`, which means the two
+   * things that can only ever be wrong in production were asserted by nothing: WHERE
+   * the sidecar is looked for, and whether the default reader is wired to look there
+   * at all. The one test that used the default reader pointed at a directory that does
+   * not exist and expected null — an assertion a completely wrong path satisfies just
+   * as well as a correct one. So these two use real files at real paths and pass no
+   * deps whatsoever.
+   */
+  function withSidecar(body: unknown, assert: (dir: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-account-label-'))
+    try {
+      writeFileSync(
+        join(dir, '.credentials.json'),
+        JSON.stringify({ claudeAiOauth: { accessToken: TOKEN } }),
+        { mode: 0o600 },
+      )
+      // 0600, because that is what the sidecar contract requires of a writer — see
+      // `docs/as-built/2026-08-09-credential-account-label.md` § The sidecar. The
+      // reader does not enforce it (a silent label drop is the one failure mode this
+      // feature works hardest to avoid), so the fixture models the contract instead.
+      writeFileSync(join(dir, '.credentials.meta.json'), JSON.stringify(body), { mode: 0o600 })
+      assert(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('finds and uses a sidecar that is actually on disk beside the credential', () => {
+    withSidecar({ label: 'acct-2', fingerprint: credentialFingerprint(TOKEN) }, (dir) => {
+      expect(resolveActiveCredential({ CLAUDE_CONFIG_DIR: dir })).toEqual({
+        kind: 'measurable',
+        token: TOKEN,
+        account_label: 'acct-2',
+      })
+    })
+  })
+
+  it('REFUSES a stale on-disk sidecar, through the same wiring that accepts a good one', () => {
+    // The refusal is the whole value of the feature, so it has to be proven on the
+    // production path and not only against an injected reader. Same directory, same
+    // default reader, same token — only the fingerprint describes a token we are not
+    // holding, which is exactly the state a swap leaves behind.
+    withSidecar({ label: 'acct-1', fingerprint: credentialFingerprint(OTHER_TOKEN) }, (dir) => {
+      expect(resolveActiveCredential({ CLAUDE_CONFIG_DIR: dir })).toEqual({
+        kind: 'measurable',
+        token: TOKEN,
+        account_label: null,
+      })
+    })
+  })
 })
 
 describe('the label is resolved WITH the credential, never separately', () => {
@@ -206,6 +277,15 @@ describe('the label is resolved WITH the credential, never separately', () => {
     expect(block).toContain('fingerprint')
     expect(block).not.toMatch(algorithm)
     expect(asBuilt).toContain('credentialFingerprint')
+
+    // AND that the contract ASKS for the file permission its own security argument
+    // depends on. The case for scrypt-over-sha256 cites a 0600 sidecar as one of three
+    // facts making a weak digest unexploitable — but this reader cannot check the mode,
+    // and refusing a loose one would drop the label silently. So the requirement only
+    // exists if the writer-facing contract states it, which for a while it did not: the
+    // permission was asserted as an observed fact in the security note and required of
+    // nobody.
+    expect(contract(asBuilt, '## The sidecar', '## ⚠️')).toContain('0600')
 
     const plan = readFileSync(
       new URL('../../docs/plans/2026-08-09-model-usage-dashboard.md', import.meta.url),

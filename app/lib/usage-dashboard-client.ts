@@ -32,9 +32,12 @@
  *     faster than it drains, so there is nothing to project. The row is omitted
  *     rather than shown empty; a permanent "—" trains the eye to hunt for a warning
  *     that is normally absent.
- *   - `account_label: null` — nothing on this instance can name which account the
- *     reading belongs to, because the credential is swapped by a process outside it.
- *     Renders as "active credential". It must NEVER guess.
+ *   - `account_label: null` — no sidecar names the account behind this reading, or the
+ *     one on disk describes a token the instance is not holding. Renders as "active
+ *     credential". It must NEVER guess. (This used to say the instance *cannot* name
+ *     the account at all; it can, when whatever swaps the credential writes a sidecar
+ *     next to it — see `open/credential-label.ts`. Null now covers the unlabelled case
+ *     and the REFUSED one, and the two are deliberately indistinguishable here.)
  *
  * A rejected fetch resolves to "unreachable", never to an empty series: an older
  * server does not mount this route, and drawing a 0% bar from a 404 would invent a
