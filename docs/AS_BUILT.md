@@ -8985,3 +8985,7 @@ what the code does.
 Behaviour unchanged in this round: tests, comments and docs only.
 
 Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
+(adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
+failed, so this is not a four-lane APPROVE and should not be read as one.
