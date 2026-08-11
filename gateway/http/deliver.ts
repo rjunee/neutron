@@ -227,6 +227,21 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
   const { buttonStore, push } = input
   const log = input.log ?? ((msg: string): void => moduleLog.warn(msg))
   const notify_timeout_ms = input.notify_timeout_ms ?? DEFAULT_NOTIFY_TIMEOUT_MS
+  // VALIDATED AT CONSTRUCTION, for the same reason `ExpoPushClient` validates its
+  // own `timeout_ms` and `batch_size` there: a bad deadline is a config mistake, and
+  // a config mistake should be one loud error at boot rather than a silent
+  // behaviour change on every fire.
+  //
+  // `??` only defaults `undefined`, so a literal `0` — or a `NaN` arriving from a
+  // parsed setting — passes straight through to `withTimeout`, where `setTimeout(0)`
+  // (Node clamps NaN to 0 too) resolves the bound on the very next macrotask. The
+  // race is then decided BEFORE the notification can possibly answer, so every
+  // notification reports not-sent, no row is ever stamped, and the re-emit
+  // suppression this whole seam exists for is silently off — the one failure mode
+  // that looks exactly like working code.
+  if (!Number.isFinite(notify_timeout_ms) || notify_timeout_ms <= 0) {
+    throw new Error('createDeliver: notify_timeout_ms must be a positive number')
+  }
 
   /**
    * Route the live push by topic grammar and swallow the sender's throw
@@ -406,6 +421,24 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       // socket — because the ButtonStore contract's exception is load-bearing: a row
       // that persisted while every transport failed must still buzz on the retry,
       // and stamping unconditionally would silence it forever.
+      //
+      // THE COST OF THE `|| delivered` ARM, NAMED RATHER THAN LEFT TO BE FOUND.
+      // Twenty lines up, a live socket is declared NOT to be evidence the owner is
+      // looking; here it is accepted as evidence he was REACHED. Both are meant, but
+      // the pair has a seam: a backgrounded phone holding an open socket while Expo
+      // is down gives `delivered: true, notified: false`, so the row is stamped and
+      // the ALERT for that key is gone for good — a `ritual-approval` or credential
+      // incident then waits silently until he next opens the app.
+      //
+      // Accepted, because the message itself is not lost: the socket handed it to the
+      // client and it is in the transcript, so this delays an alert rather than
+      // dropping information. The alternative — requiring `notified` — makes the
+      // stamp unreachable on any install with no registered device, which is every
+      // fresh one, and there the re-emit would re-notify forever with nothing able to
+      // buzz. Stamping on "reached by some transport" is the honest reading of
+      // `delivered_at`. Revisit if a key ever needs an alert guarantee STRONGER than
+      // the transcript, because that is a different contract and wants a different
+      // field, not a tweak to this condition.
       if (durability === 'reply' && (notified || delivered)) await stampDelivered(prompt_id)
     }
     return { prompt_id, persisted: true, delivered_live: delivered }

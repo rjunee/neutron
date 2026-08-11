@@ -9069,6 +9069,36 @@ notification — contradicted by that file's own header — now name the seam th
 
 Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
 
+## 2026-08-10 — resolving what review left unverified on the notification lane
+
+`createDeliver` now validates `notify_timeout_ms` at construction, the way
+`ExpoPushClient` validates `timeout_ms` and `batch_size`. `??` defaults `undefined` only,
+so a literal `0` or a `NaN` from a parsed setting reached `withTimeout` intact, and
+`setTimeout(0)` settles the bound on the next macrotask — before the notification can
+answer. Every notification would have reported not-sent, no row would ever have been
+stamped, and the re-emit suppression would have been silently OFF while every other test
+on this path still passed. Unreachable from the sole live call site, which omits the
+field; guarded because that failure mode is invisible at runtime rather than loud.
+
+The stamp condition `notified || delivered` is unchanged, and the seam in it is now named
+where it is decided. A backgrounded phone holding an open socket while Expo is down gives
+`delivered: true, notified: false`, so the row is stamped and the ALERT for that key is
+gone for good — an approval prompt then waits until the app is next opened. Accepted: the
+socket handed the message to the client and it is in the transcript, so this delays an
+alert rather than dropping information, whereas requiring `notified` makes the stamp
+unreachable on any install with no registered device (every fresh one) and the re-emit
+would then re-notify forever with nothing able to buzz.
+
+The two docblocks about `[id]`-route param staleness contradicted each other, and the
+inaccurate one was the child screen's: it claimed its OWN param had been observed to go
+stale. The recorded incident is the opposite — `useLocalSearchParams` is sticky in a
+component that stays MOUNTED, so the LAYOUT kept reporting the old id while the
+freshly-rendered chat screen already saw the new one. That matters beyond tidiness: the
+child being the fresh side is the reason re-entering a scope without `?message_id=` cannot
+resurrect a previous tap's target and re-anchor an ordinary open onto an old row. The
+screen reads the path for AGREEMENT with the shell, not because its params lag, and the
+comment now says so.
+
 ## 2026-08-10 — the fail-closed delivery guard was reading a fail-open number
 
 The previous entry made `gateway/push/chat-message-push.ts` require `delivered >= 1` before

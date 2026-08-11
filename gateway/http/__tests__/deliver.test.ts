@@ -772,6 +772,31 @@ describe('a stalled notification transport cannot hold a delivery open', () => {
     await stalled
     expect(trace.marked).toEqual([])
   })
+
+  it('rejects a non-positive notify budget at construction, not at fire time', () => {
+    // `??` defaults `undefined` ONLY, so a literal `0` or a `NaN` from a parsed
+    // setting reaches `withTimeout` intact — and `setTimeout(0)` (Node clamps NaN to
+    // 0 as well) settles the bound on the next macrotask, before the notification can
+    // possibly answer. Every notification would then report not-sent, no row would
+    // ever be stamped, and the re-emit suppression would be silently OFF while every
+    // other test in this file still passed. That is the failure worth a construction
+    // guard: it is invisible at runtime.
+    const { store } = fakeButtonStore()
+    const withBudget = (notify_timeout_ms: number): (() => unknown) => (): unknown =>
+      createDeliver({ buttonStore: store, push: {}, notify_timeout_ms })
+
+    expect(withBudget(0)).toThrow(/notify_timeout_ms/)
+    expect(withBudget(Number.NaN)).toThrow(/notify_timeout_ms/)
+    expect(withBudget(-1)).toThrow(/notify_timeout_ms/)
+    expect(withBudget(Number.POSITIVE_INFINITY)).toThrow(/notify_timeout_ms/)
+
+    // POSITIVE CONTROLS: the guard must not have been bought by rejecting
+    // everything. A real budget builds, and so does omitting the field — which is
+    // what the sole live call site does (`open/composer.ts`), so a guard that broke
+    // the default would break every delivery.
+    expect(withBudget(20)).not.toThrow()
+    expect(() => createDeliver({ buttonStore: store, push: {} })).not.toThrow()
+  })
 })
 
 // ── a foregrounded owner still gets a banner, deliberately ───────────────────
