@@ -38,8 +38,7 @@ import {
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
-  type WorkBoardTaskType,
-} from '@neutronai/work-board/store.ts'
+  type WorkBoardTaskType, WorkBoardRunStillLiveError } from '@neutronai/work-board/store.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
@@ -455,8 +454,20 @@ async function handleComplete(
 ): Promise<Response> {
   const owned = store.get(project_slug, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
-  const item = await store.complete(project_slug, item_id)
-  return jsonOk({ item, project_id })
+  // 409, not 500: the store REFUSES to complete an item whose build is still
+  // live, and that is a legitimate answer about state rather than a fault. This is
+  // the path the board row's pulsing dot takes — its click advances status, so on
+  // an in-progress item it lands here and used to assert a running build had
+  // finished (2026-08-11). The client shows the message.
+  try {
+    const item = await store.complete(project_slug, item_id)
+    return jsonOk({ item, project_id })
+  } catch (err) {
+    if (err instanceof WorkBoardRunStillLiveError) {
+      return jsonError(409, 'run_still_live', err.message)
+    }
+    throw err
+  }
 }
 
 async function handleReorder(

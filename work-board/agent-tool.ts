@@ -35,8 +35,7 @@ import {
   type WorkBoardItem,
   type WorkBoardItemUpdate,
   type WorkBoardStatus,
-  type WorkBoardStore,
-} from './store.ts'
+  type WorkBoardStore, WorkBoardRunStillLiveError } from './store.ts'
 import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
 import type { WorkBoardChatAck } from './chat-ack.ts'
 
@@ -346,7 +345,18 @@ export function registerWorkBoardToolSurface(
       const a = (args ?? {}) as IdArg
       const id = asString(a.id)
       if (id === undefined) return { ok: false, error: 'id is required' }
-      return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id))
+      // A refusal is an ANSWER, not a crash: the store throws when the item's
+      // build is still live (see WorkBoardRunStillLiveError). Surface its message
+      // so the agent learns why and stops, rather than seeing a tool error and
+      // retrying. Completion is reconciled from the run going terminal.
+      try {
+        return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id))
+      } catch (err) {
+        if (err instanceof WorkBoardRunStillLiveError) {
+          return { ok: false, error: err.message }
+        }
+        throw err
+      }
     },
   })
 

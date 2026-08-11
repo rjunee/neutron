@@ -3575,6 +3575,15 @@ export function buildOpenGraphComposer(
     }
     const workBoardStore = new WorkBoardStore(db, {
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
+      // SAFETY INVARIANT — nothing may mark an item done while its build runs.
+      // `boardRunStore` is the same store the tick loop reconciles from, so this
+      // reads the one authoritative phase. A run that has VANISHED (get → null)
+      // counts as not-live: it cannot be reconciled either, so refusing forever
+      // would strand the card. See `WorkBoardStoreOptions.isRunLive`.
+      isRunLive: (run_id: string): boolean => {
+        const run = boardRunStore.get(run_id)
+        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+      },
     })
     // M2 task 3 — bind the `/status` snapshot reader now that every source store
     // exists (projects reader / reminder store / work-board / Trident run store).
