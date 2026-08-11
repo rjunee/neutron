@@ -25,7 +25,7 @@
  * owner pays a cold spawn on every single message. Both are silent in production.
  */
 
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, setDefaultTimeout } from 'bun:test'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname } from 'node:path'
@@ -55,6 +55,21 @@ import {
   type ReplToolBridge,
 } from '../persistent-repl-substrate.ts'
 
+/**
+ * HEADROOM, because the budgets in `opts()` are the same size as bun's default per-test
+ * timeout. `readyBudgetMs`/`healthBudgetMs` are 5000 and the default timeout is 5000, so a
+ * test whose fake spawn takes its full budget on a loaded machine is killed by the RUNNER
+ * at the same instant the code under test would have succeeded — and the kill lands
+ * mid-`afterEach`, which cascades into unrelated failures in the next test. Measured on a
+ * contended box: 26 pass / 3 fail, and 29 pass / 0 fail with `--timeout 90000`.
+ *
+ * Raising the runner's patience rather than lowering the budget is deliberate. The budget
+ * is what lets a genuinely slow spawn succeed; shrinking it to fit the runner would make
+ * the suite flakier on exactly the slow machines this is about, and would weaken an
+ * assertion (`bounds the blocking MCP startup wait`) that reads the budget.
+ */
+setDefaultTimeout(90_000)
+
 afterEach(async () => {
   await shutdownAllPersistentRepls()
   setReplToolBridge(undefined)
@@ -74,6 +89,11 @@ function makeCapturingHost(
    *  and observe what happens to a session that is genuinely busy. Omitted ⇒ the reply
    *  goes out immediately, which is what every other test in this file wants. */
   replyGate?: () => Promise<void>,
+  /** Awaited before the fake child announces its dev-channel, so a test can hold a COLD
+   *  SPAWN in flight — the window in which the pool holds an unresolved promise and no
+   *  `ReplSession` exists yet to carry `activeTurn` / `turnSlotHeld`. Omitted ⇒ the
+   *  channel is announced immediately, which is what every other test here wants. */
+  readyGate?: () => Promise<void>,
 ): {
   host: PtyHost
   argvs: string[][]
@@ -127,8 +147,14 @@ function makeCapturingHost(
           return new Response('nf', { status: 404 })
         },
       })
-      void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
-      void post('/channel-bound', { session_id: sid })
+      void (async () => {
+        // Held back when a test passes `readyGate`: the post-spawn assertion waits on
+        // `/channel-ready`, so delaying it leaves the POOL holding an unresolved spawn —
+        // the cold-dispatch window. Otherwise it goes out on this tick, unchanged.
+        if (readyGate !== undefined) await readyGate()
+        await post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
+        await post('/channel-bound', { session_id: sid })
+      })()
       return {
         pid,
         write() {},
@@ -790,6 +816,64 @@ describe('revoking a server retires the warm child that was spawned under the ol
     expect(session.turnSlotHeld).toBe(0)
   })
 
+  it('spares the child of a dispatch parked BEFORE its turn slot — the window neither session field can see', async () => {
+    // THE REPRODUCED FAILURE. `acquireTurn()` is called in the CALLER's continuation, after
+    // `getOrSpawnSession` has already resolved — so for every await inside get-or-spawn a
+    // committed dispatch has a session and neither `activeTurn` nor `turnSlotHeld`. A
+    // revocation landing there read the session as idle, killed the child, and the dispatch
+    // injected into a corpse: the turn failed with a drain error instead of delivering.
+    //
+    // PARKED WHERE THE PRODUCTION WINDOW ACTUALLY IS, not at an arbitrary await: the
+    // warm-reuse branch computes the MCP freshness fingerprint by awaiting
+    // `resolveExtraMcpServers`, and in the real composition that resolver reads the
+    // installed list from the database and decrypts every env value through the secrets
+    // store. Holding that one resolver open IS the window — which is also the answer to the
+    // earlier claim that what remained here was "a handful of microtasks".
+    setReplToolBridge(bridge())
+    const { host, kills } = makeCapturingHost()
+    let hold = false
+    let release: (() => void) | undefined
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        resolveExtraMcpServers: async () => {
+          if (hold) await new Promise<void>((r) => (release = r))
+          return [EXAMPLE]
+        },
+      }),
+    )
+
+    // A warm IDLE child, settled — the state the evictor would otherwise be right to kill.
+    await drain(sub.start(spec('first')))
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 0))
+    expect(kills.n).toBe(0)
+
+    // Dispatch two, parked inside the freshness check: past the pool lookup, short of the
+    // turn slot. Waited for by TICKING until the resolver is actually suspended, so the
+    // test cannot pass by racing ahead of the window it means to be inside.
+    hold = true
+    const second = drain(sub.start(spec('second')))
+    for (let i = 0; i < 400 && release === undefined; i += 1) {
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    expect(release).toBeDefined()
+
+    // The revocation lands exactly there. POISONED, and the child is NOT touched.
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+    expect(kills.n).toBe(0)
+
+    // Let it through. `hold` is cleared first: the poison makes the freshness guard evict
+    // and respawn, and that respawn resolves the servers again — it must not park too.
+    hold = false
+    release!()
+    // DELIVERED. `drain` throws on an error event, so awaiting it is the assertion: without
+    // the committed-dispatch check this rejects with "drain error", which is the exact
+    // user-visible symptom the reviewer reproduced.
+    // …and delivered THIS turn's reply, not a truncated or empty one: the fake child echoes
+    // the prompt, so the text proves the inject reached a live REPL on the respawned child.
+    expect(await second).toContain('second')
+  })
+
   it('retires a session poisoned mid-turn AS SOON AS that turn ends, not at some next dispatch', async () => {
     // The residual the poison left behind. A child that was BUSY when the grant was
     // revoked cannot be killed on the spot — that would strand a turn which is, correctly,
@@ -905,6 +989,58 @@ describe('revoking a server retires the warm child that was spawned under the ol
     gates.shift()!()
     expect(await secondTurn).toContain('ok=1')
     for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 0))
+    expect(kills.n).toBe(1)
+    expect(pool.size).toBe(0)
+  })
+
+  it('a COLD SPAWN in flight is busy too — the dispatch that asked for it keeps its child', async () => {
+    // THE THIRD DOOR TO THE SAME STRANDED TURN, and the widest of the three. The two tests
+    // above cover a session that exists and is busy. This is the window where the session
+    // does NOT exist yet: a cold dispatch has committed, the pool holds an unresolved spawn
+    // promise, and neither `activeTurn` nor `turnSlotHeld` can say so because the object
+    // they live on is still being built.
+    //
+    // Reading busy-ness by AWAITING that promise is what broke it. The evictor's `await`
+    // resumes several await-hops before the dispatch's own — it awaits the pooled promise
+    // directly, while the caller unwinds through `getOrSpawnSession` and its lock — so the
+    // evictor saw a brand-new session with no turn and no slot, called it idle, and killed
+    // the child the dispatch was about to inject into. Measured before the fix on this very
+    // harness: evicted=1, one kill, and the turn failing its drain.
+    //
+    // The window is not microscopic like the other two: it is open for the whole spawn,
+    // which on a real box is seconds.
+    setReplToolBridge(bridge())
+    let openReady: () => void = () => {}
+    const ready = new Promise<void>((res) => {
+      openReady = res
+    })
+    const { host, kills } = makeCapturingHost(undefined, () => ready)
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    const turn = drain(sub.start(spec('hi')))
+    // Wait for the pool to hold the PENDING spawn — not for it to resolve, which is the
+    // whole point. A tick loop, so it cannot flake on a slow runner.
+    for (let i = 0; i < 200 && pool.size === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    expect(pool.size).toBe(1)
+
+    // The revocation lands mid-spawn. POISONED, not evicted, and nothing is killed.
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+    expect(kills.n).toBe(0)
+
+    // THE ASSERTION THAT FAILS WITHOUT THE FIX: the turn survives. Its child was spawned
+    // under a grant that WAS in force when the dispatch committed, which is the same
+    // bargain the busy branch strikes.
+    openReady()
+    expect(await turn).toContain('ok=0')
+
+    // And it is retired the moment that turn ends — not left to some next dispatch, which
+    // for an idle session is no bound at all.
+    for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 0))
+    const session = await [...pool.values()][0]
+    expect(session?.poisoned ?? true).toBe(true)
     expect(kills.n).toBe(1)
     expect(pool.size).toBe(0)
   })

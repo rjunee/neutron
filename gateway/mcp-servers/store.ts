@@ -269,8 +269,10 @@ export class OwnerMcpServerStore {
    * It does, however, retire the old PROCESS. Un-approving by rewriting the spec governs
    * what the next spawn wires; it says nothing about the child already running under the
    * previous grant, which keeps its command and its copied env until something evicts it.
-   * So a replace whose grant hash actually changed announces the revocation, exactly as
-   * {@link remove} and a deny do — see the call at the end of the critical section.
+   * So a replace whose grant hash changed — OR whose env VALUES changed, which the hash
+   * deliberately cannot see — announces the revocation, exactly as {@link remove} and a
+   * deny do. See the gate at the end of the critical section for why a rotated value has
+   * to count.
    *
    * Runs inside {@link serialize}, and re-reads the installed list in there, so two
    * concurrent installs cannot both rewrite a list they read before the other wrote.
@@ -279,7 +281,8 @@ export class OwnerMcpServerStore {
     const { spec, env, errors } = parseOwnerMcpServerInput(raw)
     if (spec === null) return { ok: false, errors, servers: await this.list() }
 
-    return await this.serialize(async () => {
+    let revoked = false
+    const result = await this.serialize(async () => {
       const existing = this.specs()
       const isNew = !existing.some((s) => s.name === spec.name)
       if (isNew && existing.length >= MCP_SERVERS_MAX) {
@@ -291,6 +294,9 @@ export class OwnerMcpServerStore {
       }
 
       const previous = existing.find((s) => s.name === spec.name)
+      // READ BEFORE THE OVERWRITE, so the value comparison below has something to compare
+      // against. Values only — never logged, never returned, never put in an error.
+      const previousEnv = previous === undefined ? {} : this.readSecrets(spec.name)
       const next = isNew
         ? [...existing, spec]
         : existing.map((s) => (s.name === spec.name ? spec : s))
@@ -320,19 +326,30 @@ export class OwnerMcpServerStore {
       // the process started under the previous answer has to go the same way the grant
       // did.
       //
-      // GATED ON THE GRANT HASH, not on `isNew`: a re-install of a byte-identical spec
-      // leaves the grant matching and the running child correct, so evicting there would
-      // cost a cold respawn to change nothing. A hash change is exactly the condition
-      // under which the old approval stops applying.
+      // NOT GATED ON `isNew`: a re-install of a byte-identical spec with byte-identical
+      // values leaves the grant matching and the running child correct, so retiring there
+      // would cost a cold respawn to change nothing.
       //
-      // Env VALUE-only edits are deliberately NOT covered here — the hash does not cover
-      // values, and they are already the spawn path's `freshCredential` guard's job. This
-      // is scoped to the case where the GRANT itself stops being in force.
-      if (previous !== undefined && computeMcpServerGrantHash(previous) !== computeMcpServerGrantHash(spec)) {
-        await this.announceRevocation()
-      }
+      // A CHANGED VALUE COUNTS, and it used to not. The comment here claimed a value-only
+      // rotation was "the spawn path's `freshCredential` guard's job" — it is not:
+      // `freshCredential` fingerprints the CLAUDE OAuth token (`authFingerprintFor`), and
+      // knows nothing about MCP env values. What does cover them is `freshMcpServers`,
+      // whose fingerprint folds the resolved values — but that guard only runs ON A
+      // DISPATCH, which for an idle session is hours away, and rotating a secret is
+      // usually the owner's response to believing the OLD one is compromised. Leaving the
+      // child that holds it alive for an unbounded stretch is the exact hazard the
+      // retire-on-revocation path exists to close, arriving by a door the hash cannot see
+      // through: the grant covers the env-var NAMES, deliberately never the values.
+      const grantChanged =
+        previous !== undefined &&
+        computeMcpServerGrantHash(previous) !== computeMcpServerGrantHash(spec)
+      const valuesChanged = previous !== undefined && !sameEnvValues(previousEnv, env)
+      if (grantChanged || valuesChanged) revoked = true
       return { ok: true, errors: [], servers: await this.list() }
     })
+    // OFF THE WRITE CHAIN — see {@link announceRevocation}.
+    if (revoked) await this.announceRevocation()
+    return result
   }
 
   /**
@@ -376,6 +393,16 @@ export class OwnerMcpServerStore {
    * Swallows its own failure by design: the revocation has ALREADY landed durably, and
    * turning a completed revoke into a reported failure would invite the owner to press
    * again on state that is already correct. See {@link OwnerMcpServerStoreDeps.onRevoked}.
+   *
+   * CALLED AFTER {@link serialize} RESOLVES, NEVER INSIDE IT. Every caller sets a local
+   * flag in its critical section and calls this once the chain is released. The eviction
+   * reaches into the runtime pool, where it can wait on a child's SIGTERM grace window —
+   * so calling it on the chain made a deny or an uninstall arriving during a COLD SPAWN
+   * hold the settings write path for as long as that spawn's ready budget, and queue every
+   * other install behind it. Correctness never depended on the position: the revoke is
+   * durable before this runs, so a spec written in between is one the eviction's respawn
+   * reads correctly anyway. Still AWAITED by the caller rather than fired and forgotten,
+   * so the HTTP reply does not claim a stop that has not happened yet.
    */
   private async announceRevocation(): Promise<void> {
     if (this.deps.onRevoked === undefined) return
@@ -390,7 +417,8 @@ export class OwnerMcpServerStore {
 
   async remove(name: unknown): Promise<{ removed: boolean; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
-    return await this.serialize(async () => {
+    let revoked = false
+    const result = await this.serialize(async () => {
       const existing = this.specs()
       const target = existing.find((s) => s.name === wanted)
       if (target === undefined) return { removed: false, servers: await this.list() }
@@ -410,9 +438,12 @@ export class OwnerMcpServerStore {
       )
       // AFTER the spec write, so a child respawned by the eviction reads the list
       // WITHOUT this server rather than racing the delete and re-wiring it.
-      await this.announceRevocation()
+      revoked = true
       return { removed: true, servers: await this.list() }
     })
+    // OFF THE WRITE CHAIN, and still after the spec write — see {@link announceRevocation}.
+    if (revoked) await this.announceRevocation()
+    return result
   }
 
   /**
@@ -478,16 +509,29 @@ export class OwnerMcpServerStore {
     // not a rewrite; nothing it calls is itself serialized (`list` and
     // `requestApproval` are both already invoked from inside `install`'s critical
     // section), so there is no re-entrancy to deadlock on.
-    return await this.serialize(() =>
-      this.decideLocked(name, decision, expect_grant_hash, decided_by),
+    let revoked = false
+    const result = await this.serialize(() =>
+      this.decideLocked(name, decision, expect_grant_hash, () => {
+        revoked = true
+      }, decided_by),
     )
+    // OFF THE WRITE CHAIN — see {@link announceRevocation}.
+    if (revoked) await this.announceRevocation()
+    return result
   }
 
-  /** {@link decide}'s body. Runs INSIDE {@link serialize} — never call it directly. */
+  /**
+   * {@link decide}'s body. Runs INSIDE {@link serialize} — never call it directly.
+   *
+   * `markRevoked` records that a revocation landed; the caller announces it once the write
+   * chain is released, because the eviction can wait on a subprocess and must not hold the
+   * chain while it does.
+   */
   private async decideLocked(
     name: unknown,
     decision: 'approve' | 'deny',
     expect_grant_hash: unknown,
+    markRevoked: () => void,
     decided_by?: string,
   ): Promise<{ ok: boolean; error: string | null; servers: ReadonlyArray<McpServerStatus> }> {
     const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
@@ -528,8 +572,9 @@ export class OwnerMcpServerStore {
     // saying he once approved that command.
     if (decision === 'deny') {
       await manager.revokeApproved(this.deps.project_slug, tool_name)
-      // A deny is a STOP, and a stop that leaves the subprocess running is not one.
-      await this.announceRevocation()
+      // A deny is a STOP, and a stop that leaves the subprocess running is not one. The
+      // announcement itself happens in {@link decide}, once this critical section ends.
+      markRevoked()
     }
     // READ AFTER THE REVOKE: the idempotency checks below must see post-revoke state,
     // or a deny arriving twice would short-circuit on its own first `denied` row while
@@ -752,6 +797,20 @@ export class OwnerMcpServerStore {
   private async forgetSecrets(name: string): Promise<void> {
     await this.deps.credentials.delete(this.deps.owner_slug, '', mcpServerEnvService(name))
   }
+}
+
+/**
+ * Whether two env maps carry the same NAMES with the same VALUES.
+ *
+ * Compares values, so it must never log, return or embed one — it answers a boolean and
+ * nothing else. `Object.keys` on both sides (not just one) is what makes a REMOVED
+ * variable count as a change.
+ */
+function sameEnvValues(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  if (ka.length !== kb.length) return false
+  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && a[k] === b[k])
 }
 
 /** The `grant_hash` on an approval row, or `null` when the row is unreadable. */

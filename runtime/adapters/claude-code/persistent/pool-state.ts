@@ -332,6 +332,62 @@ export const pool = new Map<string, Promise<ReplSession>>()
  *  overwritten by the newest spawn for the key; deleted on death/kill. */
 export const childByKey = new Map<string, PtyChild>()
 
+/**
+ * Pool entries whose spawn has NOT resolved yet, keyed the same way `pool` is and
+ * holding the IDENTICAL promise object so a stale delete cannot clear a newer spawn's
+ * pendingness (the `unregisterIf` identity-guard discipline).
+ *
+ * WHY A SEPARATE MAP AND NOT `pool` ITSELF: a `Promise` cannot be asked whether it has
+ * settled, and asking by awaiting it is exactly the observation that changes the answer.
+ * `evictWarmReplsForMcpSurfaceChange` has to distinguish "a warm child sitting idle"
+ * (kill it now) from "a child a COMMITTED dispatch is about to inject into" (do not) —
+ * and a cold spawn is the second case even though the session it resolves to has no
+ * active turn and holds no turn slot YET. It cannot: the caller takes the slot in the
+ * continuation AFTER `getOrSpawnSession` resolves, and the evictor's `await` on the same
+ * promise resumes three await-hops earlier, so it read the brand-new session as idle and
+ * killed the child out from under the dispatch. This map is the synchronous answer, in
+ * the same spirit as `childByKey` one entry above.
+ *
+ * Added at the single `pool.set` in `spawn.ts`; deleted when that promise settles,
+ * either way.
+ *
+ * NOT SUFFICIENT ON ITS OWN, and deliberately kept alongside {@link committedDispatches}
+ * rather than folded into it: this map is the only signal for a spawn that NO dispatch is
+ * waiting on — the supervision crash/wedge respawn in `supervision.ts` calls
+ * `getOrSpawnSession` directly, with no turn behind it. Without this entry the evictor
+ * would `await` that unresolved promise and block a revocation for the whole 30 s ready
+ * budget before killing the child it just waited for.
+ */
+export const pendingSpawns = new Map<string, Promise<ReplSession>>()
+
+/**
+ * How many dispatches are COMMITTED to a pool key but do not yet hold its turn slot —
+ * the span from "asked `getOrSpawnSession` for a session" to "`acquireTurn()` returned".
+ * A count, not a flag, because dispatches queue on the same key.
+ *
+ * WHY THE TWO SESSION FIELDS CANNOT ANSWER THIS. `session.activeTurn` is assigned late,
+ * and `session.turnSlotHeld` is taken at `acquireTurn()` — which is in the CALLER's
+ * continuation, after `getOrSpawnSession` has already resolved. For the whole span before
+ * that, a warm session reads as perfectly idle to
+ * {@link evictWarmReplsForMcpSurfaceChange}, which duly killed the child the dispatch was
+ * about to inject into, failing the turn.
+ *
+ * WHY THE SPAN IS NOT MICROSCOPIC, which is what made this worth a map. An earlier
+ * revision wrote the residual window off as "a handful of microtasks — the async unwind
+ * out of `getOrSpawnSession`". It is not: the warm-reuse branch computes the MCP
+ * freshness fingerprint with `await options.resolveExtraMcpServers()`, and in the real
+ * composition that resolver reads the installed list out of the database and DECRYPTS
+ * every env value through the secrets store. So the window contains real I/O, on the
+ * exact code path a revocation runs concurrently with — a reviewer reproduced a failed
+ * dispatch by gating that one resolver. Sized by what it contains, not by how it reads.
+ *
+ * Incremented in the turn driver before the get-or-spawn, decremented in the same
+ * driver's `finally`, so every unwind — return, throw, cancel, timeout — settles it.
+ * Ephemeral dispatches are excluded: they are never pooled, so counting them would mark a
+ * key busy on behalf of a session that does not live under it.
+ */
+export const committedDispatches = new Map<string, number>()
+
 /** Live disposable one-shot sessions that are NOT in `pool` (the ephemeral path).
  *  Tracked so `shutdownAllPersistentRepls` can terminate in-flight one-shots —
  *  the pool teardown loop only walks `pool`, so without this an ephemeral child

@@ -445,7 +445,19 @@ describe('the ENV payload is refused before it can fail server-side', () => {
   })
 })
 
-describe('a VALUE never leaves the encrypted store', () => {
+describe('a VALUE leaves the encrypted store by exactly ONE route', () => {
+  // TITLED FOR WHAT IS ACTUALLY TRUE. This block used to be called "a VALUE never leaves
+  // the encrypted store", which its own suite contradicts one describe up: `resolveApproved
+  // returns the spec plus the decrypted env` is the whole point of the feature — a stdio
+  // server cannot be started without its secret in the child's environment. A blanket
+  // "never" reads as a stronger invariant than the code has, and the next reader who finds
+  // the decryption would be right to distrust the rest of these titles.
+  //
+  // The real invariant, and the one asserted below: `resolveApproved()` is the ONLY route.
+  // Every other surface a value could reach — the status list the clients render, the plain
+  // `instance_metadata` column, the approval row the prompt is built from — carries env-var
+  // NAMES and never a value. So the blast radius of a value is one call, made on the spawn
+  // path, for a server whose grant is in force.
   test('no status row carries one', async () => {
     await store.install(DRAFT)
     const serialized = JSON.stringify(await store.list())
@@ -951,6 +963,71 @@ describe('a revocation retires what is already running', () => {
     })
     expect((await s.install(DRAFT)).ok).toBe(true)
     expect(calls).toBe(0)
+  })
+
+  test('ROTATING ONLY A VALUE announces it — the hash cannot see the change that matters most', async () => {
+    // The fourth way a running child stops matching the owner's answer, and the one the
+    // code previously waved off in a comment. The grant covers the env-var NAMES and
+    // deliberately never the values, so rotating a secret leaves the hash — and therefore
+    // the approval — untouched. That comment credited the spawn path's `freshCredential`
+    // guard with covering it; `freshCredential` fingerprints the CLAUDE OAuth token and
+    // knows nothing about MCP env values. `freshMcpServers` is the guard that does, and it
+    // only runs ON A DISPATCH.
+    //
+    // Which makes this the worst of the four to leave alone: rotating a secret is usually
+    // the owner's response to believing the old one is compromised, and the child holding
+    // that old value stayed alive — unbounded, for as long as he stayed quiet.
+    let calls = 0
+    const s = spyStore(async () => {
+      calls += 1
+    })
+    await s.install(DRAFT)
+    const hash = (await s.list())[0]!.grant_hash
+    expect((await s.decide('example-server', 'approve', hash)).ok).toBe(true)
+    expect(calls).toBe(0)
+
+    const rotated = await s.install({ ...DRAFT, env: { EXAMPLE_API_KEY: 'sk-rotated-value' } })
+    expect(rotated.ok).toBe(true)
+    // The grant is UNCHANGED — this is the whole point: the approval still holds, the
+    // server stays wired, and it is only the process that has to be retired.
+    expect((await s.list())[0]!.grant_hash).toBe(hash)
+    expect((await s.resolveApproved())[0]!.env).toEqual({ EXAMPLE_API_KEY: 'sk-rotated-value' })
+    expect(calls).toBe(1)
+  })
+
+  test('the announcement runs OFF the write chain, so a slow eviction cannot block the next save', async () => {
+    // The eviction reaches into the REPL pool, where it can wait on a child's SIGTERM
+    // grace window or on a cold spawn's ready budget. Announcing from INSIDE `serialize`
+    // put that wait on the store's one write chain, so a deny arriving mid-spawn held the
+    // settings write path — and every queued install behind it — for as long as the spawn
+    // took. Correctness never depended on the position: the revoke is durable before the
+    // announcement runs.
+    //
+    // The gate makes the eviction slow ON PURPOSE and the assertion is that a concurrent
+    // install COMPLETES while it is still running. Without the fix this test deadlocks
+    // rather than failing, which is itself the defect: the second write cannot start.
+    let releaseEviction: () => void = () => {}
+    const evicting = new Promise<void>((res) => {
+      releaseEviction = res
+    })
+    let started = 0
+    const s = spyStore(async () => {
+      started += 1
+      await evicting
+    })
+    await s.install(DRAFT)
+    const removal = s.remove('example-server')
+    // Wait until the eviction is actually in flight, so the install below really is
+    // concurrent with it rather than merely after it.
+    for (let i = 0; i < 200 && started === 0; i += 1) await new Promise((r) => setTimeout(r, 1))
+    expect(started).toBe(1)
+
+    // THE ASSERTION: the chain is free. This resolves while the eviction is still parked.
+    const reinstalled = await s.install({ ...DRAFT, name: 'other-server' })
+    expect(reinstalled.ok).toBe(true)
+
+    releaseEviction()
+    expect((await removal).removed).toBe(true)
   })
 })
 

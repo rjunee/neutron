@@ -852,3 +852,217 @@ retired when the QUEUE drains rather than when the active turn ends — the same
 poison branch already strikes. `turnTail` is only ever resolved, never rejected, so the
 pre-wait increment cannot leak. Mutant killed — move the increment back after `await prev`
 and the queued turn dies mid-flight.
+
+## Round 6 — the eviction sweep could kill a child a committed dispatch was about to use
+
+The round-5 teardown answered "is this session busy?" from `session.activeTurn` and
+`session.turnSlotHeld`. Both live ON a `ReplSession`, and both are set by the CALLER after
+`getOrSpawnSession` has already handed one back — so there are two populations the pair
+cannot describe at all, and the sweep read both as idle and killed their children.
+
+**A COLD SPAWN IN FLIGHT.** The pool holds an unresolved promise; no session exists yet.
+The sweep awaited it, and its continuation resumes several await-hops before the
+dispatch's own, so it saw a brand-new session with no turn and no slot, called it idle, and
+terminated the child the dispatch was about to inject into. Measured on the test harness
+before the fix: `evicted=1`, one kill, and the turn failing its drain. `pendingSpawns`
+(`runtime/adapters/claude-code/persistent/pool-state.ts`) is the synchronous answer, in the
+same spirit as `childByKey` — a `Promise` cannot be asked whether it has settled, and
+asking by awaiting it is the observation that changes the answer.
+
+**A DISPATCH PAST THE GET-OR-SPAWN AND SHORT OF `acquireTurn()`.** `committedDispatches`
+covers this one, and the span is not microtask-sized: the warm-reuse branch computes the
+MCP freshness fingerprint by awaiting `options.resolveExtraMcpServers()`, which in the real
+composition reads the installed list out of the database and decrypts every env value. An
+earlier revision of the docblock wrote this window off as "a handful of microtasks — the
+async unwind out of `getOrSpawnSession`"; that was wrong, and a reviewer reproduced a
+failed dispatch by gating that one resolver.
+
+Neither branch AWAITS. Both mark on resolution — `poisoned` so the next dispatch cannot
+reuse a child spawned under a withdrawn grant, `retireOnIdle` so the turn's own completion
+path tears it down the moment the queue drains. That is also what stops a deny or an
+uninstall from blocking on a cold spawn's whole ready budget.
+
+Mutant killed: disable the pending branch and
+`a COLD SPAWN in flight is busy too` fails — `{evicted: 1}`, one kill, and
+`drain error: persistent-repl: spawn failed (no-channel-ready)`.
+
+### `retireOnIdle` was honoured on exactly one exit path
+
+The teardown sat after the normal completion path, so every early return walked past it: a
+turn cancelled before or after the context reset, and — the one that mattered — a turn that
+crashed during inject on a still-LIVE child. That session kept its revoked child until some
+later dispatch happened to evict it. The check now lives in the driver's `finally`, LAST, so
+the watchdog's outstanding-turn settle is not delayed behind a SIGTERM grace window. Every
+early return releases the turn slot before returning, so they all arrive there in the same
+idle state the normal path does.
+
+### Rotating only a VALUE never announced the revocation
+
+`install()` gated the announcement on a grant-hash change, and a comment credited the spawn
+path's `freshCredential` guard with covering the rest. It does not: `freshCredential`
+fingerprints the CLAUDE OAuth token (`authFingerprintFor`) and knows nothing about MCP env
+values. The guard that does fold them is `freshMcpServers` — and it only runs ON A DISPATCH,
+which for an idle session is hours.
+
+Which makes this the worst of the four revocation shapes to have missed, because rotating a
+secret is usually the owner's response to believing the old one is compromised, and the
+child holding the old value stayed alive unbounded while he was quiet. `install()` now
+compares the stored values against the incoming ones (`sameEnvValues`, read before the
+overwrite, never logged) and announces on either a hash change or a value change. The grant
+is deliberately unchanged in the value-only case — the approval still holds and the server
+stays wired; it is only the PROCESS that has to go.
+
+Mutant killed: drop `|| valuesChanged` and `ROTATING ONLY A VALUE announces it` fails.
+
+### The announcement was holding the store's write chain
+
+`announceRevocation()` reaches into the REPL pool, where it can wait on a SIGTERM grace
+window or a cold spawn's ready budget — and it was called from INSIDE `serialize`, so a deny
+arriving mid-spawn held the settings write path, and every queued install behind it, for as
+long as the spawn took. Every caller now sets a local flag in its critical section and
+announces once the chain is released. Correctness never depended on the position: the revoke
+is durable first, so a spec written in between is one the eviction's respawn reads correctly
+anyway. It is still AWAITED by the caller, so the HTTP reply never claims a stop that has not
+happened.
+
+The new test makes the eviction slow on purpose and asserts a concurrent install COMPLETES
+while it is parked. Without the fix that test deadlocks rather than failing, which is the
+defect stated precisely: the second write cannot start.
+
+### The invisibles denylist stopped being a hand-maintained list
+
+Five revisions of an enumerated character class, each closing the code points one reviewer
+had probed and leaving the next batch open. The fifth probe found 25 more still accepted —
+the Arabic and Indic number signs, the Egyptian Hieroglyph and Duployan and musical format
+controls, the Khmer inherent vowels — every one zero-advance, every one able to make two
+hash-distinct specs print identically.
+
+A sixth revision then found the tail of the very block the fifth had claimed to take
+"whole": `U+E01F0`-`U+E0FFF`, plus `U+FFF0`-`U+FFF8`. The lesson finally took. The class is
+now four general categories — `\p{Cc}`, `\p{Cf}`, `\p{Zl}`, `\p{Zp}` — plus
+`\p{Default_Ignorable_Code_Point}`, and one named code point.
+
+`Default_Ignorable_Code_Point` is what every hand-written range was groping for. It covers
+everything a conforming renderer must draw as nothing INCLUDING the code points reserved for
+that and not yet assigned (`U+2065`, `U+FFF0`-`U+FFF8`, `U+E0002`-`U+E001F`,
+`U+E0080`-`U+E00FF`, `U+E01F0`-`U+E0FFF`) — and unassigned is exactly what no general
+category matches, which is why the enumeration needed ranges and why its ranges kept ending
+too early. Every hand-listed code point the previous revision carried is default-ignorable
+and is now covered by property rather than by name. `U+2800` (BRAILLE PATTERN BLANK) is the
+one exception: it is `So`, a renderer genuinely draws it, it just has no dots, so no property
+reaches it.
+
+Swept over all `0x110000` code points and verified a STRICT superset of the predecessor:
+4274 refused against 665, so 3609 newly closed and none lost. Non-ASCII paths and arguments
+in Cyrillic, Japanese, Arabic and accented Latin are still ACCEPTED, because refusing all
+non-ASCII to close a rendering hole would break working servers, and the whitespace
+confusables are still accepted deliberately (they advance; they are a different, unbounded
+problem the grant hash bounds instead).
+
+The guard against a seventh revision is mechanical rather than another list: a test carries
+the predecessor regex as a literal and re-sweeps the whole code space, so NARROWING the class
+fails instead of silently re-opening. Mutation-tested both directions — deleting the property
+names 429 re-opened code points; substituting the predecessor wholesale accepts 3609.
+
+The test titles were corrected in the same pass. One claimed to refuse EVERY invisible while
+walking a curated list, which is the thing this whole history proves impossible; it now says
+it is a regression list and points at the sweep for the completeness claim.
+
+### The spawn-driving test file had no timing headroom
+
+`readyBudgetMs`/`healthBudgetMs` are 5000 in that file's options and bun's default per-test
+timeout is also 5000, so a fake spawn taking its full budget on a loaded machine was killed
+by the RUNNER at the instant the code under test would have succeeded — and the kill landed
+mid-`afterEach`, cascading into unrelated failures. Measured on a contended box: 26 pass / 3
+fail, and 29 pass / 0 fail with `--timeout 90000`. `setDefaultTimeout(90_000)` raises the
+runner's patience rather than shrinking the budget, because the budget is what lets a
+genuinely slow spawn succeed; shrinking it would make the suite flakier on exactly the slow
+machines this is about.
+
+### A revocation could kill the child of a dispatch that had not yet taken its turn slot
+
+The reproduced BLOCKER, and the one whose earlier partial fix was defended with a wrong
+number. `acquireTurn()` runs in the CALLER's continuation, after `getOrSpawnSession` has
+already resolved — so for the whole span in between, a committed dispatch has a session and
+neither `activeTurn` nor `turnSlotHeld`. A revocation landing there read the session as idle,
+killed the child, and the dispatch injected into a corpse: the turn failed with a drain error
+instead of delivering.
+
+An earlier revision closed the COLD half of this (a spawn still in flight, via
+`pendingSpawns`) and wrote the warm half off in a docblock as "a handful of microtasks — the
+async unwind out of `getOrSpawnSession`". That was measured wrong by reading the code: the
+warm-reuse branch computes the MCP freshness fingerprint by awaiting
+`options.resolveExtraMcpServers()`, and in the real composition that resolver reads the
+installed list out of the database and DECRYPTS every env value through the secrets store.
+The window contains real I/O, on the exact path a revocation runs concurrently with — which
+is why a reviewer could reproduce a failed dispatch simply by holding that one resolver open.
+A docblock that is confidently specific about a window's width is worth checking against the
+code inside it.
+
+`committedDispatches` is now a count, per pool key, of dispatches between the get-or-spawn and
+the turn slot. The turn driver increments before the get-or-spawn and decrements in the
+`finally` that already covers every unwind — return, throw, cancel, timeout — and the evictor
+reads it synchronously alongside `pendingSpawns`, treating either as busy: poison the session
+when it resolves, never await it. Not awaiting is load-bearing twice, because awaiting is what
+broke the cold case and because awaiting a cold spawn would make a deny or an uninstall block
+for the whole ready budget.
+
+`pendingSpawns` is kept rather than folded in: the supervision crash/wedge respawn calls
+`getOrSpawnSession` with no dispatch behind it, so the counter never sees that one.
+
+Both docblocks that overstated were corrected. The claim that `turnSlotHeld` "covers the gap"
+now says which stretch it covers and which it does not.
+
+Tested by parking a second dispatch inside the freshness check — the production window, not
+an arbitrary await — running the revocation there, and asserting the turn still DELIVERS.
+Mutation-tested: with the committed check disabled the test fails with the drain error that
+was the original user-visible symptom.
+
+### Nothing asserted that the composer wired the revocation hook
+
+The store is persistence-layer and cannot import the REPL pool, so it announces a revocation
+through an `onRevoked` callback the composer supplies. Deleting that one property left every
+store test passing (they build their own store with their own spy) and every pool test passing
+(they call the evictor directly) — while a revoked server's stdio child kept running with the
+environment it was handed. Built-but-never-wired, in the one place where the consequence is a
+live subprocess outliving its grant.
+
+Now pinned against the REAL composer: plant a warm idle session in the pool, uninstall through
+the real HTTP surface, assert the child DIED and the pool entry is gone. Mutation-tested by
+deleting the `onRevoked` property, which fails it.
+
+### A test block's title contradicted its own suite
+
+`a VALUE never leaves the encrypted store` sat one describe below `resolveApproved returns the
+spec plus the decrypted env` — which is the whole point of the feature, since a stdio server
+cannot start without its secret in the child's environment. A blanket "never" reads as a
+stronger invariant than the code has, and the next reader to find the decryption would be
+right to distrust the surrounding titles. Retitled to the true invariant: a value leaves by
+exactly ONE route, and every other surface carries names only.
+
+### Not fixed, and why
+
+The review's first BLOCKER was that three of the four mandatory review lanes did not
+complete (a rubric runtime timeout and two cross-model calls that timed out or lost auth).
+That is a finding about the review harness, not about this branch — there is no code change
+here that can answer it, and it is recorded rather than silently dropped.
+
+**An MCP surface change evicts warm children that never received the resolver.** Only the
+live-agent wiring is handed `resolveExtraMcpServers`; other warm workflows are not, so
+evicting them costs a respawn and buys no security. Left as it is. The fix would be to skip
+sessions whose owner-MCP fingerprint is empty — and that trades an over-eviction, which
+costs latency, for a possible under-eviction, which would leave a revoked server's child
+alive if the fingerprint were ever read wrong. On the one feature here whose entire purpose
+is a gate, the fail-safe direction is worth a respawn. Eviction stays instance-wide, which
+is also what the installed set is.
+
+**Nothing bounds the AGGREGATE owner-server startup against the 30 s ready budget.**
+`MCP_TIMEOUT` is per-server; the code divides a 20 s budget across the installed servers but
+stops at a 2 s floor, because dividing further would fail healthy servers. `MCP_SERVERS_MAX`
+is 24, so the serial worst case is 24 x 2 s = 48 s and can exceed the budget. Left as it is,
+and documented at the constant rather than papered over: it requires 24 servers that all
+HANG, the failure is bounded and visible (the spawn fails its assertion and takes the
+bounded-respawn ladder, with `claude` naming the server that did not start), and the only
+real fixes are a concurrent load or a bigger budget — neither of which a per-server timeout
+can express. The tests pin the divide and the floor and explicitly do not claim the floor
+closes the gap.

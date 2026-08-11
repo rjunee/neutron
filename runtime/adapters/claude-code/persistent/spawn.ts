@@ -15,7 +15,7 @@ import { bunTerminalHost } from './bun-terminal-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
 import { ensureClaudeTrust } from './ensure-claude-trust.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
-import { childByKey, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
+import { childByKey, pendingSpawns, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
 import {
   registerLiveProcessSafe,
   type LiveProcessHandle,
@@ -1123,6 +1123,18 @@ async function getOrSpawnSessionLocked(
     ?? (evictedForceFresh ? undefined : (evictedResume ?? resolveResumeDirective(sessionKey, options)))
   const spawning = spawnWithChannelWedgeRespawn(sessionKey, options, spec, resume)
   pool.set(sessionKey, spawning)
+  // MARKED PENDING FOR AS LONG AS IT IS PENDING. A cold spawn is a dispatch that has
+  // already committed to this child — it just cannot say so through `activeTurn` /
+  // `turnSlotHeld` yet, because the session those live on does not exist until this
+  // promise resolves. `evictWarmReplsForMcpSurfaceChange` reads this map to tell a
+  // committed cold spawn apart from a genuinely idle warm child; see its docblock.
+  // Cleared on BOTH outcomes, and identity-guarded so a settle from a superseded spawn
+  // cannot clear the entry of the one that replaced it.
+  pendingSpawns.set(sessionKey, spawning)
+  const clearPending = (): void => {
+    if (pendingSpawns.get(sessionKey) === spawning) pendingSpawns.delete(sessionKey)
+  }
+  spawning.then(clearPending, clearPending)
   spawning.catch(() => {
     pool.delete(sessionKey)
     // An async spawn failure (assertion / health) on a RESUME must clear the

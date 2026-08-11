@@ -83,7 +83,15 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     expect(parseOwnerMcpServerInput({ ...GOOD, args: ['--flag​'] }).spec).toBeNull()
   })
 
-  test('refuses EVERY invisible, not just the bidi and zero-width ones', () => {
+  test('refuses every invisible FIVE PROBES FOUND — the regression list, not the definition', () => {
+    // TITLED FOR WHAT IT CHECKS. An earlier title claimed this test refused EVERY
+    // invisible, which it cannot: it walks a curated list, so it can only ever pin the
+    // code points somebody has already thought of — and the whole history below is of
+    // that list being found short. It stays because a named regression is worth pinning
+    // by name, but the COMPLETENESS claim belongs to the two tests after it: the
+    // superset guard, which re-sweeps the entire code space, and the accepted-edge test,
+    // which states what is deliberately left out.
+    //
     // The first draft of the denylist enumerated the bidi controls, the zero-widths and
     // the C0 controls, and stopped — leaving a whole family of characters that also
     // occupy no width. Measured in a browser against the approval prompt's own type
@@ -144,6 +152,32 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
       ['HANGUL JUNGSEONG FILLER (U+1160)', '\u{1160}'],
       ['HANGUL FILLER (U+3164)', '\u{3164}'],
       ['HALFWIDTH HANGUL FILLER (U+FFA0)', '\u{FFA0}'],
+      // THE TWENTY-FIVE THE FIFTH PROBE FOUND, and the reason the regex is now stated by
+      // UNICODE PROPERTY rather than by hand. Every revision above closed the code points
+      // one reviewer had probed and left the next batch open; these were all still
+      // accepted, all zero-advance, and all capable of making two hash-distinct specs
+      // print identically. `\p{Cf}` catches every one of them without naming any, which is
+      // the property this block is here to pin: narrow the regex back to an enumeration
+      // and these fail again.
+      ['ARABIC NUMBER SIGN (U+0600)', '\u{0600}'],
+      ['ARABIC NUMBER MARK ABOVE (U+0605)', '\u{0605}'],
+      ['ARABIC END OF AYAH (U+06DD)', '\u{06DD}'],
+      ['SYRIAC ABBREVIATION MARK (U+070F)', '\u{070F}'],
+      ['ARABIC POUND MARK ABOVE (U+0890)', '\u{0890}'],
+      ['ARABIC PIASTRE MARK ABOVE (U+0891)', '\u{0891}'],
+      ['ARABIC DISPUTED END OF AYAH (U+08E2)', '\u{08E2}'],
+      ['KHMER VOWEL INHERENT AQ (U+17B4)', '\u{17B4}'],
+      ['KHMER VOWEL INHERENT AA (U+17B5)', '\u{17B5}'],
+      ['KAITHI NUMBER SIGN (U+110BD)', '\u{110BD}'],
+      ['KAITHI NUMBER SIGN ABOVE (U+110CD)', '\u{110CD}'],
+      ['EGYPTIAN HIEROGLYPH VERTICAL JOINER (U+13430)', '\u{13430}'],
+      ['EGYPTIAN HIEROGLYPH END WALLED ENCLOSURE (U+13437)', '\u{13437}'],
+      ['EGYPTIAN HIEROGLYPH MIRROR VERTICALLY (U+1343F)', '\u{1343F}'],
+      ['SHORTHAND FORMAT LETTER OVERLAP (U+1BCA0)', '\u{1BCA0}'],
+      ['SHORTHAND FORMAT UP STEP (U+1BCA3)', '\u{1BCA3}'],
+      ['MUSICAL SYMBOL BEGIN BEAM (U+1D173)', '\u{1D173}'],
+      ['MUSICAL SYMBOL END BEAM (U+1D174)', '\u{1D174}'],
+      ['MUSICAL SYMBOL END PHRASE (U+1D17A)', '\u{1D17A}'],
     ]
     for (const [label, ch] of invisibles) {
       expect(MCP_SERVER_BANNED_CHARS_RE.test(ch)).toBe(true)
@@ -157,6 +191,65 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     // working servers to close a rendering hole.
     expect(parseOwnerMcpServerInput({ ...GOOD, command: '/opt/сервер/example-mcp' }).spec).not.toBeNull()
     expect(parseOwnerMcpServerInput({ ...GOOD, args: ['--label', 'für-alle'] }).spec).not.toBeNull()
+  })
+
+  test('NARROWING the denylist cannot re-open anything it already closed', () => {
+    // THE COMPLETENESS ASSERTION THE CURATED LIST ABOVE CANNOT MAKE, and the guard that
+    // makes the fifth revision the last one. Five hand-extensions of this set each read as
+    // finished and each was a strict subset of the next; the sixth change is not going to
+    // announce itself either. So the SIXTH revision is checked mechanically instead: the
+    // regex as it stood BEFORE `\p{Default_Ignorable_Code_Point}` landed is written out here
+    // as a literal, and the whole code space is swept to prove the live regex still refuses
+    // every code point that one did.
+    //
+    // A regex is not a set you can subtract, so the sweep IS the comparison. 0x110000 tests
+    // of a one-character regex run in well under a second, which is cheaper than a sixth
+    // reviewer finding the next batch by hand.
+    //
+    // What this catches that nothing else does: a later reader "tidying" the class back to
+    // the general categories plus a few hand-written ranges — which is exactly the shape of
+    // the literal below, and reads as equivalent. It is not. No general category matches an
+    // UNASSIGNED code point, and the block reserved for default-ignorables is mostly
+    // unassigned (U+2065, U+E0002-U+E001F, U+E0080-U+E00FF, U+E01F0-U+E0FFF) — invisible in
+    // every renderer precisely BECAUSE nothing is assigned there, which is why the
+    // predecessor needed ranges at all and why each of its ranges was one a reviewer had to
+    // find.
+    //
+    // MUTATION-TESTED BOTH WAYS. Deleting `\p{Default_Ignorable_Code_Point}` outright and
+    // keeping the rest fails here with 429 code points named — those are the ones ONLY the
+    // property closes out of the 665 the predecessor had. Replacing the whole live class with
+    // the predecessor literal accepts 3609 that the live class refuses; that direction is the
+    // strict-superset check at the end of this test rather than the sweep, since the sweep
+    // only walks what the predecessor closed.
+    const PREDECESSOR =
+      /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u2060-\u206F\u2800\u3164\uFE00-\uFE0F\uFFA0\u{E0000}-\u{E01EF}]/u
+    const reopened: string[] = []
+    let closedByPredecessor = 0
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue // lone surrogates are not characters
+      const ch = String.fromCodePoint(cp)
+      if (!PREDECESSOR.test(ch)) continue
+      closedByPredecessor += 1
+      if (!MCP_SERVER_BANNED_CHARS_RE.test(ch)) reopened.push(`U+${cp.toString(16).toUpperCase()}`)
+    }
+    expect(reopened).toEqual([])
+    // Sanity on the sweep itself: a probe that silently matched nothing would report a
+    // clean superset while proving nothing at all (the positive control the invisible-char
+    // work needed twice). The predecessor closed 665 code points, so the loop must have
+    // examined 665.
+    expect(closedByPredecessor).toBe(665)
+    // And the union is a STRICT superset, not an equal set — the U+E01F0-U+E0FFF tail the
+    // predecessor's own "take the block whole" argument stopped short of, and U+FFF0-U+FFF8
+    // next to the interlinear annotation marks it did ban, are the proof.
+    // U+2065 is deliberately NOT in this list: the predecessor did ban it, via the whole
+    // U+2060-U+206F range. It is the one unassigned default-ignorable a reviewer had already
+    // found, which is why the range around it is there — and it is why the four below,
+    // sitting in blocks nobody had swept, were still open.
+    for (const ch of ['\u{E01F0}', '\u{E0FFF}', '\u{FFF0}', '\u{FFF8}']) {
+      expect(PREDECESSOR.test(ch)).toBe(false)
+      expect(MCP_SERVER_BANNED_CHARS_RE.test(ch)).toBe(true)
+      expect(parseOwnerMcpServerInput({ ...GOOD, command: `/bin/a${ch}b` }).spec).toBeNull()
+    }
   })
 
   test('the whitespace confusables stay ACCEPTED — the documented edge of the denylist', () => {
