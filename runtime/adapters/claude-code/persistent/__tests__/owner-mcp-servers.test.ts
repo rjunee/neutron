@@ -582,6 +582,47 @@ describe('ONE CHILD PER SESSION KEY — resolving the installed set must not reo
     await drain(sub.start(spec('hi')))
     expect(calls).toBe(1)
   })
+
+  it('two CONCURRENT dispatches after the set CHANGES replace the warm child exactly ONCE', async () => {
+    // The other half of the same invariant, on the path the cold-start guard does not
+    // cover. The "nothing suspends between `pool.get` and `pool.set`" property protects
+    // the COLD path only. The WARM-EVICTION path suspends on purpose — at
+    // `await existing`, and again at the installed-set resolve — so two dispatches
+    // arriving after the owner installed something both awaited the same warm session,
+    // both computed the fingerprint mismatch, and both ran evict → terminate → spawn →
+    // `pool.set`. The second `pool.set` overwrote the first: TWO `claude` children
+    // resuming ONE transcript, the loser orphaned OUTSIDE the pool and so invisible to
+    // `shutdownAllPersistentRepls`.
+    setReplToolBridge(bridge())
+    const { host, argvs, kills } = makeCapturingHost()
+    let installed: readonly ResolvedOwnerMcpServer[] = []
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        enableToolBridge: true,
+        // Yields, because the await IS the window. A real timer makes it unmissable
+        // rather than scheduler-dependent.
+        resolveExtraMcpServers: async () => {
+          await Bun.sleep(5)
+          return installed
+        },
+      }),
+    )
+    await drain(sub.start(spec('cold')))
+    expect(argvs).toHaveLength(1)
+
+    // The owner installs a server, so BOTH dispatches below fail `freshMcpServers`
+    // against the same warm session.
+    installed = [EXAMPLE]
+    await Promise.all([drain(sub.start(spec('a'))), drain(sub.start(spec('b')))])
+
+    // ONE replacement. Three spawns here means both callers replaced the same session.
+    expect(argvs).toHaveLength(2)
+    // Stated separately so a future regression cannot pass by spawning two children and
+    // leaving the pool tidy: the orphan was always the pool's LOSER, not its entry.
+    expect(pool.size).toBe(1)
+    // And the replacement really did retire the original, rather than leaking it.
+    expect(kills.n).toBe(1)
+  })
 })
 
 describe('a change takes effect on the next turn, and an unchanged set does not thrash', () => {
@@ -794,6 +835,75 @@ describe('revoking a server retires the warm child that was spawned under the ol
 
     // THE ASSERTION THAT FAILS WITHOUT THE FIX: the child is dead by the time the turn
     // settles, with no second dispatch anywhere in this test.
+    for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 0))
+    expect(kills.n).toBe(1)
+    expect(pool.size).toBe(0)
+  })
+
+  it('waits for a QUEUED dispatch too, then retires when the queue drains', async () => {
+    // The eager teardown above must not become its own stranded-turn bug. A second
+    // dispatch that has already passed the freshness guards and parked in
+    // `acquireTurn()` is COMMITTED to this child — but it holds no `activeTurn` and, if
+    // the slot count is taken only AFTER the queue wait, it holds no slot either. So the
+    // active turn's release dropped the count to zero, this path read the session as
+    // idle and killed the child, and the queued dispatch then resumed from `await prev`
+    // into a dead REPL. Same stranded turn, opposite door.
+    setReplToolBridge(bridge())
+    // One gate per turn, opened in order, so the FIRST turn can settle while the second
+    // is still held in flight. A single shared gate would release both at once and the
+    // window this test is about would not exist.
+    const gates: Array<() => void> = []
+    const { host, kills } = makeCapturingHost(
+      () =>
+        new Promise<void>((res) => {
+          gates.push(res)
+        }),
+    )
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    const firstTurn = drain(sub.start(spec('first')))
+
+    let session: ReplSession | undefined
+    for (let i = 0; i < 400 && session === undefined; i += 1) {
+      const first = [...pool.values()][0]
+      if (first !== undefined) {
+        const s = await first
+        if (s.activeTurn !== undefined) session = s
+      }
+      if (session === undefined) await new Promise((r) => setTimeout(r, 5))
+    }
+    expect(session).toBeDefined()
+
+    // The second dispatch: reuses the warm session, then parks behind the first turn.
+    const secondTurn = drain(sub.start(spec('second')))
+    for (let i = 0; i < 100 && session!.turnSlotHeld < 2; i += 1) {
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    // A queued caller counts as busy. Reading 1 here is the defect itself.
+    expect(session!.turnSlotHeld).toBe(2)
+    expect(session!.activeTurn).toBeDefined()
+
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+    expect(session!.retireOnIdle).toBe(true)
+
+    // Let ONLY the first turn finish.
+    gates.shift()!()
+    expect(await firstTurn).toContain('ok=0')
+    for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 0))
+
+    // THE ASSERTION THAT FAILS WITHOUT THE FIX. The queue is not empty, so the child
+    // must still be alive and still pooled for the turn that is about to run on it.
+    expect(kills.n).toBe(0)
+    expect(pool.size).toBe(1)
+
+    // The teardown is DEFERRED, not cancelled: the queued turn delivers, and the revoked
+    // child dies the moment nothing is left waiting on it.
+    for (let i = 0; i < 200 && gates.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    gates.shift()!()
+    expect(await secondTurn).toContain('ok=1')
     for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 0))
     expect(kills.n).toBe(1)
     expect(pool.size).toBe(0)
