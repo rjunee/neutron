@@ -214,11 +214,48 @@ jobs:
           NEUTRON_TEST_CHUNK_SIZE: "100"
         run: bash scripts/run-tests.sh
 
+  # ---- the review bar, as a check rather than as prose -------------------------
+  # Code in this repo is required to go through the build-and-review loop. That
+  # requirement was written down and hand-rolled PRs went around it anyway, twice.
+  # A rule that has already failed twice does not need a third wording — it needs
+  # something that refuses. `scripts/ci/trident-verdict.ts` is that, and its
+  # FAILURE prints the exact command that feeds an already-written branch into a
+  # review lane, so the gate costs a round-trip rather than the work.
+  #
+  # `if:` restricted to pull_request: on a push to `main` there is no PR to read a
+  # verdict for, and a job that failed there would red the branch for a
+  # bookkeeping push. The aggregator below only consults this job on PR events, so
+  # the skip cannot be read as satisfaction — see its explicit check.
+  trident-verdict:
+    name: trident-verdict
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # No history needed: the head commit message (the bypass paper trail) is read
+      # through the API, so the gate does not depend on which ref got checked out.
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - name: A trident verdict exists for this PR's head commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # The PR HEAD, never github.sha — on a pull_request event github.sha is
+          # the ephemeral merge commit, which no reviewer ever examined. Keying on
+          # it would make every verdict stale by construction.
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: bun scripts/ci/trident-verdict.ts
+
   # ---- required context: keep this job named `test` (see header) ----------------
   test:
     name: test
     runs-on: ubuntu-latest
-    needs: [typecheck, lint, purity, layering, shard]
+    needs: [typecheck, lint, purity, layering, shard, trident-verdict]
     # always() so this job still RUNS when a dependency fails. Without it the job
     # is skipped, and a skipped required check does not block a PR — the exact
     # fail-open shape this aggregator exists to prevent.
@@ -231,6 +268,7 @@ jobs:
           echo "purity    : ${{ needs.purity.result }}"
           echo "layering  : ${{ needs.layering.result }}"
           echo "shards    : ${{ needs.shard.result }}"
+          echo "verdict   : ${{ needs.trident-verdict.result }} (event: ${{ github.event_name }})"
           # A matrix job's aggregate result is 'success' only when EVERY leg
           # succeeded, so this covers all four shards. 'skipped' is treated as a
           # failure on purpose: a shard that never ran means files that never ran,
@@ -243,4 +281,18 @@ jobs:
               exit 1
             fi
           done
+          # The verdict gate is checked SEPARATELY, and only on a pull_request.
+          # It is `if:`-restricted to that event, so on a push to main it is
+          # skipped by design and must not red the branch. On a PR it cannot be
+          # skipped, so demanding `success` here means a skipped or cancelled
+          # verdict job fails the required context rather than satisfying it —
+          # which is the whole reason the check is inside this aggregator instead
+          # of being a separate context that would need a branch-protection
+          # change to become blocking.
+          if [ "${{ github.event_name }}" = "pull_request" ] \
+             && [ "${{ needs.trident-verdict.result }}" != "success" ]; then
+            echo "FAIL — no trident verdict for this PR's head commit (see the trident-verdict job"
+            echo "       log: it prints the command that reviews THIS branch without restarting it)."
+            exit 1
+          fi
           echo "All gates green across 4 shards."

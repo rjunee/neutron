@@ -119,4 +119,40 @@ EOF
   exit 1
 fi
 
+# ── trident-verdict advisory — WARNS, NEVER BLOCKS ────────────────────────────
+#
+# A push is fine. Only the MERGE is gated: `trident-verdict` in ci.yml fails a PR
+# whose head commit carries no review verdict. Saying so here, at push time,
+# turns "your PR is red for a reason you have to go read" into "here is the one
+# command that fixes it", roughly ten minutes earlier.
+#
+# It must never block, for the reason the leak-gate comment above already
+# records: a gate that cannot be satisfied at the moment it fires is one people
+# learn to bypass with --no-verify, which is strictly worse than no gate. There
+# is nothing to satisfy at push time — a verdict is posted against a pushed SHA,
+# so it cannot exist before the push. Hence: advisory only, and every command
+# below is `|| true`.
+#
+# The command text is fetched FROM THE GATE (`--redeem-command`) rather than
+# copied. A second spelling would drift from the one CI prints, and a drifted
+# redemption path is a gate that only rejects.
+{
+  _tv_branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  _tv_gate="$ROOT/scripts/ci/trident-verdict.ts"
+  _tv_cmd=""
+  if [ -f "$_tv_gate" ] && command -v bun >/dev/null 2>&1; then
+    _tv_cmd="$(bun "$_tv_gate" --redeem-command --branch "${_tv_branch:-}" 2>/dev/null || true)"
+  fi
+  if [ -n "$_tv_cmd" ]; then
+    echo "" >&2
+    echo "note: pushed. The MERGE is gated on a review verdict for this head commit." >&2
+    echo "      If this branch has not been through a review lane, put it through one —" >&2
+    echo "      it re-enters the existing branch and reuses the PR, nothing is rebuilt:" >&2
+    echo "" >&2
+    echo "        $_tv_cmd" >&2
+    echo "" >&2
+    echo "      docs/trident-verdict-gate.md" >&2
+  fi
+} || true
+
 exit 0
