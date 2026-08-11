@@ -9789,8 +9789,9 @@ that tree at the time. The row is replaced in the PR description by the round-7 
 its head, not restated. A verdict is quotable only with
 the head it ran against, and it has to be re-run before it is quoted.
 
-**The codex lane then found eight more in this round's own draft, and the shape repeats one
-altitude up.** All are fixed here; the code still has not changed.
+**The codex lane then found eight more, and the shape repeats one altitude up.** All are fixed
+here; the code still has not changed. Seven were introduced by this round's own draft; the
+exception is the cron handler's four-hour "absolute backstop", inherited and re-endorsed.
 
 * **"A hot loop of suppressed attempts cannot silence the key forever" is false, because `ms` is
   not validated.** A probe called `rateLimited('k', NaN)` 100,001 times with the clock advancing
