@@ -16,13 +16,20 @@
  * `parseVerdict` stays green through most of the table.
  *
  * ONE STRUCTURAL WARNING, from the defect that cost the most here. The
- * `every failure path prints …` cases are a TABLE with a universal NAME, and the
- * first version of that table omitted four real failure paths while its name
- * asserted it covered all of them. A universal claim in a test name is only as
- * true as the table under it. When adding a failure path to the gate, add its row.
+ * redemption cases are a TABLE, and their name used to be a universal claim —
+ * "every failure path prints the command" — while the table omitted four real
+ * failure paths. A universal claim in a test name is only as true as the table under
+ * it, and no enumeration can ever close that gap, because adding a `return 1` to the
+ * gate does not add a row here. The universal half is therefore checked against the
+ * GATE'S SOURCE ("EVERY red exit in the gate prints the redemption"), and the rows
+ * are named for what they are. When adding a failure path, add its row anyway: the
+ * structural check proves the command is printed, the row proves it is printed with
+ * the right branch and PR in it.
  */
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -441,8 +448,51 @@ describe('the failure REDEEMS the branch into a review lane', () => {
     },
   ]
 
+  test('EVERY red exit in the gate prints the redemption — checked against the source, not the table', () => {
+    // The table below is a table, and its name used to be a universal claim: "every
+    // failure path prints the command". It omitted four real paths while asserting
+    // it covered all of them, and the enumeration cannot ever prove otherwise —
+    // adding a `return 1` to the gate does not add a row here.
+    //
+    // So the universal half is checked universally, against the gate's own source:
+    // every red exit must have a `printRedemption(` call between it and the
+    // preceding statement boundary. A new failure path that forgets the redemption
+    // reds THIS test on the day it is written, whether or not anybody adds a row.
+    // The window is the ENCLOSING BLOCK, walked by indentation, not a fixed number
+    // of lines back. A fixed window was the first version of this check and it was
+    // useless in the one direction that matters: six lines above a new red exit
+    // reached over the block opener into the PREVIOUS branch, found its
+    // `printRedemption`, and passed a red exit that printed nothing. Measured — a
+    // mutant that adds exactly that survived, which is the whole failure mode this
+    // test exists to catch.
+    const src = read('scripts/ci/trident-verdict.ts')
+    const lines = src.split('\n')
+    const indentOf = (l: string): number => /^ */.exec(l)![0].length
+    const unredeemed: string[] = []
+    lines.forEach((line, i) => {
+      if (!/^\s*return 1\b/.test(line)) return
+      let redeemed = false
+      for (let j = i - 1; j >= 0; j--) {
+        const above = lines[j]!
+        if (!above.trim()) continue // a blank line is not a block boundary
+        // Less indented than the return means this is the block's opener: stop
+        // before crossing into whatever came before it.
+        if (indentOf(above) < indentOf(line)) break
+        if (above.includes('printRedemption(')) {
+          redeemed = true
+          break
+        }
+      }
+      if (!redeemed) unredeemed.push(`line ${i + 1}: ${line.trim()}`)
+    })
+    // The count is asserted too: a refactor that deletes every red exit would
+    // otherwise satisfy an emptiness check trivially.
+    expect(lines.filter((l) => /^\s*return 1\b/.test(l)).length).toBeGreaterThanOrEqual(8)
+    expect(unredeemed).toEqual([])
+  })
+
   for (const { name, make, pr } of failing) {
-    test(`every failure path prints the command that reviews THIS branch — ${name}`, async () => {
+    test(`an enumerated failure path prints the command that reviews THIS branch — ${name}`, async () => {
       const h = make()
       expect(await runGate(h.deps)).toBe(1)
       const out = h.output()
@@ -1169,7 +1219,7 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     expect(job).toContain('pull-requests: read')
   })
 
-  test('posting a verdict re-runs the failed ci run — the gate is not a one-shot read', () => {
+  test('posting a verdict re-runs the ci run — the gate is not a one-shot read', () => {
     // Without this the gate is self-defeating on every reviewed PR: it reads the
     // comments at the moment it runs, the review lane posts the verdict after that,
     // and no `pull_request` workflow re-triggers on a comment. The check would stay
@@ -1177,7 +1227,14 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     const rerun = read('.github/workflows/trident-verdict-rerun.yml')
     expect(rerun).toContain('issue_comment')
     expect(rerun).toContain('actions: write')
-    expect(rerun).toContain('gh run rerun --failed')
+    // A verdict is EDITABLE and DELETABLE after it is posted, so `created` alone
+    // makes "newest verdict wins" false the moment the check goes green: the
+    // comment that greened it could be edited into blocking evidence, or deleted,
+    // and nothing would look again.
+    expect(rerun).toMatch(/types:\s*\[created,\s*edited,\s*deleted\]/)
+    // And an edit is matched against the body BEFORE the change as well, because
+    // editing a verdict INTO prose leaves no fence in the new body at all.
+    expect(rerun).toContain('github.event.changes.body.from')
     // Only a PR comment, only a verdict-shaped one, only from write access — the
     // same author bar the gate itself applies, so a stranger cannot spend runner
     // minutes by pasting the fence.
@@ -1220,6 +1277,169 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     // The leak-gate loop consumes stdin, so the advisory cannot re-read it. The
     // lines are captured inside the loop.
     expect(hook).toMatch(/REFLINES="\$\{REFLINES\}/)
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// The re-run workflow's SCRIPT is executed, not read
+// --------------------------------------------------------------------------- //
+
+/**
+ * A text assertion cannot see a one-way door.
+ *
+ * The previous version of this file checked that the workflow contained the string
+ * `gh run rerun --failed`, and that assertion was green over two real defects: the
+ * script returned early on a run whose conclusion was `success`, and `--failed`
+ * cannot select a verdict job that previously PASSED. Both mean the same thing — once
+ * the check was green, no later verdict could ever turn it red, so "the newest
+ * verdict wins" was true only while the branch was failing. Reading the file proved
+ * a command was mentioned; it could not prove which run reaches it.
+ *
+ * So the step's script is extracted and RUN, with `gh` replaced by a stub that
+ * records its arguments and answers from a fixture. What the workflow does to a
+ * green run, to a run still in progress, and to a PR with no run at all is then
+ * observable.
+ */
+describe('the re-run workflow re-reads the comments for a run that already passed', () => {
+  const workflow = read('.github/workflows/trident-verdict-rerun.yml')
+
+  // The step body, dedented out of the YAML block scalar. `run: |` is the last
+  // block in the file, so everything after it is the script.
+  const script = (() => {
+    const at = workflow.indexOf('run: |\n')
+    expect(at).toBeGreaterThan(0)
+    const lines = workflow.slice(at + 'run: |\n'.length).split('\n')
+    const indent = /^(\s*)\S/.exec(lines.find((l) => l.trim()) ?? '')![1]!.length
+    return lines.map((l) => l.slice(indent)).join('\n')
+  })()
+
+  type Run = { id: number; status: string; conclusion: string | null; head_branch: string }
+
+  /** Run the real script with a stub `gh`, and report what it asked `gh` to do. */
+  const exec = (runsPerCall: Run[][], opts: { waitSeconds?: string } = {}) => {
+    const head_branch = 'trident/some-work'
+    const dir = mkdtempSync(join(tmpdir(), 'trident-rerun-'))
+    writeFileSync(join(dir, 'script.sh'), script)
+    writeFileSync(
+      join(dir, 'pr.json'),
+      JSON.stringify({ head: { sha: 'a'.repeat(40), ref: head_branch } }),
+    )
+    runsPerCall.forEach((runs, i) => {
+      writeFileSync(join(dir, `runs-${i}.json`), JSON.stringify({ workflow_runs: runs }))
+    })
+    // The stub answers the two `gh api` reads from fixtures — advancing one fixture
+    // per poll, so a run can be in progress on the first look and finished on the
+    // next — and records `gh run rerun` instead of performing it.
+    writeFileSync(
+      join(dir, 'gh'),
+      [
+        '#!/bin/sh',
+        `echo "$*" >> "${join(dir, 'calls')}"`,
+        'if [ "$1" = "api" ]; then',
+        '  case "$2" in',
+        `    */pulls/*) cat "${join(dir, 'pr.json')}" ;;`,
+        '    *actions/workflows*)',
+        `      n=$(cat "${join(dir, 'poll')}" 2>/dev/null || echo 0)`,
+        `      echo $((n + 1)) > "${join(dir, 'poll')}"`,
+        `      f="${join(dir, 'runs-')}$n.json"`,
+        `      [ -f "$f" ] || f="${join(dir, `runs-${runsPerCall.length - 1}.json`)}"`,
+        '      cat "$f" ;;',
+        '  esac',
+        'fi',
+        'exit 0',
+      ].join('\n'),
+    )
+    chmodSync(join(dir, 'gh'), 0o755)
+    const p = Bun.spawnSync(['bash', join(dir, 'script.sh')], {
+      env: {
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        REPO: 'owner/neutron',
+        PR: '42',
+        WAIT_SECONDS: opts.waitSeconds ?? '60',
+        POLL_SECONDS: '0',
+      },
+    })
+    const calls = existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : ''
+    return {
+      code: p.exitCode,
+      out: new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr),
+      reruns: calls.split('\n').filter((l) => l.startsWith('run rerun')),
+    }
+  }
+
+  const completed = (conclusion: string): Run[] => [
+    { id: 555, status: 'completed', conclusion, head_branch: 'trident/some-work' },
+  ]
+
+  test('a run that SUCCEEDED is re-run — a newer blocking verdict can still turn it red', () => {
+    // THE round-2 blocker, in executable form. The old script read the conclusion
+    // and exited 0 on `success`, so a green check was permanent no matter what the
+    // newest verdict said.
+    const { code, out, reruns } = exec([completed('success')])
+    expect(code).toBe(0)
+    expect(reruns).toEqual(['run rerun 555 --repo owner/neutron'])
+    expect(out).toContain('Re-running run 555 whole')
+  })
+
+  test('the whole run is re-run, never only its failed jobs', () => {
+    // `--failed` omits a verdict job that PASSED, which is exactly the job that has
+    // to run again when a verdict is edited, deleted, or superseded by a blocking
+    // one. Selecting the failed set is the same one-way door as exiting on success.
+    for (const conclusion of ['failure', 'cancelled', 'success', 'timed_out']) {
+      const { reruns } = exec([completed(conclusion)])
+      expect(reruns).toEqual(['run rerun 555 --repo owner/neutron'])
+      expect(reruns.join('')).not.toContain('--failed')
+    }
+  })
+
+  test('an in-progress run is WAITED for, then re-run — not abandoned', () => {
+    // The verdict job is short and the rest of the suite is not, so a run still
+    // going has very likely already failed the gate against a comment that did not
+    // exist yet. The old script exited 0 here and left a correct branch red until
+    // somebody re-ran it by hand.
+    const inProgress: Run[] = [
+      { id: 555, status: 'in_progress', conclusion: null, head_branch: 'trident/some-work' },
+    ]
+    const { code, out, reruns } = exec([inProgress, inProgress, completed('failure')])
+    expect(code).toBe(0)
+    expect(out).toContain('status=in_progress')
+    expect(reruns).toEqual(['run rerun 555 --repo owner/neutron'])
+  })
+
+  test('a wait that times out says how to finish it by hand rather than looping forever', () => {
+    // Bounded: an unbounded wait is a hung job. `WAIT_SECONDS=0` puts the deadline
+    // in the past on the first look, so the give-up path is the one exercised — and
+    // it must hand over the exact command rather than leaving a red check unexplained.
+    const queued: Run[] = [{ id: 555, status: 'queued', conclusion: null, head_branch: 'trident/some-work' }]
+    const { code, out, reruns } = exec([queued], { waitSeconds: '0' })
+    expect(code).toBe(0)
+    expect(reruns).toEqual([])
+    expect(out).toContain('gh run rerun 555 --repo owner/neutron')
+  })
+
+  test('no ci run for the head commit yet is a no-op, not a re-run of something else', () => {
+    const { code, reruns, out } = exec([[]])
+    expect(code).toBe(0)
+    expect(reruns).toEqual([])
+    expect(out).toContain('No ci run recorded')
+  })
+
+  test("the run belonging to THIS PR's branch is preferred over another PR sharing the head commit", () => {
+    // Two open PRs can share a head commit (a branch reopened against a second
+    // base). Keyed on the sha alone, the newest run wins even when it belongs to the
+    // other PR, and this comment's check is then never re-read.
+    const other: Run = { id: 999, status: 'completed', conclusion: 'failure', head_branch: 'someone-else' }
+    const mine: Run = { id: 555, status: 'completed', conclusion: 'failure', head_branch: 'trident/some-work' }
+    const { reruns } = exec([[other, mine]])
+    expect(reruns).toEqual(['run rerun 555 --repo owner/neutron'])
+  })
+
+  test('…and with no branch match at all it still re-runs the newest for the commit', () => {
+    // The tie-break must not become a filter: a fork PR, or a renamed branch, would
+    // otherwise silently stop re-running anything.
+    const other: Run = { id: 999, status: 'completed', conclusion: 'failure', head_branch: 'someone-else' }
+    const { reruns } = exec([[other]])
+    expect(reruns).toEqual(['run rerun 999 --repo owner/neutron'])
   })
 })
 

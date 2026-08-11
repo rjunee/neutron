@@ -9,10 +9,13 @@
  * test exists to expose. So the claim now has an artifact: run this, paste the
  * summary. A number nobody can reproduce is not evidence.
  *
- * WHAT IT DOES. For each named mutant it rewrites ONE guard in
- * `scripts/ci/trident-verdict.ts` into its fail-OPEN direction, runs the suite, and
- * records CAUGHT (suite went red) or SURVIVED (suite stayed green). The original
- * file is restored after every case, including on a crash.
+ * WHAT IT DOES. For each named mutant it rewrites ONE guard — in
+ * `scripts/ci/trident-verdict.ts` or in
+ * `.github/workflows/trident-verdict-rerun.yml`, which is executable surface too —
+ * into its fail-OPEN direction, runs the suite, and records CAUGHT (the suite
+ * reported failing tests), SURVIVED (it stayed green) or BROKEN (it never reported a
+ * result). The original file is restored after every case, including on a crash, and
+ * the unmutated suite must be green before any of it is believed.
  *
  * HOW TO READ A SURVIVOR. A survivor is a hole in the TESTS, never a licence to
  * delete the mutant. It means the guard has code and no coverage: it can be
@@ -31,6 +34,7 @@ import { fileURLToPath } from 'node:url'
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const GATE = fileURLToPath(new URL('trident-verdict.ts', import.meta.url))
+const RERUN_WORKFLOW = fileURLToPath(new URL('../../.github/workflows/trident-verdict-rerun.yml', import.meta.url))
 const TEST = 'scripts/ci/trident-verdict.test.ts'
 
 /** [name, the exact source to replace, the fail-open replacement] */
@@ -113,12 +117,117 @@ const MUTANTS: [string, string, string][] = [
     '`ADOPT that branch and that PR: check out ${branch} without creating it, reuse ${pr}, ` +',
     '`` +',
   ],
+  // ---- and the redemption printed from EVERY red exit, not just enumerated ones -
+  [
+    'redemption-dropped-from-one-path',
+    "    deps.log('no usable reason records nothing, so it does not count as one.')\n    printRedemption(deps, branch, pr)",
+    "    deps.log('no usable reason records nothing, so it does not count as one.')",
+  ],
+  [
+    // Not a weakened guard but an ADDED red exit that redeems nothing — the shape
+    // the enumerated table can never catch, because a new path does not add a row.
+    'new-red-exit-with-no-redemption',
+    '  const failures = verdictFailures(verdict, headSha, { touchesSource })',
+    '  if (verdict.mutations.length > 99) {\n' +
+      "    deps.log('trident-verdict: FAIL — a brand new failure path nobody redeemed')\n" +
+      '    return 1\n' +
+      '  }\n' +
+      '  const failures = verdictFailures(verdict, headSha, { touchesSource })',
+  ],
 ]
 
-const original = readFileSync(GATE, 'utf8')
+/**
+ * Mutants of the RE-RUN WORKFLOW, which is where a green check could not be withdrawn.
+ *
+ * These are here because the two defects they encode were invisible to a suite that
+ * asserted on the workflow's TEXT: it checked that the file mentioned
+ * `gh run rerun --failed` and was green over a script that exited early on a
+ * successful run and, when it did run, selected only the jobs that had failed —
+ * never the verdict job that had passed. Both mean "the newest verdict wins" stopped
+ * being true the moment the check went green. A YAML file is executable surface, so
+ * it owes mutation evidence like any other.
+ */
+const WORKFLOW_MUTANTS: [string, string, string][] = [
+  [
+    'rerun-exits-early-on-a-green-run',
+    '          echo "Re-running run $run_id whole',
+    '          if [ "$conclusion" = "success" ]; then exit 0; fi\n          echo "Re-running run $run_id whole',
+  ],
+  [
+    'rerun-selects-failed-jobs-only',
+    'gh run rerun "$run_id" --repo "$REPO"',
+    'gh run rerun --failed "$run_id" --repo "$REPO"',
+  ],
+  ['rerun-triggers-on-creation-only', 'types: [created, edited, deleted]', 'types: [created]'],
+  [
+    'rerun-ignores-the-pre-edit-body',
+    "       contains(github.event.changes.body.from, '```review-evidence')) &&",
+    '       false) &&',
+  ],
+  [
+    'rerun-abandons-an-in-progress-run',
+    '            if [ "$status" = "completed" ]; then break; fi',
+    '            if [ "$status" != "completed" ]; then exit 0; fi',
+  ],
+  [
+    'rerun-ignores-which-pr-the-run-belongs-to',
+    '([.workflow_runs[] | select(.head_branch == $ref)] + .workflow_runs)[0]',
+    '.workflow_runs[0]',
+  ],
+]
+
+/** Every mutant, paired with the file it rewrites. */
+const CASES: [string, string, string, string][] = [
+  ...MUTANTS.map(([n, f, t]) => [GATE, n, f, t] as [string, string, string, string]),
+  ...WORKFLOW_MUTANTS.map(([n, f, t]) => [RERUN_WORKFLOW, n, f, t] as [string, string, string, string]),
+]
+const originals = new Map(CASES.map(([file]) => [file, readFileSync(file, 'utf8')]))
+
+/**
+ * Run the suite and say WHY it failed, because "non-zero" is not "caught".
+ *
+ * A mutation battery that reads only the exit code certifies a mutant as caught
+ * whenever the runner exits non-zero for ANY reason — a suite that was already red
+ * before the mutation, `bun` missing from PATH, a signal kill (status `null`), a
+ * syntax error in an unrelated file. Each of those would have printed
+ * "34 caught, 0 survived" while measuring nothing at all, which is the same class of
+ * false evidence the battery exists to remove from the as-built log.
+ *
+ * So a CAUGHT verdict requires the runner to report actual FAILING TESTS. Anything
+ * else is BROKEN and is not counted as caught.
+ */
+function runSuite(): { failures: number | null; detail: string } {
+  const p = spawnSync('bun', ['test', TEST], { cwd: REPO_ROOT, encoding: 'utf8' })
+  if (p.error) return { failures: null, detail: `could not run the suite: ${p.error.message}` }
+  if (p.status === null) return { failures: null, detail: `the runner was killed by signal ${p.signal}` }
+  const out = `${p.stdout ?? ''}${p.stderr ?? ''}`
+  const m = /^\s*(\d+)\s+fail$/m.exec(out)
+  if (!m) {
+    return {
+      failures: null,
+      detail: `exit ${p.status} with no parseable "N fail" line — the runner did not report a result`,
+    }
+  }
+  return { failures: Number(m[1]), detail: `exit ${p.status}, ${m[1]} failing` }
+}
+
+// THE POSITIVE CONTROL, before any mutant is believed — the same discipline the
+// gate itself applies before believing an absence. An already-red suite makes every
+// mutant look caught, so the battery refuses to report at all rather than certify
+// the whole table against a baseline nobody checked.
+const baseline = runSuite()
+if (baseline.failures !== 0) {
+  console.log(`BASELINE BROKEN — the unmutated suite is not green (${baseline.detail}).`)
+  console.log('Nothing is measured. A red baseline makes every mutant read as CAUGHT, so the')
+  console.log('battery reports nothing until the suite passes unmutated.')
+  process.exit(1)
+}
+console.log(`baseline: unmutated suite green (${baseline.detail})\n`)
+
 const results: [string, string][] = []
 
-for (const [name, from, to] of MUTANTS) {
+for (const [file, name, from, to] of CASES) {
+  const original = originals.get(file)!
   const hits = original.split(from).length - 1
   if (hits !== 1) {
     // A mutant whose pattern no longer matches is a STALE mutant, and it must be
@@ -128,14 +237,18 @@ for (const [name, from, to] of MUTANTS) {
     console.log(`STALE     ${name} — pattern matched ${hits} times, not 1`)
     continue
   }
-  writeFileSync(GATE, original.replace(from, to))
+  writeFileSync(file, original.replace(from, to))
   try {
-    const p = spawnSync('bun', ['test', TEST], { cwd: REPO_ROOT, encoding: 'utf8' })
-    const verdict = p.status !== 0 ? 'CAUGHT' : 'SURVIVED'
+    const { failures, detail } = runSuite()
+    // Three outcomes, not two. `failures === 0` is a real SURVIVOR: the suite ran
+    // and passed against a gate that accepts what it exists to refuse. `null` is a
+    // measurement that did not happen, and calling that CAUGHT is how a battery
+    // reports coverage it never observed.
+    const verdict = failures === null ? `BROKEN (${detail})` : failures > 0 ? 'CAUGHT' : 'SURVIVED'
     results.push([name, verdict])
     console.log(`${verdict.padEnd(9)} ${name}`)
   } finally {
-    writeFileSync(GATE, original)
+    writeFileSync(file, original)
   }
 }
 

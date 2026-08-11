@@ -295,12 +295,22 @@ is who is accountable for what its head says.
   every reviewed PR would need a hand re-run. `trident-verdict-rerun.yml` is that
   something: an `issue_comment` workflow that, on a verdict-shaped comment from an
   account with write access, finds the `ci.yml` run for the PR's **head SHA** and
-  re-runs its failed jobs. It grants nothing and is not in the aggregator — it only
-  asks CI to look again, and CI reaches its own conclusion. `gh run rerun --failed
-  <run-id>` still works by hand, and the failure output prints it with this run's id
-  already filled in. Note that `issue_comment` workflows always run from the
-  **default branch**, so this has no effect until it is merged to `main`, including
-  on the PR that adds it.
+  re-runs it. It grants nothing and is not in the aggregator — it only asks CI to
+  look again, and CI reaches its own conclusion. `gh run rerun --failed <run-id>`
+  still works by hand, and the failure output prints it with this run's id already
+  filled in. Note that `issue_comment` workflows always run from the **default
+  branch**, so this has no effect until it is merged to `main`, including on the PR
+  that adds it.
+- **A green check can be withdrawn, which is what makes "newest verdict wins"
+  true.** The re-run fires on `created`, `edited` **and** `deleted` comments, and it
+  re-runs the **whole** run rather than only its failed jobs — including a run that
+  already succeeded. Both halves are load-bearing: a verdict is editable and
+  deletable by its author, and `--failed` cannot select a verdict job that passed. Do
+  either one the cheap way and a green check becomes permanent regardless of what the
+  newest verdict says, which is exactly when the rule matters. If the run is still in
+  progress, the workflow waits for it (bounded, then it prints the manual command),
+  because its verdict job has usually already failed against a comment that did not
+  yet exist.
 - **The gate rides the existing required `test` context** rather than adding a
   new one: `test` `needs:` it, and checks `needs.trident-verdict.result` on
   pull-request events specifically. That makes it blocking with no

@@ -131,8 +131,8 @@ repository.
 
 The mutation battery is committed code, not a paragraph:
 `scripts/ci/trident-verdict-mutation-battery.ts` applies each named mutant, runs the
-suite, restores the source, and exits non-zero if anything survived — **34 applied,
-34 caught, 0 survived**, and a mutant whose pattern goes stale counts as not caught
+suite, restores the source, and exits non-zero if anything survived — **42 applied,
+42 caught, 0 survived**, and a mutant whose pattern goes stale counts as not caught
 so the battery cannot quietly shrink. This is the third statement of that number and
 the first reproducible one: the previous two claimed "17, each caught" and "16
 caught, 0 survived" from prose, and adversarial passes reproduced three and then six
@@ -153,8 +153,36 @@ side rots the constant silently, and catching it is a review duty, not a CI one.
 docblock had cited a test symbol (`assertOnlyParsedFlags`) that exists nowhere; it now
 names the real test. Named in `docs/trident-verdict-gate.md` § What it does not do.
 
-Re-verified at this head rather than carried forward: the suite is 100 pass / 0 fail,
-and the battery reports 34 applied, 34 caught, 0 survived. The pagination terminator —
+A green check can now be WITHDRAWN, which is what makes "the newest verdict wins"
+true (#179, round 5). It was false in the direction that matters: the re-run workflow
+returned early on a run whose conclusion was `success`, and otherwise re-ran only the
+jobs that had failed — which never includes a verdict job that passed. So once the
+check went green, no later verdict could turn it red, and the trigger was
+`created`-only, leaving a clean verdict free to be edited into blocking evidence or
+deleted outright with nothing looking again. It now fires on `created`, `edited` and
+`deleted` (matching the pre-edit body too, since editing a verdict into prose leaves
+no fence in the new one), re-runs the whole run unconditionally, and WAITS for a run
+still in progress instead of abandoning it — that run's verdict job has usually
+already failed against a comment that did not yet exist, so exiting there left a
+correct branch red until someone re-ran it by hand. The workflow's script is now
+EXECUTED by the suite against a stub `gh`, not read for strings: the old text
+assertion checked that the file mentioned `gh run rerun --failed` and was green over
+both defects.
+
+Two claims that were structurally unprovable are now proved. The battery ran the
+unmutated suite for the first time before believing any mutant — without that
+control, a suite that was already red, a missing `bun`, or a signal kill certified
+every mutant as CAUGHT, which is the same false-evidence shape the battery exists to
+remove; a CAUGHT verdict now requires the runner to report failing tests, and a
+measurement that did not happen is BROKEN rather than caught. And "every failure path
+prints the redeeming command" was a universal claim standing on an enumerated table
+that had already missed four paths; it is now checked against the gate's own source,
+walking the enclosing block of every red exit. Both were mutation-tested: with the
+suite pre-broken the battery prints `BASELINE BROKEN` and exits 1 instead of reporting
+42 caught, and a red exit added with no redemption reds the structural test.
+
+Re-verified at this head rather than carried forward: the suite is 108 pass / 0 fail,
+and the battery reports 42 applied, 42 caught, 0 survived. The pagination terminator —
 the mutant that survived a green 51-test suite two rounds ago — reds four tests when
 mutated to `return items`: "an executable file on page 2 still requires mutation
 evidence", "a verdict on page 2 of the comments is found, not read as absent",

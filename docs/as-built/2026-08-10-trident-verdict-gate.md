@@ -153,7 +153,8 @@ restores the file, and exits non-zero if anything survived — so the number is
 reproduced by running it rather than by trusting this paragraph:
 
     bun scripts/ci/trident-verdict-mutation-battery.ts
-    → 34 mutants applied, 34 caught, 0 survived
+    → baseline: unmutated suite green (exit 0, 0 failing)
+    → 42 mutants applied, 42 caught, 0 survived
 
 A stale mutant (one whose pattern no longer matches the source) is reported as
 `STALE-PATTERN` and counts as *not caught*, so the battery cannot quietly shrink
@@ -362,11 +363,54 @@ repo-relative.
   `branch` and `PR #` — so a branch literally named `review` would have false-failed,
   invisibly, because CI runs detached. It now anchors on the subject phrase.
 
+### Round 5 — a green check that could not be withdrawn, and two unprovable claims
+
+The re-run workflow was the hole. `types: [created]` meant an edited or deleted
+verdict was never re-read; `exit 0` on a `success` conclusion and `gh run rerun
+--failed` (which cannot select a verdict job that PASSED) meant a green check could
+never go back to red. Together: **"the newest verdict wins" stopped being true the
+moment it became green** — the only moment it matters. The trigger now covers
+`created, edited, deleted`, matches the pre-edit body as well (editing a verdict into
+prose leaves no fence in the new body), re-runs the run WHOLE, and waits out a run
+still in progress rather than abandoning it.
+
+The suite could not have caught any of that: it asserted the file *contained the
+string* `gh run rerun --failed`. The step's script is now extracted from the YAML and
+EXECUTED against a stub `gh` that answers from fixtures and records its calls, so
+which run gets re-run is observable. Six workflow mutants ride the battery, because a
+workflow is executable surface too.
+
+| mutant | the test that went red |
+|---|---|
+| `rerun-exits-early-on-a-green-run` | a run that SUCCEEDED is re-run — a newer blocking verdict can still turn it red |
+| `rerun-selects-failed-jobs-only` | the whole run is re-run, never only its failed jobs |
+| `rerun-triggers-on-creation-only` | posting a verdict re-runs the ci run — the gate is not a one-shot read |
+| `rerun-ignores-the-pre-edit-body` | posting a verdict re-runs the ci run — the gate is not a one-shot read |
+| `rerun-abandons-an-in-progress-run` | an in-progress run is WAITED for, then re-run — not abandoned |
+| `rerun-ignores-which-pr-the-run-belongs-to` | the run belonging to THIS PR's branch is preferred over another PR sharing the head commit |
+| `redemption-dropped-from-one-path` | EVERY red exit in the gate prints the redemption |
+| `new-red-exit-with-no-redemption` | EVERY red exit in the gate prints the redemption |
+
+Two claims were also structurally unprovable. **The battery never ran the unmutated
+suite**, and read only the exit code — so an already-red suite, a missing `bun`, or a
+signal kill would have certified all 42 mutants as CAUGHT while measuring nothing.
+CAUGHT now requires the runner to report failing tests, a measurement that did not
+happen is BROKEN, and the green baseline is a precondition (verified: with one test
+deliberately broken the battery prints `BASELINE BROKEN` and exits 1 instead of
+reporting 42 caught). **And "every failure path prints the redeeming command" was a
+universal claim resting on a table that had already missed four paths** — no
+enumeration can close that, since adding a `return 1` does not add a row. It is now
+checked against the gate's source, walking the enclosing block of each red exit. The
+first version of that check used a fixed six-line window, and a mutant that added an
+unredeemed red exit SURVIVED it: the window reached over the block opener into the
+previous branch and found its `printRedemption`. The indentation walk kills it.
+
 ### Verification
 
-* `bun test scripts/ci/trident-verdict.test.ts` — **100 pass, 0 fail**.
-* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **34 applied, 34 caught, 0
-  survived**, reproducible by running it.
+* `bun test scripts/ci/trident-verdict.test.ts` — **108 pass, 0 fail**.
+* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **42 applied, 42 caught, 0
+  survived**, reproducible by running it, and refusing to report at all unless the
+  unmutated suite is green.
 * Still open, and unchanged by this round: the codex cross-model lane did not
   complete on round 2 (capacity), so that lane's verdict is owed rather than clean.
 
