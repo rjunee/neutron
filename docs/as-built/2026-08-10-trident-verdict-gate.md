@@ -193,6 +193,16 @@ facts, two different messages), reduced to the error's first line, and it still
 redeems. Still exit 1: "I could not check" must never be worth more than a failed
 check. Two further mutants cover it.
 
+**Both escape paths were exercised LIVE on a real pull request, not only against
+fixtures.** The push-time advisory ran on a real `git push` and printed the
+redeeming command naming the branch actually being pushed. And the bypass fired in
+a real CI run: the gate read the marker off the head commit through the API, named
+the SHA it applied to, printed the reason, and emitted the notice annotation —
+`trident-verdict: BYPASSED for <sha> — no review verdict was required`. That is the
+paper-trail property demonstrated rather than asserted, which matters more for an
+escape hatch than for anything else in the change: the failure mode of a bypass is
+that it works and leaves no record.
+
 **The push-time advisory named the wrong branch, and only text coverage existed.**
 It read `git rev-parse --abbrev-ref HEAD`, so `git push origin some-other-branch`,
 a multi-ref push and a tag push all printed a redemption command for whatever
