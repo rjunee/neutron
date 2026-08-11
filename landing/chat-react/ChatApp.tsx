@@ -917,7 +917,7 @@ function buildEditIndex(
 function TypingIndicator({
   activity,
 }: {
-  activity?: { label: string; detail?: string } | null
+  activity?: { label: string } | null
 }): React.JSX.Element {
   // SAY WHAT IT IS DOING, not just that it is doing something. Three dots for
   // four minutes is indistinguishable from a hang — the owner watched exactly
@@ -940,9 +940,7 @@ function TypingIndicator({
         {label !== undefined && label.length > 0 ? (
           // `title` carries the collapsed one-liner on hover without spending a
           // second line in the transcript on it.
-          <span className="car-typing-label" title={activity?.detail ?? undefined}>
-            {label}
-          </span>
+          <span className="car-typing-label">{label}</span>
         ) : null}
       </div>
     </div>

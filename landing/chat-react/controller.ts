@@ -1026,10 +1026,28 @@ export class NeutronChatController {
           STEP_KINDS.has(row.kind) &&
           scopeKey === activityScopeKey(this.projectId)
         ) {
-          const next =
-            row.detail === undefined ? { label: row.label } : { label: row.label, detail: row.detail }
-          if (this.liveActivity?.label !== next.label) {
-            this.liveActivity = next
+          // PREFER `detail` OVER `label`, because for the most common row kind the
+          // label is a KIND WORD and the meaning is in the detail.
+          // `activity-inspector.ts:417` emits `{kind:'status', label:'status',
+          // detail: summarize(message)}` — so the substrate's `message:'working'`
+          // arrives with the useful half in `detail`. Rendering `label` showed the
+          // owner a bubble reading literally "status" (screenshot, 2026-08-11) and
+          // hid "working" behind a hover nobody would find on a phone.
+          //
+          // The guard below compares the DISPLAYED text, not `label`. Comparing
+          // `label` was the second half of that bug: every status row carries the
+          // identical label, so the first one latched and no later status could
+          // ever replace it — the indicator froze on one word for the whole turn.
+          // Prefer `detail` ONLY when the label is a GENERIC KIND-WORD (label ===
+          // kind), which is exactly the `status` case. A `tool_start` label is the
+          // humanized TOOL NAME and must always win over any detail it carries —
+          // blanket detail-preference would replace "Reading files" with a file
+          // path, which is less informative, not more.
+          const generic = row.label === row.kind
+          const text =
+            generic && row.detail !== undefined && row.detail.length > 0 ? row.detail : row.label
+          if (this.liveActivity?.label !== text) {
+            this.liveActivity = { label: text }
             this.publish()
           }
         }
