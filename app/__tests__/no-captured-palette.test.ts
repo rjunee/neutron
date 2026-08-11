@@ -334,3 +334,47 @@ describe('no colour literal exists outside the theme module', () => {
     expect(colourLiterals(themeFile.code).length).toBeGreaterThan(60);
   });
 });
+
+/**
+ * EVERY VEIL CARRIES VEIL INK.
+ *
+ * `veil` is the one fill that is deliberately dark in BOTH palettes, because it
+ * sits over a photo thumbnail rather than over the page — so it is the one ground
+ * where "take the colour from the theme" is not enough. `text_primary` IS from the
+ * theme, and in light mode it is near-black: 2.01:1 on the veil composited over a
+ * pale image. The control renders, its colour is tokenised, the palette-literal
+ * guard above is green, and the owner cannot see it.
+ *
+ * That is exactly what happened: the composer's remove-attachment glyph painted
+ * `text_primary` on `theme.veil` while `button-primitives` next door already used
+ * `veil_ink`. `contrast.test.ts` asserts `veil_ink` clears AA on that composite and
+ * that `text_primary` does not — a TOKEN-level fact both files were free to ignore.
+ * This is the SITE-level half.
+ *
+ * The invariant is a pairing, not a count for its own sake: a veil is only ever
+ * painted in order to carry ink, so every file that paints one must also draw with
+ * `veil_ink`, and no file may draw with `veil_ink` without a veil to draw it on.
+ * A third overlay inked with `text_primary` breaks the first half and fails here.
+ */
+describe('ink drawn on a veil comes from veil_ink', () => {
+  const veilFiles = FILES.filter((f) => !isTest(f.path) && f.code.includes('theme.veil,'));
+  const inkFiles = FILES.filter((f) => !isTest(f.path) && f.code.includes('theme.veil_ink'));
+
+  it('the scan can see both halves at all', () => {
+    // Positive control. `theme.veil,` and `theme.veil_ink` are different substrings
+    // by construction (the comma), but a stripComments change or a rename could make
+    // either side silently empty, and two empty sets agree perfectly.
+    expect(veilFiles.length, 'no file paints theme.veil — the scan is broken').toBeGreaterThan(0);
+    expect(inkFiles.length, 'no file uses theme.veil_ink — the scan is broken').toBeGreaterThan(0);
+  });
+
+  it('the two sets are the SAME files', () => {
+    const painted = veilFiles.map((f) => f.path).sort();
+    const inked = inkFiles.map((f) => f.path).sort();
+    expect(
+      inked,
+      `these paint a veil without drawing veil_ink on it (or the reverse):\n` +
+        `  veil: ${painted.join(', ')}\n  veil_ink: ${inked.join(', ')}`,
+    ).toEqual(painted);
+  });
+});

@@ -952,7 +952,13 @@ const makeStyles = (theme: NeutronTheme) =>
     },
     removeAttachmentText: {
       ...TYPOGRAPHY.caption,
-      color: theme.text_primary,
+      // `veil_ink`, NOT `text_primary`. The chip behind this glyph is `theme.veil`
+      // — a dark scrim that is deliberately dark in BOTH palettes, because it sits
+      // over an image thumbnail rather than over the page. `text_primary` follows
+      // the theme, so in light mode it is near-black on that dark scrim and the
+      // dismiss control all but disappears. `veil_ink` is the token that exists for
+      // exactly this: the ink for anything painted on a veil.
+      color: theme.veil_ink,
       fontWeight: '700',
     },
     row: {

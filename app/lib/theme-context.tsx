@@ -141,7 +141,19 @@ export function readStoredPreferenceSync(
   try {
     const raw = backing.getItem(THEME_STORAGE_KEY);
     // A thenable is the async backing; do not block on it here.
-    if (raw !== null && typeof raw === 'object' && 'then' in raw) return undefined;
+    if (raw !== null && typeof raw === 'object' && 'then' in raw) {
+      // But DO handle it. Discovering the backing is async costs a real read, and
+      // an unhandled rejection from a promise nobody awaited is a hard crash on
+      // React Native's default handler — a broken AsyncStorage would take the app
+      // down at boot through the very probe that exists to avoid a wrong frame.
+      // The VALUE is still ignored: the async path below re-reads it, and that is
+      // the read whose answer is used.
+      void (raw as Promise<string | null>).then(
+        () => undefined,
+        () => undefined,
+      );
+      return undefined;
+    }
     return isThemePreference(raw) ? raw : DEFAULT_PREFERENCE;
   } catch {
     return undefined;
@@ -385,43 +397,64 @@ export function ThemeProvider({
  * the version-stable choice; the noise is the price and is recorded here so it is not
  * mistaken for a real fault.
  */
-interface ThemeRead {
-  state: ThemeState;
-  /**
-   * Whether React answered — i.e. whether we are inside a render with a live hook
-   * dispatcher. `false` means no further hook may be called in this pass, which is
-   * the fact {@link useThemedStyles} needs and cannot recover on its own: it calls
-   * `useMemo` AFTER this, and that would throw for exactly the same reason.
-   */
-  live: boolean;
-}
-
-function themeRead(): ThemeRead {
+function useThemeRead(): ThemeState {
   try {
-    return { state: useContext(ThemeContext) ?? FALLBACK, live: true };
+    return useContext(ThemeContext) ?? FALLBACK;
   } catch (err) {
-    if (err instanceof TypeError) return { state: FALLBACK, live: false };
+    if (err instanceof TypeError) return FALLBACK;
     throw err;
   }
 }
 
-function themeState(): ThemeState {
-  return themeRead().state;
-}
-
 /** The whole theme state — for the settings control and the app shell. */
 export function useThemeState(): ThemeState {
-  return themeState();
+  return useThemeRead();
 }
 
 /** The active colors. The hook ~70 components call. */
 export function useTheme(): NeutronTheme {
-  return themeState().palette.colors;
+  return useThemeRead().palette.colors;
 }
 
 /** The active work-phase colors (dot + tag). */
 export function usePhase(): NeutronPhaseColors {
-  return themeState().palette.phase;
+  return useThemeRead().palette.phase;
+}
+
+/**
+ * THE SHEET CACHE — module scope, keyed by factory and then by palette.
+ *
+ * It used to be a `useMemo` inside {@link useThemedStyles}, which is memoised per
+ * COMPONENT INSTANCE: every rendered `ChatRow`, `TaskRow` and rail row re-ran
+ * `StyleSheet.create` and retained its own copy of an identical sheet. A long list
+ * therefore paid the build once per row rather than once per palette, which is the
+ * opposite of what this module's docblock claims it does.
+ *
+ * Both maps are weak, so a factory that goes out of scope takes its sheets with it,
+ * and the palettes are frozen module-scope singletons — so a sheet is built at most
+ * twice per factory for the life of the process, no matter how many components or
+ * rows call it.
+ *
+ * Being a plain cache rather than a hook is also what removes the conditional
+ * `useMemo` this function used to need: it is a pure function of `(factory,
+ * palette)`, so it is correct to call with or without a live React dispatcher, and
+ * `useThemedStyles` no longer has a hook to skip.
+ */
+const SHEET_CACHE = new WeakMap<object, WeakMap<NeutronPalette, unknown>>();
+
+function cachedSheet<T>(
+  factory: (theme: NeutronTheme, phase: NeutronPhaseColors) => T,
+  palette: NeutronPalette,
+): T {
+  let byPalette = SHEET_CACHE.get(factory);
+  if (byPalette === undefined) {
+    byPalette = new WeakMap<NeutronPalette, unknown>();
+    SHEET_CACHE.set(factory, byPalette);
+  }
+  if (byPalette.has(palette)) return byPalette.get(palette) as T;
+  const built = factory(palette.colors, palette.phase);
+  byPalette.set(palette, built);
+  return built;
 }
 
 /**
@@ -437,25 +470,17 @@ export function usePhase(): NeutronPhaseColors {
  * phase-using component remember to pass `usePhase()` back in at the call site,
  * which is a thing to get wrong for no benefit.
  *
- * MEMOISATION IS SKIPPED WHEN THERE IS NO DISPATCHER. See `themeRead` — a component
- * invoked from plain JavaScript through the `HookRuntime` DI seam has no live React
- * dispatcher, so `useMemo` would throw the same `TypeError` the context read just
- * absorbed. Building the sheet directly is the correct degradation and costs nothing
- * that matters: the memo is a performance optimisation over a pure function of the
- * palette, so calling it is always semantically identical to reading the cache.
+ * THE CACHE IS NOT A HOOK. See {@link SHEET_CACHE} — memoisation lives at module
+ * scope, keyed by factory and palette, so this function calls exactly one hook
+ * unconditionally. That matters twice: a component invoked from plain JavaScript
+ * through the `HookRuntime` DI seam has no live React dispatcher and would have
+ * thrown on a `useMemo` here, and a per-instance memo was allocating one sheet per
+ * LIST ROW rather than one per palette.
  */
 export function useThemedStyles<T>(
   factory: (theme: NeutronTheme, phase: NeutronPhaseColors) => T,
 ): T {
-  const { state, live } = themeRead();
-  const palette = state.palette;
-  // `live` is constant for a given call context — either this code is running inside
-  // a React render or it is not — so the conditional hook below cannot vary between
-  // renders of the same component, which is the property the rule protects.
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  if (!live) return factory(palette.colors, palette.phase);
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  return useMemo(() => factory(palette.colors, palette.phase), [factory, palette]);
+  return cachedSheet(factory, useThemeRead().palette);
 }
 
 /** A sheet built from a NAMED palette, for a test that compares both without

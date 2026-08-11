@@ -331,3 +331,101 @@ the owner's ruling, not a unilateral fix.
 it cannot see native layout. Every visual claim is UNVERIFIED until it runs on a
 phone; the contrast numbers are arithmetic over the palettes and are as good as
 arithmetic gets, which is not the same as "looks right".
+
+## Round 3 (2026-08-11) — the type base was never applying, and a hook that was not named like one
+
+Four review findings, and the first one matters most because every test in this change
+said it was fine.
+
+### THE 17px TYPE BASE WAS DEAD CSS
+
+`landing/chat-react.html` — the comment above the rem base was TERMINATED
+mid-paragraph, and the remaining five lines of prose ran on to a second terminator. A
+browser reads that trailing prose as a selector prelude, fails to parse it, and CSS
+error recovery discards the NEXT rule — which was `html { font-size: 106.25%; }`. The
+root stayed at 16px, every `rem` on the page resolved against it, and the headline of
+this whole change (Telegram sits at ~17, we were at 15) shipped as a no-op.
+
+`type-scale.test.ts` was green throughout, because it read the raw file with
+`readFileSync` and matched the declaration as a string. **Matching a declaration in a
+file is not evidence the declaration takes effect.** The fix is one character; the
+guard is the part worth keeping:
+
+- the test now strips comments the way a CSS parser does — first opener to the NEXT
+  closer, never nesting — and every web assertion reads the STRIPPED sheet, so a rule
+  sitting in dead territory is no longer visible to the test either;
+- `has NO stray comment terminator, so no rule is silently discarded` fails on any
+  closer surviving into the parsed output, and on unbalanced delimiters either way;
+- a positive control asserts the stripper can actually see a comment, so neither
+  assertion can pass by returning nothing.
+
+Mutation-tested: re-inserting the early terminator turns that test red with the
+offending span quoted in the failure message.
+
+### A hook that was not named like one, so the rule could not check it
+
+`app/lib/theme-context.tsx` — `themeRead()` called `useContext`, which
+`react-hooks/rules-of-hooks` flags as an error, and app lint was red. Renamed to
+`useThemeRead()`, the one-line `themeState()` indirection collapsed into it, and the
+two `eslint-disable` comments are GONE rather than moved — one was already unused, and
+the other is no longer needed because of the next item. `eslint lib/theme-context.tsx`
+now reports zero errors.
+
+### The sheet cache moved to module scope
+
+`useThemedStyles` memoised with `useMemo`, which is per COMPONENT INSTANCE: every
+rendered `ChatRow`, `TaskRow` and rail row re-ran `StyleSheet.create` and retained its
+own copy of an identical sheet. A long list paid the build once per ROW, the opposite
+of what the module docblock claimed. It is now a `WeakMap<factory, WeakMap<palette,
+sheet>>` at module scope — at most two sheets per factory for the life of the process,
+shared by every instance.
+
+That also REMOVED the conditional-hook problem rather than suppressing it: the cache is
+a pure function of `(factory, palette)`, correct with or without a live React
+dispatcher, so `useThemedStyles` now calls exactly one hook unconditionally and needs
+no rules-of-hooks exemption at all.
+
+### The remove-attachment glyph was invisible in light mode
+
+`app/components/InputComposer.tsx` — the dismiss chip paints `theme.veil` (a dark
+scrim, deliberately dark in BOTH palettes because it sits over an image thumbnail) and
+inked its glyph with `theme.text_primary`, which is near-black in light mode: 2.01:1 on
+that composite. `lib/button-primitives.tsx` next door already used `veil_ink`.
+Switched.
+
+`contrast.test.ts` had asserted the TOKEN-level fact — `veil_ink` clears AA on the
+veil-over-white composite and `text_primary` does not — and both files were free to
+ignore it. `no-captured-palette.test.ts` now carries the SITE-level half: a veil is
+only ever painted in order to carry ink, so the set of files painting `theme.veil` and
+the set drawing `theme.veil_ink` must be the same set. Mutation-tested — reverting the
+one line names both files in the failure. A prefix-matching variant was written first
+and deleted: it could not have caught this defect (the ink lived in a sibling style,
+not inside the veil block), and a guard that cannot fail on the bug it was written for
+is worse than none.
+
+### The pre-paint probe no longer leaks a promise
+
+`readStoredPreferenceSync` has to CALL `getItem` to discover whether the backing
+answers synchronously. On native that returns a Promise it discarded — and an unhandled
+rejection is a hard crash on React Native's default handler, so a broken AsyncStorage
+would have taken the app down at boot through the very probe that exists to avoid a
+wrong-coloured frame. It now attaches a no-op handler to both arms. The VALUE is still
+ignored; the async read below is still the one whose answer is used.
+
+### Test signal
+
+`scripts/ci/lint.sh` and `scripts/ci/typecheck-all.sh` pass. The three touched app test
+files run green (217 assertions). The flat-`bun test` caveat recorded in round 2 still
+holds and was re-confirmed rather than assumed: 211 failures at this branch's HEAD and
+211 identical failures with these changes applied — same test names, empty diff. A
+directory run measures process-global interference, not correctness, which is why
+`scripts/run-tests.sh` chunks. Real CI on the PR is green across all thirteen checks.
+
+### Not addressed here
+
+One of the three review lanes (the rubric runtime) produced no verdict at all — an
+empty output file, not a passing one. That is a gap in review COVERAGE rather than a
+defect in the change, and it is not something this lane can close from inside the
+worktree; it needs re-running or substituting before merge.
+
+**Still nothing seen on a device.**

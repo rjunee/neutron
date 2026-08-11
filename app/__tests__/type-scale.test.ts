@@ -28,6 +28,48 @@ const WEB_CSS = readFileSync(
   'utf8',
 );
 
+/**
+ * THE STYLESHEET WITH ITS COMMENTS REMOVED — i.e. what the browser actually parses.
+ *
+ * Every assertion below reads from this rather than from the raw file, and the
+ * reason is a defect this file was green through: the comment above `html {
+ * font-size: 106.25%; }` was TERMINATED mid-paragraph, and the remaining five lines
+ * of prose ran on until a second terminator. A browser reads that trailing prose as
+ * a selector prelude, fails to parse it, and CSS error recovery discards the rule
+ * that follows — so the 17px rem base, the entire point of the change, never
+ * applied. Every test here still passed, because `readFileSync` finds the string
+ * whether or not the rule is reachable.
+ *
+ * That is the general trap, and it is worth naming: MATCHING A DECLARATION IN A
+ * FILE IS NOT EVIDENCE THE DECLARATION TAKES EFFECT. Stripping comments the way the
+ * parser does — and asserting the comments are well-formed, below — is the cheapest
+ * thing that makes the difference visible without a browser.
+ */
+function styleBlock(html: string): string {
+  const open = html.indexOf('<style>');
+  const close = html.indexOf('</style>');
+  if (open < 0 || close < 0) throw new Error('no <style> block in the web client');
+  return html.slice(open + '<style>'.length, close);
+}
+
+/** Remove comment spans exactly as a CSS parser does: from the first opener to the
+ *  NEXT closer, never nesting. A stray closer therefore survives into the output,
+ *  which is what makes it detectable. */
+function stripCssComments(css: string): string {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const open = css.indexOf('/*', i);
+    if (open < 0) return out + css.slice(i);
+    out += css.slice(i, open);
+    const close = css.indexOf('*/', open + 2);
+    if (close < 0) return out; // unterminated: the parser eats the rest of the sheet
+    i = close + 2;
+  }
+}
+
+const WEB_CSS_PARSED = stripCssComments(styleBlock(WEB_CSS));
+
 describe('mobile type scale', () => {
   it('body is at least as large as the thing it was compared against', () => {
     expect(TYPOGRAPHY.body.fontSize).toBeGreaterThanOrEqual(TELEGRAM_BODY_PX);
@@ -87,10 +129,37 @@ describe('mobile type scale', () => {
 const CSS_DEFAULT_BASE_PX = 16;
 
 function webRemBasePx(): number {
-  const pct = /html \{ font-size: ([\d.]+)%; \}/.exec(WEB_CSS);
+  const pct = /html \{ font-size: ([\d.]+)%; \}/.exec(WEB_CSS_PARSED);
   if (pct !== null) return (Number(pct[1]) / 100) * CSS_DEFAULT_BASE_PX;
   throw new Error('the stylesheet must set a PERCENTAGE rem base on html');
 }
+
+describe('the stylesheet the browser sees', () => {
+  it('the comment stripper can see a comment at all', () => {
+    // Positive control, per the "prove the tool returns a POSITIVE" habit: a
+    // stripper that returned its input unchanged would make the assertion below
+    // vacuous, and a stripper that returned '' would make it vacuously true.
+    expect(stripCssComments('a{} /* gone */ b{}')).toBe('a{}  b{}');
+    expect(WEB_CSS_PARSED.length).toBeGreaterThan(10_000);
+    expect(WEB_CSS_PARSED.length).toBeLessThan(styleBlock(WEB_CSS).length);
+  });
+
+  it('has NO stray comment terminator, so no rule is silently discarded', () => {
+    // The assertion the type base needed. A closer left in the parsed output means a
+    // comment ended early and the prose after it became garbage in selector position
+    // — everything up to the next `{...}` is then dropped by error recovery, which is
+    // invisible to any test that greps the raw file.
+    const strays = [...WEB_CSS_PARSED.matchAll(/.{0,60}\*\/.{0,60}/g)].map((m) => m[0].trim());
+    expect(
+      strays,
+      `these sit OUTSIDE any comment — a rule after each one is being dropped:\n${strays.join('\n---\n')}`,
+    ).toEqual([]);
+    // And the complement: no comment left open, which would eat the rest of the sheet.
+    const openers = (styleBlock(WEB_CSS).match(/\/\*/g) ?? []).length;
+    const closers = (styleBlock(WEB_CSS).match(/\*\//g) ?? []).length;
+    expect(closers, 'unbalanced CSS comment delimiters').toBe(openers);
+  });
+});
 
 describe('web type scale', () => {
   it('the rem BASE is the new body size, and is reader-relative', () => {
@@ -98,17 +167,17 @@ describe('web type scale', () => {
     // form that respects a configured base — a `px` here would satisfy the size
     // assertion and quietly break the preference.
     expect(webRemBasePx()).toBeGreaterThanOrEqual(TELEGRAM_BODY_PX);
-    expect(WEB_CSS, 'the rem base must be a percentage, not px').toMatch(
+    expect(WEB_CSS_PARSED, 'the rem base must be a percentage, not px').toMatch(
       /html \{ font-size: [\d.]+%; \}/,
     );
-    expect(WEB_CSS).not.toMatch(/html \{ font-size: [\d.]+px; \}/);
+    expect(WEB_CSS_PARSED).not.toMatch(/html \{ font-size: [\d.]+px; \}/);
   });
 
   it('body uses the base and a themed line-height', () => {
-    expect(WEB_CSS).toContain('font: 1rem/var(--body-line)');
+    expect(WEB_CSS_PARSED).toContain('font: 1rem/var(--body-line)');
     // Light text on a dark ground reads lighter than it is and needs more leading.
-    const dark = /:root \{[\s\S]*?--body-line: ([\d.]+);/.exec(WEB_CSS);
-    const light = /:root\[data-theme="light"\] \{[\s\S]*?--body-line: ([\d.]+);/.exec(WEB_CSS);
+    const dark = /:root \{[\s\S]*?--body-line: ([\d.]+);/.exec(WEB_CSS_PARSED);
+    const light = /:root\[data-theme="light"\] \{[\s\S]*?--body-line: ([\d.]+);/.exec(WEB_CSS_PARSED);
     expect(dark, 'dark must declare --body-line').not.toBeNull();
     expect(light, 'light must declare --body-line').not.toBeNull();
     expect(Number(dark![1])).toBeGreaterThan(Number(light![1]));
@@ -119,8 +188,7 @@ describe('web type scale', () => {
     // `font-size: Npx` declarations sat between 10px and 22px; a 17px body would
     // have made every one of them read undersized. They are all `rem` now, so the
     // one base above moves the whole UI.
-    const style = WEB_CSS.slice(WEB_CSS.indexOf('<style>'), WEB_CSS.indexOf('</style>'));
-    const pinned = [...style.matchAll(/font-size: ([\d.]+)px/g)].map((m) => m[0]);
+    const pinned = [...WEB_CSS_PARSED.matchAll(/font-size: ([\d.]+)px/g)].map((m) => m[0]);
     // ZERO now, with no exception. The html base used to be the one legitimate px
     // font-size; expressing it as a percentage removes even that, so the rule has no
     // carve-out left to hide behind.
@@ -130,7 +198,7 @@ describe('web type scale', () => {
   it('and there are many rem sizes, so the rule was applied not deleted', () => {
     // The positive half: a stylesheet that had simply dropped its font sizes would
     // satisfy the assertion above.
-    const rems = [...WEB_CSS.matchAll(/font-size: [\d.]+rem/g)];
+    const rems = [...WEB_CSS_PARSED.matchAll(/font-size: [\d.]+rem/g)];
     expect(rems.length).toBeGreaterThan(100);
   });
 });
@@ -151,10 +219,10 @@ describe('the two clients agree', () => {
     // tighter than the old pin.
     for (const sel of ['.car-md p', '.car-text']) {
       const rule = new RegExp(`\\${sel.replace('.', '.')}[^}]*line-height: var\\(--chat-line\\)`);
-      expect(WEB_CSS, `${sel} must take its leading from --chat-line`).toMatch(rule);
+      expect(WEB_CSS_PARSED, `${sel} must take its leading from --chat-line`).toMatch(rule);
     }
-    const dark = /:root \{[\s\S]*?--chat-line: ([\d.]+);/.exec(WEB_CSS);
-    const light = /:root\[data-theme="light"\] \{[\s\S]*?--chat-line: ([\d.]+);/.exec(WEB_CSS);
+    const dark = /:root \{[\s\S]*?--chat-line: ([\d.]+);/.exec(WEB_CSS_PARSED);
+    const light = /:root\[data-theme="light"\] \{[\s\S]*?--chat-line: ([\d.]+);/.exec(WEB_CSS_PARSED);
     expect(dark, 'dark must declare --chat-line').not.toBeNull();
     expect(light, 'light must declare --chat-line').not.toBeNull();
     // Same relationship as --body-line, for the same reason.
