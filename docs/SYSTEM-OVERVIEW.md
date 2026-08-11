@@ -804,10 +804,17 @@ there is nothing underneath him.
   stated 20 s share of the budget across the servers actually wired (one or two still get
   the full 10 s) rather than letting N hung servers each honour 10 s and collectively blow
   it. Whether the CLI's blocking connect group loads serially is NOT verified, so it is
-  sized for the worse case. Past ~10 servers a 2 s floor wins and the serial worst case CAN
-  exceed the budget — stated here and asserted in the test rather than glossed, because a
-  timeout short enough to fit would fail healthy servers; closing it properly needs a
-  concurrent load or a larger budget, not a smaller per-server bound.
+  sized for the worse case. Past ten servers a 2 s floor wins, because a timeout short
+  enough to keep dividing would fail HEALTHY servers — so the floor is not allowed to
+  over-subscribe the budget and `MCP_SERVERS_MAX` is DERIVED from the two constants
+  (20 s budget / 2 s floor = **10 installed servers**, the number `max_servers` advertises
+  and the store enforces). It was 24, which permitted 48 s of startup against the 30 s
+  ready budget; a test sweeps every count from 1 to the cap so raising one without the
+  other fails CI. What that does NOT cover, stated rather than implied: `MCP_TIMEOUT` is
+  process-wide and also governs the two compiled-in servers, so the true serial worst case
+  is (N + 2) shares — correcting the divisor is deliberately refused because it would
+  shrink the healthy one-server case to bound two local processes that are never slow, and
+  the residual failure is a bounded, visible assertion failure into the respawn ladder.
 - **The config, secrets and all, is cleaned up on EVERY path.** The MCP config carries
   the dev-channel token and each server's env values at 0600 inside a 0700 per-spawn
   directory. A throw between writing it and having a child (the child-exit handler owns

@@ -8762,3 +8762,39 @@ reported as write-only by a grep for four symbols that do not exist in the tree.
 not re-fixed.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.
+
+## 2026-08-10 — the advertised MCP-server maximum is now a number the startup bound can honour
+
+`MCP_SERVERS_MAX` is 10, derived rather than picked:
+`OWNER_MCP_STARTUP_BUDGET_MS / OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS` (20 s / 2 s in
+`runtime/adapters/claude-code/persistent/signatures.ts`). It was 24, and the spawn's
+per-server `MCP_TIMEOUT` stops dividing at a 2 s floor, so twenty-four servers permitted 48 s
+of owner-server startup against the 30 s `readyBudgetMs` in `post-spawn-assertion.ts` — the
+owner could install up to the maximum `GET /api/app/mcp-servers` advertises and be handed a
+bound the arithmetic could not deliver. The cap was the only free variable of the three: the
+budget is a share of the ready window on his PRIMARY conversational REPL, and a shorter floor
+fails servers that are working.
+
+Two prior reviews looked at this and accepted it, both comparing the floor against the ready
+budget and neither asking why the cap was 24. The floor reasoning was sound; the cap was the
+half nobody examined.
+
+📌 **A test that asserts two numbers DISAGREE passes forever and reads as intent.** The old
+assertion was `expect(FLOOR * MCP_SERVERS_MAX).toBeGreaterThan(BUDGET)` under the title "does
+not pretend the floor closes the gap" — honest about the defect and, in being honest, pinning
+it in place. It is now `toBe(BUDGET)` plus a sweep over every count from 1 to the cap, which
+is what covers the middle of the range where the division rather than the floor is the bound.
+Two mutants run, both dead: the cap back to 24 fails with `Expected: 20000, Received: 48000`,
+and `Math.floor` → `Math.ceil` fails at `20001` — the second dies ONLY in the sweep, since
+every endpoint assertion survives it, which is the proof the loop carries weight.
+
+Three docblocks were corrected alongside, each describing the state before the fix, including
+one cross-reference to a failure the paragraph it pointed at no longer described. The
+`(N + 2)` undercount — `MCP_TIMEOUT` is process-wide and also governs the two compiled-in
+servers — is unchanged and still deliberately accepted, now stated next to what IS closed.
+
+Seven of the eight items handed to this round were already fixed by rounds 4-6 and were
+re-read in the code rather than trusted from the brief; the `retireOnIdle` "write-only" report
+remains false and was again left alone.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md` § Round 7.

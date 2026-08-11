@@ -1250,3 +1250,90 @@ The security invariants were re-checked and hold: an unapproved server is never 
 changed command, args or env-var NAMES requires re-approval; the prompt renders what is
 granted and never a value; `cc-import-*` and `cc-trident-*` receive nothing; the session MCP
 config stays `0600`.
+
+## Round 7 — the advertised maximum was a number the startup bound could not honour
+
+Round 4 closed with the aggregate-startup-budget finding left open, on the reasoning quoted
+two sections up: the docblock states the tradeoff accurately, the floor exists because
+dividing further fails healthy servers, and the residual failure is bounded and visible. That
+reasoning was sound about the FLOOR and wrong about the CAP, which is the half nobody
+examined. Both reviews that looked at it compared the floor against the ready budget and
+accepted the mismatch. Neither asked why `MCP_SERVERS_MAX` was 24.
+
+Nothing derived it. `runtime/mcp-servers.ts` carried `export const MCP_SERVERS_MAX = 24` under
+the comment "Most servers one instance may install" — a number picked independently of the
+arithmetic that has to honour it. `runtime/adapters/claude-code/persistent/signatures.ts`
+divides a 20 s budget between the wired servers and stops at a 2 s floor, so 24 servers permit
+48 s of owner-server startup against the 30 s `readyBudgetMs` in
+`runtime/adapters/claude-code/persistent/post-spawn-assertion.ts`. The cap is the ONLY free
+variable of the three: the budget is a share of the ready window on the owner's primary
+conversational REPL and cannot grow, and a shorter floor fails servers that are working.
+
+So the cap is now derived — `OWNER_MCP_STARTUP_BUDGET_MS / OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS`
+= 10 — and the aggregate fits at every count the owner can reach instead of only at small
+ones. This is a real product-surface reduction: `GET /api/app/mcp-servers` now advertises
+`max_servers: 10`, and `gateway/mcp-servers/store.ts` refuses the eleventh install. Ten stdio
+subprocesses on one box is well past what a single owner runs, and the alternative was
+continuing to advertise a ceiling of 24 while the code could only bound 10 — a promise, not a
+limit.
+
+It is a literal rather than an import because `runtime/mcp-servers.ts` is substrate-neutral
+and those two constants belong to one adapter. The equality is pinned instead by a sweep in
+`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts`, so raising the
+cap without raising the budget fails CI.
+
+### The test that documented the gap now closes it
+
+The old assertion was `expect(FLOOR * MCP_SERVERS_MAX).toBeGreaterThan(BUDGET)` under the
+title "does not pretend the floor closes the gap". It was honest, and it pinned the defect in
+place: a test asserting that the numbers DISAGREE passes forever and reads as intent. It is
+now `toBe(BUDGET)`, plus a loop over every count from 1 to the maximum asserting
+`ownerMcpStartupTimeoutMs(n) * n <= BUDGET`. The loop is what covers the middle of the range,
+where the division rather than the floor is the bound.
+
+Three docblocks were corrected in the same change, because each described the old state.
+`signatures.ts` claimed `MCP_SERVERS_MAX` "permits far more" and that "the serial worst case
+CAN then exceed the ready budget"; the paragraph on the `(N + 2)` undercount then referred to
+"the same bounded, visible failure the floor paragraph describes", a cross-reference to a
+failure that paragraph no longer describes. A stale docblock that points at another stale
+docblock is how the next reader inherits the wrong model of the system.
+
+### What this deliberately does NOT close
+
+`MCP_TIMEOUT` is process-wide, so it also governs the two compiled-in servers (the in-process
+tools bridge and the per-session dev-channel sink) and the true serial worst case is `(N + 2)`
+shares, not `N`. At N=1 that is 3 × 10 s = the whole 30 s budget. Correcting the divisor is
+still refused for the reason already documented — it would shrink the healthy one-server case
+from 10 s to ~6.6 s to bound two local processes that are never slow — and the derived cap
+does not change that. Both the docblock and the test now say so in the same place they assert
+what IS closed, rather than leaving the reader to discover the difference.
+
+### Mutation log — both mutants RUN, both dead
+
+| Mutation | Result |
+|---|---|
+| `MCP_SERVERS_MAX` back to 24 | 1 fail — `Expected: 20000, Received: 48000`; the exact arithmetic the finding described |
+| `Math.floor` → `Math.ceil` in `ownerMcpStartupTimeoutMs` | 1 fail — `Expected: <= 20000, Received: 20001` |
+
+The second mutant is the one worth keeping. Every endpoint assertion in that test still passes
+under it — n=1, n=2, n=4 and n=`MAX` are all unchanged by the rounding — so it dies ONLY in
+the sweep, which is the proof the loop carries weight rather than decorating the assertions
+around it.
+
+### Verified rather than re-fixed
+
+Seven of the eight items handed to this round were already closed on the branch by rounds 4–6,
+and were re-read in the code rather than trusted from the brief: the `mcp_env.*` reservation
+with its `*Reserved` methods and 400 mapping (`project-credentials/store.ts`), the
+`getOrSpawnLocks` serialization of warm replacement (`spawn.ts`), the `committedDispatches`
+term that closes the get-or-spawn-to-`acquireTurn` eviction window (`pool.ts`), the evictor's
+self-retire for a spawn with no dispatch behind it, the `finally`-based revocation announce on
+the partial-failure edit path (`gateway/mcp-servers/store.ts`), the property-based invisibles
+regex, and the two over-broad test titles. The `retireOnIdle` "write-only" report remains
+false and was again left alone.
+
+The security invariants were re-checked against this change specifically. Lowering a count cap
+cannot widen a grant: an unapproved server is still never wired, a changed command, args or
+env-var NAMES still requires re-approval, the prompt still renders names and never a value,
+`cc-import-*` and `cc-trident-*` still receive nothing, and the session MCP config is still
+`0600`.

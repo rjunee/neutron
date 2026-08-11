@@ -45,10 +45,9 @@ export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
  * `readyBudgetMs`", which quietly compared two quantities that are not comparable.
  * `MCP_TIMEOUT` bounds ONE server's `initialize`; `readyBudgetMs` bounds the WHOLE
  * spawn. If `claude` loads the blocking connect group serially, four hung servers
- * exhaust the budget between them while every individual timeout is honoured — and
- * `runtime/mcp-servers.ts`'s `MCP_SERVERS_MAX` permits far more. Whether the CLI's
- * load is serial or concurrent is NOT verified here, so the bound is sized for the
- * worse of the two rather than assuming the better.
+ * exhaust the budget between them while every individual timeout is honoured. Whether
+ * the CLI's load is serial or concurrent is NOT verified here, so the bound is sized for
+ * the worse of the two rather than assuming the better.
  *
  * So the per-server bound is DIVIDED across the servers actually wired, against
  * {@link OWNER_MCP_STARTUP_BUDGET_MS} — the share of the ready budget the MCP load may
@@ -56,14 +55,20 @@ export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
  * handshake) still fits. One or two servers get the same 10 s they got before, so the
  * ordinary case is unchanged.
  *
- * {@link OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS} is where the honesty has to be explicit:
- * past ~10 servers, dividing the budget would produce a timeout so short that healthy
- * servers fail to start, which trades a rare slow spawn for a broken one. The floor
- * wins there, and the serial worst case CAN then exceed the ready budget. What that
- * costs is bounded and visible — the spawn fails the assertion and takes the
- * bounded-respawn ladder, with `claude` reporting which server did not start — not
- * silent corruption. A genuine fix for 24 hung servers would be a concurrent load or a
- * larger budget, neither of which this bound can supply.
+ * {@link OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS} is the other half of the bound: past ten
+ * servers, dividing the budget further would produce a timeout so short that HEALTHY
+ * servers fail to start, which trades a rare slow spawn for a permanently broken one.
+ * The floor wins there — so the floor is not permitted to over-subscribe the budget, and
+ * `runtime/mcp-servers.ts`'s `MCP_SERVERS_MAX` is DERIVED from these two constants
+ * (budget / floor = 10) rather than chosen independently. That derivation is what makes
+ * "the serial worst case fits the budget" true at EVERY count the owner can reach
+ * instead of only at small ones.
+ *
+ * It did not used to be. The cap was 24, and 24 x the 2 s floor is 48 s against a 30 s
+ * ready budget: the floor won, the aggregate ran to 2.4x its share, and the docblock here
+ * described that as an accepted consequence — a bound the advertised maximum could not
+ * honour. Raising the cap again without raising the budget re-opens it, and the sweep in
+ * `__tests__/owner-mcp-servers.test.ts` fails when it does.
  *
  * ── THE DIVISOR COUNTS OWNER SERVERS; THE VARIABLE GOVERNS TWO MORE ─────────
  * `MCP_TIMEOUT` is PROCESS-WIDE. It applies to every server in the spawn's
@@ -79,8 +84,11 @@ export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
  * to bound two servers that are local to this box and effectively never slow — the
  * bridge is in-process and the sink is a bun script on loopback — and if either of them
  * really does take 10 s to answer `initialize`, the spawn has a worse problem than its
- * MCP budget. The cost of the undercount is the same bounded, visible failure the floor
- * paragraph describes; the cost of the correction would be paid on every ordinary spawn.
+ * MCP budget. The cost of the undercount is a BOUNDED, VISIBLE failure — the spawn fails
+ * the post-spawn assertion and takes the bounded-respawn ladder, with `claude` reporting
+ * which server did not start, not a silent wedge — while the cost of the correction would
+ * be paid on every ordinary spawn. This is the one part of the arithmetic the derived cap
+ * above does NOT close, and it is stated here rather than left to be rediscovered.
  */
 export const OWNER_MCP_STARTUP_TIMEOUT_MS = 10_000
 /**
