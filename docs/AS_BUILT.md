@@ -191,6 +191,35 @@ page is reported as unreadable". Re-adding the unparsed `branch=`/`prNumber=` pa
 the printed command reds "the printed command contains NO argument spelling the
 dispatcher would silently swallow".
 
+An association is not a permission, and the gate had been reading one as the other
+(#179, round 6). `author_association` was filtered on `OWNER`, `MEMBER` and
+`COLLABORATOR` under a docblock claiming those "mean write access" — false for
+`MEMBER`, which means org membership and is reported by a read-only or triage-only
+member of an org-owned repository. The trusted set is now `OWNER` and `COLLABORATOR`,
+exact on a user-owned repository, and the re-run workflow's trigger list matches it
+value for value; the org-owned answer (the collaborator-permission endpoint requiring
+`write`/`maintain`/`admin`) is documented rather than implemented, because it needs a
+token with push access that a fork's `pull_request` run does not get and would fail
+closed on every fork PR. Two more leaks of the same shape closed with it: an
+UNPARSEABLE verdict line was quoted into the public check log before the home-path
+check could reach it — the ordering, not a missing rule — so every refusal that
+echoes a value now redacts the account segment first; and mutation evidence could be
+one sentence pasted across `mutant`, `red` and `control`, which names no observation
+at all, so a self-identical entry is refused and the gate's own control fixture was
+rewritten to clear its own bar. Three latent classifier bugs went with them: `docs`
+exempted at any depth (so `open/docs/handler.ts` owed no evidence — now anchored to
+the root prose tree, while `__tests__` keeps its any-depth exemption), the re-run
+workflow selecting a run by branch name rather than by the PR its own
+`pull_requests` records, and the universal red-exit scan seeing only literal
+`return 1`. Two limits are stated rather than closed, because both lie outside what
+this repository can observe: branch adoption is an instruction to a dispatcher that
+lives elsewhere, and a verdict is testimony by a trusted author — this gate cannot
+re-run a mutant that ran on a reviewer's machine, so it refuses the shapes "nothing
+was run" reaches for and names the boundary past that. Re-verified at this head: 118
+pass / 0 fail, and the battery reports 48 applied, 48 caught, 0 survived — and now
+prints WHICH tests each mutant reds, so the per-guard rows in the detail entry are
+read off the run instead of recalled.
+
 Detail: `docs/as-built/2026-08-10-trident-verdict-gate.md`.
 
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)

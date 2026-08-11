@@ -67,6 +67,29 @@ const MUTANTS: [string, string, string][] = [
     'if (false) throw new VerdictError(`mutation entry has an empty ${key}`)',
   ],
   ['homedir-path-accepted', 'if (HOMEDIR_PATH.test(value)) {', 'if (false) {'],
+  ['self-identical-mutation-accepted', 'if (distinct.size < 3) {', 'if (false) {'],
+  [
+    // The quoting path publishes a value the home-path check has not reached yet, so
+    // its redaction is the only thing standing between a syntax error and an account
+    // name in a public log.
+    'error-quoting-unredacted',
+    '  return JSON.stringify(value.replace(HOMEDIR_PATH_GLOBAL, (_m, prefix: string) => `${prefix}<redacted>`))',
+    '  return JSON.stringify(value)',
+  ],
+  [
+    // `docs` matched at any depth exempted `open/docs/handler.ts` from owing
+    // evidence. Latent in this tree, and the classifier being wrong either way.
+    'nested-docs-dir-exempted',
+    "if (parts.length > 1 && ROOT_EXEMPT_DIRS.has(parts[0]!)) return false",
+    "if (parts.slice(0, -1).some((seg) => ROOT_EXEMPT_DIRS.has(seg))) return false",
+  ],
+  [
+    // MEMBER back in the trusted set: on an org-owned repository that is a read-only
+    // org member greening a required check.
+    'member-association-trusted',
+    "const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'COLLABORATOR'])",
+    "const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])",
+  ],
   // ---- a verdict is an approval, and this repository is public -----------------
   [
     'author-trust-filter-emptied',
@@ -171,8 +194,23 @@ const WORKFLOW_MUTANTS: [string, string, string][] = [
   ],
   [
     'rerun-ignores-which-pr-the-run-belongs-to',
-    '([.workflow_runs[] | select(.head_branch == $ref)] + .workflow_runs)[0]',
-    '.workflow_runs[0]',
+    '([.workflow_runs[] | select(any(.pull_requests[]?; .number == $pr))]',
+    '([.workflow_runs[] | select(false)]',
+  ],
+  [
+    'rerun-selects-by-branch-name-alone',
+    '                  ([.workflow_runs[] | select(any(.pull_requests[]?; .number == $pr))]\n' +
+      '                   + [.workflow_runs[] | select(.head_branch == $ref)]\n' +
+      '                   + .workflow_runs)[0]',
+    '                  ([.workflow_runs[] | select(.head_branch == $ref)] + .workflow_runs)[0]',
+  ],
+  [
+    'rerun-trusts-a-read-only-org-member',
+    "      (github.event.comment.author_association == 'OWNER' ||\n" +
+      "       github.event.comment.author_association == 'COLLABORATOR')",
+    "      (github.event.comment.author_association == 'OWNER' ||\n" +
+      "       github.event.comment.author_association == 'MEMBER' ||\n" +
+      "       github.event.comment.author_association == 'COLLABORATOR')",
   ],
 ]
 
@@ -195,20 +233,33 @@ const originals = new Map(CASES.map(([file]) => [file, readFileSync(file, 'utf8'
  *
  * So a CAUGHT verdict requires the runner to report actual FAILING TESTS. Anything
  * else is BROKEN and is not counted as caught.
+ *
+ * AND IT RETURNS THEIR NAMES, not only a count. A count says a mutant was caught by
+ * SOMETHING; it cannot say whether the test that caught it is the one that claims to
+ * cover that guard. The as-built entry for this work asserted per-guard coverage —
+ * "removing X fails the Y test" — off an output that had discarded exactly that, so
+ * the specific half of the claim was prose sitting on top of an aggregate. The names
+ * come out of the runner now, so the claim and the artifact are the same thing.
  */
-function runSuite(): { failures: number | null; detail: string } {
+function runSuite(): { failures: number | null; detail: string; failed: string[] } {
   const p = spawnSync('bun', ['test', TEST], { cwd: REPO_ROOT, encoding: 'utf8' })
-  if (p.error) return { failures: null, detail: `could not run the suite: ${p.error.message}` }
-  if (p.status === null) return { failures: null, detail: `the runner was killed by signal ${p.signal}` }
+  if (p.error) return { failures: null, detail: `could not run the suite: ${p.error.message}`, failed: [] }
+  if (p.status === null) {
+    return { failures: null, detail: `the runner was killed by signal ${p.signal}`, failed: [] }
+  }
   const out = `${p.stdout ?? ''}${p.stderr ?? ''}`
+  // bun prints one `(fail) <describe> > <test>` line per failing case, with an
+  // optional trailing duration. Anything it does not print, this cannot invent.
+  const failed = [...out.matchAll(/^\(fail\)\s+(.*?)(?:\s+\[[\d.]+m?s\])?\s*$/gm)].map((m) => m[1]!.trim())
   const m = /^\s*(\d+)\s+fail$/m.exec(out)
   if (!m) {
     return {
       failures: null,
       detail: `exit ${p.status} with no parseable "N fail" line — the runner did not report a result`,
+      failed,
     }
   }
-  return { failures: Number(m[1]), detail: `exit ${p.status}, ${m[1]} failing` }
+  return { failures: Number(m[1]), detail: `exit ${p.status}, ${m[1]} failing`, failed }
 }
 
 // THE POSITIVE CONTROL, before any mutant is believed — the same discipline the
@@ -224,7 +275,7 @@ if (baseline.failures !== 0) {
 }
 console.log(`baseline: unmutated suite green (${baseline.detail})\n`)
 
-const results: [string, string][] = []
+const results: { name: string; verdict: string; failed: string[] }[] = []
 
 for (const [file, name, from, to] of CASES) {
   const original = originals.get(file)!
@@ -233,28 +284,34 @@ for (const [file, name, from, to] of CASES) {
     // A mutant whose pattern no longer matches is a STALE mutant, and it must be
     // loud: silently skipping it would shrink the battery while the summary still
     // read "all caught".
-    results.push([name, `STALE-PATTERN (${hits} matches)`])
+    results.push({ name, verdict: `STALE-PATTERN (${hits} matches)`, failed: [] })
     console.log(`STALE     ${name} — pattern matched ${hits} times, not 1`)
     continue
   }
   writeFileSync(file, original.replace(from, to))
   try {
-    const { failures, detail } = runSuite()
+    const { failures, detail, failed } = runSuite()
     // Three outcomes, not two. `failures === 0` is a real SURVIVOR: the suite ran
     // and passed against a gate that accepts what it exists to refuse. `null` is a
     // measurement that did not happen, and calling that CAUGHT is how a battery
     // reports coverage it never observed.
     const verdict = failures === null ? `BROKEN (${detail})` : failures > 0 ? 'CAUGHT' : 'SURVIVED'
-    results.push([name, verdict])
+    results.push({ name, verdict, failed })
     console.log(`${verdict.padEnd(9)} ${name}`)
+    // WHICH tests, printed with the mutant rather than summarised away. This is what
+    // makes "removing this guard reds that test" a reproducible line instead of a
+    // recollection. Capped, because one mutant can red dozens and the useful part is
+    // whether the NAMED guard's own test is among them.
+    for (const t of failed.slice(0, 6)) console.log(`          red: ${t}`)
+    if (failed.length > 6) console.log(`          red: …and ${failed.length - 6} more`)
   } finally {
     writeFileSync(file, original)
   }
 }
 
-const caught = results.filter(([, v]) => v === 'CAUGHT').length
+const caught = results.filter((r) => r.verdict === 'CAUGHT').length
 console.log(`\n${results.length} mutants applied, ${caught} caught, ${results.length - caught} survived`)
-for (const [name, verdict] of results) {
+for (const { name, verdict } of results) {
   if (verdict !== 'CAUGHT') console.log(`  ${verdict}: ${name}`)
 }
 process.exit(caught === results.length ? 0 : 1)

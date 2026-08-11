@@ -401,6 +401,24 @@ describe('mutation evidence is owed by executable surface, not by prose', () => 
       expect(touchesGatedSurface(exempt)).toBe(false)
     }
   })
+
+  test('a `docs` directory NESTED somewhere else is not prose — only the root docs tree is', () => {
+    // `docs` was matched at any depth, so an executable module under a nested
+    // directory that happens to be named `docs` owed no mutation evidence. No such
+    // file is in the tree today, which is why this survived two rounds — and a
+    // classifier that can be walked around as soon as somebody makes a directory is
+    // wrong now, not wrong later.
+    for (const gated of ['open/docs/handler.ts', 'scripts/docs/build.sh', 'app/docs/render.tsx']) {
+      expect(touchesGatedSurface(gated)).toBe(true)
+    }
+    // The root prose tree still exempts, at any depth inside it.
+    for (const exempt of ['docs/plans/thing.md', 'docs/tools/generate.ts']) {
+      expect(touchesGatedSurface(exempt)).toBe(false)
+    }
+    // And `__tests__` keeps its any-depth exemption — that one is test scaffolding
+    // wherever it sits, which is the difference between the two sets.
+    expect(touchesGatedSurface('open/nested/__tests__/helper.ts')).toBe(false)
+  })
 })
 
 // --------------------------------------------------------------------------- //
@@ -448,7 +466,7 @@ describe('the failure REDEEMS the branch into a review lane', () => {
     },
   ]
 
-  test('EVERY red exit in the gate prints the redemption — checked against the source, not the table', () => {
+  test('EVERY red exit SHAPE in the gate prints the redemption — checked against the source', () => {
     // The table below is a table, and its name used to be a universal claim: "every
     // failure path prints the command". It omitted four real paths while asserting
     // it covered all of them, and the enumeration cannot ever prove otherwise —
@@ -465,12 +483,23 @@ describe('the failure REDEEMS the branch into a review lane', () => {
     // `printRedemption`, and passed a red exit that printed nothing. Measured — a
     // mutant that adds exactly that survived, which is the whole failure mode this
     // test exists to catch.
+    // WHAT "EVERY" MEANS HERE, because the previous name claimed more than the check
+    // delivered. This scans the source for red-exit SHAPES: a returned non-zero
+    // literal (`return 1`, `return 2`) and a `process.exit(<non-zero>)`. A red exit
+    // written some OTHER way — `return code` where `code` is computed, a thrown value
+    // some caller turns into 1 — is invisible to a source scan and always will be.
+    // Two things keep that gap small rather than open: `runGate` catches everything
+    // thrown and redeems on the way out (its own row is in the table below), and the
+    // gate has exactly one non-zero return value. The claim is "every red exit shape
+    // this scan can see", and now the name says that instead of implying more.
     const src = read('scripts/ci/trident-verdict.ts')
     const lines = src.split('\n')
     const indentOf = (l: string): number => /^ */.exec(l)![0].length
+    const isRedExit = (l: string): boolean =>
+      /^\s*return [1-9]\d*\b/.test(l) || /^\s*process\.exit\([1-9]\d*\)/.test(l)
     const unredeemed: string[] = []
     lines.forEach((line, i) => {
-      if (!/^\s*return 1\b/.test(line)) return
+      if (!isRedExit(line)) return
       let redeemed = false
       for (let j = i - 1; j >= 0; j--) {
         const above = lines[j]!
@@ -486,8 +515,10 @@ describe('the failure REDEEMS the branch into a review lane', () => {
       if (!redeemed) unredeemed.push(`line ${i + 1}: ${line.trim()}`)
     })
     // The count is asserted too: a refactor that deletes every red exit would
-    // otherwise satisfy an emptiness check trivially.
-    expect(lines.filter((l) => /^\s*return 1\b/.test(l)).length).toBeGreaterThanOrEqual(8)
+    // otherwise satisfy an emptiness check trivially. The floor is a restated number
+    // and it is a floor for that reason — it exists to catch "the scan found nothing",
+    // not to pin the exact shape of the gate.
+    expect(lines.filter(isRedExit).length).toBeGreaterThanOrEqual(8)
     expect(unredeemed).toEqual([])
   })
 
@@ -764,13 +795,27 @@ describe('only an author with write access can record a verdict', () => {
     expect(await runGate(h.deps)).toBe(0)
   })
 
-  test('the three write-access associations count, case-insensitively, and nothing else does', () => {
-    for (const ok of ['OWNER', 'MEMBER', 'COLLABORATOR', 'owner', ' Collaborator ']) {
+  test('OWNER and COLLABORATOR count, case-insensitively, and nothing else does', () => {
+    for (const ok of ['OWNER', 'COLLABORATOR', 'owner', ' Collaborator ']) {
       expect(isTrustedAuthor(ok)).toBe(true)
     }
     for (const no of ['CONTRIBUTOR', 'NONE', '', undefined, 'OWNER_OF_SOMETHING']) {
       expect(isTrustedAuthor(no)).toBe(false)
     }
+  })
+
+  test('MEMBER is NOT write access — it is org membership, and it does not count', async () => {
+    // Two reviewers confirmed the docblock's claim that OWNER/MEMBER/COLLABORATOR
+    // "mean write access" was false. MEMBER means "belongs to the org that owns the
+    // repository", which on an org-owned repository is satisfied by a read-only or
+    // triage-only member — so trusting it hands a required check to an account with
+    // no write access at all. On this user-owned repository the value cannot occur,
+    // which made the hole latent rather than live and is exactly why it survived two
+    // rounds. This test is the thing that dies if MEMBER is put back.
+    expect(isTrustedAuthor('MEMBER')).toBe(false)
+    const h = harness({ comments: [{ body: verdictBlock(HEAD), author_association: 'MEMBER' }] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('none of them is a verdict')
   })
 
   test('"posted but not counted" is a different message from "nobody posted one"', async () => {
@@ -1070,7 +1115,7 @@ describe('TRIDENT_BYPASS needs write access, not just a commit message', () => {
   })
 
   test('and the same marker from an account WITH write access still works', async () => {
-    for (const assoc of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+    for (const assoc of ['OWNER', 'COLLABORATOR']) {
       const h = harness({
         comments: [],
         prAuthorAssociation: assoc,
@@ -1125,7 +1170,7 @@ describe('a verdict may not carry a home-directory absolute path', () => {
   test('a mutation field citing an absolute home path is refused', async () => {
     for (const p of HOME_PATHS) {
       const body = verdictBlock(HEAD).replace('  red: gate accepted a stale verdict', `  red: broke ${p}`)
-      expect(() => parseVerdict(body)).toThrow(/home-directory absolute path/)
+      expect(() => parseVerdict(body)).toThrow(/absolute path under a home directory/)
       const h = harness({ comments: [body] })
       expect(await runGate(h.deps)).toBe(1)
       expect(h.output()).toContain('malformed verdict block')
@@ -1161,6 +1206,77 @@ describe('a verdict may not carry a home-directory absolute path', () => {
         parseVerdict(verdictBlock(HEAD).replace('  control: 12/12 green', `  control: ${ok} unchanged`)),
       ).not.toThrow()
     }
+  })
+
+  test('a SYNTAX error on a line carrying a home path is quoted REDACTED, not verbatim', async () => {
+    // The leak the home-path rule could not reach. `rejectHomePath` runs after the
+    // line has parsed, and an unparseable line is quoted back before that — it has
+    // to be, or the author cannot find the line to fix. So the quoting path was the
+    // one place a public check log could publish an account name, and it is the
+    // ordering that made it invisible rather than any missing check.
+    for (const p of HOME_PATHS) {
+      const body = verdictBlock(HEAD).replace('  red: gate accepted a stale verdict', `  red ${p} no colon here`)
+      const h = harness({ comments: [body] })
+      expect(await runGate(h.deps)).toBe(1)
+      expect(h.output()).toContain('unparseable verdict line')
+      // The diagnostic survives — the reader still sees which line — and the account
+      // name does not.
+      expect(h.output()).toContain('<redacted>')
+      expect(h.output()).not.toContain('someone')
+    }
+  })
+
+  test('and a non-integer count carrying a home path is redacted too, not just the syntax path', async () => {
+    // Same class, different message: every refusal that echoes a value is on this
+    // hook now, so a future one does not have to rediscover the ordering.
+    const body = verdictBlock(HEAD, { 'codex.blocking': '/Users/someone/notes.md' })
+    const h = harness({ comments: [body] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).not.toContain('someone')
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// Mutation evidence has to name three DIFFERENT observations
+// --------------------------------------------------------------------------- //
+
+describe('one sentence in all three mutation fields is not evidence', () => {
+  const same = 'I ran the mutation testing and it was fine'
+
+  test('mutant, red and control repeating the same text is refused', async () => {
+    const body = [
+      '```review-evidence',
+      `commit: ${HEAD}`,
+      'codex.ran: true',
+      'codex.blocking: 0',
+      'adversarial.ran: true',
+      'adversarial.blocking: 0',
+      `- mutant: ${same}`,
+      `  red: ${same}`,
+      `  control: ${same}`,
+      '```',
+    ].join('\n')
+    expect(() => parseVerdict(body)).toThrow(/three different observations/)
+    const h = harness({ comments: [body] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('malformed verdict block')
+  })
+
+  test('and TWO of the three matching is refused as well — case and padding do not rescue it', () => {
+    const body = verdictBlock(HEAD).replace('  control: 12/12 green', '  control:  Gate Accepted A Stale Verdict ')
+    expect(() => parseVerdict(body)).toThrow(/three different observations/)
+  })
+
+  test('three genuinely different observations pass — this is a floor, not a style rule', async () => {
+    const h = harness({ comments: [verdictBlock(HEAD)] })
+    expect(await runGate(h.deps)).toBe(0)
+  })
+
+  test("the gate's own control fixture clears this bar too", async () => {
+    // A control fixture that could not pass the gate's own guards would report BROKEN
+    // LOOKUP on every PR, so the guard and the fixture have to be checked together.
+    const control = await selfTest()
+    expect(control.ok).toBe(true)
   })
 })
 
@@ -1240,9 +1356,13 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     // minutes by pasting the fence.
     expect(rerun).toContain('github.event.issue.pull_request != null')
     expect(rerun).toContain('review-evidence')
-    for (const assoc of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+    for (const assoc of ['OWNER', 'COLLABORATOR']) {
       expect(rerun).toContain(`author_association == '${assoc}'`)
     }
+    // Value for value with the gate's own set, MEMBER included in the exclusion:
+    // a trigger list that is WIDER than the gate's is an account that can spend
+    // runner minutes on a check it can never satisfy.
+    expect(rerun).not.toContain("author_association == 'MEMBER'")
     // Keyed to the head SHA, like everything else here.
     expect(rerun).toContain('head_sha=$head_sha')
     // It must never be able to satisfy the required check itself: it is not a
@@ -1313,7 +1433,14 @@ describe('the re-run workflow re-reads the comments for a run that already passe
     return lines.map((l) => l.slice(indent)).join('\n')
   })()
 
-  type Run = { id: number; status: string; conclusion: string | null; head_branch: string }
+  type Run = {
+    id: number
+    status: string
+    conclusion: string | null
+    head_branch: string
+    /** What the run itself records about which PR it was for. Empty on `push` runs. */
+    pull_requests?: { number: number }[]
+  }
 
   /** Run the real script with a stub `gh`, and report what it asked `gh` to do. */
   const exec = (runsPerCall: Run[][], opts: { waitSeconds?: string } = {}) => {
@@ -1422,6 +1549,45 @@ describe('the re-run workflow re-reads the comments for a run that already passe
     expect(code).toBe(0)
     expect(reruns).toEqual([])
     expect(out).toContain('No ci run recorded')
+  })
+
+  test("the run that RECORDS this PR number wins, even over a run on this PR's branch name", () => {
+    // A branch name is not a PR identity, and selecting on it was the whole tie-break
+    // before this tier existed. Both of these runs are for the head commit; the one
+    // whose own `pull_requests` names PR 42 is the one whose check this comment is
+    // about, and it is deliberately NOT the branch-name match here so that a
+    // branch-only selector picks the wrong run and reds this test.
+    const branchMatchButOtherPr: Run = {
+      id: 999,
+      status: 'completed',
+      conclusion: 'failure',
+      head_branch: 'trident/some-work',
+      pull_requests: [{ number: 7 }],
+    }
+    const mine: Run = {
+      id: 555,
+      status: 'completed',
+      conclusion: 'failure',
+      head_branch: 'a-fork-branch-with-another-name',
+      pull_requests: [{ number: 42 }],
+    }
+    const { reruns } = exec([[branchMatchButOtherPr, mine]])
+    expect(reruns).toEqual(['run rerun 555 --repo owner/neutron'])
+  })
+
+  test('a run that records no PR at all falls through to the branch tier, not to nothing', () => {
+    // `pull_requests` is empty on a run triggered by `push`, so the PR tier can
+    // legitimately match nothing. It must degrade to the branch signal rather than
+    // becoming a filter that stops re-running anything.
+    const pushRun: Run = {
+      id: 555,
+      status: 'completed',
+      conclusion: 'failure',
+      head_branch: 'trident/some-work',
+      pull_requests: [],
+    }
+    const { reruns } = exec([[pushRun]])
+    expect(reruns).toEqual(['run rerun 555 --repo owner/neutron'])
   })
 
   test("the run belonging to THIS PR's branch is preferred over another PR sharing the head commit", () => {

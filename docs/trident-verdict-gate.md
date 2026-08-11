@@ -125,11 +125,28 @@ the internet could green a required check on a change it never reviewed — and,
 by posting a deliberately malformed block, could equally force a reviewed PR
 **red**, because a malformed newest candidate is fatal by design.
 
-So the comment's `author_association` must be `OWNER`, `MEMBER` or
-`COLLABORATOR` — the three values that mean write access here. `CONTRIBUTOR`,
-`FIRST_TIME_CONTRIBUTOR`, `MANNEQUIN` and `NONE` are outside it. The filter runs
-**before** the parse, so an untrusted comment cannot reach the parser and cannot
-force a red either.
+So the comment's `author_association` must be `OWNER` or `COLLABORATOR`.
+`CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `MANNEQUIN` and `NONE` are outside it.
+The filter runs **before** the parse, so an untrusted comment cannot reach the
+parser and cannot force a red either.
+
+**`MEMBER` is not on that list, and an earlier version of this document said it
+was.** `author_association` describes a RELATIONSHIP, not a permission. `MEMBER`
+means "belongs to the organisation that owns the repository" — on an org-owned
+repository a read-only or triage-only member reports it, so trusting the value
+hands a required check to an account with no write access at all. This repository
+is user-owned, where the value cannot occur, which is why the claim went two review
+rounds unchallenged. `COLLABORATOR` *is* exact on a user-owned repository: a
+personal-repo collaborator has push.
+
+**Porting this gate to an org-owned repository needs a different check** — ask
+`GET /repos/{owner}/{repo}/collaborators/{username}/permission` and require
+`write`, `maintain` or `admin`. That is not what runs here, deliberately: it costs
+an API call per candidate author and needs a token with push access, which a
+`pull_request` run from a fork does not get, so it would fail closed as "could not
+read this PR" on every fork PR. A live reliability failure is a worse trade than a
+hole that cannot occur on this repository — but the next repository is where it
+can, so it is written down here rather than left to be re-derived.
 
 "Someone posted one and it does not count" is reported as its own message,
 separate from "nobody posted one". They call for opposite next actions.
@@ -275,7 +292,7 @@ because two reasons is a contradiction, not an update. The marker must be at col
 and placeholder-shaped) cannot arm it.
 
 **And it requires write access, exactly like a verdict does.** The hatch is
-honoured only when the pull request's `author_association` is `OWNER`, `MEMBER` or
+honoured only when the pull request's `author_association` is `OWNER` or
 `COLLABORATOR`. This repository is public and anyone may open a PR against it;
 authors write their own commit messages, so a hatch keyed to nothing but a string
 in one is a hatch every fork author holds — one line would have turned the required

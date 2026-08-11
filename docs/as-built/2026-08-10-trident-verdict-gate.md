@@ -53,7 +53,7 @@ required check writable by any GitHub account on the internet: post the block,
 turn the check green on a change you never reviewed. The mirror-image abuse is
 worse in a quieter way — a malformed newest candidate is fatal by design, so a
 stranger could force a REVIEWED PR red at will. `author_association` must now be
-`OWNER`, `MEMBER` or `COLLABORATOR`, and the filter runs BEFORE the parse so an
+`OWNER` or `COLLABORATOR`, and the filter runs BEFORE the parse so an
 untrusted comment cannot reach the parser at all. "Someone posted one and it does
 not count" is its own message, separate from "nobody posted one"; they call for
 opposite next actions. The trade is named rather than hidden: an external
@@ -323,7 +323,7 @@ public and a verdict is an approval. The hatch beside it checked only that the
 marker existed and carried a reason — and **fork authors write their own commit
 messages**, so one line would have turned the required check green on a change
 nobody reviewed. It is now honoured only when the PR's `author_association` is
-`OWNER`, `MEMBER` or `COLLABORATOR`, the same bar, checked before the reason is even
+`OWNER` or `COLLABORATOR`, the same bar, checked before the reason is even
 validated (so an outside author is told the hatch is unavailable rather than invited
 to try a better reason). A PR with no marker is untouched by the rule and still gets
 the ordinary "no verdict" message.
@@ -387,9 +387,9 @@ workflow is executable surface too.
 | `rerun-triggers-on-creation-only` | posting a verdict re-runs the ci run — the gate is not a one-shot read |
 | `rerun-ignores-the-pre-edit-body` | posting a verdict re-runs the ci run — the gate is not a one-shot read |
 | `rerun-abandons-an-in-progress-run` | an in-progress run is WAITED for, then re-run — not abandoned |
-| `rerun-ignores-which-pr-the-run-belongs-to` | the run belonging to THIS PR's branch is preferred over another PR sharing the head commit |
-| `redemption-dropped-from-one-path` | EVERY red exit in the gate prints the redemption |
-| `new-red-exit-with-no-redemption` | EVERY red exit in the gate prints the redemption |
+| `rerun-ignores-which-pr-the-run-belongs-to` | the run that RECORDS this PR number wins, even over a run on this PR's branch name |
+| `redemption-dropped-from-one-path` | EVERY red exit SHAPE in the gate prints the redemption |
+| `new-red-exit-with-no-redemption` | EVERY red exit SHAPE in the gate prints the redemption |
 
 Two claims were also structurally unprovable. **The battery never ran the unmutated
 suite**, and read only the exit code — so an already-red suite, a missing `bun`, or a
@@ -405,12 +405,82 @@ first version of that check used a fixed six-line window, and a mutant that adde
 unredeemed red exit SURVIVED it: the window reached over the block opener into the
 previous branch and found its `printRedemption`. The indentation walk kills it.
 
+### Round 6 — an association is not a permission, and a log that quotes is a log that leaks
+
+**`MEMBER` was trusted, and `MEMBER` is not write access.** `author_association`
+reports a RELATIONSHIP: it means "belongs to the organisation that owns the
+repository", which on an org-owned repository is satisfied by a read-only or
+triage-only member. The docblock asserted all three trusted values "mean write
+access to this repository", two reviewers called it false, and it was. The set is
+now `OWNER` and `COLLABORATOR` — exact on a user-owned repository, where a
+collaborator has push and `MEMBER` cannot occur at all. That last fact is why this
+survived two rounds: the hole was unreachable here, so nothing could ever
+demonstrate it. The re-run workflow's trigger list was widened to match the same
+two values, because a trigger list wider than the gate is an account that can spend
+runner minutes on a check it can never satisfy. The org-owned answer — the
+collaborator-permission endpoint, requiring `write`/`maintain`/`admin` — is written
+into the docblock and `docs/trident-verdict-gate.md` rather than implemented,
+because it costs a token with push access that a fork's `pull_request` run does not
+get, and it would fail closed as "could not read this PR" on every fork PR. Trading
+a live failure for an unreachable hole is the wrong way round; not writing the
+trade down is what leaves the next reader to re-derive it.
+
+**A syntax error published what the home-path rule existed to suppress.**
+`rejectHomePath` runs after a line has parsed. An UNPARSEABLE line is quoted back
+before that, and it has to be — the author cannot find the line otherwise — so the
+one refusal that had to echo was also the one the redaction never reached. It was
+the ordering, not a missing check. Every refusal that quotes a value now goes
+through `quoteRedacted`, which keeps the diagnostic and replaces the account
+segment: the reader still sees the offending line, and `/Users/<name>/…` leaves as
+`/Users/<redacted>/…`.
+
+**Mutation evidence had to be non-empty, unbracketed and not `n/a` — and could
+still be one sentence pasted three times.** The three fields name three different
+observations (what broke, which test went RED, which stayed GREEN), so repeating
+one across them names no observation at all; it is the same "nothing was run" the
+`n/a` rule refuses, wearing a longer disguise. `finishMutation` now refuses a
+self-identical entry, and the gate's own control fixture was rewritten to clear its
+own bar. This does not make a verdict provable — the gate cannot observe a run that
+happened on a reviewer's machine, and the module header now says so in those words,
+alongside the other limit it cannot close (a review lane's dispatcher is not in this
+repository, so no test here can make branch adoption deterministic). Both were
+raised as defects; both are boundaries, and naming them is the only honest form.
+
+**Three smaller corrections, all latent rather than live, all fixed as
+classifier bugs rather than deferred until reachable.** `docs` was exempted at any
+depth, so an executable module under a nested `docs/` directory owed no evidence —
+the exemption is now anchored to the root prose tree, while `__tests__` keeps its
+any-depth exemption because test scaffolding is scaffolding wherever it sits. The
+re-run workflow selected a CI run by head SHA with the branch name as tie-break;
+a branch name is not a PR identity, so it now prefers the run whose own
+`pull_requests` records this PR number, falling back to the branch (empty on
+`push`-triggered runs) and then to the newest. And "EVERY red exit prints the
+redemption" scanned only literal `return 1`; it now also sees `return <n>` and
+`process.exit(<n>)`, and its name says "every red exit SHAPE" because a computed
+return value is invisible to a source scan and always will be.
+
+| mutant | test that goes RED |
+| --- | --- |
+| `member-association-trusted` | MEMBER is NOT write access — it is org membership, and it does not count |
+| `error-quoting-unredacted` | a SYNTAX error on a line carrying a home path is quoted REDACTED, not verbatim |
+| `self-identical-mutation-accepted` | one sentence in all three mutation fields is not evidence |
+| `nested-docs-dir-exempted` | a `docs` directory NESTED somewhere else is not prose |
+| `rerun-selects-by-branch-name-alone` | the run that RECORDS this PR number wins |
+| `rerun-trusts-a-read-only-org-member` | posting a verdict re-runs the ci run |
+
+The battery itself was the last of it: it reported CAUGHT/SURVIVED counts and threw
+away WHICH tests went red, so the per-guard claims in this table were prose sitting
+on an aggregate. It prints the failing test names with each mutant now, which is how
+the six rows above were read off the run rather than recalled.
+
 ### Verification
 
-* `bun test scripts/ci/trident-verdict.test.ts` — **108 pass, 0 fail**.
-* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **42 applied, 42 caught, 0
-  survived**, reproducible by running it, and refusing to report at all unless the
-  unmutated suite is green.
+* `bun test scripts/ci/trident-verdict.test.ts` — **118 pass, 0 fail**.
+* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **48 applied, 48 caught, 0
+  survived**, reproducible by running it, refusing to report at all unless the
+  unmutated suite is green, and naming the tests each mutant reds.
+* `bash scripts/ci/typecheck-all.sh` — 51 tsconfigs, all pass. `bash
+  scripts/ci/lint.sh` — 0 found across every gate.
 * Still open, and unchanged by this round: the codex cross-model lane did not
   complete on round 2 (capacity), so that lane's verdict is owed rather than clean.
 

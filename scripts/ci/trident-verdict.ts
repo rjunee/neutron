@@ -35,6 +35,28 @@
  * the exact waste the redemption exists to prevent. The output now says what the
  * reader must ask for, and names the failure to watch for, instead.
  *
+ * WHAT THIS GATE CANNOT CHECK, stated here rather than left to be discovered,
+ * because both limits have been read as defects and both are boundaries instead:
+ *
+ *   1. ADOPTION IS AN INSTRUCTION, NOT A HANDSHAKE. The command in the failure
+ *      output asks a review lane to take over THIS branch and THIS PR. The lane's
+ *      dispatcher — the thing that decides whether that happens — is not in this
+ *      repository, so nothing here can make adoption deterministic, and no test
+ *      here can even read its grammar. What IS enforced from inside this tree:
+ *      the printed command contains no argument the dispatcher would silently
+ *      swallow (`DISPATCHER_PARSED_FLAGS`), and the output names the failure to
+ *      watch for. A lane that answers with a fresh branch is a gap in the lane.
+ *   2. THE VERDICT IS TESTIMONY, AND THE AUTHOR IS WHO IS ACCOUNTABLE FOR IT. This
+ *      gate checks that a review was RECORDED against this commit by someone with
+ *      write access, in a shape that cannot be produced by accident. It does not
+ *      re-run the mutants a verdict names, and could not: it has no way to observe
+ *      a run that happened on a reviewer's machine. So the guards below reject
+ *      evidence that is empty, templated, unusable (`n/a`) or self-identical —
+ *      every shape "nothing was run" reaches for — and past that the record is a
+ *      signed claim by a trusted author, not a proof. The deterministic artifact
+ *      that DOES observe mutants is `scripts/ci/trident-verdict-mutation-battery.ts`,
+ *      which runs them against this suite and prints which tests went red.
+ *
  * NOT A FILE IN THE PR'S OWN DIFF. The record deliberately lives OUTSIDE the
  * branch. A committed `verdict.json` would be self-certifying — the author of
  * the change would also be the author of its approval.
@@ -64,6 +86,17 @@ import { execFileSync } from 'node:child_process'
  * indented, or `> `-prefixed, the shape a sloppy reply produces — must not
  * compete for "newest verdict", or a discussion post can displace the real one.
  * `\r` is tolerated so CRLF bodies still parse.
+ *
+ * AND ANCHORING IS ALL IT DOES, said plainly because the previous wording read as
+ * a general claim about quoting. Two column-0 shapes still parse as live: a block
+ * nested inside a WIDER fence (four backticks), and one inside a `<details>`
+ * wrapper. Both render as quoted prose to a human and as a verdict to this regex,
+ * in both directions — a false green and a false red are each reachable that way.
+ * Neither is a privilege escalation: the author must still hold write access, so
+ * the reachable outcome is a trusted reviewer shadowing their OWN verdict by
+ * quoting it. That is a real footgun and a bounded one, and it is named here
+ * rather than papered over: `> `-prefixed and indented copies are covered, a
+ * wider fence is not.
  */
 export const VERDICT_FENCE = /^```review-evidence[ \t\r]*\n([\s\S]*?)\n```[ \t\r]*$/m
 
@@ -118,6 +151,23 @@ const FULL_SHA = /^[0-9a-f]{40}$/i
  * keep out of public output.
  */
 const HOMEDIR_PATH = /(?:^|[^A-Za-z0-9_])(?:\/(?:Users|home)\/|[A-Za-z]:\\Users\\)[^\s/\\]/
+/**
+ * Same three shapes, global and with the account segment captured, for REDACTING a
+ * value the gate has to quote back.
+ *
+ * Some refusals must echo the offending value or the reader cannot find the line
+ * they need to fix — "unparseable verdict line" is useless without the line. But
+ * this log is public output on a public repository, and the check that would have
+ * caught a home path runs LATER in the parse than the syntax error does, so the
+ * quoting path could publish exactly what `rejectHomePath` exists to keep out.
+ * Quoting a redacted copy keeps the diagnostic and drops the account name.
+ */
+const HOMEDIR_PATH_GLOBAL = /(\/(?:Users|home)\/|[A-Za-z]:\\Users\\)[^\s/\\]+/g
+
+/** Quote a value for the public check log with any account name removed. */
+function quoteRedacted(value: string): string {
+  return JSON.stringify(value.replace(HOMEDIR_PATH_GLOBAL, (_m, prefix: string) => `${prefix}<redacted>`))
+}
 
 export class VerdictError extends Error {}
 
@@ -150,14 +200,14 @@ function truthy(raw: string): boolean {
 function count(raw: string, key: string): number {
   const trimmed = raw.trim()
   if (!/^-?\d+$/.test(trimmed)) {
-    throw new VerdictError(`${key} must be an integer count, got ${JSON.stringify(trimmed)}`)
+    throw new VerdictError(`${key} must be an integer count, got ${quoteRedacted(trimmed)}`)
   }
   // Reject the MINUS SIGN, not the resulting number. `Number('-0')` is `-0`, and
   // `-0 < 0` is false — so a value-based guard lets `-0` through, and a regressed
   // producer emitting `-1` or `-0` would read as "zero blocking findings". A count
   // is never written with a sign, so the sign itself is the defect.
   if (trimmed.startsWith('-')) {
-    throw new VerdictError(`${key} must be a non-negative integer count, got ${JSON.stringify(trimmed)}`)
+    throw new VerdictError(`${key} must be a non-negative integer count, got ${quoteRedacted(trimmed)}`)
   }
   return Number(trimmed)
 }
@@ -165,7 +215,7 @@ function count(raw: string, key: string): number {
 function rejectPlaceholder(key: string, value: string): void {
   if (PLACEHOLDER.test(value.trim())) {
     throw new VerdictError(
-      `${key} is an unfilled template placeholder (${JSON.stringify(value.trim())}) — ` +
+      `${key} is an unfilled template placeholder (${quoteRedacted(value.trim())}) — ` +
         "the gate's own FAIL template is not a verdict",
     )
   }
@@ -178,9 +228,13 @@ function rejectPlaceholder(key: string, value: string): void {
 function rejectHomePath(key: string, value: string): void {
   if (HOMEDIR_PATH.test(value)) {
     throw new VerdictError(
-      `${key} contains a home-directory absolute path (not quoted here — this log is public). ` +
-        'A verdict is a public comment on a public repository and cannot be un-published, so ' +
-        'cite paths repo-relative (`open/composer.ts:11`) and re-post the verdict',
+      `${key} contains an absolute path under a home directory (not quoted here — this log is ` +
+        'public). A verdict is a public comment on a public repository and cannot be ' +
+        'un-published, so cite paths repo-relative (`open/composer.ts:11`) and re-post the ' +
+        'verdict. This refuses the SHAPE `/Users/<x>`, `/home/<x>` or `C:\\Users\\<x>`, which ' +
+        'includes a CI runner path like `/home/runner/work/...` where there is no account name ' +
+        'to leak — a repo-relative citation is wanted there too, so the shape is refused rather ' +
+        'than special-cased',
     )
   }
 }
@@ -196,11 +250,28 @@ function finishMutation(pending: Record<string, string>): Mutation {
     rejectHomePath(`mutation ${key}`, value)
     if (UNUSABLE_VALUE.test(value.trim())) {
       throw new VerdictError(
-        `mutation entry has an unusable ${key} (${JSON.stringify(value.trim())}) — ` +
+        `mutation entry has an unusable ${key} (${quoteRedacted(value.trim())}) — ` +
           'the producing side refuses these values before it posts, and a hand-written ' +
           'verdict is not held to a lower bar than a generated one',
       )
     }
+  }
+  // AND THE THREE FIELDS MUST SAY THREE DIFFERENT THINGS. They describe three
+  // different observations — what was broken, which test went red because of it,
+  // which test stayed green without it — so one sentence pasted into all three is
+  // not evidence, it is the same "nothing was run" the `n/a` rule already refuses,
+  // wearing a longer disguise. That disguise is the one the earlier bar could not
+  // see: every individual field was non-empty, unbracketed and not in the unusable
+  // list, so `- mutant: did the thing / red: did the thing / control: did the thing`
+  // cleared it. This gate cannot re-run a mutant (see the header), so the shapes it
+  // CAN refuse are worth refusing.
+  const distinct = new Set([pending.mutant!, pending.red!, pending.control!].map((v) => v.trim().toLowerCase()))
+  if (distinct.size < 3) {
+    throw new VerdictError(
+      'mutation entry repeats the same text for more than one of mutant/red/control — these are ' +
+        'three different observations (what broke, which test went RED, which test stayed GREEN), ' +
+        'so one sentence in all three names no observation at all',
+    )
   }
   return { mutant: pending.mutant!, red: pending.red!, control: pending.control! }
 }
@@ -231,7 +302,7 @@ export function parseVerdict(commentBody: string): Verdict {
       continue
     }
     const m = SCALAR.exec(line)
-    if (!m) throw new VerdictError(`unparseable verdict line: ${JSON.stringify(rawLine)}`)
+    if (!m) throw new VerdictError(`unparseable verdict line: ${quoteRedacted(rawLine)}`)
     const key = m[1]!
     const value = m[2]!
     if (pending && (key === 'red' || key === 'control')) {
@@ -243,7 +314,7 @@ export function parseVerdict(commentBody: string): Verdict {
       // A contradiction, not an update. Last-line-wins is how a 2 becomes a 0.
       throw new VerdictError(
         `duplicate key ${JSON.stringify(key)} — the later line would silently overwrite ` +
-          `${JSON.stringify(scalars.get(key))}, which is how a 2 becomes a 0`,
+          `${quoteRedacted(scalars.get(key) ?? '')}, which is how a 2 becomes a 0`,
       )
     }
     scalars.set(key, value)
@@ -263,7 +334,7 @@ export function parseVerdict(commentBody: string): Verdict {
   const commit = scalars.get('commit')!.trim()
   if (!FULL_SHA.test(commit)) {
     throw new VerdictError(
-      `commit must be the full 40-hex SHA the review examined, got ${JSON.stringify(commit)}`,
+      `commit must be the full 40-hex SHA the review examined, got ${quoteRedacted(commit)}`,
     )
   }
 
@@ -332,8 +403,24 @@ const EXEC_SUFFIXES = [
   '.sql',
   '.awk',
 ]
-/** Path segments whose subtree is prose or test scaffolding, not product surface. */
-const EXEMPT_SEGMENTS = new Set(['__tests__', 'docs', 'node_modules'])
+/**
+ * Path segments whose subtree is test scaffolding or vendored, at ANY depth.
+ *
+ * `docs` is deliberately NOT in here — see `ROOT_EXEMPT_DIRS`.
+ */
+const EXEMPT_SEGMENTS = new Set(['__tests__', 'node_modules'])
+/**
+ * Directories that are prose only WHEN THEY ARE THE FIRST SEGMENT.
+ *
+ * `docs` used to be matched at any depth, which exempted `open/docs/handler.ts` —
+ * an executable module in a subdirectory that happens to be named `docs` — from
+ * owing mutation evidence. No such file exists in the tree today, so this was
+ * latent rather than live, and a latent hole in the classifier is still the
+ * classifier being wrong: whether the gate can be walked around should not depend
+ * on nobody having created a directory yet. The repo's prose tree is `docs/` at the
+ * root, so the root is where the exemption belongs.
+ */
+const ROOT_EXEMPT_DIRS = new Set(['docs'])
 /**
  * Repo-root files that can select or deselect what CI runs. An edit here can
  * deselect a suite, so the file's POWER is what gates it, not its typical diff
@@ -365,8 +452,9 @@ const EXECUTABLE_DIRS = new Set(['bin', 'scripts'])
  *
  * Gated: `.github/workflows/**` and `.githooks/**` (an edit there can disable
  * gating outright); repo-root test-selection config; and any executable-suffix
- * file that is not a `*.test.*` file and not inside a `__tests__/` or `docs/`
- * subtree.
+ * file that is not a `*.test.*` file, not inside a `__tests__/` subtree at any
+ * depth, and not under the root `docs/` tree. A `docs` directory NESTED somewhere
+ * else is not prose and does not exempt — `open/docs/handler.ts` gates.
  *
  * NOT gated, deliberately rather than silently: prose (`**\/*.md`, including
  * normative documents — their overclaims are review's to catch), lockfiles (they
@@ -382,6 +470,7 @@ export function touchesGatedSurface(path: string): boolean {
   if (parts[0] === '.githooks') return true
   const base = parts[parts.length - 1]!
   if (/\.test\.[a-z]+$/.test(base)) return false
+  if (parts.length > 1 && ROOT_EXEMPT_DIRS.has(parts[0]!)) return false
   if (parts.slice(0, -1).some((seg) => EXEMPT_SEGMENTS.has(seg))) return false
   if (EXEC_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true
   // Extensionless file in an executable directory: a shebang script or the CLI
@@ -535,13 +624,13 @@ export function readBypass(commitMessage: string): BypassOutcome {
   if (PLACEHOLDER.test(reason)) {
     return {
       kind: 'invalid',
-      detail: `TRIDENT_BYPASS reason is an unfilled placeholder (${JSON.stringify(reason)})`,
+      detail: `TRIDENT_BYPASS reason is an unfilled placeholder (${quoteRedacted(reason)})`,
     }
   }
   if (!/[a-z]{3}/i.test(reason)) {
     return {
       kind: 'invalid',
-      detail: `TRIDENT_BYPASS reason ${JSON.stringify(reason)} says nothing a reader could act on`,
+      detail: `TRIDENT_BYPASS reason ${quoteRedacted(reason)} says nothing a reader could act on`,
     }
   }
   return { kind: 'bypass', reason }
@@ -562,9 +651,12 @@ export const CONTROL_COMMENT = [
   'codex.blocking: 0',
   'adversarial.ran: true',
   'adversarial.blocking: 0',
-  '- mutant: control fixture, not a real review',
-  '  red: control fixture, not a real review',
-  '  control: control fixture, not a real review',
+  // Three DISTINCT strings, because `finishMutation` refuses an entry that repeats
+  // one sentence across the three fields — and a control fixture that cannot clear
+  // the gate's own bar proves nothing about the gate.
+  '- mutant: control fixture: a broken guard, not a real review',
+  '  red: control fixture: the test that would go red, not a real review',
+  '  control: control fixture: the test that would stay green, not a real review',
   '```',
 ].join('\n')
 
@@ -703,11 +795,36 @@ export interface GateDeps {
  * "Anyone may comment" is the correct policy for a comment and the wrong one for
  * an approval.
  *
- * `author_association` is what the issue-comments endpoint reports, and these
- * three are the values that mean write access to this repository. CONTRIBUTOR,
- * FIRST_TIME_CONTRIBUTOR, MEMBER-of-some-other-org and NONE are all outside.
+ * `author_association` is what the issue-comments endpoint reports. It describes a
+ * RELATIONSHIP, not a permission, and the previous version of this comment claimed
+ * otherwise — that OWNER, MEMBER and COLLABORATOR "are the values that mean write
+ * access". Two reviewers called that false and it is:
+ *
+ *   • MEMBER means "belongs to the organisation that owns the repository", which on
+ *     an org-owned repository says nothing at all about this repository — a member
+ *     with read-only or triage-only access reports MEMBER. So MEMBER is NOT trusted
+ *     here. THIS repository is user-owned, where the value cannot occur at all, so
+ *     dropping it costs nothing today and closes the hole for any org-owned
+ *     repository this gate is later copied into.
+ *   • COLLABORATOR is exact on a USER-owned repository — a personal-repo
+ *     collaborator has push — and is NOT exact on an org-owned one, where a
+ *     collaborator can hold read or triage only.
+ *
+ * So what this set actually encodes: on a user-owned repository, OWNER and
+ * COLLABORATOR are precisely the accounts with push. CONTRIBUTOR,
+ * FIRST_TIME_CONTRIBUTOR, MEMBER and NONE are outside.
+ *
+ * PORTING THIS TO AN ORG-OWNED REPOSITORY REQUIRES A DIFFERENT CHECK, and this is
+ * the note that says so rather than letting the next reader inherit the wrong
+ * claim: ask the permission endpoint (`GET /repos/{owner}/{repo}/collaborators/
+ * {username}/permission`) and require `write`, `maintain` or `admin`. That is not
+ * done here because it costs an API call per candidate author and needs a token
+ * with push access — a `pull_request` run from a fork does not get one, and the
+ * call would fail closed as "could not read this PR" on every fork PR. Trading a
+ * live reliability failure for a hole that cannot occur on this repository is the
+ * wrong way round; the note is the honest half of that trade.
  */
-const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
+const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'COLLABORATOR'])
 
 export function isTrustedAuthor(association: string | undefined): boolean {
   return TRUSTED_ASSOCIATIONS.has((association ?? '').trim().toUpperCase())
@@ -926,8 +1043,8 @@ async function gate(deps: GateDeps): Promise<number> {
     deps.log('')
     deps.log('This repository is public and anyone may open a PR, so a hatch that trusts only a')
     deps.log('line in a commit message is a hatch anyone holds — the author of a fork PR writes')
-    deps.log('their own commit messages. Only OWNER, MEMBER or COLLABORATOR may record one, the')
-    deps.log('same bar a verdict is held to.')
+    deps.log('their own commit messages. Only the repository OWNER or a COLLABORATOR on it may')
+    deps.log('record one — the same bar a verdict is held to.')
     printRedemption(deps, branch, pr)
     return 1
   }
@@ -1010,8 +1127,8 @@ async function gate(deps: GateDeps): Promise<number> {
     deps.log(`  head SHA : ${headSha}`)
     deps.log('')
     deps.log('This repository is public: anyone may comment, so a verdict selected by its body')
-    deps.log('alone would be an approval anyone could write. Only OWNER, MEMBER or COLLABORATOR')
-    deps.log('comments count.')
+    deps.log('alone would be an approval anyone could write. Only comments from the repository')
+    deps.log('OWNER or a COLLABORATOR on it count.')
     printRedemption(deps, branch, pr)
     return 1
   }
