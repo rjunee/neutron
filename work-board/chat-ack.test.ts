@@ -287,6 +287,29 @@ describe('boardLabelForProjectId — the ONE board-name mapping', () => {
     expect(label).toBe(UNKNOWN_BOARD_LABEL)
     expect(label).not.toContain('…')
   })
+
+  /**
+   * THE INPUT THAT ACTUALLY PINS THE ORDER, found by mutation testing.
+   *
+   * The sibling test above does not: a RUN of joiners is a SINGLE grapheme
+   * cluster (verified — `Intl.Segmenter` returns one segment for 60 of them), so
+   * once the cap became grapheme-aware that input is never truncated at all and
+   * the floor's position stops mattering. Moving the floor back after the cap left
+   * it GREEN — a guard that a green run cannot distinguish from real coverage.
+   *
+   * Joiners SEPARATED BY SPACES break the cluster, so the flattened name is 60
+   * graphemes that render as nothing. Cap-then-floor truncates it, splices in a
+   * visible `…`, and publishes that as a board name; floor-then-cap asks the
+   * question of the owner's name and degrades to the word.
+   */
+  test('an invisible name LONGER than the cap still degrades to the word', () => {
+    const invisible = `${ZWJ} `.repeat(60)
+    // The premise: it really is over the cap, and it really renders as nothing.
+    expect(countGraphemes(sanitizeBoardLabel(invisible))).toBe(0)
+    const label = boardLabelForProjectId('p9', () => invisible)
+    expect(label).toBe(UNKNOWN_BOARD_LABEL)
+    expect(label).not.toContain('…')
+  })
 })
 
 /**
