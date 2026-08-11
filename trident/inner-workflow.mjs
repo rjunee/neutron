@@ -688,8 +688,26 @@ function enforceSeverityGate(synthesis) {
 // are data. Every deferred peer contributes its own blocker finding, because
 // "which cross-model reviewer is down" is the actionable part.
 //
-// `peers` is `[{ name, evidence }]` — only the DEFERRED ones. 'not_connected'
-// (never set up) and 'connected' (ran fine) do not reach here.
+// GENERALISED AGAIN over EVERY SEAT ON THE PANEL, not only the cross-model ones.
+// A CORE Claude reviewer whose agent died had NO gate at all: its slot held `null`,
+// the synthesis prompt interpolated the literal string `null`, and a synthesis model
+// most plausibly reads that as "this reviewer raised nothing" — an implicit pass.
+// So the input is now every seat that was DISPATCHED and produced no usable verdict,
+// whichever seat it was, and the caller derives that list IN CODE rather than
+// describing it to a model. Panel completeness is arithmetic, not interpretation.
+//
+// `peers` is `[{ name, title, evidence }]` — only the seats that produced nothing.
+// An ABSENT peer (never configured — e.g. kimi with no API key) is a legitimate
+// reduced panel and deliberately never reaches here.
+//
+// Each blocker carries `kind: LANE_FINDING_KIND` so `classifyBlock` can tell a
+// lane failure from a code finding by reading a FIELD. It used to re-derive the
+// title template and string-match it, which made two sites share one format by
+// convention — the exact "a field's name is not a contract" trap: reword the title
+// in one place and the classifier silently reads every lane blocker as a code
+// finding, sending the fix loop off to re-Forge a network timeout.
+const LANE_FINDING_KIND = 'lane'
+
 function enforceCrossModelGate(synthesis, deferredPeers) {
   if (deferredPeers.length === 0 || !synthesis || synthesis.verdict !== 'APPROVE') {
     return synthesis
@@ -699,7 +717,8 @@ function enforceCrossModelGate(synthesis, deferredPeers) {
     findings: [
       ...deferredPeers.map((p) => ({
         severity: 'blocker',
-        title: `${p.name} cross-model review DEFERRED — refusing to silently APPROVE`,
+        kind: LANE_FINDING_KIND,
+        title: p.title,
         evidence: p.evidence,
       })),
       ...((synthesis && synthesis.findings) || []),
@@ -729,10 +748,18 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
     if (slot === null || slot === undefined) continue
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const current = out[slot]
+      // A SEAT PRESENT IN `slots` WAS CONFIGURED — so a null/undefined verdict here
+      // is NOT "absent", it is a dispatched reviewer that produced nothing because
+      // its agent died. This used to `break` on `!current`, which meant a dead peer
+      // was neither retried NOR gated: the caller then read the same null as
+      // 'not_connected' and the panel could reach APPROVE with an empty seat.
+      // A missing status on a configured slot is therefore `deferred` — and
+      // retryable, which is the cheapest possible remedy for a crashed lane.
+      const status = current && current[statusKey] ? current[statusKey] : 'deferred'
       // Only a DEFERRED lane is retried. `connected` is a real answer and
       // `not_connected` is the deliberate graceful path — retrying either would
       // spend a call to learn something already known.
-      if (!current || current[statusKey] !== 'deferred') break
+      if (status !== 'deferred') break
       if (logFn) logFn(`trident.lane-retry ${name} attempt=${attempt}/${attempts} (was deferred)`)
       let next = null
       try {
@@ -757,13 +784,15 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // APPROVE, because a review we did not get cannot be treated as one. It changes
 // only what happens NEXT: stop, report honestly, and let the operator fix the
 // lane, rather than editing code at random until the round budget runs out.
+// A lane blocker is identified by the `kind` FIELD the gate stamps on it, not by
+// re-deriving its title template and string-matching. Two sites agreeing on a
+// message format is a contract nothing enforces; reword the title in the gate and
+// this classifier silently reads every lane blocker as a CODE finding, sending the
+// fix loop to re-Forge a network timeout. The field is what the gate actually sets.
 function classifyBlock(synthesis, deferredPeers) {
   if (!deferredPeers || deferredPeers.length === 0) return 'code'
   const findings = (synthesis && synthesis.findings) || []
-  const deferralTitles = new Set(deferredPeers.map((p) => `${p.name} cross-model review DEFERRED`))
-  const codeFindings = findings.filter(
-    (f) => !(f && typeof f.title === 'string' && [...deferralTitles].some((t) => f.title.startsWith(t))),
-  )
+  const codeFindings = findings.filter((f) => !(f && f.kind === LANE_FINDING_KIND))
   return codeFindings.length === 0 ? 'infra-only' : 'code'
 }
 
@@ -935,6 +964,7 @@ function ciDeferredPeer(ci) {
   if (ci.status === 'pending') {
     return {
       name: 'CI',
+      title: 'CI status UNREADABLE (still running) — refusing to silently APPROVE',
       evidence:
         'the PR checks had not finished when the review completed. A verdict given before CI ' +
         'settles is a verdict about code nobody has run, so this does not APPROVE — re-run once ' +
@@ -943,6 +973,7 @@ function ciDeferredPeer(ci) {
   }
   return {
     name: 'CI',
+    title: 'CI status UNREADABLE — refusing to silently APPROVE',
     evidence:
       'the PR check status could not be read (gh missing, unauthenticated, or an unparseable ' +
       'reply). "Could not tell" is not "passed", so this does not APPROVE — restore the ability ' +
@@ -1016,6 +1047,84 @@ ${cmd}`,
   return classifyCi(res)
 }
 
+/**
+ * A CROSS-MODEL SEAT'S STATUS, DERIVED FROM WHETHER IT WAS CONFIGURED — never read
+ * off a verdict that may not exist.
+ *
+ * THE BUG THIS REPLACES FAILED OPEN, which is the direction that ships unreviewed
+ * code. The caller used to write, for each optional peer:
+ *
+ *     codexSlot !== null && verdicts[codexSlot]
+ *       ? verdicts[codexSlot]
+ *       : { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected' }
+ *
+ * Two DIFFERENT situations collapse into that one else-branch: the peer was never
+ * configured (no credential — a legitimate reduced panel), and the peer WAS
+ * configured, WAS dispatched, and its agent DIED (`verdicts[slot]` is null). The
+ * second is a review we did not get, and `deferredCrossModelPeers` only blocks on
+ * the exact string 'deferred' — so a crashed reviewer was indistinguishable from an
+ * absent one and the panel could reach APPROVE with a seat that produced nothing.
+ *
+ * The slot is the authority on "was this configured": it is assigned when and only
+ * when the reviewer is pushed onto the panel. So:
+ *   • no slot            → 'not_connected'  (never configured — reduced panel, no block)
+ *   • slot, has a status → that status      ('connected' / 'deferred' / 'not_connected')
+ *   • slot, NO status    → 'deferred'       (configured, dispatched, produced nothing)
+ *
+ * The last line is the fix. A configured slot can NEVER report 'not_connected' by
+ * DEFAULT — only by the reviewer explicitly saying so (exit 10/11, which is the real
+ * graceful path and is preserved).
+ */
+function crossModelPeerStatus(slot, verdicts, statusKey) {
+  if (slot === null || slot === undefined) return 'not_connected'
+  const verdict = verdicts[slot]
+  const status = verdict && typeof verdict[statusKey] === 'string' ? verdict[statusKey] : ''
+  return status.length > 0 ? status : 'deferred'
+}
+
+/**
+ * THE CORE SEATS — always dispatched, and until now never checked.
+ *
+ * `argus:claude` and `argus:adversarial` are pushed unconditionally, so unlike the
+ * cross-model peers there is no "absent" case to preserve: if one of them produced
+ * no verdict, its agent died. That case had NO gate anywhere. The synthesis prompt
+ * interpolated `JSON.stringify(verdicts[0])`, so a dead core reviewer arrived at the
+ * synthesis model as the literal token `null` — which reads most plausibly as "this
+ * reviewer raised nothing", an implicit pass. Combined with `enforceSeverityGate`
+ * (which can turn a findings-light REQUEST_CHANGES into an APPROVE), a two-reviewer
+ * panel could merge on ONE reviewer's word, or on none.
+ *
+ * So completeness is computed HERE, in code, and fed to the same single gate the
+ * cross-model peers use. Being data rather than a second guard is the point: a seat
+ * added later is enforced by construction.
+ */
+const CORE_REVIEWER_SEATS = [
+  { slot: 0, name: 'Argus rubric (core reviewer)' },
+  { slot: 1, name: 'Argus adversarial (core reviewer)' },
+]
+
+function missingCoreReviewers(verdicts, seats) {
+  const out = []
+  for (const seat of seats) {
+    const v = verdicts[seat.slot]
+    // A usable verdict is an object carrying a `verdict` string (VERDICT_SCHEMA's
+    // required field). Anything else — null, undefined, a stray string, an object
+    // with the field missing — is a seat that produced nothing.
+    if (v && typeof v.verdict === 'string' && v.verdict.length > 0) continue
+    out.push({
+      name: seat.name,
+      title: `${seat.name} produced NO verdict — refusing to silently APPROVE`,
+      evidence:
+        `${seat.name} was dispatched and returned no usable verdict — its agent died, timed out, ` +
+        'or returned a malformed result. This seat is ALWAYS configured, so there is no ' +
+        '"not connected" reading available: the panel is incomplete. A reviewer that never ran ' +
+        'raised nothing because it never ran, which is not the same as finding nothing, and per ' +
+        'the never-silent-downgrade rule an incomplete panel cannot APPROVE. Re-run the round.',
+    })
+  }
+  return out
+}
+
 // Which cross-model peers were configured but failed. Kept separate from the gate
 // so the mapping status → blocker text is readable and testable on its own.
 function deferredCrossModelPeers(statuses) {
@@ -1023,6 +1132,7 @@ function deferredCrossModelPeers(statuses) {
   if (statuses.codex === 'deferred') {
     out.push({
       name: 'Codex',
+      title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
       evidence:
         'codex was configured (CODEX_HOME set) but the review call failed/timed out; per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Re-run once codex auth is restored.',
     })
@@ -1030,6 +1140,7 @@ function deferredCrossModelPeers(statuses) {
   if (statuses.kimi === 'deferred') {
     out.push({
       name: 'Kimi K3',
+      title: 'Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE',
       evidence:
         'a Kimi API key was configured but the review call failed, timed out, or returned no answer text (the thinking-budget case). A deferred cross-model review cannot be treated as an approval, and there is deliberately NO fallback to a Claude-family reviewer — that would restore the single-family panel this peer exists to break.',
     })
@@ -1204,17 +1315,17 @@ TASK: ${task}`,
   const ci = await probeCi(prForCi, round)
   log(`trident-v2 ci: round=${round} status=${ci.status} failing=${ci.failing.length}`)
 
-  const claudeVerdicts = [verdicts[0], verdicts[1]]
-  const codexReview =
-    codexSlot !== null && verdicts[codexSlot]
-      ? verdicts[codexSlot]
-      : { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected' }
-  const codexStatus = codexReview.codexStatus || 'not_connected'
-  const kimiReview =
-    kimiSlot !== null && verdicts[kimiSlot]
-      ? verdicts[kimiSlot]
-      : { verdict: 'COMMENT', findings: [], kimiStatus: 'not_connected' }
-  const kimiStatus = kimiReview.kimiStatus || 'not_connected'
+  // PANEL COMPLETENESS IS DERIVED IN CODE. Every seat's status comes from whether it
+  // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
+  // default applied to a missing verdict, which is how a crashed reviewer used to read
+  // as one that was never set up. See `crossModelPeerStatus` / `missingCoreReviewers`.
+  const missingCore = missingCoreReviewers(verdicts, CORE_REVIEWER_SEATS)
+  const codexStatus = crossModelPeerStatus(codexSlot, verdicts, 'codexStatus')
+  const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, 'kimiStatus')
+  // Only read for the 'connected' panel line, where the verdict is present by
+  // definition — a status of 'connected' can only come off a real verdict object.
+  const codexReview = codexSlot === null ? null : verdicts[codexSlot]
+  const kimiReview = kimiSlot === null ? null : verdicts[kimiSlot]
 
   // ASYMMETRIC GATING (minority-veto): findings BOTH reviewers confirm → confirmed;
   // ONE credible evidence-backed BLOCKER vetoes APPROVE; a single-reviewer
@@ -1237,14 +1348,24 @@ TASK: ${task}`,
       : kimiStatus === 'deferred'
         ? `Verdict D (kimi K3 cross-model): DEFERRED — a key was configured but the review call FAILED/timed out/returned no answer. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
         : `Verdict D (kimi K3 cross-model): NOT CONNECTED — no Kimi key for this instance. Note it and proceed on the other verdicts (do NOT block on kimi).`
+  // A CORE SEAT THAT DIED MUST NOT ARRIVE AS THE TOKEN `null`. These two lines used to
+  // be `${JSON.stringify(verdicts[0])}`, so a dead reviewer was handed to the synthesis
+  // model as the bare word `null` — most plausibly read as "raised nothing", an implicit
+  // pass. Naming it is a courtesy to the model; the block itself is deterministic
+  // (`missingCore` → `enforceCrossModelGate`) and does not depend on the model reading
+  // this correctly.
+  const corePanelLine = (letter, label, verdict) =>
+    verdict && typeof verdict.verdict === 'string' && verdict.verdict.length > 0
+      ? `Verdict ${letter} (${label}): ${JSON.stringify(verdict)}`
+      : `Verdict ${letter} (${label}): DID NOT COMPLETE — this reviewer was dispatched and returned NO verdict (its agent died, timed out, or returned a malformed result). It raised nothing because it NEVER RAN, which is NOT the same as finding nothing. The panel is incomplete: do NOT return APPROVE.`
   const synthesisRaw = await agent(
     `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
-Verdict A (Claude rubric): ${JSON.stringify(verdicts[0])}
-Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}
+${corePanelLine('A', 'Claude rubric', verdicts[0])}
+${corePanelLine('B', 'Claude adversarial', verdicts[1])}
 ${codexPanelLine}
 ${kimiPanelLine}`,
     withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
@@ -1277,9 +1398,13 @@ ${kimiPanelLine}`,
           findings: [...ciBlockerFindings(ci), ...(severityGated?.findings ?? [])],
         }
       : severityGated
+  // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
+  // because a missing core seat is the most fundamental incompleteness the panel can
+  // have — and note this list is assembled AFTER `enforceSeverityGate`, so its
+  // nit-downgrade can never undo the block.
   const peers = ci.status === 'pending' || ci.status === 'unknown'
-    ? [...deferred, ciDeferredPeer(ci)]
-    : deferred
+    ? [...missingCore, ...deferred, ciDeferredPeer(ci)]
+    : [...missingCore, ...deferred]
   const gated = enforceCrossModelGate(withCi, peers)
   // Carry WHY this is blocked, not just that it is. The fix loop must not re-Forge
   // when the only blocker is a lane that could not run — there is nothing in the
