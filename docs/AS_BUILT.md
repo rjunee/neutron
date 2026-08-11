@@ -31,13 +31,39 @@ geometry varies: **old constants 68.1%, new constants 66.1%**, against the light
 rail-header icon at **51.9%**. Two points is a nudge, not a redesign, and it is nowhere
 near the thing that actually reads as crossing ellipses. The aspect change is a real
 geometric property and it stays pinned; the perceptual verdict was never measured and is
-withdrawn. What IS measured, on
-the committed binaries: the nucleus clearance the geometry promises (0.91 → 1.80 units),
-open voids between the petals, zero dark nicks at 1024px, the stroke above the 16px
-tab-slot floor, and one drawing feeding every mirror. The reason to state this plainly is
-that the accompanying `stroke/ry <= 0.42` guard was **relaxed to 0.5 in this branch to
-admit the new value** — a guard loosened to pass the change it polices — and it is now
-deleted in favour of `measure_petal_void()`, which measures the property on a render.
+withdrawn. What IS measured, on the committed binaries: the nucleus clearance the geometry
+promises (0.91 → 1.80 units), open voids between the petals, zero dark nicks at 1024px, the
+stroke above the 16px tab-slot floor, and one drawing feeding every mirror. The reason to
+state this plainly is that the accompanying `stroke/ry <= 0.42` guard was **relaxed to 0.5
+in this branch to admit the new value** — a guard loosened to pass the change it polices —
+and it is now deleted in favour of `measure_petal_void()`, which measures the property on a
+render.
+
+The geometry is boxed in rather than merely chosen, which is the answer to "then lighten
+it": sweeping the stroke toward the 16px tab-slot floor reopens the nicks — 2.40 (exactly
+the floor) gives 6 slivers at 0.051 sq units, 2.45 gives 0.039, 2.50 gives 0.0098, and 2.60
+is the first sliver-free weight. Approaching the rail icon's coverage means visible chips at
+launcher size or a sub-floor stroke.
+
+**Guards that measured less than they claimed** (review round 2, all fixed here). Three
+pixel scans sampled every other pixel in each axis — a quarter of the image — while
+asserting exactly zero; the "full-bleed and opaque" check tested four corner pixels; the
+flat-tile check tested three; and `carries the rejected teal in NO committed icon` never
+opened `landing/favicon.ico` at all. All now scan at full resolution, and the .ico's six
+frames are decoded (13 assets, asserted by count). Two guards passed over dead code: the
+generator-wiring test matched an identifier that also appears in the import block, so
+deleting the call left it green in both scripts; and the geometry test's regex was anchored
+on ` />`, so it pinned only the un-rotated ellipse while `rx`/`ry` on both rotated orbits
+were pinned by nothing. `assert slivers == 0` had no noise floor and was a latent hard block
+rather than a weak assertion — it held at n=1024 and not at n=1200 (4 islands of 0.000711 sq
+units), and since both generators call it before writing, a Pillow resample change would
+have made the pipeline unrunnable rather than the icon worse.
+
+`app/assets/images/icon.png` is now emitted **RGB**. It was RGBA — every pixel opaque, but
+the channel present — while the docstring beside it said "iOS rejects alpha", so it relied
+on a downstream Expo flatten that nothing in the repo pins. The test asserts the channel
+COUNT, not just that pixels are opaque, because an RGBA file full of opaque pixels satisfies
+the latter.
 
 **`landing/apple-touch-icon.png` was still the artwork the owner rejected on 2026-07-30** —
 teal `#6fe3d4` concentric rings — served as the iOS home-screen icon and declared in
