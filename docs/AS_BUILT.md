@@ -9126,3 +9126,44 @@ test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the fail
 specific: a guard that exists in TWO independently-built copies gets one copy's evidence
 pasted onto the other's test, and the untested copy is then defended by a citation. The
 control is mechanical — run the named mutant and read WHICH tests go red, not how many.
+
+## 2026-08-11 — the pre-push leak gate refused a push over mainline's own published history
+
+Found by being blocked by it. This PR went CONFLICTING against `main` (one conflict: two
+entries appended to the same `docs/AS_BUILT.md` tail), and a DIRTY pull request produces no
+merge ref — so **no `pull_request` workflow fires at all**. Two pushes had produced only the
+CodeQL run and no `ci` run, which read like queue latency and was not: GitHub cannot build a
+merge commit it cannot compute. Integrating `main` is the only way to get CI to run again.
+
+Merging it in then tripped `.githooks/pre-push`. After a merge `remote_sha` is STILL an
+ancestor of the new tip, so the hook's existing rebase branch never fired and the window
+stayed `remote_sha..local_sha` — which now contains every commit the merge brought along,
+including mainline's published messages and the `Co-authored-by:` trailers GitHub stamps onto
+squash merges. The push was refused over history the author cannot rewrite. Same defect class
+the hook already documents for rebases, in the shape it did not cover.
+
+The window is now mainline-relative whenever mainline is already an ancestor:
+`origin/main..local_sha`. Everything reachable from `origin/main` is public by definition, so
+that is the honest publication boundary — it still covers every commit the branch adds, and it
+cannot hide a new leak, because a commit it excludes is one already reachable from public
+mainline. It also generalises the rebase special-case rather than sitting beside it as a
+second rule.
+
+An allowlist entry — what the block message suggests for a false positive — was NOT available
+here: for a message finding it would have to name the denylisted term, and the whole point of
+keeping the denylist out of the repo is that the string is never committed.
+
+📌 **A control that cannot be satisfied gets bypassed, and the bypass is worse than no
+control.** The gate's own header says this about `--no-verify`, citing two prior incidents.
+This is the third shape of it, and the fix belongs in the boundary, not in the author's
+discipline.
+
+Two tests drive a REAL `git push` through the installed hook. **The mutation was run:** against
+the old hook the merge case fails with `PUSH BLOCKED` over mainline's message, reproducing the
+production symptom exactly. The paired test commits a NEW denylisted message on top of the
+merge and asserts it is STILL refused, so widening the exclusion cannot buy the first case by
+going blind.
+
+Pre-existing and verified with a control run rather than assumed: `leak-gate-selftest.test.ts`
+times out on several cases under load at bun's 5 s default — 8 failures without these changes,
+6 with. Both new tests carry explicit 60 s timeouts.
