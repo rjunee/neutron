@@ -80,11 +80,12 @@ export const GENERAL_HTTP_ID = 'general';
  * `<owner_home>/Projects/general/docs`.
  *
  * REMINDERS NO LONGER USES THIS FUNCTION — use {@link httpScopeSegment} for any
- * surface that reserves a segment for the no-project scope. Reminders was about
- * to become the first MUTATING surface on the shared mapping, which would have
- * put create/snooze/cancel across the same seam the reads already cross, so the
+ * surface that reserves a segment for the no-project scope. Reminders was about to
+ * put create/snooze/cancel across this seam in the change that added them, so the
  * server learned the reserved segment instead
- * (`gateway/http/app-reminders-surface.ts` `resolveScopeSegment`).
+ * (`gateway/http/app-reminders-surface.ts` `resolveScopeSegment`). NOT because it
+ * was the only mutating surface here — see below, two of the remaining four write
+ * through this function today.
  *
  * STILL OPEN for docs / tabs / work-board / activity, which pre-date this module.
  * TWO OF THOSE FOUR MUTATE, and an earlier version of this docblock called all

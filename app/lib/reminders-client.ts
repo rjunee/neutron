@@ -18,11 +18,14 @@
  * project-scoped surface was the fifth to forget the mapping, which is the defect
  * `general-scope.ts` exists to stop.
  *
- * BUT NOT THE SAME MAPPING THE READ-ONLY CLIENTS USE. Those collapse General onto
- * the literal segment `general`, which is itself a legal project id — so on an
- * instance that HAS a project called `general`, the General scope and that
- * project become one server-side scope. Every call below is project-scoped and
- * four of them MUTATE, so this client uses `httpScopeSegment*` instead: General
+ * BUT NOT THE SAME MAPPING THE OTHER FOUR CLIENTS USE — and they are not
+ * "read-only", which is what an earlier version of this line said. Those collapse
+ * General onto the literal segment `general`, which is itself a legal project id —
+ * so on an instance that HAS a project called `general`, the General scope and
+ * that project become one server-side scope. Two of the four (`docs-client.ts`,
+ * `work-board-client.ts`) still WRITE across that seam; closing them is the #183
+ * data migration. Every call below is project-scoped and four of them mutate, so
+ * this client uses `httpScopeSegment*` instead: General
  * keeps the `~general` sentinel through to the server, which reserves it
  * (`gateway/http/app-reminders-surface.ts` `resolveScopeSegment`) and gives the
  * scope its own `app-project:~general` topic. Sending a create, a snooze or a
