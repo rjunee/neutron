@@ -9203,11 +9203,17 @@ Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`
 ## 2026-08-10 — the push-tap latch is released when the tap's target goes away
 
 `ChatSyncSurface`'s imperative re-anchor latched the honoured `message_id` and never
-cleared it, which made a per-tap instruction behave as a per-process one. Tap the
-notification for a message, rail-tap to another project (a chat route with no
-`?message_id=`), then tap the SAME notification again — notifications stay in the shade
-until dismissed — and the transcript did not move: the equality check had already spent the
-target.
+cleared it, which made a per-tap instruction behave as a per-process one.
+
+⚠️ **THE SEQUENCE THIS ENTRY ORIGINALLY GAVE AS THE MOTIVATION IS REFUTED — see the
+2026-08-11 entry below.** It read: *"tap the notification for a message, rail-tap to another
+project (a chat route with no `?message_id=`), then tap the SAME notification again — and the
+transcript did not move: the equality check had already spent the target."* The premise is
+true and the conclusion is not. A real second tap never reaches the equality check, because
+`app/lib/push.ts:292` returns on a seen `request.identifier` **before** `resolvePushRoute`, so
+the re-tap produces no navigation at all and never re-supplies `?message_id=` — it is
+swallowed one layer up, and that dedupe gap is filed as **#182**. The latch-release fix
+described below is correct by inspection and stands; only this motivating sequence was wrong.
 
 The COMPONENT is not remounted along that path — the shell is a single root-stack screen
 named `projects/[id]` and expo-router only diverges on a route named exactly `[id]`, so a
@@ -9322,9 +9328,9 @@ its own failure mode, the next question is which OTHER paragraph was built on th
 
 ## 2026-08-11 — the no-project scope was addressing a real project, and one comment claimed a tap that never arrives
 
-Two review findings on the ritual-push branch, from a panel where two independent lanes converged
-on the first. Both are about the same failure shape from opposite ends: a name that means two
-things, and a comment that describes a path no code takes.
+Landed via PR #171. Two review findings on the ritual-push branch, from a panel where two
+independent lanes converged on the first. Both are about the same failure shape from opposite
+ends: a name that means two things, and a comment that describes a path no code takes.
 
 **A SCOPE IS NOT AN ID, and `general` is a legal project id.** The mobile rail spells the
 no-project General scope `~general`, deliberately outside the gateway's `[A-Za-z0-9_.-]`

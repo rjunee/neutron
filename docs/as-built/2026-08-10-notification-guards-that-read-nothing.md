@@ -302,10 +302,22 @@ missed, and it was in this change's own new code: `honouredDeepLink` in
 `app/components/ChatSyncSurface.tsx` latched the honoured target id and nothing ever
 cleared it.
 
-The sequence that breaks: tap the notification for X (the transcript re-anchors, X is
-latched), rail-tap to another project — `/projects/<other>/chat`, no query, so no target —
-then tap the SAME notification again, which is still sitting in the shade. The equality
-check swallowed it and the transcript did not move.
+⚠️ **THE SEQUENCE THIS SECTION ORIGINALLY GAVE IS REFUTED.** It read: *"tap the notification
+for X (the transcript re-anchors, X is latched), rail-tap to another project —
+`/projects/<other>/chat`, no query, so no target — then tap the SAME notification again, which
+is still sitting in the shade. The equality check swallowed it and the transcript did not
+move."* The premise is true and the conclusion is not. A **real second tap never reaches the
+equality check**: `app/lib/push.ts:292` returns on a seen `request.identifier` **before**
+`resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
+`?message_id=`. It is swallowed one layer up. The dedupe TTL is 7 days and warm taps pass
+`{dismiss:false}`, so the notification really does stay in the shade — which is precisely what
+made the false claim read as plausible. That dedupe gap is filed as **#182**; the latch-release
+fix below is correct by inspection and stands. Corrected in PR #171 (`docs/AS_BUILT.md`,
+2026-08-11 entry).
+
+What the latch defect actually is, without the unreachable sequence: `honouredDeepLink` is a
+per-tap instruction stored in a ref that nothing ever cleared, so it behaved as a per-process
+one. Any later render of this surface with no target left the spent id latched.
 
 **The latch survives the switch because this COMPONENT is not remounted.** The shell is a
 single root-stack screen named `projects/[id]`, and expo-router only diverges on a route
