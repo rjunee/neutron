@@ -1251,6 +1251,11 @@
   }
   .car-day-divider span { flex: 0 0 auto; }
   .car-typing { display: inline-flex; gap: 4px; align-items: center; }
+
+    /* The live step label beside the typing dots. Uses `faint`, which now clears
+       AA on every ground (see the web contrast gate), so it is legible while
+       staying quieter than body text. */
+    .car-typing-label { color: var(--faint); font-size: 12px; margin-left: 8px; align-self: center; }
   .car-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: car-blink 1.4s infinite both; }
   /* M1 UX REDESIGN — quiet centered SYSTEM-notification pill (cold-start
      "Waking up…", quota). NOT a chat bubble — small, muted, a tiny spinner + short

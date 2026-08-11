@@ -30,7 +30,7 @@ import { groupReactions, isColdStartAck, spentChoiceValue } from '@neutronai/cha
 
 import type { ProjectTab } from './config.ts'
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
-import { parseActivityRow, type ActivityRow } from './activity-client.ts'
+import { activityScopeKey, parseActivityRow, type ActivityRow } from './activity-client.ts'
 import type {
   ChatMessage,
   ChatMessageOption,
@@ -144,6 +144,19 @@ export interface ChatViewModel {
    * during streaming so the composer shows Stop.
    */
   awaitingFirstToken: boolean
+  /**
+   * What the agent is doing RIGHT NOW, for the waiting indicator — the human tool
+   * label plus its collapsed one-liner, or null when nothing is in flight.
+   *
+   * Owner-asked 2026-08-11 after a 277-second turn showed him nothing: "I need
+   * some kind of response in the chat to say that it's actually working... like is
+   * it breaking down and scoping the work or what?"
+   *
+   * The data always existed — an ActivityInspector fed by a Pre/PostToolUse tap —
+   * but it was fanned to the inspector PANEL only. This surfaces the newest row in
+   * the chat thread itself.
+   */
+  liveActivity: { label: string; detail?: string } | null
   /**
    * Chat-typing persistence — true while the active project's Work Board has at
    * least one `in_progress` item (the SAME signal that flashes the Work-tab
@@ -461,6 +474,8 @@ export class NeutronChatController {
   private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
   private readonly switchConnectingGraceMs: number
   private awaitingReply = false
+  /** Newest activity row for the ACTIVE scope while a turn is in flight. */
+  private liveActivity: { label: string; detail?: string } | null = null
   private pending = 0
   private projectId: string | null
   /** FIX 1 — reactive project list (seeded from bootstrap, updated on frame). */
@@ -781,6 +796,8 @@ export class NeutronChatController {
    */
   async send(body: string, attachments?: readonly string[]): Promise<void> {
     this.awaitingReply = true
+    // A new turn starts clean: never inherit the previous turn's last step.
+    this.liveActivity = null
     // FIX #347 — a new turn begins: allow this turn's cold-start pill to show
     // (until its real reply starts), and clear any stale pill from the prior turn.
     this.replyStartedThisTurn = false
@@ -986,6 +1003,34 @@ export class NeutronChatController {
             fn(scopeKey, row)
           } catch {
             /* a throwing panel subscriber must not wedge the frame loop */
+          }
+        }
+        // SURFACE IT IN THE CHAT TOO — under two guards, because the comment above
+        // records a deliberate decision NOT to publish() here: a keepalive tick
+        // arriving as an activity event would re-render the whole transcript.
+        //
+        //   1. only while a turn is IN FLIGHT — an idle session never re-renders,
+        //      which is exactly the case that comment protects.
+        //   2. only when the LABEL actually changed — repeated rows for the same
+        //      step are dropped, so a chatty tool cannot cause a render per event.
+        //
+        // Together these bound re-renders to real step transitions during a turn.
+        // Only STEP-MEANINGFUL kinds. `keepalive` is a real row kind and arrives
+        // DURING a turn, so without this filter a keepalive would overwrite the
+        // label with noise — and `token` fires per chunk, which would defeat the
+        // change-guard below. `error` is included deliberately: "it failed" is the
+        // most useful thing the indicator can say.
+        const STEP_KINDS = new Set(['tool_start', 'thinking', 'status', 'turn_start', 'error'])
+        if (
+          this.awaitingReply &&
+          STEP_KINDS.has(row.kind) &&
+          scopeKey === activityScopeKey(this.projectId)
+        ) {
+          const next =
+            row.detail === undefined ? { label: row.label } : { label: row.label, detail: row.detail }
+          if (this.liveActivity?.label !== next.label) {
+            this.liveActivity = next
+            this.publish()
           }
         }
       }
@@ -1404,6 +1449,9 @@ export class NeutronChatController {
       messages,
       isRunning: this.awaitingReply || liveStreams.length > 0,
       awaitingFirstToken: this.awaitingReply && liveStreams.length === 0,
+      // A settled turn reports null rather than freezing the last step on screen,
+      // which would read as "still working" forever.
+      liveActivity: this.awaitingReply ? this.liveActivity : null,
       hasActiveWork: this.computeHasActiveWork(),
       workBoardGrewNonce: this.workBoardGrewNonce,
       // Chat-rail stability — present a project-switch's initial `connecting` as

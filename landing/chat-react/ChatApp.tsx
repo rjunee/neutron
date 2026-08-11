@@ -914,7 +914,20 @@ function buildEditIndex(
   return map
 }
 
-function TypingIndicator(): React.JSX.Element {
+function TypingIndicator({
+  activity,
+}: {
+  activity?: { label: string; detail?: string } | null
+}): React.JSX.Element {
+  // SAY WHAT IT IS DOING, not just that it is doing something. Three dots for
+  // four minutes is indistinguishable from a hang — the owner watched exactly
+  // that on 2026-08-11 and asked for "some kind of response in the chat to say
+  // that it's actually working".
+  //
+  // The dots STAY. They are the "alive" signal and they animate; the label is
+  // additive, and absent for the window before the first tool call, so the
+  // indicator must still read correctly with no label at all.
+  const label = activity?.label
   return (
     <div className="car-row car-row-agent" aria-live="polite">
       <div className="car-avatar" aria-hidden="true">
@@ -924,6 +937,13 @@ function TypingIndicator(): React.JSX.Element {
         <span className="car-dot" />
         <span className="car-dot" />
         <span className="car-dot" />
+        {label !== undefined && label.length > 0 ? (
+          // `title` carries the collapsed one-liner on hover without spending a
+          // second line in the transcript on it.
+          <span className="car-typing-label" title={activity?.detail ?? undefined}>
+            {label}
+          </span>
+        ) : null}
       </div>
     </div>
   )
@@ -1852,7 +1872,9 @@ function ChatSurface({
               signal as the flashing Work-tab dot) keeps the dots visible while a
               long/background build runs on after the ack turn settles, and stops
               them the moment the board reports the work done. */}
-          {vm.awaitingFirstToken || vm.hasActiveWork ? <TypingIndicator /> : null}
+          {vm.awaitingFirstToken || vm.hasActiveWork ? (
+            <TypingIndicator activity={vm.liveActivity} />
+          ) : null}
         </ThreadPrimitive.Viewport>
         <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
           ↓
