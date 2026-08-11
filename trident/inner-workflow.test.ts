@@ -337,9 +337,26 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
 // gate was broken or deleted. The workflow script genuinely cannot be imported
 // (it has no module resolution and its top-level `return` is the Workflow
 // runtime's result API), so the gate is lifted out of the source text and run.
+interface Peer {
+  name: string
+  title: string
+  evidence: string
+}
+
 function loadRealGate(): {
-  enforceCrossModelGate: (s: unknown, peers: unknown[]) => { verdict: string; findings: unknown[] } | null
-  deferredCrossModelPeers: (statuses: unknown) => Array<{ name: string; evidence: string }>
+  enforceCrossModelGate: (
+    s: unknown,
+    peers: unknown[],
+  ) => {
+    verdict: string
+    findings: Array<{ kind?: string; title?: string; severity?: string; evidence?: string }>
+  } | null
+  deferredCrossModelPeers: (statuses: unknown) => Peer[]
+  crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
+  missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
+  coreSeats: Array<{ slot: number; name: string }>
+  classifyBlock: (s: unknown, peers: unknown[]) => string
+  corePanelLine: (letter: string, label: string, verdict: unknown) => string
 } {
   const grab = (name: string): string => {
     const at = SRC.indexOf(`function ${name}(`)
@@ -360,8 +377,36 @@ function loadRealGate(): {
     }
     throw new Error(`could not brace-match ${name}`)
   }
+  // The consts the functions close over come along, lifted from the SAME source so
+  // the test cannot disagree with the shipped values. `LANE_FINDING_KIND` is the
+  // field `enforceCrossModelGate` stamps and `classifyBlock` reads — hard-coding
+  // 'lane' here would let the two drift apart with the test still green, which is
+  // the whole failure shape this file exists to prevent.
+  const grabConst = (name: string): string => {
+    const line = SRC.split('\n').find((l) => l.startsWith(`const ${name} =`))
+    if (line === undefined) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
+    return line
+  }
+  const grabBlock = (name: string): string => {
+    const at = SRC.indexOf(`const ${name} = [`)
+    if (at === -1) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
+    const end = SRC.indexOf('\n]', at)
+    if (end === -1) throw new Error(`could not close const ${name}`)
+    return SRC.slice(at, end + 2)
+  }
   const factory = new Function(
-    `${grab('enforceCrossModelGate')}\n${grab('deferredCrossModelPeers')}\nreturn { enforceCrossModelGate, deferredCrossModelPeers }`,
+    [
+      grabConst('LANE_FINDING_KIND'),
+      grabBlock('CORE_REVIEWER_SEATS'),
+      grab('enforceCrossModelGate'),
+      grab('deferredCrossModelPeers'),
+      grab('crossModelPeerStatus'),
+      grab('hasUsableVerdict'),
+      grab('missingCoreReviewers'),
+      grab('corePanelLine'),
+      grab('classifyBlock'),
+      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, coreSeats: CORE_REVIEWER_SEATS, classifyBlock, corePanelLine }',
+    ].join('\n'),
   ) as () => ReturnType<typeof loadRealGate>
   return factory()
 }
@@ -435,6 +480,255 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const { deferredCrossModelPeers } = gate()
     const peers = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' })
     expect(peers[0]!.evidence).toContain('NO fallback to a Claude-family')
+  })
+})
+
+/**
+ * PANEL COMPLETENESS — a reviewer that DIED must never read as one that was ABSENT.
+ *
+ * BOTH BUGS BELOW FAILED OPEN, which is why they are P1 rather than cosmetic: each one
+ * let the panel reach APPROVE with a seat that produced nothing, and an APPROVE is what
+ * merges code. A gate that fails CLOSED wastes a round; a gate that fails OPEN ships
+ * unreviewed code.
+ *
+ *   1. A CROSS-MODEL PEER THAT DIED READ AS "NEVER CONFIGURED". The caller's fallback
+ *      was `{ verdict: 'COMMENT', findings: [], codexStatus: 'not_connected' }` for both
+ *      "no slot" and "slot but null verdict", and only the exact string 'deferred'
+ *      blocks. So a configured reviewer whose agent crashed was indistinguishable from
+ *      a self-hoster who never set one up — and the second of those is DELIBERATELY a
+ *      legitimate reduced panel, so the collapse silently disarmed the gate.
+ *
+ *   2. A CORE REVIEWER THAT DIED HAD NO GATE AT ALL. `argus:claude` / `argus:adversarial`
+ *      are always dispatched, and their verdicts were interpolated into the synthesis
+ *      prompt with a bare `JSON.stringify(verdicts[0])` — so a dead one arrived as the
+ *      literal token `null`, which a synthesis model most plausibly reads as "this
+ *      reviewer raised nothing": an implicit pass. Nothing in code checked.
+ *
+ * THE DISTINCTION THAT MUST SURVIVE is absent-vs-died. Kimi with no API key is a real
+ * product configuration and must still merge; kimi configured and crashed must not.
+ * Every assertion here comes in that pair.
+ */
+describe('inner-workflow.mjs — panel completeness is derived in CODE, not read off a prompt', () => {
+  const gate = (): ReturnType<typeof loadRealGate> => loadRealGate()
+
+  test('the completeness helpers are extractable (a guard that cannot load cannot fail)', () => {
+    const g = gate()
+    expect(typeof g.crossModelPeerStatus).toBe('function')
+    expect(typeof g.missingCoreReviewers).toBe('function')
+    expect(typeof g.classifyBlock).toBe('function')
+    expect(g.coreSeats.map((s) => s.slot)).toEqual([0, 1])
+  })
+
+  describe('crossModelPeerStatus — the slot is the authority on "was this configured"', () => {
+    test('NO SLOT → not_connected (never configured: the reduced panel that must still merge)', () => {
+      const { crossModelPeerStatus } = gate()
+      expect(crossModelPeerStatus(null, [], 'kimiStatus')).toBe('not_connected')
+      expect(crossModelPeerStatus(undefined as unknown as null, [], 'kimiStatus')).toBe('not_connected')
+    })
+
+    test('SLOT + null verdict → deferred, NOT not_connected — this is the #535 fix', () => {
+      // The agent was dispatched and died. Before the fix this returned
+      // 'not_connected', which no gate blocks on.
+      const { crossModelPeerStatus } = gate()
+      expect(crossModelPeerStatus(2, [{}, {}, null], 'codexStatus')).toBe('deferred')
+      expect(crossModelPeerStatus(2, [{}, {}], 'codexStatus')).toBe('deferred')
+    })
+
+    test('SLOT + a verdict object MISSING its status field → deferred', () => {
+      // A malformed reply is a review we did not get. The old code read the absent
+      // field, applied `|| 'not_connected'`, and merged.
+      const { crossModelPeerStatus } = gate()
+      expect(crossModelPeerStatus(2, [{}, {}, { verdict: 'APPROVE' }], 'codexStatus')).toBe('deferred')
+      expect(crossModelPeerStatus(2, [{}, {}, { codexStatus: '' }], 'codexStatus')).toBe('deferred')
+    })
+
+    test('SLOT + a real status → that status, verbatim (including the graceful exit-10 path)', () => {
+      const { crossModelPeerStatus } = gate()
+      const v = [{}, {}, { codexStatus: 'connected' }, { kimiStatus: 'not_connected' }]
+      expect(crossModelPeerStatus(2, v, 'codexStatus')).toBe('connected')
+      // An EXPLICIT not_connected from the reviewer itself still means "no credential"
+      // and still yields a legitimate reduced panel. Only the DEFAULT changed.
+      expect(crossModelPeerStatus(3, v, 'kimiStatus')).toBe('not_connected')
+      expect(crossModelPeerStatus(2, [{}, {}, { codexStatus: 'deferred' }], 'codexStatus')).toBe('deferred')
+    })
+
+    test('end to end: a DEAD configured peer now blocks an APPROVE; an ABSENT one does not', () => {
+      // The whole seam in four lines. Same synthesis verdict, same statusKey, one
+      // difference: whether the reviewer had a seat.
+      const { crossModelPeerStatus, deferredCrossModelPeers, enforceCrossModelGate } = gate()
+      const approve = { verdict: 'APPROVE', findings: [] }
+
+      const died = crossModelPeerStatus(2, [{}, {}, null], 'kimiStatus')
+      const blocked = enforceCrossModelGate(approve, deferredCrossModelPeers({ codex: 'connected', kimi: died }))
+      expect(blocked?.verdict).toBe('REQUEST_CHANGES')
+
+      const absent = crossModelPeerStatus(null, [{}, {}], 'kimiStatus')
+      expect(enforceCrossModelGate(approve, deferredCrossModelPeers({ codex: 'connected', kimi: absent }))).toBe(
+        approve,
+      )
+    })
+  })
+
+  describe('missingCoreReviewers — the always-configured seats, which had no gate (#536)', () => {
+    test('both core reviewers answered → no peers, and an APPROVE stands', () => {
+      const { missingCoreReviewers, coreSeats, enforceCrossModelGate } = gate()
+      const verdicts = [
+        { verdict: 'APPROVE', findings: [] },
+        { verdict: 'APPROVE', findings: [] },
+      ]
+      const missing = missingCoreReviewers(verdicts, coreSeats)
+      expect(missing).toHaveLength(0)
+      const approve = { verdict: 'APPROVE', findings: [] }
+      expect(enforceCrossModelGate(approve, missing)).toBe(approve)
+    })
+
+    test('a null core verdict → one peer, and it BLOCKS an APPROVE', () => {
+      const { missingCoreReviewers, coreSeats, enforceCrossModelGate } = gate()
+      const missing = missingCoreReviewers([null, { verdict: 'APPROVE', findings: [] }], coreSeats)
+      expect(missing).toHaveLength(1)
+      expect(missing[0]!.name).toContain('rubric')
+      const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, missing)
+      expect(out?.verdict).toBe('REQUEST_CHANGES')
+      expect(out?.findings[0]?.title).toContain('produced NO verdict')
+    })
+
+    test('BOTH core reviewers dead → two blockers, so the operator knows the panel was empty', () => {
+      const { missingCoreReviewers, coreSeats, enforceCrossModelGate } = gate()
+      const missing = missingCoreReviewers([null, undefined], coreSeats)
+      expect(missing).toHaveLength(2)
+      const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, missing)
+      expect(out?.verdict).toBe('REQUEST_CHANGES')
+      expect(out?.findings.length).toBe(2)
+    })
+
+    test('a MALFORMED core verdict (no `verdict` string) counts as missing', () => {
+      // VERDICT_SCHEMA requires `verdict`. An object without it is not a review, and
+      // treating "an object came back" as success is how a dead seat passes.
+      const { missingCoreReviewers, coreSeats } = gate()
+      expect(missingCoreReviewers([{ findings: [] }, { verdict: '' }], coreSeats)).toHaveLength(2)
+      expect(missingCoreReviewers(['APPROVE', 42], coreSeats)).toHaveLength(2)
+    })
+
+    test('the blocker EXPLAINS the never-ran/found-nothing distinction, not just that it failed', () => {
+      // The evidence lands in the PR. "Reviewer X produced no verdict" with no reason
+      // reads as a flake to be re-run blind; the operator needs to know the panel was
+      // incomplete and why that is not an approval.
+      const { missingCoreReviewers, coreSeats } = gate()
+      const evidence = missingCoreReviewers([null, null], coreSeats)[0]!.evidence
+      expect(evidence).toContain('never ran')
+      expect(evidence).toContain('not the same as finding nothing')
+    })
+  })
+
+  describe('the block is classified as infra-only, so the fix loop does not re-Forge a dead agent', () => {
+    test('a missing core seat composes through the REAL gate to infra-only', () => {
+      // COMPOSED FROM THE REAL FUNCTIONS rather than a hand-built finding: the gate
+      // stamps `kind` and the classifier reads it, and this is the only assertion that
+      // fails if those two ever disagree. Editing a title can no longer break it, and
+      // renaming the field can no longer pass it.
+      const { missingCoreReviewers, coreSeats, enforceCrossModelGate, classifyBlock } = gate()
+      const peers = missingCoreReviewers([null, { verdict: 'APPROVE', findings: [] }], coreSeats)
+      const gated = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
+      expect(classifyBlock(gated, peers)).toBe('infra-only')
+    })
+
+    test('a dead seat PLUS a real code finding is still code — a genuine blocker is never dropped', () => {
+      const { missingCoreReviewers, coreSeats, enforceCrossModelGate, classifyBlock } = gate()
+      const peers = missingCoreReviewers([null, { verdict: 'APPROVE', findings: [] }], coreSeats)
+      const gated = enforceCrossModelGate(
+        { verdict: 'APPROVE', findings: [{ severity: 'blocker', title: 'Null deref in the reap path' }] },
+        peers,
+      )
+      expect(classifyBlock(gated, peers)).toBe('code')
+    })
+
+    test('a deferred cross-model peer composes through the same path to infra-only', () => {
+      const { deferredCrossModelPeers, enforceCrossModelGate, classifyBlock } = gate()
+      const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' })
+      const gated = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
+      expect(classifyBlock(gated, peers)).toBe('infra-only')
+    })
+  })
+
+  describe('the wiring — derived in code, and after the severity gate', () => {
+    test('the synthesis prompt no longer hands a dead core reviewer the bare token `null`', () => {
+      expect(SRC).not.toContain('Verdict A (Claude rubric): ${JSON.stringify(verdicts[0])}')
+      expect(SRC).not.toContain('Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}')
+      expect(SRC).toContain("corePanelLine('A', 'Claude rubric', verdicts[0])")
+      expect(SRC).toContain("corePanelLine('B', 'Claude adversarial', verdicts[1])")
+    })
+
+    // RUN corePanelLine, DO NOT GREP FOR IT. The assertions above are wiring checks:
+    // they prove the call site exists, and nothing more. The original guard for the
+    // #536 prompt fix was `expect(SRC).toContain('DID NOT COMPLETE')`, and a mutation
+    // that replaces the branch condition with `true` — putting the bare `null` straight
+    // back into the prompt and leaving the dead-seat message unreachable — keeps that
+    // phrase in the file and keeps the test green. That mutant survived. These do not.
+    describe('corePanelLine — the dead-seat message is produced, not merely present in the file', () => {
+      test('a real verdict is passed through verbatim as JSON', () => {
+        const { corePanelLine } = gate()
+        const v = { verdict: 'APPROVE', findings: [] }
+        const line = corePanelLine('A', 'Claude rubric', v)
+        expect(line).toBe(`Verdict A (Claude rubric): ${JSON.stringify(v)}`)
+        expect(line).not.toContain('DID NOT COMPLETE')
+      })
+
+      test('a DEAD seat yields DID NOT COMPLETE and never the token `null`', () => {
+        const { corePanelLine } = gate()
+        for (const dead of [null, undefined, 'APPROVE', 42, {}, { verdict: '' }]) {
+          const line = corePanelLine('B', 'Claude adversarial', dead)
+          expect(line).toContain('DID NOT COMPLETE')
+          // The precise regression: `Verdict B (…): null`. A synthesis model reads a
+          // verdict-shaped blank as "this reviewer raised nothing" — an implicit pass.
+          expect(line).not.toContain(': null')
+          expect(line).not.toContain(': undefined')
+          expect(line).toContain('do NOT return APPROVE')
+        }
+      })
+
+      test('it agrees with missingCoreReviewers on EVERY seat — one predicate, never two', () => {
+        // The dangerous drift is the pair disagreeing: the prompt saying a seat is fine
+        // while the gate blocks it, or worse, the prompt saying DID NOT COMPLETE while
+        // nothing blocks. Asserted over the same inputs both callers can see.
+        const { corePanelLine, missingCoreReviewers, coreSeats } = gate()
+        const cases: unknown[] = [null, undefined, {}, { verdict: '' }, 'APPROVE', 42, { verdict: 'APPROVE' }]
+        for (const c of cases) {
+          const blocked = missingCoreReviewers([c, { verdict: 'APPROVE' }], coreSeats).length === 1
+          const saysDead = corePanelLine('A', 'Claude rubric', c).includes('DID NOT COMPLETE')
+          expect(saysDead).toBe(blocked)
+        }
+      })
+    })
+
+    test('no caller invents a not_connected status for a slot that exists', () => {
+      // The exact literal that collapsed died-into-absent. Its absence is the fix.
+      // COMMENT LINES ARE STRIPPED FIRST: the docblock on `crossModelPeerStatus` quotes
+      // the old expression verbatim to explain the bug, and a naive whole-file check
+      // would fail on the documentation of the very fix it is verifying.
+      const code = SRC.split('\n')
+        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+        .join('\n')
+      expect(code).not.toContain("codexStatus: 'not_connected' }")
+      expect(code).not.toContain("kimiStatus: 'not_connected' }")
+      expect(SRC).toContain("crossModelPeerStatus(codexSlot, verdicts, 'codexStatus')")
+      expect(SRC).toContain("crossModelPeerStatus(kimiSlot, verdicts, 'kimiStatus')")
+    })
+
+    test('missingCore reaches the gate on BOTH the CI-pending and CI-settled branches', () => {
+      // One branch carrying the peers and the other not is how half a gate ships.
+      expect(SRC).toContain('missingCoreReviewers(verdicts, CORE_REVIEWER_SEATS)')
+      expect(SRC).toContain('[...missingCore, ...deferred, ciDeferredPeer(ci)]')
+      expect(SRC).toContain('[...missingCore, ...deferred]')
+    })
+
+    test('the completeness peers are assembled AFTER enforceSeverityGate, which can only pass', () => {
+      // enforceSeverityGate turns a nit-only REQUEST_CHANGES into an APPROVE. If the
+      // completeness gate ran before it, that downgrade would undo this block.
+      expect(SRC.indexOf('enforceSeverityGate(synthesisRaw)')).toBeGreaterThan(-1)
+      expect(SRC.indexOf('const gated = enforceCrossModelGate(')).toBeGreaterThan(
+        SRC.indexOf('enforceSeverityGate(synthesisRaw)'),
+      )
+    })
   })
 })
 

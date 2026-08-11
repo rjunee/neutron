@@ -67,9 +67,27 @@ function extractMaybeAsync(name: string): string {
   return SRC.includes(`async function ${name}(`) ? `async ${body}` : body
 }
 
+/**
+ * Lift a top-level `const NAME = …` one-liner out of the source.
+ *
+ * `classifyBlock` closes over `LANE_FINDING_KIND` — the field name the gate STAMPS on a
+ * lane blocker and the classifier READS. Re-declaring 'lane' here instead would let the
+ * two drift apart with this file still green, which is the exact cannot-fail shape the
+ * header above is about.
+ */
+function extractConst(name: string): string {
+  const line = SRC.split('\n').find((l) => l.startsWith(`const ${name} =`))
+  if (line === undefined) throw new Error(`const ${name} not found in inner-workflow.mjs`)
+  return line
+}
+
+const PRELUDE = extractConst('LANE_FINDING_KIND')
+
 const load = <T>(name: string, isAsync = false): T =>
   // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-  new Function(`${isAsync ? extractMaybeAsync(name) : extractFn(name)}; return ${name}`)() as T
+  new Function(
+    `${PRELUDE}\n${isAsync ? extractMaybeAsync(name) : extractFn(name)}; return ${name}`,
+  )() as T
 
 type Verdict = Record<string, unknown>
 type RetryFn = (input: {
@@ -80,12 +98,17 @@ type RetryFn = (input: {
   log?: (m: string) => void
 }) => Promise<Verdict[]>
 type ClassifyFn = (
-  synthesis: { findings?: Array<{ title?: string }> } | null,
+  synthesis: { findings?: Array<{ title?: string; kind?: string }> } | null,
   deferred: Array<{ name: string }>,
 ) => string
+type GateFn = (
+  synthesis: unknown,
+  peers: Array<{ name: string; title: string; evidence: string }>,
+) => { verdict: string; findings: Array<{ kind?: string; title?: string }> } | null
 
 const retryDeferredPeers = load<RetryFn>('retryDeferredPeers', true)
 const classifyBlock = load<ClassifyFn>('classifyBlock')
+const enforceCrossModelGate = load<GateFn>('enforceCrossModelGate')
 
 const SLOTS = [
   { name: 'codex', slot: 0, statusKey: 'codexStatus' },
@@ -205,9 +228,16 @@ describe('retryDeferredPeers — retry the lane, not the round', () => {
 })
 
 describe('classifyBlock — is this about the code, or about a lane that could not run?', () => {
-  const deferral = (name: string) => ({
-    title: `${name} cross-model review DEFERRED — refusing to silently APPROVE`,
-  })
+  // BUILT BY THE REAL GATE, not hand-written. A lane blocker is now identified by the
+  // `kind` FIELD the gate stamps rather than by re-deriving its title template and
+  // string-matching it — two sites agreeing on a message format is a contract nothing
+  // enforces, and a reworded title would have silently reclassified every lane failure
+  // as a code finding. Constructing the fixture with `enforceCrossModelGate` means this
+  // suite fails the moment the producer and the reader disagree.
+  const deferral = (name: string) =>
+    enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, [
+      { name, title: `${name} cross-model review DEFERRED — refusing to silently APPROVE`, evidence: 'x' },
+    ])!.findings[0]!
 
   test('deferral findings ONLY ⇒ infra-only', () => {
     expect(
@@ -260,9 +290,105 @@ describe('the fix loop honours the classification', () => {
   })
 
   test('the retry runs BEFORE the verdicts are read', () => {
+    // Anchored on the FIRST read of the verdict array in the completeness derivation.
+    // It used to anchor on `const claudeVerdicts =`, which was a DEAD binding — declared
+    // and never used — so this assertion was pinned to a line that could be deleted
+    // without changing any behaviour.
     const retryAt = SRC.indexOf('retryDeferredPeers({')
-    const readAt = SRC.indexOf('const claudeVerdicts =')
+    const readAt = SRC.indexOf('const missingCore = missingCoreReviewers(')
     expect(retryAt).toBeGreaterThan(-1)
     expect(readAt).toBeGreaterThan(retryAt)
+  })
+})
+
+/**
+ * A CONFIGURED SEAT THAT PRODUCED NOTHING IS A DEFERRED LANE — so it is RETRYABLE.
+ *
+ * The loop used to `break` on `!current`, so a peer whose agent DIED (slot assigned,
+ * `verdicts[slot]` null) was neither retried nor gated: the caller then read the same
+ * null as 'not_connected' and the panel could APPROVE with an empty seat. Retrying is
+ * the cheapest possible remedy — one call, versus a whole round of four reviewers.
+ *
+ * The `slot === null` skip above is what keeps the ABSENT case free: a peer with no
+ * credential never enters `slots`, so nothing here can spend a call on it.
+ */
+describe('retryDeferredPeers — a DEAD lane (null verdict on a configured slot) is retryable', () => {
+  test('a null verdict on a configured slot IS retried, and a good retry replaces it', async () => {
+    const calls: string[] = []
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict, { kimiStatus: 'connected' }],
+      slots: SLOTS,
+      invoke: async (n) => {
+        calls.push(n)
+        return { codexStatus: 'connected', verdict: 'APPROVE' }
+      },
+    })
+    expect(calls).toEqual(['codex'])
+    expect(out[0]?.['codexStatus']).toBe('connected')
+  })
+
+  test('an UNDEFINED verdict (the slot never got written) is retried too', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ codexStatus: 'connected' }],
+      slots: SLOTS,
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual(['kimi'])
+  })
+
+  test('a verdict object MISSING its status field is retried — a malformed reply is not an answer', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ verdict: 'APPROVE', findings: [] }, { kimiStatus: 'connected' }],
+      slots: SLOTS,
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual(['codex'])
+  })
+
+  test('a dead lane whose retry ALSO dies stays dead — the round is not silently healed', async () => {
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict],
+      slots: [SLOTS[0]!],
+      attempts: 2,
+      invoke: async () => null,
+    })
+    // Still nothing at the slot, so `crossModelPeerStatus` reports 'deferred' and the
+    // gate blocks. The remedy for an unrecoverable lane is a block, never a default.
+    expect(out[0]).toBeNull()
+  })
+
+  test('a dead lane is retried at most `attempts` times', async () => {
+    let n = 0
+    await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict],
+      slots: [SLOTS[0]!],
+      attempts: 3,
+      invoke: async () => {
+        n += 1
+        return null
+      },
+    })
+    expect(n).toBe(3)
+  })
+
+  test('an ABSENT peer (no slot) is still never retried — the reduced panel costs nothing', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ codexStatus: 'connected' }],
+      slots: [{ name: 'kimi', slot: null, statusKey: 'kimiStatus' }],
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual([])
   })
 })
