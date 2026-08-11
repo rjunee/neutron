@@ -30,8 +30,10 @@
  * This docblock states INTENT on purpose. Earlier revisions restated the
  * predicate in prose, then enumerated the deviations from the originals, then
  * enumerated which cases the suite covers — and each enumeration was falsified
- * by the next reader to grep. A test cannot go stale quietly; a docblock can,
- * so this one deliberately says less than it knows.
+ * by the next reader to grep. A docblock goes stale in silence; a test at least
+ * has to be kept green — though only a test on the WIRED path proves anything,
+ * and this refactor's round 1 shipped 41 green ones that did not. So this
+ * docblock deliberately says less than it knows.
  *
  *   - `once(key)` — the GBrain unavailable latch
  *     (gbrain-memory/GBrainSyncHook.ts `latchIfUnavailable`): the FIRST
@@ -74,9 +76,10 @@
  *     let a persistently-throwing sink re-attempt on every single call,
  *     precisely the flood the window exists to prevent. A caller that needs a
  *     DELIVERY bound must make its own sink non-throwing; this primitive will
- *     not do it for them. `ms` is likewise not validated here, and a NaN `ms`
- *     suppresses the key for the life of the process (verified by execution),
- *     so a caller that COMPUTES `ms` must validate it.
+ *     not do it for them. `ms` is likewise not validated here: a NaN `ms`
+ *     suppresses the key for as long as the clock keeps moving forward — only a
+ *     reading behind the last stamp gets through (verified by execution) — so a
+ *     caller that COMPUTES `ms` must validate it.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -151,8 +154,8 @@ export interface Logger extends LogEmitter {
    * "Roughly" is load-bearing: a clock reading behind the last stamp emits
    * rather than suppressing, and a throwing sink consumes a window with no
    * guarantee that anything was delivered. Both are deliberate — the head
-   * docblock gives the reasons and the rest of the caller-facing contract, and
-   * `logger/__tests__/logger.test.ts` holds the pinned cases.
+   * docblock gives the reasons, and `logger/__tests__/logger.test.ts` holds the
+   * pinned cases.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }
@@ -356,11 +359,14 @@ export function createLogger(subsystem: string, options?: LoggerOptions): Logger
           const last = rateLimitState.get(subsystem)?.get(key)
           if (last === undefined) return true
           const elapsed = clock() - last
-          // A BACKWARD clock step (`Date.now()` is not monotonic — NTP, a VM
-          // resume) makes `elapsed` negative, and a plain `>= ms` would then
-          // suppress the line for step+ms. For a rate-limited heartbeat that
-          // silence reads as "the thing died", so treat a backward step as due
-          // now: the window re-stamps on this emit and self-heals.
+          // A backward clock step (`Date.now()` is not monotonic — NTP, a VM
+          // resume) can land the reading BEHIND `last`, making `elapsed`
+          // negative, and a plain `>= ms` would then suppress the line for
+          // step+ms. For a rate-limited heartbeat that silence reads as "the
+          // thing died", so treat a reading behind the stamp as due now: the
+          // window re-stamps on this emit and self-heals. (A smaller step that
+          // leaves the reading ahead of `last` is still suppressed — the
+          // condition is the sign of `elapsed`, not the step.)
           return elapsed < 0 || elapsed >= ms
         },
         () => {

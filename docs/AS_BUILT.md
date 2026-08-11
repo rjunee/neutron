@@ -9794,15 +9794,18 @@ that tree at the time. The row is replaced in the PR description by the round-7 
 its head, not restated. A verdict is quotable only with
 the head it ran against, and it has to be re-run before it is quoted.
 
-**The codex lane then found eight more, and the shape repeats one altitude up.** All are fixed
-here; the code still has not changed. Seven were introduced by this round's own draft; the
-exception is the cron handler's four-hour "absolute backstop", inherited and re-endorsed.
+**The codex lane then found eight more, and the shape repeats one altitude up.** Each is
+addressed below; the code still has not changed. Seven were introduced by this round's own draft;
+the exception is the cron handler's four-hour "absolute backstop", inherited and re-endorsed.
 
 * **"A hot loop of suppressed attempts cannot silence the key forever" is false, because `ms` is
   not validated.** A probe called `rateLimited('k', NaN)` 100,001 times with the clock advancing
-  and got exactly one line — `NaN` fails both halves of the comparison, so the key is suppressed
-  for the life of the process. The clause is deleted and the consequence is stated where a caller
-  will meet it. Note what this means about the sentence deleted at the top of this entry: the NaN
+  and got exactly one line — `NaN` fails both halves of the comparison. The clause is deleted and
+  the consequence is stated where a caller will meet it. (The first attempt at that replacement
+  said "for the life of the process", which a third pass then refuted: a reading BEHIND the last
+  stamp satisfies `elapsed < 0` and emits, so a NaN window holds only while the clock moves
+  forward. Corrected — and it is the same over-general shape as "a backward step", written into
+  the sentence FIXING that shape.) Note what this means about the sentence deleted at the top of this entry: the NaN
   BEHAVIOUR was real, and what was false was the claim about which file documented it and how
   many callers could reach it. **Deleting a false sentence can delete a true fact riding along
   inside it** — this round put the fact back, in the contract, verified by execution.
@@ -9810,8 +9813,10 @@ exception is the cron handler's four-hour "absolute backstop", inherited and re-
   completeness claim about a suite whose gap the NEXT sentence discloses. Now: it is where the
   behavior is pinned, explicitly not a complete specification.
 * **"One line per key" for `once`** describes an attempt bound as a delivery bound — a throwing
-  sink burns the latch and delivers nothing (probe: `{"sink_calls":1,"delivered":[]}`). Both
-  helpers now say ATTEMPT.
+  sink burns the latch with no guarantee anything was delivered (probe with a sink that throws
+  BEFORE delivering: one sink call, nothing delivered; a sink that delivers and then throws does
+  deliver, which is exactly why the bound cannot be stated as "delivers nothing"). Both helpers
+  now say ATTEMPT.
 * **"The two consequences a caller has to plan around" is a total**, and the same contract
   carries more caller obligations (validate a computed `ms`; latch state is shared across
   `createLogger` calls by `subsystem × key`). Now "two consequences that are easy to get wrong",
@@ -9848,9 +9853,28 @@ lives on the primitive), "all eight are fixed" written before the confirmation p
 "the log is append-only, so it is designed never to be revisited" — refuted by this very round,
 which came back and revised three earlier entries by hand.
 
+**A THIRD pass then found eleven more, and the two that matter say the same thing about the same
+sentence twice.** "A NaN `ms` suppresses the key for the life of the process" and the inline
+comment's "a backward clock step makes `elapsed` negative" are both the CAUSE-shaped
+over-generalisation this round exists to remove — one written into the sentence that FIXED it for
+the backward step, the other left standing in the code comment three lines above the condition
+itself. Both are narrowed to the sign of `elapsed`. The rest: "the head docblock gives … the rest
+of the caller-facing contract" contradicted the head docblock's own "not the whole caller-facing
+contract"; "a throwing sink … delivers nothing" ignores a sink that delivers and then throws;
+"a test cannot go stale quietly" had a counterexample in this very PR (round 1's 41 green tests
+with the flood restored); the composer's cron docblocks named the default cadence without the
+`interval_ms` override that three of them forward; and "All are fixed here" was, again, written
+before the pass that checked it. 📌 **A sentence written to correct an over-claim is written at
+speed, from the correction, and inherits its shape** — three rounds running, the fix reproduced
+the defect in the fix. The only wordings that have never had to be corrected are a disclosed gap,
+a dated banner and a pointer, which is why those are what this round leaves behind.
+
 **Review panel for round 7:** adversarial + rubric lanes, plus an independent `codex` lane
-(codex-cli 0.147.0, read-only) run twice — once on the draft and once on the fix, producing the
-eleven items and then the seven. The kimi lane was
+(codex-cli 0.147.0, read-only) run three times — on the draft, on the fix, and on the fix to the
+fix, producing eleven items, then seven, then eleven again at falling severity (the last pass
+returned one P1 pair and nine P2/P3s). The lane's verdict on the head it last saw was
+REQUEST_CHANGES; every item is addressed in the commits after it, and this entry does NOT record
+an APPROVE, because no lane has returned one against the current head. The kimi lane was
 deliberately not run (owner's K3 quota exhausted) — **absent, not failed**, so this is a
 three-lane round. The codex sandbox could not create temp files, so it verified the unit suite
 and the 51-project typecheck itself and marked the integration-test and lint results UNVERIFIED

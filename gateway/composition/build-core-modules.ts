@@ -752,7 +752,8 @@ export function buildCoreModules(
       // supplied so legacy callers and tests that don't construct the
       // engine here stay unaffected. The cron drives
       // `engine.pollImportRunningTick(...)` on
-      // `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` so the runner's
+      // `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` (or the `interval_ms`
+      // override, when the input supplies one) so the runner's
       // terminal status (completed / failed / cancelled / hard-timeout)
       // gets detected without requiring a user inbound.
       const importRunningCfg = input.onboarding_import_running_cron

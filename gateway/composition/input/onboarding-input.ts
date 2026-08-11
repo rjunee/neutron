@@ -50,8 +50,9 @@ export interface OnboardingCompositionInput {
   }
   /**
    * S12 (2026-05-16) — import-running cron-tick config. When supplied,
-   * the composer wires a per-instance cron, on
-   * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS`, that scans
+   * the composer wires a per-instance cron — on
+   * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` unless `interval_ms` below
+   * overrides it — that scans
    * `onboarding_state` for rows at `phase=import_running` with
    * `import_job_id` non-null and calls
    * `engine.pollImportRunningTick(...)` so the runner's terminal status
