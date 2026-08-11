@@ -90,6 +90,14 @@ export function appProjectTopicId(project_id: string): string {
  * (`app/lib/general-scope.ts` `httpProjectSegment`), and moving those is a data
  * migration (General's docs live under `Projects/general/docs` today), so it is
  * filed as #183 rather than ridden in on a push fix.
+ *
+ * WHAT IS LEFT BEHIND IS NOT READ-ONLY, and the paragraph above must not be read
+ * as saying so. Reminders was the surface worth closing FIRST, not the only one
+ * that writes: `app/lib/docs-client.ts` creates, writes and deletes documents
+ * through the aliased mapper, and `app/lib/work-board-client.ts` creates,
+ * patches, moves and deletes items through it. #183 is therefore an open
+ * wrong-scope WRITE on two clients, and it is sequenced behind a data migration
+ * rather than behind a judgement that it is merely cosmetic.
  */
 function resolveScopeSegment(raw: unknown): string | null {
   // `unknown` mirrors `sanitizeProjectId`, which this delegates to and replaces at

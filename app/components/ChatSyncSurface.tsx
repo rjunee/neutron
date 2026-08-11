@@ -645,15 +645,15 @@ export function ChatSyncSurface({
   // sequence was "tap the notification for X, rail-tap elsewhere, then tap the SAME
   // notification again — it is still sitting in the shade". The premise is right and the
   // conclusion is not: a real re-tap of the same notification never gets here at all. It
-  // is swallowed ONE LAYER UP, at `app/lib/push.ts:292` — `installPushTapHandler`'s
-  // dispatcher reads `response.notification.request.identifier`, returns early on
-  // `store.has(id)`, and only THEN calls `resolvePushRoute`/`push(path)`. So the second
-  // tap produces no navigation whatsoever and never re-supplies `?message_id=`; nothing
-  // reaches this component to be swallowed by the equality check. The dedupe TTL is 7
-  // DAYS (`push-tap-dedupe-store.ts:53`) and a warm tap passes `{dismiss:false}`
-  // (`push.ts:332`), so the notification genuinely does stay in the shade — which is
-  // exactly what made the false claim read as plausible. Filed as its own defect (#182)
-  // rather than widened into this change.
+  // is swallowed ONE LAYER UP, in `installPushTapHandler`'s `dispatch` helper
+  // (`app/lib/push.ts`): it reads `response.notification.request.identifier`, returns
+  // early on `store.has(id)`, and only THEN calls `resolvePushRoute`/`push(path)`. So the
+  // second tap produces no navigation whatsoever and never re-supplies `?message_id=`;
+  // nothing reaches this component to be swallowed by the equality check. The dedupe TTL
+  // is 7 DAYS (`push-tap-dedupe-store.ts` `PUSH_TAP_DEDUPE_TTL_MS`) and the warm listener
+  // passes `{dismiss:false}`, so the notification genuinely does stay in the shade —
+  // which is exactly what made the false claim read as plausible. Filed as its own
+  // defect (#182) rather than widened into this change.
   //
   // WHAT DOES REACH IT is any SECOND ARRIVAL of the same target at this live component:
   // a fresh notification for the same message (a new `request.identifier`, so the dedupe

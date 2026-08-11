@@ -52,9 +52,9 @@
  *     AND THAT IS THE WHOLE OF THE CLAIM — the tapped row itself may well not be in
  *     the list. General's Reminders tab is not an "everything" view: the surface
  *     lists `listPendingByTopic(project_slug, 'app-project:~general')`
- *     (`gateway/http/app-reminders-surface.ts:212`) and the `include_id` widening
- *     that exists for exactly this deep-link case re-checks
- *     `extra.topic_id === topic_id` before admitting a row (:247). A legacy General
+ *     (`gateway/http/app-reminders-surface.ts`, the list route) and the
+ *     `include_id` widening that exists for exactly this deep-link case re-checks
+ *     `extra.topic_id === topic_id` before admitting a row. A legacy General
  *     reminder was written by an engine path with `topic_id` NULL, so it matches
  *     neither test and cannot be highlighted. The tap lands on the right TAB, not on
  *     the row. That is still strictly better than the `null` it used to return (the

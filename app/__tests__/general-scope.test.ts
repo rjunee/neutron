@@ -74,9 +74,11 @@ describe('the one mapping', () => {
     // Stated as an assertion rather than a comment so the defect cannot be
     // rediscovered as a surprise. `httpProjectSegment` cannot tell the no-project
     // scope from a project whose id happens to be `general`, because the segment it
-    // maps General onto is itself a legal project id. Read-only surfaces still share
-    // this — #183 — and the pin below is what stops the MUTATING one from rejoining
-    // them by a copy-paste.
+    // maps General onto is itself a legal project id. Four surfaces still share this
+    // — #183 — and TWO OF THEM MUTATE through it (`docs-client.ts` writes and deletes
+    // documents, `work-board-client.ts` creates, patches and deletes items), so #183
+    // is an open wrong-scope WRITE, not a read-only wart. The pin below is what stops
+    // the surface that HAS been split off from rejoining them by a copy-paste.
     expect(httpProjectSegment(RAIL_GENERAL_ID)).toBe(httpProjectSegment(GENERAL_HTTP_ID))
   })
 

@@ -734,17 +734,31 @@ describe('app-reminders surface — the reserved General segment', () => {
     ])
   })
 
-  it("neither scope can snooze or cancel the other's row", async () => {
-    await create(GENERAL_SEGMENT, 'from the General tab')
-    const general_row = (await list(GENERAL_SEGMENT))[0]
-    if (general_row === undefined) throw new Error('the General create did not land')
+  /**
+   * Drive snooze + cancel from `attacker_segment` at a row that belongs to
+   * `victim_segment`, and assert the row survives untouched.
+   *
+   * Parameterised because "neither scope" is a claim about BOTH directions and
+   * the first version of this test only ever created a General row — so it
+   * proved General-attacked-via-the-project and left the mirror image, a General
+   * URL reaching into the real project, entirely unexercised. A one-directional
+   * reservation would have passed it.
+   */
+  async function assertCannotReachAcross(
+    victim_segment: string,
+    attacker_segment: string,
+    message: string,
+  ): Promise<void> {
+    expect((await create(victim_segment, message)).status).toBe(200)
+    const victim_row = (await list(victim_segment))[0]
+    if (victim_row === undefined) throw new Error(`the ${victim_segment} create did not land`)
 
     // The mutating half of the finding. Pre-fix these were the SAME URL, so a
-    // cancel meant for General destroyed a row belonging to an unrelated project.
+    // cancel meant for one scope destroyed a row belonging to the other.
     for (const action of ['snooze', 'cancel'] as const) {
       const res = await authedFetch(
         harness.base,
-        `/api/app/projects/${COLLIDING_PROJECT_ID}/reminders/${general_row.id}/${action}`,
+        `/api/app/projects/${attacker_segment}/reminders/${victim_row.id}/${action}`,
         {
           method: 'POST',
           body: JSON.stringify({ new_fire_at: FIXED_NOW_S + 7200 }),
@@ -754,8 +768,24 @@ describe('app-reminders surface — the reserved General segment', () => {
       const json = (await res.json()) as { code: string }
       expect(json.code).toBe('reminder_not_found')
     }
-    // Still pending, still General's, untouched by either attempt.
-    expect((await list(GENERAL_SEGMENT)).map((r) => r.id)).toEqual([general_row.id])
+    // Still pending, still the victim's, untouched by either attempt.
+    expect((await list(victim_segment)).map((r) => r.id)).toEqual([victim_row.id])
+  }
+
+  it("the project cannot snooze or cancel the General scope's row", async () => {
+    await assertCannotReachAcross(GENERAL_SEGMENT, COLLIDING_PROJECT_ID, 'from the General tab')
+  })
+
+  it("the General scope cannot snooze or cancel the project's row", async () => {
+    // The direction the original test never built a row for. It is not symmetric
+    // by inspection: General's segment is reserved by an exact-match branch that
+    // runs BEFORE `sanitizeProjectId`, so this path exercises different code than
+    // its mirror and has to be asserted rather than assumed.
+    await assertCannotReachAcross(
+      COLLIDING_PROJECT_ID,
+      GENERAL_SEGMENT,
+      'from the general project',
+    )
   })
 
   it("the include_id widening does not leak the other scope's row either", async () => {

@@ -9342,7 +9342,7 @@ request, and the reminders surface derived one `app-project:general` topic for b
 by construction, then mapped onto something that is not.
 
 What made it worth a round rather than a note: **reminders was about to be the first MUTATING
-surface on that mapping.** The read-only clients (docs, tabs, work-board, activity) have shared it
+surface on that mapping.** The four other clients (docs, tabs, work-board, activity) have shared it
 for months. This branch routed `list`, `create`, `snooze`, `cancel` and `convert-to-task` through
 it, so two unrelated rail entries would have shared a pending list *and* its writes — a cancel
 aimed at General destroying a real project's row. Before the branch that path 400'd
@@ -9368,11 +9368,22 @@ than replacing it. Two functions, not a flag: a server that has not learned the 
 the right route sentinel after `#general` shipped and broke on-device (#411).
 
 **SCOPE OF THE FIX, STATED RATHER THAN IMPLIED: reminders ONLY.** Docs, tabs, work-board and
-activity still collapse General onto `general` and still alias. They are reads, they pre-date this
-module, and closing them is a **data migration** — `Projects/general/docs` is a directory with files
-in it, and either way the split goes, one scope stops seeing content it can see today. Filed as
-**#183** with both fix directions, not ridden in on a push fix. Open has no root `ISSUES.md` (the
-purity gate reserves that path); its defect tracker is GitHub Issues.
+activity still collapse General onto `general` and still alias. They pre-date this module, and
+closing them is a **data migration** — `Projects/general/docs` is a directory with files in it, and
+either way the split goes, one scope stops seeing content it can see today. Filed as **#183** with
+both fix directions, not ridden in on a push fix. Open has no root `ISSUES.md` (the purity gate
+reserves that path); its defect tracker is GitHub Issues.
+
+**AND THE RESIDUAL IS NOT READ-ONLY — corrected in round 2, because the first version of this
+entry, of `general-scope.ts`'s docblock, of the test comment and of #183 itself all called those
+four clients "read-only".** Two of them write: `docs-client.ts` (`writeFile`, `moveFile`,
+`createFolder`, `uploadBinary`, `deleteFile`, `deleteFolder`, `deleteBinary`,
+`deleteBinariesUnderPrefix`) and `work-board-client.ts` (`create`, `update`, `complete`, `reorder`,
+`delete`, `start`). Only `tabs-client.ts` and `activity-client.ts` are reads. So #183 is an **open
+wrong-scope write** on the same terms that made reminders worth closing first — a docs delete from
+one scope removes the other scope's file — and reminders was the surface worth closing FIRST, not
+the only mutating one. The sequencing behind a migration is unchanged; what changed is that it is no
+longer justified by a severity claim that was false.
 
 **THE SECOND FINDING IS A COMMENT, AND THE FIX IS TO CORRECT THE CLAIM.** The latch-release from the
 previous round is correct by inspection and stays. What was wrong is the sequence used to motivate
@@ -9425,3 +9436,46 @@ both halves were individually correct. **When a value exists to be unforgeable, 
 layer that reads it and check the guarantee is still true there.** The generalisation of the
 adjacent lesson from the same file: a comment describing a mode is a claim about reachability, and
 the way to check it is to walk the layer ABOVE the one the comment is written in.
+
+### Round 2 — the correction had itself carried the false claim, and one sentinel had escaped to the screen
+
+Same PR **#171**, second review round. Nothing about the reservation changed; four things that
+DESCRIBED it did, plus one user-visible leak the reservation created.
+
+**THE SEVERITY CLAIM WAS WRONG IN FIVE PLACES AT ONCE.** "Read-only clients" was written into
+`app/lib/general-scope.ts`, `gateway/http/app-reminders-surface.ts`,
+`app/__tests__/general-scope.test.ts`, this file, and the body of GitHub issue #183 — and it is false
+of two of the four. It survived a whole round because it was *plausible*: reminders genuinely was the
+surface being made to mutate in this branch, so "the mutating one" read as a description of the SET
+when it was only a description of the DIFF. All five now name the writing methods by symbol, and
+#183's title and table say WRITES. The reason to care is not tidiness — a residual filed as read-only
+gets scheduled like a cosmetic, and this one can delete a document.
+
+**THE RESERVATION PUT `~general` ON THE FOCUS SCREEN.** `app-focus-surface.ts`'s
+`extractProjectIdFromTopic` decodes `app-project:<id>` back to whatever id it carries, so the moment
+General's reminders got their own topic, a General row's project chip rendered the literal string
+`~general` — an internal routing token displayed as though the owner had named a project that. It was
+unreachable before this branch (the surface 400'd on `~`), which is why no existing test could have
+caught it: `focus-row-formatters.test.ts` hand-builds its items, so it only ever sees values someone
+thought to type. `projectChipLabel` now maps the sentinel to `General`, and deliberately does NOT
+route it through `isInstanceLevel` — General is a routable scope with its own tabs, and flipping that
+predicate would have silently redirected the tap to the projects list.
+
+**TWO CITATIONS HAD GONE STALE INSIDE THEIR OWN BRANCH.** A prose edit in one commit cited
+`app-reminders-surface.ts:212` and `:247`; a later commit on the same branch added lines above both.
+Rather than repoint them at 271 and 307 — which the next commit would break again — they now name the
+call and the expression. 📌 **A `file:line` citation into a file the same branch is still editing is
+stale before it merges. Cite the symbol.**
+
+**THE BIDIRECTIONAL TEST WAS ONLY UNIDIRECTIONAL.** `"neither scope can snooze or cancel the other's
+row"` created a General row and attacked it through the project's URL — and never built the mirror.
+The two directions are not symmetric by inspection: the reserved segment is matched by an exact-match
+branch that runs *before* `sanitizeProjectId`, so the General-as-attacker path executes different
+code. Split into two named tests over one parameterised helper. Mutation-tested by aliasing the
+sentinel back to `general` **on the snooze/cancel branch only**, leaving list and create reserved: the
+new test reds, the original passes — which is the proof that it covered one half while reading as
+though it covered both.
+
+📌 **A test whose NAME quantifies over both directions ("neither", "either", "any") is asserting
+something its body may not reach.** The name is the claim; the fixtures are the coverage. When they
+disagree, the name is what everyone believes.

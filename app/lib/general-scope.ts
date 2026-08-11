@@ -11,10 +11,15 @@
  *     `encodeURIComponent` so it survives being a URL path segment.
  *   - the shared client chat SCOPE is `''` (`railIdToScope`), which the live
  *     `work_board_changed` filter and the app-ws URL both require.
- *   - the HTTP PATH SEGMENT is `'general'`, and every project-scoped app surface
- *     400s on anything else: `sanitizeProjectId('~general')` → null →
- *     `invalid_project_id`, and an empty segment produces a `//docs` double slash
- *     that matches no route at all.
+ *   - the HTTP PATH SEGMENT is `'general'` on every project-scoped app surface
+ *     EXCEPT reminders, and those surfaces 400 on anything else:
+ *     `sanitizeProjectId('~general')` → null → `invalid_project_id`, and an empty
+ *     segment produces a `//docs` double slash that matches no route at all.
+ *     Reminders is the exception and the direction of travel: it RESERVES
+ *     `~general` server-side (`gateway/http/app-reminders-surface.ts`
+ *     `resolveScopeSegment`), so for that one surface the segment is the sentinel
+ *     itself. Do not read the `'general'` half as universal — it was, until
+ *     `httpScopeSegment` below existed.
  *
  * WHY THIS MODULE EXISTS RATHER THAN A FOURTH COPY OF THE MAPPING. The rail id
  * reached the gateway RAW on two surfaces at once, and each failed in its own
@@ -81,12 +86,26 @@ export const GENERAL_HTTP_ID = 'general';
  * server learned the reserved segment instead
  * (`gateway/http/app-reminders-surface.ts` `resolveScopeSegment`).
  *
- * STILL OPEN for docs / tabs / work-board / activity, which are reads and
- * pre-date this module. Closing those means moving General's existing content off
- * `general` — `Projects/general/docs` is a directory with files in it — so it is
- * a migration in its own lane, filed as #183, and NOT a rider on a push fix. Do
- * NOT "close" it by changing the constant below: that orphans every General doc
- * already written.
+ * STILL OPEN for docs / tabs / work-board / activity, which pre-date this module.
+ * TWO OF THOSE FOUR MUTATE, and an earlier version of this docblock called all
+ * four "reads" — they are not, and the distinction is the whole reason reminders
+ * was worth splitting off:
+ *
+ *   - `docs-client.ts` — `writeFile`, `moveFile`, `createFolder`, `uploadBinary`,
+ *     `deleteFile`, `deleteFolder`, `deleteBinary`, `deleteBinariesUnderPrefix`.
+ *   - `work-board-client.ts` — `create`, `update`, `complete`, `reorder`,
+ *     `delete`, `start`.
+ *   - `tabs-client.ts` and `activity-client.ts` really are reads.
+ *
+ * (Named by SYMBOL, not by line: this docblock has already shipped one stale
+ * `file:line` citation that a later commit in the same branch shifted.)
+ *
+ * So the residual is a wrong-scope WRITE on two clients, not a wrong-scope read
+ * on four. It is still not fixed HERE because closing it means moving General's
+ * existing content off `general` — `Projects/general/docs` is a directory with
+ * files in it — so it is a migration in its own lane, filed as #183, and NOT a
+ * rider on a push fix. Do NOT "close" it by changing the constant below: that
+ * orphans every General doc already written.
  *
  * Not percent-encoded here: encoding is the caller's job, because a caller
  * interpolating into a URL needs `encodeURIComponent` and a caller comparing
@@ -116,9 +135,14 @@ export function httpProjectSegmentEncoded(project_id: string | null | undefined)
  * cannot address the same rows, which under `httpProjectSegment` they do.
  *
  * Use this for any project-scoped surface that MUTATES. Reminders is the one
- * today (`reminders-client.ts` → `gateway/http/app-reminders-surface.ts`
- * `resolveScopeSegment`); the read-only clients still share `httpProjectSegment`
- * and its collision, for the migration reason recorded above.
+ * SERVER surface that has learned the reserved segment today
+ * (`reminders-client.ts` → `gateway/http/app-reminders-surface.ts`
+ * `resolveScopeSegment`). The other four clients still share `httpProjectSegment`
+ * and its collision — and two of them (docs, work-board) mutate through it, so
+ * "the other clients", NOT "the read-only clients": they are not waiting on this
+ * function, they are waiting on the #183 migration recorded above. Moving one of
+ * them here before its server surface reserves the segment turns its collision
+ * into a 400.
  *
  * A server that has not learned the reserved segment answers `~general` with
  * `invalid_project_id`, so this is not a drop-in for `httpProjectSegment` — the
