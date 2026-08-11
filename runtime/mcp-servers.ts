@@ -154,15 +154,42 @@ export function isReservedMcpServerName(name: string): boolean {
  * cannot see is a difference he cannot check.
  *
  * Added, every one of them zero-advance or line-breaking: the C1 CONTROLS
- * (U+0080-U+009F), SOFT HYPHEN (U+00AD), ARABIC LETTER MARK (U+061C), MONGOLIAN VOWEL
- * SEPARATOR (U+180E), LINE and PARAGRAPH SEPARATOR (U+2028-U+2029), the whole
+ * (U+0080-U+009F), SOFT HYPHEN (U+00AD), COMBINING GRAPHEME JOINER (U+034F), ARABIC
+ * LETTER MARK (U+061C), the MONGOLIAN FREE VARIATION SELECTORS and VOWEL SEPARATOR
+ * (U+180B-U+180F), LINE and PARAGRAPH SEPARATOR (U+2028-U+2029), the whole
  * U+2060-U+206F block (WORD JOINER, the invisible math operators, the bidi isolates
  * already listed, and the deprecated format controls — taken as one range rather than
  * three, so an unassigned code point in the middle of it cannot be the one gap), the
- * interlinear annotation marks (U+FFF9-U+FFFB), and the TAG block (U+E0000-U+E007F),
- * whose characters are invisible by design and are the tag-smuggling vector. The `u`
- * flag is what lets that last range be written as a code point instead of a surrogate
- * pair.
+ * VARIATION SELECTORS (U+FE00-U+FE0F), the interlinear annotation marks
+ * (U+FFF9-U+FFFB), and U+E0000-U+E01EF — the TAG block, whose characters are invisible
+ * by design and are the tag-smuggling vector, together with the VARIATION SELECTORS
+ * SUPPLEMENT (U+E0100-U+E01EF) and the unassigned span between them, taken as ONE range
+ * for the reason U+2060-U+206F is. The `u` flag is what lets that last range be written
+ * as a code point instead of a surrogate pair.
+ *
+ * THE VARIATION SELECTORS WERE THE GAP THE TAG BLOCK'S OWN ARGUMENT PREDICTED. An
+ * earlier revision banned U+E0000-U+E007F and stopped, leaving U+E0100-U+E01EF — the
+ * other half of the same default-ignorable family, 0x80 code points further on —
+ * accepted, alongside their BMP counterparts U+FE00-U+FE0F. Probed against this very
+ * regex, fourteen zero-advance code points were accepted while the four positive
+ * controls (U+200B, U+2060, U+0085, U+00AD) were refused, so two specs the grant hash
+ * correctly distinguishes still printed identically. Also added for the same reason,
+ * being blank rather than merely narrow: BRAILLE PATTERN BLANK (U+2800) and the HANGUL
+ * FILLERS (U+115F, U+1160, U+3164, U+FFA0), none of which has a legitimate place in a
+ * path, an argument or an env-var name.
+ *
+ * ── WHAT THIS DENYLIST DOES NOT CLOSE, STATED RATHER THAN IMPLIED ───────────
+ * WHITESPACE CONFUSABLES ARE OUT OF SCOPE AND STILL ACCEPTED: NO-BREAK SPACE (U+00A0),
+ * the U+2000-U+200A quads and the FIGURE SPACE among them, and IDEOGRAPHIC SPACE
+ * (U+3000) all ADVANCE — they render as a gap, not as nothing, so a spec carrying one
+ * differs visibly from a spec that does not. They are confusable with U+0020 rather
+ * than invisible, and confusability is an unbounded class this technique cannot close:
+ * the Cyrillic and Greek homoglyphs (`а`, `ο`) are the same hazard and cannot be
+ * enumerated either. What bounds them is not this regex but the grant itself — the hash
+ * covers the exact bytes of the command, the args and the env-var NAMES, so a
+ * confusable cannot be swapped in after an approval without producing a different hash
+ * and requiring a fresh one. This paragraph exists so the next reader does not mistake
+ * the set below for a completeness claim it does not make.
  *
  * C1 IS A RANGE FOR THE REASON U+2060-U+206F IS. An earlier revision banned only NEL
  * (U+0085) out of that block, next to a DEL (U+007F) it also banned — so U+0080-U+0084
@@ -178,7 +205,7 @@ export function isReservedMcpServerName(name: string): boolean {
  */
 // eslint-disable-next-line no-control-regex
 export const MCP_SERVER_BANNED_CHARS_RE =
-  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/u
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u180B-\u180F\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\u2800\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF9-\uFFFB\u{E0000}-\u{E01EF}]/u
 
 /**
  * One installed MCP server, as stored and as displayed. Never carries a secret:
