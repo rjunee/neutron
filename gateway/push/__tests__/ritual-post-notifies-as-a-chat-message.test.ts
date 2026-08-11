@@ -386,4 +386,39 @@ describe('a ritual row with NO PLANNER is refused, and the owner is TOLD', () =>
     expect(body.length).toBeGreaterThan(0)
     expect(body).not.toContain('ritual:')
   })
+
+  test('a plain reminder WORDED like a dispatch token still fires — the column decides, not the text', async () => {
+    // THE ARM THAT MAKES THE KEYING CHECKABLE. The guard is documented as keyed on
+    // the `ritual_id` COLUMN rather than on the shape of `message`, with a stated
+    // reason: a prefix test "would also swallow a plain reminder the owner happened
+    // to word that way". Nothing tested that reason — swapping the condition for
+    // `reminder.message.startsWith('ritual:')` passed every arm above, which is zero
+    // coverage on the one design decision the docblock argues for.
+    //
+    // So: a row with `ritual_id === null` whose message BEGINS with the token
+    // prefix. There is no planner, so the mutant would refuse it and send the
+    // "did not run" notice for a reminder the owner simply typed a colon into.
+    // The real code composes and delivers it like any other reminder.
+    const chain = buildChain({ approved: true, planner: false })
+    const worded = await store.create({
+      owner_slug: OWNER_SLUG,
+      topic_id: null,
+      fire_at: 1000,
+      message: 'ritual: stretch for ten minutes before the call',
+    })
+    // The premise of the test, pinned: this is NOT a ritual row. If `create` ever
+    // starts inferring `ritual_id` from the message, this arm would be testing
+    // nothing and should red here rather than pass for the wrong reason.
+    expect(worded.ritual_id).toBeNull()
+
+    await chain.dispatch(worded)
+
+    // COMPOSED, not refused — the compose turn is the thing the refusal skips, so
+    // it is the sharpest single assertion that the guard did not fire.
+    expect(chain.composeCalls()).toBe(1)
+    expect(chain.expo).toHaveLength(1)
+    const body = chain.expo[0]?.body ?? ''
+    expect(body).not.toContain('did not run')
+    expect(COMPOSED.startsWith(body.replace(/…$/, ''))).toBe(true)
+  })
 })
