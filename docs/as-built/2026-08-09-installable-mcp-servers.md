@@ -679,3 +679,127 @@ interleave begins, so what it intercepts is stated rather than inferred.
   bare `bun test` (5 s default) reports it as a timeout while CI's `--timeout=15000` passes
   it. Verified green at the CI timeout; noted because the local-vs-CI gap reads as a real
   failure to anyone running the file directly.
+
+## Re-review round (2026-08-10) — two of the previous round's "checked and left alone" were wrong
+
+The round above closed its findings and listed five things it had checked and deliberately
+not changed. Re-verified against the tip, two of those five did not hold.
+
+### The invisibles denylist: ten of the fourteen were not confusables at all
+
+The previous entry recorded the denylist as complete except for "the CONFUSABLES class — an
+NBSP renders like a space, a Cyrillic `а` like an `a` — which no denylist closes". That is a
+sound argument, and it covered four of the fourteen code points a reviewer had listed. It did
+not cover the other ten, which are not confusables: they are default-ignorables that render
+as nothing at all.
+
+Probed against the exported regex itself, with positive controls to prove the probe could
+return a refusal:
+
+```
+refused   U+200B, U+2060, U+0085, U+00AD, U+E0020      (positive controls)
+ACCEPTED  U+034F  COMBINING GRAPHEME JOINER
+ACCEPTED  U+180B  MONGOLIAN FREE VARIATION SELECTOR ONE
+ACCEPTED  U+FE00  VARIATION SELECTOR-1
+ACCEPTED  U+FE0F  VARIATION SELECTOR-16
+ACCEPTED  U+E0101 VARIATION SELECTOR-18 (supplement)
+ACCEPTED  U+2800  BRAILLE PATTERN BLANK
+ACCEPTED  U+115F / U+1160 / U+3164 / U+FFA0  the HANGUL FILLERS
+ACCEPTED  U+00A0 / U+2000 / U+2007 / U+3000  the space variants  ← the real confusables
+```
+
+The VARIATION SELECTORS SUPPLEMENT (U+E0100-U+E01EF) is the same default-ignorable family as
+the TAG block (U+E0000-U+E007F) the regex already banned, 0x80 code points further along —
+which is precisely the failure the TAG block's own docblock had argued against when it took
+U+2060-U+206F "as one range rather than three, so an unassigned code point in the middle of
+it cannot be the one gap". The regex now takes U+E0000-U+E01EF as one span, and adds the BMP
+variation selectors, the combining grapheme joiner, the Mongolian free variation selectors,
+the Braille blank and the Hangul fillers.
+
+The four space variants stay ACCEPTED, and a test now asserts that they do, with the argument
+written next to it: they advance, so a spec carrying one differs visibly; they are confusable
+with U+0020 rather than invisible; and confusability is unbounded (the Cyrillic path the
+existing test deliberately accepts is the same hazard). What bounds them is the grant hash,
+not the regex.
+
+📌 **A triage bucket is a claim.** Sorting a finding into a class that is legitimately out of
+scope is how it stops being examined. Here the class was real and the sorting was wrong for
+ten of fourteen items, and the whole list went out with it.
+
+### An EDIT never retired the warm child
+
+The entry above says a replace "does not touch the old approval row at all. It does not need
+to" — true, and about the ROW. `announceRevocation()` was called from `remove()` and from
+`decideLocked`'s deny branch, never from `install()`. So editing an approved server
+un-approved it for the next spawn while the child spawned under the OLD grant kept running
+the old command, with the old env values resident, until some later dispatch re-checked the
+surface. For an idle session that is hours — the same window, and the same secret-residency
+hazard, the round-3 eviction fix existed to close.
+
+`install()` now announces when the grant hash changed. Gated on the hash rather than on
+"is this an edit" so a byte-identical re-install, which leaves the grant matching and the
+running child correct, does not buy a cold respawn for nothing. Env VALUE-only edits stay out
+of scope here: the hash does not cover values and the spawn path's `freshCredential` guard
+already owns them.
+
+### Two pool races, found by reading rather than by a failing test
+
+**`acquireTurn` → `activeTurn` is a window, and the evictor was blind to it.** A dispatch wins
+the turn mutex, then does real async work before assigning `session.activeTurn`: `await
+session.ready`, and on the import path the entire `/clear` context-reset interstitial, which
+itself awaits the REPL going idle. `evictWarmReplsForMcpSurfaceChange` keyed busy-ness off
+`activeTurn` alone, so a revocation landing in that window read a committed turn's session as
+IDLE and terminated its child — stranding the turn, which is the one thing that function's
+own docblock says it declines to do. `ReplSession.turnSlotHeld` is incremented the instant the
+slot is won; the returned release is idempotent, because several of the driver's early-return
+paths release the slot they were handed and a bare decrement would go negative and read as
+idle.
+
+**A session poisoned mid-turn could outlive the grant indefinitely.** Poisoning is a promise
+that the NEXT DISPATCH evicts and respawns. Nothing in this build reaps an idle warm session —
+checked with a positive control, since that is an absence claim — so if no next message ever
+arrives there is no next dispatch, and the revoked server's stdio child keeps its environment
+for the life of the process. `retireOnIdle` is set alongside the poison and honoured on the
+turn's own completion path, after `release()` has dropped the slot count. Kept as a SEPARATE
+field from `poisoned` on purpose: `poisoned` means "unfit for reuse" and is satisfied lazily
+and correctly by the abandon-poison paths, which must not inherit an eager teardown.
+
+Covered end to end rather than by hand-setting the flag: the fake child's reply is gated so a
+turn is genuinely in flight when the revocation lands, then released. Mutants killed — remove
+the settle-path retire and `kills.n` stays 0; revert the busy check to `activeTurn` alone and
+the slot-holder test evicts a busy child.
+
+### The two smaller ones
+
+- **The mobile badge said `running`.** For the same `active` field the web badge says
+  `approved`, and `McpServerStatus.active`'s docblock states outright that it is NOT a claim
+  that a process is running — adding that "both clients' labels say that rather than
+  'running'", which was true of one client. The status line directly beneath the badge said
+  "starts it with its next session", so the card contradicted itself. The test written to
+  prevent this (`NOT "running"`, in its own words) read only the `-status` element and could
+  not see the badge; it now asserts on the whole card and pins the badge text.
+- **`MCP_TIMEOUT`'s divisor undercounts by two.** The variable is process-wide and governs the
+  in-process tools bridge and the dev-channel sink as well, while `spawn.ts` divides the 20 s
+  share by the count of OWNER servers only — so the serial worst case is (N+2) shares, and at
+  N=1 the true worst case is the whole 30 s ready budget rather than the 20 s reserved.
+  Documented rather than corrected: making the divisor N+2 would cut the healthy one-server
+  case from 10 s to ~6.6 s to bound two servers that are local to the box and effectively
+  never slow, and the cost of the undercount is the same bounded, visible spawn failure the
+  floor paragraph already describes.
+
+### Confirmed sound on re-verification
+
+- **`decide()` on the write chain.** The orphaned-approval interleave is closed, and the
+  regression test earns it: parking is ARMED at the line the interleave begins rather than
+  targeting "the first `openApproval`", and removing the `serialize` wrapper fails it.
+- **The stale `deny`.** `decideLocked` revokes every approved grant before recording the
+  denial and re-reads the rows afterwards, so a deny cannot report success over a live
+  approval.
+- **`decided_by`.** `gateway/http/app-mcp-servers-surface.ts` passes the bearer it already
+  resolved; the slug is only the no-authenticated-actor fallback.
+- **The install reply.** `await manager.openApproval(...)` is present at the committed tip,
+  and the fire-and-forget mutant still fails its test with
+  `Expected: "pending" / Received: "unapproved"`.
+- **The untrusted substrates.** `cc-import-*` and `cc-trident-*` still receive no owner MCP
+  server even when handed the resolver — the second gate in `spawn.ts` is asserted
+  independently of the wiring.
