@@ -200,14 +200,21 @@ export interface ChatMessagePushScope {
  * there is no other chat a tap could open.
  *
  * WHAT THAT MEANS TODAY, stated plainly so nobody reads the project branch as a
- * live mode it is not: EVERY out-of-turn producer in the Open composer delivers to
- * the owner's BARE `app:<user>` topic — fired reminders and rituals
+ * live mode it is not: every out-of-turn producer THAT REACHES THIS MODULE delivers
+ * to the owner's BARE `app:<user>` topic — fired reminders and rituals
  * (`open/composer.ts` `reminderGeneralTopic`), the proactive brief + idle nudge
  * (`proactiveGeneralTopic`), the overnight report (`overnightBriefTopic`) — because
  * that is the one topic the mobile client binds and hydrates, and suffixing it is
  * the PR #105 deliver-to-nobody bug. So every notification the owner receives right
  * now is General-scoped, and that is CORRECT: the message really did land in his
  * General chat, which is where he asked the tap to take him.
+ *
+ * THAT LIST IS THE `deliver` SEAM'S PRODUCERS, NOT THE SURFACE'S. A durable agent
+ * message can also reach the app-ws topic WITHOUT passing through `deliver` — a
+ * Trident terminal posts through the ChannelRouter — and such a post produces no
+ * notification at all, so it never arrives here to be scoped. Pre-existing and named
+ * at the wiring site (`open/composer.ts`, beside this sink's construction); called out
+ * here too because the enumeration above reads as exhaustive and is not.
  *
  * The project branch is not speculative either — `app:<user>:<project>` is a real
  * topic the mobile client binds when a project chat is open

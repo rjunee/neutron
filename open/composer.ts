@@ -2444,10 +2444,29 @@ export function buildOpenGraphComposer(
       ),
     })
     // THE NOTIFICATION FOR A CHAT MESSAGE, composed from the chat message, and
-    // handed to `deliver` below so EVERY out-of-turn post carries it — the fired
-    // reminder, the ritual, the morning brief, the idle nudge, the overnight
-    // report. Built here (above `deliver`) rather than beside the reminder
-    // dispatcher because it is no longer a reminder's concern.
+    // handed to `deliver` below so every out-of-turn post THAT GOES THROUGH
+    // `deliver` carries it — the fired reminder, the ritual, the morning brief, the
+    // idle nudge, the overnight report. Built here (above `deliver`) rather than
+    // beside the reminder dispatcher because it is no longer a reminder's concern.
+    //
+    // WHAT IS NOT COVERED, NAMED RATHER THAN LEFT TO BE DISCOVERED. `deliver` is not
+    // the only path a durable agent message reaches the app-ws topic by, so "every
+    // out-of-turn post" is a claim about this seam and not about the surface:
+    //
+    //   * a TRIDENT TERMINAL posts through the ChannelRouter
+    //     (`buildTridentDelivery({ sink: channelRouter })` below → `trident/delivery.ts`
+    //     `opts.sink.send`), so a build that finishes while the owner is elsewhere lands
+    //     in his chat with no buzz. This is genuinely out-of-turn and genuinely
+    //     uncovered — it is PRE-EXISTING, not a regression here (before this change the
+    //     push was composed in the reminder tick, so nothing but a fired reminder ever
+    //     notified at all), and routing it through `deliver` is a change to the Trident
+    //     delivery seam rather than a line here.
+    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, which is
+    //     deliberate: the owner sent the message that caused it, so it is in-turn.
+    //
+    // Written down because the previous wording here said "EVERY out-of-turn post",
+    // which is the confidently-specific kind of comment that gets believed instead of
+    // checked — and a reader would have concluded a completed build notifies.
     //
     // 2026-08-09, owner-reported: his phone said `ritual:kaizen`. The push was
     // composed in the reminder TICK from the reminder ROW, and a ritual row's

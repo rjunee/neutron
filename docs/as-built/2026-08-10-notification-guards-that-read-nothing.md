@@ -336,3 +336,26 @@ rather than claimed.
 per process".** The docblock said "ONCE PER TARGET" and the code honoured it exactly; what
 was never written down is that a target is scoped to a VISIT, and the missing sentence was
 the missing line of code.
+
+## Round 6 — "EVERY out-of-turn post" was a claim about one seam, not about the surface
+
+The codex lane's second pass found no code defect and one comment that overclaimed, which
+is the same failure class as the round-3 docblock: `deliver` is not the only path a durable
+agent message reaches the app-ws topic by, so wiring the sink into `deliver` does not make
+"every out-of-turn post notifies" true.
+
+The uncovered one is a TRIDENT TERMINAL. It posts through the ChannelRouter
+(`buildTridentDelivery({ sink: channelRouter })` → `trident/delivery.ts` `opts.sink.send`),
+never through `deliver`, so a build that finishes while the owner is elsewhere lands in his
+chat with no buzz. **Pre-existing, not a regression**: before this change the push was
+composed inside the reminder tick, so nothing but a fired reminder ever notified at all.
+Routing it through `deliver` is a change to the Trident delivery seam and belongs in its own
+change — recorded here and named at the wiring site so the next reader does not conclude
+from the comment that a completed build notifies.
+
+A steady-state live-agent reply also bypasses `deliver` (`buildAppWsSendReply`), and that
+one is deliberate: the owner sent the message that caused it, so it is in-turn.
+
+📌 **A comment that says EVERY is making a claim about a whole surface from inside one
+seam.** The fix for that is not a hedge, it is naming the exceptions — a reader can check a
+named exception and cannot check an absent one.
