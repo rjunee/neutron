@@ -200,8 +200,10 @@ const ZERO_WIDTH_JOINER = '\u200D'
  *
  * Mirrors `store.sanitizeTitle`, which flattens item titles for exactly this
  * reason — the label had no equivalent, which is what let it through. Capping is
- * by CODE POINTS and happens HERE, before any caller escapes, so a cap can never
- * cut an astral char in half or a `&lt;` entity in the middle.
+ * by GRAPHEMES ({@link truncate}) and happens HERE, before any caller escapes, so
+ * a cap can never cut a glyph in half or a `&lt;` entity in the middle. It used to
+ * say CODE POINTS, and that was the bug: a code point is not a glyph, so the cap
+ * split the very ZWJ sequences this function preserves.
  *
  * Returns `''` for a name with no VISIBLE content, which is what both callers'
  * floors test. Emptiness is deliberately NOT `length === 0`: {@link
