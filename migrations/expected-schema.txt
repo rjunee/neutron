@@ -95,6 +95,7 @@ CREATE INDEX idx_code_trident_runs_active
 [index] idx_code_trident_runs_slug (tbl=code_trident_runs)
 CREATE UNIQUE INDEX idx_code_trident_runs_slug
     ON code_trident_runs (project_slug, slug)
+    WHERE phase NOT IN ('done', 'failed', 'stopped')
 
 [index] idx_connect_guest_invites_project (tbl=connect_guest_invites)
 CREATE INDEX idx_connect_guest_invites_project
