@@ -279,7 +279,14 @@ export function ThemeProvider({
   // already has the owner's choice and there is no wrong-theme frame at all. Where
   // it does not (native), `seeded` is undefined and the async effect below is the
   // path — with `hydrated` false meanwhile, which the app shell gates on.
-  const seeded = readStoredPreferenceSync(store);
+  //
+  // MEMOISED ON THE STORE, not called per render. `readStoredPreferenceSync` has to
+  // CALL `getItem` to discover whether the backing answers synchronously, and on
+  // native that is an AsyncStorage bridge call whose promise is then discarded — so
+  // a bare call here would fire a real read on every provider render (theme change,
+  // OS scheme change) purely to re-learn a fact that cannot change for a given
+  // backing. `store` is itself memoised on `backing`, so this runs once.
+  const seeded = useMemo(() => readStoredPreferenceSync(store), [store]);
   const [preference, setPreferenceState] = useState<ThemePreference>(
     seeded ?? DEFAULT_PREFERENCE,
   );
