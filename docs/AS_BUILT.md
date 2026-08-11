@@ -2,6 +2,39 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
+
+`PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through
+`buildLlmCallSubstrate` and the Claude Code adapter to
+`PersistentReplSubstrateOptions.turnTimeoutMs`.
+
+Both owner attempts at the Email Core P1 build died on this (2026-08-07,
+2026-08-10), and the cause was in the launcher rather than in trident's review
+half. The workflow's agents run as sidechains of the fire session, so the
+launching turn stays open for the whole build; that session was guarded by a 90s
+window advanced by PTY bytes from the child; a reasoning-heavy step emits none;
+and on a trip the pool poisons and respawns the warm session, killing the
+detached build it hosts. The Aug 7 planner transcript ends with
+`[Request interrupted by user]` at 23:19:21 with the respawn logged 8 seconds
+later — no checkpoint, no PR, no parseable result, surfacing to the owner as
+"terminal result missing/garbled". Since Ralph mode's first step is `plan:fable`
+at max effort over SPEC.md plus a governed plan doc, a larger plan died more
+reliably.
+
+The new window sits below the 45-minute absolute ceiling, which remains the
+terminal authority, so a genuinely wedged launcher still dies. Every other
+profile is unaffected, and that is asserted rather than assumed.
+
+Worth recording: this watchdog replaced a fixed 180s cap that was removed on
+2026-07-01 because it killed one of the owner's working builds. The replacement
+killed one too, by a different mechanism, because "actively working" was measured
+as terminal chatter.
+
+Tested against the production composer's output rather than a hand-built config
+literal, so it fails if `substrates.ts` stops passing the profile.
+Mutation-verified: removing the window from the profile fails four tests, and
+keeping it while the factory silently stops threading it fails two.
+
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
 
 The `codegen_status`, `codegen_fetch`, and `codegen_cancel` tools now keep their
