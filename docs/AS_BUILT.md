@@ -8665,3 +8665,62 @@ the line the interleave begins rather than targeting the FIRST `openApproval`: t
 ordering claim silently retargeted onto `install`'s own mint and deadlocked the setup.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.
+
+## 2026-08-10 — a revocation now retires the child an EDIT orphaned, and the denylist closes the family it named
+
+Four findings from the re-review round, each verified against the tip before it was touched
+and each mutation-tested after.
+
+**The denylist was missing ten of the invisibles it claims to cover.** A probe against the
+exported `MCP_SERVER_BANNED_CHARS_RE` accepted fourteen zero-advance code points while the
+four positive controls (U+200B, U+2060, U+0085, U+00AD) were correctly refused. The previous
+round had triaged all fourteen as CONFUSABLES and declared them out of scope — but only four
+are (the space variants). The other ten are default-ignorables that render as literally
+nothing: the VARIATION SELECTORS in both planes (U+FE00-U+FE0F and U+E0100-U+E01EF),
+COMBINING GRAPHEME JOINER, the MONGOLIAN FREE VARIATION SELECTORS, BRAILLE PATTERN BLANK and
+the HANGUL FILLERS. The supplement is the same default-ignorable family as the TAG block the
+regex already banned, sitting 0x80 code points further on — the gap that block's own "take
+the whole range so no unassigned code point is the one gap" argument predicted. Now taken as
+one span, U+E0000-U+E01EF. The four genuine confusables stay accepted, and a test asserts
+that they do, so the boundary is a decision a reader can find instead of a hole.
+
+📌 **A triage bucket is a claim, and lumping a finding into an out-of-scope class is how a
+finding gets dismissed without being examined.** "Confusables, which no denylist closes" was
+true of four of the fourteen and false of ten, and it retired the whole list.
+
+**Editing an approved server never retired its warm child.** `remove()` and a deny both
+announce the revocation; `install()` did not, on the reasoning — correct as far as it goes —
+that a replaced spec hashes differently and therefore drops out of `resolveApproved` on the
+next spawn. That governs WIRING. The process started under the old grant kept running the
+old command with the old env resident, and nothing evicts it until some later dispatch
+happens to re-check the surface. `install` now announces when the grant hash actually
+changed; a byte-identical re-install still announces nothing, so this is not a pool-thrash
+on every settings save.
+
+**Eviction could kill a child under a committed dispatch.** The evictor read busy-ness from
+`session.activeTurn`, which is assigned well AFTER `acquireTurn()` returns — `await ready`
+sits between them, and on the import path so does the whole `/clear` context-reset
+interstitial, which itself awaits the REPL going idle. A revocation landing in that window
+read the session as idle and terminated the child a committed turn was about to inject into,
+stranding the turn: the exact outcome the eviction path documents itself as refusing.
+`ReplSession.turnSlotHeld` counts holders from the instant the slot is won, and the release
+is idempotent because several early-return paths release the slot they were handed.
+
+**A session poisoned mid-turn could keep its child forever.** Poisoning promises the NEXT
+DISPATCH will respawn cleanly, and nothing in this build reaps an idle warm session —
+verified, with a positive control on the grep — so a revoked child survived for as long as
+the owner stayed quiet. `retireOnIdle` is honoured on the turn's own completion path, kept
+DISTINCT from `poisoned` so the abandon-poison paths do not acquire an eager teardown they
+never asked for. Covered end to end by gating the fake child's reply to hold a turn in
+flight while the revocation lands.
+
+Also: the mobile badge said `running` where the web badge says `approved` for the same
+`active` field — contradicting both the field's own docblock and the status line one line
+below it. The assertion written to prevent exactly this read only the status element, so the
+badge escaped it; it now reads the whole card. And `MCP_TIMEOUT`'s divisor counts owner
+servers while the variable governs the two compiled-in ones too, so the serial worst case is
+(N+2) shares rather than N; documented rather than corrected, because making the divisor N+2
+would shrink the healthy one-server case to bound two local servers that are effectively
+never slow.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.

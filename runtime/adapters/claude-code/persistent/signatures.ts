@@ -64,9 +64,33 @@ export const TOOLS_BRIDGE_SERVER_NAME = 'neutron'
  * bounded-respawn ladder, with `claude` reporting which server did not start — not
  * silent corruption. A genuine fix for 24 hung servers would be a concurrent load or a
  * larger budget, neither of which this bound can supply.
+ *
+ * ── THE DIVISOR COUNTS OWNER SERVERS; THE VARIABLE GOVERNS TWO MORE ─────────
+ * `MCP_TIMEOUT` is PROCESS-WIDE. It applies to every server in the spawn's
+ * `--mcp-config`, which always includes the two compiled-in ones — the in-process tools
+ * bridge ({@link TOOLS_BRIDGE_SERVER_NAME}) and the per-session dev-channel reply sink —
+ * while `spawn.ts` divides by the count of OWNER servers alone. So the serial worst case
+ * is (N + 2) x the per-server timeout, not N x, and the "share of the ready budget"
+ * below is short by two servers' worth: at N=1 the arithmetic reserves 20 s and the true
+ * worst case is 3 x 10 s = the whole 30 s budget.
+ *
+ * Left as it is, DELIBERATELY, and documented rather than corrected in the code. Making
+ * the divisor N+2 would shrink the healthy one-server case from 10 s to ~6.6 s in order
+ * to bound two servers that are local to this box and effectively never slow — the
+ * bridge is in-process and the sink is a bun script on loopback — and if either of them
+ * really does take 10 s to answer `initialize`, the spawn has a worse problem than its
+ * MCP budget. The cost of the undercount is the same bounded, visible failure the floor
+ * paragraph describes; the cost of the correction would be paid on every ordinary spawn.
  */
 export const OWNER_MCP_STARTUP_TIMEOUT_MS = 10_000
-/** The share of the 30 s `readyBudgetMs` the whole owner-MCP load may consume. */
+/**
+ * The share of the 30 s `readyBudgetMs` the owner-MCP load may consume.
+ *
+ * Counts the OWNER's servers only. `MCP_TIMEOUT` is process-wide and also governs the two
+ * compiled-in servers, so the real serial worst case is (N + 2) shares — see § THE DIVISOR
+ * COUNTS OWNER SERVERS on {@link OWNER_MCP_STARTUP_TIMEOUT_MS} for why that undercount is
+ * accepted rather than corrected here.
+ */
 export const OWNER_MCP_STARTUP_BUDGET_MS = 20_000
 /** Shortest per-server timeout worth setting — below this, healthy servers fail. */
 export const OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS = 2_000
