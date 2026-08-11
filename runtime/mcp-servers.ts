@@ -212,6 +212,20 @@ export function isReservedMcpServerName(name: string): boolean {
  * and requiring a fresh one. This paragraph exists so the next reader does not mistake
  * the set below for a completeness claim it does not make.
  *
+ * CANONICAL EQUIVALENTS ARE THE STRONGEST CASE OF THAT, AND ARE ALSO OUT OF SCOPE.
+ * `/bin/café` written NFC (U+00E9) and written NFD (`e` + U+0301) are not merely
+ * confusable, they render IDENTICALLY, and they hash differently — so the two are a pair
+ * of grants the owner cannot tell apart by reading them. Neither normalizing nor refusing
+ * is the right answer, which is why the code does neither:
+ *   - NORMALIZING to NFC would change the bytes that get exec'd. macOS stores filenames
+ *     decomposed, so a path the owner copied out of a real NFD directory entry would be
+ *     rewritten into one that need not resolve.
+ *   - REFUSING non-NFC input would reject those same legitimate macOS paths outright.
+ * What actually bounds it is the same thing that bounds the homoglyphs: the hash is over
+ * the exact bytes, so a form the owner did not approve is a grant he has not given, and
+ * the prompt is re-rendered for it. The residue is a legibility one — two grants that look
+ * the same — and it is stated here rather than silently carried.
+ *
  * Deliberately a DENYLIST of invisibles rather than an allowlist of printable ASCII: a
  * path or an argument can legitimately carry non-ASCII text, and refusing all of it
  * would break working servers to close a rendering hole.
