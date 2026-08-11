@@ -68,10 +68,25 @@ const FINGERPRINT_SALT = 'neutron/credential-label/v1'
  * Cost parameters, chosen for a value computed on a REPEATING TICK.
  *
  * scrypt is slow on purpose; that is the point of using it over a bare digest, and
- * also the thing to bound. This runs once per usage reading — a minute apart — so a
- * few milliseconds is free and a hundred would be a hundred milliseconds of CPU
- * burned every minute forever to render a label. N=4096 is well above what a bare
- * SHA-256 costs an attacker per guess while staying invisible on the tick.
+ * also the thing to bound. N=4096 is well above what a bare SHA-256 costs an
+ * attacker per guess.
+ *
+ * ⚠️ IT IS NOT, HOWEVER, "invisible on the tick", which is what this comment used to
+ * claim while also attributing the ~100 ms figure to the default N. Both halves were
+ * wrong. MEASURED under bun, `scryptSync` at these parameters: ~73 ms steady-state
+ * and ~280 ms on the first call, SYNCHRONOUSLY, on the event loop. The default
+ * N=16384 is ~534 ms; N=1024 is the setting that would actually cost "a few
+ * milliseconds" (~5 ms). 4 MiB of scratch memory, well inside node's 32 MiB default
+ * `maxmem`, so the call cannot fail on that account.
+ *
+ * What bounds the cost today is WHERE it is paid, not how small it is: the
+ * fingerprint is computed only AFTER a sidecar has been found, read, parsed and
+ * found to carry a plausible label, so a box with no sidecar — every box, until
+ * something writes one — never calls this at all. The stall becomes real on the
+ * first tick after a writer ships, and it arrives without this file changing.
+ * Whoever lands that writer should decide then whether to lower N or memoise per
+ * token, on the strength of these numbers rather than of a comment that said there
+ * was nothing to weigh.
  */
 const FINGERPRINT_COST = { N: 4096, r: 8, p: 1 } as const
 

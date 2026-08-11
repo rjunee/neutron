@@ -8901,3 +8901,46 @@ the sidecar doc, not the module header. Fixing the code and leaving the doc is n
 fix — where the only consumer is an external writer, the doc IS the interface.
 
 Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the label reached the monitor and stopped there: the PRODUCTION sink was unpinned
+
+Review round on the account-label reader. Three defects, none of them in the refusal itself
+— that part holds: deleting the fingerprint check fails
+`REFUSES a label whose fingerprint describes a different token` immediately.
+
+**The surviving mutant was one layer past the one the feature was proud of catching.** The
+commit message records that "the MONITOR persists a null label" passed the whole suite and
+is now killed. It is. But the tests that prove the label is *carried* supply their OWN
+`onSample`, so they pin the monitor and say nothing about the sink that actually runs.
+Rewriting `open/composer.ts` to name columns one at a time —
+`record({ pool, ts, session, weekly })` instead of `record({ pool, ...reading })` — dropped
+`account_label` on every production row and passed **36/36** tests across all three of the
+feature's files. Repo-wide: only `open/__tests__/usage-sample-persistence.test.ts` covers
+that wiring at all. Its composer guard asserted `usageSamplesStore.record(` was *present*,
+never that the reading rode along whole. Now it asserts the spread, and the mutant dies.
+
+📌 **A test that supplies its own seam proves the layer above the seam, not the seam.** Both
+mutants here are the same "resolved but never carried" shape; killing it at the monitor made
+the next copy of it downstream *look* covered, because the assertion that died was about a
+sink the test wrote itself.
+
+**`slice(at, -1)` is not a failure, it is a silent widening.** The doc-drift guard added to
+stop the sidecar contract rotting a third time scoped itself with
+`doc.slice(at, doc.indexOf(to, …))` and checked only that the START was found. Renaming the
+plan's Tier-2 heading made the terminator unfindable, `indexOf` returned -1, and the
+"Tier 1 bullet" grew from **982 to 11328 characters** — the rest of the document — with all
+three assertions still green. Verified both ways: the mutant passes 15/15 against the
+original helper and fails against the guarded one. Same pattern fixed at both composer-block
+slice sites.
+
+**The scrypt cost docblock described a system that does not exist.** It claimed N=4096 stayed
+"invisible on the tick" and that ~100 ms was what the *default* N would have cost. Measured
+under bun: **~73 ms steady-state, ~280 ms on the first call, synchronous, on the event
+loop**; the default N=16384 is ~534 ms, and N=1024 is the setting that would cost the "few
+milliseconds" the comment implied. What actually bounds the cost is placement, not size —
+the fingerprint is computed only after a sidecar is found and parsed, so no box pays it
+today. Left at N=4096 deliberately rather than changing a security parameter inside a review
+round; the comment now carries the real numbers so whoever ships the writer decides with
+them. Behaviour unchanged: comments and tests only.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.

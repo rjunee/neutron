@@ -186,7 +186,15 @@ describe('the label is resolved WITH the credential, never separately', () => {
     const contract = (doc: string, from: string, to: string): string => {
       const at = doc.indexOf(from)
       expect(at).toBeGreaterThan(-1)
-      return doc.slice(at, doc.indexOf(to, at + from.length))
+      // THE END HAS TO BE FOUND TOO. `indexOf` returns -1 when the terminator is
+      // gone, and `slice(at, -1)` does not fail — it silently widens the region to
+      // the whole rest of the document. Measured: renaming the Tier-2 heading grew
+      // the "Tier 1 bullet" from 982 to 11328 characters with all three assertions
+      // below still green. A drift guard that quietly stops being scoped to the one
+      // statement it guards is worse than no guard, because it reports success.
+      const end = doc.indexOf(to, at + from.length)
+      expect(end).toBeGreaterThan(at)
+      return doc.slice(at, end)
     }
 
     const asBuilt = readFileSync(
