@@ -356,6 +356,7 @@ function loadRealGate(): {
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
   coreSeats: Array<{ slot: number; name: string }>
   classifyBlock: (s: unknown, peers: unknown[]) => string
+  corePanelLine: (letter: string, label: string, verdict: unknown) => string
 } {
   const grab = (name: string): string => {
     const at = SRC.indexOf(`function ${name}(`)
@@ -400,9 +401,11 @@ function loadRealGate(): {
       grab('enforceCrossModelGate'),
       grab('deferredCrossModelPeers'),
       grab('crossModelPeerStatus'),
+      grab('hasUsableVerdict'),
       grab('missingCoreReviewers'),
+      grab('corePanelLine'),
       grab('classifyBlock'),
-      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, coreSeats: CORE_REVIEWER_SEATS, classifyBlock }',
+      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, coreSeats: CORE_REVIEWER_SEATS, classifyBlock, corePanelLine }',
     ].join('\n'),
   ) as () => ReturnType<typeof loadRealGate>
   return factory()
@@ -653,7 +656,48 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
       expect(SRC).not.toContain('Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}')
       expect(SRC).toContain("corePanelLine('A', 'Claude rubric', verdicts[0])")
       expect(SRC).toContain("corePanelLine('B', 'Claude adversarial', verdicts[1])")
-      expect(SRC).toContain('DID NOT COMPLETE')
+    })
+
+    // RUN corePanelLine, DO NOT GREP FOR IT. The assertions above are wiring checks:
+    // they prove the call site exists, and nothing more. The original guard for the
+    // #536 prompt fix was `expect(SRC).toContain('DID NOT COMPLETE')`, and a mutation
+    // that replaces the branch condition with `true` — putting the bare `null` straight
+    // back into the prompt and leaving the dead-seat message unreachable — keeps that
+    // phrase in the file and keeps the test green. That mutant survived. These do not.
+    describe('corePanelLine — the dead-seat message is produced, not merely present in the file', () => {
+      test('a real verdict is passed through verbatim as JSON', () => {
+        const { corePanelLine } = gate()
+        const v = { verdict: 'APPROVE', findings: [] }
+        const line = corePanelLine('A', 'Claude rubric', v)
+        expect(line).toBe(`Verdict A (Claude rubric): ${JSON.stringify(v)}`)
+        expect(line).not.toContain('DID NOT COMPLETE')
+      })
+
+      test('a DEAD seat yields DID NOT COMPLETE and never the token `null`', () => {
+        const { corePanelLine } = gate()
+        for (const dead of [null, undefined, 'APPROVE', 42, {}, { verdict: '' }]) {
+          const line = corePanelLine('B', 'Claude adversarial', dead)
+          expect(line).toContain('DID NOT COMPLETE')
+          // The precise regression: `Verdict B (…): null`. A synthesis model reads a
+          // verdict-shaped blank as "this reviewer raised nothing" — an implicit pass.
+          expect(line).not.toContain(': null')
+          expect(line).not.toContain(': undefined')
+          expect(line).toContain('do NOT return APPROVE')
+        }
+      })
+
+      test('it agrees with missingCoreReviewers on EVERY seat — one predicate, never two', () => {
+        // The dangerous drift is the pair disagreeing: the prompt saying a seat is fine
+        // while the gate blocks it, or worse, the prompt saying DID NOT COMPLETE while
+        // nothing blocks. Asserted over the same inputs both callers can see.
+        const { corePanelLine, missingCoreReviewers, coreSeats } = gate()
+        const cases: unknown[] = [null, undefined, {}, { verdict: '' }, 'APPROVE', 42, { verdict: 'APPROVE' }]
+        for (const c of cases) {
+          const blocked = missingCoreReviewers([c, { verdict: 'APPROVE' }], coreSeats).length === 1
+          const saysDead = corePanelLine('A', 'Claude rubric', c).includes('DID NOT COMPLETE')
+          expect(saysDead).toBe(blocked)
+        }
+      })
     })
 
     test('no caller invents a not_connected status for a slot that exists', () => {

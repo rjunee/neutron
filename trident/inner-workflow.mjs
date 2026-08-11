@@ -1103,14 +1103,27 @@ const CORE_REVIEWER_SEATS = [
   { slot: 1, name: 'Argus adversarial (core reviewer)' },
 ]
 
+// DID THIS SEAT ACTUALLY REVIEW? A usable verdict is an object carrying a `verdict`
+// string (VERDICT_SCHEMA's required field). Anything else — null, undefined, a stray
+// string, an object with the field missing — is a seat that produced nothing.
+//
+// ONE PREDICATE, TWO CALLERS, DELIBERATELY. `missingCoreReviewers` decides whether the
+// panel is BLOCKED and `corePanelLine` decides what the synthesis prompt is TOLD; those
+// two answers must agree by construction. Written out twice they agree only by
+// convention, and the drift is silent in the dangerous direction: loosen the copy in
+// `corePanelLine` and a dead seat is described to the model as a real verdict while the
+// gate still blocks (merely confusing), but loosen the copy in `missingCoreReviewers`
+// and the prompt says DID NOT COMPLETE while nothing blocks — an APPROVE on an empty
+// seat, which is exactly #536. This is the same "a field's name is not a contract" trap
+// that `LANE_FINDING_KIND` above exists to close.
+function hasUsableVerdict(v) {
+  return Boolean(v) && typeof v.verdict === 'string' && v.verdict.length > 0
+}
+
 function missingCoreReviewers(verdicts, seats) {
   const out = []
   for (const seat of seats) {
-    const v = verdicts[seat.slot]
-    // A usable verdict is an object carrying a `verdict` string (VERDICT_SCHEMA's
-    // required field). Anything else — null, undefined, a stray string, an object
-    // with the field missing — is a seat that produced nothing.
-    if (v && typeof v.verdict === 'string' && v.verdict.length > 0) continue
+    if (hasUsableVerdict(verdicts[seat.slot])) continue
     out.push({
       name: seat.name,
       title: `${seat.name} produced NO verdict — refusing to silently APPROVE`,
@@ -1123,6 +1136,28 @@ function missingCoreReviewers(verdicts, seats) {
     })
   }
   return out
+}
+
+/**
+ * THE SYNTHESIS PROMPT'S LINE FOR ONE CORE SEAT.
+ *
+ * These two lines used to be a bare `${JSON.stringify(verdicts[0])}`, so a core reviewer
+ * whose agent died was handed to the synthesis model as the literal token `null` — which
+ * reads most plausibly as "this reviewer raised nothing", an implicit pass. Naming the
+ * failure is a courtesy to the model; the BLOCK itself is deterministic (`missingCore` →
+ * `enforceCrossModelGate`) and never depends on the model reading this correctly.
+ *
+ * TOP-LEVEL AND NAMED so it can be extracted and run by a test, like every other pure
+ * helper here. As an arrow const inside `reviewAndSynthesize` its only guard was a
+ * source-string assertion that the phrase "DID NOT COMPLETE" appears somewhere in the
+ * file — which stays green when the branch condition is replaced by `true`, i.e. when the
+ * dead-seat message becomes unreachable and the bare `null` comes straight back. A guard
+ * that a reverting mutation cannot fail is not a guard.
+ */
+function corePanelLine(letter, label, verdict) {
+  return hasUsableVerdict(verdict)
+    ? `Verdict ${letter} (${label}): ${JSON.stringify(verdict)}`
+    : `Verdict ${letter} (${label}): DID NOT COMPLETE — this reviewer was dispatched and returned NO verdict (its agent died, timed out, or returned a malformed result). It raised nothing because it NEVER RAN, which is NOT the same as finding nothing. The panel is incomplete: do NOT return APPROVE.`
 }
 
 // Which cross-model peers were configured but failed. Kept separate from the gate
@@ -1348,16 +1383,8 @@ TASK: ${task}`,
       : kimiStatus === 'deferred'
         ? `Verdict D (kimi K3 cross-model): DEFERRED — a key was configured but the review call FAILED/timed out/returned no answer. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
         : `Verdict D (kimi K3 cross-model): NOT CONNECTED — no Kimi key for this instance. Note it and proceed on the other verdicts (do NOT block on kimi).`
-  // A CORE SEAT THAT DIED MUST NOT ARRIVE AS THE TOKEN `null`. These two lines used to
-  // be `${JSON.stringify(verdicts[0])}`, so a dead reviewer was handed to the synthesis
-  // model as the bare word `null` — most plausibly read as "raised nothing", an implicit
-  // pass. Naming it is a courtesy to the model; the block itself is deterministic
-  // (`missingCore` → `enforceCrossModelGate`) and does not depend on the model reading
-  // this correctly.
-  const corePanelLine = (letter, label, verdict) =>
-    verdict && typeof verdict.verdict === 'string' && verdict.verdict.length > 0
-      ? `Verdict ${letter} (${label}): ${JSON.stringify(verdict)}`
-      : `Verdict ${letter} (${label}): DID NOT COMPLETE — this reviewer was dispatched and returned NO verdict (its agent died, timed out, or returned a malformed result). It raised nothing because it NEVER RAN, which is NOT the same as finding nothing. The panel is incomplete: do NOT return APPROVE.`
+  // A CORE SEAT THAT DIED MUST NOT ARRIVE AS THE TOKEN `null` — see `corePanelLine`,
+  // which is top-level (and behaviourally tested) rather than inlined here.
   const synthesisRaw = await agent(
     `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
