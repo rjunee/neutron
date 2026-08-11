@@ -483,6 +483,33 @@ export class TridentRunStore {
         sets.push('failure_reason = ?')
         params.push(patch.failure_reason)
       }
+      // RETRACT A STALE IN-FLIGHT CLAIM. `subagent_status` is documented as the
+      // CURRENTLY in-flight subagent (migration 0077), so a terminal row that still
+      // says 'running' is asserting something false: the owner cancelled the build,
+      // the child is dead, and the column still claims it is working. Observed live
+      // on 2026-08-10 — a cancelled run sat at `phase='stopped'` with
+      // `subagent_status='running'`.
+      //
+      // It matters beyond tidiness because gates key on this column: #143's fix
+      // widened the harvest/terminal block on `subagent_status === 'crashed'`, and
+      // the hang-watchdog and orphan-recovery read it too. A terminal row that reads
+      // `running` is exactly the kind of stale field those readers can act on.
+      //
+      // ONLY 'running' IS CLEARED, and that restriction is load-bearing. Nulling it
+      // unconditionally would erase a 'crashed' marker whenever anything terminated
+      // an already-crashed run as 'failed' — deleting the signal #143 added a gate
+      // for, while looking like a cleanup. 'completed'/'failed'/'crashed' are
+      // OUTCOMES worth keeping; 'running' is the only value that is a live claim, so
+      // it is the only one a terminal transition has any business touching.
+      //
+      // NULL rather than a new 'cancelled' enum value: the column carries a CHECK
+      // constraint (migration 0077:107-108) that SQLite cannot alter without a table
+      // rebuild, and `null` already means "nothing in flight" here
+      // (`trident/orchestrator.ts` writes it on the no-subagent paths). The reason
+      // for the stop is preserved in `failure_reason`, so no information is lost.
+      sets.push(
+        `subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END`,
+      )
       sets.push('last_advanced_at = ?')
       params.push(this.now())
       params.push(id)

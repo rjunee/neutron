@@ -362,3 +362,86 @@ describe('TridentRunStore', () => {
     })
   })
 })
+
+describe('terminalTransition retracts a stale in-flight claim', () => {
+  // Observed live 2026-08-10: the owner cancelled a running build and the row sat at
+  // `phase='stopped'` with `subagent_status='running'`. The child was already dead and
+  // the column still claimed it was working.
+  //
+  // Not cosmetic — gates key on this column. #143's fix widened the harvest/terminal
+  // block on `subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery
+  // read it too, so a terminal row reading `running` is exactly the stale field those
+  // readers can act on.
+
+  async function runAt(status: 'running' | 'crashed' | 'completed' | null) {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'email-core-p1',
+      project_slug: 'neutron-open',
+      repo_path: '/repos/neutron-open',
+      task: 'build the email core',
+    })
+    if (status !== null) await store.update(run.id, { subagent_status: status })
+    // Non-empty precondition: without this the assertions below could pass on a row
+    // that never carried the claim in the first place.
+    expect(store.get(run.id)?.subagent_status).toBe(status)
+    return { store, id: run.id }
+  }
+
+  test('cancelling a RUNNING build clears the running claim, and keeps the reason', async () => {
+    const { store, id } = await runAt('running')
+
+    const { won } = await store.terminalTransition(id, {
+      phase: 'stopped',
+      failure_reason: 'cancelled via codegen_cancel',
+    })
+
+    expect(won).toBe(true)
+    const after = store.get(id)
+    expect(after?.phase).toBe('stopped')
+    expect(after?.subagent_status).toBeNull()
+    // The reason survives, so nulling the status loses no information.
+    expect(after?.failure_reason).toBe('cancelled via codegen_cancel')
+  })
+
+  test('a CRASHED marker SURVIVES — this restriction is load-bearing, not incidental', async () => {
+    // Nulling unconditionally would erase 'crashed' whenever anything terminated an
+    // already-crashed run as 'failed', deleting the signal #143 added a gate for while
+    // looking like a cleanup. Only 'running' is a live CLAIM; the others are OUTCOMES.
+    const { store, id } = await runAt('crashed')
+
+    await store.terminalTransition(id, { phase: 'failed', failure_reason: 'reaped' })
+
+    expect(store.get(id)?.subagent_status).toBe('crashed')
+  })
+
+  test('a COMPLETED outcome also survives', async () => {
+    const { store, id } = await runAt('completed')
+
+    await store.terminalTransition(id, { phase: 'done', failure_reason: null })
+
+    expect(store.get(id)?.subagent_status).toBe('completed')
+  })
+
+  test('a run with no subagent status stays null', async () => {
+    const { store, id } = await runAt(null)
+
+    await store.terminalTransition(id, { phase: 'stopped', failure_reason: 'cancelled' })
+
+    expect(store.get(id)?.subagent_status).toBeNull()
+  })
+
+  test('a LOSER transition does not touch the status either', async () => {
+    // The atomic guard means a second terminate finds the row already terminal and
+    // writes nothing. It must not clear a status on the way past.
+    const { store, id } = await runAt('running')
+    await store.terminalTransition(id, { phase: 'stopped', failure_reason: 'first' })
+    await store.update(id, { subagent_status: 'crashed' })
+
+    const second = await store.terminalTransition(id, { phase: 'failed', failure_reason: 'second' })
+
+    expect(second.won).toBe(false)
+    expect(store.get(id)?.subagent_status).toBe('crashed')
+    expect(store.get(id)?.failure_reason).toBe('first')
+  })
+})

@@ -8508,3 +8508,45 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
+
+Observed live: the owner cancelled a running email-core build and the row settled at
+`phase='stopped'` with **`subagent_status='running'`**. The child was already dead — the
+column was asserting something false.
+
+`subagent_status` is documented (migration 0077) as the CURRENTLY in-flight subagent, and
+gates key on it: #143's fix widened the harvest/terminal block on
+`subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery read it too. A
+terminal row reading `running` is precisely the stale field those readers can act on, so
+this is not tidiness.
+
+`TridentRunStore.terminalTransition` now clears it **in the same atomic UPDATE** that
+writes the terminal phase:
+
+```sql
+subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END
+```
+
+**Only `'running'` is cleared, and that restriction is the load-bearing half.** Nulling
+unconditionally would erase a `'crashed'` marker whenever anything terminated an
+already-crashed run as `'failed'` — deleting the signal #143 added a gate for, while
+looking like a cleanup. `completed`/`failed`/`crashed` are OUTCOMES worth keeping;
+`running` is the only value that is a live CLAIM, so it is the only one a terminal
+transition has business touching.
+
+`NULL` rather than a new `'cancelled'` enum value because the column carries a CHECK
+constraint (`migrations/0077_code_trident_runs.sql:107-108`) that SQLite cannot alter
+without a table rebuild — heavier than the defect warrants — and `null` already means
+"nothing in flight" here (`trident/orchestrator.ts` writes it on the no-subagent paths).
+The reason for the stop survives in `failure_reason`, so nothing is lost.
+
+**Verification:** 6 cases in `trident/store.test.ts` against a REAL migrated DB, each with
+a non-empty precondition asserting the row actually carried the status first. Two mutants
+killing DIFFERENT tests — dropping the retraction reds the cancel case; nulling
+unconditionally reds the `crashed` AND `completed` cases — so both halves of the CASE are
+proven necessary. A loser transition (second terminate on an already-terminal row) is
+covered too: it must not clear a status on its way past.
+
+📌 **The first draft of these tests went in the wrong file.** `trident/terminate.test.ts`
+uses a FAKE store, so a SQL-level fix is invisible there — the tests would have passed
+without exercising the change at all. Test the SQL where the SQL lives.
