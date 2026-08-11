@@ -9211,9 +9211,20 @@ pool's session REGISTRATION and a miss degrades to General by its own comment
 (`runtime/adapters/claude-code/persistent/pool-state.ts:214`) while the pane derives from
 `turn.project_id`. Still a hypothesis — no miss was reproduced.
 
-Also fixed a trap the file set for its next reader: the integration test false-red under a
-bare `bun test <file>` because boot plus the 5 s ack poll exceeds bun's 5000 ms default. CI
-passes `--timeout=15000`, so it was green and the trap was invisible to CI — now pinned
-per test.
+The integration file now pins an explicit per-test timeout. **Stated as headroom, not as a
+fix**: the brief that asked for it said the file false-reds under a bare `bun test <file>`,
+and mutation-testing that claim REFUTED it — removing the timeouts still passes, because the
+whole file boots and runs in ~5.5 s. Kept because a timeout here reads exactly like broken
+ack wiring and CI's `--timeout=15000` means CI can never see it, but recorded honestly so
+nobody later reads the constant as evidence of a bug that was fixed here.
+
+**Mutation results: eight mutants, eight dead — but one only after the test was rewritten.**
+The floor-before-cap guard (P4c) SURVIVED its first mutant: a RUN of joiners is a SINGLE
+grapheme cluster, so once the cap became grapheme-aware the joiners-only input is never
+truncated and the floor's position stops mattering. The bug was real and fixed, but by the
+grapheme change rather than by the reorder — so in a green run the reorder was
+indistinguishable from dead code. Joiners SEPARATED BY SPACES break the cluster (60
+graphemes that render as nothing), which is the input that can see the difference; the test
+now uses it and the mutant dies.
 
 Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.

@@ -239,13 +239,18 @@ async function waitForRows(h: Harness, count: number): Promise<Array<{ topic_id:
 /**
  * EXPLICIT per-test budget for every test that boots a real graph.
  *
- * Bun's default is 5000 ms, and a boot (~3 s) plus {@link waitForRows}'s 5 s poll
- * ceiling exceeds it — so a developer running this file directly
- * (`bun test <file>`) got a TIMEOUT, which reads exactly like broken ack wiring
- * and sends you hunting a bug that is not there. CI passes `--timeout=15000` and
- * was always green, which is what let the trap sit here: the failure was visible
- * only to a human debugging one file. Pinned per test so the file is honest on its
- * own, independent of the runner's flags.
+ * Bun's default is 5000 ms. A boot plus {@link waitForRows}'s 5 s poll CEILING can
+ * exceed that, and a timeout here reads exactly like broken ack wiring — it sends
+ * you hunting a bug that is not there. CI passes `--timeout=15000`, so CI can
+ * never see the trap; only a developer running this one file can.
+ *
+ * HONEST SCOPE, because this was mutation-tested: removing these timeouts does
+ * NOT currently red on a bare `bun test <file>` — the whole file boots and passes
+ * in ~5.5 s, so each test is comfortably inside the default today. This is
+ * therefore HEADROOM against a slower machine or a slower boot, not a fix for an
+ * observed failure. Kept because the cost is one argument and the failure mode it
+ * prevents is a red that lies about its cause; recorded as headroom so nobody
+ * later reads it as evidence of a bug that was fixed here.
  */
 const BOOT_TEST_TIMEOUT_MS = 15_000
 
