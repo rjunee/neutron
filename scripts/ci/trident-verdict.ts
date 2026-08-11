@@ -20,12 +20,20 @@
  * silently bless whatever landed after it.
  *
  * THE FAILURE IS THE POINT. A gate that only rejects throws away work: the
- * branch is already written, tested and pushed. So every failure path prints the
- * exact command that feeds THIS branch into a review lane — `redeemCommand()`
- * below — because the trident harness re-enters an existing branch WITHOUT
- * `-c` and REUSES its PR rather than opening a duplicate. Rejecting is cheap;
- * redeeming is the part that makes the gate survivable, and therefore the part
- * that makes it stay switched on.
+ * branch is already written, tested and pushed. So every failure path prints two
+ * routes that both KEEP it — record a verdict for the head SHA (entirely inside
+ * this repository, and the thing this file reads), or hand the branch to a review
+ * lane as an explicit instruction to adopt this branch and this PR
+ * (`redeemCommand()`). Rejecting is cheap; redeeming is the part that makes the
+ * gate survivable, and therefore the part that makes it stay switched on.
+ *
+ * AND IT PROMISES ONLY WHAT IT CAN KEEP. An earlier version of this output stated
+ * that the review harness would re-enter the branch and reuse the PR by itself.
+ * It does that when it is HANDED a branch and a PR number, which its crash-resume
+ * path does and its typed-start path does not — so the message described a mode
+ * nothing entered, and following it produced a second branch and a duplicate PR:
+ * the exact waste the redemption exists to prevent. The output now says what the
+ * reader must ask for, and names the failure to watch for, instead.
  *
  * NOT A FILE IN THE PR'S OWN DIFF. The record deliberately lives OUTSIDE the
  * branch. A committed `verdict.json` would be self-certifying — the author of
@@ -68,8 +76,18 @@ function fenceMatches(body: string): string[] {
 }
 
 const SCALAR = /^([a-z_.]+):[ \t]*(.*?)[ \t]*$/
-/** A value the FAIL template printed and nobody filled in. Rejected everywhere. */
-const PLACEHOLDER = /^<[\s\S]*>$/
+/**
+ * A value the FAIL template printed and nobody filled in. Rejected everywhere.
+ *
+ * `[^<>]*`, not `[\s\S]*`. The greedy form matched from the FIRST `<` to the LAST
+ * `>`, so a filled-in value that merely happens to open and close with angle
+ * brackets was refused as unfilled: `TRIDENT_BYPASS=<incident 42> superseded by
+ * <p0 fix>` is a real reason, and the greedy regex read it as a template. An
+ * unfilled placeholder is by construction ONE bracketed span with no brackets
+ * inside it, which is exactly what this matches — every placeholder the templates
+ * print still fails it.
+ */
+const PLACEHOLDER = /^<[^<>]*>$/
 /**
  * A filled-in value that still says nothing — the shapes a writer reaches for
  * when there is nothing to report.
@@ -83,6 +101,23 @@ const PLACEHOLDER = /^<[\s\S]*>$/
 const UNUSABLE_VALUE = /^(tbd|t\.b\.d\.?|n\/a|n\.a\.?|na|none|nil|null|unknown|unproven|todo|-+)$/i
 /** `commit` must be the full SHA — never a truncation, never prose. */
 const FULL_SHA = /^[0-9a-f]{40}$/i
+/**
+ * A home-directory absolute path, in any of the three shapes a checkout produces.
+ *
+ * WHY A VERDICT IS SCREENED FOR THIS. The verdict is free text posted publicly on
+ * a public repository, and the second segment of `/Users/<name>/…` is a real
+ * account name. The leak gate covers FILES and COMMIT MESSAGES; a PR comment is
+ * outside its reach entirely, and a comment cannot be un-published — GitHub
+ * mirrors it. A live verdict already carried a home-directory worktree path into
+ * a public thread, which is what put this rule here.
+ *
+ * A verdict has no need for one: every path it cites is repo-relative, because
+ * the reader is reading it against this repository. So the absolute form is
+ * rejected outright rather than redacted, and the message never echoes the value
+ * — quoting it in the check log would republish exactly what the rule exists to
+ * keep out of public output.
+ */
+const HOMEDIR_PATH = /(?:^|[^A-Za-z0-9_])(?:\/(?:Users|home)\/|[A-Za-z]:\\Users\\)[^\s/\\]/
 
 export class VerdictError extends Error {}
 
@@ -136,6 +171,20 @@ function rejectPlaceholder(key: string, value: string): void {
   }
 }
 
+/**
+ * Refuse a value carrying a home-directory absolute path. The VALUE IS NEVER
+ * ECHOED — the check log is public, so quoting it would republish it.
+ */
+function rejectHomePath(key: string, value: string): void {
+  if (HOMEDIR_PATH.test(value)) {
+    throw new VerdictError(
+      `${key} contains a home-directory absolute path (not quoted here — this log is public). ` +
+        'A verdict is a public comment on a public repository and cannot be un-published, so ' +
+        'cite paths repo-relative (`open/composer.ts:11`) and re-post the verdict',
+    )
+  }
+}
+
 function finishMutation(pending: Record<string, string>): Mutation {
   const missing = ['mutant', 'red', 'control'].filter((k) => !(k in pending))
   if (missing.length > 0) {
@@ -144,6 +193,7 @@ function finishMutation(pending: Record<string, string>): Mutation {
   for (const [key, value] of Object.entries(pending)) {
     if (!value.trim()) throw new VerdictError(`mutation entry has an empty ${key}`)
     rejectPlaceholder(key, value)
+    rejectHomePath(`mutation ${key}`, value)
     if (UNUSABLE_VALUE.test(value.trim())) {
       throw new VerdictError(
         `mutation entry has an unusable ${key} (${JSON.stringify(value.trim())}) — ` +
@@ -205,7 +255,10 @@ export function parseVerdict(commentBody: string): Verdict {
   if (missing.length > 0) {
     throw new VerdictError(`verdict block missing required keys: ${missing.join(', ')}`)
   }
-  for (const [key, value] of scalars) rejectPlaceholder(key, value)
+  for (const [key, value] of scalars) {
+    rejectPlaceholder(key, value)
+    rejectHomePath(key, value)
+  }
 
   const commit = scalars.get('commit')!.trim()
   if (!FULL_SHA.test(commit)) {
@@ -378,18 +431,35 @@ export function filesTouchGatedSurface(files: { filename?: string; previous_file
 export const DISPATCHER_PARSED_FLAGS = new Set(['repo', 'rounds', 'mode'])
 
 /**
- * The command that feeds an ALREADY-WRITTEN branch into a review lane.
+ * The command that hands an ALREADY-WRITTEN branch to a review lane.
  *
  * This is the whole point of the gate's failure output, so it is a function with
  * ONE definition: the CI gate prints it, and `.githooks/pre-push` prints it by
  * calling this file with `--redeem-command`. A second hand-copied spelling would
  * drift, and a drifted redemption path is a gate that only rejects.
  *
- * The re-entry itself is real — the inner workflow re-enters an existing branch
- * without `git switch -c` and REUSES its PR rather than opening a duplicate —
- * which is why the instruction to do so is stated in the task text explicitly
- * rather than assumed. `repo=` is the one flag here; it is shown as a placeholder
- * because a filesystem path is not portable between machines.
+ * WHAT THIS COMMAND IS, PRECISELY. It is an INSTRUCTION to adopt this branch and
+ * this PR, carried in the task text where the planner and the builder read it.
+ * It is NOT a claim that the review harness adopts them by itself, and the
+ * previous round of this file made exactly that claim. Verified against the
+ * harness rather than assumed:
+ *
+ *   • its inner build/review workflow DOES re-enter an existing branch without
+ *     `git switch -c` and reuse its PR — but only when it is HANDED a branch and
+ *     a PR number, and only its crash-resume path hands them over;
+ *   • its merge step DOES read an adopted branch name out of the run's state, and
+ *     the comment there records why (a batch of hand-dispatched PRs on
+ *     non-trident branches that trident could review but then refused to merge) —
+ *     but nothing on the typed-start path WRITES that field;
+ *   • a typed start therefore begins with no branch and no PR, and mints both
+ *     from a slug of the task text.
+ *
+ * So the branch is redeemed when the LANE IS POINTED AT IT, which is what the
+ * sentence in the task text asks for and what `printRedemption` tells the reader
+ * to confirm. A lane that answers by opening a fresh branch has not redeemed
+ * anything, and the output says so in those words rather than promising it cannot
+ * happen. (`repo=` is the one flag here; it is a placeholder because a filesystem
+ * path is not portable between machines.)
  */
 export function redeemCommand(opts: {
   branch?: string | null | undefined
@@ -401,7 +471,8 @@ export function redeemCommand(opts: {
   const pr = rawPr ? `PR #${rawPr}` : 'the open PR'
   return (
     `/trident v2 repo=<path-to-your-checkout> review ${pr} on the EXISTING branch ${branch} — ` +
-    're-enter that branch, reuse that PR, do not restart from scratch and do not open a new PR'
+    `ADOPT that branch and that PR: check out ${branch} without creating it, reuse ${pr}, ` +
+    'do not restart from scratch and do not open a new PR'
   )
 }
 
@@ -507,7 +578,10 @@ function controlApi(comments: { body: string; author_association?: string }[]) {
     if (/\/pulls\/1\/files\?/.test(path)) {
       return /[?&]page=1(&|$)/.test(path) ? [{ filename: 'open/composer.ts' }] : []
     }
-    if (/\/pulls\/1$/.test(path)) return { changed_files: 1 }
+    // `author_association` is what the bypass hatch is checked against, so the
+    // control models it: a control that omitted it would exercise the gate with an
+    // untrusted PR author and stop proving anything about the happy path.
+    if (/\/pulls\/1$/.test(path)) return { changed_files: 1, author_association: CONTROL_ASSOCIATION }
     if (/\/comments\?/.test(path)) {
       return /[?&]page=1(&|$)/.test(path) ? comments : []
     }
@@ -677,25 +751,48 @@ function rerunHint(deps: GateDeps): string {
     : 'gh run rerun --failed <the run id of this ci run on this branch>'
 }
 
+/**
+ * What to do next, ordered by how much of it this repository can guarantee.
+ *
+ * The ORDER is the correction from the previous round, which led with a slash
+ * command and asserted that the review harness would re-enter this branch and
+ * reuse this PR by itself. That assertion was false on the typed-start path (see
+ * `redeemCommand`), and a failure message that promises a mode nothing enters is
+ * worse than one that promises nothing: the reader follows it, gets a second
+ * branch and a duplicate PR, and concludes the gate is the problem.
+ *
+ * So option 1 is the part that is entirely inside this repository and checked by
+ * this very file — review the branch, then RECORD the verdict against the head
+ * SHA — and option 2 hands the branch to a lane as an explicit adopt instruction
+ * with the failure mode named out loud. Both keep the branch. Neither pretends.
+ */
 function printRedemption(deps: GateDeps, branch: string | undefined, pr: string | undefined): void {
   deps.log('')
   deps.log('NOTHING HERE IS WASTED. The branch is written, pushed and testable — it just has')
-  deps.log('no review. Feed IT into a review lane rather than rewriting it:')
+  deps.log('no recorded review. Two ways forward, and BOTH keep this branch and this PR.')
   deps.log('')
-  deps.log(`    ${redeemCommand({ branch, prNumber: pr })}`)
-  deps.log('')
-  deps.log('The review loop re-enters an existing branch (no `git switch -c`) and REUSES this')
-  deps.log('PR — it will not open a duplicate. When the review reports clean it posts the')
-  deps.log('verdict comment for the head SHA and this gate goes green.')
-  deps.log('')
-  deps.log('If you are recording a review that already happened, comment on this PR with:')
+  deps.log('1. THE BRANCH HAS BEEN REVIEWED (or you are about to review it) — record the')
+  deps.log('   verdict. This is what the gate reads, and it is the whole bar: a comment on')
+  deps.log("   THIS PR, from an account with write access, naming this PR's head SHA:")
   deps.log('')
   for (const line of evidenceTemplate().split('\n')) deps.log(`    ${line}`)
   deps.log('')
-  deps.log('A verdict posted AFTER this run finished cannot retro-green it — nothing')
-  deps.log('re-triggers on a comment. Re-run this workflow so the gate re-reads:')
+  deps.log('   A verdict posted AFTER this run finished cannot retro-green it by itself —')
+  deps.log('   the gate reads the comments at the moment it runs. Posting one re-runs this')
+  deps.log('   workflow automatically (.github/workflows/trident-verdict-rerun.yml); if that')
+  deps.log('   does not fire, re-run it by hand:')
   deps.log('')
   deps.log(`    ${rerunHint(deps)}`)
+  deps.log('')
+  deps.log('2. HAND THE BRANCH TO A REVIEW LANE — as an ADOPT instruction, not a new build:')
+  deps.log('')
+  deps.log(`    ${redeemCommand({ branch, prNumber: pr })}`)
+  deps.log('')
+  deps.log('   Check what the lane does with it. A lane that answers by opening a FRESH')
+  deps.log('   branch, or a fresh PR, has not redeemed this one — that is a gap in the lane')
+  deps.log('   to fix, never a reason to rewrite work that is already written. The branch and')
+  deps.log('   the PR are named in the instruction above precisely because adopting them is')
+  deps.log('   the thing being asked for, not something that happens on its own.')
   deps.log('')
   deps.log('Genuinely need to go around it? Put a NON-EMPTY reason on the head commit:')
   deps.log('')
@@ -703,8 +800,9 @@ function printRedemption(deps: GateDeps, branch: string | undefined, pr: string 
   // output is pasted somewhere it becomes a commit message.
   deps.log('    TRIDENT_BYPASS=<why this one cannot wait for a review lane>')
   deps.log('')
-  deps.log('at column 0 on its own line in the commit message. It merges, and the reason is')
-  deps.log('in the permanent history for whoever asks later. See docs/trident-verdict-gate.md.')
+  deps.log('at column 0 on its own line in the commit message, from an account with write')
+  deps.log('access. It merges, and the reason is in the permanent history for whoever asks')
+  deps.log('later. See docs/trident-verdict-gate.md.')
 }
 
 /** Exit code: 0 = a verdict (or a recorded bypass) covers this head SHA, 1 = it does not. */
@@ -776,14 +874,50 @@ async function gate(deps: GateDeps): Promise<number> {
     return 1
   }
 
-  // The bypass is read FIRST: it is an explicit, recorded decision, and making
-  // it wait behind the lookup would only add noise to a merge someone has
+  // The PR object, read before anything is decided: it carries BOTH the author
+  // association the bypass is checked against and the changed-file count the file
+  // list is checked against. `changed_files` is validated later, at the point of
+  // use — validating it here would let a malformed count block a legitimate
+  // recorded bypass, which is the one path that must stay available.
+  const prMeta = (await deps.fetchJson(`repos/${repo}/pulls/${pr}`)) as
+    | { changed_files?: unknown; author_association?: unknown }
+    | undefined
+  const prAuthorAssociation =
+    typeof prMeta?.author_association === 'string' ? prMeta.author_association : undefined
+
+  // The bypass is read EARLY: it is an explicit, recorded decision, and making it
+  // wait behind the verdict lookup would only add noise to a merge someone has
   // already chosen to own.
   const commit = (await deps.fetchJson(`repos/${repo}/commits/${headSha}`)) as
     | { commit?: { message?: string } }
     | undefined
   const message = commit?.commit?.message ?? ''
   const bypass = readBypass(message)
+  // AND IT IS CHECKED FOR AUTHORSHIP, exactly like a verdict. This repository is
+  // public and anyone may open a pull request, so a hatch keyed to nothing but a
+  // string in a commit message is a hatch every fork author holds: they write
+  // their own commit messages, and one line would turn the required check green on
+  // a change nobody reviewed. The verdict path has filtered on write access from
+  // the start, for this same abuse class; the hatch was the hole left beside it.
+  //
+  // The available signal is the PULL REQUEST's `author_association` — the commits
+  // endpoint reports no association for a commit author. That is the right grain
+  // anyway: pushing a commit onto a PR head requires write access to the head
+  // branch, so the PR's author is who is accountable for what its head says.
+  if (bypass.kind !== 'none' && !isTrustedAuthor(prAuthorAssociation)) {
+    deps.log('trident-verdict: FAIL — a TRIDENT_BYPASS marker on a pull request opened by an account')
+    deps.log('without write access to this repository. It is not honoured.')
+    deps.log('')
+    deps.log(`  head SHA          : ${headSha}`)
+    deps.log(`  author association: ${prAuthorAssociation ?? '(none reported)'}`)
+    deps.log('')
+    deps.log('This repository is public and anyone may open a PR, so a hatch that trusts only a')
+    deps.log('line in a commit message is a hatch anyone holds — the author of a fork PR writes')
+    deps.log('their own commit messages. Only OWNER, MEMBER or COLLABORATOR may record one, the')
+    deps.log('same bar a verdict is held to.')
+    printRedemption(deps, branch, pr)
+    return 1
+  }
   if (bypass.kind === 'invalid') {
     deps.log(`trident-verdict: FAIL — ${bypass.detail}.`)
     deps.log('')
@@ -812,12 +946,11 @@ async function gate(deps: GateDeps): Promise<number> {
     return 0
   }
 
-  // The PR's own count of changed files, read BEFORE the list, so the list can be
-  // checked against it. The files endpoint caps at 3,000 files and a capped
+  // The PR's own count of changed files, read (above) BEFORE the list, so the list
+  // can be checked against it. The files endpoint caps at 3,000 files and a capped
   // response is a complete-looking short page — it terminates the paginator
   // exactly like a genuine last page, and a >3,000-file PR would then classify as
   // whatever its first 3,000 files happened to be.
-  const prMeta = (await deps.fetchJson(`repos/${repo}/pulls/${pr}`)) as { changed_files?: unknown } | undefined
   const changedFiles = prMeta?.changed_files
   if (typeof changedFiles !== 'number' || !Number.isInteger(changedFiles) || changedFiles < 0) {
     throw new Error(

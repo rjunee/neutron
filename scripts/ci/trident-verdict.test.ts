@@ -92,6 +92,12 @@ function harness(opts: {
   filePages?: ApiFile[][]
   /** What the PR endpoint reports. Defaults to the real length of the file list. */
   changedFiles?: unknown
+  /**
+   * The PR's own `author_association`, which is what the BYPASS is checked
+   * against. `OWNER` by default: the overwhelming majority of these cases are
+   * about content, and the author-trust cases set it explicitly.
+   */
+  prAuthorAssociation?: string | undefined
   commitMessage?: string
   env?: Record<string, string | undefined>
   control?: (() => { ok: boolean; detail: string }) | undefined
@@ -125,7 +131,12 @@ function harness(opts: {
       if (/\/pulls\/\d+\/files\?/.test(path)) return page(filePages, path)
       // The PR object itself — no `/files`, no `per_page`. It carries the
       // changed_files count the truncation check compares the list against.
-      if (/\/pulls\/\d+$/.test(path)) return { changed_files: changedFiles }
+      if (/\/pulls\/\d+$/.test(path)) {
+        return {
+          changed_files: changedFiles,
+          author_association: 'prAuthorAssociation' in opts ? opts.prAuthorAssociation : 'OWNER',
+        }
+      }
       if (path.includes('/comments')) return page(commentPages, path)
       throw new Error(`unexpected path ${path}`)
     },
@@ -221,11 +232,17 @@ describe('the gate rejects an unreviewed PR and accepts a reviewed one', () => {
 // --------------------------------------------------------------------------- //
 
 describe('a verdict cannot be faked by a hedge or a contradiction', () => {
-  test('only the literal `true` counts as ran', async () => {
-    for (const hedge of ['yes (backgrounded)', 'pending', 'probably', 'True', 'TRUE']) {
-      const h = harness({ comments: [verdictBlock(HEAD, { 'codex.ran': hedge })] })
-      expect(await runGate(h.deps)).toBe(1)
-      expect(h.output()).toContain('codex.ran is not the literal `true`')
+  test('only the literal `true` counts as ran — for BOTH lanes', async () => {
+    // Looping the hedges over `codex.ran` alone left `adversarial.ran` with code
+    // and no test: deleting its check outright survived the whole suite, so the
+    // independent pass could report "pending" and the gate would pass it. Two
+    // legs, two loops — a guard that exists twice needs coverage twice.
+    for (const key of ['codex.ran', 'adversarial.ran']) {
+      for (const hedge of ['yes (backgrounded)', 'pending', 'probably', 'True', 'TRUE', 'false']) {
+        const h = harness({ comments: [verdictBlock(HEAD, { [key]: hedge })] })
+        expect(await runGate(h.deps)).toBe(1)
+        expect(h.output()).toContain(`${key} is not the literal \`true\``)
+      }
     }
   })
 
@@ -432,9 +449,19 @@ describe('the failure REDEEMS the branch into a review lane', () => {
       // The exact command, with this branch and this PR filled in.
       expect(out).toContain(redeemCommand({ branch: BRANCH, prNumber: pr ?? PR }))
       expect(out).toContain(BRANCH)
-      // And the promise that makes it safe to run.
-      expect(out).toContain('REUSES this')
-      expect(out).toContain('will not open a duplicate')
+      // The route that is wholly inside this repository comes FIRST, and the
+      // recording template is printed with it — that is the bar the gate reads.
+      expect(out).toContain('1. THE BRANCH HAS BEEN REVIEWED')
+      expect(out).toContain('```review-evidence')
+      expect(out).toContain('2. HAND THE BRANCH TO A REVIEW LANE')
+      // And the failure mode is NAMED rather than promised away. This assertion is
+      // the round-2 blocker in test form: the previous output claimed the lane
+      // "REUSES this PR" and "will not open a duplicate", which is false on the
+      // typed-start path, so following it opened a second branch and a duplicate
+      // PR. Re-adding either promise reds this.
+      expect(out).toContain('has not redeemed this one')
+      expect(out).not.toContain('will not open a duplicate')
+      expect(out).not.toContain('REUSES this')
     })
   }
 
@@ -475,7 +502,12 @@ describe('the failure REDEEMS the branch into a review lane', () => {
     expect(cmd.startsWith('/trident v2 ')).toBe(true)
     expect(cmd).toContain(BRANCH)
     expect(cmd).toContain('PR #7')
-    expect(cmd).toContain('reuse that PR')
+    // An ADOPT instruction, spelled as an imperative. The command is the payload
+    // read by the planner and the builder, so what it ASKS FOR is the mechanism;
+    // there is no harness behaviour it can rely on to supply this for it.
+    expect(cmd).toContain('ADOPT that branch and that PR')
+    expect(cmd).toContain(`check out ${BRANCH} without creating it`)
+    expect(cmd).toContain('reuse PR #7')
     expect(cmd).toContain('do not restart from scratch')
     expect(cmd).toContain('do not open a new PR')
   })
@@ -825,6 +857,264 @@ describe('the numeric and evidence guards have coverage, not just code', () => {
 })
 
 // --------------------------------------------------------------------------- //
+// ROUND 3 — the six mutants that survived the round-2 suite
+//
+// Every case below was found by RUNNING the battery, not by reading the code, and
+// each one is a fail-OPEN direction: the mutant returned exit 0 PASS on input the
+// gate exists to refuse. The previous as-built entry claimed "16 applied, 16
+// caught, 0 survived"; the honest number was 10 of 16, which is why the table now
+// lives in a script whose output is pasted rather than in a sentence.
+// --------------------------------------------------------------------------- //
+
+describe('a blocking count of exactly ONE is a failure, not a rounding error', () => {
+  // `verdict.codexBlocking > 0` → `> 1` survived the whole suite, because every
+  // case used either 0 or 2. One unresolved P0 is the single most likely real
+  // value, and the mutant passed it.
+  test('one unresolved codex finding fails', async () => {
+    const h = harness({ comments: [verdictBlock(HEAD, { 'codex.blocking': '1' })] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('1 unresolved codex P0/P1')
+  })
+
+  test('one unresolved adversarial finding fails', async () => {
+    const h = harness({ comments: [verdictBlock(HEAD, { 'adversarial.blocking': '1' })] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('1 unresolved adversarial P0/P1')
+  })
+
+  test('the boundary is not off by one in the other direction either — 0 still passes', async () => {
+    const h = harness({ comments: [verdictBlock(HEAD, { 'codex.blocking': '0' })] })
+    expect(await runGate(h.deps)).toBe(0)
+  })
+})
+
+describe('an EMPTY count is not a zero', () => {
+  // `/^-?\d+$/` → `/^-?\d*$/` survived: the empty string matched, `Number('')` is
+  // 0, and `codex.blocking:` with nothing after it read as "no blocking findings".
+  // A producer that emits a key with an unset value is a realistic regression, and
+  // its silent reading is the worst possible one.
+  test('a blocking key with no value is malformed, never zero', async () => {
+    for (const key of ['codex.blocking', 'adversarial.blocking']) {
+      const h = harness({ comments: [verdictBlock(HEAD, { [key]: '' })] })
+      expect(await runGate(h.deps)).toBe(1)
+      expect(h.output()).toContain('must be an integer count')
+    }
+    expect(() => parseVerdict(verdictBlock(HEAD, { 'codex.blocking': '   ' }))).toThrow(/integer count/)
+  })
+})
+
+describe('a bypass reason has to contain a readable word', () => {
+  // `/[a-z]{3}/i` → `/[a-z]{1}/i` survived: the existing cases were `1` and `-`,
+  // which carry no letters at all, so shortening the run length changed nothing
+  // they could see. A two-letter reason is the discriminating input.
+  test('a reason too short to say anything is refused', () => {
+    for (const reason of ['ok', 'no', 'x2', 'P0']) {
+      expect(readBypass(`x\n\nTRIDENT_BYPASS=${reason}\n`).kind).toBe('invalid')
+    }
+  })
+
+  test('a three-letter word is enough, so this is a floor and not a style rule', () => {
+    expect(readBypass('x\n\nTRIDENT_BYPASS=key rotation, outage\n').kind).toBe('bypass')
+  })
+
+  test('a real reason that opens and closes with angle brackets is NOT a placeholder', () => {
+    // The greedy `^<[\s\S]*>$` matched from the first `<` to the last `>`, so this
+    // legitimate reason was refused as an unfilled template.
+    const outcome = readBypass('x\n\nTRIDENT_BYPASS=<incident 42> superseded by <p0 fix>\n')
+    expect(outcome).toEqual({ kind: 'bypass', reason: '<incident 42> superseded by <p0 fix>' })
+    // …and a genuine single-span placeholder is still refused.
+    expect(readBypass('x\n\nTRIDENT_BYPASS=<why this one cannot wait>\n').kind).toBe('invalid')
+  })
+})
+
+describe('a file list short by even ONE file is not a list', () => {
+  // `files.length < changedFiles` → `files.length + 1 < changedFiles` survived,
+  // because the only truncation case in the suite was 1 file against 3,200. The
+  // off-by-one is the realistic API hiccup, and it is exactly what the check is
+  // for: one missing file can be the only executable file in the PR.
+  test('one file missing from the list is unreadable, not prose-only', async () => {
+    const h = harness({
+      comments: [verdictBlock(HEAD, {}, false)],
+      files: ['docs/a.md'],
+      changedFiles: 2,
+    })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('could not READ this PR')
+    expect(h.output()).toContain('returned 1 of 2 changed files')
+  })
+
+  test('an exact match is accepted, so the check is not simply always-red', async () => {
+    const h = harness({ comments: [verdictBlock(HEAD)], files: ['open/a.ts'], changedFiles: 1 })
+    expect(await runGate(h.deps)).toBe(0)
+  })
+})
+
+describe('a list that never ends is refused rather than silently truncated', () => {
+  // The `MAX_PAGES` terminator had code and no test: every existing case reached a
+  // short page. A paginator that walks forever against a misbehaving endpoint would
+  // hang the job; one that stops without saying so classifies a PR from a partial
+  // view. The refusal is what makes the difference visible.
+  test('an endpoint that always returns a full page is reported as unreadable', async () => {
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({
+      body: `noise ${i}`,
+      author_association: 'OWNER',
+    }))
+    let calls = 0
+    const lines: string[] = []
+    const deps: GateDeps = {
+      env: {
+        GITHUB_REPOSITORY: 'example-org/example-repo',
+        PR_NUMBER: PR,
+        PR_HEAD_SHA: HEAD,
+        PR_HEAD_REF: BRANCH,
+      },
+      log: (line) => {
+        lines.push(line)
+      },
+      control: () => ({ ok: true, detail: 'stubbed' }),
+      fetchJson: async (path) => {
+        if (path.startsWith('repos/example-org/example-repo/commits/')) {
+          return { commit: { message: 'fix: something\n' } }
+        }
+        if (/\/pulls\/\d+\/files\?/.test(path)) return [{ filename: 'docs/a.md' }]
+        if (/\/pulls\/\d+$/.test(path)) return { changed_files: 1, author_association: 'OWNER' }
+        if (path.includes('/comments')) {
+          calls++
+          return fullPage
+        }
+        throw new Error(`unexpected path ${path}`)
+      },
+    }
+    expect(await runGate(deps)).toBe(1)
+    const out = lines.join('\n')
+    expect(out).toContain('could not READ this PR')
+    expect(out).toContain('refusing a truncated view')
+    // Bounded, and bounded at the documented ceiling rather than "eventually".
+    expect(calls).toBe(100)
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// The escape hatch is held to the SAME author bar as the verdict
+// --------------------------------------------------------------------------- //
+
+describe('TRIDENT_BYPASS needs write access, not just a commit message', () => {
+  const REASON = 'ops: signing key expired mid-outage, the review lane is slower than the incident'
+
+  test('a bypass on a PR from an account without write access is not honoured', async () => {
+    // THE ABUSE THIS CLOSES. The verdict path has filtered on write access from the
+    // start, because this repository is public. The hatch beside it trusted nothing
+    // but a string in a commit message — and the author of a fork PR writes their
+    // own commit messages, so one line greened a required check on an unreviewed
+    // change. Deleting the check makes every case below pass with exit 0.
+    for (const assoc of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'MANNEQUIN', undefined]) {
+      const h = harness({
+        comments: [],
+        prAuthorAssociation: assoc,
+        commitMessage: `fix: thing\n\nTRIDENT_BYPASS=${REASON}\n`,
+      })
+      expect(await runGate(h.deps)).toBe(1)
+      expect(h.output()).toContain('without write access to this repository')
+      expect(h.output()).not.toContain('BYPASSED')
+    }
+  })
+
+  test('and the same marker from an account WITH write access still works', async () => {
+    for (const assoc of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+      const h = harness({
+        comments: [],
+        prAuthorAssociation: assoc,
+        commitMessage: `fix: thing\n\nTRIDENT_BYPASS=${REASON}\n`,
+      })
+      expect(await runGate(h.deps)).toBe(0)
+      expect(h.output()).toContain('BYPASSED')
+    }
+  })
+
+  test('an untrusted author is told to review, and gets the redeeming routes', async () => {
+    const h = harness({
+      comments: [],
+      prAuthorAssociation: 'NONE',
+      commitMessage: `fix: thing\n\nTRIDENT_BYPASS=${REASON}\n`,
+    })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain(redeemCommand({ branch: BRANCH, prNumber: PR }))
+  })
+
+  test('an untrusted author with a MALFORMED marker is refused on authorship first', async () => {
+    // Order matters for the message: "you may not use this" is the actionable
+    // fact, and "your reason was empty" would invite a second attempt at a hatch
+    // that was never available.
+    const h = harness({ comments: [], prAuthorAssociation: 'NONE', commitMessage: 'x\n\nTRIDENT_BYPASS=\n' })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('without write access')
+  })
+
+  test('no marker at all is untouched by the author check', async () => {
+    // The authorship rule must not turn every outside contribution into a bypass
+    // complaint — with no marker there is nothing to refuse, and the ordinary
+    // "no verdict" path is what a contributor should see.
+    const h = harness({ comments: [], prAuthorAssociation: 'NONE' })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('no trident verdict recorded')
+    expect(h.output()).not.toContain('TRIDENT_BYPASS marker')
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// A verdict is a PUBLIC comment, and it cannot be un-published
+// --------------------------------------------------------------------------- //
+
+describe('a verdict may not carry a home-directory absolute path', () => {
+  const HOME_PATHS = [
+    '/Users/someone/repos/neutron-open/open/composer.ts:11',
+    '/home/someone/src/thing.ts',
+    'C:\\Users\\someone\\repos\\thing.ts',
+  ]
+
+  test('a mutation field citing an absolute home path is refused', async () => {
+    for (const p of HOME_PATHS) {
+      const body = verdictBlock(HEAD).replace('  red: gate accepted a stale verdict', `  red: broke ${p}`)
+      expect(() => parseVerdict(body)).toThrow(/home-directory absolute path/)
+      const h = harness({ comments: [body] })
+      expect(await runGate(h.deps)).toBe(1)
+      expect(h.output()).toContain('malformed verdict block')
+    }
+  })
+
+  test('the refusal does NOT echo the path — this check log is public too', async () => {
+    const body = verdictBlock(HEAD).replace(
+      '  control: 12/12 green',
+      `  control: ${HOME_PATHS[0]!} stayed green`,
+    )
+    const h = harness({ comments: [body] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('not quoted here')
+    // Republishing it in the failure message would defeat the entire rule.
+    expect(h.output()).not.toContain('/Users/someone')
+  })
+
+  test('a repo-relative citation — the form a verdict should use — passes', async () => {
+    const body = verdictBlock(HEAD).replace(
+      '  red: gate accepted a stale verdict',
+      '  red: scripts/ci/trident-verdict.test.ts:171 went red as expected',
+    )
+    const h = harness({ comments: [body] })
+    expect(await runGate(h.deps)).toBe(0)
+  })
+
+  test('a path-shaped word that is not a home directory is not caught', () => {
+    // The rule is narrow on purpose: it targets the two-segment home-directory
+    // shape whose second segment is an account name, not absolute paths generally.
+    for (const ok of ['/usr/bin/bun', 'open/composer.ts', 'a/home/b.ts', '/homework/notes.md']) {
+      expect(() =>
+        parseVerdict(verdictBlock(HEAD).replace('  control: 12/12 green', `  control: ${ok} unchanged`)),
+      ).not.toThrow()
+    }
+  })
+})
+
+// --------------------------------------------------------------------------- //
 // Wiring — a gate nothing runs is not a gate
 // --------------------------------------------------------------------------- //
 
@@ -867,6 +1157,45 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     expect(aggregator).toMatch(/github\.event_name\s*\}\}"\s*=\s*"pull_request"/)
     expect(aggregator).toMatch(/needs\.trident-verdict\.result\s*\}\}"\s*!=\s*"success"/)
     expect(aggregator).toMatch(/exit 1/)
+  })
+
+  test('the comments fetch has the scope it needs, not the scope it looks like it needs', () => {
+    // The verdict is read from `.../issues/{n}/comments`; a PR's conversation
+    // comments ARE issue comments, and that endpoint is governed by `issues`, not
+    // by `pull-requests`. The only live run of this job took the bypass branch and
+    // returned before the fetch, so the happy path's scope was never exercised.
+    const job = ci.slice(ci.indexOf('  trident-verdict:'), ci.indexOf('\n  test:'))
+    expect(job).toContain('issues: read')
+    expect(job).toContain('pull-requests: read')
+  })
+
+  test('posting a verdict re-runs the failed ci run — the gate is not a one-shot read', () => {
+    // Without this the gate is self-defeating on every reviewed PR: it reads the
+    // comments at the moment it runs, the review lane posts the verdict after that,
+    // and no `pull_request` workflow re-triggers on a comment. The check would stay
+    // red on a correct branch and every merge would need a hand re-run.
+    const rerun = read('.github/workflows/trident-verdict-rerun.yml')
+    expect(rerun).toContain('issue_comment')
+    expect(rerun).toContain('actions: write')
+    expect(rerun).toContain('gh run rerun --failed')
+    // Only a PR comment, only a verdict-shaped one, only from write access — the
+    // same author bar the gate itself applies, so a stranger cannot spend runner
+    // minutes by pasting the fence.
+    expect(rerun).toContain('github.event.issue.pull_request != null')
+    expect(rerun).toContain('review-evidence')
+    for (const assoc of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+      expect(rerun).toContain(`author_association == '${assoc}'`)
+    }
+    // Keyed to the head SHA, like everything else here.
+    expect(rerun).toContain('head_sha=$head_sha')
+    // It must never be able to satisfy the required check itself: it is not a
+    // dependency of the `test` aggregator, so it cannot contribute a result to it.
+    // Asserted against the `needs:` list rather than the whole file, because
+    // ci.yml's prose legitimately names the workflow.
+    const needs = /needs:\s*\[([^\]]*)\]/.exec(ci.slice(ci.indexOf('\n  test:')))
+    expect(needs).not.toBeNull()
+    expect(needs![1]).toContain('trident-verdict')
+    expect(needs![1]).not.toContain('rerun')
   })
 
   test('the pre-push hook WARNS with the same command and never blocks the push', () => {
@@ -922,11 +1251,21 @@ describe('the push-time advisory names the ref being pushed', () => {
     expect(code).toBe(0)
     expect(err).toContain('some-other-branch')
     expect(err).toContain('/trident v2 repo=')
-    // The branch this test actually runs on must not appear as the subject.
+    // The branch this test actually runs on must not appear AS THE SUBJECT of a
+    // redemption command. Asserting on the bare name was brittle in a way CI could
+    // never show: the advisory legitimately prints the words `repo=`, `review`,
+    // `branch` and `PR #`, so a branch literally named `review` or `branch` would
+    // have false-failed — and CI checks out a detached HEAD, where the name is
+    // `HEAD` and the assertion is vacuous. Anchoring to the subject phrase makes
+    // the check say what it means on any branch name.
     const checkedOut = new TextDecoder()
       .decode(Bun.spawnSync(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd: fileURLToPath(REPO_ROOT) }).stdout)
       .trim()
-    if (checkedOut && checkedOut !== 'some-other-branch') expect(err).not.toContain(checkedOut)
+    if (checkedOut && checkedOut !== 'some-other-branch') {
+      expect(err).not.toContain(`EXISTING branch ${checkedOut} `)
+    }
+    // …and the pushed branch IS the subject.
+    expect(err).toContain('EXISTING branch some-other-branch ')
   })
 
   test('a multi-ref push names every branch it pushes', () => {

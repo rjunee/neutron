@@ -120,7 +120,7 @@ same reason — the gate's own hint prints it indented and placeholder-shaped.
 
 ## Verification
 
-`scripts/ci/trident-verdict.test.ts` — **79 tests**, `bun test`, 0 fail. The
+`scripts/ci/trident-verdict.test.ts` — **100 tests**, `bun test`, 0 fail. The
 subject is `runGate`, the real call site, with the GitHub API faked at its
 `fetchJson` seam. Testing only the pure parser would stay green through the
 majority of the mutants below.
@@ -135,9 +135,33 @@ negative-count guard, and the empty-mutation-field guard — every one of them a
 guard with code and no test. **A coverage claim in prose is a claim, and this is
 what it is worth: three holes in the first sentence anyone checked.**
 
-**The second-round battery is a script, not a sentence.** Sixteen mutants applied
-one at a time, suite run per mutant, source restored and verified byte-identical
-by SHA-256 after each. Result: **16 applied, 16 caught, 0 survived.**
+**The second round said "16 applied, 16 caught, 0 survived". That was false too.**
+It described itself as "a script, not a sentence" — but the script was run in a
+scratch directory and thrown away, so the number reaching this document was still
+a sentence, and an adversarial pass then reproduced **six survivors** in that same
+suite: the `codex.blocking` and `adversarial.blocking` comparisons (`> 0` mutated
+to `> 1` — every case used 0 or 2, so *one* unresolved P0 passed), the integer
+regex (`\d+` → `\d*`, so an EMPTY count read as zero), the file-list truncation
+check off by one, the `MAX_PAGES` terminator, and one more. **Two rounds in a row
+overstated the same thing, in the same way, while the entry itself lectured about
+prose coverage claims — which is the whole reason the battery is now committed
+code.**
+
+**Third round: the battery is `scripts/ci/trident-verdict-mutation-battery.ts`.**
+It applies each named mutant to `scripts/ci/trident-verdict.ts`, runs the suite,
+restores the file, and exits non-zero if anything survived — so the number is
+reproduced by running it rather than by trusting this paragraph:
+
+    bun scripts/ci/trident-verdict-mutation-battery.ts
+    → 34 mutants applied, 34 caught, 0 survived
+
+A stale mutant (one whose pattern no longer matches the source) is reported as
+`STALE-PATTERN` and counts as *not caught*, so the battery cannot quietly shrink
+while still reporting success. The round-2 survivors each have a test now, named in
+the suite's `ROUND 3` section; and the run also caught a seventh the adversarial
+pass had not reported — `adversarial.ran` could be deleted outright and the suite
+stayed green, because the hedge-value loop covered `codex.ran` only. **A guard that
+exists twice needs coverage twice.**
 
 | mutant | the test that went red |
 |---|---|
@@ -251,3 +275,100 @@ its automatic recovery from the stale-comment race is a no-op here and the re-ru
 is manual. Neither belongs in this PR: one repository per change.
 
 Docs: `docs/trident-verdict-gate.md`.
+
+---
+
+## Round 3 — the redemption did not work, and the hatch had no author check
+
+Two blockers from the adversarial pass, both of a kind worth naming.
+
+### The printed command described a mode no code path entered
+
+The failure output claimed the review harness "re-enters an existing branch (no
+`git switch -c`) and REUSES this PR — it will not open a duplicate". Read against
+the harness rather than assumed, that is false on the path a reader actually takes:
+
+* its inner build/review workflow **does** re-enter and reuse — but only when it is
+  handed a branch and a PR number, and only its crash-resume path hands them over;
+* its merge step **does** read an adopted branch out of run state, with a comment
+  recording why (hand-dispatched PRs on non-trident branches that trident could
+  review and then refused to merge) — but nothing on the typed-start path *writes*
+  that field;
+* a typed start therefore begins with no branch and no PR and mints both from a
+  slug of the task text.
+
+So the command, pasted verbatim as instructed, opened a **second branch and a
+duplicate PR** — the exact waste the redeeming message exists to prevent. This is
+the rule-3a shape from the repo's own guidance: an aspirational docblock describing
+intent as though it were implementation, and more dangerous than a stale one because
+it is confidently specific.
+
+The fix is not a better sentence about the harness. The output now prints **two
+routes in order of what this repository can guarantee**: first *record the verdict*
+— wholly in-tree, read by this very file, and the actual bar — and second *hand the
+branch to a lane as an ADOPT instruction*, with the failure to watch for named out
+loud: *a lane that answers by opening a fresh branch has not redeemed this one.*
+`redemption-never-printed` and `adopt-instruction-dropped` are both in the battery,
+and the covering test asserts the removed promises do **not** reappear.
+
+📌 **A failure message that promises a mode nothing enters is worse than one that
+promises nothing** — the reader follows it, gets a duplicate PR, and concludes the
+gate is the problem.
+
+### `TRIDENT_BYPASS` trusted a string in a commit message
+
+The verdict path filtered on write access from the start, because this repository is
+public and a verdict is an approval. The hatch beside it checked only that the
+marker existed and carried a reason — and **fork authors write their own commit
+messages**, so one line would have turned the required check green on a change
+nobody reviewed. It is now honoured only when the PR's `author_association` is
+`OWNER`, `MEMBER` or `COLLABORATOR`, the same bar, checked before the reason is even
+validated (so an outside author is told the hatch is unavailable rather than invited
+to try a better reason). A PR with no marker is untouched by the rule and still gets
+the ordinary "no verdict" message.
+
+### The gate was a one-shot read, which made it self-defeating
+
+The gate reads the PR's comments at the moment it runs, and the real sequence is
+push → CI red → the review lane posts the verdict. Nothing in GitHub re-triggers a
+`pull_request` workflow on a comment, so **every reviewed PR would have needed a
+manual re-run** — a mechanism degraded into a chore, and a chore into a bypass
+habit. `.github/workflows/trident-verdict-rerun.yml` closes it: an `issue_comment`
+workflow that, on a verdict-shaped comment from an account with write access, finds
+the `ci.yml` run for the PR's head SHA and re-runs its failed jobs. It grants
+nothing — not in the aggregator, no verdict of its own — it only asks CI to look
+again. `issue_comment` workflows always run from the default branch, so it is inert
+until merged, including on the PR that adds it; that is a property of the event and
+is written down rather than discovered.
+
+### A verdict is a public comment, and one had already leaked a path
+
+A live verdict published a home-directory worktree path into a public thread. The
+leak gate covers files and commit messages; a PR comment is outside both, and a
+comment cannot be un-published. The parser now refuses a verdict carrying a
+home-directory absolute path in any of the three shapes a checkout produces —
+**without echoing the value**, since the check log is public too. Narrow by design:
+`/usr/bin/bun` and `open/composer.ts` pass, and the message says to cite paths
+repo-relative.
+
+### Two smaller corrections
+
+* The placeholder regex was greedy — it matched from the first `<` to the last `>`,
+  so `TRIDENT_BYPASS=<incident 42> superseded by <p0 fix>` was refused as an
+  unfilled template. An unfilled placeholder is by construction one bracketed span
+  with no brackets inside it, which is what the narrowed pattern matches.
+* The advisory test asserted the checked-out branch name did not appear *anywhere*
+  in the output, and the advisory legitimately prints the words `repo=`, `review`,
+  `branch` and `PR #` — so a branch literally named `review` would have false-failed,
+  invisibly, because CI runs detached. It now anchors on the subject phrase.
+
+### Verification
+
+* `bun test scripts/ci/trident-verdict.test.ts` — **100 pass, 0 fail**.
+* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **34 applied, 34 caught, 0
+  survived**, reproducible by running it.
+* Still open, and unchanged by this round: the codex cross-model lane did not
+  complete on round 2 (capacity), so that lane's verdict is owed rather than clean.
+
+**Managed needs the same gate**, and that is a separate PR in that repository —
+never one change spanning both trees.

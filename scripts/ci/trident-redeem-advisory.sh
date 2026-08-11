@@ -53,8 +53,8 @@ done
 {
   echo ""
   echo "note: pushed. The MERGE is gated on a review verdict for the head commit."
-  echo "      If a branch below has not been through a review lane, put it through one —"
-  echo "      it re-enters the existing branch and reuses the PR, nothing is rebuilt:"
+  echo "      If a branch below has not been through a review lane, put it through one."
+  echo "      Point the lane AT the branch — the instruction to adopt it is the payload:"
   echo ""
   for name in $branches; do
     cmd="$(bun "$GATE" --redeem-command --branch "$name" 2>/dev/null || true)"
@@ -62,6 +62,8 @@ done
     echo "        $cmd"
   done
   echo ""
+  echo "      A lane that answers by opening a NEW branch has not redeemed this one."
+  echo "      The other route is to review it and record the verdict on the PR."
   echo "      docs/trident-verdict-gate.md"
 } >&2 || true
 

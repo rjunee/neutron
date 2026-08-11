@@ -226,6 +226,12 @@ jobs:
   # verdict for, and a job that failed there would red the branch for a
   # bookkeeping push. The aggregator below only consults this job on PR events, so
   # the skip cannot be read as satisfaction — see its explicit check.
+  #
+  # THE GATE READS COMMENTS AT THE MOMENT IT RUNS, so the normal order of events
+  # (push → ci red → review lane posts the verdict) leaves a correct branch behind
+  # a stale red check, and no `pull_request` workflow re-triggers on a comment.
+  # `trident-verdict-rerun.yml` is the other half: a verdict comment from an
+  # account with write access re-runs this run's failed jobs, and this job re-reads.
   trident-verdict:
     name: trident-verdict
     runs-on: ubuntu-latest
@@ -233,6 +239,14 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # `issues: read` is NOT redundant with `pull-requests: read`. The verdict is
+      # fetched from `repos/{o}/{r}/issues/{n}/comments` — a PR's conversation
+      # comments are ISSUE comments, and that endpoint is governed by the `issues`
+      # scope. Omitting it left the happy path resting on an assumption about scope
+      # mapping that no run had exercised: the one live run took the bypass branch
+      # and returned before the comments fetch, so a 403 there would first have
+      # been seen as "could not READ this PR" on someone else's PR.
+      issues: read
     steps:
       # No history needed: the head commit message (the bypass paper trail) is read
       # through the API, so the gate does not depend on which ref got checked out.

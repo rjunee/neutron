@@ -96,13 +96,32 @@ required `test` aggregator, which demands `success` from it on pull-request even
 so a skipped verdict job fails the required context instead of satisfying it — no
 branch-protection change needed.
 
-The failure is the feature: every failure path prints the one command that feeds
-the already-written branch into a review lane, reusing its branch and its PR rather
-than rebuilding. `.githooks/pre-push` prints the same command, from the same single
-definition, and never blocks — a push is fine, only the merge is gated.
-`TRIDENT_BYPASS=<reason>` at column 0 in the head commit message passes the gate
-and records why, and is not satisfiable by an empty, placeholder, or unreadable
-reason.
+The failure is the feature: every failure path prints two routes that both keep the
+branch, ordered by what this tree can guarantee. First, record the verdict — a
+template naming this head SHA, which is the actual bar and is read by the gate
+itself. Second, hand the branch to a review lane as an explicit instruction to ADOPT
+this branch and this PR, with the failure to watch for stated rather than promised
+away: a lane that answers by opening a fresh branch has not redeemed this one. An
+earlier version instead asserted that the harness re-enters and reuses by itself,
+which is true only when it is handed a branch and a PR number — not on the typed
+path a reader takes — so following it produced a duplicate PR. `.githooks/pre-push`
+prints the same command, from the same single definition, and never blocks: a push
+is fine, only the merge is gated.
+
+Posting a verdict re-runs CI, via `.github/workflows/trident-verdict-rerun.yml`.
+Without it the gate was self-defeating on every reviewed PR — it reads the comments
+at the moment it runs, the verdict arrives after that, and no `pull_request`
+workflow re-triggers on a comment. That workflow grants nothing and is not in the
+aggregator; it only asks CI to look again at the head SHA, and it is inert until it
+reaches the default branch, as `issue_comment` always is.
+
+`TRIDENT_BYPASS=<reason>` at column 0 in the head commit message passes the gate and
+records why. It is not satisfiable by an empty, placeholder, or unreadable reason,
+**and it requires write access** — the PR's `author_association` must be OWNER,
+MEMBER or COLLABORATOR. Without that check the hatch was one every fork author held,
+since authors write their own commit messages. A verdict may also not carry a
+home-directory absolute path: the leak gate covers files and commit messages, a PR
+comment is outside both, and a comment cannot be un-published.
 
 Before believing any absence the gate runs its whole lookup against known inputs —
 a good verdict must pass, an absent one and a stale one must fail — and reports
@@ -110,14 +129,19 @@ a good verdict must pass, an absent one and a stale one must fail — and report
 of that control passed a mutant which reported "no verdict" for every PR in the
 repository.
 
-Sixteen mutants applied by script, suite run per mutant, source restored and
-verified byte-identical: 16 caught, 0 survived. They cover the candidate filter,
-the author-trust filter, pagination termination, the file-list truncation check,
-rename classification, extensionless executables, the redeeming command's argument
-spellings, the four failure paths that previously printed no command, and the
-push-time advisory naming the pushed ref rather than the checked-out branch. The
-hosted overlay repository needs the same gate, as a separate change made there —
-one repository per change.
+The mutation battery is committed code, not a paragraph:
+`scripts/ci/trident-verdict-mutation-battery.ts` applies each named mutant, runs the
+suite, restores the source, and exits non-zero if anything survived — **34 applied,
+34 caught, 0 survived**, and a mutant whose pattern goes stale counts as not caught
+so the battery cannot quietly shrink. This is the third statement of that number and
+the first reproducible one: the previous two claimed "17, each caught" and "16
+caught, 0 survived" from prose, and adversarial passes reproduced three and then six
+survivors respectively — including `codex.blocking: 1` passing a `> 0` comparison
+mutated to `> 1`, and an EMPTY count reading as zero. The battery covers the SHA
+keying, both review lanes, the parser's strictness, the author-trust filters on both
+the verdict and the hatch, pagination termination, the file-list truncation check,
+the positive control, and the redemption itself. The hosted overlay repository needs
+the same gate, as a separate change made there — one repository per change.
 
 Detail: `docs/as-built/2026-08-10-trident-verdict-gate.md`.
 

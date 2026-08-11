@@ -25,13 +25,45 @@ written, tested and pushed; telling its author "start over through the proper
 channel" is how a gate acquires a reputation for being expensive and then
 acquires a bypass habit.
 
-Every failure path therefore prints the command that reviews **this** branch:
+Every failure path therefore prints **two** routes, and both keep the branch. They
+are printed in this order deliberately, because they are not equally guaranteed.
 
-    /trident v2 repo=<path-to-your-checkout> review PR #<n> on the EXISTING branch <branch> — re-enter that branch, reuse that PR, do not restart from scratch and do not open a new PR
+**Route 1 — record the verdict.** The branch has been reviewed, or is about to be;
+what the gate reads is a `review-evidence` comment on the PR, from an account with
+write access, naming the head SHA. This route is wholly inside this repository:
+the producer is any review lane, the consumer is `scripts/ci/trident-verdict.ts`,
+and nothing outside the repo has to behave in any particular way for it to work.
+Posting the comment re-runs the failed CI jobs automatically
+(`.github/workflows/trident-verdict-rerun.yml`), and the gate re-reads.
 
-The re-entry it asks for is real: the review loop's inner workflow re-enters an
-existing branch **without** `git switch -c` and **reuses the existing PR rather
-than opening a duplicate**.
+**Route 2 — hand the branch to a review lane**, as an instruction to *adopt* it:
+
+    /trident v2 repo=<path-to-your-checkout> review PR #<n> on the EXISTING branch <branch> — ADOPT that branch and that PR: check out <branch> without creating it, reuse PR #<n>, do not restart from scratch and do not open a new PR
+
+**What that command is, and what it is not.** It is an instruction, carried in the
+task text where the planner and the builder read it. It is **not** a claim that the
+harness adopts a branch on its own, and an earlier version of this document made
+exactly that claim. Checked against the harness rather than assumed:
+
+- its inner build/review workflow *does* re-enter an existing branch without
+  `git switch -c` and reuse its PR — but only when it is **handed** a branch and a
+  PR number, and only its crash-resume path hands them over;
+- its merge step *does* read an adopted branch name out of the run's state, and the
+  comment there records why (a batch of hand-dispatched PRs on non-trident branches
+  that trident could review and then refused to merge) — but nothing on the
+  typed-start path **writes** that field;
+- so a typed start begins with no branch and no PR, and mints both from a slug of
+  the task text.
+
+The branch is redeemed when the lane is **pointed at it**, which is what the
+sentence asks for. The failure output says so, and names the failure to watch for
+in those words: *a lane that answers by opening a fresh branch has not redeemed
+this one — that is a gap in the lane to fix, never a reason to rewrite work that is
+already written.* Promising a mode nothing enters is worse than promising nothing,
+because the reader follows it, gets a duplicate PR, and concludes the gate is the
+problem. Closing the harness-side gap (a `branch=`/`pr=` pass-through on the typed
+start that writes the adopted branch into run state) is tracked where the harness
+lives, not here.
 
 **Why the branch and the PR are in the sentence and not in flags.** The
 dispatcher's parse step recognises the task text plus `repo=`, `rounds=`, `mode=`
@@ -236,18 +268,39 @@ body rather than from this commit, so the marker can be dropped on the way into
 merged goes with it. See limit 3 below.
 
 It is **not satisfiable by an empty reason**: an empty or whitespace-only value,
-an unfilled `<...>` placeholder, a value with nothing readable in it, or two
-markers in one message all fail — the last because two reasons is a
-contradiction, not an update. The marker must be at column 0, so a copy of this
-document (or of the gate's own hint, which prints it indented and
-placeholder-shaped) cannot arm it.
+an unfilled `<...>` placeholder, a value with nothing readable in it (fewer than
+three consecutive letters), or two markers in one message all fail — the last
+because two reasons is a contradiction, not an update. The marker must be at column
+0, so a copy of this document (or of the gate's own hint, which prints it indented
+and placeholder-shaped) cannot arm it.
+
+**And it requires write access, exactly like a verdict does.** The hatch is
+honoured only when the pull request's `author_association` is `OWNER`, `MEMBER` or
+`COLLABORATOR`. This repository is public and anyone may open a PR against it;
+authors write their own commit messages, so a hatch keyed to nothing but a string
+in one is a hatch every fork author holds — one line would have turned the required
+check green on a change nobody reviewed. The verdict path had filtered on write
+access from the start, for this same abuse class, and the hatch beside it was the
+hole left over. The PR's association is the available signal (the commits endpoint
+reports none for a commit author) and it is the right grain anyway: pushing a
+commit onto a PR head requires write access to the head branch, so the PR's author
+is who is accountable for what its head says.
 
 ## Operating notes
 
-- **A verdict posted after the run finished cannot retro-green it.** The gate
-  reads the PR's comments at the moment it runs. Re-run the workflow
-  (`gh run rerun --failed <run-id>` for the `ci.yml` run on the branch) or push
-  again, and it re-reads. The failure message says so.
+- **A verdict posted after the run finished does not green it by itself — but
+  posting one re-runs CI.** The gate reads the PR's comments at the moment it runs,
+  and the ordinary sequence is push → CI red → review lane posts the verdict, so
+  without something in between the check would stay red on a correct branch and
+  every reviewed PR would need a hand re-run. `trident-verdict-rerun.yml` is that
+  something: an `issue_comment` workflow that, on a verdict-shaped comment from an
+  account with write access, finds the `ci.yml` run for the PR's **head SHA** and
+  re-runs its failed jobs. It grants nothing and is not in the aggregator — it only
+  asks CI to look again, and CI reaches its own conclusion. `gh run rerun --failed
+  <run-id>` still works by hand, and the failure output prints it with this run's id
+  already filled in. Note that `issue_comment` workflows always run from the
+  **default branch**, so this has no effect until it is merged to `main`, including
+  on the PR that adds it.
 - **The gate rides the existing required `test` context** rather than adding a
   new one: `test` `needs:` it, and checks `needs.trident-verdict.result` on
   pull-request events specifically. That makes it blocking with no
@@ -295,13 +348,26 @@ reasons they cannot articulate.
    evidence, the prover cannot prove a mutation that does not exist, and no verdict
    is posted. The gate's own prose exemption is therefore unreachable from the
    producing side. The fix is in the harness repository, not here.
-5. **A verdict posted after the run has finished does not re-trigger anything
-   here.** The harness re-runs a workflow this repository does not have (its
-   checks live in `ci.yml`), so its automatic recovery from that race is a no-op
-   for this tree and the re-run is manual — which is why the failure output prints
-   the exact `gh run rerun` command with this run's id already filled in.
-6. **An external contributor cannot record a verdict, by design.** Only an account
-   with write access can, so a fork PR from outside needs a reviewer with write
-   access to post the block (or the bypass). On a public Apache-2.0 repository that
-   is the correct trade — an approval anyone can write is not an approval — but it
-   means an outside contribution cannot self-clear its own gate.
+5. **The re-run of a stale red check is now automatic, but only from `main`.**
+   The harness re-runs a workflow this repository does not have (its checks live in
+   `ci.yml`), so its own recovery from the verdict-after-the-run race is a no-op
+   here. `trident-verdict-rerun.yml` closes it from this side — and because
+   `issue_comment` workflows always run from the default branch, it is inert until
+   merged, including on the PR that introduces it. Until then, and whenever it does
+   not fire, the manual `gh run rerun --failed` printed in the failure output is the
+   fallback.
+6. **An external contributor cannot record a verdict, and cannot bypass either —
+   by design.** Both require write access, so a fork PR from outside needs a
+   reviewer with write access to post the block (or the marker). On a public
+   Apache-2.0 repository that is the correct trade — an approval anyone can write is
+   not an approval, and neither is an escape hatch anyone can pull — but it means an
+   outside contribution cannot self-clear its own gate.
+7. **A verdict is a public comment and cannot be un-published.** The gate refuses a
+   verdict carrying a home-directory absolute path (`/Users/<name>/…`,
+   `/home/<name>/…`, `C:\Users\<name>\…`) and says so without echoing the value,
+   because the check log is public too. This is a narrow rule, not general leak
+   protection: `.githooks/pre-push` and `scripts/ci/leak-gate.sh` cover files and
+   commit messages, and a PR comment is outside both. A live verdict had already
+   published a home-directory worktree path into a public thread, which is what put
+   the rule here. Cite paths repo-relative — `open/composer.ts:11` — which is the
+   form a reader wants anyway.
