@@ -3540,7 +3540,32 @@ export function buildOpenGraphComposer(
           ...(framePid !== undefined ? { project_id: framePid } : {}),
           ts: nowMs,
         }
-        appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
+        // FAN TO THE BASE TOPIC **AND** EVERY LIVE PER-PROJECT TOPIC.
+        //
+        // THE DEFECT: this addressed the snapshot to `appWsTopicId(OWNER)` — the
+        // BASE topic — and only that. A board open on a project lives on
+        // `<base>:<project_id>`, so the snapshot never reached it and the pane
+        // only ever changed on a manual reload (which re-fetches over HTTP).
+        //
+        // The `activity_event` fan a few hundred lines below has ALWAYS done this
+        // correctly (base + every scoped topic). That asymmetry is exactly what
+        // the owner saw on 2026-08-11: the activity dot pulsed while the board sat
+        // dead, because the two frames travel different paths and only one of them
+        // was addressed to where he was looking. He reported it as "the work board
+        // is not responding at all to realtime changes" — including a `clear` that
+        // appeared only after a refresh.
+        //
+        // Widening the fan cannot cross-apply one board onto another: every client
+        // re-checks the frame's `project_id` tag against its own view before
+        // applying it (`app/lib/work-board-live.ts` `decodeWorkBoardFrame`,
+        // `WorkBoardTab.tsx`), and each socket lives on exactly one topic, so
+        // nothing receives the frame twice.
+        const base = appWsTopicId(OWNER_USER_ID)
+        const scopedPrefix = `${base}:`
+        appWsRegistry.send(base, frame)
+        for (const topic of appWsRegistry.topics()) {
+          if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+        }
       } catch (err) {
         log.warn('work_board_push_failed', {
           project: changedKey,
