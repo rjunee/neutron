@@ -155,6 +155,22 @@ export interface ChatViewModel {
    * (work marked done), so the dots stop exactly when the work completes.
    */
   hasActiveWork: boolean
+  /**
+   * Bumps whenever the ACTIVE project's board GAINS items. The shell watches it
+   * and reveals the Work tab, so a plan that materialises while the owner is
+   * looking at Chat does not sit unseen behind a tab.
+   *
+   * A monotonic counter rather than a boolean because the shell needs to
+   * distinguish "grew again" from "is still grown" — a boolean would fire once
+   * and then never again, and re-deriving it from a count in the shell would
+   * re-fire on every unrelated re-render.
+   *
+   * Bumped ONLY on growth, and never on the first frame for a board (see the
+   * handler): a fresh subscription delivers the whole board as one snapshot, and
+   * treating that as growth would yank the owner off Chat every time he opened a
+   * project that already had items.
+   */
+  workBoardGrewNonce: number
   status: ConnStatus
   /** Count of sends still queued/unacked (offline tail). */
   pending: number
@@ -487,6 +503,14 @@ export class NeutronChatController {
    * updates this; cleared on project switch.
    */
   private activeWorkBoardItems: WorkBoardItem[] | null = null
+  /**
+   * Item count of the last ACTIVE-board frame, or null when no frame has been
+   * seen for the current board yet. Separate from `activeWorkBoardItems` because
+   * the null-vs-empty distinction is load-bearing: null means "no frame yet" (the
+   * next frame is a baseline, not growth) while [] means "a frame said zero".
+   */
+  private activeWorkBoardCount: number | null = null
+  private workBoardGrewNonce = 0
   private vm: ChatViewModel
   private seq = 0
   /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
@@ -659,6 +683,7 @@ export class NeutronChatController {
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
     this.activeWorkBoardItems = null
+    this.activeWorkBoardCount = null
     if (this.importProgressTimer !== null) {
       clearTimeout(this.importProgressTimer)
       this.importProgressTimer = null
@@ -982,6 +1007,15 @@ export class NeutronChatController {
       // per-tab filter, but cached here so `computeHasActiveWork` survives
       // interleaved foreign frames.
       if ((framePid ?? '') === (this.projectId ?? '')) {
+        // GROWTH DETECTION, for revealing the Work tab. Compared against the
+        // PREVIOUS active-board count, and deliberately skipped when there was no
+        // previous count for this board (`null`) — the first frame after
+        // subscribing carries the entire board, and calling that "growth" would
+        // pull the owner off Chat every time he opened a project that already had
+        // items. Only a board that gains items WHILE he is watching counts.
+        const prev = this.activeWorkBoardCount
+        if (prev !== null && items.length > prev) this.workBoardGrewNonce += 1
+        this.activeWorkBoardCount = items.length
         this.activeWorkBoardItems = items
       }
       for (const fn of this.workBoardListeners) {
@@ -1371,6 +1405,7 @@ export class NeutronChatController {
       isRunning: this.awaitingReply || liveStreams.length > 0,
       awaitingFirstToken: this.awaitingReply && liveStreams.length === 0,
       hasActiveWork: this.computeHasActiveWork(),
+      workBoardGrewNonce: this.workBoardGrewNonce,
       // Chat-rail stability — present a project-switch's initial `connecting` as
       // `idle` so `ConnectionBanner` stays hidden across a warm switch. A real
       // disconnect (which clears `switchConnecting`) still reports its true

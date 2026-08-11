@@ -972,6 +972,72 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     controller.stop()
   })
 
+  // ── workBoardGrewNonce: the signal that reveals the Work tab ──────────────
+  //
+  // Owner-asked 2026-08-11: the board must "POP open immediate as soon as items
+  // are added". Most of these assert the cases where it must STAY QUIET, because
+  // a signal that fires too eagerly steals him off Chat mid-sentence.
+  it('does NOT bump on the FIRST board frame — a fresh subscription is a baseline, not growth', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    const before = controller.getViewModel().workBoardGrewNonce
+    // Opening a project that ALREADY has items delivers them as one snapshot.
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })]))
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(before)
+    controller.stop()
+  })
+
+  it('bumps when the active board GAINS an item', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' })]))
+    await tick()
+    const base = controller.getViewModel().workBoardGrewNonce
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })]))
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(base + 1)
+    controller.stop()
+  })
+
+  it('does not bump when the board SHRINKS or stays the same — a clear must not pop it open', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })]))
+    await tick()
+    const base = controller.getViewModel().workBoardGrewNonce
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })])) // same
+    await tick()
+    sockets[0]!.deliver(changed([])) // a `clear`
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(base)
+    controller.stop()
+  })
+
+  it('a SIBLING project board growing does not pop open the active project', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' })]))
+    await tick()
+    const base = controller.getViewModel().workBoardGrewNonce
+    sockets[0]!.deliver({ ...changed([boardItem({ id: 'x' }), boardItem({ id: 'y' })]), project_id: 'other' })
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(base)
+    controller.stop()
+  })
+
   it('replays the last snapshot to a late subscriber', async () => {
     const { controller, sockets } = setup('p1')
     controller.start()
