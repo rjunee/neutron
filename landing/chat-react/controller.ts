@@ -159,13 +159,15 @@ export interface ChatViewModel {
   liveActivity: { label: string; detail?: string } | null
   /**
    * Chat-typing persistence — true while the active project's Work Board has at
-   * least one `in_progress` item (the SAME signal that flashes the Work-tab
-   * active-work dot). The typing indicator ORs this in with `awaitingFirstToken`
-   * so the dots stay visible for the WHOLE processing window — including a long
-   * or background build that continues AFTER the ack turn settles (the agent
-   * acks, dispatches the build, `awaitingReply` clears, but the board still shows
-   * work in flight). Clears the moment the board reports no `in_progress` item
-   * (work marked done), so the dots stop exactly when the work completes.
+   * least one `in_progress` item — the SAME signal that flashes the Work-tab
+   * active-work dot, which is now its ONLY consumer.
+   *
+   * It USED to be OR'd into the chat typing indicator so the dots spanned a
+   * background build that outlives the ack turn. The owner rejected that on
+   * 2026-08-11: the turn had finished and the dots were still spinning, which
+   * reads as "a message is coming" when none is. Board work has its own progress
+   * affordance. The indicator is turn-only now (`ChatApp.tsx`), so do not
+   * reintroduce the OR without re-deciding that with him.
    */
   hasActiveWork: boolean
   /**
@@ -1026,10 +1028,28 @@ export class NeutronChatController {
           STEP_KINDS.has(row.kind) &&
           scopeKey === activityScopeKey(this.projectId)
         ) {
-          const next =
-            row.detail === undefined ? { label: row.label } : { label: row.label, detail: row.detail }
-          if (this.liveActivity?.label !== next.label) {
-            this.liveActivity = next
+          // PREFER `detail` OVER `label`, because for the most common row kind the
+          // label is a KIND WORD and the meaning is in the detail.
+          // `activity-inspector.ts:417` emits `{kind:'status', label:'status',
+          // detail: summarize(message)}` — so the substrate's `message:'working'`
+          // arrives with the useful half in `detail`. Rendering `label` showed the
+          // owner a bubble reading literally "status" (screenshot, 2026-08-11) and
+          // hid "working" behind a hover nobody would find on a phone.
+          //
+          // The guard below compares the DISPLAYED text, not `label`. Comparing
+          // `label` was the second half of that bug: every status row carries the
+          // identical label, so the first one latched and no later status could
+          // ever replace it — the indicator froze on one word for the whole turn.
+          // Prefer `detail` ONLY when the label is a GENERIC KIND-WORD (label ===
+          // kind), which is exactly the `status` case. A `tool_start` label is the
+          // humanized TOOL NAME and must always win over any detail it carries —
+          // blanket detail-preference would replace "Reading files" with a file
+          // path, which is less informative, not more.
+          const generic = row.label === row.kind
+          const text =
+            generic && row.detail !== undefined && row.detail.length > 0 ? row.detail : row.label
+          if (this.liveActivity?.label !== text) {
+            this.liveActivity = { label: text }
             this.publish()
           }
         }

@@ -917,7 +917,7 @@ function buildEditIndex(
 function TypingIndicator({
   activity,
 }: {
-  activity?: { label: string; detail?: string } | null
+  activity?: { label: string } | null
 }): React.JSX.Element {
   // SAY WHAT IT IS DOING, not just that it is doing something. Three dots for
   // four minutes is indistinguishable from a hang — the owner watched exactly
@@ -940,9 +940,7 @@ function TypingIndicator({
         {label !== undefined && label.length > 0 ? (
           // `title` carries the collapsed one-liner on hover without spending a
           // second line in the transcript on it.
-          <span className="car-typing-label" title={activity?.detail ?? undefined}>
-            {label}
-          </span>
+          <span className="car-typing-label">{label}</span>
         ) : null}
       </div>
     </div>
@@ -1866,15 +1864,19 @@ function ChatSurface({
             )}
           </ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={MESSAGE_COMPONENTS} />
-          {/* Chat-typing persistence — show the standard typing dots for the WHOLE
-              processing window, not just the pre-first-token wait. `hasActiveWork`
-              (the active project's Work Board has an `in_progress` item — the same
-              signal as the flashing Work-tab dot) keeps the dots visible while a
-              long/background build runs on after the ack turn settles, and stops
-              them the moment the board reports the work done. */}
-          {vm.awaitingFirstToken || vm.hasActiveWork ? (
-            <TypingIndicator activity={vm.liveActivity} />
-          ) : null}
+          {/* TURN-ONLY. `hasActiveWork` (a board item still `in_progress`) was
+              deliberately OR'd in here so the dots spanned a background build that
+              outlives the ack turn — and the owner rejected that on 2026-08-11:
+              "The turn has finished, according to the inspector, but I'm still
+              seeing a typing indicator... It feels like I should be expecting a
+              chat message from the agent soon. There is already a progress
+              indicator for work board items."
+
+              He is right about what the signal MEANS: typing dots promise an
+              incoming message. Board work has its own progress affordance, and
+              conflating them makes the dots lie. `hasActiveWork` stays on the view
+              model — the Work-tab dot uses it — it just no longer drives this. */}
+          {vm.awaitingFirstToken ? <TypingIndicator activity={vm.liveActivity} /> : null}
         </ThreadPrimitive.Viewport>
         <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
           ↓

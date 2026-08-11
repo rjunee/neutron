@@ -112,10 +112,49 @@ describe('NeutronChatController — view model over chat-core', () => {
     await tick()
     sockets[0]!.deliver(activityFrame('Reading files', 'general', 'SPEC.md'))
     await tick()
-    expect(controller.getViewModel().liveActivity).toEqual({
-      label: 'Reading files',
-      detail: 'SPEC.md',
-    })
+    // A tool_start's label is the humanized TOOL NAME and wins over any detail —
+    // showing the file path instead would be less informative, not more.
+    expect(controller.getViewModel().liveActivity).toEqual({ label: 'Reading files' })
+    controller.stop()
+  })
+
+  it('a STATUS row shows its DETAIL, because its label is the useless word "status"', async () => {
+    // THE BUG THE OWNER SCREENSHOTTED (2026-08-11): the bubble read literally
+    // "status". `activity-inspector.ts:417` emits {kind:'status', label:'status',
+    // detail: summarize(message)}, so the substrate's message:'working' arrives
+    // with the meaning in `detail`. Rendering `label` showed a kind word and hid
+    // the content behind a hover nobody finds on a phone.
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('status', 'general', 'working', 'status'))
+    await tick()
+    expect(controller.getViewModel().liveActivity).toEqual({ label: 'working' })
+    controller.stop()
+  })
+
+  it('successive STATUS rows with DIFFERENT details each update — the indicator must not freeze', async () => {
+    // The second half of the same bug: the change-guard compared `label`, and every
+    // status row carries the identical label 'status'. So the first one latched and
+    // no later status could replace it — the owner watched one frozen word for a
+    // whole turn. The guard now compares the DISPLAYED text.
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('status', 'general', 'working', 'status'))
+    await tick()
+    expect(controller.getViewModel().liveActivity?.label).toBe('working')
+    sockets[0]!.deliver(activityFrame('status', 'general', 'scoping the plan', 'status'))
+    await tick()
+    expect(controller.getViewModel().liveActivity?.label).toBe('scoping the plan')
     controller.stop()
   })
 
