@@ -77,7 +77,20 @@ describe('chatPushExcerpt', () => {
     // nothing but zero-width spaces used to survive normalization at full length,
     // clear the sink's `length === 0` check, and buzz the owner's phone with a
     // notification containing no visible characters at all.
-    for (const body of ['​', '​⁠', '﻿ ­', '‍', '​\n‌']) {
+    // SPELLED AS ESCAPES, NOT PASTED. Written as literal characters this test can be
+    // DEFANGED WITHOUT GOING RED: strip the invisibles and every case degrades to
+    // `chatPushExcerpt('')`, which returns `''` and passes for the wrong reason — the
+    // test would no longer exercise zero-width handling at all while still reporting
+    // green. An escape survives any re-encoding, and a reviewer can see what is here.
+    const ZWSP = '\u200B';
+    const ZWNJ = '\u200C';
+    const ZWJ = '\u200D';
+    const WJ = '\u2060';
+    const BOM = '\uFEFF';
+    const SHY = '\u00AD';
+    // The ZWJ-only case is deliberately NOT stripped by `INVISIBLE_CHARS` (it welds
+    // emoji sequences), so it is `hasVisibleContent` that has to reject that one.
+    for (const body of [ZWSP, ZWSP + WJ, BOM + ' ' + SHY, ZWJ, ZWSP + '\n' + ZWNJ]) {
       expect(chatPushExcerpt(body)).toBe('')
     }
   })
@@ -95,7 +108,7 @@ describe('chatPushExcerpt', () => {
   test('a zero-width character does not eat the budget of a real message', () => {
     // Stripped before the budget is measured, not merely trimmed at the ends —
     // otherwise an invisible character mid-body would displace a visible one.
-    expect(chatPushExcerpt('alpha​beta')).toBe('alphabeta')
+    expect(chatPushExcerpt('alpha\u200Bbeta')).toBe('alphabeta')
   })
 
   test('a clip that lands before the first word is silence, not "...…"', () => {

@@ -69,8 +69,26 @@ export const CHAT_PUSH_GENERAL_TITLE = 'General'
  * together (👨‍👩‍👦), and stripping it would shatter a family emoji into three
  * separate glyphs. It needs no entry here anyway — a ZWJ-only body has no visible
  * content and is caught by {@link hasVisibleContent}.
+ *
+ * WRITTEN AS ESCAPES ON PURPOSE. The first version of this line held the literal
+ * characters, which made the character class itself invisible in the source: a
+ * reviewer could not tell which codepoints were in it or count them, and any tool
+ * that trims or re-encodes the file could drop one silently. A guard whose contents
+ * cannot be read is the same shape of hazard as the fail-open number this module was
+ * fixed for — so each entry is spelled out and named, and a diff can be reviewed.
  */
-const INVISIBLE_CHARS = /[​‌⁠﻿­‎‏]/g
+const INVISIBLE_CHARS = new RegExp(
+  '[' +
+    '\\u200B' + // ZERO WIDTH SPACE
+    '\\u200C' + // ZERO WIDTH NON-JOINER
+    '\\u2060' + // WORD JOINER
+    '\\uFEFF' + // ZERO WIDTH NO-BREAK SPACE (BOM)
+    '\\u00AD' + // SOFT HYPHEN
+    '\\u200E' + // LEFT-TO-RIGHT MARK
+    '\\u200F' + // RIGHT-TO-LEFT MARK
+    ']',
+  'g',
+)
 
 /**
  * Does this string contain anything a human would SEE and read as content?

@@ -9089,6 +9089,16 @@ alert rather than dropping information, whereas requiring `notified` makes the s
 unreachable on any install with no registered device (every fresh one) and the re-emit
 would then re-notify forever with nothing able to buzz.
 
+The zero-width guard and its test were both written with the LITERAL invisible characters
+pasted in, and both are now escape sequences. The guard's own character class was
+unreadable — a reviewer could not tell which codepoints it held or count them, and any
+tool that re-encodes the file could drop one silently. The test was worse, because it could
+be DEFANGED WITHOUT GOING RED: strip the invisibles from its fixtures and every case
+degrades to `chatPushExcerpt('')`, which returns `''` and passes for the wrong reason,
+so the test would stop exercising zero-width handling at all while still reporting green.
+Mutation-tested after the rewrite — dropping U+200B from the class still reds the
+budget-accounting case, so the escapes are load-bearing and not decoration.
+
 The two docblocks about `[id]`-route param staleness contradicted each other, and the
 inaccurate one was the child screen's: it claimed its OWN param had been observed to go
 stale. The recorded incident is the opposite — `useLocalSearchParams` is sticky in a
