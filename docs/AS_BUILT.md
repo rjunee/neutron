@@ -9756,6 +9756,15 @@ suppressed. A window-suppressed attempt did not push the next boundary out, and 
 attempt did not open a window. The disclosed gap is real by the same standard: `grep -n throw`
 over `logger/__tests__/logger.test.ts` returns nothing.
 
+One surviving claim was over-general and is narrowed here rather than kept: every round so far
+wrote "a BACKWARD clock step emits". The predicate is `elapsed < 0 || elapsed >= ms`
+(`logger/index.ts`), so what emits is a clock reading BEHIND THE LAST STAMP — a backward step
+smaller than the elapsed time leaves the reading ahead of the stamp and is still suppressed.
+📌 **A consequence named by its CAUSE ("a backward step") quantifies over more inputs than the
+code tests; named by the CONDITION the code actually tests, it cannot.** This survived six rounds
+of review of the sentence right next to the predicate, because the cause is the interesting part
+of the story and the condition is the true part.
+
 The remaining smaller items are closed with it — the S15 note in the cron handler quoted a
 "> 0 for > 15 min" alarm in the present tense and retracted it twenty lines later, so it now
 quotes it as history where it is first mentioned; and the constant-guard test's rationale is cut

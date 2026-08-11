@@ -56,13 +56,15 @@
  *     Two consequences a caller has to plan around. They are the ones looked
  *     for, not an inventory of every way this differs from the original:
  *
- *     A BACKWARD CLOCK STEP EMITS rather than suppressing. `Date.now()` is
- *     not monotonic — an NTP correction or a VM resume can step it back — and
- *     a throttle that trusts it would silence the key for the step plus the
- *     window. An hour-long step would silence a 10-minute heartbeat for over
- *     an hour, which presents as exactly the "it died" alarm the heartbeat
- *     exists to rule out. A heartbeat's failure mode is going quiet, so this
- *     errs toward an extra line.
+ *     A CLOCK READING BEHIND THE LAST STAMP EMITS rather than suppressing —
+ *     what a backward step produces once it lands behind the stamp, not what
+ *     any backward step produces. `Date.now()` is not monotonic (an NTP
+ *     correction, a VM resume), and a throttle that trusted the reading would
+ *     silence the key for the step plus the window: an hour-long step would
+ *     silence a 10-minute heartbeat for over an hour, which presents as
+ *     exactly the "it died" alarm the heartbeat exists to rule out. A
+ *     heartbeat's failure mode is going quiet, so this errs toward an extra
+ *     line.
  *
  *     THE BOUND IS ON ATTEMPTS, NOT ON DELIVERED LINES. A consumed window is
  *     no evidence that a line reached anyone: a sink that throws consumes one
@@ -144,10 +146,11 @@ export interface Logger extends LogEmitter {
    * A view that throttles a key to roughly one line per `ms` window (the
    * wedge-alert `alertDedupeMs` cooldown).
    *
-   * "Roughly" is load-bearing: a backward clock step emits rather than
-   * suppressing, and a throwing sink consumes a window with no guarantee that
-   * anything was delivered. Both are deliberate — the head docblock gives the
-   * reasons, and `logger/__tests__/logger.test.ts` is the specification.
+   * "Roughly" is load-bearing: a clock reading behind the last stamp emits
+   * rather than suppressing, and a throwing sink consumes a window with no
+   * guarantee that anything was delivered. Both are deliberate — the head
+   * docblock gives the reasons, and `logger/__tests__/logger.test.ts` is the
+   * specification.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }
