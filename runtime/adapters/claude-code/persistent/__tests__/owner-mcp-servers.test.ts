@@ -500,20 +500,37 @@ describe('a THIRD-PARTY handshake cannot wedge the owner\'s live chat', () => {
     expect(perServer * many.length).toBeLessThanOrEqual(OWNER_MCP_STARTUP_BUDGET_MS)
   })
 
-  it('stops dividing at a floor, and does not pretend the floor closes the gap', () => {
+  it('stops dividing at a floor, and the installed maximum is DERIVED so the floor fits', () => {
     // One or two servers keep exactly the bound they had, so the ordinary case is
     // untouched by the division.
     expect(ownerMcpStartupTimeoutMs(1)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
     expect(ownerMcpStartupTimeoutMs(2)).toBe(OWNER_MCP_STARTUP_TIMEOUT_MS)
     expect(ownerMcpStartupTimeoutMs(4)).toBe(OWNER_MCP_STARTUP_BUDGET_MS / 4)
-    // At the installed maximum the floor wins, and the honest consequence is asserted
-    // rather than papered over: the serial worst case CAN exceed the budget. A timeout
-    // short enough to fit would fail healthy servers, which trades a rare slow spawn
-    // for a permanently broken one.
+    // At the installed maximum the floor wins — and the maximum is derived from the floor
+    // so that winning does not over-subscribe the budget. These two lines used to read
+    // `toBeGreaterThan`, DOCUMENTING the gap instead of closing it: the cap was 24, 24 x
+    // the 2 s floor is 48 s against a 30 s ready budget, and an owner who installed up to
+    // the advertised `max_servers` was handed a bound the arithmetic could not honour.
     expect(ownerMcpStartupTimeoutMs(MCP_SERVERS_MAX)).toBe(OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS)
-    expect(OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS * MCP_SERVERS_MAX).toBeGreaterThan(
+    expect(OWNER_MCP_STARTUP_TIMEOUT_FLOOR_MS * MCP_SERVERS_MAX).toBe(
       OWNER_MCP_STARTUP_BUDGET_MS,
     )
+    // SWEPT, not spot-checked at the endpoints. The serial worst case fits the budget at
+    // EVERY count the owner can actually reach, including the counts between the flat
+    // maximum and the floor where the division is what bounds it. Raising `MCP_SERVERS_MAX`
+    // without raising the budget fails HERE, which is the guard that keeps the advertised
+    // maximum and the startup arithmetic from drifting apart again.
+    for (let n = 1; n <= MCP_SERVERS_MAX; n += 1) {
+      expect(ownerMcpStartupTimeoutMs(n) * n).toBeLessThanOrEqual(OWNER_MCP_STARTUP_BUDGET_MS)
+    }
+    // WHAT THIS STILL DOES NOT CLOSE, stated rather than implied. `MCP_TIMEOUT` is
+    // process-wide and also governs the two compiled-in servers (the tools bridge and the
+    // dev-channel sink), so the true serial worst case is (n + 2) shares, not n — at n=1
+    // that is 3 x 10 s = the whole 30 s ready budget. See § THE DIVISOR COUNTS OWNER
+    // SERVERS in `signatures.ts` for why correcting the divisor is refused: it would
+    // shrink the healthy one-server case to bound two local processes that are never slow.
+    // The failure it can still produce is the bounded, visible one — a failed post-spawn
+    // assertion into the respawn ladder — not a silent wedge.
   })
 
   it('leaves the no-installed-servers spawn exactly as it was', async () => {
