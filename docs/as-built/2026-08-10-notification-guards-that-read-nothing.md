@@ -307,8 +307,8 @@ for X (the transcript re-anchors, X is latched), rail-tap to another project —
 `/projects/<other>/chat`, no query, so no target — then tap the SAME notification again, which
 is still sitting in the shade. The equality check swallowed it and the transcript did not
 move."* The premise is true and the conclusion is not. A **real second tap never reaches the
-equality check**: `app/lib/push.ts:292` returns on a seen `request.identifier` **before**
-`resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
+equality check**: `app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier`
+**before** `resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
 `?message_id=`. It is swallowed one layer up. The dedupe TTL is 7 days and warm taps pass
 `{dismiss:false}`, so the notification really does stay in the shade — which is precisely what
 made the false claim read as plausible. That dedupe gap is filed as **#182**; the latch-release

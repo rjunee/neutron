@@ -9210,8 +9210,9 @@ cleared it, which made a per-tap instruction behave as a per-process one.
 project (a chat route with no `?message_id=`), then tap the SAME notification again — and the
 transcript did not move: the equality check had already spent the target."* The premise is
 true and the conclusion is not. A real second tap never reaches the equality check, because
-`app/lib/push.ts:292` returns on a seen `request.identifier` **before** `resolvePushRoute`, so
-the re-tap produces no navigation at all and never re-supplies `?message_id=` — it is
+`app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute`, so the re-tap produces no navigation at all and never re-supplies
+`?message_id=` — it is
 swallowed one layer up, and that dedupe gap is filed as **#182**. The latch-release fix
 described below is correct by inspection and stands; only this motivating sequence was wrong.
 
@@ -9390,7 +9391,8 @@ previous round is correct by inspection and stays. What was wrong is the sequenc
 it, in this file's own comment and in commit 93245925's message: *"tap the notification for X,
 rail-tap elsewhere, then tap the SAME notification again — it is still sitting in the shade"*. The
 premise is true and the conclusion is not. A real second tap never reaches the equality check,
-because `app/lib/push.ts:292` returns on a seen `request.identifier` **before** `resolvePushRoute` —
+because `app/lib/push.ts`'s `dispatch` helper returns on a seen `request.identifier` **before**
+`resolvePushRoute` —
 so the re-tap produces no navigation at all and never re-supplies `?message_id=`. It is swallowed one
 layer up. The dedupe TTL is 7 days and warm taps pass `{dismiss:false}`, so the notification really
 does stay in the shade, which is precisely what made the false claim read as plausible.

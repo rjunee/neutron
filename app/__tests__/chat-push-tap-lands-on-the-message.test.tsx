@@ -378,8 +378,8 @@ describe('the surface CONSUMES the pushed message id', () => {
     // WHAT THIS ARM DOES NOT PROVE, stated because the version of this comment written
     // alongside the fix claimed it: the two arrivals here are `rerender` calls, NOT two
     // notification taps. A real second tap of the SAME notification never reaches this
-    // component — `installPushTapHandler` returns at `app/lib/push.ts:292` on a seen
-    // `request.identifier`, BEFORE `resolvePushRoute`, so no route is pushed and no
+    // component — `installPushTapHandler`'s `dispatch` helper (`app/lib/push.ts`) returns
+    // on a seen `request.identifier`, BEFORE `resolvePushRoute`, so no route is pushed and no
     // `?message_id=` is re-supplied (7-day TTL; warm taps do not dismiss). This arm
     // therefore proves the latch releases on a targetless visit — which is real and is
     // what the mutation kills — and says nothing about tap-twice reachability. The
