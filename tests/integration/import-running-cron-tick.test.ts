@@ -6,9 +6,9 @@
  * `ImportJobRunner` reaches `completed`. The original wiring polled
  * once inside `notifyImportUpload`, leaving the engine stranded at
  * `import_running` after Pass-1+Pass-2 finished. This test pins the
- * cron-tick fix: a per-instance cron that polls on an interval (5 s by
- * default since 2026-05-21, lowered from the original 15 s — see
- * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS`) and advances the phase the
+ * cron-tick fix: a per-instance cron that polls on the interval named by
+ * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` (lowered once, in 2026-05-21 — read
+ * the figure there, not here) and advances the phase the
  * moment the runner's status flips to `completed`.
  *
  * Assertions:
@@ -371,7 +371,9 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
   // of these cases called an exported predicate directly, and deleting the handler's
   // throttle call left all of them green with the flood fully restored — coverage of
   // a helper, zero coverage of the fix. Asserting on what actually reaches the sink
-  // is the only shape that can see that mutation. That does couple these cases to the
+  // is the shape chosen to see that mutation — a module mock counting `rateLimited`
+  // calls would also see it, at the cost of asserting on a call instead of on output.
+  // That does couple these cases to the
   // logger's transport — the handler builds its own logger, so there is no sink to
   // inject at this seam and the assertion goes through a `console.log` spy. Deliberate:
   // coupling to the real output is what buys coverage of the real wiring.
@@ -482,10 +484,11 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     //
     // What this does NOT assert: that ">0 for >15 min" is an alarm. It is not —
     // it stopped being one on 2026-06-18 when the import timeout became
-    // progress-aware (30-min floor, deadline resets on progress inside a 5-min
-    // no-progress window, 4-h ceiling; see engine-internals.ts and the handler's
-    // comment). This line carries only the count, never progress, so it cannot
-    // separate slow-healthy from stuck. Read >0 as "work is in flight".
+    // progress-aware, and the deadline now resets on forward progress.
+    // `evaluateImportTimeout` in engine-internals.ts is the rule; it is not a flat
+    // window and the figures are not restated here. Either way this line carries
+    // only the count, never progress, so it cannot separate slow-healthy from
+    // stuck. Read >0 as "work is in flight".
     //
     // Scope note: this pins TWO ticks, one of them inside the window that would
     // have suppressed an idle tick. That is what discriminates "throttle the idle

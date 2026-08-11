@@ -9334,9 +9334,10 @@ presents as the "it died" alarm the heartbeat exists to rule out. Negative elaps
 as due, and the emit re-stamps, so the window self-heals. Every `rateLimited` caller gets it.
 
 **Verification:** 7 new cases — 6 in `tests/integration/import-running-cron-tick.test.ts`
-(file total 4 → 10), which drive the REAL handler and assert on the REAL emitted line, plus 1
-in `logger/__tests__/logger.test.ts`, which exercises the primitive directly (the backward-clock
-case; the integration cases never drive a decreasing clock) — including the boundary (one ms
+(file total 4 → 10), five of which drive the REAL handler and assert on the REAL emitted line
+while the sixth is a guard on the constant, plus 1 in `logger/__tests__/logger.test.ts`, which
+exercises the primitive directly (the backward-clock case; the integration cases never drive a
+decreasing clock) — including the boundary (one ms
 short of the interval,
 then exactly at it) and a guard on the constant. **Six** mutants, each killed, and each with a
 DISTINCT red set — which is a weaker claim than "each by a different case", and the weaker one
@@ -9757,9 +9758,9 @@ reader to grep. The head docblock drops the case-by-case inventory of the suite 
 internal-ordering sentences (stamp-before-sink; "the emit re-stamps, so the window self-heals"),
 keeping two consequences that are easy to get wrong (not the whole caller-facing contract — a
 computed `ms` still has to be validated, and latch state is shared across `createLogger` calls).
-`logger/AGENTS.md` names those two and sends the reader to the one docblock that owns the reasons
-and the rest, instead of carrying its own copy: three copies of a claim is three times the drift
-surface.
+`logger/AGENTS.md` names those two, says they are not the whole contract, and sends the reader to
+the one docblock that owns the reasons instead of carrying its own copy: three copies of a claim
+is three times the drift surface.
 
 **What was KEPT was verified BY EXECUTION this round, not by reading the comment next to it**
 (the specific failure of the two rounds before): with NO sink injected and a control line
@@ -9873,8 +9874,10 @@ a dated banner and a pointer, which is why those are what this round leaves behi
 (codex-cli 0.147.0, read-only) run three times — on the draft, on the fix, and on the fix to the
 fix, producing eleven items, then seven, then eleven again at falling severity (the last pass
 returned one P1 pair and nine P2/P3s). The lane's verdict on the head it last saw was
-REQUEST_CHANGES; every item is addressed in the commits after it, and this entry does NOT record
-an APPROVE, because no lane has returned one against the current head. The kimi lane was
+REQUEST_CHANGES. Each pass's items were worked in the commit that followed it — and the next pass
+kept finding that some had survived in a copy it had not cited, which is recorded above rather
+than smoothed over. This entry does NOT record an APPROVE, because no lane has returned one
+against the current head. The kimi lane was
 deliberately not run (owner's K3 quota exhausted) — **absent, not failed**, so this is a
 three-lane round. The codex sandbox could not create temp files, so it verified the unit suite
 and the 51-project typecheck itself and marked the integration-test and lint results UNVERIFIED

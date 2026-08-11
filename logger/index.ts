@@ -155,7 +155,8 @@ export interface Logger extends LogEmitter {
    * rather than suppressing, and a throwing sink consumes a window with no
    * guarantee that anything was delivered. Both are deliberate — the head
    * docblock gives the reasons, and `logger/__tests__/logger.test.ts` holds the
-   * pinned cases.
+   * pinned cases — not including the throwing-sink half, which is the gap the
+   * head docblock discloses.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }
