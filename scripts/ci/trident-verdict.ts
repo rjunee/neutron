@@ -426,7 +426,20 @@ export function filesTouchGatedSurface(files: { filename?: string; previous_file
  *
  * So: the branch and the PR ride in the TASK TEXT, where they are read by the
  * planner and the builder, and nothing in the printed command is flag-shaped
- * unless it is in this set. `assertOnlyParsedFlags` in the test enforces it.
+ * unless it is in this set. The test
+ * "the printed command contains NO argument spelling the dispatcher would
+ * silently swallow" enforces it by inspecting the generated string for flag
+ * SHAPES, so re-adding `branch=` reds the suite.
+ *
+ * WHAT THAT TEST CANNOT PROVE, said plainly rather than left to be discovered.
+ * The dispatcher is not in this repository — it is the review lane's own command
+ * definition, on the machine of whoever runs the lane — so no test here can read
+ * its grammar. The test checks the printed string against THIS SET; it does not
+ * check this set against the dispatcher. A change to the dispatcher's parse step
+ * therefore rots this constant silently, and catching that is a review duty, not
+ * a CI one. The set above was read off the dispatcher's parse step by hand; the
+ * only honest guard available from inside this tree is that the printed command
+ * and this declared set cannot drift APART.
  */
 export const DISPATCHER_PARSED_FLAGS = new Set(['repo', 'rounds', 'mode'])
 

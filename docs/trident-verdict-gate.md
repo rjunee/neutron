@@ -371,3 +371,14 @@ reasons they cannot articulate.
    published a home-directory worktree path into a public thread, which is what put
    the rule here. Cite paths repo-relative — `open/composer.ts:11` — which is the
    form a reader wants anyway.
+8. **Nothing here can check the dispatcher's grammar, so `DISPATCHER_PARSED_FLAGS`
+   rots silently if that grammar changes.** The route-2 command is only safe to
+   paste because the flags in it are flags the dispatcher parses, and the
+   dispatcher is not in this repository — it is the review lane's own command
+   definition, held wherever the lane runs. The test that covers this inspects the
+   printed command against the declared set; it cannot check the declared set
+   against the dispatcher, because it cannot read it. So the guard available from
+   inside this tree is only that the printed command and the declared set cannot
+   drift apart. Re-verifying the set against the dispatcher is a review duty
+   whenever either side changes, and the set was read off the dispatcher's parse
+   step by hand.

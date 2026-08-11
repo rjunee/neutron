@@ -143,6 +143,26 @@ the verdict and the hatch, pagination termination, the file-list truncation chec
 the positive control, and the redemption itself. The hosted overlay repository needs
 the same gate, as a separate change made there — one repository per change.
 
+One limit is now written down rather than left to be discovered (#179, round 4). The
+route-2 command is only safe to paste because every flag in it is a flag the review
+lane's dispatcher parses — and that dispatcher is not in this repository, so no test
+here can read its grammar. `DISPATCHER_PARSED_FLAGS` was read off its parse step by
+hand; the covering test checks the printed command against that declared set and
+cannot check the declared set against the dispatcher. So a change on the dispatcher's
+side rots the constant silently, and catching it is a review duty, not a CI one. The
+docblock had cited a test symbol (`assertOnlyParsedFlags`) that exists nowhere; it now
+names the real test. Named in `docs/trident-verdict-gate.md` § What it does not do.
+
+Re-verified at this head rather than carried forward: the suite is 100 pass / 0 fail,
+and the battery reports 34 applied, 34 caught, 0 survived. The pagination terminator —
+the mutant that survived a green 51-test suite two rounds ago — reds four tests when
+mutated to `return items`: "an executable file on page 2 still requires mutation
+evidence", "a verdict on page 2 of the comments is found, not read as absent",
+"newest-wins still holds ACROSS pages", and "an endpoint that always returns a full
+page is reported as unreadable". Re-adding the unparsed `branch=`/`prNumber=` pairs to
+the printed command reds "the printed command contains NO argument spelling the
+dispatcher would silently swallow".
+
 Detail: `docs/as-built/2026-08-10-trident-verdict-gate.md`.
 
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
