@@ -8585,3 +8585,62 @@ Both `'running'`-clearing guards elsewhere are also gated on `phase NOT IN (term
 📌 **A placeholder/parameter arity mismatch is LOUD, not silent** — sqlite throws, and the
 mutant that introduced one reddened eleven tests. The dangerous shape is a same-count
 REORDER, which is why the new case asserts each column separately instead of just the status.
+
+**Round 2 — the retraction was not DURABLE. `trident/checkpoint.sh` now refuses a terminal row.**
+
+The panel's blocker: the retraction held by TIMING, not by construction. Cancelling a build
+writes the terminal phase but does not kill the detached inner workflow — nothing in the
+cancel path reaps the child. That workflow keeps going, and every per-phase checkpoint pushes
+`subagent_status running` (`trident/inner-workflow.mjs:567`) through `trident/checkpoint.sh`,
+whose UPDATE was `WHERE id='<run-id>'` with no phase predicate. So the sequence `/code stop`
+mid-Build → row goes terminal with the claim retracted → next inner checkpoint → the claim is
+back, on a terminal row, with `branch` and `last_advanced_at` re-stamped. The exact state this
+work exists to remove, recreated by the only writer that had no terminal guard.
+
+The fix is the matching predicate, so the terminal chokepoint and the out-of-band writer agree:
+
+```sql
+UPDATE code_trident_runs SET <fields> WHERE id='<run-id>'
+  AND phase NOT IN ('done', 'failed', 'stopped')
+```
+
+Nothing useful is dropped, because `step()` returns early on `isTerminalPhase`
+(`trident/orchestrator.ts:679-683`): no reader ever consults a value a post-terminal
+checkpoint would have written, `inner_result` included — a terminal row is never harvested. A
+skipped write stays exit-0 (the checkpoint step must never fail a build) but now reports on
+stderr, because a silently-dropped checkpoint is exactly the kind of absence that costs hours;
+`changes()` is read in the same sqlite3 invocation and `tail -1` drops the busy_timeout
+PRAGMA's own echo.
+
+**Two corrections to the round-1 text above.**
+
+1. The docblock in `trident/store.ts` still justified the retraction via #143's harvest gate,
+   the hang watchdog and orphan recovery — all three unreachable on a terminal row (`step()`
+   no-ops first; the watchdog keys on `last_advanced_at`). Round 1 corrected that in this log
+   and left the comment saying it. Now the comment names what is actually load-bearing: the
+   CRASH VETO on the two write paths (`store.ts` `update()` and `saveIfActive()`), plus the
+   human read of a finished row, which is where the false claim was spotted in the first place.
+   Rule 3a shape — a confidently specific wrong rationale is worse than none, because the next
+   reader trusts it.
+2. The loser-transition test could not prove what it claimed. It set the already-terminal row
+   to `'crashed'`, which the CASE preserves anyway, so the assertion passed whether the loser
+   wrote nothing or wrote the preserving CASE. It now puts back `'running'` — the one value the
+   CASE *would* clear — and asserts row state before `won`, so a leaked write cannot hide
+   behind the `won` assertion. Killed by the mutant that drops the terminal predicate.
+
+`'pending'` is cleared too now. No production path writes it (the orchestrator writes only
+running/completed/failed/crashed/null), but it is in the type and in migration 0077's CHECK,
+and it ASSERTS a child just as `'running'` does. The split that matters is claim vs outcome,
+not one enum value.
+
+**Verification:** 613 trident tests green. Five new cases in `trident/checkpoint-sh.test.ts`
+against a real throwaway sqlite db — a per-phase checkpoint against `stopped`/`failed`/`done`
+writes nothing and re-stamps nothing, the terminal-result write is refused too, a non-terminal
+phase is unaffected (the guard is not a blanket refusal). Mutant: deleting the predicate reds
+four of them. That suite needed a `phase` column added to its fixture table, which is its own
+small lesson — a hand-rolled fixture schema silently omits the column your new guard reads.
+
+📌 **A SQL-level guard on the read side is only half a fix when an unreaped process still holds
+a pen.** The question that found this was not "is the write correct?" but "who else can write
+this row after it is terminal, and what stops them?" — and the answer was a shell script three
+directories away that no one had thought of as part of the state machine.

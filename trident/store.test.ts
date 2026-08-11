@@ -368,12 +368,14 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
   // `phase='stopped'` with `subagent_status='running'`. The child was already dead and
   // the column still claimed it was working.
   //
-  // Not cosmetic — gates key on this column. #143's fix widened the harvest/terminal
-  // block on `subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery
-  // read it too, so a terminal row reading `running` is exactly the stale field those
-  // readers can act on.
+  // Not cosmetic, but not for the reason it is tempting to write down either: #143's
+  // harvest gate and orphan recovery never see a terminal row (`step()` returns early
+  // on `isTerminalPhase`), and the hang watchdog keys on `last_advanced_at`. The
+  // reader that IS load-bearing is the CRASH VETO on the write paths — `update()`'s
+  // `AND subagent_status IS NOT 'crashed'` and `saveIfActive()`'s equivalent — which
+  // is why the 'crashed'-survives case below is the one that must never regress.
 
-  async function runAt(status: 'running' | 'crashed' | 'completed' | null) {
+  async function runAt(status: 'running' | 'pending' | 'crashed' | 'completed' | null) {
     const store = new TridentRunStore(db)
     const run = await store.create({
       slug: 'email-core-p1',
@@ -404,10 +406,23 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
     expect(after?.failure_reason).toBe('cancelled via codegen_cancel')
   })
 
+  test("a PENDING claim is retracted too — 'pending' asserts a child just as 'running' does", async () => {
+    // Not currently written by any production path (the orchestrator writes only
+    // running/completed/failed/crashed/null), but it is in the type and in migration
+    // 0077's CHECK, and it means "about to be in flight" — a claim, not an outcome. If
+    // a writer ever appears, a cancelled run must not be left asserting it.
+    const { store, id } = await runAt('pending')
+
+    await store.terminalTransition(id, { phase: 'stopped', failure_reason: 'cancelled' })
+
+    expect(store.get(id)?.subagent_status).toBeNull()
+  })
+
   test('a CRASHED marker SURVIVES — this restriction is load-bearing, not incidental', async () => {
     // Nulling unconditionally would erase 'crashed' whenever anything terminated an
-    // already-crashed run as 'failed', deleting the signal #143 added a gate for while
-    // looking like a cleanup. Only 'running' is a live CLAIM; the others are OUTCOMES.
+    // already-crashed run as 'failed', silently disarming the crash veto in `update()`
+    // / `saveIfActive()` while looking like a cleanup. 'running'/'pending' are live
+    // CLAIMS; the others are OUTCOMES.
     const { store, id } = await runAt('crashed')
 
     await store.terminalTransition(id, { phase: 'failed', failure_reason: 'reaped' })
@@ -431,18 +446,26 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
     expect(store.get(id)?.subagent_status).toBeNull()
   })
 
-  test('a LOSER transition does not touch the status either', async () => {
+  test('a LOSER transition writes NOTHING — not even a status the CASE would have cleared', async () => {
     // The atomic guard means a second terminate finds the row already terminal and
-    // writes nothing. It must not clear a status on the way past.
+    // writes nothing at all. Pinning that with a 'crashed' status could not prove it:
+    // the CASE preserves 'crashed' anyway, so the assertion would pass whether the
+    // loser wrote nothing or wrote the preserving CASE. Put back the one value the
+    // CASE *would* clear — if the loser's UPDATE landed, this goes null.
     const { store, id } = await runAt('running')
     await store.terminalTransition(id, { phase: 'stopped', failure_reason: 'first' })
-    await store.update(id, { subagent_status: 'crashed' })
+    expect(store.get(id)?.subagent_status).toBeNull() // the winner retracted it
+    await store.update(id, { subagent_status: 'running' })
+    expect(store.get(id)?.subagent_status).toBe('running')
 
     const second = await store.terminalTransition(id, { phase: 'failed', failure_reason: 'second' })
 
-    expect(second.won).toBe(false)
-    expect(store.get(id)?.subagent_status).toBe('crashed')
+    // Row state FIRST, deliberately: asserting `won` first would short-circuit the
+    // failure and hide which part of the loser's write leaked.
+    expect(store.get(id)?.subagent_status).toBe('running')
+    expect(store.get(id)?.phase).toBe('stopped')
     expect(store.get(id)?.failure_reason).toBe('first')
+    expect(second.won).toBe(false)
   })
 
   test('with NO failure_reason — the SHORT params branch — binding is still correct', async () => {

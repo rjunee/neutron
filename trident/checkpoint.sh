@@ -34,7 +34,9 @@
 # script computes it so the prompt carries no command substitution either.
 #
 # SEMANTICS ARE UNCHANGED from the inline SQL this replaces
-# (trident/inner-workflow.mjs checkpoint()/writeTerminalResult()):
+# (trident/inner-workflow.mjs checkpoint()/writeTerminalResult()), EXCEPT that
+# the UPDATE now also refuses a row that has already reached a terminal phase
+# (see the guard at the bottom):
 #   * same table (code_trident_runs), same WHERE id='<run-id>' row selection;
 #   * same column/value SET pairs (SET order is irrelevant in SQLite — every
 #     RHS sees the OLD row, incl. the `ELSE subagent_status` in the CASE);
@@ -109,8 +111,29 @@ sets+=("last_advanced_at='$(date -u +%FT%TZ)'")
 set_clause="$(printf '%s, ' "${sets[@]}")"
 set_clause="${set_clause%, }"
 
-# busy_timeout is a per-connection PRAGMA: it MUST run in the SAME sqlite3
-# invocation as the UPDATE (';'-separated), not as a separate process. stdout
-# is discarded only to drop the PRAGMA's "5000" echo (the UPDATE emits
-# nothing); errors still reach stderr and fail the script (set -e).
-sqlite3 "$db" "PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET $set_clause WHERE id='$(sql_quote "$run")'" > /dev/null
+# A TERMINAL ROW IS FROZEN — `AND phase NOT IN ('done','failed','stopped')`.
+#
+# Cancelling a build (`/code stop`, board X-cancel) writes the terminal phase but
+# does NOT kill the detached workflow that was building it: the workflow keeps
+# going and its next per-phase checkpoint would land `subagent_status='running'`
+# plus a fresh `last_advanced_at` back onto the terminal row — re-creating exactly
+# the stale "still running" claim `TridentRunStore.terminalTransition` retracts,
+# and re-stamping the branch/timestamp of a finished run. Same predicate as the
+# store's TERMINAL_PHASE_SQL (trident/store.ts) and `crashRunningByLauncher`'s
+# guard, so the terminal chokepoint and this out-of-band writer agree.
+#
+# Nothing useful is dropped: `advanceTridentRun`'s `step()` no-ops on a terminal
+# row (trident/orchestrator.ts), so no reader ever consults the values a
+# post-terminal checkpoint would have written — including `inner_result`, which is
+# only ever harvested from a non-terminal row.
+#
+# A skipped write is NOT an error (the checkpoint step must never fail the build),
+# but it IS reported on stderr so a missing checkpoint or harvest signal is
+# explainable rather than silent. busy_timeout is a per-connection PRAGMA: it MUST
+# run in the SAME sqlite3 invocation as the UPDATE (';'-separated), not as a
+# separate process — `tail -1` drops that PRAGMA's own "5000" echo and keeps only
+# `changes()`. Errors still reach stderr and fail the script (set -e + pipefail).
+changed="$(sqlite3 "$db" "PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET $set_clause WHERE id='$(sql_quote "$run")' AND phase NOT IN ('done', 'failed', 'stopped'); SELECT changes()" | tail -1)"
+if [ "$changed" = "0" ]; then
+  echo "checkpoint.sh: run '$run' is already terminal (or gone) — checkpoint NOT applied" >&2
+fi

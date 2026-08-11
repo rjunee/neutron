@@ -12,7 +12,10 @@
  *      JSON-safe indirection AND the column-consistency CASE (subagent_status
  *      flips to 'completed' ONLY when the result file has non-empty content);
  *   3. writes RETRY under a held lock (PRAGMA busy_timeout=5000 on the same
- *      connection) instead of failing instantly like the old busy_timeout=0.
+ *      connection) instead of failing instantly like the old busy_timeout=0;
+ *   4. a row that has already reached a TERMINAL phase is FROZEN — a surviving
+ *      detached workflow cannot write a stale `running` claim back onto a
+ *      cancelled/reaped run.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -33,6 +36,7 @@ beforeEach(() => {
   const db = new Database(dbPath)
   db.exec(`CREATE TABLE code_trident_runs (
     id TEXT PRIMARY KEY,
+    phase TEXT,
     pr INTEGER,
     branch TEXT,
     inner_checkpoint TEXT,
@@ -41,7 +45,10 @@ beforeEach(() => {
     subagent_status TEXT,
     last_advanced_at TEXT
   )`)
-  db.exec(`INSERT INTO code_trident_runs (id, subagent_status) VALUES ('run-1', 'pending'), ('run-other', 'pending')`)
+  db.exec(
+    `INSERT INTO code_trident_runs (id, phase, subagent_status)
+     VALUES ('run-1', 'Build', 'pending'), ('run-other', 'Build', 'pending')`,
+  )
   db.close()
 })
 
@@ -143,6 +150,65 @@ describe('checkpoint.sh — argument validation (fail loudly, touch nothing)', (
     expect(res.code).toBe(2)
     expect(res.stderr).toContain(message as string)
     expect(row('run-1').branch).toBeNull() // nothing written
+  })
+})
+
+describe('checkpoint.sh — a TERMINAL row is frozen', () => {
+  // Cancelling a build writes the terminal phase but does NOT kill the detached
+  // workflow: it keeps building and its next checkpoint would otherwise put
+  // `subagent_status='running'` (+ a fresh `last_advanced_at`) straight back onto
+  // the terminal row — re-creating the stale "still running" claim the store's
+  // `terminalTransition` retracts. This is the durability half of that fix.
+  function setPhase(id: string, phase: string): void {
+    const db = new Database(dbPath)
+    db.run('UPDATE code_trident_runs SET phase = ? WHERE id = ?', [phase, id])
+    db.close()
+  }
+
+  test.each(['stopped', 'failed', 'done'])(
+    'a per-phase checkpoint against a %s run writes NOTHING (and does not fail the build)',
+    (phase) => {
+      setPhase('run-1', phase)
+      // Non-empty precondition: the row is terminal and carries no checkpoint yet.
+      expect(row('run-1')).toMatchObject({ phase, branch: null, inner_checkpoint: null })
+
+      const res = sh([dbPath, 'run-1', 'pr', '55', 'branch', 'trident/add-widget', 'inner_checkpoint', 'forge-done', 'subagent_status', 'running'])
+
+      // Exit 0 — the checkpoint step must never fail the build.
+      expect(res.code).toBe(0)
+      expect(res.stderr).toContain('already terminal')
+      const r = row('run-1')
+      expect(r.subagent_status).toBe('pending') // NOT resurrected to 'running'
+      expect(r.branch).toBeNull()
+      expect(r.inner_checkpoint).toBeNull()
+      expect(r.pr).toBeNull()
+      expect(r.last_advanced_at).toBeNull() // not re-stamped on a finished run
+      expect(r.phase).toBe(phase)
+    },
+  )
+
+  test('the TERMINAL-RESULT write is refused too (a terminal row is never harvested)', () => {
+    const tmp = join(dir, 'terminal.json')
+    writeFileSync(tmp, '{"ok":true,"verdict":"APPROVE"}')
+    setPhase('run-1', 'stopped')
+
+    const res = sh([dbPath, 'run-1', 'inner_result_file', tmp, 'inner_verdict', 'APPROVE', 'branch', 'b'])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).toContain('already terminal')
+    expect(row('run-1')).toMatchObject({ inner_result: null, inner_verdict: null, subagent_status: 'pending' })
+  })
+
+  test('a NON-terminal phase is unaffected — the guard is not a blanket refusal', () => {
+    setPhase('run-1', 'Review')
+    expect(sh([dbPath, 'run-1', 'inner_checkpoint', 'argus-approved', 'subagent_status', 'running']).code).toBe(0)
+    expect(row('run-1')).toMatchObject({ inner_checkpoint: 'argus-approved', subagent_status: 'running' })
+  })
+
+  test('an unknown run id reports the skip rather than passing silently', () => {
+    const res = sh([dbPath, 'no-such-run', 'inner_checkpoint', 'forge-done'])
+    expect(res.code).toBe(0)
+    expect(res.stderr).toContain('checkpoint NOT applied')
   })
 })
 

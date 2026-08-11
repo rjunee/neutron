@@ -490,25 +490,40 @@ export class TridentRunStore {
       // on 2026-08-10 — a cancelled run sat at `phase='stopped'` with
       // `subagent_status='running'`.
       //
-      // It matters beyond tidiness because gates key on this column: #143's fix
-      // widened the harvest/terminal block on `subagent_status === 'crashed'`, and
-      // the hang-watchdog and orphan-recovery read it too. A terminal row that reads
-      // `running` is exactly the kind of stale field those readers can act on.
+      // WHICH READERS THIS PROTECTS — the honest list, because the obvious
+      // candidates do NOT apply and it would be easy to write a confident wrong
+      // rationale here. #143's harvest/terminal gate (`orchestrator.ts` step (1)/(1a))
+      // and orphan recovery are both UNREACHABLE on a terminal row: `step()` returns
+      // early on `isTerminalPhase(run.phase)` before either one. The hang watchdog
+      // keys on `last_advanced_at`, not on this column. What IS load-bearing is the
+      // CRASH VETO on the two write paths — `update()`'s `AND subagent_status IS NOT
+      // 'crashed'` (above) and `saveIfActive()`'s `AND (subagent_status IS NOT
+      // 'crashed' OR ? = 'crashed')` (below) — plus every human or tool read of a
+      // finished row, which is where the false claim was first spotted.
       //
-      // ONLY 'running' IS CLEARED, and that restriction is load-bearing. Nulling it
-      // unconditionally would erase a 'crashed' marker whenever anything terminated
-      // an already-crashed run as 'failed' — deleting the signal #143 added a gate
-      // for, while looking like a cleanup. 'completed'/'failed'/'crashed' are
-      // OUTCOMES worth keeping; 'running' is the only value that is a live claim, so
-      // it is the only one a terminal transition has any business touching.
+      // ONLY A LIVE CLAIM IS CLEARED ('running' / 'pending'), and that restriction is
+      // load-bearing: nulling unconditionally would erase a 'crashed' marker whenever
+      // anything terminated an already-crashed run as 'failed', silently disarming
+      // both crash vetoes above while looking like a cleanup.
+      // 'completed'/'failed'/'crashed' are OUTCOMES worth keeping; 'running' and
+      // 'pending' are the only values that ASSERT a child is in flight, so they are
+      // the only ones a terminal transition has any business touching.
       //
       // NULL rather than a new 'cancelled' enum value: the column carries a CHECK
       // constraint (migration 0077:107-108) that SQLite cannot alter without a table
       // rebuild, and `null` already means "nothing in flight" here
-      // (`trident/orchestrator.ts` writes it on the no-subagent paths). The reason
-      // for the stop is preserved in `failure_reason`, so no information is lost.
+      // (`trident/orchestrator.ts` writes it on the no-subagent paths). No
+      // information is lost — the reason for the stop lives in `failure_reason`, and
+      // `subagent_run_id` is deliberately NOT cleared, so "was a child in flight when
+      // this run was cancelled?" stays answerable structurally. That matters because
+      // `/code stop` and board-cancel supply no reason at all.
+      //
+      // DURABILITY: this write alone is not enough. Cancelling does not kill the
+      // detached workflow, whose next checkpoint would put 'running' straight back —
+      // so `trident/checkpoint.sh` carries the matching `phase NOT IN (terminal)`
+      // guard, and the two halves must stay in sync.
       sets.push(
-        `subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END`,
+        `subagent_status = CASE WHEN subagent_status IN ('running', 'pending') THEN NULL ELSE subagent_status END`,
       )
       sets.push('last_advanced_at = ?')
       params.push(this.now())
