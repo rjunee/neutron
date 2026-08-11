@@ -57,6 +57,34 @@ export const CHAT_PUSH_BODY_MAX = 160
 export const CHAT_PUSH_GENERAL_TITLE = 'General'
 
 /**
+ * Characters that occupy no visible width in a notification shade.
+ *
+ * `\s` does NOT match any of these, so neither does `trim()` — a body of nothing
+ * but zero-width spaces used to arrive here, survive normalization at full length,
+ * clear the sink's `length === 0` check and buzz the owner's phone with a
+ * notification containing no visible characters at all (measured: a U+200B + U+2060
+ * body produced a length-2 excerpt and a real push).
+ *
+ * U+200D (ZERO WIDTH JOINER) is deliberately ABSENT: it welds emoji sequences
+ * together (👨‍👩‍👦), and stripping it would shatter a family emoji into three
+ * separate glyphs. It needs no entry here anyway — a ZWJ-only body has no visible
+ * content and is caught by {@link hasVisibleContent}.
+ */
+const INVISIBLE_CHARS = /[​‌⁠﻿­‎‏]/g
+
+/**
+ * Does this string contain anything a human would SEE and read as content?
+ *
+ * Letters and digits in ANY script (`\p{L}`/`\p{N}`, so a CJK- or Cyrillic-only
+ * message counts, which `\w` would have wrongly rejected) or a pictograph (an
+ * emoji-only post is terse but it is real information the owner sent himself).
+ * Whitespace, zero-width formatting and punctuation alone are not content.
+ */
+function hasVisibleContent(s: string): boolean {
+  return /[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(s)
+}
+
+/**
  * The first part of a posted message, fit for a notification body.
  *
  * Collapses every run of whitespace to one space FIRST — a composed reminder or a
@@ -65,9 +93,15 @@ export const CHAT_PUSH_GENERAL_TITLE = 'General'
  * lines the shade gives you. Then truncates on the last word boundary at or before
  * the budget and appends a single-character ellipsis.
  *
- * Never throws, never returns whitespace-only: an empty/blank body comes back as
- * the empty string and the caller decides (the reminder outbound skips the push,
- * because a notification with no body is a buzz with no information).
+ * NEVER THROWS, AND NEVER RETURNS SOMETHING WITH NO WORDS IN IT. A body that is
+ * empty, blank, invisible (zero-width only) or punctuation-only comes back as the
+ * EMPTY STRING, and the caller decides what that means — the sink skips the push,
+ * because a buzz carrying no readable characters tells the owner only that
+ * something happened, which the durable chat row already does better.
+ *
+ * That promise is checked on the OUTPUT, not just the input, because clipping can
+ * manufacture a wordless string out of a perfectly good message (a budget that
+ * lands inside a leading run of punctuation). Both ends are guarded below.
  */
 export function chatPushExcerpt(body: string, max: number = CHAT_PUSH_BODY_MAX): string {
   // A budget of 0 / a negative / NaN would make every branch below return the
@@ -75,7 +109,11 @@ export function chatPushExcerpt(body: string, max: number = CHAT_PUSH_BODY_MAX):
   // promises never to produce. Unreachable from the single call site today; the
   // clamp is here so the invariant holds for the second one.
   const budget = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : CHAT_PUSH_BODY_MAX
-  const flat = body.replace(/\s+/g, ' ').trim()
+  const flat = body.replace(INVISIBLE_CHARS, '').replace(/\s+/g, ' ').trim()
+  // Nothing readable in the SOURCE — an all-whitespace, all-zero-width or
+  // punctuation-only post. There is no excerpt to take, so say so plainly rather
+  // than handing the sink a string whose only property is a non-zero length.
+  if (!hasVisibleContent(flat)) return ''
   if (flat.length <= budget) return flat
   const clipped = dropDanglingSurrogate(flat.slice(0, budget))
   const lastSpace = clipped.lastIndexOf(' ')
@@ -87,7 +125,12 @@ export function chatPushExcerpt(body: string, max: number = CHAT_PUSH_BODY_MAX):
   // is a buzz with no words. It also survives the sink's `length === 0` check, so
   // the guard has to be here rather than there. Fall back to the untrimmed clip,
   // which cannot be empty because `flat.length > budget >= 1`.
-  return `${trimmed.length > 0 ? trimmed : clipped}…`
+  const kept = trimmed.length > 0 ? trimmed : clipped
+  // THE OUTPUT CHECK. The source had words, but the budget may have landed before
+  // the first one (`"... hello"` at budget 3 clips to `"..."`), and `"...…"` is the
+  // same wordless buzz by a different route. Silence beats a shade full of dots.
+  if (!hasVisibleContent(kept)) return ''
+  return `${kept}…`
 }
 
 /**
@@ -273,6 +316,12 @@ export function buildChatMessagePushSink(
     // A body that excerpts to nothing carries no information — a buzz with no
     // words is worse than silence, and the durable row is already in chat. Report
     // `false`: nothing was sent, so nothing should be recorded as delivered.
+    //
+    // A LENGTH TEST IS ONLY SUFFICIENT BECAUSE `chatPushExcerpt` GUARANTEES IT.
+    // Zero-width and punctuation-only bodies are non-empty strings that render as
+    // an empty shade, and they used to pass right through this line; the excerpt now
+    // collapses every wordless body to `''` so this stays the one check the sink
+    // needs. Do not weaken that guarantee without moving the guard here.
     if (push.body.length === 0) return false
     try {
       const result = await input.fanOut.pushAll(input.project_slug, push)

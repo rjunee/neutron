@@ -158,6 +158,16 @@ export function createExpoPushClient(options: ExpoPushClientOptions = {}): ExpoP
   if (!Number.isFinite(batchSize) || batchSize <= 0) {
     throw new Error('ExpoPushClient: batch_size must be a positive number')
   }
+  // Validated for the same reason `batch_size` is, and at the same moment — at
+  // CONSTRUCTION, where a misconfiguration is one loud error, instead of at send
+  // time, where it is a `TypeError` thrown from inside a best-effort notification
+  // on every fire. `AbortSignal.timeout` rejects a non-finite argument outright
+  // (measured: `Value NaN is outside the range [0, 9007199254740991]`), and that
+  // throw would surface through the dispatcher's network-failure catch — reporting
+  // a permanent config mistake as a transient Expo outage, forever.
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('ExpoPushClient: timeout_ms must be a positive number')
+  }
   return {
     async send(messages) {
       if (messages.length === 0) {

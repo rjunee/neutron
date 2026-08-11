@@ -105,7 +105,17 @@ export interface PushDispatcher {
 export interface PushResult {
   /** Tokens that were attempted (post web-filter). */
   attempted: number
-  /** Tickets that came back `ok`. */
+  /**
+   * Tickets that came back `ok` — COUNTED, never inferred by subtracting the
+   * errors from `attempted`. Expo is supposed to return one ticket per message but
+   * a 200 can carry fewer (or none), and subtraction turns such a response into
+   * "everything was delivered". `chat-message-push.ts` stamps a durable row
+   * `delivered_at` off this number and that stamp permanently silences the
+   * idempotent re-emit, so an over-count here loses a message silently.
+   *
+   * `delivered + errored < attempted` therefore means Expo returned fewer tickets
+   * than we sent messages, and the shortfall was NOT accepted.
+   */
   delivered: number
   /** Tickets that came back `error`. */
   errored: number
@@ -143,6 +153,29 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
     try {
       const result = await opts.client.send(messages)
       const errored = result.tickets.filter((t) => t.status === 'error')
+      // `delivered` COUNTS ACCEPTED TICKETS. It must never be derived by
+      // subtracting the errors from the messages sent, which is what it used to do
+      // (`messages.length - errored.length`).
+      //
+      // The two are equal ONLY when Expo returns one ticket per message. When it
+      // returns FEWER — a 200 carrying `{data: []}`, a `{}` with no `data` key at
+      // all (`expo-push-client.ts` defaults a missing `data` to `[]`), a proxy or
+      // error page that parses as JSON — subtraction reports EVERY message as
+      // delivered on a response that accepted NOTHING: measured
+      // `{attempted: 2, delivered: 2, errored: 0, ok: true}` for an empty ticket
+      // array.
+      //
+      // That is not a cosmetic tally error. `chat-message-push.ts` was deliberately
+      // made to fail CLOSED on this field — it stamps the durable row `delivered_at`
+      // only when `delivered >= 1`, and that stamp permanently silences the
+      // idempotent re-emit. A fail-closed guard reading a fail-OPEN number is not a
+      // guard, so the zero-delivery stamp the guard exists to prevent came back by
+      // this route. Counting `status: 'ok'` is the only value that means "Expo
+      // accepted this for a device".
+      //
+      // A short batch now shows up honestly as `delivered + errored < attempted`,
+      // which is the signal that tickets went missing.
+      const delivered = result.tickets.filter((t) => t.status === 'ok').length
       if (errored.length > 0) {
         for (const ticket of errored) {
           logger.warn('expo push ticket error', {
@@ -182,12 +215,12 @@ export function createPushDispatcher(opts: PushDispatcherOptions): PushDispatche
       logger.info?.('expo push sent', {
         project_slug,
         attempted: messages.length,
-        delivered: messages.length - errored.length,
+        delivered,
         errored: errored.length,
       })
       return {
         attempted: messages.length,
-        delivered: messages.length - errored.length,
+        delivered,
         errored: errored.length,
         ok: true,
         error: null,

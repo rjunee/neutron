@@ -3846,15 +3846,27 @@ the onboarding engines — so for one round of review the suppression was INERT:
 `deliver` created was ever stamped, the condition could never be true, and the
 double-buzz continued. `deliver` now calls `ButtonStore.markDelivered` after the owner
 has ACTUALLY been reached, which is why `ChatMessagePushSink` resolves a boolean rather
-than `void`: it reports whether the transport accepted the push, reading
-`PushResult.ok` and not merely the absence of a throw (`pushAll` catches an Expo outage
-and RESOLVES). Stamping is deliberately skipped when nothing was reached, so a message
+than `void`: it reports whether a DEVICE was reached, and it FAILS CLOSED. Reading
+`PushResult.ok` is not enough — `ok` means only "no HTTP/network exception" and is
+`true` with `delivered: 0` in two ordinary cases, zero registered devices (the
+dispatcher short-circuits before Expo is called, the state of every fresh install) and
+a batch where every ticket errored. The sink therefore requires a numeric
+`PushResult.delivered >= 1` and treats a result that reports no count as not
+delivered. `delivered` is in turn COUNTED from `status: 'ok'` tickets rather than
+derived as `attempted - errored`, because a 200 carrying fewer tickets than messages
+(or none) made subtraction report a full delivery on a response that accepted nothing —
+which put the zero-delivery stamp back by a second route.
+Stamping is deliberately skipped when nothing was reached, so a message
 that persisted while every transport failed still buzzes on the retry instead of being
 silenced forever. Only `durability: 'reply'` is stamped — `persistInertAgentTurn` writes
 `delivered_at` in its own INSERT. The notification is additionally bounded at 3 s
 (`DEFAULT_NOTIFY_TIMEOUT_MS`) so it can never hold a delivery open: `POST
 /api/app/system-notice` awaits `deliver` to answer its caller, and the only limit
-underneath was Expo's 10 s PER BATCH. A timed-out notification counts as not sent.
+underneath was Expo's 10 s PER BATCH. A timed-out notification counts as not sent — the
+bound abandons it rather than cancelling it, so a merely-slow send can still land after
+being reported not-sent and the next re-emit will buzz again. That trade is deliberate:
+a duplicate buzz is visible, and the alternative (stamping on no evidence) silences the
+message forever.
 
 The notification is NOT gated on `delivered_live`, deliberately. Android keeps the
 app-ws socket open while the app sits in the background, so a live socket is a render,

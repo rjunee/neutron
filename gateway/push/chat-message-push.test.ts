@@ -59,14 +59,51 @@ describe('chatPushExcerpt', () => {
     expect(chatPushExcerpt('   \n\t ')).toBe('')
   })
 
-  test('never a BARE ELLIPSIS — a head that is all punctuation keeps its characters', () => {
-    // The punctuation strip can empty the head. `…` alone is a buzz with no words,
-    // and it slips past the sink's `length === 0` guard because it IS one character
-    // long, so the notification would fire saying nothing whatsoever.
-    const out = chatPushExcerpt('.'.repeat(200), 20)
-    expect(out).not.toBe('…')
-    expect(out.length).toBeGreaterThan(1)
-    expect(out.endsWith('…')).toBe(true)
+  test('a WORDLESS body is silence, not a shade full of punctuation', () => {
+    // This assertion used to be `not.toBe('…')` plus `length > 1`, which is weaker
+    // than the invariant it was named for: `'.…'` satisfies both and is still a buzz
+    // with no words. The rule is about READABLE CHARACTERS, so the test has to be
+    // too — a punctuation-only post excerpts to the empty string and the sink
+    // declines to send it.
+    for (const body of ['.'.repeat(200), '...', '!!!', '---', '. . .']) {
+      expect(chatPushExcerpt(body)).toBe('')
+      expect(chatPushExcerpt(body, 20)).toBe('')
+      expect(chatPushExcerpt(body, 1)).toBe('')
+    }
+  })
+
+  test('an INVISIBLE body is silence — zero-width characters are not words', () => {
+    // `\s` does not match U+200B/U+2060/U+FEFF, so neither does `trim()`. A body of
+    // nothing but zero-width spaces used to survive normalization at full length,
+    // clear the sink's `length === 0` check, and buzz the owner's phone with a
+    // notification containing no visible characters at all.
+    for (const body of ['​', '​⁠', '﻿ ­', '‍', '​\n‌']) {
+      expect(chatPushExcerpt(body)).toBe('')
+    }
+  })
+
+  test('but a body that only LOOKS wordless in Latin still counts as words', () => {
+    // The guard must not be `\w`-shaped: a CJK-only or Cyrillic-only message is real
+    // content, and so is an emoji-only one. Rejecting those would silence a genuine
+    // message in the name of an invariant about empty ones.
+    expect(chatPushExcerpt('休憩しましょう')).toBe('休憩しましょう')
+    expect(chatPushExcerpt('Привет')).toBe('Привет')
+    expect(chatPushExcerpt('🎉')).toBe('🎉')
+    expect(chatPushExcerpt('7')).toBe('7')
+  })
+
+  test('a zero-width character does not eat the budget of a real message', () => {
+    // Stripped before the budget is measured, not merely trimmed at the ends —
+    // otherwise an invisible character mid-body would displace a visible one.
+    expect(chatPushExcerpt('alpha​beta')).toBe('alphabeta')
+  })
+
+  test('a clip that lands before the first word is silence, not "...…"', () => {
+    // The source HAS words here, so the input guard passes — but a budget landing
+    // inside a leading run of punctuation manufactures a wordless output. The
+    // invariant is checked on the way out for exactly this case.
+    expect(chatPushExcerpt('... hello', 3)).toBe('')
+    expect(chatPushExcerpt('... hello', 20)).toBe('... hello')
   })
 
   test('never splits an emoji in half at the clip boundary', () => {

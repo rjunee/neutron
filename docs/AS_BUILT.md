@@ -9069,6 +9069,48 @@ notification — contradicted by that file's own header — now name the seam th
 
 Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
 
+## 2026-08-10 — the fail-closed delivery guard was reading a fail-open number
+
+The previous entry made `gateway/push/chat-message-push.ts` require `delivered >= 1` before
+a durable row is stamped `delivered_at`. Review then found that `delivered` itself was
+computed as `messages.length - errored.length` in `gateway/push/dispatcher.ts`. Those two
+are equal only when Expo returns one ticket per message; on a 200 carrying fewer tickets —
+`{data: []}`, a body with no `data` key at all, anything that parses as JSON — subtraction
+reported EVERY message as delivered on a response that accepted nothing. Measured
+`{attempted: 2, delivered: 2, errored: 0, ok: true}` for an empty ticket array, and the
+sink answered `true`. The zero-delivery stamp the guard exists to prevent was therefore
+reachable again, by a second route, through the guard itself. `delivered` now COUNTS
+`status: 'ok'` tickets, so a short batch reads honestly as `delivered + errored < attempted`.
+
+The invariant `chatPushExcerpt` documents — never a buzz with no words — did not hold for
+bodies that are invisible or punctuation-only. `\s` does not match U+200B/U+2060/U+FEFF, so
+neither does `trim()`: a zero-width body survived normalization at full length, cleared the
+sink's `length === 0` check and pushed a notification with no visible characters. Wordless
+bodies now excerpt to the empty string, checked on the OUTPUT as well as the input because
+a budget landing inside a leading run of punctuation manufactures the same thing from a good
+message. The guard is scoped by `\p{L}`/`\p{N}`/`\p{Extended_Pictographic}` rather than
+`\w`, so CJK-only, Cyrillic-only and emoji-only messages still count as content.
+
+`timeout_ms` is now validated at construction beside `batch_size`. `AbortSignal.timeout`
+rejects a non-finite argument rather than coercing it, and it is reached per batch, so an
+unvalidated deadline would have surfaced a permanent config mistake as a transient Expo
+outage on every fire.
+
+Two things review raised are recorded as deliberate rather than fixed, both in the code that
+decides them. `deliver`'s 3 s notification bound ABANDONS the send instead of cancelling it,
+so a merely-slow notification can land after being reported not-sent and the next re-emit
+buzzes again — chosen over stamping on no evidence, which silences a message forever. And
+there is no atomic claim between `emit` and `markDelivered`, so two deliveries sharing an
+idempotency key that overlap in flight can both notify; the reachable producers do not race
+(the reminder tick claims its row first, and the live keys are per-artifact), and closing it
+would put a claim-on-emit into the ButtonStore contract every caller inherits.
+
+The union hazard `wire-types/push-kind.ts` is named after recurred here and is now covered
+the same way: `gateway/push/dispatcher.test.ts` drives the REAL sink against the REAL
+dispatcher, because a hand-written `{ok, delivered}` fake on either side is exactly what let
+the two halves be independently green and jointly wrong. Every guard is mutation-tested —
+each reverts to red on its own negative cases while the positive controls keep passing.
+
 ## 2026-08-10 — `ok: true` is not a delivery; a ritual row must never fall through to a nudge
 
 Two adversarial-review blockers on the notification lane. `gateway/push/chat-message-push.ts`

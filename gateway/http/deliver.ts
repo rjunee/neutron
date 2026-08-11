@@ -172,6 +172,21 @@ export interface CreateDeliverInput {
    * would therefore stall an HTTP response for tens of seconds for the sake of a
    * best-effort buzz. On timeout the notification is treated as NOT sent, so
    * `delivered_at` stays NULL and the next re-emit tries again.
+   *
+   * WHAT THAT COSTS, STATED RATHER THAN IMPLIED: the bound ABANDONS the
+   * notification, it does not CANCEL it. The Expo POST underneath keeps running to
+   * its own 10 s deadline, so a send that is merely slow can be reported here as
+   * not-sent and still reach the device afterwards — and because the row was left
+   * unstamped, the next idempotent re-emit notifies again. The owner sees the same
+   * message buzz twice.
+   *
+   * That is the deliberate side to fail on. The alternative is stamping a row whose
+   * notification we have no evidence arrived, which silences the re-emit FOREVER for
+   * a message he may never have received. A duplicate buzz is a visible annoyance he
+   * can act on; a suppressed one is invisible, and that is the failure this seam was
+   * built to end. Cancelling for real needs a cancellation token threaded through
+   * the sink into the Expo client — worth doing when the sink has a second caller,
+   * not worth a bespoke abort path for one.
    */
   notify_timeout_ms?: number
   log?: (msg: string) => void
@@ -335,6 +350,21 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
         // both false means the row landed in the DB but never reached him, so it
         // still needs rendering AND still needs the notification. Same rule the
         // channel adapters apply to the re-render, applied to the push.
+        //
+        // THIS SUPPRESSES A LATER RE-EMIT, NOT A SIMULTANEOUS ONE, and the gap is
+        // deliberate. There is no atomic claim between `emit` and `markDelivered`,
+        // so two deliveries sharing an `idempotency_key` that overlap in flight can
+        // both read `was_delivered: false` and both buzz. Closing it means a
+        // claim-on-emit in the ButtonStore contract, which every existing caller
+        // would inherit.
+        //
+        // Not taken, because the exposure is one duplicate buzz and the reachable
+        // producers do not race: the reminder tick claims its row before dispatch
+        // (`reminders/tick.ts`), and the keys in play are per-artifact and
+        // per-producer (`ritual-approval:<content_id>`,
+        // `ritual-egress-approval:<egress_id>`, a credential incident id), so two
+        // concurrent posts of the SAME key need one producer to re-enter itself.
+        // Worth revisiting if a request-driven producer ever mints a shared key.
         alreadySeen = !emitted.was_new && emitted.was_delivered
       } else {
         const persisted = await buttonStore.persistInertAgentTurn({ topic_id, body })

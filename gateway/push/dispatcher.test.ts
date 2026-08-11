@@ -30,6 +30,7 @@ import {
 } from './expo-push-client.ts'
 import { DevicePushTokenStore } from './store.ts'
 import { createPushDispatcher, type PushDispatcherLogger } from './dispatcher.ts'
+import { buildChatMessagePushSink } from './chat-message-push.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -585,5 +586,149 @@ describe('PushDispatcher — the success tally (push observability)', () => {
     expect(result.attempted).toBe(0)
     expect(infos.length).toBe(0)
     expect(client.calls.length).toBe(0)
+  })
+
+  describe('`delivered` counts ACCEPTED tickets — it is never attempted-minus-errored', () => {
+    // WHY THIS BLOCK EXISTS. `delivered` used to be computed as
+    // `messages.length - errored.length`, which equals the accepted count ONLY when
+    // Expo returns one ticket per message. On a 200 that carries FEWER tickets the
+    // subtraction reports every message as delivered while nothing was accepted —
+    // and `chat-message-push.ts` stamps the durable row `delivered_at` off this
+    // number, which permanently silences the idempotent re-emit. The fail-closed
+    // guard added there was reading a fail-OPEN input, so the zero-delivery stamp it
+    // exists to prevent came straight back by this route.
+    const twoDevices = async (): Promise<void> => {
+      await store.register({
+        project_slug: 't1',
+        user_id: 'u1',
+        device_token: 'ExponentPushToken[aaa]',
+        platform: 'android',
+      })
+      await store.register({
+        project_slug: 't1',
+        user_id: 'u1',
+        device_token: 'ExponentPushToken[bbb]',
+        platform: 'ios',
+      })
+    }
+
+    test('an EMPTY ticket array on a 200 delivered to nobody', async () => {
+      await twoDevices()
+      const client = fakeClient([])
+      const dispatcher = createPushDispatcher({ store, client })
+
+      const result = await dispatcher.pushAll('t1', CHAT_PUSH)
+
+      // The HTTP call happened and did not throw, so `ok` stays true — that is the
+      // whole reason `ok` cannot be the field a delivery is judged on.
+      expect(result.ok).toBe(true)
+      expect(result.attempted).toBe(2)
+      expect(result.delivered).toBe(0)
+      expect(client.calls.length).toBe(1)
+    })
+
+    test('a SHORT ticket array counts only what came back ok', async () => {
+      await twoDevices()
+      // One ticket for two messages: the second was never acknowledged, so it was
+      // not delivered. Subtraction would have said 2.
+      const client = fakeClient([{ status: 'ok', id: 't-1' }])
+      const dispatcher = createPushDispatcher({ store, client })
+
+      const result = await dispatcher.pushAll('t1', CHAT_PUSH)
+
+      expect(result.delivered).toBe(1)
+      expect(result.errored).toBe(0)
+      // The shortfall is visible in the tally rather than hidden inside it.
+      expect(result.delivered + result.errored).toBeLessThan(result.attempted)
+    })
+
+    test('POSITIVE CONTROL: one ticket per message still reports a full delivery', async () => {
+      // The guard must not have been bought by making every send read as a failure.
+      // This is the case that must keep passing when the others are made to red.
+      await twoDevices()
+      const client = fakeClient((msgs) => msgs.map(() => ({ status: 'ok', id: 'tick' })))
+      const dispatcher = createPushDispatcher({ store, client })
+
+      const result = await dispatcher.pushAll('t1', CHAT_PUSH)
+
+      expect(result.attempted).toBe(2)
+      expect(result.delivered).toBe(2)
+      expect(result.errored).toBe(0)
+    })
+
+    test('POSITIVE CONTROL: one accepted ticket among failures IS a delivery', async () => {
+      await twoDevices()
+      const client = fakeClient([
+        { status: 'error', message: 'gone', details: { error: 'DeviceNotRegistered' } },
+        { status: 'ok', id: 't-2' },
+      ])
+      const dispatcher = createPushDispatcher({ store, client })
+
+      const result = await dispatcher.pushAll('t1', CHAT_PUSH)
+
+      expect(result.delivered).toBe(1)
+      expect(result.errored).toBe(1)
+    })
+
+    describe('the REAL sink against the REAL dispatcher — the two halves must agree', () => {
+      // THE UNION HAZARD, which is the one this whole lane exists for
+      // (`wire-types/push-kind.ts` records the incident it is named after): a SENDER
+      // and a CONSUMER that are each independently green can still be disjoint.
+      //
+      // It happened again here, exactly as documented. `chat-message-push.ts` was
+      // made to fail CLOSED on `PushResult.delivered`, and its tests proved that
+      // against a HAND-WRITTEN `{ ok, delivered }` fake. The dispatcher's tests
+      // proved its own tally. Both green — and the tally was computed by subtracting
+      // errors from messages sent, so a 200 that accepted nothing reported a full
+      // delivery and the fail-closed guard passed it straight through. Neither side's
+      // fixture could see it, because the defect lived in the space between them.
+      //
+      // So this block wires the real sink to the real dispatcher and asserts the
+      // ANSWER THE ROW IS STAMPED FROM, not the intermediate number. A fake on either
+      // side would recreate the blind spot.
+      const sinkOver = (
+        tickets: ExpoPushTicket[] | ((m: ExpoPushMessage[]) => ExpoPushTicket[]),
+      ): ReturnType<typeof buildChatMessagePushSink> =>
+        buildChatMessagePushSink({
+          fanOut: createPushDispatcher({ store, client: fakeClient(tickets) }),
+          project_slug: 't1',
+        })
+
+      const MSG = { project_id: null, message_id: 'p-1', body: 'the composed body' }
+
+      test('an empty ticket array is NOT a delivery, so the row is never stamped', async () => {
+        await twoDevices()
+        expect(await sinkOver([])(MSG)).toBe(false)
+      })
+
+      test('a short ticket array with one accepted ticket IS a delivery', async () => {
+        await twoDevices()
+        expect(await sinkOver([{ status: 'ok', id: 't-1' }])(MSG)).toBe(true)
+      })
+
+      test('zero registered devices is NOT a delivery — the fresh-install case', async () => {
+        // No `twoDevices()`. The dispatcher short-circuits before Expo is called and
+        // returns `ok: true, delivered: 0`; stamping on that silences the re-emit
+        // forever on a box that has never registered a phone.
+        expect(await sinkOver([])(MSG)).toBe(false)
+      })
+
+      test('an all-errored batch is NOT a delivery', async () => {
+        await twoDevices()
+        const sink = sinkOver((msgs) =>
+          msgs.map(() => ({
+            status: 'error' as const,
+            details: { error: 'DeviceNotRegistered' },
+          })),
+        )
+        expect(await sink(MSG)).toBe(false)
+      })
+
+      test('POSITIVE CONTROL: a normal send IS a delivery', async () => {
+        await twoDevices()
+        const sink = sinkOver((msgs) => msgs.map(() => ({ status: 'ok' as const, id: 'tick' })))
+        expect(await sink(MSG)).toBe(true)
+      })
+    })
   })
 })
