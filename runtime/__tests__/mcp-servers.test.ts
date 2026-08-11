@@ -118,6 +118,32 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
       ['DEPRECATED INHIBIT SYMMETRIC SWAPPING', '⁪'],
       ['INTERLINEAR ANNOTATION ANCHOR', '￹'],
       ['TAG SPACE', '\u{E0020}'],
+      // THE VARIATION-SELECTOR FAMILY — the gap the TAG block's own argument predicted.
+      // A revision banned U+E0000-U+E007F and stopped, leaving the VARIATION SELECTORS
+      // SUPPLEMENT (U+E0100-U+E01EF) — the other half of the same default-ignorable
+      // family, 0x80 code points further on — accepted, along with its BMP counterparts
+      // U+FE00-U+FE0F. Probed against the regex itself, fourteen zero-advance code points
+      // came back accepted while four positive controls were correctly refused, so two
+      // specs the grant hash distinguishes still printed identically. Pinned at both ends
+      // of both ranges.
+      ['VARIATION SELECTOR-1 (U+FE00)', '\u{FE00}'],
+      ['VARIATION SELECTOR-16 (U+FE0F)', '\u{FE0F}'],
+      ['VARIATION SELECTOR-17 (U+E0100)', '\u{E0100}'],
+      ['VARIATION SELECTOR-256 (U+E01EF)', '\u{E01EF}'],
+      // COMBINING GRAPHEME JOINER and the MONGOLIAN FREE VARIATION SELECTORS: the same
+      // zero-advance shape. U+180E (VOWEL SEPARATOR) was already banned alone, which left
+      // its immediate neighbours U+180B-U+180D and U+180F out of a contiguous block.
+      ['COMBINING GRAPHEME JOINER (U+034F)', '\u{034F}'],
+      ['MONGOLIAN FVS ONE (U+180B)', '\u{180B}'],
+      ['MONGOLIAN FVS FOUR (U+180F)', '\u{180F}'],
+      // BLANK RATHER THAN NARROW: these carry no mark at all, so a spec padded with one
+      // reads as trailing space. None has a legitimate place in a path, an arg or an
+      // env-var name.
+      ['BRAILLE PATTERN BLANK (U+2800)', '\u{2800}'],
+      ['HANGUL CHOSEONG FILLER (U+115F)', '\u{115F}'],
+      ['HANGUL JUNGSEONG FILLER (U+1160)', '\u{1160}'],
+      ['HANGUL FILLER (U+3164)', '\u{3164}'],
+      ['HALFWIDTH HANGUL FILLER (U+FFA0)', '\u{FFA0}'],
     ]
     for (const [label, ch] of invisibles) {
       expect(MCP_SERVER_BANNED_CHARS_RE.test(ch)).toBe(true)
@@ -131,6 +157,26 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     // working servers to close a rendering hole.
     expect(parseOwnerMcpServerInput({ ...GOOD, command: '/opt/сервер/example-mcp' }).spec).not.toBeNull()
     expect(parseOwnerMcpServerInput({ ...GOOD, args: ['--label', 'für-alle'] }).spec).not.toBeNull()
+  })
+
+  test('the whitespace confusables stay ACCEPTED — the documented edge of the denylist', () => {
+    // NOT an oversight, and asserted so nobody has to guess. NO-BREAK SPACE, the
+    // U+2000-U+200A quads and IDEOGRAPHIC SPACE all ADVANCE: a spec carrying one renders
+    // as a visible gap, so it does not create the pixel-identical pair the invisibles
+    // above do. They are CONFUSABLE with U+0020 rather than invisible, and confusability
+    // is unbounded — the Cyrillic and Greek homoglyphs (`а`, `ο`) are the same hazard and
+    // cannot be enumerated either, which is why the Cyrillic path a few lines up is
+    // deliberately accepted too. What bounds them is the grant, not this regex: the hash
+    // covers the exact bytes of the command, the args and the env-var names, so a
+    // confusable cannot be swapped in after an approval without invalidating it.
+    //
+    // This test is here so a future reader finds a DECISION where they would otherwise
+    // find a hole, and so that deciding to ban them becomes a deliberate edit to a
+    // failing assertion rather than a silent widening.
+    for (const ch of ['\u{00A0}', '\u{2000}', '\u{2007}', '\u{3000}']) {
+      expect(MCP_SERVER_BANNED_CHARS_RE.test(ch)).toBe(false)
+      expect(parseOwnerMcpServerInput({ ...GOOD, command: `/bin/a${ch}b` }).spec).not.toBeNull()
+    }
   })
 
   test('refuses an env name that is not a POSIX variable, and an empty value', () => {
