@@ -72,6 +72,144 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
 
 describe('NeutronChatController — view model over chat-core', () => {
+  // ── liveActivity: say WHAT it is doing, not just that it is ────────────────
+  //
+  // Owner-asked 2026-08-11 after a 277-second turn showed him only three dots.
+  // The re-render guard matters as much as the feature: the activity handler
+  // deliberately did NOT publish() before this, so a keepalive tick could not
+  // re-render the transcript. These pin both halves.
+  const activityFrame = (label: string, scope = 'general', detail?: string, kind = 'tool_start') => ({
+    v: 1,
+    type: 'activity_event',
+    scope_key: scope,
+    event: {
+      seq: 1,
+      at: 1,
+      kind,
+      label,
+      ...(detail !== undefined ? { detail } : {}),
+    },
+    ts: 1,
+  })
+
+  it('is null when nothing is in flight', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    controller.stop()
+  })
+
+  it('reports the step label + detail while a turn is in flight', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('build the email core')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files', 'general', 'SPEC.md'))
+    await tick()
+    expect(controller.getViewModel().liveActivity).toEqual({
+      label: 'Reading files',
+      detail: 'SPEC.md',
+    })
+    controller.stop()
+  })
+
+  it('does NOT publish for a repeated label — a chatty tool must not re-render per event', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    let renders = 0
+    const un = controller.subscribe(() => {
+      renders += 1
+    })
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    expect(renders).toBe(0) // same label → no publish
+    sockets[0]!.deliver(activityFrame('Running tests'))
+    await tick()
+    expect(renders).toBeGreaterThan(0) // a real step change DOES publish
+    un()
+    controller.stop()
+  })
+
+  it('ignores an activity event while NOTHING is in flight — an idle transcript never re-renders', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    let renders = 0
+    const un = controller.subscribe(() => {
+      renders += 1
+    })
+    sockets[0]!.deliver(activityFrame('Keepalive'))
+    await tick()
+    expect(renders).toBe(0)
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    un()
+    controller.stop()
+  })
+
+  it('ignores a KEEPALIVE during a turn — a heartbeat is not a step', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    sockets[0]!.deliver(activityFrame('keepalive', 'general', undefined, 'keepalive'))
+    await tick()
+    // The real step survives; the heartbeat did not overwrite it.
+    expect(controller.getViewModel().liveActivity?.label).toBe('Reading files')
+    controller.stop()
+  })
+
+  it('ignores an event for a DIFFERENT scope', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Someone else work', 'other-project'))
+    await tick()
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    controller.stop()
+  })
+
+  it('a NEW send clears the previous step, so a stale label never leaks in', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('first')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    expect(controller.getViewModel().liveActivity?.label).toBe('Reading files')
+    await controller.send('second')
+    await tick()
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    controller.stop()
+  })
+
   it('renders an optimistic user bubble and flips the typing indicator on send', async () => {
     const { controller, sockets } = setup()
     controller.start()
