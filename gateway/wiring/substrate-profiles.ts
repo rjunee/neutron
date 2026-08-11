@@ -111,6 +111,18 @@ export interface SubstrateProfile {
    * applied by the factory yet (see file header). Shape only.
    */
   readonly sandbox?: SubstrateSandboxConfig
+  /**
+   * Per-profile INACTIVITY window (ms), threaded to
+   * `ClaudeCodeSubstrateOptions.turnTimeoutMs`. Absent ⇒ the pool's
+   * `DEFAULT_TURN_INACTIVITY_MS` (90s).
+   *
+   * APPLIED, not reserved — unlike the fields above. It exists because the
+   * default measures liveness as PTY BYTES, and one profile hosts work that is
+   * legitimately silent for minutes (see `PROFILE_WARM_FIRE`). The absolute
+   * ceiling (`turn_absolute_ceiling_ms`, 45min default) remains the real backstop,
+   * so raising this window cannot make a wedged turn immortal.
+   */
+  readonly turn_inactivity_ms?: number
 }
 
 /**
@@ -194,9 +206,47 @@ export const PROFILE_EPHEMERAL: SubstrateProfile = {
  * the launching turn's settle so the detached background workflow keeps running.
  * TODAY: `skip_permissions: true`.
  *
+ * THE INACTIVITY WINDOW IS THE LOAD-BEARING FIELD HERE, and it is why this
+ * profile can no longer be a copy of the others.
+ *
+ * The pool's default turn watchdog is an INACTIVITY window of 90s that advances
+ * on every PTY byte the `claude` child emits. That default is right for a chat
+ * turn and WRONG for this profile, because the workflow's agents run as
+ * SIDECHAINS OF THIS SESSION — so the launching turn stays open for the whole
+ * build, and a reasoning-heavy step emits nothing to the terminal while it
+ * thinks. On a trip the substrate does not merely fail the turn: it POISONS AND
+ * RESPAWNS the warm session, which kills the detached build the session is
+ * hosting.
+ *
+ * That is not hypothetical. Both owner attempts at the Email Core P1 build died
+ * this way (2026-08-07 and 2026-08-10). The Aug 7 run: `plan:fable` — Fable at
+ * MAX reasoning effort, reading SPEC.md plus a governed plan doc and surveying
+ * the code — went quiet, the window tripped, the planner's transcript ends with
+ * `[Request interrupted by user]` at 23:19:21, and `repl-respawn ...
+ * cc-trident-fire-juno ... session=77fa6d70` is logged 8 seconds later. No
+ * checkpoint reached, no PR opened, no parseable result — surfacing to the owner
+ * as "terminal result missing/garbled". Ralph mode's FIRST step is the most
+ * expensive one in the pipeline, so the bigger the plan the more certainly it
+ * died: the build could essentially never succeed.
+ *
+ * The irony worth recording: this watchdog REPLACED a fixed 180s wall-clock cap
+ * that was removed on 2026-07-01 precisely because it killed one of the owner's
+ * working builds mid-turn. The replacement kills a working build too — same
+ * outcome, new mechanism — because "actively working" is measured as terminal
+ * chatter, which a thinking model does not produce. The constant's own docblock
+ * still claims an actively-working turn "runs as long as it needs".
+ *
+ * So this profile opts out of the chatter heuristic and relies on the ABSOLUTE
+ * CEILING (45min default) as its backstop. A launcher that is genuinely wedged
+ * still dies; one whose planner is thinking does not.
+ *
  * Site: `open/wiring/substrates.ts` (`makeWarmFireSubstrate`).
  */
 export const PROFILE_WARM_FIRE: SubstrateProfile = {
   skip_permissions: true,
+  // 30min of silence. Deliberately BELOW the 45min absolute ceiling so the
+  // ceiling stays the terminal authority and this window can never make a turn
+  // immortal, and far above any plausible silent-thinking stretch.
+  turn_inactivity_ms: 30 * 60_000,
 }
 

@@ -265,6 +265,39 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     }
   })
 
+  test('the PRODUCTION fire substrate carries the long inactivity window — and no other substrate does', async () => {
+    // THE WIRING, not the function. The window is useless unless the real
+    // `wireSubstrates` output carries it, and this repo has been bitten
+    // repeatedly by a capability that exists and is never connected. These opts
+    // come from the production composer with an injected factory, so this fails
+    // if `substrates.ts` ever stops passing `PROFILE_WARM_FIRE`.
+    //
+    // The defect it guards: the default 90s window measures liveness as PTY
+    // bytes, and on a trip the pool poisons + respawns the warm session — killing
+    // the detached build it hosts. Both owner attempts at the Email Core P1 build
+    // died that way (2026-08-07, 2026-08-10) during `plan:fable`.
+    const { ctx, captured } = makeCtx()
+    const w = wireSubstrates(ctx)
+    await drain(w.makeWarmFireSubstrate('/repo/alpha'))
+    // Every OTHER substrate this composition builds, drained through the same
+    // factory, so "only the fire one" is a measured claim rather than a hope.
+    // Several are nullable (LLM-less compositions); drain whichever exist and
+    // assert below that we actually collected some, so a wholesale null does not
+    // turn this into a vacuous pass.
+    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
+    for (const s of [w.makeComposeSubstrate('proj'), w.liveAgentSubstrate, w.llmCallSubstrate]) {
+      if (s !== null) await drain(s)
+    }
+
+    const fire = captured.filter((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))
+    expect(fire.length).toBeGreaterThan(0)
+    for (const o of fire) expect(o.turn_inactivity_ms).toBe(30 * 60_000)
+
+    const others = captured.filter((o) => !o.substrate_instance_id.startsWith('cc-trident-fire-'))
+    expect(others.length).toBeGreaterThan(0)
+    for (const o of others) expect(o.turn_inactivity_ms).toBeUndefined()
+  })
+
   test('production watchdog wiring reaps a capped pid-dead run, then one tick aligns count and board (#514)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'neutron-open-crash-reap-'))
     const db = ProjectDb.open(join(dir, 'project.db'))
