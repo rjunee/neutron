@@ -9444,14 +9444,22 @@ the way to check it is to walk the layer ABOVE the one the comment is written in
 Same PR **#171**, second review round. Nothing about the reservation changed; four things that
 DESCRIBED it did, plus one user-visible leak the reservation created.
 
-**THE SEVERITY CLAIM WAS WRONG IN FIVE PLACES AT ONCE.** "Read-only clients" was written into
-`app/lib/general-scope.ts`, `gateway/http/app-reminders-surface.ts`,
-`app/__tests__/general-scope.test.ts`, this file, and the body of GitHub issue #183 — and it is false
-of two of the four. It survived a whole round because it was *plausible*: reminders genuinely was the
-surface being made to mutate in this branch, so "the mutating one" read as a description of the SET
-when it was only a description of the DIFF. All five now name the writing methods by symbol, and
-#183's title and table say WRITES. The reason to care is not tidiness — a residual filed as read-only
-gets scheduled like a cosmetic, and this one can delete a document.
+**THE SEVERITY CLAIM WAS WRONG IN SIX PLACES AT ONCE.** "Read-only clients" was written into
+`app/lib/general-scope.ts` (twice), `app/lib/reminders-client.ts`,
+`gateway/http/app-reminders-surface.ts`, `app/__tests__/general-scope.test.ts`, this file, and the
+body of GitHub issue #183 — and it is false of two of the four. It survived a whole round because it
+was *plausible*: reminders genuinely was the surface being made to mutate in this branch, so "the
+mutating one" read as a description of the SET when it was only a description of the DIFF. All six now
+name the writing methods by symbol, and #183's title and table say WRITES. The reason to care is not
+tidiness — a residual filed as read-only gets scheduled like a cosmetic, and this one can delete a
+document.
+
+The count went from five to six *after* the first correction pass, and that is the finding, not a
+footnote: the sixth was in `reminders-client.ts` — the module whose entire purpose is to NOT use the
+aliased mapper — and the first pass missed it because the pass re-read the files it had already
+opened instead of searching for the sentence. 📌 **A claim that is wrong in one file is wrong wherever
+it was copied to. Grep the CLAIM, not the file** — this branch hit that same shape three times
+(`625d29d2`, `a2ab3a0e`, and here), which is twice more than a coincidence.
 
 **THE RESERVATION PUT `~general` ON THE FOCUS SCREEN.** `app-focus-surface.ts`'s
 `extractProjectIdFromTopic` decodes `app-project:<id>` back to whatever id it carries, so the moment
