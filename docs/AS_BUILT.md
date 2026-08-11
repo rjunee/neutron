@@ -9334,8 +9334,10 @@ presents as the "it died" alarm the heartbeat exists to rule out. Negative elaps
 as due, and the emit re-stamps, so the window self-heals. Every `rateLimited` caller gets it.
 
 **Verification:** 7 new cases — 6 in `tests/integration/import-running-cron-tick.test.ts`
-(file total 4 → 10) plus 1 in `logger/__tests__/logger.test.ts` — driving the REAL handler
-and asserting on the REAL emitted line, including the boundary (one ms short of the interval,
+(file total 4 → 10), which drive the REAL handler and assert on the REAL emitted line, plus 1
+in `logger/__tests__/logger.test.ts`, which exercises the primitive directly (the backward-clock
+case; the integration cases never drive a decreasing clock) — including the boundary (one ms
+short of the interval,
 then exactly at it) and a guard on the constant. **Six** mutants, each killed, and each with a
 DISTINCT red set — which is a weaker claim than "each by a different case", and the weaker one
 is the true one; see the note under the table:
@@ -9736,8 +9738,10 @@ sink "consumes the window and nobody gets a line" — is narrowed to what is kno
 sink may deliver and then throw.
 
 📌 **A chronological log entry that describes the CURRENT WORDING of a docblock is a mechanism
-claim with an extra hazard: the log is append-only, so it is designed never to be revisited, and
-no later edit to the code will ever come back to fix it.** Both false claims here were written to
+claim with an extra hazard: the log is written by appending, so nothing routinely comes back to
+an old entry, and no edit to the code ever will.** (Round 7 did come back and correct three of
+them by hand — which took a review pass to notice they were wrong, and is the reason the fix is
+a banner rather than a promise to keep sweeping.) Both false claims here were written to
 record a doc fix, describing a doc that changed in the same PR. The fix is structural — an entry
 records the DECISION and the reason, and where round 6 quoted the docblock's shape ("names the
 specific cases the suite has, one by one") it now states the decision instead. The corollary
@@ -9751,10 +9755,11 @@ this yet", written when it was true and left standing while nine sites adopted `
 alone — twenty-five lines from text this PR was rewriting. It now names no count and tells the
 reader to grep. The head docblock drops the case-by-case inventory of the suite and the
 internal-ordering sentences (stamp-before-sink; "the emit re-stamps, so the window self-heals"),
-keeping the two consequences a CALLER has to plan around. `logger/AGENTS.md` stops paraphrasing
-that contract altogether and points at the one docblock that owns it — every false claim of the
-last three rounds shipped in a paraphrase, never at the site that owned the claim, so the third
-copy was pure drift surface.
+keeping two consequences that are easy to get wrong (not the whole caller-facing contract — a
+computed `ms` still has to be validated, and latch state is shared across `createLogger` calls).
+`logger/AGENTS.md` names those two and sends the reader to the one docblock that owns the reasons
+and the rest, instead of carrying its own copy: three copies of a claim is three times the drift
+surface.
 
 **What was KEPT was verified BY EXECUTION this round, not by reading the comment next to it**
 (the specific failure of the two rounds before): with NO sink injected and a control line
@@ -9830,8 +9835,22 @@ announces the fix.** What held, again, was the sentence that named a GAP or scop
 had actually been read — which is why the durable devices in this round are a disclosed gap, a
 dated banner, and a pointer, not a better description.
 
+**A confirmation pass on the fix discharged seven of the eleven and found the other four had
+SURVIVED it, plus three new ones.** The survivors are instructive: "not restated here" was fixed
+in `logger/AGENTS.md` and left standing in the cron handler, where the same sentence sits directly
+below the restatement; "the two consequences a caller has to plan around" was scoped in the
+docblock and left as a total in this entry and the PR description; "a backward clock step" was
+narrowed in the code comments and left in the prose. 📌 **A finding gets discharged at the site
+the reviewer cited, and the copies go on being wrong** — which is the same three-copies problem
+one level up, and the argument for one owning site rather than a sweep. The three new ones were
+"these cases pin BOTH halves" (the integration cases never drive a decreasing clock — that case
+lives on the primitive), "all eight are fixed" written before the confirmation pass ran, and
+"the log is append-only, so it is designed never to be revisited" — refuted by this very round,
+which came back and revised three earlier entries by hand.
+
 **Review panel for round 7:** adversarial + rubric lanes, plus an independent `codex` lane
-(codex-cli 0.147.0, read-only), which produced the eight items above. The kimi lane was
+(codex-cli 0.147.0, read-only) run twice — once on the draft and once on the fix, producing the
+eleven items and then the seven. The kimi lane was
 deliberately not run (owner's K3 quota exhausted) — **absent, not failed**, so this is a
 three-lane round. The codex sandbox could not create temp files, so it verified the unit suite
 and the 51-project typecheck itself and marked the integration-test and lint results UNVERIFIED

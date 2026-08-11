@@ -243,8 +243,9 @@ export function buildImportRunningHandler(
     //
     // The throttle is the logger's own `rateLimited` window, not a hand-rolled
     // one, so there is no check-then-forget-to-mark seam for this call site to
-    // get wrong; its contract lives on `rateLimited` in logger/index.ts and is
-    // not restated here. Its clock is this handler's `now`, so the window is
+    // get wrong. The two clauses above are the parts of its contract that bear
+    // on THIS line; the contract itself lives on `rateLimited` in
+    // logger/index.ts. Its clock is this handler's `now`, so the window is
     // deterministic under test. The key carries `ctx.owner_slug` so the window is
     // scoped to the same thing the line reports (`project=`) — today's wiring
     // hands one slug per registration (build-core-modules.ts passes

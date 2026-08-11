@@ -360,9 +360,12 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
   // The trap is that the cheap fix and the correct fix differ. Silencing idle ticks
   // outright would have removed the S15 liveness proof the line exists for — "the
   // line stopped appearing" is a real operator signal. So idle ticks still log,
-  // just at most once per interval — the forward-clock bound; `rateLimited` emits an
-  // extra line once a clock reading lands BEHIND its last stamp, which errs toward
-  // more heartbeat, not less. These cases pin BOTH halves.
+  // just at most once per interval — the forward-clock bound. These cases pin that
+  // bound, through the handler, on a forward clock. The behaviour off that path —
+  // `rateLimited` emitting an extra line once a reading lands BEHIND its last stamp,
+  // which errs toward more heartbeat, not less — is pinned in
+  // `logger/__tests__/logger.test.ts`, on the primitive; nothing here drives a
+  // decreasing clock.
   //
   // THEY DRIVE THE HANDLER AND READ THE REAL LINE, deliberately. The first version
   // of these cases called an exported predicate directly, and deleting the handler's
