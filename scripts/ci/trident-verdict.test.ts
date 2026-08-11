@@ -101,6 +101,36 @@ function harness(opts: {
   return { deps, output: () => lines.join('\n') }
 }
 
+/**
+ * A gate whose API call fails outright.
+ *
+ * Found by running the real CLI against a real PR with a head SHA the API does not
+ * have: `gh` exited 422, `execFileSync` threw, and the gate printed a stack trace
+ * with NO redeeming command. A red check whose message an author cannot act on is
+ * exactly how a gate earns a bypass habit, so the throw is now caught, named as
+ * "could not read" rather than "no verdict", and still redeems.
+ */
+function throwingHarness(): Harness {
+  const lines: string[] = []
+  return {
+    output: () => lines.join('\n'),
+    deps: {
+      env: {
+        GITHUB_REPOSITORY: 'example-org/example-repo',
+        PR_NUMBER: PR,
+        PR_HEAD_SHA: HEAD,
+        PR_HEAD_REF: BRANCH,
+      },
+      log: (line) => {
+        lines.push(line)
+      },
+      fetchJson: async () => {
+        throw new Error('gh: No commit found for SHA (HTTP 422)\nstack line that must not be echoed')
+      },
+    },
+  }
+}
+
 // --------------------------------------------------------------------------- //
 // MUTANT 1 + the SHA keying (MUTANT 2)
 // --------------------------------------------------------------------------- //
@@ -296,6 +326,7 @@ describe('the failure REDEEMS the branch into a review lane', () => {
       name: 'a bypass with no reason',
       make: () => harness({ comments: [], commitMessage: 'fix: thing\n\nTRIDENT_BYPASS=\n' }),
     },
+    { name: 'the API call failing outright', make: () => throwingHarness() },
   ]
 
   for (const { name, make } of failing) {
@@ -444,6 +475,20 @@ describe('the lookup proves it can return a POSITIVE before any negative is beli
 // --------------------------------------------------------------------------- //
 // Fail-closed on a misconfigured invocation
 // --------------------------------------------------------------------------- //
+
+describe('an unreadable API is red, and says so in its own words', () => {
+  test('a failing API call is "could not read", not "no verdict", and still redeems', async () => {
+    const h = throwingHarness()
+    expect(await runGate(h.deps)).toBe(1)
+    const out = h.output()
+    expect(out).toContain('could not READ this PR')
+    expect(out).not.toContain('no trident verdict recorded')
+    expect(out).toContain('HTTP 422')
+    // Only the first line of the error — a stack trace is not a message.
+    expect(out).not.toContain('stack line that must not be echoed')
+    expect(out).toContain(redeemCommand({ branch: BRANCH, prNumber: PR }))
+  })
+})
 
 describe('a misconfigured gate is red, never green', () => {
   test('an absent PR number fails closed rather than reporting nothing to gate', async () => {

@@ -533,6 +533,26 @@ function printRedemption(deps: GateDeps, branch: string | undefined, pr: string 
 
 /** Exit code: 0 = a verdict (or a recorded bypass) covers this head SHA, 1 = it does not. */
 export async function runGate(deps: GateDeps): Promise<number> {
+  try {
+    return await gate(deps)
+  } catch (e) {
+    // An API failure is NOT a verdict result, and it must not read like one. The
+    // uncaught form printed a stack trace with no redeeming command, which is the
+    // one thing this gate must never do — a red check whose message the author
+    // cannot act on is how a gate earns a bypass habit. Still exit 1: "I could not
+    // check" must never be worth more than a failed check.
+    deps.log('trident-verdict: FAIL — could not READ this PR, which is not the same as "no verdict".')
+    deps.log(`  ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`)
+    deps.log('')
+    deps.log('The GitHub API call the gate makes did not return usable data (rate limit, a')
+    deps.log('transient error, a missing permission). Nothing has been concluded about the')
+    deps.log('branch. Re-run the workflow; if it persists, the gate is misconfigured, not the PR.')
+    printRedemption(deps, deps.env.PR_HEAD_REF, deps.env.PR_NUMBER)
+    return 1
+  }
+}
+
+async function gate(deps: GateDeps): Promise<number> {
   const repo = deps.env.GITHUB_REPOSITORY
   const pr = deps.env.PR_NUMBER
   const headSha = deps.env.PR_HEAD_SHA
