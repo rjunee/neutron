@@ -9,13 +9,19 @@ per-account breakdown.
 `<same dir as .credentials.json>/.credentials.meta.json`:
 
 ```json
-{ "label": "acct-2", "fingerprint": "<first 12 hex of sha256(token)>" }
+{ "label": "acct-2", "fingerprint": "<12 hex — call credentialFingerprint>" }
 ```
 
 Written by whatever swaps the credential — a hosting layer, a shell script, a
 self-hoster's cron. Same reasoning as reading `.credentials.json` itself: requiring
 an HTTP call would mean the rotator has to know this instance's port, bearer token
 and readiness to deliver one string.
+
+**The fingerprint has exactly one definition, and it is the function** —
+`credentialFingerprint` in `open/credential-label.ts`. A writer must call it
+(Managed's rotator imports it through `vendor/neutron`), never reimplement it from a
+description here. See the closing note: this line previously spelled the algorithm
+out, and spelling it out is the drift.
 
 ## ⚠️ The fingerprint is the whole design
 
@@ -97,3 +103,13 @@ appearing. The header now points at the function as the single definition and sa
 Managed's rotator should IMPORT it through `vendor/neutron` rather than reimplement it.
 That also removes the duplicated-KDF-constants hazard the writer half would otherwise
 carry.
+
+**And it drifted a second time, in this document, in the same change that recorded the
+lesson.** The code header was corrected while § The sidecar above still printed
+`sha256(token)` — and that section, not the header, is where a rotator author looks for
+the format. The stale line therefore survived in the more load-bearing of the two places.
+Fixing the code and leaving the doc is not half a fix; for a contract whose only consumer
+is an external writer, the doc *is* the interface. Both now point at the function, and the
+plan doc's Tier-1 contract (`docs/plans/2026-08-09-model-usage-dashboard.md`) has been
+corrected too — it still described a bare `{"label": "acct-2"}` with no fingerprint at
+all, which the reader rejects.

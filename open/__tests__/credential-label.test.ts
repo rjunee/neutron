@@ -18,6 +18,8 @@
 
 import { describe, expect, it } from 'bun:test'
 
+import { readFileSync } from 'node:fs'
+
 import {
   credentialFingerprint,
   credentialLabelPath,
@@ -167,6 +169,45 @@ describe('the label is resolved WITH the credential, never separately', () => {
     )
     expect(resolved).toEqual({ kind: 'unmeasurable', reason: 'unsupported_credential' })
     expect(asked).toBe(0)
+  })
+
+  it('a writer following the DOCS produces a fingerprint this reader accepts', () => {
+    // The docs are the whole interface for the half of this contract that lives in
+    // another process, so a stale sentence in them is a defect in the feature — and
+    // it drifted TWICE: the as-built § The sidecar and the plan's Tier-1 bullet each
+    // described a sidecar this reader silently rejects (`sha256(token)` in one, no
+    // fingerprint at all in the other). Silently is the problem: labels just stop
+    // appearing, which is indistinguishable from the ordinary unlabelled case.
+    //
+    // Scoped to the CONTRACT statement, not the prose: the as-built file legitimately
+    // discusses SHA-256 and scrypt in its history section, and a guard that tripped on
+    // that would be a false positive on the very document it protects.
+    const algorithm = /sha-?\d|scrypt|md5|digest|hash/i
+    const contract = (doc: string, from: string, to: string): string => {
+      const at = doc.indexOf(from)
+      expect(at).toBeGreaterThan(-1)
+      return doc.slice(at, doc.indexOf(to, at + from.length))
+    }
+
+    const asBuilt = readFileSync(
+      new URL('../../docs/as-built/2026-08-09-credential-account-label.md', import.meta.url),
+      'utf8',
+    )
+    // The fenced JSON block that shows a writer what to write.
+    const block = contract(asBuilt, '```json', '```\n')
+    expect(block).toContain('fingerprint')
+    expect(block).not.toMatch(algorithm)
+    expect(asBuilt).toContain('credentialFingerprint')
+
+    const plan = readFileSync(
+      new URL('../../docs/plans/2026-08-09-model-usage-dashboard.md', import.meta.url),
+      'utf8',
+    )
+    // The Tier-1 bullet, up to the start of Tier 2.
+    const bullet = contract(plan, '**Tier 1 — a label.**', '- **Tier 2')
+    expect(bullet).toContain('"fingerprint"')
+    expect(bullet).toContain('credentialFingerprint')
+    expect(bullet.replace('credentialFingerprint', '')).not.toMatch(algorithm)
   })
 
   it('the default label reader does NOT inherit the credentials readFile stub', () => {
