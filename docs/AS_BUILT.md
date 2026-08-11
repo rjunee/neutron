@@ -8465,3 +8465,46 @@ Every refusal mutation-tested separately, including one attempt that was NOT fai
 proved nothing until rewritten.
 
 Detail: `docs/as-built/2026-08-09-mobile-usage-card.md`.
+
+## 2026-08-10 — the builder gets the spec doc's BODY, not its YAML frontmatter
+
+`WorkBoardSpecDocService.resolveTaskForItem` returned `doc.content.trim()` — the whole
+document. `buildSpecDocMarkdown` prepends a frontmatter block (`type` / `title` /
+`created`), so **the builder's first instruction was YAML metadata** rather than the scope.
+
+Observed live on two separate email-core runs, whose dispatch branches came out
+`trident/type-plan-title-p1-email-pipeline-s`. The slug is derived from the task text, so
+the leak was visible in the BRANCH NAME while the real damage — a builder opening its
+brief on `type: plan` — was invisible.
+
+`stripFrontmatter` is exported and deliberately narrow:
+
+* the fence must **open on line 1** (leading blank lines tolerated). A `---` further down
+  is a horizontal rule, and this repo's plan docs use those constantly — treating one as a
+  closing fence would silently truncate the brief from the top, strictly worse than
+  leaving the header on.
+* the fence is a line that is **exactly** `---` after trimming, not one that merely starts
+  with it.
+* an **unclosed** opener is returned untouched; guessing where it ends would discard content.
+* a doc that is **only** frontmatter strips to empty, and `resolveTaskForItem` already
+  treats empty as "no usable spec" and falls back to the card title — so it degrades to
+  the title rather than dispatching a blank brief.
+
+### The tests were worthless on the first pass, and the mutation run is what caught it
+
+Seven cases passed, and **both mutants survived**:
+
+* **Reverting `resolveTaskForItem` to raw content passed all seven** — every case tested
+  the pure helper and none called the function actually being fixed. **The fix's own call
+  site had zero coverage.** Now covered by a real round-trip: create a card with a spec,
+  read the task back, assert no `type: plan` and no `created:` reach it, and assert it does
+  not merely begin past the header by accident.
+* **The "mid-document `---` is a rule, not a fence" case had ONE `---`** — so a mutant that
+  scans for a fence *anywhere* still finds no closer and returns the input unchanged. The
+  fixture could not distinguish the correct rule from the broken one. It has two rules now.
+
+Each mutant now dies on a **different** test.
+
+📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
+it looks identical to the real thing in a green run.** Second occurrence today. The
+mutation step is the only thing that separates them.

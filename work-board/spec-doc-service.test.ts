@@ -14,7 +14,9 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from './store.ts'
-import { WorkBoardSpecDocService, type SpecDocStore } from './spec-doc-service.ts'
+import { WorkBoardSpecDocService, type SpecDocStore,
+  stripFrontmatter,
+} from './spec-doc-service.ts'
 import { docPathFromDesignRef } from './spec-doc.ts'
 
 const PROJECT = 'proj-1'
@@ -151,6 +153,29 @@ describe('resolveTaskForItem', () => {
     expect(task).toContain('/export')
   })
 
+  test('the RESOLVED task carries the body and NOT the YAML header', async () => {
+    // THE ASSERTION THAT MATTERS. The pure-helper tests above passed even with
+    // `resolveTaskForItem` reverted to raw content, because they never called it.
+    // This drives the real round-trip: createCardWithOptionalSpec writes the doc
+    // (frontmatter and all) and resolveTaskForItem reads it back.
+    const item = await svc.createCardWithOptionalSpec(PROJECT, PROJECT, {
+      title: 'P1 — email pipeline store + poller',
+      spec: 'GOAL: escalated email notifications live end to end.\nOut of scope: the digest.\nSHIPS EMPTY sender rules.',
+    })
+    const task = await svc.resolveTaskForItem(PROJECT, {
+      title: item.title,
+      design_doc_ref: item.design_doc_ref,
+    })
+    // The body survives…
+    expect(task).toContain('GOAL: escalated email notifications')
+    // …and none of the frontmatter keys leak into the builder's first instruction.
+    expect(task).not.toContain('type: plan')
+    expect(task).not.toContain('created:')
+    // And it must not merely START past the header by accident — the first
+    // non-empty line is real content, which is what the branch slug is built from.
+    expect(task.trim().startsWith('---')).toBe(false)
+  })
+
   test('falls back to the title when there is no doc ref', async () => {
     const task = await svc.resolveTaskForItem(PROJECT, {
       title: 'just the title',
@@ -165,5 +190,55 @@ describe('resolveTaskForItem', () => {
       design_doc_ref: 'neutron-docs:plans/missing.md',
     })
     expect(task).toBe('fallback title')
+  })
+})
+
+describe('the builder gets the doc BODY, not its frontmatter', () => {
+  // Observed live 2026-08-10 on two separate email-core runs: the dispatch branch
+  // came out `trident/type-plan-title-p1-email-pipeline-s`. The slug derives from the
+  // task text, so the leaked YAML was visible in the branch NAME — while the real
+  // damage was invisible, the builder opening its brief on `type: plan` instead of the
+  // scope. `writeSpecDoc` prepends that block; `resolveTaskForItem` returned it.
+
+  const FM = ['---', 'type: plan', 'title: P1 — email pipeline', 'created: 2026-08-07T23:16:07.171Z', '---'].join('\n')
+  const BODY = '# P1 — email pipeline\n\nGOAL: escalated email notifications live end to end.'
+
+  test('a doc with frontmatter yields only the body', () => {
+    expect(stripFrontmatter(`${FM}\n\n${BODY}`).trim()).toBe(BODY)
+  })
+
+  test('a doc with NO frontmatter is returned untouched', () => {
+    expect(stripFrontmatter(BODY)).toBe(BODY)
+  })
+
+  test('a mid-document `---` is a horizontal rule, NOT a fence', () => {
+    // The load-bearing case. This repo's plan docs use `---` as section dividers
+    // constantly; treating one as a closing fence would silently truncate the brief
+    // from the top, which is strictly worse than leaving the header on.
+    // TWO rules, deliberately. With only one, a mutant that looks for a fence
+    // ANYWHERE still finds no closer and returns the input — so a single-rule
+    // fixture cannot tell the correct rule from the broken one. It passed both.
+    const withRule = 'Scope line one.\n\n---\n\nScope line two.\n\n---\n\nScope line three.'
+    expect(stripFrontmatter(withRule)).toBe(withRule)
+  })
+
+  test('an UNCLOSED opener is left alone rather than guessed at', () => {
+    const unclosed = '---\ntype: plan\nno closing fence here'
+    expect(stripFrontmatter(unclosed)).toBe(unclosed)
+  })
+
+  test('a fence must be exactly `---`, not merely start with it', () => {
+    const dashes = '----\nnot frontmatter\n----'
+    expect(stripFrontmatter(dashes)).toBe(dashes)
+  })
+
+  test('leading blank lines before the fence are tolerated', () => {
+    expect(stripFrontmatter(`\n\n${FM}\n${BODY}`).trim()).toBe(BODY)
+  })
+
+  test('a doc that is ONLY frontmatter strips to empty, so the caller falls back to the title', () => {
+    // Empty is the RIGHT result here: resolveTaskForItem treats empty as "no usable
+    // spec" and returns the card title, rather than dispatching a blank brief.
+    expect(stripFrontmatter(FM).trim()).toBe('')
   })
 })
