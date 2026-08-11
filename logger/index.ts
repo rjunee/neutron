@@ -14,36 +14,24 @@
  * the level around individual calls.
  *
  * SUPPRESSION HELPERS — these generalize the three hand-rolled patterns O2
- * will swap onto this package; their semantics deliberately match the
- * originals closely enough that the swaps are behavior-preserving under a
- * forward clock and a sink that returns. They are NOT bit-for-bit the
- * originals. Two differences change OBSERVABLE SUPPRESSION, and both are
- * deliberate and load-bearing:
+ * will swap onto this package. They are close to those originals but NOT
+ * bit-for-bit.
  *
- *   1. A BACKWARD clock step EMITS, where the original would have suppressed.
- *   2. The window is stamped BEFORE the sink call, so a THROWING sink consumes
- *      it. The original stamps AFTER its delivery call returns
- *      (`runtime/adapters/claude-code/persistent/supervision.ts` — `postAlert?.()`
- *      then `wedgeAlertState.set(...)`), so a throwing alert leaves the
- *      original's window open and does NOT leave ours open.
+ * `logger/__tests__/logger.test.ts` is the place to learn what they actually
+ * do. For `rateLimited` its cases pin the window boundary, per-key isolation,
+ * sharing across logger instances, that a window-suppressed attempt does not
+ * EXTEND an open window, that a level-gated attempt does not START one, and a
+ * backward clock step. They all use a non-throwing sink, so NOTHING there pins
+ * what a throwing sink does to a window — that behavior is described below from
+ * the code, and a reader who needs to rely on it should read `emit` rather than
+ * this sentence. Read a case rather than a sentence generally, and when you
+ * change the behavior, change a case rather than adding a sentence.
  *
- * A third difference is in the clock READS, and it shifts window boundaries
- * rather than changing which rule applies. The gate and the stamp call `clock()`
- * SEPARATELY (the gate's read is skipped on a key's first emit, which
- * short-circuits on `last === undefined` before reading), whereas the original
- * captures a single `now` (`supervision.ts` — `const now = (wopts.now ??
- * Date.now)()`) and reuses it for both the comparison and the stamp. So the
- * anchor written here is a LATER reading than the one eligibility was decided
- * on, which pushes the next window boundary out by the gap between the two
- * reads. On a real clock that gap is negligible; with an injected clock that
- * advances per call it is whatever the test makes it, so a counter-style `now`
- * will not reproduce the original's arithmetic.
- *
- * This list is the set of differences that have been LOOKED FOR, not a proof
- * that no fourth exists — an earlier revision of this docblock asserted "ONE
- * deliberate exception" and then documented a second one thirty lines later.
- * Do not "fix" any of them without reading the argument where it is
- * implemented.
+ * This docblock states INTENT on purpose: earlier revisions restated the
+ * mechanism in prose and enumerated the deviations from the originals, and the
+ * restatements and the enumerations are what kept going wrong. A test cannot go
+ * stale quietly; a docblock can, so this one deliberately says less than it
+ * knows.
  *
  *   - `once(key)` — the GBrain unavailable latch
  *     (gbrain-memory/GBrainSyncHook.ts `latchIfUnavailable`): the FIRST
@@ -60,57 +48,35 @@
  *
  *   - `rateLimited(key, ms)` — the wedge-alert cooldown
  *     (runtime/…/persistent/dead-repl-detector.ts `decideWedgeAction` +
- *     pool-state.ts `wedgeAlertState`): suppressed while
- *     `0 <= now - last < ms`; the timestamp is stamped ONLY on an attempt that
- *     passes BOTH the level gate and the window gate (the original sets
- *     `wedgeAlertState` only inside `if (action.alert.send)`), so a
- *     suppressed/level-gated attempt never extends the window.
+ *     pool-state.ts `wedgeAlertState`): a throttle for a line that must keep
+ *     appearing without flooding. A suppressed or level-gated attempt never
+ *     extends the window (the original sets `wedgeAlertState` only inside
+ *     `if (action.alert.send)`).
  *
- *     Precisely: the stamp lands immediately BEFORE the sink call, so it
- *     records an ATTEMPTED delivery, not a confirmed one. A `sink` that THROWS
- *     consumes the window without a line reaching anyone, and the throw
- *     propagates to the caller. That is deliberate rather than overlooked —
- *     stamping after the sink returned would let a persistently-throwing sink
- *     re-attempt on every single call, i.e. exactly the un-rate-limited flood
- *     these windows exist to prevent — but it means "one line per window" is a
- *     bound on ATTEMPTS, and the SECOND deliberate deviation from the original
- *     (which stamps after its delivery call returns).
+ *     Departures from "exactly one line per window" worth knowing about — not
+ *     an inventory of every way this differs from the original:
  *
- *     This is NOT confined to injected sinks. The default sink dispatches to
- *     `console.error/warn/log/debug`, which can throw for real: `EPIPE` when
- *     the read end of the pipe is GONE (a killed `journalctl`/pager — a merely
- *     full pipe blocks or gives `EAGAIN`, it does not raise `EPIPE`), and — the
- *     common case in practice — a test that replaces `console.log` with a
- *     throwing mock. Verified by executing it with NO sink injected: one
- *     throwing attempt consumed a 600 s window and a fully recovered
- *     `console.log` was still suppressed, so no line ever reached anyone.
- *     Callers who need a DELIVERY bound rather than an ATTEMPT bound must
- *     make their sink non-throwing; this primitive does not do it for them.
+ *     WHY A BACKWARD CLOCK STEP IS NOT SUPPRESSED. `Date.now()` is not
+ *     monotonic — an NTP correction or a VM resume can step it back — and a
+ *     throttle that trusts it would silence the key for the step plus the
+ *     window. An hour-long step would silence a 10-minute heartbeat for over
+ *     an hour, which presents as exactly the "it died" alarm the heartbeat
+ *     exists to rule out. A heartbeat's failure mode is going quiet, so this
+ *     errs toward an extra line, and the emit re-stamps so the window
+ *     self-heals.
  *
- *     The LOWER bound is the FIRST deliberate deviation from the original, and
- *     it is load-bearing: a NEGATIVE elapsed EMITS. `Date.now()` is not
- *     monotonic (an NTP correction, a VM resume), so it can step backward,
- *     and a plain `now - last < ms` would then suppress the key for
- *     step + `ms` — an hour-long step silences a 10-minute heartbeat for 70
- *     minutes, which presents as exactly the "it died" alarm the heartbeat
- *     exists to rule out. So a backward step counts as due now, and the emit
- *     re-stamps the window, which self-heals it. Verified by the backward-step
- *     case in `logger/__tests__/logger.test.ts` (`last = 3_600_000`, `now = 0`,
- *     `ms = 600_000` emits).
- *
- *     **The two deviations break DIFFERENT halves of "exactly one line per
- *     window", and a caller needs both:**
- *       - a backward clock step can produce MORE than one line per window
- *         (the upper bound is a forward-clock-only guarantee);
- *       - a throwing sink can produce ZERO lines while still consuming the
- *         window (there is no lower bound at all — the bound is on attempts).
- *     So: at most one line per window under a forward-only clock, and no
- *     guarantee that any given window delivers a line.
- *
- *     Edge case, for completeness: the predicate is `0 <= now - last < ms`, so
- *     a NaN `ms` makes both comparisons false and suppresses the key forever
- *     after its first emit. No live caller can hit it (all three pass numeric
- *     literals), but a computed `ms` should be validated by its caller.
+ *     WHY THE BOUND IS ON ATTEMPTS, NOT DELIVERED LINES. The window is
+ *     consumed just BEFORE the sink runs, so a sink that throws consumes it
+ *     anyway — and since a throwing sink may have delivered nothing, or
+ *     delivered and then thrown, a consumed window is no evidence that a line
+ *     reached anyone. Stamping afterwards instead would let a
+ *     persistently-throwing sink re-attempt on every single call — precisely
+ *     the flood the window exists to prevent — so the ordering stays. This is
+ *     reachable with NO sink injected: the default sink calls `console.*`,
+ *     which is a mutable global and can throw. A caller that needs a DELIVERY
+ *     bound rather than an ATTEMPT bound must make its own sink non-throwing;
+ *     this primitive will not do it for them. `ms` is likewise not validated
+ *     here — a caller that COMPUTES it should validate it.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -177,20 +143,15 @@ export interface Logger extends LogEmitter {
    */
   clearOnce(key: string): void
   /**
-   * A view that logs at most once per `ms` window per key (the
-   * wedge-alert `alertDedupeMs` cooldown) — precisely, suppressed while
-   * `0 <= now - last < ms`. The window starts ONLY on an attempt that passes
-   * both the level gate and the window gate; suppressed and level-gated
-   * attempts do not extend it. The stamp lands just BEFORE the sink call, so a
-   * sink that THROWS still consumes the window — including the DEFAULT
-   * `console` sink, which can throw on `EPIPE` or under a throwing test mock.
-   * The bound is on attempts, not on delivered lines (see the head docblock for
-   * why that is the safe side).
+   * A view that throttles a key to roughly one line per `ms` window (the
+   * wedge-alert `alertDedupeMs` cooldown). A suppressed or level-gated attempt
+   * never extends the window.
    *
-   * The "at most once" bound has ONE exception, and it is intentional: a
-   * BACKWARD clock step (negative elapsed) EMITS rather than suppressing, so
-   * a non-monotonic `Date.now()` cannot silence a heartbeat for step + `ms`.
-   * See the `rateLimited` bullet in the head docblock for why.
+   * "Roughly" is load-bearing: a backward clock step emits rather than
+   * suppressing, and a throwing sink consumes a window with no guarantee that
+   * anything was delivered. Both are deliberate — the head docblock gives the
+   * reasons and says which of them `logger/__tests__/logger.test.ts` has a case
+   * for.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }

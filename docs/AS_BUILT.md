@@ -9628,3 +9628,83 @@ than merely a false count, and it came from treating an empty tool result as evi
 (codex-cli 0.146.0, read-only). The kimi lane was deliberately not run. The codex lane is the
 one that found all four items above, having failed to return a verdict in the prior round —
 which is the argument for not counting a lane's silence as its assent.
+
+**Round 6 — the docs stopped trying to be a model of the code (PR #174).**
+
+Three consecutive documentation rounds each fixed a false claim about `logger/index.ts` and
+introduced a new one, always at the same layer: the sentence that SUMMARISED the mechanism.
+"ONE deliberate exception" (there were two), then "TWO deliberate ways" (there was a third),
+then "the default sink is a `console` method, so this only bites an injected sink" (refuted by
+execution, with no sink injected). Each of the underlying corrections was right. The summary
+of it was wrong.
+
+So this round deletes the model instead of correcting it a fourth time. The `rateLimited`
+prose no longer states the predicate, counts the deviations from the wedge-alert original, or
+describes the clock-read asymmetry. It states what the throttle is FOR, why a heartbeat must
+not be silenceable by a non-monotonic clock, and why the bound is on attempts rather than
+deliveries — then points at `logger/__tests__/logger.test.ts` as the specification of what
+actually happens. Same in `logger/AGENTS.md` and on the `Logger.rateLimited` signature. The
+rounds above record those enumerations as the fix and describe them in the present tense; they
+are gone, and this entry supersedes those sentences the way a later entry in a chronological
+log does.
+
+📌 **A docblock that states a falsifiable behavioural predicate about a SHARED primitive is a
+liability, not documentation.** It is confidently specific, it reads as authoritative, and it
+rots on the next edit to the code — while the tests sitting beside it cannot. Here the
+sentences stating INTENT survived every round unamended; every sentence stating MECHANISM was
+rewritten at least once, and three of those rewrites were themselves wrong. **When a doc and a
+test can carry the same claim, the doc should carry the reason and the test should carry the
+claim.**
+
+The counting was the tell. Each round replaced an exhaustive count with a larger one — one
+exception, then two, then two-plus-a-third-that-does-not-count — and each was falsified by the
+next reader to grep. A count over "differences found by reading the code" can only ever be a
+lower bound, so writing it as a total is the defect, independent of the number.
+
+**And the first draft of THIS round did it again, one layer up.** The replacement pointer said
+the tests specify "the exact predicates, the clock reads, the window boundaries". A cross-model
+lane checked: `logger/__tests__/logger.test.ts` has no throwing-sink case and no clock-read case
+at all (`grep -n "throw"` over the file returns nothing). So the sentence that was supposed to
+END the cycle of false mechanism claims was itself a false claim — about which claims were
+backed. Two other findings from the same lane: "a throwing sink consumes the window and nobody
+receives the line" is unknowable from here, because a sink may deliver and then throw; and
+`logger/AGENTS.md` still said "two of the differences", the same exhaustive count in a new
+sentence.
+
+A second pass then found two more, both the same shape a third time: "where they differ, the
+difference is deliberate and the reason is given below" was itself an exhaustive claim (and one
+that the non-inventory disclaimer twelve lines later contradicted), and "the tests pin which
+attempts stamp" over-read the suite, whose `rateLimited` cases all use a non-throwing sink.
+
+The move that ends it is to stop characterising coverage and DISCLOSE THE GAP instead. The head
+docblock in `logger/index.ts` names the specific cases the suite has, one by one; both it and
+`logger/AGENTS.md` then say outright that nothing there pins the throwing-sink behaviour and
+that a caller relying on it should read `emit`. A stated gap cannot be an over-claim. (Closing
+it with a throwing-sink case is a cheap follow-up and is deliberately not done here — this
+round is documentation only.)
+
+A third pass caught the enumeration itself blurring two cases — it said a level-gated attempt
+"leaves the window unextended", where `logger/__tests__/logger.test.ts:398` only shows it does
+not START one, a strictly weaker fact. Corrected to distinguish not-extending an open window
+from not-starting one.
+
+📌 **"Point at the tests instead" is only safer than restating the mechanism if you READ the
+tests first.** Otherwise it is the identical defect with a longer blast radius: a reader who
+trusts a false claim about the predicate can check the code in one grep, while a reader who
+trusts a false claim about what the SUITE covers concludes a behaviour is protected when nothing
+tests it. **A pointer is an assertion about another file, and it needs the same grounding pass
+as a claim about this one.** The failure landed in the sentence written last, at the moment of
+least verification, in this round as in the three before it.
+
+📌 **The stable form of "the docs should say less" turned out not to be a shorter description of
+the code — it was a description of the TESTS plus an explicit statement of what they do not
+cover.** Every attempt to summarise coverage ("the exact predicates, the clock reads", "which
+attempts stamp") was falsified in one grep by the next reader, because a summary of coverage is
+an exhaustive claim wearing different clothes. Naming the cases and then naming the gap is the
+only version nobody could falsify.
+
+**Verification:** documentation only; no executable line changed in this round. Test count
+unchanged — 10 in `tests/integration/import-running-cron-tick.test.ts` plus the backward-step
+case in `logger/__tests__/logger.test.ts`. Executed here: those two files plus the
+scheduler-boot test, 60 pass / 0 fail; `scripts/ci/typecheck-all.sh` exit 0;
+`scripts/ci/lint.sh` exit 0.
