@@ -76,7 +76,7 @@ function row(over: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 function payload(servers: Array<Record<string, unknown>>): Record<string, unknown> {
-  return { ok: true, servers, reserved_names: ['neutron'], max_servers: 24 };
+  return { ok: true, servers, reserved_names: ['neutron'], max_servers: 10 };
 }
 
 interface Sent {
