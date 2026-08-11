@@ -596,15 +596,35 @@ export function ChatSyncSurface({
   // `chatDeepLinkAnchor` the same question the render path asks, so on a cold open
   // both agree and neither has to win a race.
   //
-  // ONCE PER TARGET. The ref latches the id after a successful jump, so a later
-  // `rows` change (a receipt landing, the resume replay appending) cannot yank the
-  // transcript back after the owner has started scrolling. And it only latches once
-  // the row is actually PRESENT: a push arrives before the message syncs, so the
-  // effect re-runs on each `rows` update and jumps the first time it can resolve
-  // the id. If it never syncs, nothing moves.
+  // ONCE PER TARGET, AND ONCE PER VISIT. The ref latches the id after a successful
+  // jump, so a later `rows` change (a receipt landing, the resume replay appending)
+  // cannot yank the transcript back after the owner has started scrolling. And it
+  // only latches once the row is actually PRESENT: a push arrives before the message
+  // syncs, so the effect re-runs on each `rows` update and jumps the first time it
+  // can resolve the id. If it never syncs, nothing moves.
+  //
+  // LEAVING THE DEEP-LINKED ROUTE RELEASES THE LATCH, and that release is what makes
+  // "once per target" mean "once per tap" instead of "once per app run". This surface
+  // is NOT remounted by a project switch: the shell is a single root-stack screen
+  // named `projects/[id]`, and expo-router only diverges on a route named exactly
+  // `[id]`, so a rail tap re-renders this component rather than replacing it
+  // (`app/projects/[id]/_layout.tsx` — the device-instrumented note). FlashList has
+  // no `key` here either, so it keeps `isInitialScrollComplete` latched across the
+  // switch and the frozen anchor above cannot act on the way back.
+  //
+  // So without this release: tap the notification for X (honoured), rail-tap to
+  // another project (`/projects/<other>/chat`, no query ⇒ no target), then tap the
+  // SAME notification again — it is still sitting in the shade — and the equality
+  // check below swallowed it forever. The chat opened in the right project and did
+  // not move, which is the owner's original complaint arriving by a third route.
+  // Clearing on the no-target render is the whole fix: the target is a per-visit
+  // instruction, so a visit without one cannot leave a spent instruction behind.
   const honouredDeepLink = useRef<string | null>(null);
   useEffect(() => {
-    if (deepLinkTarget.length === 0) return;
+    if (deepLinkTarget.length === 0) {
+      honouredDeepLink.current = null;
+      return;
+    }
     if (honouredDeepLink.current === deepLinkTarget) return;
     // THE SAME GUARD THE RENDER PATH APPLIES. Without a device id there is no read
     // watermark, so `chatInitialAnchor` cannot tell an unread run from a read one —
@@ -627,7 +647,24 @@ export function ChatSyncSurface({
     // worst kind to leave to chance in the #505/#511 blast radius.
     if (typeof scrollToIndex !== 'function') return;
     honouredDeepLink.current = deepLinkTarget;
-    scrollToIndex.call(listRef.current, { index, animated: true });
+    // THE RETURNED PROMISE IS NOT OPTIONAL TO HANDLE. `scrollToIndex` is typed
+    // `(params) => Promise<void>` (`@shopify/flash-list/src/FlashListRef.ts:182`) and
+    // its executor calls `recyclerViewManager.getLayout(index)` SYNCHRONOUSLY
+    // (`useRecyclerViewController.tsx:383`), which THROWS when the layout manager is
+    // not initialised yet (`RecyclerViewManager.ts:138-141`). A throw inside a Promise
+    // executor is a rejection, and a dropped rejection is an UNHANDLED one — a red box
+    // in dev and log noise in production, for a call whose failure is already
+    // survivable. `Promise.resolve` wraps it because the test stub returns undefined.
+    //
+    // A REJECTED JUMP DELIBERATELY LEAVES THE LATCH SPENT. The only state that can
+    // reject is a list whose native layout has not landed, and that is exactly the
+    // COLD-OPEN case where the frozen `initialScrollIndex` above owns the position —
+    // FlashList applies it on its first layout, so nothing is lost. Re-arming here to
+    // retry would instead let a later `rows` commit yank a transcript the owner had
+    // already been placed in correctly.
+    void Promise.resolve(scrollToIndex.call(listRef.current, { index, animated: true })).catch(
+      () => {},
+    );
   }, [deepLinkTarget, rows, selfDeviceId]);
 
   // The owner's jump-to-bottom affordance. Driven off scroll GEOMETRY rather than

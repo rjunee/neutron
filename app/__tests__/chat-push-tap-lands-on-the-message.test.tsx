@@ -366,6 +366,25 @@ describe('the surface CONSUMES the pushed message id', () => {
     expect(scrollToIndexAsks().slice(beforeOld)).toEqual([
       { method: 'scrollToIndex', arg: { index: 0, animated: true } },
     ]);
+
+    // ARM 6 — THE SAME NOTIFICATION, TAPPED TWICE. A notification stays in the shade
+    // until it is dismissed, and this surface is not remounted by a project switch
+    // (`projects/[id]` does not diverge on the dynamic segment, and FlashList carries
+    // no `key`), so the sequence tap-X → rail-tap elsewhere → tap-X again reaches the
+    // SAME component instance with the same target. The middle render carries no
+    // target, which is the moment the latch has to be released: without that release
+    // the second tap hit the `honouredDeepLink === deepLinkTarget` early return and
+    // the transcript did not move at all.
+    //
+    // Asserted as a NEW ask appended after the no-target render, not as a count, so a
+    // fix that re-anchored on the empty render instead would not pass by accident.
+    const beforeRevisit = scrollToIndexAsks().length;
+    await screen.rerender(surface());
+    expect(scrollToIndexAsks().slice(beforeRevisit)).toEqual([]);
+    await screen.rerender(surface('m1'));
+    expect(scrollToIndexAsks().slice(beforeRevisit)).toEqual([
+      { method: 'scrollToIndex', arg: { index: 0, animated: true } },
+    ]);
     screen.unmount();
   });
 });

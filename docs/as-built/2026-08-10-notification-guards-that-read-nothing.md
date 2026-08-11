@@ -294,3 +294,45 @@ asked.** Refusing to compose the token was correct and left the occurrence consu
 falling back to the untrimmed clip was correct and left the string possibly empty. In both
 cases the code after the guard was doing work the guard's author had stopped thinking
 about.
+
+## Round 5 — a latch that is never released is a one-shot feature
+
+Cross-model review (codex, `gpt-5.6-sol`) found the one reachable defect the Opus lanes
+missed, and it was in this change's own new code: `honouredDeepLink` in
+`app/components/ChatSyncSurface.tsx` latched the honoured target id and nothing ever
+cleared it.
+
+The sequence that breaks: tap the notification for X (the transcript re-anchors, X is
+latched), rail-tap to another project — `/projects/<other>/chat`, no query, so no target —
+then tap the SAME notification again, which is still sitting in the shade. The equality
+check swallowed it and the transcript did not move.
+
+**It survives the project switch because nothing here is remounted.** The shell is a single
+root-stack screen named `projects/[id]`, and expo-router only diverges on a route named
+exactly `[id]`, so a rail tap RE-RENDERS this component rather than replacing it
+(`app/app/projects/[id]/_layout.tsx` carries the device-instrumented note). FlashList has
+no `key` either, so it keeps `isInitialScrollComplete` latched across the switch and the
+frozen render-path anchor cannot act on the way back. The imperative seam was the only
+thing that could move the transcript, and it had disqualified itself.
+
+The fix is that the target is a PER-VISIT instruction: a render with no target clears the
+latch, so a visit without one cannot leave a spent instruction behind. Mutation-verified —
+restoring the bare `if (deepLinkTarget.length === 0) return;` reds the new sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx` and nothing else.
+
+Same review raised a second, weaker one that is worth writing down because the mechanism is
+real even where the consequence is not. `scrollToIndex` is typed
+`(params) => Promise<void>`, and its executor calls `recyclerViewManager.getLayout(index)`
+synchronously, which THROWS when the layout manager is not yet initialised — a throw inside
+a Promise executor is a rejection, and the call site dropped it, so that is an unhandled
+rejection. It is now caught. What is NOT done, deliberately: re-arming the latch on a
+rejection. The only state that can reject is a list whose native layout has not landed,
+which is the cold open where the frozen `initialScrollIndex` owns the position anyway, and
+re-arming would let a later `rows` commit yank a transcript the owner was already placed in
+correctly. Not mutation-tested — the FlashList test stub cannot reject — and said plainly
+rather than claimed.
+
+📌 **A "once per X" latch needs a stated release condition, or "once" silently means "once
+per process".** The docblock said "ONCE PER TARGET" and the code honoured it exactly; what
+was never written down is that a target is scoped to a VISIT, and the missing sentence was
+the missing line of code.

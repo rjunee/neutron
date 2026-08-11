@@ -9199,3 +9199,33 @@ place as a possible duplicate buzz, not silently.
 
 Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`
 (§ Round-4 review fixes).
+
+## 2026-08-10 — the push-tap latch is released when the tap's target goes away
+
+`ChatSyncSurface`'s imperative re-anchor latched the honoured `message_id` and never
+cleared it, which made a per-tap instruction behave as a per-process one. Tap the
+notification for a message, rail-tap to another project (a chat route with no
+`?message_id=`), then tap the SAME notification again — notifications stay in the shade
+until dismissed — and the transcript did not move: the equality check had already spent the
+target.
+
+Nothing is remounted along that path, which is why the frozen render-path anchor could not
+cover for it. The shell is a single root-stack screen named `projects/[id]` and expo-router
+only diverges on a route named exactly `[id]`, so a rail tap re-renders this component; and
+FlashList carries no `key`, so it keeps `isInitialScrollComplete` latched across the switch.
+The imperative seam was the only thing that could move the transcript.
+
+A render with no target now clears the latch. Mutation-verified: restoring the bare
+early-return reds the new sixth arm of
+`app/__tests__/chat-push-tap-lands-on-the-message.test.tsx`, and only that arm.
+
+Also caught in the same pass: `scrollToIndex` is typed `(params) => Promise<void>` and its
+executor calls `getLayout` synchronously, which throws before the layout manager exists — a
+rejection the call site was dropping. Now caught. The latch is deliberately NOT re-armed on
+a rejection: the only state that can reject is a pre-layout list, whose position the frozen
+`initialScrollIndex` already owns, and re-arming would let a later commit yank a transcript
+the owner was placed in correctly.
+
+Found by the cross-model (codex) review lane, in this change's own new code.
+
+Detail: `docs/as-built/2026-08-10-notification-guards-that-read-nothing.md`.
