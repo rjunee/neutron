@@ -1066,3 +1066,37 @@ bounded-respawn ladder, with `claude` naming the server that did not start), and
 real fixes are a concurrent load or a bigger budget — neither of which a per-server timeout
 can express. The tests pin the divide and the floor and explicitly do not claim the floor
 closes the gap.
+
+### Round-3 verification, including what failed and did not count
+
+`typecheck-all.sh` exit 0 and `lint.sh` exit 0 on the final tree — the second only after a
+fix, because the eviction path's mark-on-resolve tripped two gates in sequence: first the
+bare-`void`-promise gate, then the pre-swallow gate, which correctly refused a two-arg
+`.then` that hides a rejection from the wrapper's counter. It ends up on
+`neutralizeAbandonedSettle`, which is the right primitive: the only way that derived promise
+rejects is a spawn failure, which the spawn's own `catch` already un-pools and logs.
+
+The five MCP suites run 160/160, and the pool suite 31/31.
+
+A single local `bun test` is not the suite: it was SIGKILLed at exit 137 partway through,
+which is why CI shards across four runners. Run the same way locally — four shards,
+sequentially on one box — three files failed, and every one was attributed rather than
+waved through:
+
+* `tests/integration/orphan-survival.test.ts` (SIGTERM cleanup / WAL) — fails at
+  `origin/main` too. Pre-existing.
+* `open/__tests__/open-projects-changed-wiring.test.ts` — fails at `origin/main` too.
+  Pre-existing.
+* `migrations/runner.test.ts` (explicit db-path arg) — passes in isolation on this branch.
+  It needs ~15 s alone against a 15 s per-file limit, so four shards plus a typecheck on
+  one box is enough to tip it. Contention, not a defect.
+
+None is in a file this round touches, and both pre-existing ones were confirmed by running
+them against `origin/main` in a separate worktree rather than by asserting it.
+
+CI note, recorded because it would otherwise look like a skipped gate: the `ci` workflow did
+not fire for this branch's push. GitHub Actions stalled repo-wide for ~45 minutes (no `ci`
+run for ANY commit in that window) and the PR's mergeability was left stuck reporting
+CONFLICTING — while `git merge-tree` against `origin/main` merges clean and `origin/main` is
+an ancestor of the branch head. `pull_request` cannot build a merge ref it believes is
+conflicted, so no run was queued.
