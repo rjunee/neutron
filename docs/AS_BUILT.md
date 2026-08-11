@@ -8508,6 +8508,7 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+
 ## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
 
 Observed live: the owner cancelled a running email-core build and the row settled at
@@ -8989,3 +8990,324 @@ Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
+
+## 2026-08-11 — "added to the work board" now says WHICH board
+
+The owner saw the chat claim `▸ On the Work Board: "P1 — email pipeline …"` beside a WORK
+panel reading `No work tracked yet.` — and reasonably called it a lie.
+
+**The write path was fine.** Board writes are scoped server-side and unspoofable
+(`work-board/agent-tool.ts:15-25`), the live push is wired
+(`open/composer.ts:3576-3577`), and the HTTP read is correctly scoped per board
+(`gateway/http/work-board-surface.ts:219`). Two boards render side by side, keyed by
+`workBoardScopeKey` (`work-board/store.ts:164-171`), and **the ACKNOWLEDGEMENT carried
+nothing that distinguished them — because it named the ITEM and never the BOARD.** (The
+panes themselves are labelled — the project rail and the Work pane header both show a
+scope, `landing/chat-react/ChatApp.tsx:1417-1434`. It was the message beside them that was
+scope-free, which is the narrower and accurate claim.)
+
+📌 **A true statement that cannot be checked reads exactly like a false one.** The defect
+was a confirmation that under-specified its subject. Fixing it does not require knowing
+why scope and pane disagreed — it makes the next disagreement legible instead of
+unfalsifiable.
+
+**What is NOT closed.** A first draft of this entry asserted the full causal chain as
+fact, and two links do not survive a read of the code: the empty state needs ZERO rows,
+not "one done item" (`landing/chat-react/WorkBoardTab.tsx:659` requires
+`active.length === 0 && completed.length === 0`; one done row renders `Done · 1` at
+`:725`), and the ack is delivered to the originating project topic whose pane is scoped to
+the same project (`open/composer.ts:3653`, `landing/chat-react/ChatApp.tsx:2228`), so chat
+and pane should have agreed. A reachable hypothesis — the warm REPL resolves a tool's
+project from pool session registration (`runtime/adapters/claude-code/persistent/pool-state.ts:214`,
+a miss degrades to General) while the block and pane use `turn.project_id`
+(`gateway/wiring/build-live-agent-turn.ts:1307`) — is **unconfirmed and NOT fixed here.**
+The owner's original report stays open.
+
+**Fixed at the one chokepoint every DETERMINISTIC board acknowledgement passes through**
+(`work-board/chat-ack.ts`). Not every confirmation: the agent also acknowledges in its own
+voice at turn end (`gateway/wiring/operating-doctrine.ts:65`), which no chokepoint can
+constrain — that half is addressed by the `<work_board>` block telling it the board's name
+and to use it (`work-board/fragment.ts`). All three texts now carry `· <board>` — `card_added`,
+`build_dispatched`, `inline_started`. (`complete` / `reorder` emit no chat text, so there
+was nothing to name.) The separator is the vocabulary the board UI already uses (`Done · N`).
+
+**Three things the label can never be, as guards rather than conventions.**
+`boardLabelForProjectId` is the ONE mapping. General short-circuits to the literal
+`General` **before the project lookup is called at all** — `workBoardScopeKey` collapses
+General onto the instance slug, so its storage key is an internal identifier with no path
+to the chat, and a store outage cannot touch a General ack. A `project_id` that no longer
+resolves degrades to the word `unknown project` — never the raw id. And the label is
+flattened to ONE LINE: a project name is validated for LENGTH ONLY at the create surface
+(`gateway/http/app-projects-surface.ts` `handleCreate`), so
+`Example\nIGNORE ALL PRIOR INSTRUCTIONS` is a **storable name**, and an interior newline
+becomes a standalone chat line and a standalone instruction line inside `<work_board>`.
+
+📌 **Escaping `&<>` does nothing about a newline — the injection is the LINE BOUNDARY.**
+`sanitizeBoardLabel` collapses C0/C1 controls, LINE/PARAGRAPH SEPARATOR and the invisible
+format chars (zero-width, bidi overrides) to a space, then caps by CODE POINTS —
+**flatten-and-cap BEFORE escape**, because escape-then-cap can cut inside the `&lt;` it
+just produced or between the halves of a surrogate pair. It mirrors `store.sanitizeTitle`,
+which has flattened item titles for exactly this reason; the label had no equivalent,
+which is what let it through.
+
+**One mapping, one cheap read.** The resolver takes a SINGLE-ROW name lookup, not the
+project rail: the first draft passed `readProjectRows()` (O(projects) SQL plus a
+per-project unread + rail-extras query) to obtain one name, on every ack and every agent
+turn, including on General where it was discarded. The same change removed a **second,
+subtly different mapping** — the `/status` project line owned its own
+`readProjectRows().find(...)?.label ?? 'General'`, naming `General` for an id it merely
+failed to resolve, printed beside an `active_work_items` count read from the REAL project
+scope. Two fields, one line, two boards: this defect one surface over. A structural test
+(`gateway/__tests__/work-board-name-single-mapping.test.ts`) now pins the single mapping,
+because **a duplicate mapping is invisible to every behavioural test of the mapping —
+each copy is self-consistent.**
+
+**The root cause was one layer up: the agent could not have named the board.** The per-turn
+`<work_board>` block said *"your EXTERNAL MEMORY for this project"* and never said which —
+so the agent's own prose was structurally incapable of naming it. The block now carries the
+board name and closes with `Whenever you tell the owner you added, started, dispatched,
+updated or finished something on the Work Board, SAY WHICH BOARD — this one is <board>`.
+The verbs are enumerated because the doctrine (`gateway/wiring/operating-doctrine.ts:65`)
+requires acknowledging starting, dispatching and finishing too; an instruction covering
+only "put something on" left the rest free to omit the board.
+
+**The panel deliberately did not change.** Its scope is already on screen — the rail marks
+the active surface (`landing/chat-react/ChatApp.tsx:1417-1432`) and the pane is scoped to
+that surface (`ChatApp.tsx:2228`); on mobile the board is a per-project route. The missing
+information was never the panel's scope but the ack's, and a message fix reaches the
+notification, the phone, and the log read back weeks later — none of which have a panel.
+Rationale in full, plus the deferred slug-collision edge:
+`docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
+
+**Mutation: twenty mutants, twenty dead**, each on a different assertion. The instructive
+ones: General short-circuiting only AFTER calling the lookup (invisible to a label
+assertion — which is why the test asserts the CALL LOG, not the rendered string); the
+fragment escaping then capping, and capping by UTF-16 units (a truncated entity and a lone
+surrogate in the prompt, neither visible to an ASCII-only cap test); and `/status`
+regrowing its own mapping.
+
+📌 **A mutation harness that verifies its own patch with a grep can lie in the direction
+that looks like a finding.** Two mutants first reported as SURVIVED were patch FAILURES —
+the verifying grep matched the docblock quoting the same prose rather than the code it was
+meant to mutate. Re-anchored on the `return` statement, both died. The same class as the
+tool-cannot-read-the-format trap: **before believing a negative, make the check prove it
+can return a positive.**
+
+### 2026-08-11 — a board confirmation says WHICH board (round 3: the sentinel, and two guards that could not fail)
+
+Review round 2 found two blockers and a major on the round-2 fix. All three held up, and
+two were the same shape: **a guard that cannot fail looks exactly like a guard that works.**
+
+**The `'general'` sentinel routed to a topic nobody subscribes to.** General reaches the
+board seams in four spellings, and the live one is the literal `'general'` — set at
+`gateway/wiring/build-live-agent-turn.ts:1508`, carried into the warm REPL session
+(`runtime/adapters/claude-code/persistent/spawn.ts:186`) and handed back as the tool call's
+`project_id` (`runtime/adapters/claude-code/persistent/pool-state.ts:214`). Round 2
+normalized it in the LABEL but not in the ROUTING: `tridentDeliveryChatId` tested
+`length > 0`, which the sentinel passes, so a General ack was filed under
+`app:<owner>:general`. **Correct board name, message delivered to nobody** — the silent chat
+the ack exists to prevent, wearing an accurate label. Fixed with one normalizer
+(`normalizeBoardProjectId`, `work-board/store.ts`) resolved ONCE per ack and threaded to
+both the label and the destination; `workBoardScopeKey` routes through it too.
+
+**The same bug had a worse second site**, found only because a mutant survived: `#339`
+stamps a board-bound build's `chat_id` via `resolve_delivery` from the same raw
+`ctx.project_id` (`trident/work-board-build-tool.ts:195,305`), so a build started from
+General announced its completion into the phantom topic. That is a **silent completion**,
+precisely the bug `#339` exists to prevent.
+
+**The DB-to-name seam had no behavioural guard.** Every label test supplied its own
+hand-built `{id: name}` map, so `project_name: (id) => id` — the composer feeding the ack a
+lookup that speaks the INTERNAL ID as the owner's board name — passed all of them.
+`tests/integration/work-board-ack-names-board.open.test.ts` now boots the real composer,
+graph and DB, inserts a real `projects` row, fires the production-wired ack, and asserts on
+the persisted `app_chat_messages` row — whose `body` is the text the owner sees and whose
+`topic_id` is the surface it reached, so one row covers both halves.
+
+**The single-mapping guard pinned a spelling and a count, not the invariant.** It asserted
+`labelSites.length >= 3` (so a fourth duplicate mapping made it GREENER), matched only
+`?? 'General'` (a backtick copy sailed through), and stripped everything after `//` on any
+line — including inside string literals. Rewritten to assert that `readProjectName` is only
+ever consumed by the shared resolver, which a duplicate cannot satisfy by adding to a count.
+
+**Minors:** `sanitizeBoardLabel` mapped all of `\p{Cf}` to a space and ZWJ lives there, so
+joined-emoji project names were shattered into separate glyphs — the board named back to the
+owner stopped matching the rail, this PR's own defect produced by its own hardening; ZWJ is
+now preserved and every other format char still neutralized. That exception opened a hole
+of its own (a joiner-only name is non-empty but renders as nothing, walking past a
+`length === 0` floor), closed by defining empty as "renders as nothing".
+`formatWorkBoardFragment` gained the `unknown project` floor its docblock implied. And
+`slugifyProjectId('General')` returned exactly the sentinel, so such a project's writes
+collapsed onto General while its acks read `General`; the id is now reserved at the one
+canonical slugifier, leaving the owner's chosen NAME untouched.
+
+**Known gap, recorded not papered over:** the deterministic ack cannot mislabel (its label
+and its write scope are the same `ctx.project_id`), but the agent's own prose is guided by
+the `<work_board>` block built from `turn.project_id`, so a pool-registration miss can make
+the two disagree. The ack then sits beside the claim and contradicts it visibly, which is
+this PR's thesis rather than an exception to it; closing it properly is a runtime-seam
+change and is NOT in this PR.
+
+**Mutation-tested: nine mutants, nine dead** — including the backtick-duplicate mapping
+that survived round 2's guard. Two survived the first pass and both were hiding a second
+unguarded copy of the bug rather than weak coverage of the thing under test.
+
+Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
+
+### 2026-08-11 — round 4: a board name that names ONE board, and an honest "still undiagnosed"
+
+Round 3 made every board confirmation carry a name. Round 4 established that the name did
+not yet IDENTIFY a board, and fixed the three routes to an ambiguous label — each one
+demonstrated by RUNNING the shipped resolver, not reasoned about.
+
+`general` is both the reserved no-project sentinel and a legal project id, and the owner's
+instance already has a real project called `General` (`app/lib/project-rail-view.ts:37-41`
+records `GET /api/app/projects` returning `id: 'general'` there). Reserving the SLUG in
+round 3 stopped a NEW project minting that id; it did nothing about the NAME. So
+`boardLabelForProjectId(null, …)` and `boardLabelForProjectId('general-project', () =>
+'General')` both returned the byte-identical `General`, and the rail was equally ambiguous
+(`landing/chat-react/ChatApp.tsx:1420` labels the General surface `General`, `:1432` renders
+`p.label`). An ack named a board, the owner looked at his rail, and two rows answered.
+`disambiguateProjectBoardLabel` now qualifies the PROJECT side — the side that has an
+alternative — to `General (project)`, case- and whitespace-insensitively on the flattened
+name. Applied server-side at BOTH producers: `boardLabelForProjectId` and the rail's `label`
+in `open/composer.ts` `readProjectRows`. **The rail label is server-computed and both
+clients render it verbatim**, so one rule replaces the two client copies a parity test would
+otherwise have to hold together — the useful check was finding where the string is PRODUCED,
+not where it is drawn.
+
+The 48-char cap was a second route to one name for two boards: `projects.name` allows 1-128,
+so any two names sharing a 47-char prefix rendered identically, and owner names are
+overwhelmingly prefix-shared with the distinguishing part at the END. `truncate` now elides
+the MIDDLE. Explicitly **not a uniqueness guarantee** — two names differing only inside the
+elided middle still collapse, and closing that needs a hash or an id suffix, neither of
+which is the owner's vocabulary. The old test pinned the cap's LENGTH, which a colliding cap
+satisfies perfectly.
+
+Two guards were defeating themselves. The cap sliced by CODE POINT while the sanitizer
+deliberately preserves the ZWJ, so `'A'.repeat(46) + '👨‍💻 Dev'` published a bare `👨` — the
+cap is now grapheme-aware (`Intl.Segmenter`). And the "renders as nothing" floor ran AFTER
+the cap, which splices in a VISIBLE `…`, so a name of 47+ joiners passed with visible content
+of exactly `"…"`; the floor now runs on the flattened-but-uncapped name.
+
+Doc correction: the round-3 detail note claimed the slug reservation was UNFIXED and out of
+the blast radius **in the same commit that shipped it** (`project-identity.ts:82`, asserted
+at `tests/integration/work-board-ack-names-board.open.test.ts:387-388`) — the folklore
+failure class, committed alongside its own refutation. Corrected, and the genuinely-open
+remainder stated: the reservation guards future MINTING only, and a project that already
+holds the id keeps sharing General's bucket because at
+`gateway/wiring/build-live-agent-turn.ts:1508` the sentinel and that id are the same string.
+
+**The owner's original report is still NOT closed, and this says so.** The zero-row pane was
+not reproduced. Eliminated with reads: an error rendering as empty (both clients have a
+distinct error branch ahead of the zero-row branch — `WorkBoardTab.tsx:657`,
+`app/app/projects/[id]/workboard.tsx:328`); a wrongly-scoped live push (a board-dispatched
+run's `project_slug` IS the board scope key, `open/composer.ts:2000`); the bearer's owner
+slug diverging from the agent's (the app-ws resolver returns the gateway's own configured
+slug on every path, `channels/adapters/app-ws/auth.ts:233,293,323`); a stale client key at
+mount (one shared General normaliser per client, refetch on every `projectId` change).
+**Not eliminated:** the warm REPL's `/tool-call` sink resolves the write scope from the
+pool's session REGISTRATION and a miss degrades to General by its own comment
+(`runtime/adapters/claude-code/persistent/pool-state.ts:214`) while the pane derives from
+`turn.project_id`. Still a hypothesis — no miss was reproduced.
+
+The integration file now pins an explicit per-test timeout. **Stated as headroom, not as a
+fix**: the brief that asked for it said the file false-reds under a bare `bun test <file>`,
+and mutation-testing that claim REFUTED it — removing the timeouts still passes, because the
+whole file boots and runs in ~5.5 s. Kept because a timeout here reads exactly like broken
+ack wiring and CI's `--timeout=15000` means CI can never see it, but recorded honestly so
+nobody later reads the constant as evidence of a bug that was fixed here.
+
+**Mutation results: eight mutants, eight dead — but one only after the test was rewritten.**
+The floor-before-cap guard (P4c) SURVIVED its first mutant: a RUN of joiners is a SINGLE
+grapheme cluster, so once the cap became grapheme-aware the joiners-only input is never
+truncated and the floor's position stops mattering. The bug was real and fixed, but by the
+grapheme change rather than by the reorder — so in a green run the reorder was
+indistinguishable from dead code. Joiners SEPARATED BY SPACES break the cluster (60
+graphemes that render as nothing), which is the input that can see the difference; the test
+now uses it and the mutant dies.
+
+Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.
+
+### 2026-08-11 — the board push never reached a project pane (work-board, round 5)
+
+Round 5 of PR #178. The previous rounds fixed how a board is NAMED; this one found and fixed
+why a pane could show nothing at all — the owner's original report, which four rounds had
+left explicitly unexplained.
+
+**THE ZERO-ROW PANE IS EXPLAINED, AND IT WAS A DELIVERY BUG.** `fanWorkBoardChanged`
+addressed its snapshot to `appWsTopicId(OWNER)` — the base topic, and only that. But a
+served client holds ONE socket scoped to whatever it is currently viewing: General sits on
+`app:<owner>`, a project sits on `app:<owner>:<project_id>`
+(`gateway/http/app-ws-surface.ts` registers `resolveChannelTopicId(user_id, project_id)`;
+`landing/chat-react/config.ts` `topicForProject` and `app/lib/work-board-live.ts` derive the
+same string). `InMemoryAppWsSessionRegistry.send` resolves its target with a single
+`Map.get` — an exact key match, no prefix fan. **So a board push reached a client sitting
+inside a project never.** The pane rendered `No work tracked yet` while the agent wrote rows
+to exactly the board it was showing, which is the screenshot the owner sent.
+
+It could not self-repair either: the 15s fallback poll was gated on a live row being ALREADY
+VISIBLE (`hasLiveRun`), and a board with zero rows cannot contain a live row — so the empty
+state was the one state the fallback could never reach. Both halves are fixed. The poll now
+also runs on a SETTLED empty read (`!loading && listError === null && items.length === 0`),
+so a dropped frame, a reconnect gap, or any future misrouting heals within 15s instead of
+persisting until reload.
+
+📌 **The fix was already written twenty lines above the bug, with a docblock describing it.**
+`fanProjectsChanged` fans to the base topic AND every live per-project topic, and its comment
+explains this exact failure for the project rail (#132: "Create Project from inside a project
+→ rail doesn't update until reload"). The work-board fan was written afterwards, against the
+same registry, and did not copy it. Widening the fan is safe because both clients already
+re-check the frame's `project_id` tag before applying it — that gate is now asserted, because
+without it a General snapshot would overwrite a project pane.
+
+**What was ruled out, and what remains open.** Not reproduced: an error rendering as empty
+(both clients have a distinct error branch ahead of the zero-row branch), a client-derived
+stale key at mount, and a writer/reader slug divergence. Still open and NOT closed by this
+PR: the warm REPL's `/tool-call` sink can resolve a write scope from the pool's session
+registration and degrade to General on a lookup miss, while the pane derives from
+`turn.project_id`. That remains a hypothesis; no miss was reproduced.
+
+**The mobile rail rendered the raw project name, and the as-built said otherwise.** The
+disambiguation rule is server-side with one implementation, but the two rails read the
+project set over DIFFERENT transports: web takes the `projects_changed` app-ws frame (which
+has always carried `label`), mobile lists over `GET /api/app/projects`, which carried no
+`label` at all. The prior as-built asserted "BOTH clients render it verbatim, so this fix
+needs no web/mobile change" — a statement about the intended design, written as though it
+described the code. On a phone the ack therefore named a board that no rail row answered to.
+The HTTP list now serves `label` (both the solo and the shared half) and mobile maps it into
+the rail and header; `name` stays raw beside it because the rename field round-trips it.
+Parity is pinned by `gateway/__tests__/work-board-label-client-parity.test.ts` instead of by
+a paragraph.
+
+**The reserved-slug fix had minted a second collision.** `slugifyProjectId` suffixed a name
+that would mint the `general` sentinel — to `general-project`, which this same function
+produces from a project genuinely named "General Project". `resolveBindTarget` resolves a
+colliding slug to the EXISTING project, so two distinct names would have silently become one
+project. The suffix is now a trailing `-`, which no input can produce because the slugifier
+trims exactly that immediately before returning — collision-proof by construction rather
+than by picking a word nobody is expected to type, the same reasoning behind the mobile
+rail's `~general`.
+
+Also closed: the label rule's own OUTPUT was a colliding INPUT (a project named
+`General (project)` returned untouched, byte-identical to the qualified form of `General`),
+and the invisible-name floor stripped only the joiner, so U+FE0F, U+3164, U+2800 and any
+combining mark walked through it and published a board-naming line naming no board.
+
+**Mutation results: seven mutants, seven dead.** Reverting the fan → 4 of 5 topology tests
+red; reverting the poll gate → red; reverting the invisible-char floor → 4 red; reverting the
+qualified-form reservation → red; reverting the slug suffix → 2 red. The single-mapping guard
+was also REWRITTEN because it was bypassable: it approved any line containing an allowed
+substring, so a direct `readProjectName(id)` lookup sitting on the same line as a legitimate
+`boardLabelForProjectId(...)` call passed it. Executed both ways — the old form PASSES that
+mutant, the new form (no `readProjectName(` invocation anywhere) fails it. A guard a mutant
+passes is zero coverage that reads green.
+
+📌 **A doc that describes a design as though it were the implementation is more dangerous
+than a stale one, because it is confidently specific.** Two of this round's three blockers
+were sitting underneath such a sentence — "BOTH clients render it verbatim" and the fan's own
+`project_id`-tagging comment, which described a delivery that could not occur. In both cases
+the prose was a correct account of the intent and a false account of the code, and in both
+cases believing it would have closed the investigation one step short of the bug.
+
+Detail: `docs/as-built/2026-08-11-work-board-message-names-its-board.md`.

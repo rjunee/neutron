@@ -500,7 +500,11 @@ function ProjectShell({ project_id }: { project_id: string }) {
   // the real name; '' is the honest last resort, never a fabricated placeholder
   // (ISSUES #393).
   const railEntry = (railProjects ?? []).find((p) => p.id === project_id);
-  const scopeName = project?.name ?? railEntry?.name ?? '';
+  // The RAIL entry leads, because it is the source that carries `label` — the
+  // server's one board-label rule — so the header names the same board the ack
+  // does, in the same words. The settings doc (raw `name`) stays as the fallback
+  // for the frames where the rail list has not resolved.
+  const scopeName = railEntry?.label ?? project?.name ?? '';
   const scopeEmoji = (project?.emoji ?? railEntry?.emoji ?? '').length > 0
     ? (project?.emoji ?? railEntry?.emoji ?? '')
     : '📁';
@@ -512,7 +516,11 @@ function ProjectShell({ project_id }: { project_id: string }) {
     const navigable = (railProjects ?? []).filter((p) => projectCardInteractivity(p).navigable);
     const views: RailProjectView[] = sortProjectsByActivity(navigable).map((p) => ({
       id: p.id,
-      name: p.name,
+      // `label`, not `name` — the server's one board-label rule, so a project
+      // named `General` is distinguishable in the rail from the General board.
+      // The rail used to map `name` raw, which is how an ack could name a board
+      // that no row on THIS device answered to.
+      name: p.label,
       emoji: p.emoji,
       unread_count: p.unread_count,
       origin_instance: p.origin_instance,

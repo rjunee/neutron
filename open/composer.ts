@@ -432,7 +432,12 @@ import {
   type ReplActivityTap,
 } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
-import { buildWorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
+import {
+  boardLabelForProjectId,
+  buildWorkBoardChatAck,
+  disambiguateProjectBoardLabel,
+  GENERAL_BOARD_LABEL,
+} from '@neutronai/work-board/chat-ack.ts'
 import { createProjectCredentialsSurface } from '@neutronai/gateway/http/project-credentials-surface.ts'
 import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-credential-surface.ts'
 import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-connect-surface.ts'
@@ -445,6 +450,7 @@ import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
 import {
   WorkBoardStore,
+  normalizeBoardProjectId,
   workBoardProjectIdForKey,
   workBoardScopeKey,
   type WorkBoardItem,
@@ -1903,7 +1909,10 @@ export function buildOpenGraphComposer(
     const statusChatCommandFilter = buildStatusChatCommandFilter({
       snapshot: async (input) =>
         statusSnapshotHolder.deref((fn) => fn(input)) ?? {
-          active_project: 'General',
+          // Pre-bind fallback only (a fully-degraded all-zero snapshot). The NAME
+          // still comes from the shared board vocabulary, not a local literal, so
+          // `General` is spelled in exactly one place in the codebase.
+          active_project: GENERAL_BOARD_LABEL,
           model: getBestModel(),
           pending_reminders: 0,
           active_work_items: 0,
@@ -2290,7 +2299,13 @@ export function buildOpenGraphComposer(
           .all()
           .map((r) => ({
             id: r.id,
-            label: r.name,
+            // The rail name goes through the SAME disambiguation the acks and the
+            // `<work_board>` block use, so a project called `General` does not read
+            // identically to the General board the rail also lists. Server-side on
+            // purpose: BOTH the web rail (`ChatApp.tsx` `p.label`) and the mobile
+            // rail render this string verbatim, so one rule here beats two client
+            // copies that have to be kept in parity.
+            label: disambiguateProjectBoardLabel(r.name),
             emoji: resolveProjectEmoji(r.emoji, r.name),
             unread: readProjectUnread(r.id),
             last_activity_at: r.last_activity_at ?? r.updated_at,
@@ -2298,6 +2313,28 @@ export function buildOpenGraphComposer(
           }))
       } catch {
         return []
+      }
+    }
+    // ONE project id → its rail name, for every owner-facing "which board" label
+    // (`boardLabelForProjectId`: the three deterministic work-board acks, the
+    // per-turn `<work_board>` block, and the `/status` project line).
+    //
+    // Deliberately NOT `readProjectRows()`: that reads every live project and runs
+    // a per-project unread count + rail-extras query, and these callers discard
+    // all of it but one name — on every ack and every agent turn. Returns null on
+    // a miss or a read failure; `boardLabelForProjectId` turns that into a WORD,
+    // never the raw id.
+    const readProjectName = (project_id: string): string | null => {
+      try {
+        return (
+          db
+            .prepare<{ name: string }, [string]>(
+              `SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+            )
+            .get(project_id)?.name ?? null
+        )
+      } catch {
+        return null
       }
     }
     // ── The owner gate (C3c: carved to open/wiring/owner-gate.ts) ──────────
@@ -3540,7 +3577,29 @@ export function buildOpenGraphComposer(
           ...(framePid !== undefined ? { project_id: framePid } : {}),
           ts: nowMs,
         }
-        appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
+        // Fan to the base topic AND every live per-project topic — the SAME
+        // topology `fanProjectsChanged` uses, for the same reason. Each served
+        // client holds ONE socket scoped to whatever it is currently viewing
+        // (`app:<owner>:<project>`; General stays on `app:<owner>`), and the
+        // registry routes by EXACT topic string (`session-registry.send` is a
+        // single `Map.get`, no prefix match). A board push addressed only to the
+        // base topic therefore reached a client sitting INSIDE a project NEVER:
+        // its pane rendered `No work tracked yet` while the agent wrote rows to
+        // exactly the board it was showing, and the 15s fallback poll could not
+        // repair it because that poll only runs once a live row is ALREADY
+        // visible. Both halves are fixed — here, and at the poll's gate.
+        //
+        // Widening the fan cannot cross-apply one board onto another: every
+        // client re-checks the frame's `project_id` tag against its own view
+        // before applying it (`WorkBoardTab.tsx` `(framePid ?? '') !== projectId`,
+        // `app/lib/work-board-live.decodeWorkBoardFrame`), and each socket lives
+        // on exactly one topic so nothing receives the frame twice.
+        const base = appWsTopicId(OWNER_USER_ID)
+        const scopedPrefix = `${base}:`
+        appWsRegistry.send(base, frame)
+        for (const topic of appWsRegistry.topics()) {
+          if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+        }
       } catch (err) {
         log.warn('work_board_push_failed', {
           project: changedKey,
@@ -3555,10 +3614,13 @@ export function buildOpenGraphComposer(
     // exists (projects reader / reminder store / work-board / Trident run store).
     // Deterministic READ-only aggregation, scoped to the turn's active project.
     statusSnapshotHolder.bind((input): StatusSnapshot => {
-      const activeProject =
-        input.project_id !== undefined
-          ? readProjectRows().find((p) => p.id === input.project_id)?.label ?? 'General'
-          : 'General'
+      // `/status` names the board too, and through the SAME mapping as the acks
+      // and the prompt block — this line used to own a second, subtly different
+      // one that fell back to `General` for an id it could not resolve. That is
+      // this PR's defect exactly: it printed `Project: General` beside an
+      // `active_work_items` count read from the REAL project scope below, so the
+      // count and the name described different boards.
+      const activeProject = boardLabelForProjectId(input.project_id ?? null, readProjectName)
       let pendingReminders = 0
       try {
         pendingReminders = new ReminderStore(db).listPending(input.project_slug).length
@@ -3622,10 +3684,18 @@ export function buildOpenGraphComposer(
     // `chat_id` so terminal-result delivery routes the completion message back to
     // the surface the build came from (board-dispatched runs previously carried a
     // null chat_id → the delivery no-op'd → silent completions).
-    const tridentDeliveryChatId = (projectId: string | null): string =>
-      projectId !== null && projectId.length > 0
-        ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
-        : appWsTopicId(OWNER_USER_ID)
+    //
+    // Through `normalizeBoardProjectId`, NOT a local `!== null && length > 0`
+    // test: General reaches this function as the `'general'` sentinel on the live
+    // path (the warm REPL's `/tool-call` scope — see the normalizer's docblock),
+    // and a bare non-empty check routed that to `app:<owner>:general`, a
+    // per-project topic no client subscribes to. Every message routed through
+    // here — a board-bound build's completion, a clarifying question, a
+    // deterministic board ack — was silently deliverable-to-nobody on General.
+    const tridentDeliveryChatId = (projectId: string | null): string => {
+      const scope = normalizeBoardProjectId(projectId)
+      return scope === null ? appWsTopicId(OWNER_USER_ID) : `${appWsTopicId(OWNER_USER_ID)}:${scope}`
+    }
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT
@@ -3643,6 +3713,13 @@ export function buildOpenGraphComposer(
     // a feature flag — Open always wires it; there is no env gate.
     const workBoardChatAck = buildWorkBoardChatAck({
       resolve_chat_id: (projectId) => tridentDeliveryChatId(projectId),
+      // Hand the ack a project-NAME lookup so every confirmation names the board
+      // it mutated in the owner's own words (the rail project name, or `General`).
+      // Read fresh per ack, so a project renamed mid-session is named correctly.
+      // `boardLabelForProjectId` owns the mapping — this closure never supplies a
+      // storage key or an internal id as a fallback, and is not called at all when
+      // the mutation is General-scoped.
+      project_name: readProjectName,
       post: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
     })
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
@@ -4631,9 +4708,15 @@ export function buildOpenGraphComposer(
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
+            // The block also NAMES the board (rail project name, or `General`) and
+            // tells the agent to name it when it confirms, so its own prose can no
+            // longer be mistaken for a claim about the board the owner happens to
+            // be watching. The DATA and the NAME are derived from the same
+            // `project_id`, so the block cannot mislabel the board it is showing.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
                 workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                boardLabelForProjectId(project_id, readProjectName),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the

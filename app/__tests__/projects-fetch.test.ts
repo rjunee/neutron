@@ -180,6 +180,7 @@ describe('fetchProjects (ISSUES #9)', () => {
     const base = (ms: number, id: string): Project => ({
       id,
       name: id,
+      label: id,
       description: '',
       emoji: '📁',
       last_activity_ms: ms,

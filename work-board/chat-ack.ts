@@ -38,10 +38,60 @@
  *     inline_active false→true flips, successful build dispatch/start). Human
  *     HTTP mutations and rejected dispatches post nothing — those callers simply
  *     never invoke it.
+ *   - EVERY ack NAMES THE BOARD it mutated, in the owner's own vocabulary — the
+ *     project name shown in the rail, or `General`. See "naming the board" below.
+ *
+ * NAMING THE BOARD
+ * ----------------
+ * The owner runs many boards side by side: one per project plus General. The ack
+ * used to name only the ITEM (`▸ On the Work Board: "…"`), so an ack for the
+ * `example-project` board read identically to one for General — and while the
+ * owner watched a pane holding none of it, a truthful confirmation about a
+ * DIFFERENT board was indistinguishable from a fabricated one. He reasonably
+ * called it a lie. Every text now carries `· <board>`.
+ *
+ * Three things the label must never be:
+ *   - the STORAGE KEY. `workBoardScopeKey` collapses General onto the instance
+ *     slug, so General's key is an internal identifier that must never reach the
+ *     chat. General is answered by {@link boardLabelForProjectId} BEFORE the
+ *     project lookup is called at all — there is no path on which resolving
+ *     General can produce, or even read, that key.
+ *   - an internal PROJECT ID. A `project_id` that no longer resolves to a rail
+ *     project (deleted mid-turn) degrades to {@link UNKNOWN_BOARD_LABEL}, never
+ *     to the raw id.
+ *   - AMBIGUOUS BETWEEN TWO BOARDS. A label that two boards answer to is not a
+ *     name; it is the defect wearing one. `general` is both the no-project
+ *     sentinel and a legal project id, and the owner's box already has a project
+ *     called `General` — so General and that project used to produce the SAME
+ *     label, and the rail showed two rows with one name. {@link
+ *     disambiguateProjectBoardLabel} qualifies the project side. The 48-char cap
+ *     was a second route to the same place (two names sharing a long prefix capped
+ *     to one label); {@link truncate} elides the MIDDLE so the distinguishing tail
+ *     survives.
+ *   - MORE THAN ONE LINE. Project names are owner-authored free text and are
+ *     validated for length only, so `\n` survives into `projects.name`. Both
+ *     consumers of this label splice it into a line-oriented medium — a chat
+ *     message and the `<work_board>` prompt block — where an interior newline
+ *     becomes a STANDALONE LINE that reads as its own message or its own
+ *     instruction. {@link sanitizeBoardLabel} is the chokepoint that collapses
+ *     it; see its docblock.
  */
+
+import { normalizeBoardProjectId } from './store.ts'
 
 /** Which board event the ack speaks to. Distinct dedup identities per item. */
 export type WorkBoardChatAckKind = 'card_added' | 'build_dispatched' | 'inline_started'
+
+/** The owner-facing name of the no-project board. NEVER the instance slug. */
+export const GENERAL_BOARD_LABEL = 'General'
+
+/**
+ * Shown when a non-null `project_id` does not resolve to a rail project (the
+ * project was deleted between the mutation and the ack). Deliberately a WORD,
+ * not the id — an internal id in the chat is exactly what (c) forbids, and an
+ * ack that silently omitted the board would re-open the defect this closes.
+ */
+export const UNKNOWN_BOARD_LABEL = 'unknown project'
 
 export interface WorkBoardChatAckInput {
   /** The composing turn's ACTIVE project (null on the General surface). */
@@ -58,33 +108,296 @@ export interface WorkBoardChatAck {
 
 const DEFAULT_DEDUP_WINDOW_MS = 30_000
 const MAX_TITLE_LEN = 96
+/** Board labels are owner-authored project names — cap them like a title. */
+export const MAX_BOARD_LABEL_LEN = 48
 
-function truncateTitle(title: string): string {
-  // Measure + slice by CODE POINTS, not UTF-16 code units: a raw `.slice` on a
-  // string whose astral char (emoji, etc.) straddles the cut index yields a lone
-  // surrogate → mojibake before the ellipsis. `Array.from` iterates code points.
-  const chars = Array.from(title)
-  if (chars.length <= MAX_TITLE_LEN) return title
-  return `${chars.slice(0, MAX_TITLE_LEN - 1).join('')}…`
+/** The elision mark {@link truncate} splices in. One grapheme, always visible. */
+const ELLIPSIS = '…'
+
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+/**
+ * Split into USER-PERCEIVED CHARACTERS (grapheme clusters), not code points.
+ *
+ * A code-point split is what shattered the emoji this module is specifically
+ * hardened to keep whole: `👨‍💻` is THREE code points joined by a ZWJ, so a
+ * code-point slice landing inside it emits a bare `👨` and drops the rest — the
+ * board named back to the owner is not the board in his rail, which is the defect
+ * {@link ZERO_WIDTH_JOINER} exists to prevent, reintroduced one layer down. A
+ * grapheme split cuts only BETWEEN glyphs, so no sequence can be cut in half.
+ */
+function graphemes(text: string): string[] {
+  return Array.from(GRAPHEME_SEGMENTER.segment(text), (s) => s.segment)
 }
 
-function textFor(kind: WorkBoardChatAckKind, title: string): string {
-  const t = truncateTitle(title)
+/**
+ * Cap `text` to `max` GRAPHEMES, eliding the MIDDLE and keeping the tail.
+ *
+ * WHY THE MIDDLE AND NOT THE TAIL. A head-only cap makes two DIFFERENT names
+ * render as ONE label whenever they share a long prefix, and owner-authored names
+ * are overwhelmingly prefix-shared with the distinguishing part at the END
+ * (`… Review — Phase 1` / `… Phase 2`, `… — v1` / `… — v2`). Both used to cap to
+ * the byte-identical `Q3 Financial Reporting and Compliance Review — …`, so the
+ * ack named a board the owner could not tell from its sibling — this PR's defect
+ * exactly, arriving through the length cap instead of through the mapping.
+ * Keeping both ends makes that class distinguishable.
+ *
+ * NOT a uniqueness GUARANTEE, and deliberately not: two names differing ONLY
+ * inside the elided middle still collapse. A guarantee needs a hash or an id
+ * suffix, and neither is the owner's vocabulary — which is the requirement this
+ * label exists to satisfy. The residual is recorded in the as-built note.
+ */
+function truncate(text: string, max: number): string {
+  const g = graphemes(text)
+  if (g.length <= max) return text
+  // One grapheme is spent on the ellipsis; split the rest head-heavy so an odd
+  // budget favours the beginning (where the name's subject usually is).
+  const keep = max - 1
+  const tail = Math.floor(keep / 2)
+  const head = keep - tail
+  const headText = g.slice(0, head).join('')
+  return tail === 0 ? `${headText}${ELLIPSIS}` : `${headText}${ELLIPSIS}${g.slice(g.length - tail).join('')}`
+}
+
+/**
+ * Every char class that can END A LINE or steer a rendered one: C0/C1 controls
+ * (`\n`, `\r`, `\t`, NEL), LINE/PARAGRAPH SEPARATOR, and the format chars
+ * (`\p{Cf}` — the bidi overrides, which reorder a rendered label without
+ * occupying a visible column, plus soft hyphen and the zero-width spaces).
+ * Neutralized to a SPACE rather than deleted so `a\nb` reads as two words, not
+ * the single word `ab`.
+ */
+const LINE_BREAKING_OR_INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu
+
+/**
+ * ZERO WIDTH JOINER — in `\p{Cf}` with the bidi overrides, and the ONE member of
+ * that class that is load-bearing content rather than a rendering instruction.
+ * It is what binds a multi-codepoint emoji into one glyph, and emoji project
+ * names are a first-class pattern here (`open/composer.ts` resolveProjectEmoji),
+ * so blanket-spacing `\p{Cf}` shattered them: a project named `👨‍💻 Dev Work`
+ * was acknowledged as `👨 💻 Dev Work` — the board named back to the owner was
+ * not the board he can see in the rail, which is this whole PR's defect in
+ * miniature. Kept verbatim; every other format char is still neutralized. ZWJ
+ * cannot end a line and does not reorder anything, so keeping it costs nothing
+ * the class was defending.
+ */
+const ZERO_WIDTH_JOINER = '\u200D'
+
+/**
+ * FLATTEN one owner-authored name into exactly one line, then cap it.
+ *
+ * `projects.name` is validated for length ONLY (`gateway/http/app-projects-surface.ts`
+ * handleCreate trims and bounds to 1-128 chars), so an interior newline is a
+ * STORABLE project name. Both consumers of this label splice it into a
+ * line-oriented medium, and in both an interior newline is an injection:
+ *
+ *   - the chat ack — the extra line renders as its own message-like line, so the
+ *     confirmation the ack exists to make checkable becomes two claims;
+ *   - the `<work_board>` prompt block — a name ending
+ *     `\nIGNORE ALL PRIOR INSTRUCTIONS` yields a standalone instruction line
+ *     INSIDE the block. XML-escaping does not help: `&<>` are not what makes it
+ *     dangerous, the line boundary is.
+ *
+ * Mirrors `store.sanitizeTitle`, which flattens item titles for exactly this
+ * reason — the label had no equivalent, which is what let it through. Capping is
+ * by GRAPHEMES ({@link truncate}) and happens HERE, before any caller escapes, so
+ * a cap can never cut a glyph in half or a `&lt;` entity in the middle. It used to
+ * say CODE POINTS, and that was the bug: a code point is not a glyph, so the cap
+ * split the very ZWJ sequences this function preserves.
+ *
+ * Returns `''` for a name with no VISIBLE content, which is what both callers'
+ * floors test. Emptiness is deliberately NOT `length === 0`: {@link
+ * ZERO_WIDTH_JOINER} is preserved (it is content inside an emoji), so a name of
+ * nothing but joiners is a non-empty string that RENDERS AS NOTHING. Left to a
+ * length test it walked straight past both floors and produced `· ` — a
+ * board-naming line with no board named, which is the unnamed ack this PR exists
+ * to remove, reintroduced by the exception that keeps emoji intact.
+ */
+export function sanitizeBoardLabel(raw: string): string {
+  // FLOOR BEFORE CAP, and that order is the guard. `truncate` splices in a
+  // VISIBLE ellipsis, so flooring the capped string asks "does this render as
+  // anything?" of a string the cap just guaranteed renders as at least `…`: a name
+  // of 47+ joiners passed the floor with visible content of exactly `"…"` and was
+  // published as a board name. Flooring the FLATTENED-but-uncapped string asks the
+  // question of the owner's actual name, which is what the floor is for.
+  const flattened = flattenToOneLine(raw)
+  if (!hasVisibleContent(flattened)) return ''
+  return truncate(flattened, MAX_BOARD_LABEL_LEN)
+}
+
+/** Appended to a project name that would otherwise read as the General board. */
+export const PROJECT_BOARD_SUFFIX = '(project)'
+
+/**
+ * Make a PROJECT's owner-facing name distinguishable from the General board.
+ *
+ * THE DEFECT THIS CLOSES. `general` is both the reserved no-project sentinel AND
+ * a legal project id, and the owner's instance already has a real project called
+ * `General` (`app/lib/project-rail-view.ts` records `GET /api/app/projects`
+ * returning `id: 'general'` on his box). Reserving the SLUG — this PR's
+ * `onboarding/wow-moment/project-identity.ts` — stops a NEW project minting that
+ * id; it does nothing about the NAME, and the name is the whole owner-facing
+ * problem. Before this, the General board and a project named `General` produced
+ * the byte-identical label `General` from `boardLabelForProjectId`, and the two
+ * rail rows read identically too. So the ack named a board, the owner looked at
+ * the rail, and two rows answered to the name — which is indistinguishable from
+ * the ack naming the wrong board.
+ *
+ * The PROJECT is disambiguated rather than General because General is the fixed,
+ * unnameable board every instance has, and the project is the one the owner
+ * chose the name of — so the qualifier lands on the thing that has an alternative.
+ *
+ * ONE rule, applied SERVER-SIDE at both seams that produce an owner-facing board
+ * name — {@link boardLabelForProjectId} (the acks, the `<work_board>` block, the
+ * `/status` line) and the project rail's `label` (`open/composer.ts`
+ * `readProjectRows`, which BOTH the web and the mobile rail render verbatim). The
+ * rail label is server-computed, so there is no client copy of this rule to drift
+ * and no second spelling to keep in parity.
+ *
+ * Case- and whitespace-insensitive, on the FLATTENED name: `general`, `General `
+ * and `General\n` all read as `General` to the owner, so all three collide. A
+ * non-colliding name is returned UNTOUCHED (no flatten, no cap) — the rail shows
+ * full names and this function must not quietly become a second cap.
+ */
+export function disambiguateProjectBoardLabel(name: string): string {
+  const flattened = flattenToOneLine(name).toLowerCase()
+  const general = GENERAL_BOARD_LABEL.toLowerCase()
+  // The QUALIFIED form is reserved too, and it has to be. Qualifying only the
+  // bare name left the output colliding with a DIFFERENT input: a project
+  // literally named `General (project)` was returned untouched, byte-identical
+  // to what a project named `General` becomes — so the rule that exists to make
+  // two boards distinguishable produced two boards with one name, one step
+  // further out. Qualifying it again (`General (project) (project)`) is ugly and
+  // correct; it is also self-terminating, because the result is a new string
+  // only ever produced from an input the owner deliberately chose to collide.
+  const collides = flattened === general || flattened === `${general} ${PROJECT_BOARD_SUFFIX}`
+  return collides ? `${name} ${PROJECT_BOARD_SUFFIX}` : name
+}
+
+/**
+ * Every char that occupies NO visible column on its own, yet is neither
+ * whitespace (so `trim` leaves it) nor removed by the flatten step (so it
+ * survives to be counted as content):
+ *
+ *   - U+200D ZERO WIDTH JOINER — {@link ZERO_WIDTH_JOINER}, deliberately kept by
+ *     the flatten because inside an emoji it is content;
+ *   - U+FE00-U+FE0F VARIATION SELECTORS (incl. VS16, the emoji presentation
+ *     selector) and the supplementary U+E0100-U+E01EF — they restyle a
+ *     PRECEDING glyph, so with no glyph in front they style nothing;
+ *   - `\p{M}` COMBINING MARKS — likewise decorations on a preceding base;
+ *   - the BLANK-BUT-NOT-WHITESPACE fillers U+115F, U+1160, U+3164, U+FFA0
+ *     (Hangul) and U+2800 (BRAILLE PATTERN BLANK), which Unicode classes as
+ *     ordinary letters/symbols yet which render as nothing at all.
+ *
+ * The floor used to strip only the joiner, so every one of the others walked
+ * straight through it: a project name of a single U+FE0F is a "non-empty"
+ * string, passes, and publishes `· ` — a board-naming line with no board
+ * named, which is the unnamed ack this module exists to remove. Reachable
+ * because `projects.name` is validated for LENGTH only.
+ *
+ * Escapes, not the literal characters: a source line of invisible bytes cannot
+ * be reviewed, and cannot be diffed when one of them is later dropped.
+ * Stripping happens for the TEST only — the label itself is never rewritten
+ * here.
+ */
+const INVISIBLE_ALONE =
+  /[\u200D\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u115F\u1160\u3164\uFFA0\u2800\p{M}]/gu
+
+/** Does this label render as anything at all? See {@link INVISIBLE_ALONE}. */
+function hasVisibleContent(label: string): boolean {
+  return label.replace(INVISIBLE_ALONE, '').trim().length > 0
+}
+
+/** {@link sanitizeBoardLabel}'s flatten step without its cap, for the longer
+ *  title slot (titles cap at {@link MAX_TITLE_LEN}, labels at 48). */
+function flattenToOneLine(raw: string): string {
+  return raw
+    .replace(LINE_BREAKING_OR_INVISIBLE, (ch) => (ch === ZERO_WIDTH_JOINER ? ch : ' '))
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * Resolve ONE project id to its rail name (`projects.name`), or null/undefined
+ * when the id names no live project.
+ *
+ * A single-row lookup on purpose. This is called on every ack AND every agent
+ * turn to answer one question — what is this project called — and the full rail
+ * read it replaced (`readProjectRows()`) is O(projects) SQL plus a per-project
+ * unread count and rail-extras query, all of it discarded but one name.
+ */
+export type WorkBoardProjectNameLookup = (project_id: string) => string | null | undefined
+
+/**
+ * THE one mapping from a turn's `project_id` to the board name the owner reads.
+ * Every owner-facing board name resolves through here — the three deterministic
+ * acks, the `<work_board>` prompt block, and the `/status` project line.
+ *
+ * General (`null` / blank / the `general` sentinel) short-circuits to
+ * {@link GENERAL_BOARD_LABEL} and `lookup` IS NOT CALLED: General's storage key
+ * is the instance slug and must never surface, and there is no rail row to find.
+ * A real project resolves to its rail name, DISAMBIGUATED against the General
+ * board by {@link disambiguateProjectBoardLabel} then flattened + capped by
+ * {@link sanitizeBoardLabel}; a miss, a blank name, or a THROWING lookup degrades
+ * to {@link UNKNOWN_BOARD_LABEL}, never the raw id.
+ *
+ * The value it returns is UNIQUE PER BOARD for the two cases the owner actually
+ * hits — General vs a project named `General`, and two long names that differ at
+ * the end — which is what makes an ack checkable against the rail. It is not
+ * unique in general; see {@link truncate} for the residual and why closing it
+ * would cost the owner's vocabulary.
+ */
+export function boardLabelForProjectId(
+  project_id: string | null | undefined,
+  lookup: WorkBoardProjectNameLookup,
+): string {
+  const pid = normalizeBoardProjectId(project_id)
+  if (pid === null) return GENERAL_BOARD_LABEL
+  let found: string | null | undefined
+  try {
+    found = lookup(pid)
+  } catch {
+    // A project-store read failure degrades the LABEL only. The caller still
+    // delivers: an ack swallowed for want of a name is the silent chat the ack
+    // exists to prevent.
+    found = null
+  }
+  // Disambiguate BEFORE sanitizing: the collision test needs the owner's whole
+  // name, and the suffix must be inside the cap's budget so a colliding name can
+  // never be capped back down to the bare `General` it was distinguished from.
+  const label = sanitizeBoardLabel(
+    disambiguateProjectBoardLabel(typeof found === 'string' ? found : ''),
+  )
+  return label.length === 0 ? UNKNOWN_BOARD_LABEL : label
+}
+
+function textFor(kind: WorkBoardChatAckKind, title: string, board: string): string {
+  // Flatten the title too. It arrives from `store.sanitizeTitle` on every wired
+  // path today, but this is the last hop before an owner-facing line and the
+  // ack must not inherit its one-line guarantee from a caller.
+  const t = truncate(flattenToOneLine(title), MAX_TITLE_LEN)
   switch (kind) {
     case 'card_added':
-      return `▸ On the Work Board: "${t}"`
+      return `▸ On the Work Board · ${board}: "${t}"`
     case 'build_dispatched':
-      return `⑂ Build dispatched: "${t}" — running autonomously; the result will post here when it lands.`
+      return `⑂ Build dispatched · ${board}: "${t}" — running autonomously; the result will post here when it lands.`
     case 'inline_started':
-      return `› Working on "${t}" now — I'll post here when it's done.`
+      return `› Started "${t}" · ${board} — I'll post here when it's done.`
   }
 }
 
 /**
  * Build the shared ack poster.
  *
- * @param deps.resolve_chat_id  maps the turn's `project_id` (null → General) to
- *   the chat topic id the message lands in — wired to `tridentDeliveryChatId`.
+ * @param deps.resolve_chat_id  maps a NORMALIZED board scope (`null` → General,
+ *   never the `'general'` sentinel — see `normalizeBoardProjectId`) to the chat
+ *   topic id the message lands in — wired to `tridentDeliveryChatId`. It receives
+ *   the SAME normalized value the label is resolved from, which is the invariant
+ *   that keeps the named board and the delivered-to board identical.
+ * @param deps.project_name     resolve ONE project id to its rail name, so every
+ *   text can NAME its board. Read fresh per ack (a mid-session rename is named
+ *   correctly) and NOT called at all on General. REQUIRED: an ack that cannot name
+ *   its board is the defect, so there is no unlabeled path.
  * @param deps.post             durable+live delivery — wired to the #337 app-ws
  *   poster (`buildClarifyPoster.post`), so the ack persists AND fans live
  *   exactly like a normal agent reply. Late-binding safe: a no-op if unbound.
@@ -93,6 +406,7 @@ function textFor(kind: WorkBoardChatAckKind, title: string): string {
  */
 export function buildWorkBoardChatAck(deps: {
   resolve_chat_id: (project_id: string | null) => string
+  project_name: WorkBoardProjectNameLookup
   post: (chat_id: string, text: string) => void
   now?: () => number
   dedup_window_ms?: number
@@ -130,8 +444,22 @@ export function buildWorkBoardChatAck(deps: {
         // `post` throws, the catch swallows it and the stamp is NOT set, so the
         // next fire for this (item,kind) can still land instead of being muted
         // for the whole window with no ack ever delivered.
-        const chatId = deps.resolve_chat_id(input.project_id)
-        deps.post(chatId, textFor(input.kind, input.title))
+        // ONE normalization, threaded to BOTH the label and the destination, so
+        // the board this ack NAMES and the topic it LANDS IN can never be
+        // different boards. They were: the sentinel `'general'` (which is what a
+        // live General turn actually carries — see `normalizeBoardProjectId`)
+        // normalized to `General` in the label and to a per-project topic
+        // `app:<owner>:general` in the routing, so the General surface never
+        // received its own ack. Resolving the scope ONCE here is the fix; passing
+        // `input.project_id` to `resolve_chat_id` is the bug.
+        // `boardLabelForProjectId` owns the project read and guards it: a
+        // throwing lookup degrades to `unknown project` and this ack still
+        // DELIVERS. On General the lookup is never called, so a project-store
+        // failure cannot affect a General ack at all.
+        const scope = normalizeBoardProjectId(input.project_id)
+        const board = boardLabelForProjectId(scope, deps.project_name)
+        const chatId = deps.resolve_chat_id(scope)
+        deps.post(chatId, textFor(input.kind, input.title, board))
         lastPostedAt.set(key, t)
       } catch {
         // The ack must NEVER perturb the tool result — swallow everything.

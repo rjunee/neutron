@@ -32,10 +32,39 @@ import type { ImportResult } from '../history-import/types.ts'
 import type { CapturedProject } from './action-types.ts'
 
 /**
+ * RESERVED project id: the work-board / wire sentinel for the no-project
+ * ("General") scope. A real project may NOT own it.
+ *
+ * A project literally named "General" slugified to exactly `general`, and that
+ * word is the sentinel every seam reads as "no project": the Work Board collapses
+ * it onto the instance bucket (`workBoardScopeKey`), and the owner-facing label
+ * short-circuits it to `General` WITHOUT a rail lookup. So such a project's board
+ * writes landed on the General board while its acks read `General` — truthfully
+ * naming a board that was not the one in the rail, undetectably. Duplicate
+ * "General" projects are not hypothetical here either; see the note on
+ * `InMemoryProjectSettingsStore.get` in `gateway/http/app-projects-surface.ts`
+ * about a stray navigation manufacturing one.
+ *
+ * Reserving it at the ONE slugifier closes every create path at once (the HTTP
+ * create surface, the `create_project` agent tool, and the onboarding finalizer
+ * all route through `createProjectRow` → here). The suffixed id keeps the owner's
+ * chosen NAME intact — only the internal id shifts, and only for this one word.
+ *
+ * MUST equal `GENERAL_WORK_BOARD_PROJECT_ID` in `work-board/store.ts`. Declared
+ * here rather than imported so this module keeps its dependency-free shape (it is
+ * mirrored into the importer's leaf-local copy); a drift-guard in
+ * `tests/integration/work-board-ack-names-board.open.test.ts` asserts the two are
+ * the same string, the same arrangement `defaultProjectIdSlugifier` /
+ * `humaniseProjectId` already use.
+ */
+const RESERVED_GENERAL_PROJECT_ID = 'general'
+
+/**
  * Canonical project-id slugifier. Lowercase, replace any run of
  * non-`[a-z0-9._-]` chars with `-`, trim leading/trailing `-`, cap at 64
  * chars. Returns `'project'` when the input collapses to empty
- * (all-emoji / all-punctuation names).
+ * (all-emoji / all-punctuation names), and never returns the reserved
+ * {@link RESERVED_GENERAL_PROJECT_ID}.
  *
  * MUST stay identical to `defaultProjectIdSlugifier` in
  * `gateway/wiring/build-onboarding-handoff.ts` (which now
@@ -46,7 +75,24 @@ export function slugifyProjectId(name: string): string {
   const replaced = lowered.replace(/[^a-z0-9._-]+/g, '-')
   const trimmed = replaced.replace(/^-+|-+$/g, '')
   const capped = trimmed.slice(0, 64)
-  return capped.length === 0 ? 'project' : capped
+  if (capped.length === 0) return 'project'
+  // Suffix rather than reject: a create must still succeed, and the owner's NAME
+  // is unaffected — `projects.name` keeps "General", only the id changes.
+  // Applied after the cap so the result stays within bounds.
+  //
+  // THE SUFFIX IS A TRAILING `-`, AND THAT IS THE WHOLE POINT. The obvious
+  // spelling `general-project` is REACHABLE by this very function — a project
+  // genuinely named "General Project" slugifies to it — so the escape hatch for
+  // one collision silently minted another, and `resolveBindTarget`
+  // (`gateway/wiring/project-create.ts`) resolves a colliding slug to the
+  // EXISTING project, so two distinct names would have quietly become one
+  // project. A trailing `-` cannot be produced from any input at all, because the
+  // trim two lines up strips exactly that: whatever a name slugifies to, it never
+  // ends in `-`. Collision-proof BY CONSTRUCTION rather than by picking a word we
+  // hope nobody uses — the same reasoning that made the mobile rail's General
+  // sentinel `~general` (`app/lib/project-rail-view.ts`), a value the id
+  // validator itself rejects.
+  return capped === RESERVED_GENERAL_PROJECT_ID ? `${capped}-` : capped
 }
 
 /** Hard cap on the synthesized at-rest context paragraph. */

@@ -135,6 +135,36 @@ export const MAX_DESIGN_DOC_REF_LEN = 2048
 export const GENERAL_WORK_BOARD_PROJECT_ID = 'general'
 
 /**
+ * THE one normalization of a turn's `project_id` to a board scope: a real
+ * project id, or `null` for General.
+ *
+ * General arrives in FOUR spellings depending on which seam produced it —
+ * `null` (the composer's own active project on the General surface), `undefined`,
+ * `''` (the mobile client subscribes with an empty string), and the literal
+ * `'general'` sentinel (`build-live-agent-turn.ts` sets
+ * `turn.project_id ?? 'general'` for the warm-pool key, and that value reaches
+ * the agent tools as `ToolCallContext.project_id` via the persistent REPL's
+ * `/tool-call` sink). Every consumer that branches on "is this General?" MUST
+ * branch through here, because a consumer that tests only `null`/`''` treats the
+ * sentinel as a real project.
+ *
+ * THAT WAS A LIVE DEFECT, not a hypothetical: the ack's board LABEL normalized
+ * the sentinel (→ `General`, correct) while its chat ROUTING did not (→ the
+ * per-project topic `app:<owner>:general`, which the General surface does not
+ * subscribe to). The ack named the right board and delivered it to a topic
+ * nobody was listening on — the silent chat the ack exists to prevent, wearing a
+ * correct label. One normalizer, applied ONCE per ack and threaded to both, is
+ * what makes the label and the destination provably the same board.
+ */
+export function normalizeBoardProjectId(
+  project_id: string | null | undefined,
+): string | null {
+  const pid = typeof project_id === 'string' ? project_id.trim() : ''
+  if (pid.length === 0 || pid === GENERAL_WORK_BOARD_PROJECT_ID) return null
+  return pid
+}
+
+/**
  * The per-project Work Board STORAGE KEY (the `project_slug` column value),
  * scoped under the single owner.
  *
@@ -165,9 +195,10 @@ export function workBoardScopeKey(
   owner_slug: string,
   project_id: string | null | undefined,
 ): string {
-  const pid = typeof project_id === 'string' ? project_id.trim() : ''
-  if (pid.length === 0 || pid === GENERAL_WORK_BOARD_PROJECT_ID) return owner_slug
-  return pid
+  // Through {@link normalizeBoardProjectId} so the storage key and every
+  // owner-facing label agree on which ids mean General — by construction, not by
+  // two copies of the same three-way test drifting apart.
+  return normalizeBoardProjectId(project_id) ?? owner_slug
 }
 
 /**
