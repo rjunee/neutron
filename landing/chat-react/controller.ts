@@ -159,13 +159,15 @@ export interface ChatViewModel {
   liveActivity: { label: string; detail?: string } | null
   /**
    * Chat-typing persistence — true while the active project's Work Board has at
-   * least one `in_progress` item (the SAME signal that flashes the Work-tab
-   * active-work dot). The typing indicator ORs this in with `awaitingFirstToken`
-   * so the dots stay visible for the WHOLE processing window — including a long
-   * or background build that continues AFTER the ack turn settles (the agent
-   * acks, dispatches the build, `awaitingReply` clears, but the board still shows
-   * work in flight). Clears the moment the board reports no `in_progress` item
-   * (work marked done), so the dots stop exactly when the work completes.
+   * least one `in_progress` item — the SAME signal that flashes the Work-tab
+   * active-work dot, which is now its ONLY consumer.
+   *
+   * It USED to be OR'd into the chat typing indicator so the dots spanned a
+   * background build that outlives the ack turn. The owner rejected that on
+   * 2026-08-11: the turn had finished and the dots were still spinning, which
+   * reads as "a message is coming" when none is. Board work has its own progress
+   * affordance. The indicator is turn-only now (`ChatApp.tsx`), so do not
+   * reintroduce the OR without re-deciding that with him.
    */
   hasActiveWork: boolean
   /**
