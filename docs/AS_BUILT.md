@@ -34,6 +34,33 @@ Tested against the production composer's output rather than a hand-built config
 literal, so it fails if `substrates.ts` stops passing the profile.
 Mutation-verified: removing the window from the profile fails four tests, and
 keeping it while the factory silently stops threading it fails two.
+## 2026-08-11 — a nit may not cost a round (#184)
+
+`enforceSeverityGate` in `trident/inner-workflow.mjs` now enforces
+deterministically what the synthesis prompt has always merely asserted: a
+non-blocking finding does not block a merge on its own. A `REQUEST_CHANGES` is
+downgraded to `APPROVE` only when every finding is explicitly `minor` or `nit`,
+and the findings survive on the verdict so they reach the PR as comments.
+
+The rule had no enforcement, so it held only as far as one model's obedience.
+It did not hold: PR #171 saw a reviewer seat return APPROVE with four MINOR/NIT
+findings while the synthesis returned REQUEST_CHANGES, and on 2026-08-11 six of
+six capped lanes terminated REQUEST_CHANGES with none converging — a reviewer
+asked for findings always finds some, so a loop that blocks on non-blocking
+findings cannot terminate by construction.
+
+The gate can only turn a rejection into a pass, so it refuses whenever anything
+is ambiguous. It enumerates the NON-blocking severities rather than the blocking
+ones, which makes an unknown, absent or misspelled severity block rather than
+pass; a rejection carrying no findings at all is left untouched; and it runs
+first in the chain so the CI gate and the cross-model gate both retain the last
+word. `blocker` and `major` still veto, as does red CI, a deferred reviewer, and
+the mutation-prover phase.
+
+Tested against the real function extracted from the `.mjs` and evaluated rather
+than a hand-copied duplicate. 13 tests, 38 assertions, mutation-verified:
+admitting `major` to the non-blocking set fails two of them, and dropping the
+empty-findings guard fails one.
 
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
 
