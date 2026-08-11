@@ -282,7 +282,28 @@ export class OwnerMcpServerStore {
     if (spec === null) return { ok: false, errors, servers: await this.list() }
 
     let revoked = false
-    const result = await this.serialize(async () => {
+    const markRevoked = (): void => {
+      revoked = true
+    }
+    // ANNOUNCED FROM A `finally`, so a throw between the invalidating spec write and the
+    // end of the critical section still retires the child that write un-authorized. The
+    // announcement swallows its own failure ({@link announceRevocation}), so awaiting it
+    // here cannot mask the original error on its way out.
+    try {
+      return await this.installLocked(spec, env, markRevoked)
+    } finally {
+      // OFF THE WRITE CHAIN — see {@link announceRevocation}.
+      if (revoked) await this.announceRevocation()
+    }
+  }
+
+  /** {@link install}'s body. `markRevoked` is described at its call site. */
+  private async installLocked(
+    spec: OwnerMcpServerSpec,
+    env: Record<string, string>,
+    markRevoked: () => void,
+  ): Promise<McpServerWriteResult> {
+    return await this.serialize(async () => {
       const existing = this.specs()
       const isNew = !existing.some((s) => s.name === spec.name)
       if (isNew && existing.length >= MCP_SERVERS_MAX) {
@@ -302,8 +323,31 @@ export class OwnerMcpServerStore {
         : existing.map((s) => (s.name === spec.name ? spec : s))
       await writeOwnerMcpServers(this.deps.db, this.deps.project_slug, next)
 
+      // RECORDED IMMEDIATELY AFTER THE WRITE THAT INVALIDATES THE LIVE SPEC, and it used
+      // to be recorded at the END of this critical section. The reasoning for both is in
+      // the long comment below; the position is what makes it survive a partial failure.
+      //
+      // The write above is the moment the durable spec stops authorizing what the warm
+      // child is running. Everything after it can throw — the credential write encrypts
+      // and hits the database, `requestApproval` inserts through the same mutex — and a
+      // throw there unwinds out of `serialize` without reaching the end of this function
+      // at all, so the flag was never set and the announcement never ran. The old,
+      // still-APPROVED command kept running, holding its old env, with the durable spec
+      // no longer describing it and nothing scheduled to reap it. Setting the flag here
+      // means the caller's `finally` announces on the failure path too: the revocation
+      // has already effectively happened, so the eviction has to follow it whether or not
+      // the rest of the install completed.
+      const grantChanged =
+        previous !== undefined &&
+        computeMcpServerGrantHash(previous) !== computeMcpServerGrantHash(spec)
+      const valuesChanged = previous !== undefined && !sameEnvValues(previousEnv, env)
+      if (grantChanged || valuesChanged) markRevoked()
+
       if (spec.env_names.length > 0) {
-        await this.deps.credentials.set(this.deps.owner_slug, {
+        // `setReserved`, not `set`: this store OWNS the `mcp_env.*` namespace and the
+        // generic `set` now refuses it. See § RESERVED NAMESPACES in
+        // `project-credentials/store.ts` for what the generic path was skipping.
+        await this.deps.credentials.setReserved(this.deps.owner_slug, {
           service: mcpServerEnvService(spec.name),
           plaintext: JSON.stringify(env),
           scope: 'global',
@@ -340,16 +384,11 @@ export class OwnerMcpServerStore {
       // child that holds it alive for an unbounded stretch is the exact hazard the
       // retire-on-revocation path exists to close, arriving by a door the hash cannot see
       // through: the grant covers the env-var NAMES, deliberately never the values.
-      const grantChanged =
-        previous !== undefined &&
-        computeMcpServerGrantHash(previous) !== computeMcpServerGrantHash(spec)
-      const valuesChanged = previous !== undefined && !sameEnvValues(previousEnv, env)
-      if (grantChanged || valuesChanged) revoked = true
+      //
+      // THE FLAG ITSELF IS SET ABOVE, right after the spec write — see the comment there
+      // for why the end of this section was too late.
       return { ok: true, errors: [], servers: await this.list() }
     })
-    // OFF THE WRITE CHAIN — see {@link announceRevocation}.
-    if (revoked) await this.announceRevocation()
-    return result
   }
 
   /**
@@ -416,9 +455,28 @@ export class OwnerMcpServerStore {
   }
 
   async remove(name: unknown): Promise<{ removed: boolean; servers: ReadonlyArray<McpServerStatus> }> {
-    const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
     let revoked = false
-    const result = await this.serialize(async () => {
+    // IN A `finally`, for the reason spelled out in {@link install}: the revoke here is
+    // durable before the flag is set, so a throw in anything after it — the forget, the
+    // spec write, the closing `list()` — must not swallow the eviction of the child that
+    // revoke just un-authorized.
+    try {
+      return await this.removeLocked(name, () => {
+        revoked = true
+      })
+    } finally {
+      // OFF THE WRITE CHAIN, and still after the spec write — see {@link announceRevocation}.
+      if (revoked) await this.announceRevocation()
+    }
+  }
+
+  /** {@link remove}'s body. Runs INSIDE {@link serialize}. */
+  private async removeLocked(
+    name: unknown,
+    markRevoked: () => void,
+  ): Promise<{ removed: boolean; servers: ReadonlyArray<McpServerStatus> }> {
+    const wanted = typeof name === 'string' ? name.trim().toLowerCase() : ''
+    return await this.serialize(async () => {
       const existing = this.specs()
       const target = existing.find((s) => s.name === wanted)
       if (target === undefined) return { removed: false, servers: await this.list() }
@@ -429,6 +487,19 @@ export class OwnerMcpServerStore {
           if (row.tool_name === tool_name) await manager.cancelPending(row.id)
         }
         await manager.revokeApproved(this.deps.project_slug, tool_name)
+        // MARKED AT THE REVOKE, not after the spec write. This is the instant the grant
+        // stops being in force, and everything below it can throw: the forget hits the
+        // credential store, the spec write hits `instance_metadata`, and a throw in either
+        // unwinds out of `serialize` — leaving, before this moved, a revoked grant whose
+        // warm child nobody had been told to retire.
+        //
+        // Moving it does NOT re-open the race the previous comment here guarded. That
+        // comment worried a respawn would read a list still containing this server and
+        // re-wire it; it cannot, because the revoke on the line above already means
+        // `resolveApproved` refuses it whatever the list says. And the ANNOUNCEMENT still
+        // fires after the whole critical section either way — it is in the caller's
+        // `finally`, not here.
+        markRevoked()
       }
       await this.forgetSecrets(wanted)
       await writeOwnerMcpServers(
@@ -436,14 +507,14 @@ export class OwnerMcpServerStore {
         this.deps.project_slug,
         existing.filter((s) => s.name !== wanted),
       )
-      // AFTER the spec write, so a child respawned by the eviction reads the list
-      // WITHOUT this server rather than racing the delete and re-wiring it.
-      revoked = true
+      // AND AGAIN, UNCONDITIONALLY. Setting the flag twice is free, and it keeps the
+      // announcement firing on the path where `approvals()` returned null so the block
+      // above was skipped: nothing was approved in that case, but the SPEC is now gone, and
+      // a child spawned while the manager was available is running a server this instance
+      // no longer installs. Dropping the spec is itself a withdrawal of the answer.
+      markRevoked()
       return { removed: true, servers: await this.list() }
     })
-    // OFF THE WRITE CHAIN, and still after the spec write — see {@link announceRevocation}.
-    if (revoked) await this.announceRevocation()
-    return result
   }
 
   /**
@@ -510,14 +581,20 @@ export class OwnerMcpServerStore {
     // `requestApproval` are both already invoked from inside `install`'s critical
     // section), so there is no re-entrancy to deadlock on.
     let revoked = false
-    const result = await this.serialize(() =>
-      this.decideLocked(name, decision, expect_grant_hash, () => {
-        revoked = true
-      }, decided_by),
-    )
-    // OFF THE WRITE CHAIN — see {@link announceRevocation}.
-    if (revoked) await this.announceRevocation()
-    return result
+    // IN A `finally`, for the reason spelled out in {@link install}. A deny revokes and
+    // THEN records; `respondApproval` and the closing `list()` both come after, and a throw
+    // in either used to discard the eviction of a child the revoke had just un-authorized —
+    // the stop button reporting a failure while the process it was meant to stop lived on.
+    try {
+      return await this.serialize(() =>
+        this.decideLocked(name, decision, expect_grant_hash, () => {
+          revoked = true
+        }, decided_by),
+      )
+    } finally {
+      // OFF THE WRITE CHAIN — see {@link announceRevocation}.
+      if (revoked) await this.announceRevocation()
+    }
   }
 
   /**
@@ -766,7 +843,8 @@ export class OwnerMcpServerStore {
    */
   private readSecrets(name: string): Record<string, string> {
     try {
-      const resolved = this.deps.credentials.resolve(
+      // `resolveReserved` — the generic `resolve` answers null for this namespace.
+      const resolved = this.deps.credentials.resolveReserved(
         this.deps.owner_slug,
         '',
         mcpServerEnvService(name),
@@ -795,7 +873,8 @@ export class OwnerMcpServerStore {
   }
 
   private async forgetSecrets(name: string): Promise<void> {
-    await this.deps.credentials.delete(this.deps.owner_slug, '', mcpServerEnvService(name))
+    // `deleteReserved` — see the note at the `setReserved` write.
+    await this.deps.credentials.deleteReserved(this.deps.owner_slug, '', mcpServerEnvService(name))
   }
 }
 

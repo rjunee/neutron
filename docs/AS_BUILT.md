@@ -8724,3 +8724,41 @@ would shrink the healthy one-server case to bound two local servers that are eff
 never slow.
 
 Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.
+
+## 2026-08-10 — the MCP secret namespace had a second writer, and it skipped the eviction
+
+An installed MCP server's env VALUES live in `project_credentials` at global scope under
+`mcp_env.<name>`, sharing that table's AES envelope. `sanitizeService` accepts `.`, so the
+namespace was a legal generic service name and `POST /api/app/credentials` +
+`DELETE /api/app/credentials/mcp_env.<name>` both reached it — skipping the MCP store's
+validation and, the part that matters, its `onRevoked` announcement. So a generic overwrite
+rotated a secret while leaving the warm `claude` child holding the PREVIOUS one alive and
+unreaped, and a generic delete left the server installed, approved, secret-less, and still
+running. The namespace is now reserved in `project-credentials/store.ts`: `set`, `delete` and
+`resolve` refuse it and the owning module uses explicit `setReserved` / `deleteReserved` /
+`resolveReserved` (separate methods, not a flag, so the privileged path is greppable). The
+enumerations omit reserved rows — the Admin tab was rendering one per installed server with a
+Delete button that now refuses, and `<available_services>` was advertising a secret blob to
+the agent as a usable service. `handleDelete` maps the refusal to 400; unwrapped it was a 500.
+
+Two more, both in the "the fix is durable but the eviction was lost" family. A pending spawn
+with NO dispatch behind it — the supervision or admin respawn, which calls
+`getOrSpawnSession` directly and so never increments `committedDispatches` — was marked
+`poisoned` + `retireOnIdle` by `evictWarmReplsForMcpSurfaceChange` and then never retired,
+because those flags are read by a turn's completion path and no turn existed. The child ran
+on under the revoked configuration until some future dispatch. The callback now retires a
+genuinely idle session itself, re-reading every busy signal after the spawn resolves so a
+dispatch that committed mid-spawn is still spared. Worth naming: a test asserting on the two
+flags would have PASSED — they were set, and correctly; what was missing was a reader. And
+`install`/`remove`/`decide` now announce from a `finally`, with the flag set at the write that
+un-authorizes rather than at the end of the critical section — a throw in the credential
+write, in `requestApproval`, or in `respondApproval` unwound out of `serialize` and discarded
+the eviction of a child the durable spec no longer described.
+
+Five mutants run, five dead, including one proving the no-dispatch retire did not buy itself
+by stranding the committed case (6 failures, 4 of them pre-existing tests). Four other
+findings this round were already fixed by earlier rounds and one was false — `retireOnIdle`
+reported as write-only by a grep for four symbols that do not exist in the tree. Verified,
+not re-fixed.
+
+Detail: `docs/as-built/2026-08-09-installable-mcp-servers.md`.

@@ -197,3 +197,66 @@ describe('the global route is the one writer of instance-wide state', () => {
     expect(await handler(get('http://x/api/app/credentialsomething'))).toBeNull()
   })
 })
+
+describe('THE MCP SECRET NAMESPACE IS NOT REACHABLE OVER HTTP', () => {
+  // An installed MCP server's env VALUES live in this same table under
+  // `mcp_env.<server>` (`gateway/mcp-servers/store.ts`). Because `service` accepts `.`,
+  // both of these routes reached that namespace — and reaching it here skips the MCP
+  // store's `onRevoked` announcement, which is what retires the warm `claude` child still
+  // holding the OLD secret in its environment. So the write rotated a secret while the
+  // process holding the previous one stayed alive and unreaped, and the delete left the
+  // server installed, approved, secret-less, and still running.
+  //
+  // Asserted at the ROUTE, not just at the store, because the status code is part of the
+  // fix: an unwrapped store throw on the DELETE path answered 500 for what is a 400.
+
+  const MCP_SERVICE = 'mcp_env.example-server'
+
+  test('POST /api/app/credentials refuses the namespace with a 400', async () => {
+    const res = await handler(post(GLOBAL_URL, { service: MCP_SERVICE, token: '{}' }))
+    expect(res?.status).toBe(400)
+    const body = (await res?.json()) as { code?: string }
+    expect(body.code).toBe('reserved_service')
+    // AND NOTHING LANDED — a 400 that still wrote is the failure a status-only test misses.
+    expect(store.resolveReserved(OWNER, undefined, MCP_SERVICE)).toBeNull()
+  })
+
+  test('DELETE /api/app/credentials/<service> refuses with a 400, not a 500', async () => {
+    await store.setReserved(OWNER, {
+      service: MCP_SERVICE,
+      plaintext: '{"EXAMPLE_API_KEY":"v"}',
+      scope: 'global',
+    })
+    const res = await handler(del(`${GLOBAL_URL}/${MCP_SERVICE}`))
+    expect(res?.status).toBe(400)
+    const body = (await res?.json()) as { code?: string }
+    expect(body.code).toBe('reserved_service')
+    // The secret is intact, so the still-running child's grant was not silently orphaned.
+    expect(store.resolveReserved(OWNER, undefined, MCP_SERVICE)?.plaintext).toBe(
+      '{"EXAMPLE_API_KEY":"v"}',
+    )
+  })
+
+  test('the PROJECT family cannot reach it either', async () => {
+    const written = await handler(post(PROJECT_URL, { service: MCP_SERVICE, token: '{}' }))
+    expect(written?.status).toBe(400)
+    const deleted = await handler(del(`${PROJECT_URL}/${MCP_SERVICE}`))
+    expect(deleted?.status).toBe(400)
+  })
+
+  test('the uppercase path segment the route accepts is still refused', async () => {
+    // `sanitizeServiceSegment` permits `A-Za-z0-9_.-`, so the segment survives to the
+    // store, which lowercases it. A case-sensitive reservation would have been bypassed
+    // by exactly this request.
+    const res = await handler(del(`${GLOBAL_URL}/MCP_ENV.example-server`))
+    expect(res?.status).toBe(400)
+  })
+
+  test('the GET does not enumerate it next to the real credentials', async () => {
+    await store.setReserved(OWNER, { service: MCP_SERVICE, plaintext: '{}', scope: 'global' })
+    await store.set(OWNER, { service: 'openai', plaintext: 'sk-global', scope: 'global' })
+    const res = await handler(get(GLOBAL_URL))
+    const body = (await res?.json()) as { global: Array<{ service: string }> }
+    expect(body.global.map((r) => r.service)).toEqual(['openai'])
+  })
+})

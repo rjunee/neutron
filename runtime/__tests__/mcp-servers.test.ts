@@ -272,6 +272,33 @@ describe('parseOwnerMcpServerInput — the one validator', () => {
     }
   })
 
+  test('CANONICAL EQUIVALENTS stay accepted and hash apart — the strongest confusable, decided', () => {
+    // The sharpest case of the paragraph above, and the one worth pinning because both
+    // available "fixes" are wrong. `/bin/café` composed (U+00E9) and decomposed
+    // (`e` + U+0301) render IDENTICALLY — not merely confusably — and hash differently, so
+    // they are a pair of grants the owner cannot tell apart by reading them.
+    //
+    // NEITHER NORMALIZING NOR REFUSING IS RIGHT, which is why the code does neither:
+    // normalizing to NFC would change the bytes that get exec'd, and macOS stores
+    // filenames decomposed, so a path copied out of a real directory entry would be
+    // rewritten into one that need not resolve; refusing non-NFC input would reject those
+    // same legitimate paths outright.
+    //
+    // What bounds it is the hash, not the charset: a form the owner did not approve is a
+    // grant he has not given. Asserted so this stays a DECISION, and so banning or
+    // normalizing becomes a deliberate edit to a failing assertion.
+    const composed = '/bin/café'
+    const decomposed = '/bin/café'
+    expect(composed).not.toBe(decomposed)
+    expect(composed.normalize('NFC')).toBe(decomposed.normalize('NFC'))
+    const a = parseOwnerMcpServerInput({ ...GOOD, command: composed }).spec
+    const b = parseOwnerMcpServerInput({ ...GOOD, command: decomposed }).spec
+    expect(a).not.toBeNull()
+    expect(b).not.toBeNull()
+    // Different grants, so an approval of one is not an approval of the other.
+    expect(computeMcpServerGrantHash(a!)).not.toBe(computeMcpServerGrantHash(b!))
+  })
+
   test('refuses an env name that is not a POSIX variable, and an empty value', () => {
     expect(parseOwnerMcpServerInput({ ...GOOD, env: { 'not-a-var': 'x' } }).spec).toBeNull()
     expect(parseOwnerMcpServerInput({ ...GOOD, env: { GOOD_NAME: '' } }).spec).toBeNull()

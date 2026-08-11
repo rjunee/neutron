@@ -288,7 +288,17 @@ async function handleDelete(
   if (requested !== null && requested !== scope) {
     return jsonError(400, 'scope_not_allowed', SCOPE_NOT_ALLOWED)
   }
-  const removed = await store.delete(owner_slug, project_id ?? '', service)
+  // WRAPPED, because this path can now be REFUSED and not merely miss. The store
+  // reserves the namespaces it hosts for other modules (`mcp_env.*` — an installed
+  // MCP server's secret), and an unwrapped throw would answer 500 for what is a
+  // 400: the caller asked for something this surface must not do. See § RESERVED
+  // NAMESPACES in `project-credentials/store.ts`.
+  let removed: boolean
+  try {
+    removed = await store.delete(owner_slug, project_id ?? '', service)
+  } catch (err) {
+    return mapWriteError(err)
+  }
   if (!removed) {
     return jsonError(404, 'credential_not_found', `service=${service} scope=${scope}`)
   }

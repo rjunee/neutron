@@ -1104,3 +1104,149 @@ which is why nothing queued: `pull_request` will not build a merge ref it believ
 conflicted. The branch was genuinely clean against `main` throughout (`git merge-tree`
 merged with no conflict, and `origin/main` was an ancestor of the head). A rebase onto
 current `main` cleared the stale status and the checks ran.
+
+## Round 4 — the second writer, and a deferral with no receiver
+
+Three lanes this round (adversarial on Opus, rubric on codex, codex), with the Kimi lane
+deliberately absent rather than failed. Eight findings arrived; **four were already fixed on
+this branch by rounds 2 and 3**, and one was false. Verifying before fixing is the whole
+report, so the disposition is recorded per item.
+
+### The one that mattered: `mcp_env.*` had two writers
+
+`gateway/mcp-servers/store.ts` stores each installed server's env VALUES in the
+`project_credentials` table under `mcp_env.<name>`, at global scope, because it wanted that
+table's AES envelope rather than a fourth one. `sanitizeService` accepts `.`, so that
+namespace was **a perfectly legal generic service name** — and
+`gateway/http/project-credentials-surface.ts` exposes `POST /api/app/credentials` and
+`DELETE /api/app/credentials/<service>` over it.
+
+Both reached the namespace, and both skipped the thing that makes a rotation safe: the
+`onRevoked` announcement that retires the warm `claude` child still holding the OLD secret
+in its environment. So a generic overwrite rotated a secret **while leaving the process that
+holds the previous one alive and unreaped** — and rotating is usually the owner's response to
+believing the old value is compromised. The delete direction was worse: it left the server
+installed, approved, secret-less, and that same child running.
+
+The namespace is now RESERVED in `project-credentials/store.ts`. `set`, `delete` and
+`resolve` refuse it; the owning module reaches its rows through explicit `setReserved` /
+`deleteReserved` / `resolveReserved`. Separate methods rather than an options flag, so the
+privileged path is greppable and a would-be second writer has to name it. The read direction
+is closed too — no caller in this build resolves an owner-supplied service name, so this is
+against a future one, and it answers `null` rather than throwing because an unset service is
+a state every consumer already handles whereas a throw would be a new failure mode on the
+turn path.
+
+The enumerations (`listGlobal`, `listForProject`, and `listAvailableServices` transitively)
+now omit reserved rows. Two reasons, both real: the Admin tab was rendering one row per
+installed MCP server next to the owner's actual credentials with a Delete button that now
+correctly refuses, and the agent's `<available_services>` block was advertising an MCP
+server's secret blob as an external service it could use.
+
+`handleDelete` gained a `try`/`catch` → `mapWriteError`. Without it the refusal answered
+**500 for what is a 400** — the caller asked for something the surface must not do.
+
+### The deferral that had no receiver
+
+`evictWarmReplsForMcpSurfaceChange` treats a pending spawn as busy and marks it
+`poisoned` + `retireOnIdle` rather than awaiting it. For a COMMITTED dispatch that is right —
+its `finally` retires the child the moment it goes idle. But `pendingSpawns` catches a second
+population with **no dispatch behind it at all**: the supervision crash/wedge respawn and an
+admin respawn both call `getOrSpawnSession` directly, so `committedDispatches` never counts
+them and no turn driver ever runs. Both flags were set correctly on a session nobody would
+ever ask about, and the freshly-resolved child kept running under the REVOKED configuration
+until some future dispatch arrived — unbounded, on a quiet instance.
+
+The callback now DECIDES rather than merely marks: it retires a genuinely idle session
+itself, and defers only where the deferral has a reader. The guard is the turn-completion
+path's own, re-read AFTER the spawn resolves rather than trusted from the synchronous
+snapshot, so a dispatch that committed mid-spawn is still spared. Flags are still set first,
+so a failed teardown still refuses reuse.
+
+Note the shape: **a test asserting on the two flags would have PASSED against this bug.**
+They were both set, and correctly. What was missing was a reader. Only a probe that parks the
+spawn and drives the revocation can see it, which is why the new test does exactly that and
+calls no `substrate.start()` anywhere.
+
+The docblock's "both are answered the same way — mark on resolution" was corrected. It was
+accurate about the mechanism and wrong about the coverage, which is the shape the repo's
+rule 3a is about.
+
+### The partial-failure edit path
+
+`install` writes the spec FIRST, deliberately — a fresh spec hashes differently, so the
+fail-closed direction is "unapproved". That write is also the instant the durable spec stops
+authorizing what the warm child is running. Everything after it can throw, and a throw
+unwound out of `serialize` **without ever reaching the `revoked = true` that sat at the end
+of the critical section**, so the old approved command kept running with the durable spec no
+longer describing it and nothing scheduled to reap it.
+
+The flag is now set immediately after the invalidating write, and announced from a `finally`.
+The same shape applied to `remove` (revoke lands, then the forget and the spec write can
+throw) and to `decide` (a deny revokes, then `respondApproval` can throw) — a stop button
+reporting failure while the process it was meant to stop lives on. All three now announce
+from a `finally`. In `remove` the mark moved to the revoke itself; that does not re-open the
+race its old comment guarded, because the revoke already means `resolveApproved` refuses the
+server whatever the list says.
+
+### Already fixed, verified rather than re-fixed
+
+- **Concurrent `start()` spawning two REPLs on one key** — fixed in round 3 by
+  `withGetOrSpawnLock` (`runtime/adapters/claude-code/persistent/spawn.ts`), which serializes
+  the whole get-or-spawn body per key and covers the warm-eviction path's two deliberate
+  suspends.
+- **Eviction killing a running dispatch in the get-or-spawn → acquire-turn window** — fixed
+  by `committedDispatches` (`runtime/adapters/claude-code/persistent/pool.ts`), and the
+  "`turnSlotHeld` covers the gap" overstatement was already corrected in the same round.
+- **The enumerated invisible-character denylist** — already property-based:
+  `\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}⠀` in
+  `runtime/mcp-servers.ts`. The finding cited the pre-fix line numbers.
+- **The "refuses EVERY invisible" test title** and the "a VALUE never leaves the encrypted
+  store" describe title — both already renamed to what they check.
+
+What was left of the invisibles finding is real and now stated: **canonical equivalents.**
+`/bin/café` composed (U+00E9) and decomposed (`e` + U+0301) render IDENTICALLY and hash
+differently. Neither available fix is right — normalizing to NFC changes the bytes that get
+exec'd and macOS stores filenames decomposed, so a path copied from a real directory entry
+would be rewritten into one that need not resolve; refusing non-NFC rejects those same
+legitimate paths. What bounds it is the hash, not the charset. Documented in the docblock and
+pinned by a test, so banning or normalizing becomes a deliberate edit to a failing assertion
+rather than a silent widening.
+
+The aggregate-startup-budget finding (2 s floor × 24 servers = 48 s against a 30 s ready
+budget) was left as it is, because `runtime/adapters/claude-code/persistent/signatures.ts`
+already states the tradeoff accurately and at length: dividing the budget past ~10 servers
+produces a timeout so short that healthy servers fail, the floor wins, and the cost is a
+bounded visible assertion failure with `claude` naming the server that did not start. A
+genuine fix needs a concurrent load or a larger budget. That is a documented decision, not an
+aspirational docblock.
+
+### The false one
+
+A reviewer reported `retireOnIdle` as write-only — "set dirty, declared, read nowhere". It is
+read, in the turn-completion teardown guard in `runtime/adapters/claude-code/persistent/pool.ts`,
+and asserted by two tests in
+`runtime/adapters/claude-code/persistent/__tests__/owner-mcp-servers.test.ts`. The reviewer's
+own cited grep was `reapIdle|IDLE_TTL|idleTtl|maxIdleMs` — **none of those symbols exist in
+this tree**, so the search could not have found the read it claimed absent. A tool that
+cannot match the thing returns an absence that reads like an answer; the control is to grep
+for a string you know is present. Not fixed, because there was nothing to fix.
+
+### Mutation log — every fix has a mutant that was RUN and died
+
+| Mutation | Result |
+|---|---|
+| `RESERVED_SERVICE_PREFIXES` → a name nothing uses | 5 fail / 21 pass — set, delete, case-shift, resolve, enumerations |
+| Unwrap `handleDelete`'s `try`/`catch` | 3 fail — the refusal answers 500, not 400 |
+| Move `markRevoked()` back below the credential write | 1 fail — `calls` 0, expected 1 |
+| Delete the self-retire branch | 1 fail — `kills.n` 0, expected 1: the child survives its own revocation |
+| Drop the `committedDispatches` term from the self-retire guard | 6 fail, incl. 4 pre-existing — the committed dispatch is stranded |
+
+The last one is the useful one: it proves the new branch did not buy the no-dispatch case by
+breaking the committed case, which is the regression this fix could most easily have
+introduced.
+
+The security invariants were re-checked and hold: an unapproved server is never wired; a
+changed command, args or env-var NAMES requires re-approval; the prompt renders what is
+granted and never a value; `cc-import-*` and `cc-trident-*` receive nothing; the session MCP
+config stays `0600`.

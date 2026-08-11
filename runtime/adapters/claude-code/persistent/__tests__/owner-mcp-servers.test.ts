@@ -44,6 +44,10 @@ import type { SessionHandle } from '../../../../session-handle.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from '../pty-host.ts'
 import { pool } from '../pool-state.ts'
+import { poolKeyFor } from '../pool.ts'
+// The supervision respawn's own entry point (`supervision.ts` calls exactly this), used
+// by the no-dispatch eviction test to reproduce a spawn with no turn driver behind it.
+import { getOrSpawnSession } from '../spawn.ts'
 import type { ReplSession } from '../repl-session.ts'
 import {
   createPersistentReplSubstrate,
@@ -1041,6 +1045,102 @@ describe('revoking a server retires the warm child that was spawned under the ol
     for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 0))
     const session = await [...pool.values()][0]
     expect(session?.poisoned ?? true).toBe(true)
+    expect(kills.n).toBe(1)
+    expect(pool.size).toBe(0)
+  })
+
+  it('retires a revoked child that NO DISPATCH is waiting on — nothing would have read the flag', async () => {
+    // THE FOURTH DOOR, and the one where the deferral had no receiver at all.
+    //
+    // The three tests above all end with a TURN whose completion path reads
+    // `retireOnIdle` and tears the child down. That is what made marking the flag a
+    // sufficient answer for them. But `pendingSpawns` catches a second population with no
+    // dispatch behind it: the supervision crash/wedge respawn and an admin respawn both
+    // call `getOrSpawnSession` directly (`supervision.ts`), so `committedDispatches` never
+    // counts them and NO TURN DRIVER EVER RUNS. The evictor set `poisoned` +
+    // `retireOnIdle` on a session nobody would ever ask about, and the freshly-resolved
+    // child went on running under the REVOKED configuration — env resident — until some
+    // future dispatch happened to arrive. For a quiet instance that is unbounded, which is
+    // the exact hazard this whole function exists to close.
+    //
+    // Driven the way the finding says to drive a concurrency defect: park one path (the
+    // spawn, held at its ready gate) and drive the other (the revocation), rather than
+    // asserting on structure. A test that read the two flags would have PASSED against
+    // the bug — they were both set correctly; it was the absence of a reader that was the
+    // defect.
+    //
+    // MUTATION: delete the self-retire branch from the `spawning || committed` callback
+    // in `evictWarmReplsForMcpSurfaceChange` and this fails on `kills.n` — the child
+    // survives its own revocation.
+    setReplToolBridge(bridge())
+    let openReady: () => void = () => {}
+    const ready = new Promise<void>((res) => {
+      openReady = res
+    })
+    const { host, kills } = makeCapturingHost(undefined, () => ready)
+    const options = opts(host, {
+      enableToolBridge: true,
+      resolveExtraMcpServers: async () => [EXAMPLE],
+    })
+    // NO `substrate.start()` anywhere in this test — that is the whole point. This is the
+    // supervision respawn's own call shape, which is why nothing increments
+    // `committedDispatches`.
+    const key = poolKeyFor(options)
+    const spawning = getOrSpawnSession(key, options, spec('hi'))
+    for (let i = 0; i < 200 && pool.size === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    expect(pool.size).toBe(1)
+
+    // Reported as `poisoned`: the decision is taken synchronously, and the function must
+    // not await a spawn to sharpen it — awaiting is what made a deny block for the whole
+    // ready budget. The counts describe the decision, not the eventual disposal.
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+    expect(kills.n).toBe(0)
+
+    openReady()
+    const session = await spawning
+    for (let i = 0; i < 60; i += 1) await new Promise((r) => setTimeout(r, 0))
+
+    // THE ASSERTIONS THAT FAIL WITHOUT THE FIX. Flags still set, so a failed teardown
+    // still refuses reuse...
+    expect(session.poisoned).toBe(true)
+    expect(session.retireOnIdle).toBe(true)
+    // ...and the child is actually DEAD and out of the pool, with no dispatch in sight.
+    expect(kills.n).toBe(1)
+    expect(pool.size).toBe(0)
+  })
+
+  it('does NOT retire a spawn a dispatch IS waiting on — the deferral is kept where it has a reader', async () => {
+    // The other half of the same branch, and the regression the fix could easily have
+    // introduced. A COLD DISPATCH is also `spawning`, and it must still be spared: its
+    // child was spawned under a grant that WAS in force when it committed, and killing it
+    // strands the turn with a drain error. The self-retire above therefore re-reads
+    // `committedDispatches` AFTER the spawn resolves, and defers when a dispatch is behind
+    // it.
+    //
+    // MUTATION: drop the `committedDispatches` term from the self-retire's guard and this
+    // fails — the turn dies instead of delivering.
+    setReplToolBridge(bridge())
+    let openReady: () => void = () => {}
+    const ready = new Promise<void>((res) => {
+      openReady = res
+    })
+    const { host, kills } = makeCapturingHost(undefined, () => ready)
+    const sub = createPersistentReplSubstrate(
+      opts(host, { enableToolBridge: true, resolveExtraMcpServers: async () => [EXAMPLE] }),
+    )
+    const turn = drain(sub.start(spec('hi')))
+    for (let i = 0; i < 200 && pool.size === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    expect(await evictWarmReplsForMcpSurfaceChange()).toEqual({ evicted: 0, poisoned: 1 })
+
+    openReady()
+    // The turn DELIVERS — it was not killed out from under itself by the new branch.
+    expect(await turn).toContain('ok=0')
+    // And it is retired once that turn ends, by the turn's own completion path.
+    for (let i = 0; i < 60; i += 1) await new Promise((r) => setTimeout(r, 0))
     expect(kills.n).toBe(1)
     expect(pool.size).toBe(0)
   })

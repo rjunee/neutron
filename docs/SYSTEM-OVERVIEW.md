@@ -765,6 +765,16 @@ there is nothing underneath him.
   variable unset is not what was approved. Keeping values out of the spec is what
   makes the spec safe to store in a plain metadata column, return to both clients,
   render in a prompt and log.
+- **`mcp_env.*` is a RESERVED namespace, so that join has exactly one writer.** Sharing
+  the credential table meant the generic credential CRUD could reach those rows —
+  `service` accepts `.`, so `POST /api/app/credentials` and
+  `DELETE /api/app/credentials/mcp_env.<name>` were both valid requests. Reaching them
+  there skipped the `onRevoked` announcement, so a rotation left the warm child holding
+  the OLD secret alive. `ProjectCredentialStore.set` / `delete` / `resolve` now refuse the
+  namespace (400 `reserved_service`) and `gateway/mcp-servers/store.ts` uses the explicit
+  `setReserved` / `deleteReserved` / `resolveReserved` methods. The list surfaces omit
+  reserved rows, so Admin does not render a credential it cannot author and the
+  `<available_services>` block does not advertise a secret blob as a usable service.
 - **Two independent gates confine it to the owner's session.**
   `resolveExtraMcpServers` is wired onto `cc-agent-*` alone
   (`open/wiring/substrates.ts`), AND `spawn.ts` requires `enableToolBridge` as
