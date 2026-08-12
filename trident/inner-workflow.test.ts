@@ -368,9 +368,10 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'baseBranch',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
+      'NO_PATTERN_KILL_RULE',
       [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
-    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '')('/tmp/some-diff.diff')
+    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '')('/tmp/some-diff.diff')
   }
 
   /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */

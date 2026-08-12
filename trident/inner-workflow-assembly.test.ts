@@ -45,6 +45,12 @@ interface RunOpts {
    * run from returning APPROVE is the completeness gate — nothing else is in the way.
    */
   approveAll?: boolean
+  /**
+   * Run in Ralph mode, which is the ONLY way `plan:fable` is dispatched — the planner
+   * prompt is unreachable otherwise, so a rule spliced only into the non-Ralph path
+   * would look covered while the planner never sees it.
+   */
+  ralph?: boolean
 }
 
 async function runWorkflow(
@@ -66,6 +72,20 @@ async function runWorkflow(
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: opts.approveAll === true ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
+    }
+    if (label === 'plan:fable') {
+      // `remainingTasks: 0` so the run does NOT hand back to the outer loop for a
+      // re-fire — it continues into forge:build + the full review panel.
+      return {
+        implementationPlan: '- [ ] the one task',
+        topTask: 'the one task',
+        executionSpec: 'TARGET FILES: x.ts',
+        complexity: 'reasoning',
+        remainingTasks: 0,
+      }
+    }
+    if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
+      return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
     }
     if (label === 'argus:codex' || label === 'argus:codex-retry') {
       // `codexTruncated` included because CODEX_VERDICT_SCHEMA REQUIRES it — a mock
@@ -95,7 +115,7 @@ async function runWorkflow(
     baseBranch: 'main',
     slug: 'test-run',
     maxRounds: 3,
-    ralph: false,
+    ralph: opts.ralph === true,
     mergeMode: 'local', // no PR path
     prNumber: null,
     branch: null,
@@ -103,6 +123,7 @@ async function runWorkflow(
     runId: null,
     resumeCheckpoint: null,
     codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
+    kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance,
@@ -250,5 +271,119 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
     expect(synth?.prompt).not.toContain('Verdict C (codex cross-model): NOT CONNECTED')
     // The core seats answered, so only codex is hedged.
     expect(synth?.prompt).not.toContain('DID NOT COMPLETE')
+  })
+})
+
+/**
+ * NO-PATTERN-KILL, ASSERTED ON THE COMPOSED PROMPT — not on the constant.
+ *
+ * A rule constant that nothing splices in is the same defect one layer up: the source
+ * text `const NO_PATTERN_KILL_RULE = …` can be present and correct while a given agent
+ * never receives a word of it. Only the ASSEMBLED prompt the agent is actually handed
+ * proves coverage, so these run the real workflow body and assert on what `agent()`
+ * was called with — the same technique the reflection-boundary suite above uses.
+ *
+ * This caught the real gap: argus:adversarial (a CORE reviewer seat) and both
+ * cross-model bridges build their prompts INLINE rather than from `ARGUS_RUBRIC`, so
+ * splicing the rule into the rubric left three command-running seats uncovered.
+ *
+ * Scope is "every agent that can run a shell command", because that is exactly the set
+ * that can `pkill`. argus:synthesis is deliberately excluded and asserted excluded: it
+ * merges verdict TEXT and is handed no tools, which is why it carries neither of the
+ * two pre-existing rules either.
+ */
+describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told not to pattern-kill', () => {
+  // Verbatim fragments of the shipped rule. Retyped deliberately: reading the constant
+  // out of the source and asserting the prompt contains it would pass even if the rule
+  // were softened to "avoid pkill when convenient" — these pin the MEANING.
+  const SHARED_BOX = 'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES'
+  const PROHIBITION = 'NEVER kill processes by pattern or by name'
+  const CARVE_OUT = 'Kill ONLY a pid you started yourself and can name'
+
+  /** Every seat that is handed a shell, in BOTH modes. `plan:fable` is Ralph-only. */
+  const COMMAND_RUNNING_LABELS = [
+    'forge:build',
+    'forge:fix-round-2',
+    'argus:claude',
+    'argus:adversarial',
+    'argus:codex',
+    'argus:kimi',
+  ]
+
+  let captured: Captured[]
+  let ralphCaptured: Captured[]
+  beforeAll(async () => {
+    captured = (await runWorkflow(GUIDANCE)).captured
+    ralphCaptured = (await runWorkflow(GUIDANCE, { ralph: true })).captured
+  })
+
+  test('the harness actually dispatched every seat it claims to cover', () => {
+    for (const label of COMMAND_RUNNING_LABELS) {
+      expect(captured.some((c) => c.label === label)).toBe(true)
+    }
+    // The planner exists ONLY in Ralph mode — assert the mode really produced it,
+    // or its coverage test below would vacuously pass over an empty call list.
+    expect(ralphCaptured.some((c) => c.label === 'plan:fable')).toBe(true)
+  })
+
+  test('EVERY command-running prompt carries the rule, with the reason and the carve-out', () => {
+    for (const label of COMMAND_RUNNING_LABELS) {
+      const calls = captured.filter((c) => c.label === label)
+      expect(calls.length).toBeGreaterThan(0)
+      for (const c of calls) {
+        // The REASON is other lanes, not the agent's own safety.
+        expect(c.prompt).toContain(SHARED_BOX)
+        // An ABSOLUTE prohibition, and it names the binaries by hand.
+        expect(c.prompt).toContain(PROHIBITION)
+        expect(c.prompt).toContain('`pkill`')
+        expect(c.prompt).toContain('`killall`')
+        expect(c.prompt).toContain('kill $(pgrep')
+        // …but a pid-scoped kill of something the agent started is still ALLOWED,
+        // or agents would be unable to stop their own background processes.
+        expect(c.prompt).toContain(CARVE_OUT)
+        expect(c.prompt).toContain('`$!`')
+      }
+    }
+  })
+
+  test('the Ralph PLANNER gets it too — the planner spawns processes like any other seat', () => {
+    const plan = ralphCaptured.filter((c) => c.label === 'plan:fable')
+    expect(plan.length).toBeGreaterThan(0)
+    for (const c of plan) {
+      expect(c.prompt).toContain(SHARED_BOX)
+      expect(c.prompt).toContain(PROHIBITION)
+      expect(c.prompt).toContain(CARVE_OUT)
+    }
+    // …and Ralph's forge:build, which is assembled through a DIFFERENT path (it gets
+    // the planner's execution note appended), keeps the rule.
+    const forge = ralphCaptured.filter((c) => c.label === 'forge:build')
+    expect(forge.length).toBeGreaterThan(0)
+    for (const c of forge) expect(c.prompt).toContain(PROHIBITION)
+  })
+
+  test('it is stated as a PROHIBITION, never softened into advice', () => {
+    const forge = captured.find((c) => c.label === 'forge:build')
+    expect(forge).toBeDefined()
+    const prompt = String(forge?.prompt)
+    // No hedge anywhere in the sentence that carries the rule.
+    const sentence = prompt.slice(prompt.indexOf(SHARED_BOX), prompt.indexOf(CARVE_OUT))
+    for (const hedge of ['try to avoid', 'prefer not', 'should avoid', 'if possible', 'generally']) {
+      expect(sentence.toLowerCase()).not.toContain(hedge)
+    }
+    // And it tells the agent what to do INSTEAD, so "work around it" is the escape
+    // hatch rather than killing a process it did not start.
+    expect(prompt).toContain('do NOT kill it — work around it')
+  })
+
+  test('argus:synthesis is toolless, so it gets none of the three shell rules (not an omission)', () => {
+    const synth = captured.filter((c) => c.label === 'argus:synthesis')
+    expect(synth.length).toBeGreaterThan(0)
+    for (const c of synth) {
+      expect(c.prompt).not.toContain(SHARED_BOX)
+      // The pre-existing rules are absent for the same reason — this is the control
+      // that shows exclusion is the file's convention for a toolless seat.
+      expect(c.prompt).not.toContain('NEVER call AskUserQuestion')
+      expect(c.prompt).not.toContain('redirect stdout+stderr to a log file')
+    }
   })
 })
