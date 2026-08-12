@@ -977,6 +977,10 @@ describe('the post-APPROVE MUTATION PROVER stands between APPROVE and merge', ()
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {
         hostCalls.push(cmd)
+        // The gate PINS the branch head before anything else; answer that with a
+        // real sha so the run reaches the predicate this test is about rather
+        // than stopping at an unresolvable head.
+        if (cmd.includes('rev-parse')) return { ...ok(), stdout: 'a'.repeat(40) }
         // `git diff --name-only` returns nothing readable → the prose-only
         // predicate fails closed → the proof is required → there is no claim.
         return ok()

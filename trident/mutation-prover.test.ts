@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
@@ -325,6 +327,64 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     expect(host.calls).toHaveLength(0)
   })
 
+  test('a SYMLINK out of the worktree is refused, and the file it points at is never written', async () => {
+    // `validateClaim` rejects an absolute path and a `..` segment, but the branch
+    // under proof is agent-authored and a COMMITTED SYMLINK is neither: it
+    // materialises in the proof worktree as a link, and `readFile`/`writeFile`
+    // follow it. This test runs on the REAL filesystem — an in-memory `fs` has no
+    // symlinks and so cannot show the escape at all.
+    const tmp = await mkdtemp(join(tmpdir(), 'prover-symlink-'))
+    try {
+      const repo = join(tmp, 'repo')
+      const wt = proofWorktreePath(repo, RUN)
+      await mkdir(join(wt, 'src'), { recursive: true })
+      const outside = join(tmp, 'outside.ts')
+      await writeFile(outside, SRC_BEFORE, 'utf8')
+      // The link sits at the nominated path; the claim itself is clean.
+      await symlink(outside, join(wt, CLAIM.file))
+
+      const host = scriptedHost()
+      const prover = createMutationProver({ run_host: host.run, run_guard: async (a, c) => host.run(a, c) })
+      const evidence = await prover.prove({ run: { ...RUN, repo_path: repo }, claim: CLAIM })
+
+      expect(evidence.proved).toBe(false)
+      expect(evidence.reason).toContain('outside the proof worktree')
+      // THE REFUSAL, observed on the filesystem rather than in the reason string:
+      // the file the link pointed at still holds its original bytes.
+      expect(await readFile(outside, 'utf8')).toBe(SRC_BEFORE)
+      // And nothing was executed against it.
+      expect(evidence.observed).toBeNull()
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  test('an ordinary file under a symlinked worktree PREFIX still proves', async () => {
+    // The containment check resolves BOTH sides. Resolving only the target would
+    // refuse every honest claim on a box where the worktree root itself sits
+    // under a symlinked prefix (the `/tmp` → `/private/tmp` case).
+    const tmp = await mkdtemp(join(tmpdir(), 'prover-prefix-'))
+    try {
+      const real = join(tmp, 'real')
+      const repo = join(tmp, 'repo-link')
+      const wt = proofWorktreePath(real, RUN)
+      await mkdir(join(wt, 'src'), { recursive: true })
+      await writeFile(join(wt, CLAIM.file), SRC_BEFORE, 'utf8')
+      await symlink(real, repo)
+
+      const host = scriptedHost()
+      const prover = createMutationProver({ run_host: host.run, run_guard: async (a, c) => host.run(a, c) })
+      const evidence = await prover.prove({ run: { ...RUN, repo_path: repo }, claim: CLAIM })
+
+      expect(evidence.reason).not.toContain('outside the proof worktree')
+      expect(evidence.proved).toBe(true)
+      // Restored on the real filesystem, not just in the digest.
+      expect(await readFile(join(wt, CLAIM.file), 'utf8')).toBe(SRC_BEFORE)
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+
   test('the guard and the control must be TESTS — a shell one-liner is not one', async () => {
     // The bypass this closes: `bash -c 'grep …'` is red under any mutation of the
     // line and `echo` is green by construction, so the pair walks the red→green
@@ -511,6 +571,33 @@ describe('NO AGENT MAY COMPOSE THE EVIDENCE BLOCK', () => {
     expect(prover.verify(editedObservation).ok).toBe(false)
   })
 
+  test('the RATIONALE is signed too — the sentence a human reads cannot be rewritten', async () => {
+    // `rationale` is the human-facing "why this mutation proves the change".
+    // It was the one claim field the payload left out, so a block could be
+    // re-narrated after the fact and still verify — the block would say one
+    // thing to a reader and another to the token.
+    const withReason: MutationClaim = { ...CLAIM, rationale: 'breaks the boundary check' }
+    const { prover } = proverOver()
+    const real = await prover.prove({ run: RUN, claim: withReason })
+    expect(real.proved).toBe(true)
+    expect(prover.verify(real).ok).toBe(true)
+
+    const renarrated: MutationEvidence = {
+      ...real,
+      claimed: { ...real.claimed, rationale: 'proves something else entirely' },
+    }
+    expect(prover.verify(renarrated).ok).toBe(false)
+
+    // ADDING one where there was none is an edit too — absent must not sign the
+    // same bytes as present.
+    const plain = await prover.prove({ run: RUN, claim: CLAIM })
+    const backfilled: MutationEvidence = {
+      ...plain,
+      claimed: { ...plain.claimed, rationale: 'added after the fact' },
+    }
+    expect(prover.verify(backfilled).ok).toBe(false)
+  })
+
   test('a genuine block from ANOTHER prover does not verify here (no cross-process replay)', async () => {
     const { prover: a } = proverOver()
     const { prover: b } = proverOver()
@@ -604,6 +691,10 @@ describe('NO AGENT MAY COMPOSE THE EVIDENCE BLOCK', () => {
         replace: 'CLAIMED_REPLACE',
         guard: ['CLAIMED_GUARD_ARGV'],
         control: ['CLAIMED_CONTROL_ARGV'],
+        // OPTIONAL, and therefore the one this census used to miss: it was absent
+        // from the block below, so the walk never demanded the payload cover it
+        // and `rationale` sat unsigned while the suite stayed green.
+        rationale: 'CLAIMED_RATIONALE',
       },
       observed: {
         head_sha: 'HEAD_SHA_MARKER',
@@ -831,6 +922,65 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.evidence?.proved).toBe(true)
   })
 
+  test('the diff that BINDS the proof is read at the same commit the proof runs against', async () => {
+    // THE RACE. The gate used to resolve the branch NAME twice — once for
+    // `base...branch` (the file list that binds the proof to this PR) and again
+    // inside `prove`. A push landing between them meant the binding described
+    // commit A while the proof, and the final head check, described commit B: a
+    // mutation of a file B never changed could sail through on A's file list.
+    //
+    // With one pinned commit there is only ever ONE resolution to race, so the
+    // diff must be asked for by SHA, not by branch name.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const diffRanges: string[] = []
+    const scripted = scriptedHost()
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('--name-only')) {
+          diffRanges.push(cmd[cmd.length - 1] ?? '')
+          return res(0, 'src/limit.ts\n')
+        }
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        return scripted.run(cmd, cwd)
+      },
+      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
+      fs,
+    })
+    expect(out.ok).toBe(true)
+    // The binding was read at the PINNED SHA, never at the mutable branch name.
+    expect(diffRanges).toEqual([`main...${HEAD}`])
+    expect(out.evidence?.observed?.head_sha).toBe(HEAD)
+  })
+
+  test('a branch that moves between the DIFF and the proof is refused', async () => {
+    // The same race from the other side: the pin is taken, and by the time the
+    // gate re-reads the head the branch has moved. The proof is of the pinned
+    // commit, so what would merge is not what was proved.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const scripted = scriptedHost()
+    let heads = 0
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('rev-parse')) {
+          heads += 1
+          return res(0, heads === 1 ? HEAD : 'c'.repeat(40))
+        }
+        return scripted.run(cmd, cwd)
+      },
+      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
+      fs,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain('is not the commit that was proved')
+  })
+
   test('an APPROVE with NO nominated mutation is blocked — the gate cannot run nothing', async () => {
     const out = await runMutationProofGate({
       run: RUN,
@@ -851,12 +1001,40 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       base_branch: 'main',
       run_host: async (cmd) => {
         calls.push(cmd)
-        return cmd.includes('--name-only') ? res(0, 'README.md\ndocs/a.md\n') : res(0)
+        if (cmd.includes('--name-only')) return res(0, 'README.md\ndocs/a.md\n')
+        // The gate PINS the commit before it reads the diff, and re-reads it to
+        // confirm the branch has not moved under the exemption.
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        return res(0)
       },
     })
     expect(out.ok).toBe(true)
     expect(out.exempt).toBe(true)
     expect(calls.some((c) => c.includes('worktree'))).toBe(false)
+  })
+
+  test('a docs-only diff whose branch MOVES under the exemption is not exempt', async () => {
+    // The exemption is the one path that returns `ok` without running anything,
+    // so it needs the same commit binding as the proof path: a branch that was
+    // docs-only when the diff was read can pick up code straight afterwards, and
+    // exempting THAT would merge unproved code with no proof ever run.
+    let heads = 0
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd) => {
+        if (cmd.includes('--name-only')) return res(0, 'README.md\ndocs/a.md\n')
+        if (cmd.includes('rev-parse')) {
+          heads += 1
+          return res(0, heads === 1 ? HEAD : 'b'.repeat(40))
+        }
+        return res(0)
+      },
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('moved while the prose-only exemption')
   })
 
   test('an unreadable diff takes the PROOF path, not the exempt path', async () => {
@@ -905,7 +1083,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: null,
       base_branch: 'main',
-      run_host: async () => res(0, 'src/limit.ts\n'),
+      run_host: async (cmd: string[]) => (cmd.includes('rev-parse') ? res(0, HEAD) : res(0, 'src/limit.ts\n')),
       evidence: { schema: MUTATION_PROOF_SCHEMA, proved: true, proof_token: 'a'.repeat(64) },
     } as unknown as MutationGateInput
     const out = await runMutationProofGate(smuggler)

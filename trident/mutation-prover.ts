@@ -68,8 +68,8 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile, realpath, writeFile } from 'node:fs/promises'
+import { join, resolve, sep } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
@@ -209,6 +209,12 @@ export interface VerifyResult {
 export interface ProverFs {
   read(path: string): Promise<string>
   write(path: string, contents: string): Promise<void>
+  /**
+   * Resolve a path with every symlink followed, for the containment check in
+   * `proveInWorktree`. Optional: an in-memory `fs` has no symlinks, so tests that
+   * inject one omit it and the check resolves to the path itself.
+   */
+  realpath?(path: string): Promise<string>
 }
 
 /**
@@ -243,6 +249,15 @@ export interface MutationProverDeps {
 export interface ProveInput {
   run: Pick<TridentRun, 'id' | 'slug' | 'repo_path' | 'branch'>
   claim: MutationClaim
+  /**
+   * The commit to prove, PINNED by the caller. A branch is a mutable ref: when
+   * the gate resolved `base...branch` for the diff-binding and `prove` then
+   * resolved the branch NAME again, the two could land on different commits, and
+   * the file list that bound the proof to this PR belonged to a commit that was
+   * no longer being proved. Passing the sha makes both halves read one immutable
+   * commit. Omitted (direct callers/tests) → resolve the branch, as before.
+   */
+  head_sha?: string
 }
 
 /**
@@ -293,7 +308,19 @@ export function canonicalPayload(e: Omit<MutationEvidence, 'proof_token'>): stri
     e.run_id,
     e.proved,
     e.reason,
-    [e.claimed.file, e.claimed.find, e.claimed.replace, e.claimed.guard, e.claimed.control],
+    // `rationale` is signed too, with an explicit null for "absent". It is the
+    // human-facing sentence saying WHY this mutation proves the change, so a
+    // block whose rationale can be rewritten after the fact while its token
+    // still verifies is exactly the "edited after the fact" case this promises
+    // to catch. An unsigned optional field is an unprotected one.
+    [
+      e.claimed.file,
+      e.claimed.find,
+      e.claimed.replace,
+      e.claimed.guard,
+      e.claimed.control,
+      e.claimed.rationale ?? null,
+    ],
     o === null
       ? null
       : [
@@ -437,6 +464,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
   const fs: ProverFs = deps.fs ?? {
     read: (p) => readFile(p, 'utf8'),
     write: (p, c) => writeFile(p, c, 'utf8'),
+    realpath: (p) => realpath(p),
   }
 
   function sign(e: Omit<MutationEvidence, 'proof_token'>): MutationEvidence {
@@ -532,10 +560,19 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     }
 
     const repo = run.repo_path
-    const head = await deps.run_host(['git', '-C', repo, 'rev-parse', run.branch], repo)
-    const headSha = head.stdout.trim().toLowerCase()
-    if (!head.ok || !HEX40.test(headSha)) {
-      return refuse(run.id, claim, `could not resolve the head of ${run.branch}`)
+    // The PINNED commit when the caller supplied one — never a second resolution
+    // of the branch name. Re-resolving here is what let the diff-binding and the
+    // proof describe two different commits (see `ProveInput.head_sha`).
+    let headSha: string
+    if (input.head_sha !== undefined) {
+      headSha = input.head_sha.trim().toLowerCase()
+      if (!HEX40.test(headSha)) return refuse(run.id, claim, 'the pinned head sha is not a commit sha')
+    } else {
+      const head = await deps.run_host(['git', '-C', repo, 'rev-parse', run.branch], repo)
+      headSha = head.stdout.trim().toLowerCase()
+      if (!head.ok || !HEX40.test(headSha)) {
+        return refuse(run.id, claim, `could not resolve the head of ${run.branch}`)
+      }
     }
 
     // DETACHED at the head sha, never at the branch name: the branch may still
@@ -556,6 +593,34 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     }
   }
 
+  /**
+   * Does `target` still sit under `wt` once every symlink is followed?
+   *
+   * Both sides are resolved: the worktree root itself can legitimately live
+   * under a symlinked prefix (`/tmp` → `/private/tmp`), and comparing a resolved
+   * target against an unresolved root would refuse every honest claim there.
+   * A target that does not exist yet resolves to itself, so the ordinary
+   * "file is missing" refusal below still reports the missing file.
+   */
+  async function withinWorktree(target: string, wt: string): Promise<boolean> {
+    const rp = fs.realpath ?? (async (p: string) => p)
+    let root: string
+    let leaf: string
+    try {
+      root = resolve(await rp(wt))
+    } catch {
+      return false
+    }
+    try {
+      leaf = resolve(await rp(target))
+    } catch {
+      // Not resolvable (most often: it does not exist). Fall back to the lexical
+      // path so a missing file is reported as missing, not as an escape.
+      leaf = resolve(target)
+    }
+    return leaf === root || leaf.startsWith(root.endsWith(sep) ? root : root + sep)
+  }
+
   async function proveInWorktree(
     run_id: string,
     claim: MutationClaim,
@@ -564,6 +629,19 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     deadline: number,
   ): Promise<MutationEvidence> {
     const target = join(wt, claim.file)
+
+    // CONTAINMENT, resolved rather than assumed. `validateClaim` rejects an
+    // absolute path and a `..` segment, but neither says anything about a
+    // SYMLINK: the branch under proof is agent-authored, a committed symlink
+    // materialises in the proof worktree as a symlink, and `readFile`/`writeFile`
+    // follow it. Without this the prover would write the mutation THROUGH the
+    // link to a path outside the throwaway tree — a file it does not own, on the
+    // host, while running agent-nominated commands. Refuse instead.
+    const contained = await withinWorktree(target, wt)
+    if (!contained) {
+      return refuse(run_id, claim, `${claim.file} resolves outside the proof worktree (a symlink) — refusing to mutate it`)
+    }
+
     let before: string
     try {
       before = await fs.read(target)
@@ -889,15 +967,20 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
  * The files this branch changes against `base`, per git — NEVER per an agent's
  * account of them. Returns null when the diff could not be read, which
  * `isProseOnlyChange` treats as "require the proof".
+ *
+ * `ref` should be a PINNED commit sha wherever the answer is going to be used to
+ * decide something (the gate passes one): given a branch NAME this re-resolves
+ * the ref, and a branch that moves between two such resolutions yields a file
+ * list for a commit nobody is proving.
  */
 export async function changedFilesOnBranch(
   run_host: RunHostCommand,
   repo_path: string,
   base_branch: string,
-  branch: string | null,
+  ref: string | null,
 ): Promise<string[] | null> {
-  if (branch === null || branch.trim().length === 0) return null
-  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base_branch}...${branch}`], repo_path)
+  if (ref === null || ref.trim().length === 0) return null
+  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base_branch}...${ref}`], repo_path)
   if (!res.ok) return null
   const files = res.stdout
     .split(/\r?\n/)
@@ -982,6 +1065,15 @@ export interface MutationGateInput {
   proof_budget_ms?: number
 }
 
+/** Is the branch still on the commit the gate pinned? */
+async function headStillAt(input: MutationGateInput, pinnedSha: string): Promise<boolean> {
+  const res = await input.run_host(
+    ['git', '-C', input.run.repo_path, 'rev-parse', input.run.branch ?? 'HEAD'],
+    input.run.repo_path,
+  )
+  return res.ok && res.stdout.trim().toLowerCase() === pinnedSha
+}
+
 /**
  * THE PHASE. Runs after a verdict reaches APPROVE and BEFORE the merge.
  *
@@ -991,8 +1083,41 @@ export interface MutationGateInput {
  * convincing its prose — can put one on this path.
  */
 export async function runMutationProofGate(input: MutationGateInput): Promise<MutationGateOutcome> {
-  const files = await changedFilesOnBranch(input.run_host, input.run.repo_path, input.base_branch, input.run.branch)
+  // PIN THE COMMIT FIRST, and read everything else off the PIN. A branch is a
+  // mutable ref, and this phase used to resolve it three separate times: once
+  // for the diff that binds the proof to this PR, once inside `prove`, and once
+  // for the final head check. A branch that moved between the first two made the
+  // binding describe a commit that was no longer the one being proved — and on
+  // the prose-only path, which returned before any sha was resolved at all, a
+  // branch that was docs-only when the diff was read could pick up code
+  // afterwards and merge with no proof ever run.
+  const pinned = await input.run_host(
+    ['git', '-C', input.run.repo_path, 'rev-parse', input.run.branch ?? 'HEAD'],
+    input.run.repo_path,
+  )
+  const pinnedSha = pinned.stdout.trim().toLowerCase()
+  if (!pinned.ok || !HEX40.test(pinnedSha)) {
+    return {
+      ok: false,
+      reason: 'mutation proof required but the branch head could not be resolved — a proof cannot be bound to it',
+      exempt: false,
+      evidence: null,
+    }
+  }
+
+  const files = await changedFilesOnBranch(input.run_host, input.run.repo_path, input.base_branch, pinnedSha)
   if (isProseOnlyChange(files)) {
+    // The exemption is bound to the pinned commit like any other outcome: if the
+    // branch moved since the pin, THIS is no longer the diff that would merge.
+    const stillThere = await headStillAt(input, pinnedSha)
+    if (!stillThere) {
+      return {
+        ok: false,
+        reason: 'mutation proof rejected: the branch moved while the prose-only exemption was being decided',
+        exempt: false,
+        evidence: null,
+      }
+    }
     return { ok: true, reason: 'prose-only diff — mutation proof not required', exempt: true, evidence: null }
   }
 
@@ -1037,7 +1162,8 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
       ...(input.fs !== undefined ? { fs: input.fs } : {}),
       ...(input.proof_budget_ms !== undefined ? { proof_budget_ms: input.proof_budget_ms } : {}),
     })
-  const evidence = await prover.prove({ run: input.run, claim: input.claim })
+  // PROVE THE PINNED COMMIT — the same one the file list above came from.
+  const evidence = await prover.prove({ run: input.run, claim: input.claim, head_sha: pinnedSha })
 
   // THE HEAD THE MERGE WILL TAKE, re-read AFTER the proof. A proof is bound to
   // one commit; if the branch moved while it ran, the commit that would merge is
@@ -1056,7 +1182,22 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     }
   }
 
-  const verified = prover.verify(evidence, { run_id: input.run.id, head_sha: headSha })
+  // `head_sha: pinnedSha` and the equality below are the same guarantee read from
+  // both ends: the block must prove the commit we pinned, and the branch must
+  // still be on it. Comparing only against the RE-READ head would accept a proof
+  // of whatever the branch had drifted to.
+  if (headSha !== pinnedSha) {
+    return {
+      ok: false,
+      reason:
+        `mutation proof rejected: the branch moved from ${pinnedSha.slice(0, 8)} to ${headSha.slice(0, 8)} ` +
+        'while the proof ran — the commit that would merge is not the commit that was proved',
+      exempt: false,
+      evidence,
+    }
+  }
+
+  const verified = prover.verify(evidence, { run_id: input.run.id, head_sha: pinnedSha })
   if (!verified.ok) {
     // A block WE just produced that came back `proved:false` already carries the
     // specific observation that killed it ("the guard PASSED under the

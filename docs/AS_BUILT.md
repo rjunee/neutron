@@ -32,7 +32,13 @@ Two things make the proof about THIS PR rather than about mutation in the
 abstract. The nominated file must appear in `base...branch` — a mutation of a
 stable, well-guarded file the diff never touches proves red-then-green perfectly
 and certifies nothing, and being diff-independent it would let one boilerplate
-nomination satisfy the phase forever. And the guard and control must be TEST
+nomination satisfy the phase forever. The nominated path must also RESOLVE inside
+the throwaway worktree: rejecting a leading `/` and a `..` segment says nothing
+about a SYMLINK, and the branch under proof is agent-authored, so a committed link
+materialises in the proof worktree and `readFile`/`writeFile` follow it — the
+prover would have written the mutation through it to a host file it does not own.
+Both sides are resolved before the comparison, so a worktree that itself sits
+under a symlinked prefix still proves. And the guard and control must be TEST
 INVOCATIONS (`bun test …`, `go test …`, `python3 -m pytest …`), not merely
 allowlisted programs: `bash -c 'grep …'` reddens under any edit of the line and
 `sh -c 'echo ok'` is green by construction, so a general shell is off the list
@@ -52,6 +58,13 @@ migration gate compares against.
 The proof is BOUND, and `verify` enforces the binding rather than documenting it:
 to the run id, and to the branch head as re-read AFTER the proof, so a branch
 that moved mid-proof blocks instead of merging a commit that was never proved.
+The gate PINS that commit once, up front, and reads everything off the pin — the
+`base...<sha>` diff that binds the proof to this PR, the proof itself, and the
+final head comparison. It used to resolve the branch NAME separately for the diff
+and for the proof, so a push landing between them left the binding describing one
+commit while the proof described another; the prose-only exemption was worse,
+returning before any sha was resolved at all, so a branch that was docs-only when
+its diff was read could pick up code afterwards and merge with no proof ever run.
 The whole phase runs against ONE wall-clock budget (15 min for all three runs,
 not each), and a command that outruns it is KILLED and reaped — `tick.ts` is
 single-flight, so an abandoned guard was every other run's stall as well as an
@@ -69,7 +82,16 @@ each mutation was confirmed applied (exactly one occurrence, changed bytes) befo
 its test was run. The signed payload is covered structurally rather than by a
 list: a test censuses every leaf of a fully-populated block and demands the
 canonical bytes carry each one, so a field quietly dropped from the signature
-reddens even though every other assertion still passes.
+reddens even though every other assertion still passes. That census is why
+`claimed.rationale` is signed: as an OPTIONAL field it was missing from the
+fully-populated block, so the walk never demanded the payload cover it and the
+human-facing "why this proves the change" sentence could be rewritten on a real
+block that still verified. It is signed with an explicit null for absent, so
+backfilling one is an edit too. Three further mutations — unsigning `rationale`,
+dropping the worktree-containment check, and reading the binding diff off the
+branch name instead of the pinned sha — were each confirmed applied (the changed
+pattern asserted present in the source) and each reddened exactly the test written
+for it.
 
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 
