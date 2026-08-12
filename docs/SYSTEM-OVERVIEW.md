@@ -5325,8 +5325,12 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   atlas/sentinel SYSTEM personas (`prompts/{atlas,sentinel}.md` via
   `@neutronai/prompts` `loadPrompt`, `trident/agent-prompts.ts` → `dispatchAgent`).
   `trident/merge.ts` fills the
-  `'pr'` (`gh pr merge --squash`) and `'local'` (`git merge --no-ff`) merge
-  bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
+  `'pr'` (`gh pr merge --squash --match-head-commit <reviewed OID>` — #545: the
+  merge is PINNED to the commit the reviewed diff was generated from — the
+  building agent's reported `commitSha`, never a fresh head probe — carried in
+  `inner_result.reviewedHead`, so a head that moved after the APPROVE fails
+  LOUDLY instead of shipping unreviewed code) and
+  `'local'` (`git merge --no-ff`) merge bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
   tested the legacy harness fixes are mapped (see `trident/legacy-fixes.test.ts`): no
   phantom-id poll, no silent exit, loud fail on a missing Ralph
   `REMAINING_TASKS`, the `max_rounds`/`max_ralph_rounds` caps, the

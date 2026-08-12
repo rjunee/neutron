@@ -13,7 +13,11 @@ import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+// The REAL decoder the outer merge pins on — the resume-path assertions below run
+// it against the shape this script writes, rather than restating the rule.
+import { reviewedHeadOid } from './merge.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
+import type { TridentRun } from './store.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -233,6 +237,124 @@ describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
   test('an existing PR is REUSED, never duplicated', () => {
     expect(SRC).toContain('gh pr list --head')
     expect(SRC).toContain('NEVER open a duplicate PR')
+  })
+})
+
+describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF CAME FROM, and is CARRIED', () => {
+  // The OUTER merge pins `gh pr merge --match-head-commit` to this exact field
+  // (`reviewedHeadOid`, merge.ts), so whatever is recorded here is what the merge
+  // certifies as reviewed.
+  //
+  // IT MUST NEVER COME FROM A FRESH HEAD PROBE. `forge.commitSha` and `diffFile`
+  // are reported by the SAME agent run, so the sha names exactly the tree the
+  // reviewers read. A remote head probe does not: a third party's push satisfies
+  // it just as well, and recording THAT as `reviewedHead` makes the merge pin to —
+  // and thereby vouch for — a commit no reviewer saw. Binding to the reported sha
+  // can only ever fail CLOSED: a merely stale sha makes `--match-head-commit`
+  // refuse, which is the safe direction.
+
+  /** Every assignment to `reviewedHead` anywhere in the script. */
+  const reviewedHeadAssignments = (): string[] =>
+    SRC.split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^(let )?reviewedHead\s*=/.test(l))
+
+  test("round 1 pins to Forge's reported commit sha, fixed BEFORE the review that judges it", () => {
+    const decl = SRC.indexOf('let reviewedHead = branchHead')
+    const firstReview = SRC.indexOf('let synthesis = await reviewAndSynthesize(')
+    expect(decl).toBeGreaterThan(-1)
+    expect(firstReview).toBeGreaterThan(decl)
+  })
+
+  test('NO assignment of reviewedHead is ever derived from a head probe (the fail-open)', () => {
+    const assigns = reviewedHeadAssignments()
+    expect(assigns.length).toBeGreaterThan(0)
+    for (const line of assigns) {
+      // `readBranchHead`/`headAfter` answer "did the branch move?", NOT "what did
+      // the reviewers read?" — pinning to either certifies an unreviewed push.
+      expect(line).not.toContain('readBranchHead')
+      expect(line).not.toContain('headAfter')
+    }
+  })
+
+  test("every fix round re-pins to the sha THAT round's fix agent reported committing", () => {
+    const rePin = SRC.indexOf('reviewedHead = typeof fix?.commitSha')
+    const loopReview = SRC.indexOf('synthesis = await reviewAndSynthesize(diffFile, round, pr)\n    finalVerdict')
+    expect(rePin).toBeGreaterThan(-1)
+    expect(loopReview).toBeGreaterThan(rePin)
+    // The fix agent is asked for that sha under the same schema round 1 uses.
+    expect(SRC).toContain('const fix = await agent(')
+  })
+
+  test('the terminal result carries `reviewedHead` (the field merge.ts pins on)', () => {
+    const start = SRC.indexOf('const terminalResult = {')
+    const end = SRC.indexOf('await writeTerminalResult(terminalResult)')
+    expect(start).toBeGreaterThan(-1)
+    expect(SRC.slice(start, end)).toContain('reviewedHead,')
+  })
+
+  // THE CRASH-RESUME SHORTCUT RECORDS NO HEAD, ON PURPOSE.
+  //
+  // It runs only when the prior process reached 'argus-approved' and its terminal
+  // result was never harvested — and the terminal result is the ONLY place a
+  // reviewed OID is written, so by construction none exists to resume from.
+  // Probing the head at resume and labelling it `reviewedHead` would certify an
+  // unreviewed commit: reviewers approve A, B is pushed into the crash window,
+  // resume reads B, and the merge pins to B and SUCCEEDS. The pin then vouches for
+  // a commit nobody read, which is worse than no pin at all.
+  describe('the crash-resume shortcut records NO reviewed head (fail-closed)', () => {
+    // The resume block's CODE, sliced out so these assertions cannot be satisfied
+    // by an unrelated part of the file. Comment lines are stripped: the docblock
+    // there names `reviewedHead` to explain why it is deliberately absent, and a
+    // naive check would fail on the documentation of the very fix it verifies.
+    const resumeBlock = (): string => {
+      const at = SRC.indexOf("if (resumeCheckpoint === 'argus-approved') {")
+      expect(at).toBeGreaterThan(-1)
+      const end = SRC.indexOf('return resumeResult', at)
+      expect(end).toBeGreaterThan(at)
+      return SRC.slice(at, end)
+        .split('\n')
+        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+        .join('\n')
+    }
+
+    test('it does NOT probe the branch head and pass it off as reviewed', () => {
+      const block = resumeBlock()
+      expect(block).not.toContain('readBranchHead')
+      expect(block).not.toContain('reviewedHead')
+    })
+
+    test('the resume result omits the field entirely, so `reviewedHeadOid` yields null', () => {
+      // Mirrors the object the resume path builds. merge.ts must refuse this.
+      const resumeResult = {
+        ok: true,
+        prNumber: 42,
+        branch: 'feat-x',
+        verdict: 'APPROVE',
+        round: 0,
+        checkpoint: 'argus-approved',
+      }
+      expect('reviewedHead' in resumeResult).toBe(false)
+      // The REAL decoder, on the REAL shape — not a restatement of the rule.
+      expect(reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)).toBeNull()
+    })
+
+    test('A approved → crash → B pushed → resume must not merge B', () => {
+      // The boundary the shortcut used to get wrong, end to end through the real
+      // decoder: whatever B is, a resume result cannot name it as reviewed.
+      const B = 'b'.repeat(40)
+      const resumeResult = {
+        ok: true,
+        prNumber: 42,
+        branch: 'feat-x',
+        verdict: 'APPROVE',
+        round: 0,
+        checkpoint: 'argus-approved',
+      }
+      const pinned = reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)
+      expect(pinned).toBeNull()
+      expect(pinned).not.toBe(B)
+    })
   })
 })
 

@@ -1681,6 +1681,34 @@ try {
   if (resumeCheckpoint === 'argus-approved') {
     log(`trident-v2 resume: prior run reached 'argus-approved' for ${forgeBranch} — skipping build+review`)
     finalVerdict = 'APPROVE'
+    // NO `reviewedHead` ON THIS PATH — DELIBERATELY, so the merge FAILS CLOSED (#545).
+    //
+    // This shortcut runs precisely when the prior process reached 'argus-approved'
+    // but never got its terminal result harvested — so BY CONSTRUCTION there is no
+    // recorded reviewed OID anywhere: the only place one is written is the terminal
+    // result this resume is standing in for. Probing the head HERE and calling the
+    // answer `reviewedHead` would be a LIE with a safety label on it: reviewers
+    // approved commit A, someone pushes B into the crash window, resume reads B,
+    // and the outer merge pins to B and SUCCEEDS — shipping a commit no reviewer
+    // saw while `--match-head-commit` certifies it as reviewed. A pinned merge of
+    // an unreviewed commit is WORSE than an unpinned one, because the pin
+    // manufactures confidence nobody earned.
+    //
+    // So this path records nothing. `reviewedHeadOid` returns null, `mergePr`
+    // refuses, and the run fails LOUDLY. That is the same fail-closed rule the
+    // rest of #545 follows: a merge we cannot prove was reviewed is a merge we do
+    // not make.
+    //
+    // HOW THAT RUN IS RECOVERED, precisely — the failure is loud and ONE-SHOT, not
+    // a silent gate that never fires again. The refusal puts the run in `failed`,
+    // which is TERMINAL, so it is never re-ticked or retried into a loop (and
+    // orphan redispatch is separately bounded to one per run per process). Note
+    // that recovery is a FRESH run, not a re-fire of this row: this row's
+    // `inner_checkpoint` is still 'argus-approved', so re-dispatching IT would
+    // re-enter this same shortcut and refuse again — correctly, since there is
+    // still no reviewed OID. A new run starts with a null checkpoint and so does
+    // a real build + review, which is the only thing that can legitimately
+    // produce one.
     const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
     // Re-write the terminal result so a re-fired run whose prior process crashed
     // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
@@ -1785,6 +1813,25 @@ ${task}${reflectionGuidance}`,
   let branchHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
   let roundLostItsWork = null
 
+  // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
+  // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
+  // (both are required FORGE_SCHEMA fields, so this is always populated on a
+  // healthy build). Carried out in the terminal result and passed to
+  // `--match-head-commit` at merge, so a head that moved fails LOUDLY instead of
+  // silently shipping code no reviewer saw (observed on PR #171: the head went
+  // clean → dirty mid-review).
+  //
+  // DELIBERATELY NOT A FRESH PROBE OF THE REMOTE HEAD. A commit pushed between
+  // Forge's push and the probe would be read back and recorded as `reviewedHead`,
+  // and the merge would then pin to it and SUCCEED — certifying as reviewed a
+  // commit whose code is not in the diff anyone read. That is the same lie the
+  // crash-resume shortcut was fixed to stop telling, and a pinned merge of an
+  // unreviewed commit is worse than an unpinned one because the pin manufactures
+  // confidence nobody earned. A sha that is merely STALE cannot mis-merge:
+  // `--match-head-commit` just REFUSES. Empty (Forge reported no sha) records
+  // nothing and the outer merge refuses too — fail-closed either way.
+  let reviewedHead = branchHead
+
   // First review + synthesis.
   let synthesis = await reviewAndSynthesize(diffFile, round, pr)
   finalVerdict = normalizeVerdict(synthesis.verdict)
@@ -1807,7 +1854,7 @@ ${task}${reflectionGuidance}`,
     // Fix round (> 1): the branch/PR were created in round 1, so ALWAYS re-enter
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
     // reuses the PR (no duplicate). Codex [P1] fix.
-    await agent(
+    const fix = await agent(
       `${forgeBuildContract(true)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
@@ -1834,6 +1881,13 @@ ${task}${reflectionGuidance}`,
       break
     }
     branchHead = headAfter
+    // …and the commit THIS round's review judges is, exactly as in round 1, the
+    // one the fix agent reported committing — NOT `headAfter` (#545). The remote
+    // probe above answers a different question ("did the branch move?"), and a
+    // third party's push satisfies it just as well as the fix agent's own commit;
+    // recording that push as `reviewedHead` would pin the merge to code the
+    // upcoming review never sees. Empty → fail-closed, same as round 1.
+    reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
     synthesis = await reviewAndSynthesize(diffFile, round, pr)
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
@@ -1855,6 +1909,11 @@ ${task}${reflectionGuidance}`,
     verdict: finalVerdict,
     round,
     checkpoint: finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes',
+    // THE REVIEWED COMMIT (#545) — the OUTER merge pins to exactly this OID
+    // (`gh pr merge --match-head-commit`), so anything pushed after the review
+    // makes the merge fail loudly rather than ship unreviewed. Empty means the
+    // probe read nothing: the outer loop then REFUSES to merge (fail-closed).
+    reviewedHead,
     // 0 here (the FINAL Ralph task, or a non-Ralph run) → the outer loop does NOT
     // re-fire; it runs the normal merge (APPROVE) / fail (REQUEST_CHANGES) path.
     remainingTasks: ralphRemaining,

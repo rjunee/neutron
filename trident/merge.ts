@@ -7,8 +7,9 @@
  * same `(cmd, cwd) => HostCommandResult` shape `defaultGitModeProbe`
  * uses), so tests assert the exact git/gh calls without shelling out.
  *
- *   • `'pr'`    → `gh pr merge <pr> --squash`, then delete the REMOTE
- *                 branch (`git push origin --delete`) + the local branch.
+ *   • `'pr'`    → `gh pr merge <pr> --squash --match-head-commit <reviewed OID>`,
+ *                 then delete the REMOTE branch (`git push origin --delete`) +
+ *                 the local branch.
  *   • `'local'` → merge the feature branch into the base locally, then
  *                 delete the local branch.
  *
@@ -23,6 +24,21 @@
  * `git worktree list` is clean after EVERY merge. Best-effort + non-fatal: the
  * merge has already landed, so a failed worktree removal is logged, never thrown
  * (it must not undo a completed merge).
+ *
+ * THE MERGE IS PINNED TO THE REVIEWED COMMIT (#545). A bare `gh pr merge` merges
+ * whatever the PR head is AT MERGE TIME, which is not necessarily what Argus
+ * reviewed: between the APPROVE and this call anyone (a human, another agent, a
+ * lingering Forge worktree) can push, and the merge would ship code no reviewer
+ * ever saw. That window is not theoretical — it was OBSERVED on this repo (PR
+ * #171 went clean → dirty mid-review). So the inner workflow records the OID OF
+ * THE COMMIT THE REVIEWED DIFF WAS GENERATED FROM — the building agent reports
+ * its `commitSha` alongside that diff, never a fresh head probe (a third party's
+ * push satisfies a probe just as well, and pinning to it would certify code no
+ * reviewer read) — and carries it in the typed terminal result
+ * (`reviewedHead`); `mergePr` reads it back off the run and passes
+ * `--match-head-commit`, so a moved head makes GitHub REFUSE the merge and the
+ * run fails LOUDLY. Fail-CLOSED: no recorded reviewed OID → no merge (an
+ * unpinnable merge is exactly the unreviewable merge this prevents).
  */
 
 import { join } from 'node:path'
@@ -147,6 +163,33 @@ function withLocalMergeLock(repo_path: string, body: () => Promise<void>): Promi
   }
   next.then(cleanup, cleanup)
   return next
+}
+
+/** A full git object id — the only form `--match-head-commit` accepts (an
+ *  abbreviated sha would be rejected by the API, turning the guard into an
+ *  unconditional merge failure). */
+const FULL_OID = /^[0-9a-f]{40}$/
+
+/**
+ * The head OID the reviewers actually judged, read back off the run's typed
+ * terminal result (`inner_result`, the `reviewedHead` field `inner-workflow.mjs`
+ * writes at review time). Returns null when the column is absent/unparseable or
+ * the value is not a full OID — the caller must then REFUSE to merge (#545): a
+ * merge we cannot pin is a merge we cannot prove was reviewed.
+ */
+export function reviewedHeadOid(run: TridentRun): string | null {
+  if (typeof run.inner_result !== 'string' || run.inner_result.trim().length === 0) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(run.inner_result)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== 'object') return null
+  const head = (parsed as Record<string, unknown>).reviewedHead
+  if (typeof head !== 'string') return null
+  const oid = head.trim().toLowerCase()
+  return FULL_OID.test(oid) ? oid : null
 }
 
 function must(step: string, res: HostCommandResult): HostCommandResult {
@@ -280,7 +323,25 @@ export function buildMergeCleanupDeps(
           exit_code: -1,
         })
       }
-      must('gh pr merge', await run_host(['gh', 'pr', 'merge', String(run.pr), '--squash'], repo))
+      // PIN THE MERGE TO THE REVIEWED COMMIT (#545). No recorded OID → refuse:
+      // merging an unpinnable head is how code no reviewer saw ships silently.
+      const reviewed_head = reviewedHeadOid(run)
+      if (reviewed_head === null) {
+        throw new TridentMergeError(
+          'pr-mode merge requires the reviewed head OID (no `reviewedHead` in the inner result) — refusing to merge an unpinned head',
+          'precondition',
+          { ok: false, stdout: '', stderr: 'reviewedHead missing/not a full OID', exit_code: -1 },
+        )
+      }
+      // `--match-head-commit` makes GitHub reject the merge if the PR head moved
+      // since the review — a LOUD failure instead of shipping unreviewed code.
+      must(
+        'gh pr merge',
+        await run_host(
+          ['gh', 'pr', 'merge', String(run.pr), '--squash', '--match-head-commit', reviewed_head],
+          repo,
+        ),
+      )
       if (branch !== null) {
         // Best-effort branch teardown — the merge already landed, so a
         // failed delete is logged but not fatal to the merge itself.
