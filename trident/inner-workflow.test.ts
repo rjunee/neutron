@@ -1305,6 +1305,28 @@ describe('inner-workflow.mjs — worktree cleanup on ALL paths, destructive on N
       expect(got.exit).toBe(null)
     })
 
+    test('a reported 0 does NOT outrank PRESERVED records in the transcript', () => {
+      // THE ONE READING THAT FAILS SILENTLY. Every other mis-transcription lands on
+      // 'failed', which logs LOUDLY; this one lands on 'ok', so the operator's only
+      // notice that a worktree still holds uncommitted work is simply never printed
+      // and the lost-work alarm is invisible rather than wrong.
+      //
+      // The pair is impossible in a real run: the script increments `preserved` at
+      // every PRESERVED record and ends on `[ "$preserved" -eq 0 ] || exit 3`, so
+      // exit 0 and a PRESERVED line cannot both be true — asserted against the
+      // SHIPPED script above, not assumed. So the record is believed over the number.
+      const raw = 'PRESERVED worktree /wt reason=dirty\n  ?? brand-new.ts\nRESULT preserved=1 removed=0'
+      expect(classify(0, raw).outcome).toBe('preserved-unmarked')
+      expect(classify('0', raw).outcome).toBe('preserved-unmarked')
+      expect(classify(0, `${raw}\n___EXIT=0`).outcome).toBe('preserved-unmarked')
+      // …and a GENUINE clean run still reads as ok — the script emits no PRESERVED
+      // line at all when it preserved nothing, so believing the record cannot cry wolf.
+      expect(classify(0, 'REMOVED /wt\nDELETED branch b\nRESULT preserved=0 removed=1').outcome).toBe('ok')
+      expect(classify(0, 'SKIPPED /wt reason=not-a-worktree-root\nRESULT preserved=0 removed=0').outcome)
+        .toBe('ok')
+      expect(classify(0, 'KEPT branch b reason=checked-out\nRESULT preserved=0 removed=0').outcome).toBe('ok')
+    })
+
     test('a cleanup that never ran is a FAILURE, never a preservation', () => {
       // Exit 2 (usage), 127 (wrong script path) and a silent agent all mean the
       // script inspected NOTHING. Calling those "PRESERVED WORK" points the

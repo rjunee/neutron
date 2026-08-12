@@ -1049,10 +1049,21 @@ const CLEANUP_SCHEMA = {
  *   * With NO usable exit code at all, the script's own `PRESERVED` records in
  *     the transcript still decide. Announcing preserved work that was in fact
  *     removed costs the operator one wasted look; the reverse costs them the work.
+ *   * A reported 0 does NOT outrank a transcript that says `PRESERVED`. The script
+ *     increments its counter at every one of those records and ends on
+ *     `[ "$preserved" -eq 0 ] || exit 3`, so "exit 0" and "PRESERVED …" cannot both
+ *     be true of one real run — the pair is only ever a mis-transcription. Reading
+ *     the number instead of the record is the one way left for this path to fail
+ *     SILENTLY: the log says `ok`, and the operator's only notice that a worktree
+ *     still holds uncommitted work is never printed. Because a genuine clean run
+ *     emits no `PRESERVED` line at all (it says REMOVED/DELETED/KEPT/SKIPPED),
+ *     believing the record here can never cry wolf.
  *
  * Only a real 3 (or a transcript that says PRESERVED) is a preservation. Exit 2 is
  * a usage error and 127 a wrong script path — the script inspected NOTHING on
- * those, and calling them "PRESERVED WORK" drowns the real alarm in noise.
+ * those, and calling them "PRESERVED WORK" drowns the real alarm in noise. Those
+ * two already log LOUDLY as 'failed', so they are left to that path: the override
+ * above exists only for the reading that would otherwise be silent.
  *
  * @param reported the agent's `exit_code` field, in whatever type it arrived as
  * @param raw the agent's transcription of the script's stdout+stderr
@@ -1073,9 +1084,13 @@ function classifyCleanupOutcome(reported, raw) {
     : markers
       ? Number(markers[markers.length - 1].slice('___EXIT='.length))
       : null
-  if (exit === 0) return { exit, outcome: 'ok' }
   if (exit === 3) return { exit, outcome: 'preserved' }
-  if (exit === null && /^PRESERVED /m.test(text)) return { exit, outcome: 'preserved-unmarked' }
+  // The two readings that would otherwise SILENCE the alarm — no exit code at all,
+  // and a reported 0 that the transcript itself contradicts.
+  if ((exit === null || exit === 0) && /^PRESERVED /m.test(text)) {
+    return { exit, outcome: 'preserved-unmarked' }
+  }
+  if (exit === 0) return { exit, outcome: 'ok' }
   return { exit, outcome: 'failed' }
 }
 
@@ -2098,7 +2113,7 @@ ${cleanupCmd}`,
     log(`trident-v2 cleanup:worktree PRESERVED WORK (exit=3) — nothing was force-removed:\n${cleanupRaw}`)
   } else if (cleanupOutcome === 'preserved-unmarked') {
     log(
-      `trident-v2 cleanup:worktree PRESERVED WORK (exit code unreported — read from the output) — nothing was force-removed:\n${cleanupRaw}`,
+      `trident-v2 cleanup:worktree PRESERVED WORK (exit code ${cleanupExit === null ? 'unreported' : `mis-reported as ${cleanupExit}`} — read from the output instead) — nothing was force-removed:\n${cleanupRaw}`,
     )
   } else {
     log(`trident-v2 cleanup:worktree FAILED (exit=${cleanupExit === null ? 'unknown' : cleanupExit}) — the cleanup script did not run to completion, so NOTHING was inspected or removed (this is not a preservation):\n${cleanupRaw}`)
