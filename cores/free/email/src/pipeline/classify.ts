@@ -73,10 +73,29 @@ export const BODY_EXCERPT_LIMIT = 2000
  * Extract the bare address from an RFC 5322 mailbox spec
  * (`"Name" <local@host>` → `local@host`). Returns the lower-cased input when
  * there is no angle-bracket form.
+ *
+ * ── WHY TWO indexOf CALLS AND NOT A REGEX ─────────────────────────────────────
+ * This used to be `/<([^>]*)>/.exec(from)`, and CodeQL was right to call it
+ * `js/polynomial-redos`. `[^>]` matches `<` as well, so on a `From:` header of
+ * N `<` characters and no `>` the engine consumes to end-of-string from EVERY
+ * one of the N starting positions: quadratic. Measured on the pre-fix code,
+ * 32 KB of `<` took 867 ms and each doubling of the input quadrupled the time,
+ * so a 1 MB header — well inside what a sender may legally emit — is minutes of
+ * pegged CPU. `from` is an RFC 5322 header, which means the REMOTE SENDER
+ * chooses this string; on a public, self-hostable project that is a
+ * denial-of-service anyone can post to any self-hoster's mail path.
+ *
+ * `indexOf` scans forward once and has no backtracking to do, so the rewrite is
+ * linear by construction rather than linear by careful quantifier tuning. The
+ * semantics are preserved exactly: the greedy `[^>]*` between `<` and `>` picks
+ * out the span from the FIRST `<` to the FIRST `>` that follows it, and a `<`
+ * with no `>` after it anywhere makes the whole match fail and falls back to the
+ * unbracketed input. See `pipeline-classify-redos.test.ts` for the linearity pin.
  */
 export function bareAddress(from: string): string {
-  const match = /<([^>]*)>/.exec(from)
-  const raw = match?.[1] ?? from
+  const open = from.indexOf('<')
+  const close = open === -1 ? -1 : from.indexOf('>', open + 1)
+  const raw = open !== -1 && close !== -1 ? from.slice(open + 1, close) : from
   return raw.trim().toLowerCase()
 }
 

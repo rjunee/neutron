@@ -138,11 +138,13 @@ const EXPECTED_COMPOSITION_KEYS = [
   // (`connect/surface-gate.ts`) — see `open-connect-served.test.ts`.
   'connect_api',
   'cores',
-  // PRE-EXISTING INVENTORY DRIFT, fixed here: the composer has set this field
-  // since the Cores OAuth broker landed, but the expected-key list was never
-  // updated, so this characterization was already red on `main` before the
-  // email pipeline touched it.
-  'cores_oauth_broker_surface',
+  // NOT `cores_oauth_broker_surface`. An earlier round of this branch added it
+  // here, described as pre-existing drift that had "already" reddened `main`.
+  // That was wrong — checked out and run, `main` is GREEN without it — and the
+  // line reddened this characterization instead. The field is spread in
+  // CONDITIONALLY (`composer.ts`: `coresOAuthBroker !== undefined`, which needs
+  // Google OAuth configured), and this boot configures no OAuth, so the composer
+  // correctly does not set it and it correctly does not belong in this list.
   'create_project',
   'cron_jobs',
   'db',
