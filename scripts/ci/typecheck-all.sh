@@ -15,13 +15,24 @@
 #
 # Note: `tsconfig.base.json` is `extends`-only (no `include`) and is NOT named
 # `tsconfig.json`, so `find -name tsconfig.json` correctly skips it.
+#
+# `.claude/worktrees/` IS EXCLUDED, and that exclusion is not a narrowing of the
+# gate. Those directories are OTHER CHECKOUTS of this same repo — agent lane
+# worktrees that git nests inside the working tree — so every tsconfig under them
+# is a duplicate of one already in the matrix, pinned to whatever commit that lane
+# happens to sit on. Including them made the local matrix 3366 configs instead of
+# 51, of which 3315 were worktree copies, and typechecking other lanes' in-progress
+# code produced dozens of failures that belong to no one. CI runs on a fresh clone
+# with no worktrees, so this changes nothing there and everything locally — and a
+# matrix that looks hung for thousands of configs is exactly what pushes an agent
+# toward `pkill -f typecheck-all.sh`, the command this branch exists to forbid.
 
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 2
 
 discover() {
-  find . -name tsconfig.json -not -path '*/node_modules/*' \
+  find . -name tsconfig.json -not -path '*/node_modules/*' -not -path './.claude/worktrees/*' \
     | sed 's|^\./||' \
     | LC_ALL=C sort
 }

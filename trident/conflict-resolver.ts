@@ -97,7 +97,7 @@ const REDIRECT_RULE =
 // This resolver is a FORGE with Bash running mid-rebase on the SHARED box, which is
 // exactly when an agent reaches for `pkill` to clear something it thinks is stuck.
 const NO_PATTERN_KILL_RULE =
-  'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match the whole machine, not your worktree, and one such command has already SIGTERMed every concurrent lane on this box including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
+  'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match EVERY process your user is running anywhere on this box, not just the ones in your worktree, and one such command has already SIGTERMed every concurrent lane here including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
 
 /** The Forge contract for a mid-rebase conflict resolution. */
 function conflictPrompt(input: {

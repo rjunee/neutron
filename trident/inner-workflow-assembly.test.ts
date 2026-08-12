@@ -51,6 +51,18 @@ interface RunOpts {
    * would look covered while the planner never sees it.
    */
   ralph?: boolean
+  /**
+   * Run the FULL production wiring: pr merge-mode plus a threaded dbPath/runId/
+   * checkpointScript.
+   *
+   * Without this the harness never dispatches `checkpoint:*`, `terminal-result` or
+   * `ci-probe-round-*` at all — a null dbPath no-ops the first two and `isPr === false`
+   * short-circuits the third — so any claim made about those seats' prompts was
+   * vacuously true over an empty call list. They are exempt seats, and an exemption
+   * that is never re-proved against a real prompt is exactly the hole the exemption
+   * list exists to prevent.
+   */
+  pr?: boolean
 }
 
 async function runWorkflow(
@@ -68,7 +80,9 @@ async function runWorkflow(
     // label, including a retry lane ('argus:codex-retry').
     if (dead.has(String(label))) return null
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
-      return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed: true }
+      // A PR number only in pr-mode — `probeCi` needs one or it returns early and the
+      // `ci-probe-round-*` seat is never dispatched.
+      return { prNumber: opts.pr === true ? 4242 : null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed: true }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: opts.approveAll === true ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
@@ -100,7 +114,17 @@ async function runWorkflow(
       // synthesis APPROVEs immediately, so the gate is the only remaining actor.
       return { verdict: opts.approveAll === true || synthCount > 1 ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
     }
-    // checkpoint / terminal-result / cleanup bash steps (also no-op'd by null dbPath).
+    if (String(label).startsWith('ci-probe-round-')) {
+      // A GREEN board, in the shape `gh pr checks --json` really prints, so the pr-mode
+      // run classifies CI as passing and reaches the end of the workflow (an unparseable
+      // reply classifies 'unknown', which blocks and would cut the run short of the
+      // `terminal-result` seat this run exists to dispatch).
+      return { raw: '[{"name":"test","state":"SUCCESS","link":"https://example.invalid/1"}]', exit_code: 0 }
+    }
+    // A DISTINCT sha per round, so each fix round reads as having LANDED (an unchanged
+    // head is classified "did not land" and stops the loop before forge:fix-round-2).
+    if (String(label).startsWith('head-probe-round-')) return { head: `sha-${String(label)}` }
+    // checkpoint / terminal-result / cleanup bash steps.
     return ''
   }
   const parallel = async (fns: Array<() => Promise<unknown>>): Promise<unknown[]> =>
@@ -116,15 +140,18 @@ async function runWorkflow(
     slug: 'test-run',
     maxRounds: 3,
     ralph: opts.ralph === true,
-    mergeMode: 'local', // no PR path
+    // pr-mode ALSO threads a dbPath/runId/checkpointScript, because those two switches
+    // are what gate the three bookkeeping seats between them: `isPr` gates ci-probe,
+    // dbPath+runId gate checkpoint/terminal-result.
+    mergeMode: opts.pr === true ? 'pr' : 'local',
     prNumber: null,
     branch: null,
-    dbPath: null, // → checkpoint()/writeTerminalResult() no-op (no bash agent steps)
-    runId: null,
+    dbPath: opts.pr === true ? '/tmp/trident-test.db' : null,
+    runId: opts.pr === true ? 'test-run-id' : null,
     resumeCheckpoint: null,
     codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
-    kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured
-    checkpointScript: null,
+    kimiConfigured: true, // → the kimi seat runs and its prompt is captured
+    checkpointScript: opts.pr === true ? '/repo/trident/checkpoint.sh' : null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance,
   }
@@ -141,7 +168,17 @@ async function runWorkflow(
 }
 
 const FORGE_LABELS = ['forge:build', 'forge:fix-round-2']
-const REVIEWER_LABELS = ['argus:claude', 'argus:adversarial', 'argus:synthesis', 'argus:codex']
+// EVERY reviewer seat, cross-model ones included. `argus:kimi` was missing, so the
+// reflection merge-gate below never read the kimi bridge's prompt at all — appending the
+// owner corrections to `kimiReviewerPrompt` leaked them into a dispatched reviewer with
+// both suites green.
+const REVIEWER_LABELS = [
+  'argus:claude',
+  'argus:adversarial',
+  'argus:synthesis',
+  'argus:codex',
+  'argus:kimi',
+]
 
 describe('inner-workflow.mjs — AS-BUILT reflection boundary (executed prompt capture)', () => {
   let captured: Captured[]
@@ -288,9 +325,10 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
  * splicing the rule into the rubric left three command-running seats uncovered.
  *
  * Scope is "every agent that can run a shell command", because that is exactly the set
- * that can `pkill`. argus:synthesis is deliberately excluded and asserted excluded: it
- * merges verdict TEXT and is handed no tools, which is why it carries neither of the
- * two pre-existing rules either.
+ * that can `pkill`. The covered set is DERIVED from the labels the workflow actually
+ * dispatched, minus an explicit, reasoned exclusion list — NEVER hand-listed. A
+ * hand-list is drift-blind: it silently passes while a newly added shell seat goes
+ * uncovered, which is precisely how `cleanup:worktree` shipped without the rule.
  */
 describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told not to pattern-kill', () => {
   // Verbatim fragments of the shipped rule. Retyped deliberately: reading the constant
@@ -299,36 +337,123 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
   const SHARED_BOX = 'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES'
   const PROHIBITION = 'NEVER kill processes by pattern or by name'
   const CARVE_OUT = 'Kill ONLY a pid you started yourself and can name'
+  /** The rule's LAST words — the far edge of the hedge-scan window. */
+  const TAIL = 'work around it and say so in your report.'
 
-  /** Every seat that is handed a shell, in BOTH modes. `plan:fable` is Ralph-only. */
-  const COMMAND_RUNNING_LABELS = [
-    'forge:build',
-    'forge:fix-round-2',
-    'argus:claude',
-    'argus:adversarial',
-    'argus:codex',
-    'argus:kimi',
+  /**
+   * The ONLY seats allowed to lack the rule, each with the reason it cannot pattern-kill.
+   * Everything else the workflow dispatches is REQUIRED to carry it, so a new shell seat
+   * fails this suite until it is either given the rule or consciously exempted here with
+   * a justification. That inversion — deny-by-default instead of an allow-list of covered
+   * labels — is the whole point of this rewrite.
+   */
+  /** A seat is handed ONE literal command and told to run exactly it — no room for a kill. */
+  const isSingleCommandSeat = (p: string): boolean => p.includes('Run EXACTLY this single Bash command')
+
+  const EXCLUDED: Array<{ match: (l: string) => boolean; why: string; proof: (prompt: string) => boolean }> = [
+    // argus:synthesis USED TO BE EXEMPT HERE, as "toolless". That exemption was circular:
+    // its only evidence was that the prompt omits the other shell rules, which is the
+    // authoring choice the exemption was meant to justify, not evidence about the seat.
+    // Nothing in inner-workflow.mjs grants or withholds tools — there is no allowedTools
+    // plumbing at all — so argus:synthesis runs with the same default toolset as
+    // argus:claude and can shell out. It now carries the rule and is covered like the rest.
+    //
+    // The probe/bookkeeping seats are each handed ONE literal command and told to run
+    // EXACTLY it and nothing else, so there is no room in them for a kill of any shape.
+    // `proof` is what keeps that claim HONEST: if one of these is ever loosened into a
+    // free-form shell seat, the proof stops holding and this suite fails — the exclusion
+    // cannot quietly rot into a hole.
+    { match: (l) => l.startsWith('checkpoint:'), why: 'single fixed `bash checkpoint.sh …` command', proof: isSingleCommandSeat },
+    { match: (l) => l === 'terminal-result', why: 'single fixed `printf … && bash checkpoint.sh …` command', proof: isSingleCommandSeat },
+    { match: (l) => l.startsWith('head-probe-round-'), why: 'single fixed `git ls-remote`/`rev-parse` command', proof: isSingleCommandSeat },
+    { match: (l) => l.startsWith('ci-probe-round-'), why: 'single fixed `gh pr checks` command', proof: isSingleCommandSeat },
   ]
 
   let captured: Captured[]
   let ralphCaptured: Captured[]
+  let prCaptured: Captured[]
+  let retryCaptured: Captured[]
+  /** Every call from ALL modes — a rule spliced into only one path must not read as covered. */
+  let allCalls: Captured[]
+  /** Distinct dispatched labels that are NOT exempt → the set that must carry the rule. */
+  let coveredLabels: string[]
   beforeAll(async () => {
     captured = (await runWorkflow(GUIDANCE)).captured
     ralphCaptured = (await runWorkflow(GUIDANCE, { ralph: true })).captured
+    // THE PR PATH IS A SEPARATE DISPATCH SET, not a variation on the local one. Three
+    // seats exist only here (checkpoint:*, terminal-result, ci-probe-round-*), so a
+    // local-only harness derives `coveredLabels` from a panel that is missing them and
+    // every claim about them — exemption proofs included — passes over an empty list.
+    prCaptured = (await runWorkflow(GUIDANCE, { pr: true })).captured
+    // THE RETRY LANES ARE ONLY REACHABLE THROUGH A DEAD PEER. With all mocks answering,
+    // `argus:codex-retry`/`argus:kimi-retry` are never dispatched, so they never enter
+    // `allCalls` and a shell seat added there would ship uncovered with the suite green.
+    retryCaptured = (await runWorkflow(GUIDANCE, { dead: ['argus:codex', 'argus:kimi'] })).captured
+    allCalls = [...captured, ...ralphCaptured, ...prCaptured, ...retryCaptured]
+    coveredLabels = [...new Set(allCalls.map((c) => String(c.label)))]
+      .filter((l) => !EXCLUDED.some((e) => e.match(l)))
+      .sort()
   })
 
-  test('the harness actually dispatched every seat it claims to cover', () => {
-    for (const label of COMMAND_RUNNING_LABELS) {
-      expect(captured.some((c) => c.label === label)).toBe(true)
+  test('the harness actually dispatched the seats this suite exists to cover', () => {
+    // Pinned floor: if a refactor stops dispatching any of these, the derived set would
+    // quietly shrink and the coverage test below would pass over a smaller panel.
+    for (const label of [
+      'forge:build',
+      'forge:fix-round-2',
+      'argus:claude',
+      'argus:adversarial',
+      'argus:codex',
+      'argus:kimi',
+      'argus:synthesis',
+      // Reachable ONLY through a dead peer, and covered seats in their own right.
+      'argus:codex-retry',
+      'argus:kimi-retry',
+      'cleanup:worktree',
+    ]) {
+      expect(coveredLabels).toContain(label)
     }
     // The planner exists ONLY in Ralph mode — assert the mode really produced it,
     // or its coverage test below would vacuously pass over an empty call list.
     expect(ralphCaptured.some((c) => c.label === 'plan:fable')).toBe(true)
   })
 
+  test('the pr path dispatched the three seats that exist ONLY there', () => {
+    // THE GUARD ON THE EXEMPTION PROOFS. Each of these is exempt, and an exemption is
+    // only re-proved against prompts that were actually captured. If the pr-mode run
+    // ever stops dispatching them, the proof loop below would silently iterate nothing
+    // and the exclusion list would rot back into an unchecked allow-list.
+    const prLabels = prCaptured.map((c) => String(c.label))
+    expect(prLabels.some((l) => l.startsWith('checkpoint:'))).toBe(true)
+    expect(prLabels.some((l) => l === 'terminal-result')).toBe(true)
+    expect(prLabels.some((l) => l.startsWith('ci-probe-round-'))).toBe(true)
+    expect(prLabels.some((l) => l.startsWith('head-probe-round-'))).toBe(true)
+  })
+
+  test('every EXEMPT seat still earns its exemption — no exclusion may rot into a hole', () => {
+    // An exclusion list is only as trustworthy as the claim behind each entry. For every
+    // seat that was actually dispatched AND exempted, re-prove the stated reason against
+    // its real prompt. Loosening `head-probe` into a free-form shell seat, say, would keep
+    // it exempt by label while making the exemption false — and this fails on that.
+    const exempted = [...new Set(allCalls.map((c) => String(c.label)))].filter((l) =>
+      EXCLUDED.some((e) => e.match(l)),
+    )
+    expect(exempted.length).toBeGreaterThan(0)
+    for (const label of exempted) {
+      const entry = EXCLUDED.find((e) => e.match(label))
+      expect(entry).toBeDefined()
+      expect(String(entry?.why).length).toBeGreaterThan(0)
+      for (const c of allCalls.filter((x) => String(x.label) === label)) {
+        // `${label}: ${why}` is no longer true of the real prompt if this fails.
+        expect(entry?.proof(c.prompt)).toBe(true)
+      }
+    }
+  })
+
   test('EVERY command-running prompt carries the rule, with the reason and the carve-out', () => {
-    for (const label of COMMAND_RUNNING_LABELS) {
-      const calls = captured.filter((c) => c.label === label)
+    expect(coveredLabels.length).toBeGreaterThan(0)
+    for (const label of coveredLabels) {
+      const calls = allCalls.filter((c) => String(c.label) === label)
       expect(calls.length).toBeGreaterThan(0)
       for (const c of calls) {
         // The REASON is other lanes, not the agent's own safety.
@@ -361,29 +486,62 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
     for (const c of forge) expect(c.prompt).toContain(PROHIBITION)
   })
 
-  test('it is stated as a PROHIBITION, never softened into advice', () => {
-    const forge = captured.find((c) => c.label === 'forge:build')
-    expect(forge).toBeDefined()
-    const prompt = String(forge?.prompt)
-    // No hedge anywhere in the sentence that carries the rule.
-    const sentence = prompt.slice(prompt.indexOf(SHARED_BOX), prompt.indexOf(CARVE_OUT))
-    for (const hedge of ['try to avoid', 'prefer not', 'should avoid', 'if possible', 'generally']) {
-      expect(sentence.toLowerCase()).not.toContain(hedge)
+  test('it is stated as a PROHIBITION, never softened into advice — in EVERY covered prompt', () => {
+    // SCANNED PER SEAT, not on forge:build alone. Every covered seat is only required to
+    // CONTAIN the rule's fragments, which a hand-written hedged paraphrase spliced into
+    // one seat would satisfy — while a single-prompt hedge scan never looked at it. The
+    // coverage test above already iterates every covered label; so does this one now.
+    expect(coveredLabels.length).toBeGreaterThan(0)
+    for (const label of coveredLabels) {
+      for (const c of allCalls.filter((x) => String(x.label) === label)) {
+        const prompt = c.prompt
+        // ANCHOR THE WINDOW BEFORE SLICING. `slice(indexOf(a), indexOf(b))` silently
+        // yields '' when either anchor is missing (-1) or when they are reordered
+        // (start > end), and an empty window passes every `not.toContain` below
+        // vacuously — the scan would fail OPEN exactly when the rule had been mangled.
+        // Prove the window is real first.
+        const start = prompt.indexOf(SHARED_BOX)
+        const carve = prompt.indexOf(CARVE_OUT)
+        const tail = prompt.indexOf(TAIL)
+        expect(start).toBeGreaterThanOrEqual(0)
+        expect(carve).toBeGreaterThan(start)
+        expect(tail).toBeGreaterThan(carve)
+        // Scan the ENTIRE rule — opening claim, prohibition, carve-out AND the closing
+        // instruction. Stopping at the carve-out would miss a hedge bolted onto the end,
+        // which softens the rule just as effectively as one in the first sentence.
+        const rule = prompt.slice(start, tail + TAIL.length)
+        expect(rule).toContain(PROHIBITION)
+        expect(rule).toContain(CARVE_OUT)
+        // NOTE: 'unless you' is deliberately NOT on this list. It is the natural phrasing
+        // of the carve-out the rule itself requires ("do NOT kill it unless you started
+        // it"), so banning it would fire on a strictly STRONGER rewording — a hedge scan
+        // that blocks improvements is a worse guard than one that misses this phrase.
+        for (const hedge of ['try to avoid', 'prefer not', 'should avoid', 'if possible', 'generally', 'where practical', 'when convenient', 'as a rule']) {
+          expect(rule.toLowerCase()).not.toContain(hedge)
+        }
+        // And it tells the agent what to do INSTEAD, so "work around it" is the escape
+        // hatch rather than killing a process it did not start.
+        expect(prompt).toContain('do NOT kill it — work around it')
+      }
     }
-    // And it tells the agent what to do INSTEAD, so "work around it" is the escape
-    // hatch rather than killing a process it did not start.
-    expect(prompt).toContain('do NOT kill it — work around it')
   })
 
-  test('argus:synthesis is toolless, so it gets none of the three shell rules (not an omission)', () => {
-    const synth = captured.filter((c) => c.label === 'argus:synthesis')
+  test('argus:synthesis carries the rule — nothing in the workflow withholds tools from it', () => {
+    // The retired "toolless" exemption rested on a property the source does not have.
+    // Pin the absence, so re-introducing that exemption requires first introducing the
+    // tool plumbing that would make it true.
+    // Comment lines stripped first — the source now DISCUSSES the absent plumbing in
+    // prose, and matching that prose would make this assertion pass/fail on commentary.
+    const code = SRC.split('\n')
+      .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .join('\n')
+    expect(code).not.toMatch(/allowedTools|disallowedTools/)
+    const synth = allCalls.filter((c) => c.label === 'argus:synthesis')
     expect(synth.length).toBeGreaterThan(0)
     for (const c of synth) {
-      expect(c.prompt).not.toContain(SHARED_BOX)
-      // The pre-existing rules are absent for the same reason — this is the control
-      // that shows exclusion is the file's convention for a toolless seat.
-      expect(c.prompt).not.toContain('NEVER call AskUserQuestion')
-      expect(c.prompt).not.toContain('redirect stdout+stderr to a log file')
+      expect(c.prompt).toContain(SHARED_BOX)
+      expect(c.prompt).toContain(PROHIBITION)
+      expect(c.prompt).toContain(CARVE_OUT)
     }
   })
 })

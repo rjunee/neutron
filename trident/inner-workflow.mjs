@@ -489,7 +489,7 @@ const REDIRECT_RULE =
 // pid file you wrote yourself, is legitimate. A pattern is never legitimate,
 // because the pattern cannot distinguish your process from someone else's.
 const NO_PATTERN_KILL_RULE =
-  'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match the whole machine, not your worktree, and one such command has already SIGTERMed every concurrent lane on this box including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
+  'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match EVERY process your user is running anywhere on this box, not just the ones in your worktree, and one such command has already SIGTERMed every concurrent lane here including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
 
 // Forge build contract (from prompts/forge.md): smallest-correct-change,
 // push + open-PR, PR_NUMBER/BRANCH/WORKTREE last-lines discipline. With
@@ -1615,7 +1615,15 @@ TASK: ${task}`,
     .map((seat) => corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot]))
     .join('\n')
   const synthesisRaw = await agent(
-    `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
+    // The synthesis seat gets the no-pattern-kill rule like every other seat. It was
+    // once exempted as "toolless", but NOTHING in this file grants or withholds tools —
+    // there is no allowedTools plumbing anywhere — so every seat runs with the same
+    // default toolset and any seat can shell out. An exemption whose only evidence was
+    // "we did not write the other shell rules into this prompt" was circular: it
+    // re-observed the prompt-authoring choice it was supposed to justify.
+    `${NO_PATTERN_KILL_RULE}
+
+Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
@@ -1989,8 +1997,15 @@ ${task}${reflectionGuidance}`,
   const branchTeardownStep = isPr
     ? `3. git branch -D ${forgeBranch}   (ignore "not found" — the work is pushed to origin/the PR, so the local branch is disposable)`
     : `3. KEEP the branch '${forgeBranch}' — do NOT delete it. This is LOCAL mode: the OUTER loop merges this branch and deletes it post-merge. Deleting it here would lose the build.`
+  // THIS SEAT NEEDS THE RULE MOST, not least: `git worktree remove --force` is exactly
+  // the command that fails with "worktree is dirty/locked" when some process still holds
+  // the directory — and the incident of record began with an agent concluding that a
+  // stale typecheck was holding ITS worktree. A cleanup agent that reaches for `pkill`
+  // to unstick a removal re-runs the whole fratricide.
   await agent(
-    `Cleanup step (MUST succeed on every path; ignore individual command failures). From ${repoPath}:
+    `Cleanup step (MUST succeed on every path; ignore individual command failures). ${NO_PATTERN_KILL_RULE}
+
+From ${repoPath}:
 1. Find the worktree for branch '${forgeBranch}':  git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch /{ if ($2=="refs/heads/${forgeBranch}") print w }'
 2. For that path (if any):  git worktree remove --force <path>
 ${branchTeardownStep}

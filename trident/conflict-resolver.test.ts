@@ -8,6 +8,8 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -233,5 +235,60 @@ describe('buildForgeConflictResolver', () => {
     const out = await p
     expect(out.resolved).toBe(false)
     expect((out as { question: string }).question).toContain('timed out')
+  })
+})
+
+/**
+ * NO-PATTERN-KILL, ON THE COMPOSED CONFLICT PROMPT.
+ *
+ * `trident/conflict-resolver.ts` DUPLICATES `NO_PATTERN_KILL_RULE` from
+ * `trident/inner-workflow.mjs` (that file is an unimportable Workflow script, so the
+ * three shared rules are copied rather than imported). A duplicated constant with no
+ * test is a constant that drifts: blanking this copy left the whole trident suite green,
+ * so the mid-rebase Forge — a Bash agent running on the shared box at exactly the moment
+ * an agent reaches for `pkill` to clear something it thinks is stuck — could silently
+ * lose the rule.
+ *
+ * Two guards, because they fail for different reasons: the first proves the rule reaches
+ * the ASSEMBLED prompt (a constant nothing splices in is the same defect one layer up),
+ * the second proves the two copies have not drifted APART.
+ */
+describe('conflict-resolver — the mid-rebase Forge is told not to pattern-kill', () => {
+  const read = (f: string): string => readFileSync(fileURLToPath(new URL(f, import.meta.url)), 'utf8')
+  /** Pull the rule's string literal out of a source file. Neither copy contains a `'`. */
+  const ruleLiteral = (src: string): string => {
+    const m = /const NO_PATTERN_KILL_RULE =\s*\n?\s*'([^']*)'/.exec(src)
+    return m?.[1] ?? ''
+  }
+
+  test('the composed prompt carries the prohibition, the reason and the pid carve-out', async () => {
+    const f = scriptedFactory('...work...\nRESOLVED')
+    const resolve = buildForgeConflictResolver({ build_substrate: f.build })
+    await resolve(input())
+    const prompt = f.specs[0]!.prompt
+    // The REASON is the other lanes, not this agent's own safety.
+    expect(prompt).toContain('YOU SHARE THIS MACHINE WITH OTHER BUILD LANES')
+    // An ABSOLUTE prohibition that names the binaries.
+    expect(prompt).toContain('NEVER kill processes by pattern or by name')
+    expect(prompt).toContain('`pkill`')
+    expect(prompt).toContain('`killall`')
+    expect(prompt).toContain('kill $(pgrep')
+    // …but a pid-scoped kill of something this agent started is still ALLOWED.
+    expect(prompt).toContain('Kill ONLY a pid you started yourself and can name')
+    expect(prompt).toContain('`$!`')
+    // And the escape hatch is to work around it, not to kill it.
+    expect(prompt).toContain('do NOT kill it — work around it')
+  })
+
+  test('the duplicated rule is byte-identical to the inner-workflow original', () => {
+    const here = ruleLiteral(read('./conflict-resolver.ts'))
+    const there = ruleLiteral(read('./inner-workflow.mjs'))
+    // Both must actually be FOUND — a regex that matched nothing would compare '' to ''
+    // and pass while both copies were gone. Pinned on the rule's KEY SENTENCE rather
+    // than on a length threshold: `length > 100` is satisfied by 101 characters of
+    // anything, so a copy gutted down to a hedge would still clear it.
+    expect(here).toContain('NEVER kill processes by pattern or by name')
+    expect(there).toContain('NEVER kill processes by pattern or by name')
+    expect(here).toBe(there)
   })
 })
