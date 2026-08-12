@@ -31,6 +31,7 @@
  */
 
 import { buildClassifyPrompt, DEFAULT_CATEGORIES } from './prompts.ts'
+import { isSenderRuleHandling } from './store.ts'
 import type { SenderCacheRow, SenderRule } from './store.ts'
 
 export type ClassificationSource = 'rule' | 'pattern' | 'cache' | 'llm' | 'default'
@@ -179,7 +180,13 @@ export async function classifyEmail(
     // handling therefore decides, and it is immune to the mass-mailer
     // downgrade: an owner naming a sender outranks the heuristic that bulk mail
     // is rarely important.
-    if (rule.handling !== null) {
+    // An UNRECOGNISED handling is treated as if the owner had not specified one
+    // — the rule's category and the heuristics still apply. The old reading was
+    // "escalate, or else archive", which turned a typo into a silent inversion
+    // of the owner's stated intent. Falling through cannot do that: the worst
+    // case is that an unreadable instruction is ignored, which is what an
+    // unreadable instruction deserves.
+    if (rule.handling !== null && isSenderRuleHandling(rule.handling)) {
       const escalate = rule.handling === 'escalate'
       return {
         category: rule.category ?? (escalate ? 'important' : 'newsletter'),

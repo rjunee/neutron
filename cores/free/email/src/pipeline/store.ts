@@ -113,12 +113,28 @@ export interface SenderCacheRow {
 
 export type SenderRuleKind = 'sender' | 'domain'
 
+/**
+ * What the owner asked to HAPPEN to mail from this sender. NULL (absent) is a
+ * distinct, common state — "they named a category but not an action" — and
+ * falls through to the cascade; it is not a third behaviour.
+ *
+ * The set is closed because the classifier's reading of it is "escalate, or
+ * else archive". Under free text a typo did not fail, it INVERTED: `esclate`
+ * silently archived the one sender the owner had singled out to be told about.
+ */
+export const SENDER_RULE_HANDLINGS = ['escalate', 'archive'] as const
+export type SenderRuleHandling = (typeof SENDER_RULE_HANDLINGS)[number]
+
+export function isSenderRuleHandling(v: unknown): v is SenderRuleHandling {
+  return typeof v === 'string' && (SENDER_RULE_HANDLINGS as readonly string[]).includes(v)
+}
+
 export interface SenderRule {
   id: number
   pattern: string
   kind: SenderRuleKind
   category: string | null
-  handling: string | null
+  handling: SenderRuleHandling | null
   /** 1 ⇒ always important, immune to the mass-mailer downgrade. */
   protected: number
   created_at: number
@@ -128,7 +144,7 @@ export interface AddSenderRuleInput {
   pattern: string
   kind: SenderRuleKind
   category?: string | null
-  handling?: string | null
+  handling?: SenderRuleHandling | null
   protected?: boolean
   created_at?: number
 }
@@ -458,6 +474,17 @@ export class EmailPipelineStore {
   }
 
   addSenderRule(input: AddSenderRuleInput): SenderRule {
+    // VALIDATE AT THE BOUNDARY, not just in the schema. The DB CHECK (0003) is
+    // the backstop; this is the error the caller can actually act on, and it
+    // names the legal values rather than surfacing a constraint violation.
+    // Rejecting is the safe direction: a rule that does not exist falls through
+    // to the cascade, while a rule with an unreadable action silently inverts.
+    const handling = input.handling ?? null
+    if (handling !== null && !isSenderRuleHandling(handling)) {
+      throw new Error(
+        `sender rule handling must be one of ${SENDER_RULE_HANDLINGS.join(', ')} (got ${JSON.stringify(handling)})`,
+      )
+    }
     this.db.run(
       `INSERT INTO sender_rules (pattern, kind, category, handling, protected, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,

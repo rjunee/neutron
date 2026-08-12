@@ -15,6 +15,10 @@ import { describe, expect, test } from 'bun:test'
 import { PROMOTIONS_LABEL, bareAddress, classifyEmail } from '../src/pipeline/classify.ts'
 import type { ClassifyDeps, ClassifyInput } from '../src/pipeline/classify.ts'
 import type { SenderCacheRow, SenderRule } from '../src/pipeline/store.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { openEmailPipelineStore } from '../src/pipeline/store.ts'
 
 function rule(over: Partial<SenderRule> & Pick<SenderRule, 'pattern' | 'kind'>): SenderRule {
   return {
@@ -376,5 +380,64 @@ describe('the model verdict is validated, and the cache keeps BOTH facts', () =>
     )
     expect(c.source).toBe('default')
     expect(c.important).toBe(false)
+  })
+})
+
+describe('a sender rule the owner mistyped', () => {
+  test('an unrecognised handling is IGNORED, not read as archive', async () => {
+    // The inversion this pins: `handling` used to be free text and the
+    // classifier read it as "escalate, or else archive". So `esclate` did not
+    // fail — it guaranteed silent archival of the one sender the owner had
+    // singled out to be told about, "payment failed" included.
+    const c = await classifyEmail(
+      {
+        sender: 'billing@vendor.example.com',
+        subject: 'Action required: payment failed',
+        snippet: 'declined',
+        body_text: 'Your payment method was declined.',
+        label_ids: ['INBOX'],
+      },
+      {
+        rules: [
+          {
+            id: 1,
+            pattern: 'billing@vendor.example.com',
+            kind: 'sender',
+            category: null,
+            // Deliberately not a legal value — this is the typo.
+            handling: 'esclate' as unknown as null,
+            protected: 0,
+            created_at: 0,
+          },
+        ],
+        cache_lookup: () => null,
+        cache_store: () => undefined,
+        llm: null,
+      },
+    )
+    // Falls through to the heuristics, which know what "payment failed" is.
+    expect(c.important).toBe(true)
+  })
+
+  test('the store REFUSES to persist an illegal handling', () => {
+    const home = mkdtempSync(join(tmpdir(), 'email-rule-handling-'))
+    const store = openEmailPipelineStore({ owner_home: home })
+    try {
+      expect(() =>
+        store.addSenderRule({
+          pattern: 'billing@vendor.example.com',
+          kind: 'sender',
+          handling: 'esclate' as unknown as null,
+        }),
+      ).toThrow(/escalate, archive/)
+      expect(store.listSenderRules()).toEqual([])
+      // NULL stays legal — "no action specified" is a real state, not a third
+      // behaviour, and it falls through to the cascade.
+      store.addSenderRule({ pattern: 'news@vendor.example.com', kind: 'sender' })
+      expect(store.listSenderRules()).toHaveLength(1)
+    } finally {
+      store.close()
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
