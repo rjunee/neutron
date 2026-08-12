@@ -512,7 +512,10 @@ describe('orchestrator — idempotent crash-resume', () => {
   test('when the row has no PR but gh finds one, it is folded in (no duplicate open)', async () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', prNumber: 99, branch: 'feat-x' } }),
-      hostResponder: (cmd) => (cmd.includes('pr') && cmd.includes('list') ? ok('99') : ok()),
+      // Answers the PR lookup, and falls through to a drift-free repo for
+      // everything else — an unanswered `rev-parse` would hold this pr-mode
+      // merge (#542) and the run would never reach `done`.
+      hostResponder: (cmd) => (cmd.includes('pr') && cmd.includes('list') ? ok('99') : driftFreeHost(cmd)),
     })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
