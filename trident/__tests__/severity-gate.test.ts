@@ -50,17 +50,109 @@ function grab(name: string): string {
   throw new Error(`could not brace-match ${name}`)
 }
 
+/**
+ * The DECLARATION line of the severity set — anchored at column 0.
+ *
+ * The docblock above the const discusses `NON_BLOCKING_SEVERITIES` by name, so a
+ * bare `indexOf('const NON_BLOCKING_SEVERITIES')` is one prose edit away from
+ * extracting a COMMENT instead of the declaration — and then `loadReal` would
+ * evaluate a comment and every test here would fail for the wrong reason (or,
+ * worse, the source assertion below would pass against prose). Comment lines
+ * start with `//`, so anchoring on a leading newline can only ever match the
+ * real top-level declaration.
+ */
+function severitySetDecl(): string {
+  const at = SRC.indexOf('\nconst NON_BLOCKING_SEVERITIES')
+  if (at === -1) throw new Error('NON_BLOCKING_SEVERITIES is missing from inner-workflow.mjs')
+  return SRC.slice(at + 1, SRC.indexOf('\n', at + 1))
+}
+
+/** The whole comment block above the severity set — the thing #184's false claim hid in. */
+function gateDocblock(): string {
+  const at = SRC.indexOf('// A NIT MAY NOT COST A ROUND.')
+  if (at === -1) throw new Error('the severity-gate docblock header is missing')
+  const end = SRC.indexOf('\nconst NON_BLOCKING_SEVERITIES')
+  if (end === -1 || end < at) throw new Error('the severity-gate docblock is not above its const')
+  return SRC.slice(at, end)
+}
+
+/** Just the bullets the docblock asserts ARE enforced. */
+function implementedClaims(): string {
+  const doc = gateDocblock()
+  const at = doc.indexOf('// IMPLEMENTED')
+  const end = doc.indexOf('// NOT IMPLEMENTED')
+  if (at === -1 || end === -1 || end < at) {
+    throw new Error('the docblock no longer separates IMPLEMENTED from NOT IMPLEMENTED claims')
+  }
+  return doc.slice(at, end)
+}
+
+/**
+ * The source MINUS the docblock under audit.
+ *
+ * Checking a cited symbol against all of `SRC` is self-satisfying: the citation
+ * itself lives in `SRC`, so `expect(SRC).toContain('enforceImaginaryGate')` passes
+ * on a symbol that exists nowhere else in the repo — a fabricated citation, which
+ * is the exact defect class this file exists to catch. Resolve citations here.
+ */
+function codeOutsideDocblock(): string {
+  const doc = gateDocblock()
+  const at = SRC.indexOf(doc)
+  if (at === -1) throw new Error('the docblock did not come from SRC')
+  return SRC.slice(0, at) + SRC.slice(at + doc.length)
+}
+
+const HISTORY_OPEN = '(PR #184 asserted here'
+const HISTORY_CLOSE = 'do not reintroduce it in any form.)'
+
+/**
+ * The docblock MINUS its one sanctioned mention of the deleted claim.
+ *
+ * The block is allowed to say the words once, in the past tense, to record WHAT
+ * #184 asserted — deleting that sentence too would leave the next reader unable to
+ * recognise the claim if it came back. Everything outside it is held to a flat ban,
+ * because scoping the ban to the IMPLEMENTED bullets let a plain rewording survive
+ * in the surrounding prose ("the mutation prover still vetoes a bad APPROVE").
+ *
+ * THE CARVE-OUT IS BOUNDED BY A LITERAL, not by "the next `)`". A paren scan is
+ * unbounded in the one direction that matters: deleting the citation's closing
+ * paren — an ordinary copy-edit — silently extends the exemption over the whole
+ * IMPLEMENTED section, and a live present-tense claim written in the swallowed
+ * region then passes the ban with all 17 tests green. An exemption that grows on
+ * its own is a gate that stops firing without anyone seeing it, which is the exact
+ * defect class this file exists to catch. So both ends are fixed strings, an edit
+ * to either fails LOUD, and the carved span may never reach the claim bullets.
+ *
+ * Takes the docblock as a parameter so the bounding can be tested against a
+ * mutated block; production callers pass nothing and get the real one.
+ */
+function docblockOutsideHistory(doc: string = gateDocblock()): string {
+  const at = doc.indexOf(HISTORY_OPEN)
+  if (at === -1) {
+    throw new Error('the docblock no longer records what #184 claimed — the ban below has no carve-out to justify')
+  }
+  const closeAt = doc.indexOf(HISTORY_CLOSE, at)
+  if (closeAt === -1) {
+    throw new Error(
+      'the #184 citation no longer ends with its sanctioned closing sentence — without that bound the exemption would widen silently',
+    )
+  }
+  const end = closeAt + HISTORY_CLOSE.length
+  const carved = doc.slice(at, end)
+  if (carved.includes('IMPLEMENTED')) {
+    throw new Error('the #184 carve-out reached the claim bullets — the prover ban would be vacuous over them')
+  }
+  return doc.slice(0, at) + doc.slice(end)
+}
+
 function loadReal(): {
   // `undefined` is in the domain deliberately: the gate is fed a synthesis result
   // that can be absent, and the pass-through for it is asserted below.
   enforceSeverityGate: (v: Verdict | null | undefined) => Verdict | null | undefined
 } {
   // The severity set is a const the function closes over, so it must come along.
-  const at = SRC.indexOf('const NON_BLOCKING_SEVERITIES')
-  if (at === -1) throw new Error('NON_BLOCKING_SEVERITIES is missing from inner-workflow.mjs')
-  const consts = SRC.slice(at, SRC.indexOf('\n', at) + 1)
   const factory = new Function(
-    `${consts}\n${grab('enforceSeverityGate')}\nreturn { enforceSeverityGate }`,
+    `${severitySetDecl()}\n${grab('enforceSeverityGate')}\nreturn { enforceSeverityGate }`,
   ) as () => ReturnType<typeof loadReal>
   return factory()
 }
@@ -82,10 +174,7 @@ describe('the extraction itself works (a gate that cannot load is a gate that ca
     // severities would make a typo ('blockers') fail OPEN — an unrecognised
     // severity would read as non-blocking and merge. Enumerating the
     // NON-blocking ones makes every unrecognised severity block instead.
-    const line = SRC.slice(
-      SRC.indexOf('const NON_BLOCKING_SEVERITIES'),
-      SRC.indexOf('\n', SRC.indexOf('const NON_BLOCKING_SEVERITIES')),
-    )
+    const line = severitySetDecl()
     expect(line).toContain("'minor'")
     expect(line).toContain("'nit'")
     expect(line).not.toContain("'blocker'")
@@ -94,12 +183,19 @@ describe('the extraction itself works (a gate that cannot load is a gate that ca
 })
 
 describe('it downgrades ONLY an all-non-blocking rejection', () => {
-  test('nits and minors alone → APPROVE, and the findings SURVIVE as comments', () => {
+  test('nits and minors alone → APPROVE, and the findings SURVIVE on the verdict', () => {
     const { enforceSeverityGate } = loadReal()
-    const out = enforceSeverityGate(reject(f('nit'), f('minor'), f('nit')))
+    const input = reject(f('nit'), f('minor'), f('nit'))
+    // Snapshotted BEFORE the call: asserting against `input.findings` afterwards
+    // would also pass if the gate mutated the array in place.
+    const expected = structuredClone(input.findings)
+    const out = enforceSeverityGate(input)
     expect(out?.verdict).toBe('APPROVE')
-    // The whole point is that they are surfaced, not discarded.
-    expect((out?.findings as Finding[]).length).toBe(3)
+    // The whole point is that THIS gate does not drop them — it hands them on to
+    // the gates after it. Nothing downstream posts them to the PR. Compared by
+    // VALUE, not by length: a gate that replaced or rewrote the findings would
+    // satisfy `.length === 3` while destroying the property this test names.
+    expect(out?.findings).toEqual(expected)
   })
 
   test('a single nit → APPROVE (this is the PR #171 case: a seat approved with four nits and synthesis still rejected)', () => {
@@ -167,6 +263,16 @@ describe('it never touches anything that is not a REQUEST_CHANGES', () => {
     expect(enforceSeverityGate(null)).toBe(null)
     expect(enforceSeverityGate(undefined)).toBeUndefined()
   })
+
+  test('an APPROVE carrying a BLOCKER also passes through — the documented gap, pinned', () => {
+    // NOT a safeguard, and deliberately asserted so it cannot be mistaken for one:
+    // this gate reads severities ONLY to refuse a downgrade. It never blocks. The
+    // docblock's "NOT IMPLEMENTED" bullet says exactly this, and if someone ever
+    // makes a blocker veto an APPROVE, THIS test fails and forces that bullet to
+    // be rewritten — which is the whole point of writing the gap down.
+    const input = { verdict: 'APPROVE', findings: [f('blocker'), f('major')] }
+    expect(loadReal().enforceSeverityGate(input)).toBe(input)
+  })
 })
 
 describe('the ORDERING in the chain is what stops a false APPROVE', () => {
@@ -193,5 +299,84 @@ describe('the ORDERING in the chain is what stops a false APPROVE', () => {
     expect(chain).toContain(': severityGated')
     expect(chain).not.toContain('synthesisRaw?.findings')
     expect(chain).not.toContain(': synthesisRaw')
+  })
+})
+
+describe('the docblock may not claim a safeguard that no code implements (#184 → #198)', () => {
+  // WHY A TEST READS A COMMENT. PR #184 wrote into this docblock that "the
+  // mutation-prover phase still stands between APPROVE and merge", and used that
+  // claim as part of its justification for removing nit-blocking. No such phase
+  // has ever existed anywhere in this repo. It survived review for one reason:
+  // nothing executable read the docblock, so every check stayed green. This is
+  // that reader. It is a source assertion by necessity — the defect IS the prose.
+  test('the docblock says "prover" NOWHERE except in the past-tense record of what #184 claimed', () => {
+    // A flat ban, not a pattern match on the phrasing #184 happened to use. Any
+    // regex over the wording is a spelling test: `the mutation-prover phase is
+    // still in place` and `the mutation prover still vetoes a bad APPROVE` both
+    // evade a verb list, and prose outside the IMPLEMENTED bullets was not read
+    // at all. There is no legitimate present-tense use of the word here, so the
+    // rule is: the word appears once, inside the historical citation, or not.
+    expect(docblockOutsideHistory()).not.toMatch(/prover|proving/i)
+    // The carve-out itself stays a record of a DELETED claim, not a live one.
+    const doc = gateDocblock()
+    expect(doc).toContain('No such phase ever existed')
+    expect(doc).not.toMatch(/\b(stands?|sits?)\s+between\s+APPROVE\s+and\s+merge/i)
+    // And it may not come back as a promise instead of a statement.
+    expect(docblockOutsideHistory()).not.toMatch(/(TODO|FIXME|XXX|later|planned|will\s+be)[^\n]*phase/i)
+  })
+
+  test('the history carve-out cannot widen to swallow a live claim', () => {
+    // The evasion this bounds, verified by mutation before the bound existed: delete
+    // the citation's closing paren and write a present-tense claim under it. With an
+    // unbounded `indexOf(')')` scan the carve-out grew 227 → 961 chars, ate the whole
+    // IMPLEMENTED section, and "the mutation prover still vetoes a bad APPROVE today"
+    // sat in the docblock at 17 pass / 0 fail. The ban had silently stopped existing.
+    const evaded = gateDocblock().replace(
+      HISTORY_CLOSE,
+      'do not reintroduce it in any form.\n//\n// Note: the mutation prover still vetoes a bad APPROVE today.',
+    )
+    // Prove the mutation APPLIED before believing anything about the result — a
+    // no-op replace would make the expectation below pass for the wrong reason.
+    expect(evaded).not.toBe(gateDocblock())
+    expect(evaded).toContain('still vetoes a bad APPROVE today')
+    // REFUSED, loudly. Not "returns a string that happens to still contain prover":
+    // the bound must reject the block outright rather than silently exempt more.
+    expect(() => docblockOutsideHistory(evaded)).toThrow(/widen silently|vacuous/)
+  })
+
+  test('the IMPLEMENTED claims never mention a prover, and each names real code', () => {
+    const claims = implementedClaims()
+    expect(claims).not.toMatch(/prover|proving/i)
+    // The block's own rule: a claim must name the code that enforces it. So every
+    // symbol it backticks has to actually be in the source — a claim naming a
+    // function that does not exist is the same defect wearing a citation.
+    // flatMap, not map: the capture group is `string | undefined` to the type
+    // checker, and a `!` here would silently turn a regex that stopped matching
+    // into a loop over nothing — a guard that cannot fail.
+    const cited = [...claims.matchAll(/`([^`]+)`/g)].flatMap((m) => (m[1] ? [m[1]] : []))
+    expect(cited.length).toBeGreaterThan(0)
+    const code = codeOutsideDocblock()
+    for (const symbol of cited) {
+      if (/^[A-Za-z_$][\w$]*$/.test(symbol)) {
+        // An identifier must resolve to a DECLARATION. Mere presence is not enough:
+        // an ordinary English word in backticks ('every') occurs in the source by
+        // coincidence and would pass while naming no code at all.
+        expect(code).toMatch(new RegExp(String.raw`\b(function|const|let|var|class)\s+${symbol}\b`))
+      } else {
+        // An expression citation (`ci.status === 'red'`) has no declaration to find,
+        // so it must appear verbatim — outside the docblock, or it cites itself.
+        expect(code).toContain(symbol)
+      }
+    }
+  })
+
+  test('the gap is stated as a gap — a blocker does NOT veto an APPROVE', () => {
+    // The honest counterpart to the deletion. If this bullet is ever removed while
+    // enforceSeverityGate still early-returns on a non-REQUEST_CHANGES verdict,
+    // the docblock is back to overstating the floor.
+    const doc = gateDocblock()
+    expect(doc).toContain('NOT IMPLEMENTED')
+    expect(doc).toMatch(/does NOT veto an APPROVE/)
+    expect(grab('enforceSeverityGate')).toContain("verdict !== 'REQUEST_CHANGES'")
   })
 })
