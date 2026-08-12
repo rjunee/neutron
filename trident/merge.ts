@@ -199,11 +199,39 @@ export async function detectBaseBranch(
 // base), not the resolver (never invoked) — ever looked at the combination.
 //
 // WHAT THIS DELIBERATELY DOES NOT CATCH, stated so nobody reads more into a
-// green merge than is there: cross-file semantic coupling. If the base changes
-// the behaviour of a helper in `a.ts` and the branch adds a caller in `b.ts`,
-// the file sets do not intersect and this lands. Catching that requires
-// re-running the review, not a git query. This gate is the circuit breaker for
-// the same-file silent-merge case; it is not a claim of semantic safety.
+// green merge than is there. Two holes, both chosen:
+//
+//   1. CROSS-FILE SEMANTIC COUPLING. If the base changes the behaviour of a
+//      helper in `a.ts` and the branch adds a caller in `b.ts`, the file sets do
+//      not intersect and this lands. Catching that requires re-running the
+//      review, not a git query.
+//
+//   2. THE UNCONFLICTED HUNKS OF A CONFLICTED FILE. The resolver exemption is
+//      per PATH, not per hunk: once every branch commit touching `F` has been
+//      through the resolver, ALL of `F` is exempt — including hunks git
+//      reconciled silently at the other end of the file. Concretely: base edits
+//      line 10, branch edits line 20, and the two collide only at line 1. The
+//      resolver is handed the line-1 conflict, resolves it, and the line-10 /
+//      line-20 combination lands with nobody having compared them.
+//      This is the deliberate choice, not an oversight:
+//        * The alternative — hold whenever a conflicted file also has silently
+//          merged hunks — holds nearly every file that conflicts at all, because
+//          a file worth conflicting on is usually edited in more than one place.
+//          That deletes the resolver path in practice, and the issue is explicit
+//          that the textual path already works.
+//        * The resolver is not given a hunk. It is given the file, mid-rebase,
+//          with both sides in the working tree, and it is a Forge — the whole
+//          file is in its context whether or not git marked it. Coverage here is
+//          "a reviewer looked at this file against this base", which is true.
+//        * Erring the other way costs a re-run of a build that already conflicted
+//          once; the gate that always fires is the gate that gets turned off.
+//      So: a conflicted path is treated as reviewed-against-this-base as a
+//      WHOLE. If that ever proves too generous, the narrowing is to intersect
+//      `git diff <review_base> <current_base> -- F` hunk ranges with the
+//      resolver's — a strictly bigger change than this circuit breaker.
+//
+// This gate is the circuit breaker for the same-file silent-merge case, at file
+// granularity; it is not a claim of semantic safety.
 
 /** A base-drift verdict over one (base, branch) pair. Pure data — the decision
  *  to hold is the caller's, because local mode must also subtract the files the
@@ -379,25 +407,44 @@ export function shouldHoldForBaseDrift(
   conflicted: ReadonlySet<string> = new Set(),
   opts: { hold_when_unassessable?: boolean } = {},
 ): boolean {
-  if (!assessment.assessable) return assessment.moved || opts.hold_when_unassessable === true
+  if (!assessment.assessable) {
+    if (assessment.moved) return true
+    if (opts.hold_when_unassessable === true) return true
+    // LOCAL mode's fail-open rests on one claim: the same broken repo still has
+    // to survive a rebase and a `git merge`, which fail loudly. That claim holds
+    // only while THE REPO is the broken thing — a ref that would not resolve
+    // breaks those steps too. It does NOT hold when both refs resolved fine and
+    // git still could not answer, because then nothing is broken: the two
+    // histories are simply unrelated. A rebase of unrelated history replays the
+    // commits and `git merge --no-ff` lands them, with no fork point having ever
+    // established what the review was computed against. Nothing downstream is
+    // loud there, so this fails closed.
+    return assessment.current_base_sha !== null && assessment.branch_head_sha !== null
+  }
   if (!assessment.moved) return false
   return assessment.overlap.some((f) => !conflicted.has(f))
 }
 
-/** How many commits in `base..head` touched `path`, or null when git failed. */
+/** The commits in `base..head` that touched `path`, or null when git failed.
+ *  These are the ORIGINAL (pre-rebase) commit shas — the same identities
+ *  `REBASE_HEAD` reports while they are being replayed, which is what makes the
+ *  two sets in `resolverCoveredPaths` directly comparable. */
 async function commitsTouching(
   run_host: RunHostCommand,
   repo: string,
   base_sha: string,
   head_sha: string,
   path: string,
-): Promise<number | null> {
+): Promise<string[] | null> {
   const res = await run_host(
     ['git', '-C', repo, 'log', '--format=%H', `${base_sha}..${head_sha}`, '--', path],
     repo,
   )
   if (!res.ok) return null
-  return res.stdout.split(/\r?\n/).filter((s) => s.trim().length > 0).length
+  return res.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => SHA_RE.test(s))
 }
 
 /**
@@ -410,24 +457,33 @@ async function commitsTouching(
  * else: nobody ever saw base-vs-(C1+C2). Exempting `F` on the strength of that
  * one conflict is exactly the silent reconciliation this gate exists to stop.
  *
- * So a path is covered only when it conflicted in at least as many rounds as
- * there are branch commits touching it (one round replays one commit). Anything
- * we cannot count — a failed `git log`, a path with no commits behind it — is
- * NOT covered, so the hold fires. Erring toward a hold costs a re-run; erring
- * the other way costs an un-reviewed merge.
+ * So a path is covered only when EVERY branch commit that touches it conflicted
+ * and was handed to the resolver. This is matched by COMMIT IDENTITY, not by
+ * counting rounds: rounds are loop iterations, and one commit can occupy several
+ * of them (a resolver that stages nothing leaves `--continue` refusing, git
+ * re-reports the same conflict, and the same commit is offered again). Counting
+ * those as two would let one commit's resolution vouch for a second commit
+ * nobody ever saw — coverage inflated to exactly the un-reviewed combination
+ * this gate exists to stop.
+ *
+ * Anything we cannot establish — a failed `git log`, a path with no commits
+ * behind it, a round whose `REBASE_HEAD` would not resolve (and so was never
+ * attributed) — leaves the path NOT covered, so the hold fires. Erring toward a
+ * hold costs a re-run; erring the other way costs an un-reviewed merge.
  */
 async function resolverCoveredPaths(
   run_host: RunHostCommand,
   repo: string,
-  conflicted: ReadonlyMap<string, number>,
+  conflicted: ReadonlyMap<string, ReadonlySet<string>>,
   review_base_sha: string | null,
   branch_head_sha: string | null,
 ): Promise<Set<string>> {
   const covered = new Set<string>()
   if (review_base_sha === null || branch_head_sha === null) return covered
-  for (const [path, rounds] of conflicted) {
-    const touches = await commitsTouching(run_host, repo, review_base_sha, branch_head_sha, path)
-    if (touches !== null && touches > 0 && rounds >= touches) covered.add(path)
+  for (const [path, resolvedCommits] of conflicted) {
+    const touching = await commitsTouching(run_host, repo, review_base_sha, branch_head_sha, path)
+    if (touching === null || touching.length === 0) continue
+    if (touching.every((sha) => resolvedCommits.has(sha))) covered.add(path)
   }
   return covered
 }
@@ -476,14 +532,29 @@ export function baseDriftHoldMessage(
   silent_overlap: string[],
 ): string {
   if (!assessment.assessable && !assessment.moved) {
-    // We never even established where the base is (a fetch that failed, a ref
-    // that would not resolve). Say exactly that instead of narrating a drift we
-    // did not observe — a hold nobody believes is a hold nobody acts on.
+    // We never even established that the base moved (a fetch that failed, a ref
+    // that would not resolve, a merge-base that would not answer). Say exactly
+    // that instead of narrating a drift we did not observe — a hold nobody
+    // believes is a hold nobody acts on.
+    //
+    // NAME THE REF THAT ACTUALLY FAILED. The assessment already says which:
+    // a null sha is a ref that did not resolve, and if BOTH resolved then the
+    // failure was the fork point between them. Blaming the base for a branch
+    // that would not resolve sent the reader to look at `main` — which is fine —
+    // and prescribed a re-run that cannot fix a missing branch ref.
+    const unresolved: string[] = []
+    if (assessment.current_base_sha === null) unresolved.push(`\`${base}\``)
+    if (assessment.branch_head_sha === null) unresolved.push(`\`${branch}\``)
+    const cause =
+      unresolved.length > 0
+        ? `I could not establish where ${unresolved.join(' or ')} ` +
+          `${unresolved.length > 1 ? 'are' : 'is'} right now`
+        : `I could not establish what \`${branch}\` and \`${base}\` have in common`
     return (
-      `I'm holding the merge of \`${branch}\` into \`${base}\`: I could not establish where ` +
-      `\`${base}\` is right now, so I cannot tell whether this was reviewed against it. ` +
-      `Nothing has confirmed that combination, so I am not landing it — re-run the build to ` +
-      `get the diff reviewed against the current \`${base}\`.`
+      `I'm holding the merge of \`${branch}\` into \`${base}\`: ${cause}, so I cannot tell ` +
+      `whether this was reviewed against it. Nothing has confirmed that combination, so I am ` +
+      `not landing it — re-run the build to get the diff reviewed against the current ` +
+      `\`${base}\`.`
     )
   }
   const head =
@@ -695,12 +766,35 @@ export function buildMergeCleanupDeps(
             { ok: false, stdout: '', stderr: 'run.branch is null and `gh pr view` gave no headRefName', exit_code: -1 },
           )
         }
-        // A FAILED fetch leaves `origin/<base>` at whatever it happened to be —
-        // typically the sha this branch forked from, which reports `moved:false`
-        // with total confidence. Discarding this result was the difference
-        // between a gate and a decoration, so an unrefreshable base tip is
-        // itself a hold.
-        const fetched = await run_host(['git', '-C', repo, 'fetch', 'origin', base], repo)
+        // Refresh BOTH sides from origin, with EXPLICIT refspecs.
+        //
+        // A FAILED fetch leaves the remote-tracking refs at whatever they
+        // happened to be — typically the sha this branch forked from, which
+        // reports `moved:false` with total confidence. Discarding this result was
+        // the difference between a gate and a decoration, so an unrefreshable tip
+        // is itself a hold.
+        //
+        // The refspecs are spelled out rather than left to `git fetch origin
+        // <base>`: that short form's contract is FETCH_HEAD, and whether it also
+        // advances `refs/remotes/origin/<base>` depends on the remote's configured
+        // refspec (a `--no-tags`/mirror/partial clone, or a remote with no
+        // fetch refspec at all, need not update it). The gate rev-parses the
+        // remote-tracking ref, so "fetch succeeded" must MEAN "that ref is
+        // current" — otherwise a stale tip scores `moved:false` and the silent
+        // stale-review merge path is open again. `+` forces the update, so a
+        // force-pushed branch does not fail the fetch and thereby hold forever.
+        const fetched = await run_host(
+          [
+            'git',
+            '-C',
+            repo,
+            'fetch',
+            'origin',
+            `+refs/heads/${base}:refs/remotes/origin/${base}`,
+            `+refs/heads/${branchForGate}:refs/remotes/origin/${branchForGate}`,
+          ],
+          repo,
+        )
         if (!fetched.ok) {
           const unknown: BaseDriftAssessment = {
             review_base_sha: null,
@@ -716,8 +810,26 @@ export function buildMergeCleanupDeps(
             silent_overlap: [],
           })
         }
-        const baseRef = (await revParseCommit(run_host, repo, `origin/${base}`)) !== null ? `origin/${base}` : base
-        const assessment = await assessBaseDrift(run_host, repo, baseRef, branchForGate)
+        // ASSESS THE REFS GITHUB WILL MERGE — the REMOTE ones, on BOTH sides.
+        // `gh pr merge` squashes `refs/heads/<branch>` AS ORIGIN HOLDS IT into
+        // `refs/heads/<base>` AS ORIGIN HOLDS IT; this local checkout is not a
+        // participant. Passing the bare branch name here scored the wrong tree
+        // entirely, because `git rev-parse <name>` searches `refs/heads/` BEFORE
+        // `refs/remotes/`: on a checkout that still had a stale local copy of the
+        // branch the gate measured the stale head (while the real, drifted head
+        // landed), and on one that never had it — the normal case, since the
+        // merge host does not check out every PR — the ref did not resolve at
+        // all, which fails closed into a hold no re-run can clear. Both refs are
+        // guaranteed present by the explicit-refspec fetch above; if one still
+        // will not resolve, the assessment is unassessable and PR mode holds,
+        // which is the correct direction for a server-side merge with no
+        // downstream step to catch it.
+        const assessment = await assessBaseDrift(
+          run_host,
+          repo,
+          `origin/${base}`,
+          `origin/${branchForGate}`,
+        )
         // No `conflicted` set to subtract: nothing rebases locally here, and a PR
         // with TEXTUAL conflicts is refused by GitHub itself (`gh pr merge` exits
         // non-zero → TridentMergeError). So every drift that reaches a mergeable
@@ -893,9 +1005,10 @@ async function abortRebase(run_host: RunHostCommand, repo: string, base: string)
  * per-repo merge lock (so the tree is exclusively ours). On success the branch
  * has been replayed on top of `base` and the working tree is left on `branch`;
  * the caller then checks out `base` + merges (a clean no-ff). RETURNS, per path,
- * HOW MANY rounds git raised a conflict on it — the base-drift hold (#542)
- * subtracts a path only when the resolver saw a conflict for every branch commit
- * that touched it, so the count (not just membership) is what the caller needs.
+ * WHICH BRANCH COMMITS the resolver was handed a conflict for — the base-drift
+ * hold (#542) subtracts a path only when that covers every branch commit that
+ * touched it, so the identities (not just membership, and not a round count) are
+ * what the caller needs.
  * Throws:
  *   - `TridentMergeConflictEscalation` when the resolver escalates (ambiguous)
  *     OR no resolver is configured on a conflict — the OUTER loop turns this into
@@ -909,14 +1022,20 @@ async function rebaseBranchOntoBase(
   branch: string,
   run: TridentRun,
   resolver: MergeConflictResolver | undefined,
-): Promise<Map<string, number>> {
-  // Per path, the NUMBER of rounds git raised a conflict on it, ACCUMULATED
-  // across rounds (a later round's `--diff-filter=U` no longer lists an earlier
-  // round's file, and the #542 hold must account for all of them, not just the
-  // last round's). A rebase round replays exactly ONE commit, so this count is a
-  // lower bound on the distinct branch commits the resolver saw for that path —
-  // which is precisely what the hold compares against.
-  const conflictedAll = new Map<string, number>()
+): Promise<Map<string, Set<string>>> {
+  // Per path, the SET OF BRANCH COMMITS the resolver was handed a conflict for,
+  // accumulated across rounds (a later round's `--diff-filter=U` no longer lists
+  // an earlier round's file, and the #542 hold must account for all of them, not
+  // just the last round's).
+  //
+  // Keyed on the commit being replayed (`REBASE_HEAD`), NOT on a round counter.
+  // Rounds are loop iterations and a single commit can occupy several of them:
+  // a resolver that edits the file but forgets to `git add` leaves
+  // `rebase --continue` refusing, git re-reports the identical conflict, and we
+  // come round again on the SAME commit. Counting rounds scored that as two
+  // commits' worth of coverage, which is how one resolved commit came to vouch
+  // for a second commit nobody had ever looked at.
+  const conflictedAll = new Map<string, Set<string>>()
   must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
   let res = await run_host(['git', '-C', repo, 'rebase', base], repo)
   let rounds = 0
@@ -929,7 +1048,18 @@ async function rebaseBranchOntoBase(
     }
     rounds++
     const conflicted = await listConflictedFiles(run_host, repo)
-    for (const f of conflicted) conflictedAll.set(f, (conflictedAll.get(f) ?? 0) + 1)
+    // The ORIGINAL branch commit git is replaying right now. A round we cannot
+    // attribute to a commit is attributed to NONE — it simply does not count
+    // toward coverage, so the path stays held rather than being exempted on the
+    // strength of a conflict we cannot place.
+    const replaying = await revParseCommit(run_host, repo, 'REBASE_HEAD')
+    if (replaying !== null) {
+      for (const f of conflicted) {
+        const seen = conflictedAll.get(f)
+        if (seen === undefined) conflictedAll.set(f, new Set([replaying]))
+        else seen.add(replaying)
+      }
+    }
     if (resolver === undefined) {
       await abortRebase(run_host, repo, base)
       throw new TridentMergeConflictEscalation(

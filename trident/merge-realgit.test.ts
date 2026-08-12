@@ -447,6 +447,90 @@ describe('REAL git — base-drift hold: a same-file silent reconciliation never 
     expect(await gitOut(repo, 'rev-parse', 'main')).toBe(mainBeforeMerge)
   }, 30_000)
 
+  test('HOLDS when a resolver that stages NOTHING makes git re-offer the same commit', async () => {
+    // THE ROUND-vs-COMMIT INFLATION, end to end on real git. Same two-commit
+    // shape as the test above, but the resolver forgets to `git add` on its
+    // first call: `rebase --continue` refuses ("needs merge"/"resolve all
+    // conflicts"), git re-reports the IDENTICAL conflict, and the loop comes
+    // round a second time ON THE SAME COMMIT. Counting ROUNDS scored that as 2
+    // — exactly `touches` for a file 2 branch commits edit — so the file was
+    // "covered", the hold was skipped, and C2's un-reviewed bottom-of-file edit
+    // LANDED on main. Counting COMMIT IDENTITIES sees one commit, and holds.
+    const repo = await baseRepoWithModule()
+    await fakeBuild(repo, 'trident/feat', 'mod.txt', lines('L1-from-branch', 'L20'))
+    const tmp = join(repo, '.build-second')
+    await git(repo, 'worktree', 'add', '-q', tmp, 'trident/feat')
+    writeFileSync(join(tmp, 'mod.txt'), lines('L1-from-branch', 'L20-from-branch'))
+    await git(tmp, 'add', '.')
+    await git(tmp, ...GIT_ID, 'commit', '-q', '-m', 'build second commit')
+    await git(repo, 'worktree', 'remove', '--force', tmp)
+    await advanceMain(repo, 'mod.txt', lines('L1-from-main', 'L20'))
+    const mainBeforeMerge = await gitOut(repo, 'rev-parse', 'main')
+
+    let calls = 0
+    const resolve = async (input: { repo_path: string; conflicted_files: string[] }) => {
+      calls++
+      for (const f of input.conflicted_files) {
+        writeFileSync(join(input.repo_path, f), lines('L1-resolved', 'L20'))
+        // Round 1 deliberately does NOT stage — the whole point of the repro.
+        if (calls > 1) await git(input.repo_path, 'add', f)
+      }
+      return { resolved: true as const }
+    }
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main', resolve_conflict: resolve })
+    const held = (await cleanupAfterMerge(localRun(repo, 'dddddd55', 'trident/feat'), deps).catch(
+      (e: unknown) => e,
+    )) as TridentBaseDriftHold
+    expect(calls).toBeGreaterThan(1)
+    expect(held).toBeInstanceOf(TridentBaseDriftHold)
+    expect(held.detail.silent_overlap).toEqual(['mod.txt'])
+    // main is untouched, and C2's edit did NOT sneak in.
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'rev-parse', 'main')).toBe(mainBeforeMerge)
+    expect(await gitOut(repo, 'show', 'main:mod.txt')).not.toContain('L20-from-branch')
+  }, 30_000)
+
+  test('DOCUMENTED LIMIT: a conflicted file is exempted WHOLE, silently-merged hunks included', async () => {
+    // This pins a DECISION, not an accident — see the "WHAT THIS DELIBERATELY
+    // DOES NOT CATCH" block in merge.ts. The exemption is per PATH, not per
+    // hunk: base and branch collide at line 1 (the resolver is handed that),
+    // while main's line-10 edit and the branch's line-20 edit reconcile
+    // silently. Both land, on the reasoning that the resolver is given the
+    // WHOLE FILE mid-rebase with both sides present, so "a reviewer looked at
+    // this file against this base" is true of the file, not just the hunk.
+    // If that ever proves too generous this test is the one that must change,
+    // and it will say so loudly instead of a hole being discovered in prod.
+    const repo = await makeBaseRepo()
+    const wide = (l1: string, l10: string, l20: string): string =>
+      Array.from({ length: 20 }, (_, i) => (i === 0 ? l1 : i === 9 ? l10 : i === 19 ? l20 : `L${i + 1}`)).join('\n') +
+      '\n'
+    writeFileSync(join(repo, 'mod.txt'), wide('L1', 'L10', 'L20'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'add mod')
+    // One branch commit: collides at line 1, and separately edits line 20.
+    await fakeBuild(repo, 'trident/feat', 'mod.txt', wide('L1-from-branch', 'L10', 'L20-from-branch'))
+    // Main collides at line 1, and separately edits line 10.
+    await advanceMain(repo, 'mod.txt', wide('L1-from-main', 'L10-from-main', 'L20'))
+
+    const resolve = async (input: { repo_path: string; conflicted_files: string[] }) => {
+      for (const f of input.conflicted_files) {
+        // The resolver settles line 1 and keeps BOTH silently-merged edits.
+        writeFileSync(join(input.repo_path, f), wide('L1-resolved', 'L10-from-main', 'L20-from-branch'))
+        await git(input.repo_path, 'add', f)
+      }
+      return { resolved: true as const }
+    }
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main', resolve_conflict: resolve })
+    await cleanupAfterMerge(localRun(repo, 'dddddd66', 'trident/feat'), deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    const landed = await gitOut(repo, 'show', 'main:mod.txt')
+    expect(landed).toContain('L1-resolved')
+    // The two hunks nothing compared against each other — landed, by design.
+    expect(landed).toContain('L10-from-main')
+    expect(landed).toContain('L20-from-branch')
+  }, 30_000)
+
   test('LANDS when the moved base touched a DIFFERENT file than the reviewed diff', async () => {
     const repo = await baseRepoWithModule()
     await fakeBuild(repo, 'trident/feat', 'mod.txt', lines('L1', 'L20-from-branch'))
