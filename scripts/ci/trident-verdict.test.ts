@@ -1474,8 +1474,17 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
   })
 
   test('the job only ever runs on a pull_request, so no other event can mint a green one', () => {
-    const job = ci.slice(ci.indexOf('  trident-verdict:'))
+    const job = ci.slice(ci.indexOf('  trident-verdict:'), ci.indexOf('\n  test:'))
     expect(job).toContain("if: github.event_name == 'pull_request'")
+    // AND THE PREDICATE IS NOT DEAD, the same hole closed on the re-run workflow's
+    // `if:` above. The assertion beneath this one is a SUBSTRING check, so appending
+    // `&& false` satisfies it while the job can never run again — it would then be
+    // permanently `skipped`, which the aggregator reds rather than reads as a pass,
+    // so this is a branch stuck red rather than a gate stuck open. Asserted anyway:
+    // a predicate no test can see is one a later edit can quietly widen.
+    const predicate = /^ {4}if: (.*)$/m.exec(job)
+    expect(predicate).not.toBeNull()
+    expect(predicate![1]).not.toMatch(/\bfalse\b/)
   })
 
   test('it passes the PR HEAD sha, not the ephemeral merge commit', () => {

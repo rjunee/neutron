@@ -266,6 +266,14 @@ const CI_WORKFLOW_MUTANTS: [string, string, string][] = [
   ],
   ['ci-issues-scope-deleted', '      issues: read\n', ''],
   [
+    // The job's `if:` has the same shape as the re-run workflow's predicate: every
+    // assertion on it was a SUBSTRING check, so `&& false` left them all satisfied
+    // over a job that can never run.
+    'ci-job-predicate-short-circuited-false',
+    "    if: github.event_name == 'pull_request'\n",
+    "    if: github.event_name == 'pull_request' && false\n",
+  ],
+  [
     // The subtler form of `ci-gate-not-invoked`: the gate still RUNS, and its exit
     // code — the only thing the job reports — is discarded.
     'ci-gate-exit-code-swallowed',

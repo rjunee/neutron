@@ -258,8 +258,18 @@ repo resolving against the bypass. And a verdict wrapped in `<!-- -->` parsed wh
 rendering as nothing, so the audit record could be invisible; HTML comments are now
 stripped at both fence call sites, since stripping at one would turn a hidden block into a
 false red instead of a false green. A sixth finding was vetoed with a citation
-(`if: always()` is pinned at `scripts/ci/ci-workflow.test.ts:186`). Re-verified at this
-head: 128 pass / 0 fail, and the battery reports 58 applied, 58 caught, 0 survived.
+(`if: always()` is pinned at `scripts/ci/ci-workflow.test.ts:186`).
+
+An adoption round rebased this onto main and re-ran the two load-bearing mutants by
+hand rather than on the previous round's word: neutering the verdict step to
+`echo "skipped"` reds it (1 fail), and stopping the paginator after page 1 reds it
+(4 fail). One NEW survivor turned up, the last instance of the substring shape this
+round kept finding: the verdict JOB's own `if:` tolerated `&& false`, satisfying the
+only assertion on it while the job could never run. It is fail-CLOSED — a job that
+never runs is `skipped`, which the aggregator reds — so this was a branch stuck red,
+not a gate stuck open; closed anyway, because a predicate no test can see is one a
+later edit can quietly widen. Re-verified at this head: 128 pass / 0 fail, and the
+battery reports 59 applied, 59 caught, 0 survived.
 
 Detail: `docs/as-built/2026-08-10-trident-verdict-gate.md`.
 

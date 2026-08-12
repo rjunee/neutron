@@ -573,10 +573,20 @@ finding needs the same evidence as an accepted one.
 ### Verification
 
 * `bun test scripts/ci/trident-verdict.test.ts` — **128 pass, 0 fail**.
-* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **58 applied, 58 caught, 0
+* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **59 applied, 59 caught, 0
   survived**, reproducible by running it, refusing to report at all unless the
   unmutated suite is green, and naming the tests each mutant reds. The ten rows above
   were read off that run.
+* The adoption round re-ran the two load-bearing mutants BY HAND, off the battery, so
+  the battery is not the only witness to its own coverage: `ci-gate-not-invoked` reds
+  1 test and `pagination-stops-after-page-1` reds 4. That round added the 59th mutant,
+  `ci-job-predicate-short-circuited-false` — the verdict job's `if:` took `&& false`
+  while the suite stayed green at 128/0. Fail-CLOSED (a skipped job reds the
+  aggregator), so it stuck the branch red rather than opening the gate; closed anyway.
+* The gate was also run LIVE against this PR, which is how the failure vocabularies
+  were confirmed to be distinct rather than asserted to be: against an unpushed SHA it
+  says "could not READ this PR", not "no verdict", and against the pushed head it takes
+  the recorded bootstrap bypass. The `trident-verdict` job itself passes in Actions.
 * `bash scripts/ci/typecheck-all.sh` — 51 tsconfigs, all pass. `bash
   scripts/ci/lint.sh` — 0 found across every gate.
 * `bash scripts/ci/leak-gate.sh --tree .` and the message scan over this round's
