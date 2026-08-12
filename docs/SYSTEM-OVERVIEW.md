@@ -5286,7 +5286,7 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   (`trident/state-machine.ts`): the phase graph
   `forge-init → {argus | ralph-plan} → ralph-task → … → argus ⇄ forge-fix
   → done` with terminal `done | failed | stopped`, the Argus round cap
-  (`max_rounds`, default 8) and the Ralph plan↔task round cap
+  (`max_rounds`, default 10) and the Ralph plan↔task round cap
   (`max_ralph_rounds`, default 20). The pure `computeTransition` owns the
   control flow; `deps.classify` reads the sub-agent outcome. PR-2 shipped
   `stubAdvanceDeps` (always "running"); PR-3 supersedes it with a real
