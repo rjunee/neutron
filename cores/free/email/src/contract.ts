@@ -88,6 +88,23 @@ export interface GmailListInput {
   exhaustive?: boolean
 }
 
+/**
+ * The "this mailbox is finished" marker for `page_tokens`.
+ *
+ * ABSENT and EXHAUSTED are different states and cannot share a representation.
+ * The fan-out returns a cursor only for accounts that have another page, so
+ * once one account runs out the returned map names only the others — and a
+ * caller resuming from that map restarts the finished account at its newest
+ * page. With two mailboxes of unequal depth the maps then ALTERNATE: `{B:p2}`
+ * restarts A, whose next map `{A:p1}` restarts B, forever. The backlog sweep
+ * never completes and steady-state paging never converges.
+ *
+ * A caller paging a whole mailbox therefore carries finished accounts forward
+ * with this sentinel, and the fan-out SKIPS them: no request, no rows, and
+ * `ok: true`, because "already finished" is not a failure.
+ */
+export const PAGE_TOKEN_EXHAUSTED = '__neutron_exhausted__'
+
 export interface GmailListResult {
   results: GmailMessageMeta[]
   /**

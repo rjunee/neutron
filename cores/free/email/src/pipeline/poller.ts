@@ -40,7 +40,7 @@
  * must never gate delivery.
  */
 
-import { DEFAULT_LABEL, PROCESSED_LABEL_NAME } from '../contract.ts'
+import { DEFAULT_LABEL, PAGE_TOKEN_EXHAUSTED, PROCESSED_LABEL_NAME } from '../contract.ts'
 import type { GmailClient, GmailMessageMeta } from '../contract.ts'
 import { classifyEmail, type ClassifyDeps, type Classification } from './classify.ts'
 import { escalateEmail, type EscalateDeps } from './escalate.ts'
@@ -146,6 +146,35 @@ function accountsOnThisPage(
   const stamped = new Set<string>()
   for (const row of page.results) stamped.add(row.account_id ?? '')
   return stamped.size > 0 ? [...stamped] : ['']
+}
+
+/**
+ * The cursor map to resume from next time.
+ *
+ * An account that returned NO cursor is FINISHED, and must be carried forward
+ * as such — dropping it from the map means "start from the newest page", so a
+ * finished mailbox restarts every time a deeper one is still paging and the two
+ * never converge. Every account in scope therefore appears in the result:
+ * either with its next cursor, or with the exhausted sentinel.
+ */
+function nextCursorMap(
+  scope: readonly string[],
+  returned: Readonly<Record<string, string>>,
+  previous: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const id of scope) {
+    const next = returned[id]
+    if (next !== undefined && next.length > 0) out[id] = next
+    else if (previous[id] === PAGE_TOKEN_EXHAUSTED) out[id] = PAGE_TOKEN_EXHAUSTED
+    else out[id] = PAGE_TOKEN_EXHAUSTED
+  }
+  return out
+}
+
+/** True when at least one account in the map still has pages to read. */
+function anyCursorsRemain(map: Readonly<Record<string, string>>): boolean {
+  return Object.values(map).some((t) => t !== PAGE_TOKEN_EXHAUSTED)
 }
 
 /** Read back the persisted per-account cursor map; a corrupt value restarts the sweep. */
@@ -294,11 +323,18 @@ export async function runEmailPipelineTick(
       //      success by design (a dead grant must not empty the inbox), but a
       //      partial page cannot prove the unread accounts are exhausted.
       const next = page.next_page_token
-      const nextPerAccount = page.next_page_tokens ?? {}
+      // Carry FINISHED accounts forward as exhausted rather than dropping them:
+      // an absent account restarts from its newest page, so with mailboxes of
+      // unequal depth the maps alternate and the sweep never completes.
+      const nextPerAccount = nextCursorMap(
+        accountsOnThisPage(page, false),
+        page.next_page_tokens ?? {},
+        perAccount,
+      )
       const outcomes = page.accounts
       const allAccountsAnswered = outcomes === undefined || outcomes.every((a) => a.ok)
       const cursorsRemain =
-        Object.keys(nextPerAccount).length > 0 || (next !== undefined && next.length > 0)
+        anyCursorsRemain(nextPerAccount) || (next !== undefined && next.length > 0)
 
       if (cursorsRemain || !allAccountsAnswered) {
         if (next !== undefined && next.length > 0) {
@@ -578,8 +614,12 @@ export async function runEmailPipelineTick(
         break
       }
       cursor = listed.next_page_token
-      cursors = { ...(listed.next_page_tokens ?? {}) }
-      if (cursor === undefined && Object.keys(cursors).length === 0) {
+      cursors = nextCursorMap(
+        accountsOnThisPage(listed, false),
+        listed.next_page_tokens ?? {},
+        cursors,
+      )
+      if (cursor === undefined && !anyCursorsRemain(cursors)) {
         exhausted = true
         break
       }

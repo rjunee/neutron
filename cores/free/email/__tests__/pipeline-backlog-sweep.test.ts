@@ -293,3 +293,54 @@ describe('a new mailbox whose probe FAILS still gets its sweep', () => {
     })
   })
 })
+
+describe('mailboxes of UNEQUAL depth converge', () => {
+  test('A with 2 pages and B with 3 does not oscillate forever', async () => {
+    await withStore(async (store) => {
+      // The oscillation: the fan-out reports a cursor only for accounts that
+      // still have a page, and an account ABSENT from the map restarts at its
+      // newest page. So {B:p2} restarted A, whose {A:p1} restarted B, forever —
+      // the sweep never completed and the backlog never got marked.
+      const pages: GmailListResult[] = [
+        {
+          results: [msg('a-1', 'acct-a'), msg('b-1', 'acct-b')],
+          next_page_tokens: { 'acct-a': 'a-p2', 'acct-b': 'b-p2' },
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: true },
+          ],
+        },
+        {
+          // A is finished here; B still has one more.
+          results: [msg('a-2', 'acct-a'), msg('b-2', 'acct-b')],
+          next_page_tokens: { 'acct-b': 'b-p3' },
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: true },
+          ],
+        },
+        {
+          results: [msg('b-3', 'acct-b')],
+          next_page_tokens: {},
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: true },
+          ],
+        },
+      ]
+      const gmail = scriptedClient(pages)
+
+      // Three sweep ticks must CONVERGE, not alternate.
+      await tick(gmail, store)
+      await tick(gmail, store)
+      const third = await tick(gmail, store)
+
+      expect(store.getCheckpoint(CHECKPOINT_BACKLOG_DONE)).toBe('1')
+      expect(third.backlog_sweeping).toBe(true)
+      // A is carried forward as EXHAUSTED once it runs out, rather than being
+      // dropped from the map and restarted.
+      expect(gmail.calls[2]?.page_tokens?.['acct-a']).toBe('__neutron_exhausted__')
+      expect(gmail.calls[2]?.page_tokens?.['acct-b']).toBe('b-p3')
+    })
+  })
+})

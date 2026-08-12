@@ -68,6 +68,7 @@ import {
   type GmailMessageMeta,
   type GmailMessageModifyInput,
   type GmailMessageModifyResult,
+  PAGE_TOKEN_EXHAUSTED,
   type GmailSearchInput,
   type GmailSendInput,
   type GmailSendResult,
@@ -126,6 +127,18 @@ export interface MultiAccountGmailClientOptions {
     operation: string
     error: string
   }) => void
+}
+
+/** The accounts a caller has marked finished via the exhausted sentinel. */
+function exhaustedFrom(
+  page_tokens: Readonly<Record<string, string>> | undefined,
+): ReadonlySet<string> {
+  const out = new Set<string>()
+  if (page_tokens === undefined) return out
+  for (const [id, token] of Object.entries(page_tokens)) {
+    if (token === PAGE_TOKEN_EXHAUSTED) out.add(id)
+  }
+  return out
 }
 
 function errorText(err: unknown): string {
@@ -254,6 +267,7 @@ export function buildMultiAccountGmailClient(
     limit: number,
     mode: 'exhaustive' | 'capped',
     read: (client: GmailClient, account: GmailAccountDescriptor) => Promise<GmailListResult>,
+    exhausted: ReadonlySet<string> = new Set(),
   ): Promise<
     GmailListAcrossAccounts & {
       next_page_token?: string
@@ -262,7 +276,16 @@ export function buildMultiAccountGmailClient(
     }
   > {
     const accounts = await accountsOrThrow()
-    const settled = await Promise.allSettled(accounts.map((a) => read(buildClient(a), a)))
+    // An account the caller marked EXHAUSTED is SKIPPED, not re-read from its
+    // newest page. Without this a finished mailbox restarts every time a deeper
+    // one is still paging, so the cursor maps alternate and never empty — the
+    // sweep never completes. Skipping resolves to an empty OK result, because
+    // "already finished" is a completed read, not a failed one.
+    const settled = await Promise.allSettled(
+      accounts.map(async (a): Promise<GmailListResult> =>
+        exhausted.has(a.account_id) ? { results: [] } : await read(buildClient(a), a),
+      ),
+    )
 
     const outcomes: AccountReadOutcome[] = []
     const merged: GmailMessageMeta[] = []
@@ -385,6 +408,7 @@ export function buildMultiAccountGmailClient(
               ? { page_token: input.page_tokens[account.account_id] as string }
               : {}),
           }),
+        exhaustedFrom(input.page_tokens),
       )
       return {
         results: out.results,
