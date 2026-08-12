@@ -103,6 +103,25 @@ export interface TridentRun {
    */
   inner_checkpoint: string | null
   /**
+   * MID-LOOP RESUME (migration 0121) — the branch head OID the checkpoint above
+   * was RECORDED AGAINST, written by the inner workflow in the SAME
+   * `trident/checkpoint.sh` UPDATE as the checkpoint name, so the pair is atomic
+   * and can never drift apart. A relaunched run compares it with the LIVE branch
+   * head: equal → the prior phase's outcome is about exactly this code and the run
+   * may skip forward; different, unreadable, or NULL (a row written before this
+   * column existed) → re-review. It is the ONLY source a resumed run may take a
+   * `reviewedHead` from (#545) — a live probe can name a commit pushed after the
+   * review, and pinning the merge to that would certify unreviewed code.
+   */
+  inner_checkpoint_head: string | null
+  /**
+   * MID-LOOP RESUME (migration 0121) — the synthesised findings the
+   * `argus-request-changes` checkpoint was recorded with, as compact JSON. A
+   * resume that skips forward to the fix round fixes THESE; absent/unparseable →
+   * the run re-reviews rather than sending Forge in with nothing to act on.
+   */
+  inner_checkpoint_findings: string | null
+  /**
    * Trident v2 (migration 0089) — the inner loop's final synthesised Argus
    * verdict (`APPROVE` → merge; `REQUEST_CHANGES` → failed after maxRounds).
    * Null while in flight.
@@ -179,6 +198,10 @@ export interface TridentRunUpdate {
   failure_reason?: string | null
   workflow_run_id?: string | null
   inner_checkpoint?: string | null
+  /** Workflow-owned (0121); patchable for the workflow-sim writes in tests. */
+  inner_checkpoint_head?: string | null
+  /** Workflow-owned (0121); patchable for the workflow-sim writes in tests. */
+  inner_checkpoint_findings?: string | null
   inner_verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
   /** Phase 2a (0091) — the inner workflow's typed terminal result (compact JSON). */
   inner_result?: string | null
@@ -211,6 +234,8 @@ interface TridentRunDbRow {
   failure_reason: string | null
   workflow_run_id: string | null
   inner_checkpoint: string | null
+  inner_checkpoint_head: string | null
+  inner_checkpoint_findings: string | null
   inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   inner_result: string | null
   started_at: string
@@ -222,7 +247,8 @@ const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
   'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
-  'workflow_run_id, inner_checkpoint, inner_verdict, inner_result, ' +
+  'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
+  'inner_checkpoint_findings, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at, harvested_at'
 
 /** Phases the tick driver never loads — see `state-machine.ts`. */
@@ -269,6 +295,8 @@ export class TridentRunStore {
       failure_reason: null,
       workflow_run_id: null,
       inner_checkpoint: null,
+      inner_checkpoint_head: null,
+      inner_checkpoint_findings: null,
       inner_verdict: null,
       inner_result: null,
       started_at: ts,
@@ -277,7 +305,7 @@ export class TridentRunStore {
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${COLS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         run.id,
         run.slug,
@@ -302,6 +330,8 @@ export class TridentRunStore {
         run.failure_reason,
         run.workflow_run_id,
         run.inner_checkpoint,
+        run.inner_checkpoint_head,
+        run.inner_checkpoint_findings,
         run.inner_verdict,
         run.inner_result,
         run.started_at,
@@ -445,6 +475,9 @@ export class TridentRunStore {
     if (patch.failure_reason !== undefined) push('failure_reason', patch.failure_reason)
     if (patch.workflow_run_id !== undefined) push('workflow_run_id', patch.workflow_run_id)
     if (patch.inner_checkpoint !== undefined) push('inner_checkpoint', patch.inner_checkpoint)
+    if (patch.inner_checkpoint_head !== undefined) push('inner_checkpoint_head', patch.inner_checkpoint_head)
+    if (patch.inner_checkpoint_findings !== undefined)
+      push('inner_checkpoint_findings', patch.inner_checkpoint_findings)
     if (patch.inner_verdict !== undefined) push('inner_verdict', patch.inner_verdict)
     if (patch.inner_result !== undefined) push('inner_result', patch.inner_result)
     if (patch.harvested_at !== undefined) push('harvested_at', patch.harvested_at)
@@ -575,6 +608,14 @@ export class TridentRunStore {
    * persist, whose in-memory run still carries a stale null) can never clobber a
    * result the detached workflow wrote out-of-band. Use `update({inner_result})`
    * for the workflow-sim write in tests.
+   *
+   * `inner_checkpoint_head`/`inner_checkpoint_findings` (0121) are excluded for the
+   * same reason AND a sharper one: they are only meaningful PAIRED with the
+   * `inner_checkpoint` they were written beside. The workflow writes all three in
+   * ONE atomic UPDATE; an outer-loop snapshot that carried a checkpoint name
+   * forward without them could pair a fresh name with a stale OID, and that pair is
+   * exactly what a resumed run reads to decide whether prior review work — up to
+   * and including an APPROVE — may be trusted.
    */
   async save(run: TridentRun): Promise<void> {
     await this.db.run(
@@ -712,6 +753,8 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     failure_reason: row.failure_reason,
     workflow_run_id: row.workflow_run_id,
     inner_checkpoint: row.inner_checkpoint,
+    inner_checkpoint_head: row.inner_checkpoint_head,
+    inner_checkpoint_findings: row.inner_checkpoint_findings,
     inner_verdict: row.inner_verdict,
     inner_result: row.inner_result,
     started_at: row.started_at,

@@ -83,6 +83,8 @@ beforeEach(() => {
     pr INTEGER,
     branch TEXT,
     inner_checkpoint TEXT,
+    inner_checkpoint_head TEXT,
+    inner_checkpoint_findings TEXT,
     inner_verdict TEXT,
     inner_result TEXT,
     subagent_status TEXT
@@ -182,6 +184,56 @@ describe('checkpoint.sh — terminal-result write (legacy writeTerminalResult() 
     const r = row('run-1')
     expect(r.inner_result).toBeNull()
     expect(r.subagent_status).toBe('pending')
+  })
+})
+
+describe('checkpoint.sh — the checkpoint records WHICH COMMIT it applied to (0121)', () => {
+  // The name alone could not tell a resumed run whether the branch still holds the
+  // code the checkpoint was about, which is why every relaunch had to rebuild. The
+  // OID lands in the SAME UPDATE as the name, so the pair is atomic.
+  test('inner_checkpoint_head is written beside the checkpoint name, in one statement', () => {
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'forge-done', 'inner_checkpoint_head', 'a'.repeat(40)])
+    expect(res.code).toBe(0)
+    const r = row('run-1')
+    expect(r.inner_checkpoint).toBe('forge-done')
+    expect(r.inner_checkpoint_head).toBe('a'.repeat(40))
+    expect(row('run-other').inner_checkpoint_head).toBeNull()
+  })
+
+  test('an EMPTY head CLEARS the previous one (a phase with no sha must not inherit)', () => {
+    sh([dbPath, 'run-1', 'inner_checkpoint', 'fix-round-2', 'inner_checkpoint_head', 'a'.repeat(40)])
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'fix-round-3', 'inner_checkpoint_head', ''])
+    expect(res.code).toBe(0)
+    const r = row('run-1')
+    expect(r.inner_checkpoint).toBe('fix-round-3')
+    // NOT the round-2 sha: a stale OID next to a fresh name is exactly the pairing
+    // a resume would misread as "this code was already reviewed".
+    expect(r.inner_checkpoint_head).toBe('')
+  })
+
+  test('inner_findings_file loads the findings JSON via readfile(), quotes and all', () => {
+    const tmp = join(dir, 'findings.json')
+    const findings = [{ severity: 'blocker', title: "it's broken", evidence: 'a.ts:1' }]
+    writeFileSync(tmp, JSON.stringify(findings))
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'argus-request-changes', 'inner_findings_file', tmp])
+    expect(res.code).toBe(0)
+    expect(JSON.parse(String(row('run-1').inner_checkpoint_findings))).toEqual(findings)
+  })
+
+  test('a MISSING findings file leaves the column NULL and never fails the build', () => {
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'argus-request-changes', 'inner_findings_file', join(dir, 'nope.json')])
+    expect(res.code).toBe(0)
+    expect(row('run-1').inner_checkpoint_findings).toBeNull()
+    // The checkpoint itself still landed — a resume then re-reviews rather than
+    // fixing blind, which is the safe degrade.
+    expect(row('run-1').inner_checkpoint).toBe('argus-request-changes')
+  })
+
+  test('the findings write does NOT flip subagent_status (a mid-run checkpoint is not a result)', () => {
+    const tmp = join(dir, 'findings.json')
+    writeFileSync(tmp, '[{"severity":"blocker"}]')
+    sh([dbPath, 'run-1', 'inner_findings_file', tmp])
+    expect(row('run-1').subagent_status).toBe('pending')
   })
 })
 

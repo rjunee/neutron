@@ -361,6 +361,13 @@ export function buildTridentOrchestrator(
   async function launch(run: TridentRun): Promise<AdvanceOutcome> {
     const base = await resolveBase(run)
     const resume_checkpoint = run.inner_checkpoint
+    // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
+    // against (and, for a REQUEST_CHANGES checkpoint, the findings recorded with
+    // it). Threading the name alone is what forced every relaunch to rebuild: a
+    // verdict is about a COMMIT, and without the OID the workflow cannot tell
+    // whether the branch still holds the code that verdict was about.
+    const resume_checkpoint_head = run.inner_checkpoint_head
+    const resume_findings = run.inner_checkpoint_findings
     const existingPr = run.pr ?? (await detectExistingPr(run))
     const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
 
@@ -400,6 +407,8 @@ export function buildTridentOrchestrator(
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
+      resume_checkpoint_head,
+      resume_findings,
       // Prefer the per-run resolver (store-backed, self-healing) over any static
       // dir; either resolves the CODEX_HOME the inner review threads.
       codex_home: opts.resolve_codex_home

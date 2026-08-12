@@ -5227,7 +5227,10 @@ deleted, no dual path):
   workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
   (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`
   / `fix-round-N`; timestamps via `date -u +%FT%TZ` since `Date.now` is
-  unavailable in a workflow). A workflow is session-bound (`resumeFromRunId` is
+  unavailable in a workflow). Each checkpoint also records the branch head OID it
+  APPLIES TO (`inner_checkpoint_head`, migration `0121`) in the SAME atomic
+  UPDATE, plus the findings an `argus-request-changes` was recorded with
+  (`inner_checkpoint_findings`) — see MID-LOOP RESUME below. A workflow is session-bound (`resumeFromRunId` is
   same-session only) and the background workflow does NOT survive a process exit,
   so **the tick loop owns liveness**: a persisted `subagent_run_id` THIS process
   never fired + no `inner_result` yet is an ORPHAN → re-fire a FRESH workflow that
@@ -5240,7 +5243,31 @@ deleted, no dual path):
   Migrations `0089` (`workflow_run_id` / `inner_checkpoint` / `inner_verdict`) +
   `0091` (`inner_result`, the harvest signal — WORKFLOW-OWNED; the orchestrator
   only ever reads it, never writes it, so a launch `save()` can't clobber the
-  detached workflow's out-of-band write).
+  detached workflow's out-of-band write) + `0121` (`inner_checkpoint_head` /
+  `inner_checkpoint_findings`, WORKFLOW-OWNED for the same reason and excluded from
+  `save()`/`saveIfActive()`, since a checkpoint NAME paired with a stale OID is
+  exactly what a resume must never read).
+- **MID-LOOP RESUME — the comparison, not the checkpoint name, is the gate:** a
+  relaunched run skips forward past work a dead process already paid for, but ONLY
+  over code the prior phase's outcome is actually about. `classifyResume`
+  (`trident/inner-workflow.mjs`) compares the RECORDED `inner_checkpoint_head`
+  against a live `git ls-remote` (pr) / `git rev-parse` (local) probe of the branch
+  head. **Equal** → the prior verdict is about exactly this code: `forge-done` /
+  `fix-round-N` → skip the Forge build and review the recorded commit (the diff is
+  regenerated as `git diff <base>..<oid>`, BY OID — a branch name is a moving
+  target); `argus-request-changes` (+ recorded findings) → skip the re-review and
+  go straight to the fix round, inheriting the spent round budget so the cap keeps
+  bounding across crashes; `argus-approved` → skip build+review and let the OUTER
+  loop merge. **Different, unreadable, an abbreviated/malformed sha, a NULL OID (a
+  row written before `0121`), a checkpoint name it does not know
+  (`ralph-task-built`), or a diff that could not be regenerated** → REBUILD and
+  RE-REVIEW. `reviewedHead` — the OID the outer merge pins with
+  `--match-head-commit` — may only ever be set from the RECORDED value or from a
+  Forge agent's own reported `commitSha`, NEVER from the live probe (#545): a probe
+  can name a commit pushed after the review, and a pin manufactures confidence
+  nobody earned. Behavioural coverage in `trident/inner-workflow-resume.test.ts`
+  asserts which phases did NOT run, since a "resume" that silently re-runs
+  everything is the old behaviour wearing a new name.
 - **Orchestrator surface:** `Workflow` is now on the live-chat agent's constant
   `DEFAULT_TOOL_NAMES` (`build-live-agent-turn.ts`) so the owner's orchestrator
   REPL can fire background tridents directly + stay responsive (readies the

@@ -9267,3 +9267,68 @@ Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
+
+## 2026-08-12 — a resumed lane no longer re-buys a review it already paid for
+
+**What broke.** When a lane's host process dies mid-loop — the common case is the shared
+account hitting its session limit, which returns a 429 and ends the session — the relaunch
+rebuilt and re-reviewed from zero. The branch and its pushed commits survive, so no code was
+lost; what was lost was every review round already bought. Fifteen lanes died that way in
+three waves on 2026-08-12; several had completed round-1 review and one was at fix round 7.
+
+`resumeCheckpoint` existed (`trident/inner-workflow.mjs`) but the workflow understood exactly
+ONE value, `argus-approved`; every other checkpoint fell through to a full rebuild.
+
+**Why distrusting the checkpoint was CORRECT, and what actually had to change.** A verdict is
+about a COMMIT, not about a branch. Reviewers approved commit A; if anything pushed B into the
+crash window, "the last checkpoint said approved" is a statement about code nobody reviewed —
+so a resume that probed the head and called the answer `reviewedHead` would let the outer merge
+pin to B and SUCCEED, certifying an unreviewed commit (#545). The enabling gap was that
+`checkpoint()` persisted the NAME, the branch and the PR number, and no OID: a resumed run
+genuinely could not tell A from B, which is precisely why failing closed was right.
+
+**The fix, in the order it has to be built.**
+- `checkpoint()` now records the branch head OID the checkpoint APPLIES TO
+  (`code_trident_runs.inner_checkpoint_head`, migration `0121`) in the SAME
+  `trident/checkpoint.sh` UPDATE as the name, so the pair is atomic and can never drift. It is
+  written on EVERY checkpoint — including as an empty string when a phase reported no sha,
+  because a skipped write would leave the PREVIOUS phase's OID sitting next to the new name.
+  An `argus-request-changes` checkpoint additionally records the findings it was recorded with
+  (`inner_checkpoint_findings`), through the same temp-file + `readfile()` indirection the
+  terminal result uses.
+- `classifyResume` decides on the COMPARISON, never the checkpoint name. Recorded OID ==
+  live head → `forge-done`/`fix-round-N` skip the build and review the recorded commit;
+  `argus-request-changes` (+ findings) goes straight to the fix round, inheriting the spent
+  round budget so the cap keeps bounding across crashes; `argus-approved` skips build+review.
+  Head moved, head unreadable, an abbreviated/malformed sha, NO recorded OID (a row written
+  before `0121`), an unknown checkpoint name (`ralph-task-built` — its next task is still
+  unbuilt), or a diff that could not be regenerated → REBUILD and RE-REVIEW.
+- The resume diff is regenerated `git diff <base>..<oid>` — BY OID, never by branch name, so a
+  push landing between the comparison and the diff cannot swap the code under review.
+- `reviewedHead` may still only ever be set from a RECORDED value (the checkpoint's OID) or a
+  Forge agent's own reported `commitSha`. NEVER from the live probe: the probe is an input to
+  the comparison and nothing more. `--match-head-commit` re-checks the same equality at merge
+  time, so a push landing after the resume fails the merge LOUDLY rather than shipping.
+- Only then do the launchers pass the checkpoint through (they hardcoded
+  `"resumeCheckpoint": None`, so even the single old path never engaged). They deliberately do
+  NOT accept a head: an operator-typed OID is not a recorded one, and only
+  `trident/checkpoint.sh` may write the value a merge is allowed to pin to.
+
+**Tested in the direction that matters — a FALSE resume.** `trident/inner-workflow-resume.test.ts`
+drives the REAL workflow body and asserts WHICH PHASES DID NOT RUN, because a "resume" that
+silently re-runs everything is the current behaviour wearing a new name and would pass a naive
+"it returned APPROVE" test. Covered: head moved → re-review (and the recorded findings are not
+replayed); no recorded OID → re-review, without even spending the probe; `argus-approved` +
+head moved → NO instant APPROVE, and the only APPROVE the run can emit is pinned to the commit
+THIS run's panel read; a legitimate skip runs no `forge:build` and no `plan:fable`; a resumed
+`fix-round-7` continues at round 8 and can still exhaust the cap.
+
+Mutants run, proven applied by grepping the mutated source before believing a green result:
+disabling the head comparison (4 tests die, including the #545 case), and pinning
+`reviewedHead` to the probe instead of the record (the source-level invariant test dies).
+
+Also fixed while here, because the resume would otherwise have walked into it: the fix-round
+prompt now names the EXACT diff path to re-write (`git diff <base>..HEAD > <diffFile>`). The
+next review reads that path, and a fix agent writing its diff somewhere else left the panel
+reading pre-fix code — latent before, and a resume whose diff file is named after the recorded
+OID would have hit it every time.
