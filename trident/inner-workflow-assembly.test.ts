@@ -51,6 +51,12 @@ interface RunOpts {
    * would look covered while the planner never sees it.
    */
   ralph?: boolean
+  /**
+   * Configure the kimi cross-model seat. OPT-IN and default OFF: hardcoding it on would
+   * silently promote every pre-existing panel test from a 3-seat to a 4-seat panel, which
+   * changes what the completeness gate is actually being asserted about.
+   */
+  kimi?: boolean
 }
 
 async function runWorkflow(
@@ -123,7 +129,7 @@ async function runWorkflow(
     runId: null,
     resumeCheckpoint: null,
     codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
-    kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured
+    kimiConfigured: opts.kimi === true, // → opt-in; on, the kimi seat runs and its prompt is captured
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance,
@@ -288,9 +294,10 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
  * splicing the rule into the rubric left three command-running seats uncovered.
  *
  * Scope is "every agent that can run a shell command", because that is exactly the set
- * that can `pkill`. argus:synthesis is deliberately excluded and asserted excluded: it
- * merges verdict TEXT and is handed no tools, which is why it carries neither of the
- * two pre-existing rules either.
+ * that can `pkill`. The covered set is DERIVED from the labels the workflow actually
+ * dispatched, minus an explicit, reasoned exclusion list — NEVER hand-listed. A
+ * hand-list is drift-blind: it silently passes while a newly added shell seat goes
+ * uncovered, which is precisely how `cleanup:worktree` shipped without the rule.
  */
 describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told not to pattern-kill', () => {
   // Verbatim fragments of the shipped rule. Retyped deliberately: reading the constant
@@ -299,27 +306,57 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
   const SHARED_BOX = 'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES'
   const PROHIBITION = 'NEVER kill processes by pattern or by name'
   const CARVE_OUT = 'Kill ONLY a pid you started yourself and can name'
+  /** The rule's LAST words — the far edge of the hedge-scan window. */
+  const TAIL = 'work around it and say so in your report.'
 
-  /** Every seat that is handed a shell, in BOTH modes. `plan:fable` is Ralph-only. */
-  const COMMAND_RUNNING_LABELS = [
-    'forge:build',
-    'forge:fix-round-2',
-    'argus:claude',
-    'argus:adversarial',
-    'argus:codex',
-    'argus:kimi',
+  /**
+   * The ONLY seats allowed to lack the rule, each with the reason it cannot pattern-kill.
+   * Everything else the workflow dispatches is REQUIRED to carry it, so a new shell seat
+   * fails this suite until it is either given the rule or consciously exempted here with
+   * a justification. That inversion — deny-by-default instead of an allow-list of covered
+   * labels — is the whole point of this rewrite.
+   */
+  const EXCLUDED: Array<{ match: (l: string) => boolean; why: string }> = [
+    {
+      match: (l) => l === 'argus:synthesis',
+      why: 'toolless — it merges verdict TEXT and is handed no tools, so it has no shell at all',
+    },
+    // The probe/bookkeeping seats are each handed ONE literal command and told to run
+    // EXACTLY it and nothing else, so there is no room in them for a kill of any shape.
+    { match: (l) => l.startsWith('checkpoint:'), why: 'single fixed `bash checkpoint.sh …` command' },
+    { match: (l) => l === 'terminal-result', why: 'single fixed `printf … && bash checkpoint.sh …` command' },
+    { match: (l) => l.startsWith('head-probe-round-'), why: 'single fixed `git ls-remote`/`rev-parse` command' },
+    { match: (l) => l.startsWith('ci-probe-round-'), why: 'single fixed `gh pr checks` command' },
   ]
 
   let captured: Captured[]
   let ralphCaptured: Captured[]
+  /** Every call from BOTH modes — a rule spliced into only one path must not read as covered. */
+  let allCalls: Captured[]
+  /** Distinct dispatched labels that are NOT exempt → the set that must carry the rule. */
+  let coveredLabels: string[]
   beforeAll(async () => {
-    captured = (await runWorkflow(GUIDANCE)).captured
-    ralphCaptured = (await runWorkflow(GUIDANCE, { ralph: true })).captured
+    captured = (await runWorkflow(GUIDANCE, { kimi: true })).captured
+    ralphCaptured = (await runWorkflow(GUIDANCE, { kimi: true, ralph: true })).captured
+    allCalls = [...captured, ...ralphCaptured]
+    coveredLabels = [...new Set(allCalls.map((c) => String(c.label)))]
+      .filter((l) => !EXCLUDED.some((e) => e.match(l)))
+      .sort()
   })
 
-  test('the harness actually dispatched every seat it claims to cover', () => {
-    for (const label of COMMAND_RUNNING_LABELS) {
-      expect(captured.some((c) => c.label === label)).toBe(true)
+  test('the harness actually dispatched the seats this suite exists to cover', () => {
+    // Pinned floor: if a refactor stops dispatching any of these, the derived set would
+    // quietly shrink and the coverage test below would pass over a smaller panel.
+    for (const label of [
+      'forge:build',
+      'forge:fix-round-2',
+      'argus:claude',
+      'argus:adversarial',
+      'argus:codex',
+      'argus:kimi',
+      'cleanup:worktree',
+    ]) {
+      expect(coveredLabels).toContain(label)
     }
     // The planner exists ONLY in Ralph mode — assert the mode really produced it,
     // or its coverage test below would vacuously pass over an empty call list.
@@ -327,8 +364,9 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
   })
 
   test('EVERY command-running prompt carries the rule, with the reason and the carve-out', () => {
-    for (const label of COMMAND_RUNNING_LABELS) {
-      const calls = captured.filter((c) => c.label === label)
+    expect(coveredLabels.length).toBeGreaterThan(0)
+    for (const label of coveredLabels) {
+      const calls = allCalls.filter((c) => String(c.label) === label)
       expect(calls.length).toBeGreaterThan(0)
       for (const c of calls) {
         // The REASON is other lanes, not the agent's own safety.
@@ -365,10 +403,24 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
     const forge = captured.find((c) => c.label === 'forge:build')
     expect(forge).toBeDefined()
     const prompt = String(forge?.prompt)
-    // No hedge anywhere in the sentence that carries the rule.
-    const sentence = prompt.slice(prompt.indexOf(SHARED_BOX), prompt.indexOf(CARVE_OUT))
-    for (const hedge of ['try to avoid', 'prefer not', 'should avoid', 'if possible', 'generally']) {
-      expect(sentence.toLowerCase()).not.toContain(hedge)
+    // ANCHOR THE WINDOW BEFORE SLICING. `slice(indexOf(a), indexOf(b))` silently yields
+    // '' when either anchor is missing (-1) or when they are reordered (start > end), and
+    // an empty window passes every `not.toContain` below vacuously — the scan would fail
+    // OPEN exactly when the rule had been mangled. Prove the window is real first.
+    const start = prompt.indexOf(SHARED_BOX)
+    const carve = prompt.indexOf(CARVE_OUT)
+    const tail = prompt.indexOf(TAIL)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(carve).toBeGreaterThan(start)
+    expect(tail).toBeGreaterThan(carve)
+    // Scan the ENTIRE rule — opening claim, prohibition, carve-out AND the closing
+    // instruction. Stopping at the carve-out would miss a hedge bolted onto the end,
+    // which softens the rule just as effectively as one in the first sentence.
+    const rule = prompt.slice(start, tail + TAIL.length)
+    expect(rule).toContain(PROHIBITION)
+    expect(rule).toContain(CARVE_OUT)
+    for (const hedge of ['try to avoid', 'prefer not', 'should avoid', 'if possible', 'generally', 'where practical', 'when convenient', 'as a rule', 'unless you']) {
+      expect(rule.toLowerCase()).not.toContain(hedge)
     }
     // And it tells the agent what to do INSTEAD, so "work around it" is the escape
     // hatch rather than killing a process it did not start.
