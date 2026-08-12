@@ -69,9 +69,17 @@ describe('G5 CI typechecks every tsconfig on disk', () => {
 
   // Independent enumeration: walk the repo ourselves, skipping node_modules,
   // and collect every file literally named `tsconfig.json`.
+  //
+  // `.claude/worktrees` is skipped for the SAME reason the script skips it: those are
+  // nested checkouts of this repo (agent lane worktrees), not source of its own, and
+  // every config under them duplicates one already counted. The enumeration stays
+  // independent about what it FINDS — it still walks the tree itself rather than
+  // trusting the script — and only agrees about which trees are this repo's.
   function findTsconfigsOnDisk(): string[] {
     const out: string[] = []
+    const worktrees = join(REPO_ROOT, '.claude', 'worktrees')
     const walk = (abs: string) => {
+      if (abs === worktrees) return
       for (const ent of readdirSync(abs, { withFileTypes: true })) {
         if (ent.name === 'node_modules' || ent.name === '.git') continue
         const child = join(abs, ent.name)

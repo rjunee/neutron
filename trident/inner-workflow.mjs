@@ -1594,7 +1594,15 @@ TASK: ${task}`,
     .map((seat) => corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot]))
     .join('\n')
   const synthesisRaw = await agent(
-    `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
+    // The synthesis seat gets the no-pattern-kill rule like every other seat. It was
+    // once exempted as "toolless", but NOTHING in this file grants or withholds tools —
+    // there is no allowedTools plumbing anywhere — so every seat runs with the same
+    // default toolset and any seat can shell out. An exemption whose only evidence was
+    // "we did not write the other shell rules into this prompt" was circular: it
+    // re-observed the prompt-authoring choice it was supposed to justify.
+    `${NO_PATTERN_KILL_RULE}
+
+Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).

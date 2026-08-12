@@ -284,9 +284,11 @@ describe('conflict-resolver — the mid-rebase Forge is told not to pattern-kill
     const here = ruleLiteral(read('./conflict-resolver.ts'))
     const there = ruleLiteral(read('./inner-workflow.mjs'))
     // Both must actually be FOUND — a regex that matched nothing would compare '' to ''
-    // and pass while both copies were gone.
-    expect(here.length).toBeGreaterThan(100)
-    expect(there.length).toBeGreaterThan(100)
+    // and pass while both copies were gone. Pinned on the rule's KEY SENTENCE rather
+    // than on a length threshold: `length > 100` is satisfied by 101 characters of
+    // anything, so a copy gutted down to a hedge would still clear it.
+    expect(here).toContain('NEVER kill processes by pattern or by name')
+    expect(there).toContain('NEVER kill processes by pattern or by name')
     expect(here).toBe(there)
   })
 })
