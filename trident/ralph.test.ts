@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { detectRalphMode, defaultRalphModeProbe, type HostCommandResult } from './git-mode.ts'
-import { buildSimFirer } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
@@ -83,6 +83,9 @@ describe('Ralph mode threads through to the inner loop', () => {
       run_host: async () => ok(),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
+      // Sim gate: the real post-APPROVE prover needs a real repo (see
+      // `buildSimMutationProofGate`); this file's subject is elsewhere.
+      prove_mutation: buildSimMutationProofGate(),
     })
     const loop = new TridentTickLoop({ store, step: orch.step })
     const run = await store.create({

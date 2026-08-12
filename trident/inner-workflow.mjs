@@ -435,7 +435,7 @@ const KIMI_VERDICT_SCHEMA = {
 const FORGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['worktreePath', 'branch', 'commitSha', 'prNumber', 'diffFile', 'testsPassed'],
+  required: ['worktreePath', 'branch', 'commitSha', 'prNumber', 'diffFile', 'testsPassed', 'mutationClaim'],
   properties: {
     worktreePath: { type: 'string' },
     branch: { type: 'string' },
@@ -443,6 +443,27 @@ const FORGE_SCHEMA = {
     prNumber: { type: ['number', 'null'] },
     diffFile: { type: 'string' },
     testsPassed: { type: 'boolean' },
+    // The POST-APPROVE MUTATION PROVER's input, and ONLY its input. Forge
+    // NOMINATES a mutation here; the deterministic prover (`mutation-prover.ts`)
+    // RUNS it between APPROVE and merge and emits the evidence itself. There is
+    // deliberately NO field on this schema for a result, a verdict or an evidence
+    // block: an agent that could report "mutation verified" is an agent that can
+    // fabricate it, and on PR #477 a hand-written evidence block with invented
+    // keys reached the parser. What Forge says here is a proposal to execute,
+    // never a finding.
+    mutationClaim: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['file', 'find', 'replace', 'guard', 'control'],
+      properties: {
+        file: { type: 'string', description: 'repo-relative PRODUCTION file to mutate (never a test file)' },
+        find: { type: 'string', description: 'exact substring occurring EXACTLY ONCE, whose behaviour the PR relies on' },
+        replace: { type: 'string', description: 'what replaces it — the break' },
+        guard: { type: 'array', items: { type: 'string' }, description: 'argv that MUST go RED under the mutation' },
+        control: { type: 'array', items: { type: 'string' }, description: 'argv that MUST stay GREEN under the mutation' },
+        rationale: { type: 'string', description: 'why this is the behaviour worth proving (recorded, not parsed)' },
+      },
+    },
   },
 }
 
@@ -549,7 +570,8 @@ CONTRACT
 3. Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
-6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
+6. NOMINATE THE MUTATION that proves your change is actually guarded, in the \`mutationClaim\` schema field: \`file\` (a PRODUCTION file you changed — never a test), \`find\` (an EXACT substring of it, occurring EXACTLY ONCE, that the new behaviour depends on), \`replace\` (what breaks it), \`guard\` (the argv of the test that MUST go RED once it is broken, e.g. \`["bun","test","path/to/file.test.ts"]\`), \`control\` (the argv of a DIFFERENT test that MUST stay GREEN, proving the break is specific). BOTH argv must be TEST-RUNNER invocations (\`bun test …\`, \`npm test …\`, \`node --test …\`, \`go test …\`, \`cargo test …\`, \`python3 -m pytest …\`, \`make test…\`) — a shell one-liner is REFUSED, and so is a \`file\` that is a test file, documentation, or one this branch's diff does not touch. A DETERMINISTIC phase runs this after review and before merge: it applies the mutation, watches the guard go red, restores the file, and watches the guard go green. Do NOT run it yourself, and do NOT write any "mutation verified" note, evidence block, or summary — a hand-written one is REJECTED and blocks the merge. The gate reads only what the machine observed. Use \`null\` ONLY when the diff is pure documentation prose.
+7. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -1877,6 +1899,12 @@ ${task}${reflectionGuidance}`,
   if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
   if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
 
+  // The mutation the post-APPROVE prover will RUN (never a result it reports).
+  // The LAST round that touched the code owns it: a fix round can move or delete
+  // the line round 1 nominated, and proving a mutation against a line that no
+  // longer exists is not a proof — the prover refuses an un-appliable claim.
+  let mutationClaim = forge.mutationClaim ?? null
+
   // C1 checkpoint — Forge done (PR + branch persisted).
   await checkpoint('forge-done', { pr })
 
@@ -1974,6 +2002,9 @@ ${task}${reflectionGuidance}`,
         complexityTag,
       ),
     )
+    // Re-nominate from the round that actually edited the code (see above). A
+    // fix round that returns none leaves the previous nomination standing.
+    if (fix && fix.mutationClaim) mutationClaim = fix.mutationClaim
     await checkpoint(`fix-round-${round}`, { pr })
     // DID IT LAND? A fix round runs in a throwaway worktree, so edits that were
     // never committed+pushed are already gone — and reviewing again would
@@ -2023,6 +2054,10 @@ ${task}${reflectionGuidance}`,
     // 0 here (the FINAL Ralph task, or a non-Ralph run) → the outer loop does NOT
     // re-fire; it runs the normal merge (APPROVE) / fail (REQUEST_CHANGES) path.
     remainingTasks: ralphRemaining,
+    // The mutation the outer loop's post-APPROVE prover will RUN. A NOMINATION,
+    // not a result — nothing this workflow can write asserts that a mutation was
+    // verified, by construction.
+    mutationClaim,
     // WHY it is blocked, surfaced to the operator and the outer loop. 'infra-only'
     // means the CODE WAS NEVER JUDGED — a lane could not run, so this verdict says
     // nothing about the diff. Reporting that as an ordinary REQUEST_CHANGES is what

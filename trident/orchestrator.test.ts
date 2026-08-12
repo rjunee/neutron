@@ -6,7 +6,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
-import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator, isTridentHarvestTerminal } from './orchestrator.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -52,6 +52,8 @@ interface Harness {
   /** RALPH RE-FIRE (#362) — every atomic reset patch `persist_refire_reset` was
    *  called with (assert the crash-safe bundle: inner_result + slot + ralph_round). */
   refirePatches: import('./store.ts').TridentRunUpdate[]
+  /** What the post-APPROVE mutation-prover phase was asked to prove, per call. */
+  proofCalls: Array<{ branch: string | null; run_id: string }>
 }
 
 function buildHarness(opts: {
@@ -67,8 +69,14 @@ function buildHarness(opts: {
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
+  /** Post-APPROVE mutation-prover phase. Default: a SIMULATED pass — these
+   *  tests are about the outer loop, and the real prover needs a real repo (see
+   *  `buildSimMutationProofGate`). Set false to assert the block path; OMIT the
+   *  seam entirely (build the orchestrator directly) to exercise the real gate. */
+  mutation_proof_ok?: boolean
 }): Harness {
   const hostCalls: string[][] = []
+  const proofCalls: Array<{ branch: string | null; run_id: string }> = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
   const now = opts.now ?? (() => new Date(0).toISOString())
   // Bind the store to the SAME clock as the orchestrator so `last_advanced_at`
@@ -94,6 +102,7 @@ function buildHarness(opts: {
       refirePatches.push(patch)
       return store.update(id, patch).then(() => {})
     },
+    prove_mutation: buildSimMutationProofGate({ ok: opts.mutation_proof_ok ?? true }, proofCalls),
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
@@ -110,7 +119,7 @@ function buildHarness(opts: {
     step: orch.step,
     ...(opts.on_terminal !== undefined ? { on_terminal: opts.on_terminal } : {}),
   })
-  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
+  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches, proofCalls }
 }
 
 /** Tick, then simulate the in-flight workflow finishing (write its result), so a
@@ -969,5 +978,115 @@ describe('applyResult stamps harvested_at (the outer loop is the ONLY writer)', 
     expect(terminated?.phase).toBe('failed')
     expect(terminated?.harvested_at).toBeNull() // terminalTransition never sets it
     expect(isTridentHarvestTerminal(terminated!)).toBe(false)
+  })
+})
+
+describe('the post-APPROVE MUTATION PROVER stands between APPROVE and merge', () => {
+  test('an unproved APPROVE does NOT merge — it fails, with the prover\'s reason', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+      mutation_proof_ok: false,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toBe('simulated mutation proof failure')
+    // The verdict is preserved: the review DID approve. What is missing is the
+    // proof, and the row must say that rather than pretend Argus rejected it.
+    expect(final.inner_verdict).toBe('APPROVE')
+    expect(final.inner_checkpoint).toBe('argus-approved')
+    // THE IRREVERSIBLE STEP NEVER RAN.
+    expect(h.hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
+  })
+
+  test('the prover is pointed at the branch the merge will take, not the one on the row', async () => {
+    // The run row's branch is STALE (here: never written at all) and the build
+    // named it in its result. The merge below uses `result.branch ?? run.branch`,
+    // so a prover handed the un-updated `run` would resolve a head off the OLD
+    // ref — proving one commit and merging another.
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'trident/the-real-branch' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(final.branch).toBe('trident/the-real-branch')
+    expect(h.proofCalls).toEqual([{ branch: 'trident/the-real-branch', run_id: run.id }])
+  })
+
+  test('with NO seam wired at all, a run whose build nominated no mutation still does not merge', async () => {
+    // The DEFAULT path — `prove_mutation` unset, so the orchestrator uses the
+    // real `runMutationProofGate`. This is the fail-closed wiring assertion: if
+    // someone deletes the call, this test merges and goes red.
+    const hostCalls: string[][] = []
+    const sim = buildSimFirer(store, () => ({
+      result: { verdict: 'APPROVE', prNumber: 77, branch: 'feat-x' },
+    }))
+    const orch = buildTridentOrchestrator({
+      fire_workflow: sim.fire_workflow,
+      db_path: join(tmp, 'project.db'),
+      run_host: async (cmd) => {
+        hostCalls.push(cmd)
+        // The gate PINS the branch head before anything else; answer that with
+        // the sha the sim recorded as REVIEWED, so the tip and the commit the
+        // merge would take agree and the run reaches the predicate this test is
+        // about rather than stopping earlier.
+        if (cmd.includes('rev-parse')) return { ...ok(), stdout: SIM_REVIEWED_HEAD }
+        // `git diff --name-only` returns nothing readable → the prose-only
+        // predicate fails closed → the proof is required → there is no claim.
+        return ok()
+      },
+      base_branch: 'main',
+      now: () => new Date(0).toISOString(),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(
+      { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches: [], proofCalls: [] },
+      run.id,
+    )
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('nominated no mutation')
+    expect(hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
+  })
+
+  test('the proof must be of the commit the MERGE takes, not of whatever the tip is', async () => {
+    // TWO PINS. `mergePr` merges `reviewedHead` (#545 — the OID the reviewers
+    // judged); this gate pins the branch TIP. When a tip has moved past the
+    // reviewed commit, proving the tip certifies a commit that is not the one
+    // shipping — and both halves look right on their own. Real gate, no seam.
+    const hostCalls: string[][] = []
+    const sim = buildSimFirer(store, () => ({
+      result: { verdict: 'APPROVE', prNumber: 78, branch: 'feat-x' },
+    }))
+    const orch = buildTridentOrchestrator({
+      fire_workflow: sim.fire_workflow,
+      db_path: join(tmp, 'project.db'),
+      run_host: async (cmd) => {
+        hostCalls.push(cmd)
+        // The tip has moved on since the review recorded SIM_REVIEWED_HEAD.
+        if (cmd.includes('rev-parse')) return { ...ok(), stdout: 'c'.repeat(40) }
+        return ok()
+      },
+      base_branch: 'main',
+      now: () => new Date(0).toISOString(),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(
+      { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches: [], proofCalls: [] },
+      run.id,
+    )
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain(`the merge would take ${SIM_REVIEWED_HEAD.slice(0, 8)}`)
+    expect(final.failure_reason).toContain('the branch tip is cccccccc')
+    // THE IRREVERSIBLE STEP NEVER RAN — and neither did the proof: no worktree
+    // was provisioned for a commit that was never going to be the merged one.
+    expect(hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
+    expect(hostCalls.some((c) => c.join(' ').includes('worktree add'))).toBe(false)
   })
 })

@@ -32,6 +32,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from './store.ts'
+import { buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { TridentTickLoop } from './tick.ts'
 
@@ -71,6 +72,9 @@ function orchestrator(fire: ReturnType<typeof crashingFirer>) {
     run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
+    // Sim gate: the real post-APPROVE prover needs a real repo (see
+    // `buildSimMutationProofGate`); this file's subject is the crashed launch.
+    prove_mutation: buildSimMutationProofGate(),
   })
 }
 

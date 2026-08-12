@@ -23,7 +23,7 @@ import {
 } from './code-command.ts'
 import type { TridentBoardBinder } from './board-dispatch.ts'
 import type { HostCommandResult } from './git-mode.ts'
-import { buildSimFirer, SIM_REVIEWED_HEAD } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate, SIM_REVIEWED_HEAD } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
@@ -435,6 +435,9 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
       },
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
+      // Sim gate: the real post-APPROVE prover needs a real repo (see
+      // `buildSimMutationProofGate`); this file's subject is the /code surface.
+      prove_mutation: buildSimMutationProofGate(),
     })
     const loop = new TridentTickLoop({ store, step: orch.step })
 

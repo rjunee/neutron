@@ -2,6 +2,119 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — a mutation-verified claim now has to be a mutation that ran
+
+`trident/mutation-prover.ts` adds the post-APPROVE phase that stands between an
+Argus APPROVE and the irreversible merge. It is deterministic TypeScript, and it
+does the thing rather than asking for a report of it: it provisions a throwaway
+worktree detached at the branch head, applies the nominated mutation, watches the
+guard go RED, watches a control stay GREEN, restores the file, watches the guard
+come back GREEN — and writes the evidence block from those observations.
+`orchestrator.applyResult` calls it before `cleanupAfterMerge`, so an APPROVE
+that cannot be proved fails the run instead of merging it.
+
+The gap it closes is not that reviewers were lax. It is that an agent can write a
+completely convincing "mutation-verified" paragraph without having run one, and a
+gate that reads text accepts it: on PR #477 a hand-written evidence block with
+invented keys reached the parser, and it was refused for its shape — a well-formed
+fake would have armed the gate. So no agent composes the block. Forge NOMINATES a
+mutation (`mutationClaim` on `FORGE_SCHEMA`: file, find, replace, guard argv,
+control argv) and that nomination is untrusted input the prover EXECUTES; the
+schema keeps `claimed` and `observed` apart, and `proved` is a function of
+`observed` alone. Every block is signed with an HMAC keyed by a secret minted in
+memory per prover — no disk, no DB, no prompt — so a block that was written rather
+than produced cannot verify, and neither can a real one that was edited afterwards
+or replayed from another process. Placeholder-shaped observations (`"<sha256>"`, a
+"RED" run that exited 0, a red and a green run with byte-identical output) are
+rejected first, by name, so a fake is told what was wrong with it.
+
+Two things make the proof about THIS PR rather than about mutation in the
+abstract. The nominated file must appear in `base...branch` — a mutation of a
+stable, well-guarded file the diff never touches proves red-then-green perfectly
+and certifies nothing, and being diff-independent it would let one boilerplate
+nomination satisfy the phase forever. The nominated path must also RESOLVE inside
+the throwaway worktree: rejecting a leading `/` and a `..` segment says nothing
+about a SYMLINK, and the branch under proof is agent-authored, so a committed link
+materialises in the proof worktree and `readFile`/`writeFile` follow it — the
+prover would have written the mutation through it to a host file it does not own.
+Both sides are resolved before the comparison, so a worktree that itself sits
+under a symlinked prefix still proves. And the guard and control must be TEST
+INVOCATIONS (`bun test …`, `go test …`, `python3 -m pytest …`), not merely
+allowlisted programs: `bash -c 'grep …'` reddens under any edit of the line and
+`sh -c 'echo ok'` is green by construction, so a general shell is off the list
+entirely. The nominated file may not be a test file or documentation either.
+
+Docs-only PRs are exempt through a predicate that fails closed at every step: an
+unreadable diff, an empty list, one unrecognised path — each requires the proof.
+A `.md` under `skills/`, `prompts/`, `.claude/` or `.github/` is executable prose,
+not documentation, and takes the proof path — matched on EVERY path segment, so
+`onboarding/interview/skills/_envelope.md` is caught as surely as the root-level
+one. `SPEC.md` and `IMPLEMENTATION_PLAN.md` drive the harness (Ralph mode and its
+task list) and are not documentation; neither is `CODEOWNERS`. `.txt` is not
+prose in this repo — `scripts/ci/leak-gate-allowlist.txt` decides which leak
+findings are suppressed and `migrations/expected-schema.txt` is the schema the
+migration gate compares against.
+
+The proof is BOUND, and `verify` enforces the binding rather than documenting it:
+to the run id, and to the branch head as re-read AFTER the proof, so a branch
+that moved mid-proof makes the GATE refuse.
+
+KNOWN GAP, stated here rather than implied away, because the point of this phase
+is that a claim means what it says. The binding holds up to the moment the gate
+returns; it does not reach through the merge itself. `merge.ts` takes a
+`TridentRun` and nothing else, so the proved sha cannot currently be handed to it:
+in PR mode `gh pr merge --squash` carries no `--match-head-commit` (the OUTER
+`merge.sh` does pin the head, so a trident-driven merge is covered — a direct
+orchestrator merge is not), and in local mode the branch is REBASED onto the
+latest base first, which can run the bounded conflict resolver and land bytes
+that were never proved. Closing this needs the merge seam to accept an expected
+head, which is a change to `MergeCleanupDeps` and not to this phase.
+The gate PINS that commit once, up front, and reads everything off the pin — the
+`base...<sha>` diff that binds the proof to this PR, the proof itself, and the
+final head comparison. It used to resolve the branch NAME separately for the diff
+and for the proof, so a push landing between them left the binding describing one
+commit while the proof described another; the prose-only exemption was worse,
+returning before any sha was resolved at all, so a branch that was docs-only when
+its diff was read could pick up code afterwards and merge with no proof ever run.
+The whole phase runs against ONE wall-clock budget (15 min for all three runs,
+not each), and a command that outruns it is KILLED and reaped — `tick.ts` is
+single-flight, so an abandoned guard was every other run's stall as well as an
+orphan process writing into a worktree about to be force-removed.
+
+NO FEATURE FLAGS: there is no config, env var or operator switch that turns the
+proof off, only a `prove_mutation` test seam of the same kind as `merge_deps`,
+which production does not wire.
+
+Mutation-verified: deleting the guard-must-go-RED check, the signature check, the
+placeholder-digest check, the ambiguity refusal, the restore step, the fail-closed
+prose predicate, the untrusted-claim shape check, the diff-binding check, the
+test-shape check and the gate call in the merge path each redden the suite, and
+each mutation was confirmed applied (exactly one occurrence, changed bytes) before
+its test was run. The signed payload is covered structurally rather than by a
+list: a test censuses every leaf of a fully-populated block and demands the
+canonical bytes carry each one, so a field quietly dropped from the signature
+reddens even though every other assertion still passes. That census is why
+`claimed.rationale` is signed: as an OPTIONAL field it was missing from the
+fully-populated block, so the walk never demanded the payload cover it and the
+human-facing "why this proves the change" sentence could be rewritten on a real
+block that still verified. It is signed with an explicit null for absent, so
+backfilling one is an edit too. Three further mutations — unsigning `rationale`,
+dropping the worktree-containment check, and reading the binding diff off the
+branch name instead of the pinned sha — were each confirmed applied (the changed
+pattern asserted present in the source) and each reddened exactly the test written
+for it.
+
+Integrating #545 surfaced a SECOND pin: that change merges `reviewedHead` — the
+OID the reviewers judged — while this gate pins the branch TIP, and nothing
+compared the two. A tip that had moved past the reviewed commit therefore
+produced a valid proof of one commit while the merge took another, with both
+halves looking right on their own. `runMutationProofGate` now takes the caller's
+pin (`expected_head`, `reviewedHeadOid(run)` from the orchestrator) and refuses a
+mismatch BEFORE it reads the diff, so the prose-only exemption cannot fire on a
+diff that is not the one shipping. Absent (local mode, a legacy row) → the tip is
+the only commit in play; a pr-mode merge with no recorded OID is already refused
+by `mergePr`.
+
 ## 2026-08-12 — a dirty worktree is preserved, never force-removed (#541)
 
 The inner workflow's `finally{}` cleanup is now the checked-in

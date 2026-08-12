@@ -54,6 +54,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { parsePhaseModelConfig } from './phase-models.ts'
+import { parseMutationClaim, type MutationClaim } from './mutation-prover.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { fileURLToPath } from 'node:url'
@@ -128,6 +129,19 @@ export interface InnerResult {
    * as 0 (no re-fire) so legacy rows and single-task builds are unchanged.
    */
   remaining_tasks: number | null
+  /**
+   * MUTATION PROVER (post-APPROVE phase) — the build's NOMINATION of which
+   * production behaviour to break and which command guards it. UNTRUSTED
+   * input: the outer loop RUNS it and observes the result; it never reads a
+   * conclusion the workflow drew about it.
+   *
+   * Note what is deliberately NOT carried here: an evidence block. A workflow
+   * cannot report that a mutation was verified — that finding is produced by
+   * `mutation-prover.ts` from its own observations, or it does not exist.
+   * `null` (absent/malformed) → the gate has nothing to run, so it refuses the
+   * merge unless the diff is prose-only.
+   */
+  mutation_claim: MutationClaim | null
 }
 
 /** The terminal outcome of FIRING the workflow (NOT the build result). */
@@ -377,6 +391,8 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)
         ? Math.max(0, Math.trunc(p.remainingTasks))
         : null,
+    // MUTATION PROVER — shape-checked only; the outer loop proves it by running it.
+    mutation_claim: parseMutationClaim(p.mutationClaim),
   }
 }
 

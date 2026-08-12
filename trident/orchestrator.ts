@@ -26,9 +26,14 @@
  *      tick. Once the workflow has written its TYPED terminal result, decode it
  *      (`parseInnerResult`), SERVER-GATE a merge-eligible `APPROVE` against the
  *      Argus-phase-recorded `inner_checkpoint='argus-approved'` (never a
- *      self-asserted result line), then on APPROVE → phase `done`
- *      (persist pr/branch/inner_verdict) + merge (`cleanupAfterMerge`, the
- *      outer/human gate); on REQUEST_CHANGES / failed-provenance → phase `failed`
+ *      self-asserted result line), then RUN THE MUTATION PROVER
+ *      (`mutation-prover.ts`) — the post-APPROVE, pre-merge phase that breaks
+ *      the production behaviour the PR relies on, watches the guard go RED,
+ *      restores it, watches it come back GREEN, and emits the evidence block
+ *      FROM those observations (an agent can neither compose nor supply one) —
+ *      and only then on APPROVE → phase `done` (persist pr/branch/inner_verdict)
+ *      + merge (`cleanupAfterMerge`, the outer/human gate); on
+ *      REQUEST_CHANGES / failed-provenance / unproved-mutation → phase `failed`
  *      with a named reason (recoverable: re-run), never a silent success.
  *
  *      RALPH RE-FIRE (#362): a harvested result carrying `remaining_tasks > 0` is
@@ -70,11 +75,17 @@ import {
 import {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  reviewedHeadOid,
   runWorktreePath,
   TridentMergeConflictEscalation,
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
+import {
+  runMutationProofGate,
+  type MutationGateInput,
+  type MutationGateOutcome,
+} from './mutation-prover.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
@@ -83,6 +94,9 @@ import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 export interface TridentStep {
   (run: TridentRun): Promise<AdvanceOutcome>
 }
+
+/** The post-APPROVE mutation-prover phase, as the orchestrator calls it. */
+export type MutationProofGate = (input: MutationGateInput) => Promise<MutationGateOutcome>
 
 export interface BuildTridentOrchestratorOptions {
   /** The inner-workflow FIRER (Phase 2a). Fires the inner CC Dynamic Workflow on
@@ -149,6 +163,19 @@ export interface BuildTridentOrchestratorOptions {
   resolve_phase_models?: () => Record<string, { model?: string; effort?: string }> | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
+  /**
+   * TEST SEAM for the post-APPROVE mutation-prover phase. Defaults to the real
+   * `runMutationProofGate`, which provisions a git worktree at the branch head,
+   * applies the nominated mutation and runs the guard — none of which a unit
+   * test with a fake `run_host` and a `/repo` path that does not exist can do.
+   *
+   * PRODUCTION MUST NOT SET THIS. It is the same kind of seam as `merge_deps`,
+   * and it carries the same rule: the composer wires neither, so a real run
+   * always gets the real gate. Deliberately NOT a config flag or an env
+   * override — there is no supported way for an OPERATOR (or an agent editing
+   * settings) to turn the proof off, only for a test process to substitute one.
+   */
+  prove_mutation?: MutationProofGate
   /**
    * Bounded Forge merge-conflict resolver (#342). Threaded into the default
    * `buildMergeCleanupDeps` so a LOCAL-mode merge that hits a rebase conflict
@@ -300,6 +327,7 @@ export function buildTridentOrchestrator(
       opts.run_host,
       opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {},
     )
+  const proveMutation = opts.prove_mutation ?? runMutationProofGate
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
   const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
   const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
@@ -595,6 +623,47 @@ export function buildTridentOrchestrator(
     const argusApproved = run.inner_checkpoint === 'argus-approved'
 
     if (result.verdict === 'APPROVE' && argusApproved) {
+      // MUTATION PROVER — the post-APPROVE, pre-merge phase. An APPROVE says a
+      // reviewer BELIEVES the change is guarded; this RUNS the mutation and
+      // watches the guard go red and come back green. It is deterministic TS
+      // and it is the only producer of its own evidence — no agent output is
+      // read here, because a convincing paragraph about a mutation is exactly
+      // what this phase exists to stop being sufficient. Fails CLOSED: an
+      // unprovable APPROVE does not merge (prose-only diffs are exempted by
+      // `isProseOnlyChange`, which itself fails closed).
+      //
+      // `{ ...run, branch }` — the FRESHLY RESOLVED branch, never the one on the
+      // row. `branch` above is `result.branch ?? run.branch`, and on a run whose
+      // row was written before the build named its branch (`run.branch === null`,
+      // or a stale value) the prover would resolve a head off the OLD ref while
+      // the merge below took the new one: proving one commit and merging another.
+      //
+      // `expected_head` — the commit `mergePr` will actually take (#545 pins the
+      // merge to `reviewedHead`, the OID the reviewers judged, NOT to whatever
+      // the branch tip happens to be). The prover pins the branch tip. Those are
+      // two independent answers to "which commit is this about", and nothing
+      // compared them: a branch tip that has moved past the reviewed commit gave
+      // a proof of B while the merge took A. Handing the merge's own pin in
+      // makes the gate refuse that instead of certifying the wrong commit.
+      // Null (local mode, or a row with no recorded OID) → no second pin to
+      // check; `mergePr` itself refuses an unpinnable pr-mode merge.
+      const proof = await proveMutation({
+        run: { ...run, branch },
+        claim: result.mutation_claim,
+        base_branch: await resolveBase(run),
+        run_host: opts.run_host,
+        expected_head: reviewedHeadOid(run),
+      })
+      if (!proof.ok) {
+        // `inner_verdict`/`inner_checkpoint` are left EXACTLY as the review left
+        // them: Argus really did approve, and its recorded provenance is the
+        // audit trail. Rewriting either to make the row look like a rejection
+        // would misattribute the block — this is a MISSING PROOF, not a
+        // reviewer's finding, and `failure_reason` says which.
+        const blocked: TridentRun = { ...failedRun(run, proof.reason, true), pr, branch }
+        return { run: blocked, changed: true, waiting: false, note: 'APPROVE blocked (mutation prover) → failed' }
+      }
+
       // FIX 1 (#351) — record this run's DEDICATED merge worktree on the row BEFORE
       // the merge, so `code_trident_runs.worktree` is populated (was always empty)
       // and the isolated path is durable for cleanup even if the merge escalates or
@@ -615,7 +684,12 @@ export function buildTridentOrchestrator(
       }
       try {
         const res = await cleanupAfterMerge(doneRun, merge_deps)
-        return { run: doneRun, changed: true, waiting: false, note: `APPROVE (argus-approved) → done; ${res.note}` }
+        return {
+          run: doneRun,
+          changed: true,
+          waiting: false,
+          note: `APPROVE (argus-approved, ${proof.reason}) → done; ${res.note}`,
+        }
       } catch (err) {
         // #342 — a genuinely ambiguous merge conflict escalates a SPECIFIC
         // question to chat (not a raw "merge failed"): fail the run with the

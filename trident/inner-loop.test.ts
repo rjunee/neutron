@@ -99,6 +99,13 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       round: 2,
       checkpoint: 'argus-approved',
       remainingTasks: 0,
+      mutationClaim: {
+        file: 'trident/merge.ts',
+        find: 'const a = 1',
+        replace: 'const a = 2',
+        guard: ['bun', 'test', 'trident/merge.test.ts'],
+        control: ['bun', 'test', 'trident/store.test.ts'],
+      },
     })
     expect(parseInnerResult(raw)).toEqual({
       ok: true,
@@ -108,7 +115,26 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       round: 2,
       checkpoint: 'argus-approved',
       remaining_tasks: 0,
+      mutation_claim: {
+        file: 'trident/merge.ts',
+        find: 'const a = 1',
+        replace: 'const a = 2',
+        guard: ['bun', 'test', 'trident/merge.test.ts'],
+        control: ['bun', 'test', 'trident/store.test.ts'],
+      },
     })
+  })
+  test('a malformed mutationClaim decodes to null — the gate then has nothing to run', () => {
+    // Half a claim is not a claim: the prover would have nothing to execute, and
+    // "I could not run it" must never read as "it passed".
+    const half = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', mutationClaim: { file: 'a.ts' } }))
+    expect(half?.mutation_claim).toBeNull()
+    // A prose-shaped "claim" — the exact thing a model writes when it is
+    // narrating rather than nominating.
+    const prose = parseInnerResult(
+      JSON.stringify({ verdict: 'APPROVE', mutationClaim: 'I verified the guard fails when reverted' }),
+    )
+    expect(prose?.mutation_claim).toBeNull()
   })
   test('decodes remainingTasks (the #362 Ralph re-fire signal); absent → null', () => {
     const withRemaining = parseInnerResult(
@@ -136,6 +162,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       round: 0,
       checkpoint: null,
       remaining_tasks: null,
+      mutation_claim: null,
     })
   })
 })
