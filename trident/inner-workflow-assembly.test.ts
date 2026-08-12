@@ -316,22 +316,31 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
    * a justification. That inversion — deny-by-default instead of an allow-list of covered
    * labels — is the whole point of this rewrite.
    */
-  const EXCLUDED: Array<{ match: (l: string) => boolean; why: string; proof: RegExp }> = [
+  /** A seat is handed ONE literal command and told to run exactly it — no room for a kill. */
+  const isSingleCommandSeat = (p: string): boolean => p.includes('Run EXACTLY this single Bash command')
+  /**
+   * A seat is TOOLLESS: it carries none of the shell-agent rules. That absence is the
+   * file's own convention for a seat with no tools, and it is the actual reason
+   * argus:synthesis is exempt — so it is what the exemption is checked against.
+   */
+  const isToolless = (p: string): boolean =>
+    !p.includes('NEVER call AskUserQuestion') && !p.includes('redirect stdout+stderr to a log file')
+
+  const EXCLUDED: Array<{ match: (l: string) => boolean; why: string; proof: (prompt: string) => boolean }> = [
     {
       match: (l) => l === 'argus:synthesis',
       why: 'toolless — it merges verdict TEXT and is handed no tools, so it has no shell at all',
-      // Its prompt is a synthesis brief, not a command; it carries none of the shell rules.
-      proof: /You are the ARGUS SYNTHESI[SZ]|synthesi/i,
+      proof: isToolless,
     },
     // The probe/bookkeeping seats are each handed ONE literal command and told to run
     // EXACTLY it and nothing else, so there is no room in them for a kill of any shape.
     // `proof` is what keeps that claim HONEST: if one of these is ever loosened into a
-    // free-form shell seat, its prompt stops matching and this suite fails — the
-    // exclusion cannot quietly rot into a hole.
-    { match: (l) => l.startsWith('checkpoint:'), why: 'single fixed `bash checkpoint.sh …` command', proof: /Run EXACTLY this single Bash command/ },
-    { match: (l) => l === 'terminal-result', why: 'single fixed `printf … && bash checkpoint.sh …` command', proof: /Run EXACTLY this single Bash command/ },
-    { match: (l) => l.startsWith('head-probe-round-'), why: 'single fixed `git ls-remote`/`rev-parse` command', proof: /Run EXACTLY this single Bash command/ },
-    { match: (l) => l.startsWith('ci-probe-round-'), why: 'single fixed `gh pr checks` command', proof: /Run EXACTLY this single Bash command/ },
+    // free-form shell seat, the proof stops holding and this suite fails — the exclusion
+    // cannot quietly rot into a hole.
+    { match: (l) => l.startsWith('checkpoint:'), why: 'single fixed `bash checkpoint.sh …` command', proof: isSingleCommandSeat },
+    { match: (l) => l === 'terminal-result', why: 'single fixed `printf … && bash checkpoint.sh …` command', proof: isSingleCommandSeat },
+    { match: (l) => l.startsWith('head-probe-round-'), why: 'single fixed `git ls-remote`/`rev-parse` command', proof: isSingleCommandSeat },
+    { match: (l) => l.startsWith('ci-probe-round-'), why: 'single fixed `gh pr checks` command', proof: isSingleCommandSeat },
   ]
 
   let captured: Captured[]
@@ -382,7 +391,8 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
       expect(entry).toBeDefined()
       expect(String(entry?.why).length).toBeGreaterThan(0)
       for (const c of allCalls.filter((x) => String(x.label) === label)) {
-        expect(c.prompt).toMatch(entry!.proof)
+        // `${label}: ${why}` is no longer true of the real prompt if this fails.
+        expect(entry?.proof(c.prompt)).toBe(true)
       }
     }
   })
