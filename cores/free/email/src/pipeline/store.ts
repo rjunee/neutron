@@ -129,13 +129,29 @@ export class EmailPipelineStore {
     this.now = now
   }
 
-  hasEmail(id: string): boolean {
-    const row = this.db.query<{ n: number }, [string]>(`SELECT 1 AS n FROM emails WHERE id = ?`).get(id)
+  /**
+   * "Already handled?" — keyed on (account, message), because Gmail ids are
+   * ACCOUNT-LOCAL. Matching on the id alone would report a message from a
+   * SECOND mailbox as already seen the moment the first mailbox happened to
+   * use that id, and the poller would skip it silently: no classification, no
+   * escalation, no brief row. `account_id` defaults to the '' single-account
+   * sentinel so a single-backend install is unaffected.
+   */
+  hasEmail(id: string, account_id: string | null = null): boolean {
+    const row = this.db
+      .query<{ n: number }, [string, string]>(
+        `SELECT 1 AS n FROM emails WHERE id = ? AND account_id = ?`,
+      )
+      .get(id, account_id ?? '')
     return row !== null
   }
 
-  getEmail(id: string): EmailRow | null {
-    return this.db.query<EmailRow, [string]>(`SELECT * FROM emails WHERE id = ?`).get(id)
+  getEmail(id: string, account_id: string | null = null): EmailRow | null {
+    return this.db
+      .query<EmailRow, [string, string]>(
+        `SELECT * FROM emails WHERE id = ? AND account_id = ?`,
+      )
+      .get(id, account_id ?? '')
   }
 
   insertEmail(input: InsertEmailInput): void {
@@ -147,7 +163,10 @@ export class EmailPipelineStore {
       [
         input.id,
         input.thread_id,
-        input.account_id ?? null,
+        // '' is the single-account sentinel — NEVER NULL. A NULL component in
+        // the (account_id, id) primary key never compares equal, so the same
+        // message would insert twice and escalate twice.
+        input.account_id ?? '',
         input.sender,
         input.subject,
         input.snippet ?? '',
@@ -183,18 +202,27 @@ export class EmailPipelineStore {
       .all(max_attempts)
   }
 
-  markEscalated(id: string, at: number): void {
-    this.db.run(`UPDATE emails SET escalated_at = ?, last_error = NULL WHERE id = ?`, [at, id])
+  /** Account-qualified, like `hasEmail` — the id alone is not an identity. */
+  markEscalated(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(
+      `UPDATE emails SET escalated_at = ?, last_error = NULL WHERE id = ? AND account_id = ?`,
+      [at, id, account_id ?? ''],
+    )
   }
 
-  recordEscalationFailure(id: string, error: string, at: number): void {
+  recordEscalationFailure(
+    id: string,
+    error: string,
+    at: number,
+    account_id: string | null = null,
+  ): void {
     this.db.run(
       `UPDATE emails
           SET escalation_attempts = escalation_attempts + 1,
               last_error = ?,
               processed_at = ?
-        WHERE id = ?`,
-      [error, at, id],
+        WHERE id = ? AND account_id = ?`,
+      [error, at, id, account_id ?? ''],
     )
   }
 

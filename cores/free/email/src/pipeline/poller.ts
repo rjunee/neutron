@@ -35,8 +35,10 @@ export const CHECKPOINT_LAST_POLL_AT = 'last_poll_at'
 export const CHECKPOINT_CONSECUTIVE_ERRORS = 'consecutive_errors'
 /** Set to '1' once every message already in the inbox has been marked handled. */
 export const CHECKPOINT_BACKLOG_DONE = 'backlog_marked'
-/** Gmail page cursor for an in-flight backlog sweep. */
+/** Gmail page cursor for an in-flight backlog sweep (single-account path). */
 export const CHECKPOINT_BACKLOG_CURSOR = 'backlog_cursor'
+/** JSON `account_id -> cursor` map for a multi-account backlog sweep. */
+export const CHECKPOINT_BACKLOG_CURSORS = 'backlog_cursors'
 
 /** Messages marked per tick while the backlog sweep is running. */
 export const DEFAULT_BACKLOG_PAGE_SIZE = 100
@@ -77,6 +79,22 @@ export interface EmailPipelineTickResult {
   backlog_sweeping: boolean
 }
 
+/** Read back the persisted per-account cursor map; a corrupt value restarts the sweep. */
+function parseCursorMap(raw: string | null): Record<string, string> {
+  if (raw === null || raw.length === 0) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'string' && v.length > 0) out[k] = v
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
 export async function runEmailPipelineTick(
   deps: EmailPipelineTickDeps,
 ): Promise<EmailPipelineTickResult> {
@@ -114,13 +132,15 @@ export async function runEmailPipelineTick(
     if (store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1') {
       result.backlog_sweeping = true
       const cursor = store.getCheckpoint(CHECKPOINT_BACKLOG_CURSOR)
+      const perAccount = parseCursorMap(store.getCheckpoint(CHECKPOINT_BACKLOG_CURSORS))
       const page = await gmail.listMessages({
         label: DEFAULT_LABEL,
         max_results: deps.backlog_page_size ?? DEFAULT_BACKLOG_PAGE_SIZE,
         ...(cursor !== null && cursor.length > 0 ? { page_token: cursor } : {}),
+        ...(Object.keys(perAccount).length > 0 ? { page_tokens: perAccount } : {}),
       })
       for (const meta of page.results) {
-        if (store.hasEmail(meta.id)) continue
+        if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
         const received_at = Date.parse(meta.internal_date)
         store.insertEmail({
           id: meta.id,
@@ -137,13 +157,38 @@ export async function runEmailPipelineTick(
         })
         result.precutoff++
       }
+      // COMPLETION IS EARNED, NOT ASSUMED. Two ways this used to end early:
+      //
+      //  (a) `next_page_token` is omitted by the fan-out whenever MORE THAN ONE
+      //      account is connected (`multi-account.ts`), because one cursor
+      //      cannot address N mailboxes. Reading that absence as "no more mail"
+      //      marked the sweep done after a single page, and every remaining
+      //      historical message then entered live classification — the exact
+      //      escalation-of-old-mail this sweep exists to prevent. So the
+      //      per-account cursor map is authoritative when present.
+      //  (b) One account failing while others answered. Fan-out returns partial
+      //      success by design (a dead grant must not empty the inbox), but a
+      //      partial page cannot prove the unread accounts are exhausted.
       const next = page.next_page_token
-      if (next !== undefined && next.length > 0) {
-        store.setCheckpoint(CHECKPOINT_BACKLOG_CURSOR, next)
-        log?.('email pipeline backlog sweep advancing', { marked: result.precutoff })
+      const nextPerAccount = page.next_page_tokens ?? {}
+      const outcomes = page.accounts
+      const allAccountsAnswered = outcomes === undefined || outcomes.every((a) => a.ok)
+      const cursorsRemain =
+        Object.keys(nextPerAccount).length > 0 || (next !== undefined && next.length > 0)
+
+      if (cursorsRemain || !allAccountsAnswered) {
+        if (next !== undefined && next.length > 0) {
+          store.setCheckpoint(CHECKPOINT_BACKLOG_CURSOR, next)
+        }
+        store.setCheckpoint(CHECKPOINT_BACKLOG_CURSORS, JSON.stringify(nextPerAccount))
+        log?.('email pipeline backlog sweep advancing', {
+          marked: result.precutoff,
+          accounts_pending: outcomes?.filter((a) => !a.ok).length ?? 0,
+        })
       } else {
         store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
         store.setCheckpoint(CHECKPOINT_BACKLOG_CURSOR, '')
+        store.setCheckpoint(CHECKPOINT_BACKLOG_CURSORS, '')
         log?.('email pipeline backlog sweep complete', { marked: result.precutoff })
       }
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
@@ -163,6 +208,7 @@ export async function runEmailPipelineTick(
             // the verdict, not its wording), so a resume quotes the category
             // — the part of the verdict that survives a restart.
             reason: pending.category ?? 'important',
+            account_id: pending.account_id,
           },
           escalateDeps,
         )
@@ -218,13 +264,9 @@ export async function runEmailPipelineTick(
       )
 
       if (verdict.important) {
-        // KEEP INBOX — an escalated message is one the owner still has to
-        // handle in their mail client. Only the processed label is added.
-        await gmail.modifyMessage({
-          message_id: meta.id,
-          add_label_ids: [label_id],
-          ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
-        })
+        // Record FIRST (see the ordering note below), then label. KEEP INBOX —
+        // an escalated message is one the owner still has to handle in their
+        // mail client, so only the processed label is added.
         store.insertEmail({
           id: meta.id,
           thread_id: meta.thread_id,
@@ -238,22 +280,34 @@ export async function runEmailPipelineTick(
           category: verdict.category,
           handling: 'escalate',
         })
+        await gmail.modifyMessage({
+          message_id: meta.id,
+          add_label_ids: [label_id],
+          ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
+        })
         const outcome = await escalateEmail(
-          { id: meta.id, sender: meta.from, subject: meta.subject, reason: verdict.reason },
+          {
+            id: meta.id,
+            sender: meta.from,
+            subject: meta.subject,
+            reason: verdict.reason,
+            account_id,
+          },
           escalateDeps,
         )
         if (outcome.delivered) result.escalated++
         return
       }
 
-      // NOT IMPORTANT: archive + label. No chat post, no push — the row's
-      // existence is what queues it for the P2 brief.
-      await gmail.modifyMessage({
-        message_id: meta.id,
-        add_label_ids: [label_id],
-        remove_label_ids: [DEFAULT_LABEL],
-        ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
-      })
+      // NOT IMPORTANT: record FIRST, then archive. No chat post, no push — the
+      // row's existence is what queues it for the P2 brief.
+      //
+      // ORDER IS LOad-BEARING. Archiving first would remove `INBOX` and only
+      // then try to persist: if the insert throws (disk full, SQLite error),
+      // the message is gone from every future poll AND was never queued, so it
+      // silently misses the brief with nothing left to find it by. Persisting
+      // first can only fail the other way — a row whose archive did not happen
+      // is re-seen, and `hasEmail` makes the retry a no-op.
       store.insertEmail({
         id: meta.id,
         thread_id: meta.thread_id,
@@ -267,11 +321,17 @@ export async function runEmailPipelineTick(
         category: verdict.category,
         handling: 'archive',
       })
+      await gmail.modifyMessage({
+        message_id: meta.id,
+        add_label_ids: [label_id],
+        remove_label_ids: [DEFAULT_LABEL],
+        ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
+      })
       result.archived++
     }
 
     for (const meta of listed.results) {
-      if (store.hasEmail(meta.id)) continue
+      if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
       result.scanned++
       try {
         await handleMessage(meta)

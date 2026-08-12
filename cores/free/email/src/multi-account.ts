@@ -229,10 +229,15 @@ export function buildMultiAccountGmailClient(
   async function fanOutList(
     operation: 'listMessages' | 'search',
     limit: number,
-    read: (client: GmailClient) => Promise<GmailListResult>,
-  ): Promise<GmailListAcrossAccounts & { next_page_token?: string }> {
+    read: (client: GmailClient, account: GmailAccountDescriptor) => Promise<GmailListResult>,
+  ): Promise<
+    GmailListAcrossAccounts & {
+      next_page_token?: string
+      next_page_tokens?: Readonly<Record<string, string>>
+    }
+  > {
     const accounts = await accountsOrThrow()
-    const settled = await Promise.allSettled(accounts.map((a) => read(buildClient(a))))
+    const settled = await Promise.allSettled(accounts.map((a) => read(buildClient(a), a)))
 
     const outcomes: AccountReadOutcome[] = []
     const merged: GmailMessageMeta[] = []
@@ -240,6 +245,8 @@ export function buildMultiAccountGmailClient(
     let firstFailure: unknown = null
     let okCount = 0
     let solePageToken: string | undefined
+    /** account_id → cursor, for callers that must page a whole mailbox. */
+    const pageTokens: Record<string, string> = {}
 
     for (let i = 0; i < accounts.length; i++) {
       // Non-null: index-aligned with `accounts` by construction.
@@ -270,6 +277,12 @@ export function buildMultiAccountGmailClient(
       })
       // Only meaningful when exactly one account is connected; see the header.
       if (accounts.length === 1) solePageToken = result.value.next_page_token
+      // The per-account cursor is reported ALWAYS, however many accounts are
+      // connected. `solePageToken` collapses to nothing for N>1, and a caller
+      // enumerating a whole mailbox (the pipeline's backlog sweep) would read
+      // that absence as "no more mail" and stop after a single page.
+      const token = result.value.next_page_token
+      if (token !== undefined && token.length > 0) pageTokens[account.account_id] = token
       for (const row of result.value.results) {
         if (seen.has(row.id)) continue
         seen.add(row.id)
@@ -291,6 +304,7 @@ export function buildMultiAccountGmailClient(
       results: merged.slice(0, limit),
       accounts: outcomes,
       ...(solePageToken !== undefined ? { next_page_token: solePageToken } : {}),
+      next_page_tokens: pageTokens,
     }
   }
 
@@ -307,14 +321,26 @@ export function buildMultiAccountGmailClient(
     listMessagesAcrossAccounts,
     async listMessages(input: GmailListInput): Promise<GmailListResult> {
       const max_results = input.max_results ?? DEFAULT_LIST_LIMIT
-      const out = await fanOutList('listMessages', max_results, (client) =>
-        client.listMessages({ ...input, max_results }),
+      const out = await fanOutList('listMessages', max_results, (client, account) =>
+        client.listMessages({
+          ...input,
+          max_results,
+          // Each account resumes from ITS OWN cursor when the caller is paging
+          // a whole mailbox; absent ⇒ that account starts at its newest page.
+          ...(input.page_tokens?.[account.account_id] !== undefined
+            ? { page_token: input.page_tokens[account.account_id] as string }
+            : {}),
+        }),
       )
       return {
         results: out.results,
         ...(out.next_page_token !== undefined
           ? { next_page_token: out.next_page_token }
           : {}),
+        ...(out.next_page_tokens !== undefined
+          ? { next_page_tokens: out.next_page_tokens }
+          : {}),
+        accounts: out.accounts,
       }
     },
     async search(input: GmailSearchInput): Promise<GmailListResult> {

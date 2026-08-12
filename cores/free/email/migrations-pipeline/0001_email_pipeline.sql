@@ -34,11 +34,16 @@ CREATE TABLE IF NOT EXISTS emails (
   -- idempotency spine: an escalated message stays in INBOX (so the owner
   -- still sees it), and it is this table — not the label set — that stops
   -- the next tick reprocessing it.
-  id                   TEXT PRIMARY KEY,
+  id                   TEXT NOT NULL,
   thread_id            TEXT NOT NULL,
-  -- WHICH connected account this was read from, when the fan-out client
-  -- stamped one. NULL on a single-account client.
-  account_id           TEXT,
+  -- WHICH connected account this was read from. Gmail message ids are
+  -- ACCOUNT-LOCAL, so the id ALONE is not an identity: two connected mailboxes
+  -- can carry the same id, and keying on `id` would make the second one look
+  -- already-handled and silently drop it — a message the owner never hears
+  -- about. '' is the single-account sentinel rather than NULL, because NULL
+  -- never compares equal in a composite key, which would let the same message
+  -- insert twice and escalate twice.
+  account_id           TEXT NOT NULL DEFAULT '',
   sender               TEXT NOT NULL,
   subject              TEXT NOT NULL,
   snippet              TEXT NOT NULL DEFAULT '',
@@ -59,7 +64,9 @@ CREATE TABLE IF NOT EXISTS emails (
   -- on the same row as the message it guards.
   escalated_at         INTEGER,
   escalation_attempts  INTEGER NOT NULL DEFAULT 0,
-  last_error           TEXT
+  last_error           TEXT,
+  -- Identity is (account, message), never the message id alone.
+  PRIMARY KEY (account_id, id)
 );
 
 -- The resume query's index: pending escalations are

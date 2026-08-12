@@ -69,7 +69,7 @@ export interface EscalateResult {
 }
 
 export async function escalateEmail(
-  email: Pick<EmailRow, 'id' | 'sender' | 'subject'> & { reason: string },
+  email: Pick<EmailRow, 'id' | 'sender' | 'subject'> & { reason: string; account_id?: string | null },
   deps: EscalateDeps,
 ): Promise<EscalateResult> {
   const text = composeEscalationText({
@@ -81,11 +81,11 @@ export async function escalateEmail(
   let delivered = false
   try {
     await deps.deliver(deps.topic_id, { body: text, durability: 'reply' })
-    deps.store.markEscalated(email.id, deps.now())
+    deps.store.markEscalated(email.id, deps.now(), email.account_id ?? null)
     delivered = true
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    deps.store.recordEscalationFailure(email.id, msg, deps.now())
+    deps.store.recordEscalationFailure(email.id, msg, deps.now(), email.account_id ?? null)
     deps.log?.('email escalation chat delivery failed', { email_id: email.id, error: msg })
   }
 

@@ -65,12 +65,44 @@ export interface GmailListInput {
    * AND-s the project label with the inbox label server-side.
    */
   project_id?: string
+  /**
+   * PER-ACCOUNT resume cursors, keyed by `account_id` — the input twin of
+   * `GmailListResult.next_page_tokens`. Each account resumes from its own
+   * cursor; an account absent from the map starts from its newest page. The
+   * multi-account fan-out reads this; single-backend clients ignore it and use
+   * `page_token`.
+   */
+  page_tokens?: Readonly<Record<string, string>>
 }
 
 export interface GmailListResult {
   results: GmailMessageMeta[]
-  /** Opaque cursor — present when Gmail returned a `nextPageToken`. */
+  /**
+   * Opaque cursor — present when Gmail returned a `nextPageToken`.
+   *
+   * MEANINGFUL ONLY FOR A SINGLE-BACKEND READ. The fan-out cannot express one
+   * cursor for N mailboxes, so it omits this whenever more than one account is
+   * connected. ABSENCE THEREFORE DOES NOT MEAN "no more mail" — a caller that
+   * must enumerate a whole mailbox has to use `next_page_tokens`. Treating a
+   * missing `next_page_token` as completion silently truncates every
+   * multi-account install to a single page.
+   */
   next_page_token?: string
+  /**
+   * PER-ACCOUNT cursors keyed by `account_id`, for callers that must page an
+   * entire mailbox rather than read its newest page. Only accounts that
+   * returned a cursor appear, so an EMPTY map means "every account that
+   * answered is exhausted" — the only safe completion signal when several
+   * mailboxes are merged. Single-backend clients omit it.
+   */
+  next_page_tokens?: Readonly<Record<string, string>>
+  /**
+   * Per-account read outcomes, present only on the fan-out client. A caller
+   * that must enumerate a whole mailbox has to know whether every account
+   * actually ANSWERED: one failed account means the merged set is incomplete,
+   * and concluding "exhausted" from it would skip that mailbox entirely.
+   */
+  accounts?: AccountReadOutcome[]
 }
 
 export interface GmailSearchInput {
