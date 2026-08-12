@@ -66,6 +66,15 @@ export interface ShellAffordance {
    */
   readonly withDraft?: boolean
   /**
+   * Probe the shell AFTER the Admin surface has been opened from the header menu,
+   * rather than at rest. The things you ADJUST live behind that menu rather than
+   * in the tab band (`ProjectShell`'s `MENU_TARGETS`), so an affordance that lives
+   * on the Admin surface is not in the tree until the owner has taken the two
+   * steps a real one takes to get there — and those two steps are part of what is
+   * being asserted.
+   */
+  readonly inAdmin?: boolean
+  /**
    * Layouts where this affordance is deliberately absent, WITH the reason. Almost
    * everything has none: the default expectation is that the owner can do the
    * same things at every window size, and an exception has to be argued for in
@@ -140,6 +149,26 @@ export const SHELL_AFFORDANCES: readonly ShellAffordance[] = [
       'You cannot see how much of your usage window is left — the meter is drawing a blank divider even though the server reported a reading.',
     reachable: (root) =>
       present(root, '.car-usage[data-available="true"]') && present(root, '.car-usage-fill'),
+  },
+  {
+    id: 'github-connect',
+    can: 'Connect GitHub, so a build can push and open a pull request',
+    // #551 — THE ONE THAT WAS NEVER REACHABLE AT ALL. The device-flow surface,
+    // its route slot and its composition were all merged, tested and green: the
+    // backend tests passed, the route resolved, and a composition-coverage test
+    // asserted the slot was mounted. No client on any surface called it, so the
+    // only way a human could start the flow was to have a terminal on the
+    // machine — and the agent, hitting the same wall, recommended exactly that.
+    // Every automated signal said it worked. This is the signal that did not.
+    broken:
+      'You cannot connect GitHub — Admin has no control to start it, so a build still has nowhere to push and no way to open a pull request.',
+    inAdmin: true,
+    // Enabled, not merely present: a Connect button stuck disabled is the same
+    // dead end as a missing one.
+    reachable: (root) => {
+      const btn = root.querySelector('button.cint-github-connect') as HTMLButtonElement | null
+      return btn !== null && !btn.disabled
+    },
   },
   {
     id: 'theme',

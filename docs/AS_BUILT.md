@@ -2,6 +2,94 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — the owner can connect GitHub, and the agent stops pointing at a terminal (#551, #552)
+
+Two halves of one failure, so one change. The owner's codegen could not push or
+open a pull request because no GitHub token existed, and the agent's advice was
+to run `gh auth login` — on a machine he has no shell on. A button without the
+advice fix leaves the agent recommending the shell; the advice fix without a
+button points at a surface with no control on it.
+
+**#551 — the entry point.** The entire GitHub device-flow backend was already
+merged and composed: `github/device-flow.ts`, `github/connect.ts`,
+`github/credential.ts`, `trident/git-mode.ts`, and
+`gateway/http/github-connect-surface.ts` behind route slot
+`app_github_connect_surface` → `/api/app/github-auth`. **No client on any surface
+called it.** That is why it survived: the backend tests passed, the route
+resolved, and a composition-coverage test asserted the slot was mounted. Not one
+of them asked whether a human could start the flow.
+
+So both clients grew a GitHub section on the Integrations surface they already
+had — web `landing/chat-react/IntegrationsTab.tsx` over the new
+`landing/chat-react/github-connect-client.ts`, mobile `app/app/integrations.tsx`
+over the new `app/lib/github-connect-client.ts`. It follows the Google connect
+section's shape and NOT its flow: those rows drive an OAuth redirect, and this is
+a device flow, so the screen is built around the CODE rather than the button.
+Connect POSTs to start; the `user_code` is displayed large and monospaced; Copy
+puts it on the clipboard in one press (the owner is usually reading it off a
+phone and typing it into something else); the `verification_uri` is a real link;
+and the client polls the status route at GitHub's own 5s floor until it answers
+`connected`, then re-renders — no manual refresh, which is what separates a flow
+from a wall of instructions. The poll stops the moment the flow settles, and a
+DROPPED poll is not treated as a failed flow on either surface — the code stays
+on screen and the next tick tries again, because the owner is mid-flow on another
+device and one flaky read is not a disconnection. The mobile screen additionally
+re-reads on foreground, since "tap Open GitHub, approve, come back" is one
+gesture there. The
+`device_code` is the bearer half of the exchange; the surface never returns it and
+neither client renders it, asserted against a response that carries one anyway.
+The web section sits OUTSIDE the `/api/cores/integrations` load: the control a
+blocked owner needs must not wait on an unrelated round trip.
+
+**#552 — the advice.** `MISSING_CREDENTIAL_DOCTRINE` in
+`gateway/wiring/operating-doctrine.ts`: when a capability is blocked by a missing
+credential, name the in-product surface the owner can reach to supply it, and
+never give a shell command as the remedy, because the owner cannot be assumed to
+have a terminal on the machine the agent runs on. It names GitHub and the failure
+that produced it concretely. It is doctrine rather than a persona line because it
+is product behaviour every install should have, not a preference the owner might
+edit away. It is phrased UNCONDITIONALLY — no branch on deployment shape, which
+is both shorter and strictly better, since naming the surface is right either way
+and a branch is only something for the model to get wrong.
+
+**Verified — and the verification is the point of this change.** A test that
+asserts a component rendered would have passed on the broken build, because the
+component was fine and nothing reached it.
+
+- The web reachability gate carries a `github-connect` affordance, probed at BOTH
+  layouts after walking the owner's real path (header menu → Admin). It needed a
+  third probe phase, `inAdmin`, because the things you adjust live behind that
+  menu rather than in the tab band.
+- `landing/chat-react/__tests__/github-connect-reachable.test.tsx` (13) and
+  `app/__tests__/github-connect-reachable.test.tsx` (14) PRESS the control and
+  assert the wire: the POST leaves, the code renders, Copy reaches the clipboard,
+  `Linking` gets the URL, the poll flips to connected and then STOPS, a DROPPED
+  poll leaves the code on screen rather than blanking a flow that is working, an
+  in-flight flow shows its existing code without starting a second, the
+  gateway's error is shown verbatim, and the `device_code` never renders. The web
+  harness lets a real 5ms interval elapse and counts requests; the mobile one
+  intercepts the timer, and intercepts `clearInterval` as well as `setInterval`,
+  because a capture that sees only the start can prove a poll BEGAN and never
+  that it ended.
+- The doctrine rule is asserted against the COMPOSED system prompt in
+  `gateway/wiring/__tests__/build-live-agent-turn.test.ts`, not only against the
+  module — a rule nothing splices in is the same defect one layer up.
+- Mutation-proved, each mutation confirmed APPLIED by grep before the result was
+  believed (two mutation tests in this repo have silently not applied and gone
+  green): renaming the web control's class reds both layouts of the reachability
+  gate; skipping the probe's walk to Admin reds both layouts too, so those two
+  steps are load-bearing and not decoration; making Connect call status instead
+  of start reds 7 of the 13 web tests and 8 of the 14 mobile ones; disabling the poll
+  effect reds exactly the two tests that need a poll; blanking the state on a failed poll reds the
+  dropped-poll test on EACH surface and nothing else. The web dropped-poll test
+  was added in review, after that mutation was found to leave the whole web file
+  green — the behaviour was already correct there and only the mobile side was
+  holding it to the rule.
+- `bash scripts/ci/typecheck-all.sh > /tmp/neutron-typecheck.log 2>&1` — 51
+  tsconfigs, all pass. `scripts/ci/lint.sh` and `scripts/ci/leak-gate.sh` clean.
+
+NO FEATURE FLAGS — single code path, on by default.
+
 ## 2026-08-12 — a dirty worktree is preserved, never force-removed (#541)
 
 The inner workflow's `finally{}` cleanup is now the checked-in

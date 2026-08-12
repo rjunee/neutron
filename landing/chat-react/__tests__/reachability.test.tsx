@@ -82,11 +82,17 @@ afterAll(async () => {
   await GlobalRegistrator.unregister()
 })
 
-/** The tab set the resolver answers with — the shipped builtin shape. */
+/** The tab set the resolver answers with — the shipped builtin shape.
+ *
+ *  `admin` is in here because the owner-facing INTEGRATIONS surface is an admin
+ *  tab, and the shell routes it into the header menu rather than the tab band
+ *  (`MENU_TARGETS`). Without it the menu holds nothing, `HeaderMenu` renders
+ *  null, and every affordance behind it is invisible to this gate. */
 const RESOLVED_TABS = [
   { key: 'chat', label: 'Chat', scope: 'project', source: 'builtin', order: 0, mount: { kind: 'builtin', target: 'chat' } },
   { key: 'work_board', label: 'Work', scope: 'project', source: 'builtin', order: 5, mount: { kind: 'builtin', target: 'workboard' } },
   { key: 'documents', label: 'Documents', scope: 'project', source: 'builtin', order: 10, mount: { kind: 'builtin', target: 'docs' } },
+  { key: 'admin', label: 'Admin', scope: 'global', source: 'builtin', order: 20, mount: { kind: 'builtin', target: 'admin' } },
 ]
 
 /** A MEASURED usage reading. The meter's job is to show a number when the server
@@ -102,6 +108,7 @@ const USAGE_READING = {
 interface Mounted {
   root: HTMLElement
   typeDraft(): Promise<void>
+  openAdmin(): Promise<void>
   unmount(): Promise<void>
 }
 
@@ -157,6 +164,14 @@ async function mountShell(layout: LayoutName): Promise<Mounted> {
       return json({ ok: true, scope: 'project', project_id: PROJECT, tabs: RESOLVED_TABS })
     }
     if (url.endsWith('/api/app/usage')) return json(USAGE_READING)
+    // The Admin surface's own reads. Answered as a FRESH install would answer —
+    // nothing connected — because that is the state the owner is in at the exact
+    // moment they need the control this gate is looking for.
+    if (url.endsWith('/api/app/github-auth')) return json({ status: 'not_connected' })
+    if (url.endsWith('/api/cores/integrations')) return json({ ok: true, oauth: [], api_keys: [] })
+    if (url.endsWith('/api/app/codex-auth')) return json({ status: 'not_connected' })
+    if (url.endsWith('/api/app/credentials')) return json({ global: [] })
+    if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
     return new Response('not found', { status: 404 })
   }
 
@@ -232,6 +247,36 @@ async function mountShell(layout: LayoutName): Promise<Mounted> {
         await tick()
       })
     },
+    /**
+     * Walk the REAL path to the Admin surface: open the header menu, choose the
+     * Admin row. Not a direct render of the tab — the two steps are part of what
+     * "the owner can reach it" means, and a menu that stopped listing Admin would
+     * make everything on it unreachable while every component still rendered.
+     */
+    async openAdmin(): Promise<void> {
+      const menuBtn = container.querySelector(
+        '[data-testid="header-menu-button"]',
+      ) as HTMLButtonElement | null
+      if (menuBtn === null) return
+      await act(async () => {
+        menuBtn.click()
+        await tick()
+      })
+      const item = container.querySelector(
+        '[data-testid="header-menu-item-admin"]',
+      ) as HTMLButtonElement | null
+      if (item === null) return
+      await act(async () => {
+        item.click()
+        await tick()
+      })
+      // The Admin surface reads its state over HTTP before it can render a
+      // control; give those round trips a turn to land.
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+    },
     async unmount(): Promise<void> {
       await act(async () => {
         root.unmount()
@@ -251,12 +296,21 @@ async function probeLayout(layout: LayoutName): Promise<Record<string, boolean>>
   const mounted = await mountShell(layout)
   const out: Record<string, boolean> = {}
   try {
-    for (const a of SHELL_AFFORDANCES.filter((x) => x.withDraft !== true)) {
+    for (const a of SHELL_AFFORDANCES.filter(
+      (x) => x.withDraft !== true && x.inAdmin !== true,
+    )) {
       out[a.id] = a.reachable(mounted.root)
     }
     await mounted.typeDraft()
     for (const a of SHELL_AFFORDANCES.filter((x) => x.withDraft === true)) {
       out[a.id] = a.reachable(mounted.root)
+    }
+    // LAST: opening Admin swaps the visible panel, so anything probed after it is
+    // probed against a different surface.
+    const admin = SHELL_AFFORDANCES.filter((x) => x.inAdmin === true)
+    if (admin.length > 0) {
+      await mounted.openAdmin()
+      for (const a of admin) out[a.id] = a.reachable(mounted.root)
     }
   } finally {
     await mounted.unmount()
