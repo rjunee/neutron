@@ -95,6 +95,38 @@ export const BUILD_ROUTING_DOCTRINE =
   'item pending; NEVER guess, and NEVER surface the raw rejection text to the owner.'
 
 /**
+ * Missing-credential remedy (#552). When a capability fails for want of a
+ * credential, the agent reaches for the shell — because the shell is what it can
+ * see. It told the owner to run `gh auth login` on a machine he has no terminal
+ * on, while the product's own connect surface sat one tap away and unmentioned.
+ *
+ * WHY IT IS DOCTRINE AND NOT A PERSONA LINE. This is product behaviour every
+ * install should have, not a preference: a persona file is the owner's to edit,
+ * and the one moment this rule matters is the moment the agent has already
+ * decided the terminal is the answer.
+ *
+ * PHRASED UNCONDITIONALLY, on purpose. Nothing here branches on how the product
+ * is deployed, because the rule is right either way and a branch would only give
+ * the model something to get wrong: naming the in-product surface is never worse
+ * than naming a shell command, and a terminal on the machine the agent runs on is
+ * never something it can assume the owner has.
+ */
+export const MISSING_CREDENTIAL_DOCTRINE =
+  'Blocked on a credential? Name the surface, never a shell command. When a capability ' +
+  'fails because a credential is missing, expired or rejected, say plainly what is not ' +
+  'connected and then name the IN-PRODUCT place the owner can go to supply it — the ' +
+  'Integrations surface (General → Admin on the web, Integrations on the phone) is where ' +
+  'accounts, keys and tokens are connected. NEVER offer a terminal command as the remedy: ' +
+  'not a login command, not exporting an environment variable, not editing a file by hand. ' +
+  'You cannot assume the owner has a shell on the machine you are running on, and telling ' +
+  'someone to run a command they cannot run is the same as telling them nothing. ' +
+  'CONCRETELY: when a git push or a pull request fails for want of a GitHub token, the ' +
+  'answer is that GitHub is not connected yet and the fix is the "Connect GitHub" control ' +
+  'on the Integrations surface — it shows a short code to enter at GitHub and finishes on ' +
+  'its own. The same rule holds for every other credential. If no in-product surface exists ' +
+  'for one, say exactly that rather than substituting a command.'
+
+/**
  * Build the `<operating_doctrine>` fragment for the given surface.
  *
  * Pure + deterministic so the composer's system prompt stays a stable
@@ -115,6 +147,8 @@ export function buildOperatingDoctrineFragment(input: OperatingDoctrineInput): s
   lines.push(principles)
   lines.push('')
   lines.push(BUILD_ROUTING_DOCTRINE)
+  lines.push('')
+  lines.push(MISSING_CREDENTIAL_DOCTRINE)
   lines.push('')
   lines.push(weightingTail(input))
   lines.push('</operating_doctrine>')

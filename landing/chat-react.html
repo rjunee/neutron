@@ -1572,6 +1572,25 @@
   }
   .cint-account .cint-row-main { flex: 1 1 160px; }
   .cint-account .cint-badge { margin-left: auto; }
+  /* The GitHub device-flow block. `.cint-row-sub` ellipsises on one line, which
+     is right for a label and wrong for a sentence, so prose opts out with
+     `.cint-row-wrap`. The CODE is the interaction — read off this screen and
+     typed into another device — so it is set large, monospaced and wide-tracked,
+     and it is user-selectable even though a Copy button sits under it. */
+  .cint-row-wrap { white-space: normal; overflow: visible; line-height: 1.45; }
+  .cint-device {
+    display: flex; flex-direction: column; gap: 8px;
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface);
+  }
+  .cint-device-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.6rem; font-weight: 700; letter-spacing: .18em; color: var(--fg);
+    user-select: all; word-break: break-all;
+  }
+  /* `.cdoc-btn` is authored for <button>; the "Open GitHub" affordance is a real
+     link (middle-click, long-press, open-in-new-tab all have to work), so it
+     needs the two inline-element properties a <button> already has. */
+  a.cdoc-btn { display: inline-block; text-decoration: none; }
   .cint-key-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
   .cint-key-input {
     flex: 1 1 200px; min-width: 0; background: var(--bg); color: var(--fg);
