@@ -6,7 +6,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
-import { buildSimFirer, buildSimMutationProofGate, type SimPlan } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator, isTridentHarvestTerminal } from './orchestrator.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -160,7 +160,11 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.inner_verdict).toBe('APPROVE')
     expect(final.inner_checkpoint).toBe('argus-approved')
     expect(final.workflow_run_id).not.toBeNull()
-    expect(h.hostCalls.map((c) => c.join(' '))).toContain('gh pr merge 42 --squash')
+    // #545 — the merge is PINNED to the head the review judged, so a commit that
+    // landed after the APPROVE makes GitHub refuse instead of shipping unreviewed.
+    expect(h.hostCalls.map((c) => c.join(' '))).toContain(
+      `gh pr merge 42 --squash --match-head-commit ${SIM_REVIEWED_HEAD}`,
+    )
     // exactly one fire.
     expect(h.inputs.length).toBe(1)
   })
@@ -180,6 +184,53 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.worktree).toBe(runWorktreePath('/repo', final))
     expect(joined.some((c) => c.includes(`worktree add --detach --force ${final.worktree}`))).toBe(true)
     expect(joined.some((c) => c === `git -C ${final.worktree} rebase main`)).toBe(true)
+  })
+})
+
+describe('orchestrator — #545: a head that MOVED after the review never merges', () => {
+  test('GitHub refuses the pinned merge → the run FAILS loudly (nothing is torn down)', async () => {
+    // The observed window (PR #171 went clean → dirty mid-review): a commit lands
+    // between the APPROVE and the merge. `--match-head-commit` makes GitHub reject
+    // it, and the run must surface that as a failure — NEVER quietly merge the head
+    // the reviewers never saw, and never retry the merge unpinned.
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd[0] === 'gh'
+          ? {
+              ok: false,
+              stdout: '',
+              stderr: 'failed to merge pull request: Head branch was modified. Review and try the merge again.',
+              exit_code: 1,
+            }
+          : ok(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('Head branch was modified')
+    // The APPROVE itself still happened — this failed at the MERGE, not the review.
+    expect(final.inner_verdict).toBe('APPROVE')
+    const joined = h.hostCalls.map((c) => c.join(' '))
+    expect(joined).toContain(`gh pr merge 42 --squash --match-head-commit ${SIM_REVIEWED_HEAD}`)
+    // Exactly one merge attempt, and no branch teardown after the refusal (the PR
+    // is still open and reviewable by a human).
+    expect(joined.filter((c) => c.startsWith('gh pr merge'))).toHaveLength(1)
+    expect(joined.some((c) => c.includes('push origin --delete') || c.includes('branch -D'))).toBe(false)
+  })
+
+  test('a workflow that recorded NO reviewed head fails BEFORE any gh call (fail-closed)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x', reviewedHead: null } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('reviewed head')
+    // Not merged at all — an unpinnable merge is never attempted, pinned or not.
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.startsWith('gh pr merge'))).toBe(false)
   })
 })
 
@@ -313,7 +364,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     expect(final.inner_verdict).toBe('APPROVE')
     expect(final.inner_checkpoint).toBe('argus-approved')
     const mergeCalls = h.hostCalls.map((c) => c.join(' ')).filter((c) => c.includes('gh pr merge'))
-    expect(mergeCalls).toEqual(['gh pr merge 55 --squash'])
+    expect(mergeCalls).toEqual([`gh pr merge 55 --squash --match-head-commit ${SIM_REVIEWED_HEAD}`])
 
     // THREE inner iterations fired — one per task (the bug shipped after ONE).
     expect(h.inputs.length).toBe(3)
@@ -482,6 +533,7 @@ describe('orchestrator — crash-safe harvest (result survives a restart)', () =
         verdict: 'APPROVE',
         round: 1,
         checkpoint: 'argus-approved',
+        reviewedHead: SIM_REVIEWED_HEAD,
       }),
     })
 

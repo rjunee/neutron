@@ -10,11 +10,39 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+// The REAL decoder the outer merge pins on — the resume-path assertions below run
+// it against the shape this script writes, rather than restating the rule.
+import { reviewedHeadOid } from './merge.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
+import type { TridentRun } from './store.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+
+// Lift ONE function's source out of the .mjs. Module scope because two loaders need
+// it (the gate helpers, and the codex bridge command below) and a second copy could
+// drift into extracting something other than what ships.
+function grabFunction(name: string): string {
+  const at = SRC.indexOf(`function ${name}(`)
+  if (at === -1) throw new Error(`${name} is missing from inner-workflow.mjs`)
+  // Brace-match to the end of the function so the extraction survives edits
+  // inside the body rather than depending on a fixed line count.
+  let depth = 0
+  let started = false
+  for (let i = at; i < SRC.length; i += 1) {
+    const c = SRC[i]
+    if (c === '{') {
+      depth += 1
+      started = true
+    } else if (c === '}') {
+      depth -= 1
+      if (started && depth === 0) return SRC.slice(at, i + 1)
+    }
+  }
+  throw new Error(`could not brace-match ${name}`)
+}
 
 // The checked-in checkpoint-writer the workflow's Bash steps invoke (P10) —
 // its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
@@ -212,6 +240,124 @@ describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
   })
 })
 
+describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF CAME FROM, and is CARRIED', () => {
+  // The OUTER merge pins `gh pr merge --match-head-commit` to this exact field
+  // (`reviewedHeadOid`, merge.ts), so whatever is recorded here is what the merge
+  // certifies as reviewed.
+  //
+  // IT MUST NEVER COME FROM A FRESH HEAD PROBE. `forge.commitSha` and `diffFile`
+  // are reported by the SAME agent run, so the sha names exactly the tree the
+  // reviewers read. A remote head probe does not: a third party's push satisfies
+  // it just as well, and recording THAT as `reviewedHead` makes the merge pin to —
+  // and thereby vouch for — a commit no reviewer saw. Binding to the reported sha
+  // can only ever fail CLOSED: a merely stale sha makes `--match-head-commit`
+  // refuse, which is the safe direction.
+
+  /** Every assignment to `reviewedHead` anywhere in the script. */
+  const reviewedHeadAssignments = (): string[] =>
+    SRC.split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^(let )?reviewedHead\s*=/.test(l))
+
+  test("round 1 pins to Forge's reported commit sha, fixed BEFORE the review that judges it", () => {
+    const decl = SRC.indexOf('let reviewedHead = branchHead')
+    const firstReview = SRC.indexOf('let synthesis = await reviewAndSynthesize(')
+    expect(decl).toBeGreaterThan(-1)
+    expect(firstReview).toBeGreaterThan(decl)
+  })
+
+  test('NO assignment of reviewedHead is ever derived from a head probe (the fail-open)', () => {
+    const assigns = reviewedHeadAssignments()
+    expect(assigns.length).toBeGreaterThan(0)
+    for (const line of assigns) {
+      // `readBranchHead`/`headAfter` answer "did the branch move?", NOT "what did
+      // the reviewers read?" — pinning to either certifies an unreviewed push.
+      expect(line).not.toContain('readBranchHead')
+      expect(line).not.toContain('headAfter')
+    }
+  })
+
+  test("every fix round re-pins to the sha THAT round's fix agent reported committing", () => {
+    const rePin = SRC.indexOf('reviewedHead = typeof fix?.commitSha')
+    const loopReview = SRC.indexOf('synthesis = await reviewAndSynthesize(diffFile, round, pr)\n    finalVerdict')
+    expect(rePin).toBeGreaterThan(-1)
+    expect(loopReview).toBeGreaterThan(rePin)
+    // The fix agent is asked for that sha under the same schema round 1 uses.
+    expect(SRC).toContain('const fix = await agent(')
+  })
+
+  test('the terminal result carries `reviewedHead` (the field merge.ts pins on)', () => {
+    const start = SRC.indexOf('const terminalResult = {')
+    const end = SRC.indexOf('await writeTerminalResult(terminalResult)')
+    expect(start).toBeGreaterThan(-1)
+    expect(SRC.slice(start, end)).toContain('reviewedHead,')
+  })
+
+  // THE CRASH-RESUME SHORTCUT RECORDS NO HEAD, ON PURPOSE.
+  //
+  // It runs only when the prior process reached 'argus-approved' and its terminal
+  // result was never harvested — and the terminal result is the ONLY place a
+  // reviewed OID is written, so by construction none exists to resume from.
+  // Probing the head at resume and labelling it `reviewedHead` would certify an
+  // unreviewed commit: reviewers approve A, B is pushed into the crash window,
+  // resume reads B, and the merge pins to B and SUCCEEDS. The pin then vouches for
+  // a commit nobody read, which is worse than no pin at all.
+  describe('the crash-resume shortcut records NO reviewed head (fail-closed)', () => {
+    // The resume block's CODE, sliced out so these assertions cannot be satisfied
+    // by an unrelated part of the file. Comment lines are stripped: the docblock
+    // there names `reviewedHead` to explain why it is deliberately absent, and a
+    // naive check would fail on the documentation of the very fix it verifies.
+    const resumeBlock = (): string => {
+      const at = SRC.indexOf("if (resumeCheckpoint === 'argus-approved') {")
+      expect(at).toBeGreaterThan(-1)
+      const end = SRC.indexOf('return resumeResult', at)
+      expect(end).toBeGreaterThan(at)
+      return SRC.slice(at, end)
+        .split('\n')
+        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+        .join('\n')
+    }
+
+    test('it does NOT probe the branch head and pass it off as reviewed', () => {
+      const block = resumeBlock()
+      expect(block).not.toContain('readBranchHead')
+      expect(block).not.toContain('reviewedHead')
+    })
+
+    test('the resume result omits the field entirely, so `reviewedHeadOid` yields null', () => {
+      // Mirrors the object the resume path builds. merge.ts must refuse this.
+      const resumeResult = {
+        ok: true,
+        prNumber: 42,
+        branch: 'feat-x',
+        verdict: 'APPROVE',
+        round: 0,
+        checkpoint: 'argus-approved',
+      }
+      expect('reviewedHead' in resumeResult).toBe(false)
+      // The REAL decoder, on the REAL shape — not a restatement of the rule.
+      expect(reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)).toBeNull()
+    })
+
+    test('A approved → crash → B pushed → resume must not merge B', () => {
+      // The boundary the shortcut used to get wrong, end to end through the real
+      // decoder: whatever B is, a resume result cannot name it as reviewed.
+      const B = 'b'.repeat(40)
+      const resumeResult = {
+        ok: true,
+        prNumber: 42,
+        branch: 'feat-x',
+        verdict: 'APPROVE',
+        round: 0,
+        checkpoint: 'argus-approved',
+      }
+      const pinned = reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)
+      expect(pinned).toBeNull()
+      expect(pinned).not.toBe(B)
+    })
+  })
+})
+
 describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthesis', () => {
   test('parallel() runs argus-claude + argus-adversarial, each with VERDICT_SCHEMA', () => {
     // The reviewer thunks are collected into a `reviewers` array (codex is pushed
@@ -308,6 +454,87 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     expect(SRC).toContain('full third panelist')
   })
 
+  test('the bridge READS BACK the truncation marker — the wrapper tells the model, the grep tells the workflow', () => {
+    // The wrapper caps the diff and discloses it IN THE PROMPT, but exit 0 is exit 0:
+    // without this grep a review of the first 3000 lines of an 11k-line diff came
+    // back as a clean whole-change APPROVE, and nothing downstream could tell.
+    expect(SRC).toContain('grep -q CODEX_REVIEW_DIFF_TRUNCATED')
+    expect(SRC).toContain('CODEX_TRUNCATED=1')
+    expect(SRC).toContain('CODEX_TRUNCATED=0')
+    // …and it is a REQUIRED schema field, copied from that line rather than judged.
+    expect(SRC).toContain("required: ['verdict', 'findings', 'codexStatus', 'codexTruncated']")
+    expect(SRC).toContain('copy the CODEX_TRUNCATED line VERBATIM')
+  })
+
+  /**
+   * THE READBACK, EXECUTED — because the substring assertions above cannot fail on the
+   * mutation that matters. Swap the two echo branches (`=1` on the else) and every
+   * string those assertions look for is still present, still spelled the same, still
+   * in the same file: green suite, inverted meaning, every truncated review from then
+   * on presented to the synthesis as a full-coverage panelist. A guard whose only
+   * coverage survives its own inversion is documentation.
+   *
+   * So these run the REAL fragment — generated by the shipped `codexReviewerPrompt`,
+   * not retyped here — against a fixture stderr file, and assert on its OUTPUT.
+   */
+  const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
+
+  const codexBridgeCommand = (runId: string): string => {
+    // Instantiate the real prompt builder with stub closure values; `shSingleQuote`
+    // comes from the same source so the quoting under test is the shipped quoting.
+    const factory = new Function(
+      'repoPath',
+      'slug',
+      'runId',
+      'codexHome',
+      'baseBranch',
+      'NO_INTERACTIVE_RULE',
+      'REDIRECT_RULE',
+      'NO_PATTERN_KILL_RULE',
+      [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
+    ) as (...args: string[]) => (diffFile: string) => string
+    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '')('/tmp/some-diff.diff')
+  }
+
+  /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */
+  const runReadback = (errContent: string | null): string => {
+    const runId = `truncation-readback-${process.pid}`
+    const errFile = `/tmp/trident-codex-${runId}.err`
+    rmSync(errFile, { force: true })
+    if (errContent !== null) writeFileSync(errFile, errContent)
+    const command = codexBridgeCommand(runId)
+    const at = command.indexOf('if grep -q')
+    if (at === -1) throw new Error('the bridge command no longer greps stderr for the truncation marker')
+    const nl = command.indexOf('\n', at)
+    const fragment = command.slice(at, nl === -1 ? undefined : nl)
+    // The fragment must read the file this test wrote, or it is proving nothing.
+    expect(fragment).toContain(errFile)
+    const out = spawnSync(BASH, ['-c', fragment], { encoding: 'utf8' }).stdout.trim()
+    rmSync(errFile, { force: true })
+    return out
+  }
+
+  test('BEHAVIOR: wrapper stderr carrying the marker makes the bridge report CODEX_TRUNCATED=1', () => {
+    const out = runReadback(
+      'CODEX_REVIEW_DIFF_TRUNCATED: showing the first 3000 of 11241 diff lines to codex.\n',
+    )
+    expect(out).toBe('CODEX_TRUNCATED=1')
+  })
+
+  test('BEHAVIOR: stderr WITHOUT the marker reports CODEX_TRUNCATED=0 — the flag is not always-on', () => {
+    // The other half of the inversion: a full-diff review must not be hedged into a
+    // partial one, or the PARTIAL framing becomes noise everyone learns to skip.
+    const out = runReadback('reading prompt from stdin\nmodel: gpt-5.6-sol\n')
+    expect(out).toBe('CODEX_TRUNCATED=0')
+  })
+
+  test('BEHAVIOR: a MISSING stderr file reports 0 — that case is caught by the exit code, not here', () => {
+    // grep exits 2 on an unreadable file, so this says "not truncated". Safe only
+    // because a wrapper that never wrote stderr did not exit 0 either, and a non-zero
+    // exit maps to deferred/not_connected — which the panel gates on independently.
+    expect(runReadback(null)).toBe('CODEX_TRUNCATED=0')
+  })
+
   test('a deterministic never-silent-downgrade guard forces REQUEST_CHANGES on deferred+APPROVE', () => {
     expect(SRC).toContain('function enforceCrossModelGate(')
     expect(SRC).toContain('function deferredCrossModelPeers(')
@@ -354,29 +581,12 @@ function loadRealGate(): {
   deferredCrossModelPeers: (statuses: unknown) => Peer[]
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
-  coreSeats: Array<{ slot: number; name: string }>
+  coreSeats: Array<{ slot: number; name: string; letter: string; panelLabel: string }>
   classifyBlock: (s: unknown, peers: unknown[]) => string
   corePanelLine: (letter: string, label: string, verdict: unknown) => string
+  codexPanelLine: (status: string, review: unknown) => string
 } {
-  const grab = (name: string): string => {
-    const at = SRC.indexOf(`function ${name}(`)
-    if (at === -1) throw new Error(`${name} is missing from inner-workflow.mjs`)
-    // Brace-match to the end of the function so the extraction survives edits
-    // inside the body rather than depending on a fixed line count.
-    let depth = 0
-    let started = false
-    for (let i = at; i < SRC.length; i += 1) {
-      const c = SRC[i]
-      if (c === '{') {
-        depth += 1
-        started = true
-      } else if (c === '}') {
-        depth -= 1
-        if (started && depth === 0) return SRC.slice(at, i + 1)
-      }
-    }
-    throw new Error(`could not brace-match ${name}`)
-  }
+  const grab = grabFunction
   // The consts the functions close over come along, lifted from the SAME source so
   // the test cannot disagree with the shipped values. `LANE_FINDING_KIND` is the
   // field `enforceCrossModelGate` stamps and `classifyBlock` reads — hard-coding
@@ -387,28 +597,52 @@ function loadRealGate(): {
     if (line === undefined) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
     return line
   }
-  const grabBlock = (name: string): string => {
-    const at = SRC.indexOf(`const ${name} = [`)
-    if (at === -1) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
-    const end = SRC.indexOf('\n]', at)
-    if (end === -1) throw new Error(`could not close const ${name}`)
-    return SRC.slice(at, end + 2)
+  // THE CORE SEATS ARE NO LONGER A LITERAL TO LIFT. They used to be a top-level
+  // `const CORE_REVIEWER_SEATS = [{ slot: 0 }, { slot: 1 }]`, which is the positional
+  // pattern the file itself documents as a latent bug for codex — inserting a seat at
+  // the head of the panel left the new one ungated (fail-OPEN). The slots are now
+  // DERIVED from `reviewers.length` at push time, so this reconstructs them the same
+  // way: read the `pushCoreReviewer` call sites IN ORDER and number them. The names,
+  // letters, labels and ORDERING therefore still come from the shipped source (a
+  // renamed seat or a reordered panel shows up here), while nothing hard-codes a slot.
+  const grabCoreSeats = (): Array<{ slot: number; name: string; letter: string; panelLabel: string }> => {
+    const sites = [...SRC.matchAll(/pushCoreReviewer\(\s*\{([^}]*)\}/g)]
+    if (sites.length === 0) throw new Error('no pushCoreReviewer(...) sites in inner-workflow.mjs')
+    return sites.map((m, slot) => {
+      const field = (f: string): string => {
+        const hit = new RegExp(`${f}:\\s*'([^']*)'`).exec(m[1] ?? '')
+        if (hit === null) throw new Error(`core seat ${slot} has no ${f}`)
+        return hit[1] as string
+      }
+      return { slot, name: field('name'), letter: field('letter'), panelLabel: field('panelLabel') }
+    })
   }
   const factory = new Function(
     [
       grabConst('LANE_FINDING_KIND'),
-      grabBlock('CORE_REVIEWER_SEATS'),
+      // `classifyBlock` now closes over the severity set too — lifted from the SAME
+      // source for the same reason as LANE_FINDING_KIND: re-declaring {minor,nit}
+      // here would let the classifier and the severity gate drift apart green.
+      grabConst('NON_BLOCKING_SEVERITIES'),
+      // `usableStatus` is the ONE "did this field answer" predicate the lane retry and
+      // `hasUsableVerdict` now share; `CORE_SEAT_STATUS_KEY` is the field it reads for a
+      // core seat. Both are lifted rather than restated for the same reason as the two
+      // above — restating them here is exactly how the retry and the gate drifted apart
+      // green in the first place.
+      grabConst('usableStatus'),
+      grabConst('CORE_SEAT_STATUS_KEY'),
       grab('enforceCrossModelGate'),
       grab('deferredCrossModelPeers'),
       grab('crossModelPeerStatus'),
       grab('hasUsableVerdict'),
       grab('missingCoreReviewers'),
       grab('corePanelLine'),
+      grab('codexPanelLine'),
       grab('classifyBlock'),
-      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, coreSeats: CORE_REVIEWER_SEATS, classifyBlock, corePanelLine }',
+      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, classifyBlock, corePanelLine, codexPanelLine }',
     ].join('\n'),
-  ) as () => ReturnType<typeof loadRealGate>
-  return factory()
+  ) as () => Omit<ReturnType<typeof loadRealGate>, 'coreSeats'>
+  return { ...factory(), coreSeats: grabCoreSeats() }
 }
 
 describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgrade)', () => {
@@ -423,6 +657,91 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const g = gate()
     expect(typeof g.enforceCrossModelGate).toBe('function')
     expect(typeof g.deferredCrossModelPeers).toBe('function')
+    expect(typeof g.codexPanelLine).toBe('function')
+  })
+
+  test('a TRUNCATED codex APPROVE is handed to the synthesis as PARTIAL, not as a whole-change approval', () => {
+    // The defect: codex read the first N lines of the diff, said APPROVE about them,
+    // and the panel line presented it as "a full third panelist" — a cross-model
+    // approval of code codex never saw.
+    const { codexPanelLine } = gate()
+    const line = codexPanelLine('connected', {
+      verdict: 'APPROVE',
+      findings: [],
+      codexStatus: 'connected',
+      codexTruncated: true,
+    })
+    expect(line).toContain('PARTIAL')
+    expect(line).toContain('CODEX_REVIEW_DIFF_TRUNCATED')
+    expect(line).toContain('do NOT record it as a whole-change cross-model approval')
+    expect(line).not.toContain('full third panelist')
+    // Its BLOCKERS are not softened — only its approval is re-scoped.
+    expect(line).toContain('VETO')
+  })
+
+  test('an UNtruncated connected codex is still the full third panelist (the re-scoping is not blanket)', () => {
+    const { codexPanelLine } = gate()
+    const line = codexPanelLine('connected', {
+      verdict: 'APPROVE',
+      findings: [],
+      codexStatus: 'connected',
+      codexTruncated: false,
+    })
+    expect(line).toContain('full third panelist')
+    expect(line).not.toContain('PARTIAL')
+  })
+
+  test('a MISSING codexTruncated is PARTIAL, not full coverage — the flag fails SAFE', () => {
+    // The old test only ever passed the field, so the DEFAULT was untested and it
+    // pointed the wrong way: `=== true` meant a bridge that dropped the field earned
+    // the "full third panelist" framing — the permissive answer for the one case where
+    // nothing is known about coverage. Same direction as crossModelPeerStatus, where a
+    // configured seat with no status defaults to 'deferred'.
+    const { codexPanelLine } = gate()
+    const line = codexPanelLine('connected', { verdict: 'APPROVE', findings: [], codexStatus: 'connected' })
+    expect(line).toContain('PARTIAL')
+    expect(line).toContain('SCOPE UNKNOWN')
+    expect(line).not.toContain('full third panelist')
+    // Blockers keep their veto here too — only the approval is re-scoped.
+    expect(line).toContain('VETO')
+  })
+
+  test('a NON-BOOLEAN codexTruncated is PARTIAL — a stringified flag is not a reported one', () => {
+    // A schema-violating 'true'/'false' string used to sail into the full-panelist
+    // branch; 'false' as a string is truthy, so the truncated case did too.
+    const { codexPanelLine } = gate()
+    for (const bad of ['true', 'false', 1, 0, null, undefined]) {
+      const line = codexPanelLine('connected', {
+        verdict: 'APPROVE',
+        findings: [],
+        codexStatus: 'connected',
+        codexTruncated: bad,
+      })
+      expect(line).toContain('PARTIAL')
+      expect(line).not.toContain('full third panelist')
+    }
+    // …and a review object that is missing entirely is not a full panelist either.
+    expect(codexPanelLine('connected', null)).not.toContain('full third panelist')
+  })
+
+  test('deferred/not_connected panel lines are unchanged by the truncation flag', () => {
+    const { codexPanelLine } = gate()
+    const deferredLine = codexPanelLine('deferred', { codexTruncated: true })
+    expect(deferredLine).toContain('DEFERRED')
+    expect(deferredLine).toContain('do NOT return APPROVE')
+    // The deferral no longer claims the CALL failed — an empty diff is the other way in.
+    expect(deferredLine).toContain('EMPTY')
+    expect(codexPanelLine('not_connected', { codexTruncated: true })).toContain('NOT CONNECTED')
+  })
+
+  test('the deferred-codex blocker text names the EMPTY-DIFF cause, not just auth', () => {
+    // An operator whose diff file failed to write was told to re-run "once codex auth
+    // is restored" — a correct-looking instruction that fixes nothing.
+    const { deferredCrossModelPeers } = gate()
+    const [codexPeer] = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
+    expect(codexPeer?.evidence).toContain('EMPTY')
+    expect(codexPeer?.evidence).toContain('CODEX_REVIEW_EMPTY_DIFF')
+    expect(codexPeer?.evidence).not.toContain('Re-run once codex auth is restored')
   })
 
   test('deferred codex + APPROVE synthesis → forced REQUEST_CHANGES with a blocker prepended', () => {
@@ -433,11 +752,49 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     expect(out?.findings.length).toBe(1)
   })
 
-  test('deferred codex + REQUEST_CHANGES synthesis → passes through unchanged (already blocked)', () => {
+  // THE BUG THIS PAIR REPLACES. The gate used to early-return an ALREADY
+  // REQUEST_CHANGES synthesis untouched — "already blocked, nothing to do". But the
+  // synthesis prompt tells the model, verbatim, "do NOT return APPROVE" when a seat is
+  // down, so the COMPLIANT synthesis takes exactly that path: the deterministic
+  // "which seat is missing" blocker was dropped from the PR entirely, and because
+  // nothing stamped `kind`, `classifyBlock` read the model's own findings as CODE and
+  // re-Forged a full round against a panel that was still down a seat.
+  test('deferred codex + REQUEST_CHANGES synthesis → the lane blocker is STILL injected', () => {
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
     const deferredCodex = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
-    const s = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major' }] }
-    expect(enforceCrossModelGate(s, deferredCodex)).toBe(s)
+    const s = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major', title: 'real code bug' }] }
+    const out = enforceCrossModelGate(s, deferredCodex)
+    expect(out?.verdict).toBe('REQUEST_CHANGES')
+    // Prepended, and STAMPED — the model's finding still rides along behind it.
+    expect(out?.findings).toHaveLength(2)
+    expect(out?.findings[0]?.kind).toBe('lane')
+    expect(out?.findings[0]?.title).toContain('Codex')
+    expect(out?.findings[1]?.title).toBe('real code bug')
+  })
+
+  test('a dead CORE seat + a compliant REQUEST_CHANGES classifies as infra-only, NOT code', () => {
+    // End to end on the exact path the prompt makes likely: the synthesis obeys
+    // "do NOT return APPROVE", and the loop must NOT re-Forge code for a reviewer
+    // that never ran. Composed from the real functions, so a gate that forgets to
+    // stamp `kind` fails here rather than silently costing a round.
+    const { missingCoreReviewers, coreSeats, enforceCrossModelGate, classifyBlock } = gate()
+    const peers = missingCoreReviewers([null, { verdict: 'APPROVE' }], coreSeats)
+    const compliant = { verdict: 'REQUEST_CHANGES', findings: [] }
+    const out = enforceCrossModelGate(compliant, peers)
+    expect(out?.findings[0]?.title).toContain('produced NO verdict')
+    expect(classifyBlock(out, peers)).toBe('infra-only')
+  })
+
+  test('a non-object synthesis (a dead synthesis agent) still yields a blocked verdict', () => {
+    // The gate must not read `.findings` off null and crash the round; an absent
+    // synthesis with an incomplete panel is the most blocked state there is.
+    const { missingCoreReviewers, coreSeats, enforceCrossModelGate } = gate()
+    const peers = missingCoreReviewers([null, null], coreSeats)
+    for (const dead of [null, undefined, 'REQUEST_CHANGES']) {
+      const out = enforceCrossModelGate(dead, peers)
+      expect(out?.verdict).toBe('REQUEST_CHANGES')
+      expect(out?.findings).toHaveLength(2)
+    }
   })
 
   test('connected peers + APPROVE → NOT downgraded (both ran fine)', () => {
@@ -472,6 +829,25 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
     expect(out?.verdict).toBe('REQUEST_CHANGES')
     expect(out?.findings.length).toBe(2)
+  })
+
+  // EVERY PRODUCER OWNS ITS TITLE, AND EVERY TITLE IS ASSERTED. The gate posts
+  // `title: p.title` verbatim, so authorship sits with each producer — and deleting
+  // the `title:` line from the codex or kimi branch used to survive the entire suite
+  // green, leaving the gate to post a blocker reading `title: undefined` on the PR.
+  // (Only missingCoreReviewers' title was behaviourally asserted; the others were
+  // covered by a whole-file substring grep, which any producer's title satisfies for
+  // all of them.) The title is the line a human reads first when a lane is down.
+  test('the codex + kimi blockers each carry their OWN non-empty, self-identifying title', () => {
+    const { deferredCrossModelPeers, enforceCrossModelGate } = gate()
+    const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' })
+    const byName = (n: string): Peer => peers.find((p) => p.name === n) as Peer
+    expect(byName('Codex').title).toBe('Codex cross-model review DEFERRED — refusing to silently APPROVE')
+    expect(byName('Kimi K3').title).toBe('Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE')
+    // …and they survive the gate as distinct titles, so the PR names WHICH lane died.
+    const titles = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)?.findings.map((f) => f.title)
+    expect(titles).toEqual([byName('Codex').title, byName('Kimi K3').title])
+    for (const t of titles ?? []) expect(typeof t).toBe('string')
   })
 
   test("the kimi blocker states there is NO Claude-family fallback", () => {
@@ -654,8 +1030,37 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
     test('the synthesis prompt no longer hands a dead core reviewer the bare token `null`', () => {
       expect(SRC).not.toContain('Verdict A (Claude rubric): ${JSON.stringify(verdicts[0])}')
       expect(SRC).not.toContain('Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}')
-      expect(SRC).toContain("corePanelLine('A', 'Claude rubric', verdicts[0])")
-      expect(SRC).toContain("corePanelLine('B', 'Claude adversarial', verdicts[1])")
+      // Every core panel line is produced by corePanelLine, DERIVED FROM THE SAME
+      // `coreSeats` the gate reads — no `verdicts[0]` / `verdicts[1]` literal to fall
+      // out of step with the seat list (the letter+label ride on the seat).
+      expect(SRC).toContain('corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot])')
+      expect(SRC).toContain('${corePanelLines}')
+    })
+
+    test('the core seats DERIVE their slot at push time — no positional literal anywhere', () => {
+      // The literal `[{ slot: 0 }, { slot: 1 }]` is the pattern this file documents as
+      // a latent bug for the cross-model peers: insert a reviewer at the HEAD of the
+      // panel and the new seat is ungated (fail-OPEN, the shape of #536) while Verdict
+      // A is labelled with the wrong reviewer's review. Its ABSENCE is the fix.
+      expect(SRC).not.toContain('CORE_REVIEWER_SEATS')
+      expect(SRC).toContain('coreSeats.push({ ...seat, slot: reviewers.length')
+      expect(SRC).toContain('missingCoreReviewers(verdicts, coreSeats)')
+      // …and the derived list is the SAME object the retry, the prompt and the gate
+      // all read, so a seat cannot be enforced in one and forgotten in another.
+      expect(SRC).toContain('...coreSeats,')
+    })
+
+    test('a core seat that DIED is retried like any other lane (not thrown away)', () => {
+      // A dead CORE seat had zero retries: the slots list held only codex/kimi, so one
+      // transient argus:claude crash produced an infra-only block, exited the loop on
+      // round 1 and discarded the whole Forge build. `statusKey: 'verdict'` is what
+      // makes a core seat retryable by the same helper — a real verdict is never
+      // 'deferred', so only a seat that produced nothing is re-run.
+      expect(SRC).toContain("const CORE_SEAT_STATUS_KEY = 'verdict'")
+      expect(SRC).toContain('statusKey: CORE_SEAT_STATUS_KEY')
+      // The retry re-runs the seat's OWN thunk, so it cannot drift from the prompt
+      // the seat was originally dispatched with.
+      expect(SRC).toContain('return await reviewers[core.slot]()')
     })
 
     // RUN corePanelLine, DO NOT GREP FOR IT. The assertions above are wiring checks:
@@ -690,12 +1095,24 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
         // The dangerous drift is the pair disagreeing: the prompt saying a seat is fine
         // while the gate blocks it, or worse, the prompt saying DID NOT COMPLETE while
         // nothing blocks. Asserted over the same inputs both callers can see.
+        //
+        // EVERY SEAT MEANS EVERY SEAT. This used to place each case at index 0 with slot
+        // 1 always healthy, so the name claimed coverage the body did not have: the
+        // whole B seat went unexercised. Now the case is walked ACROSS the seats — the
+        // one under test is the dead one, and the other seats are healthy — so the
+        // assertion is made once per seat per case, and a seat added to the panel
+        // widens this loop automatically.
         const { corePanelLine, missingCoreReviewers, coreSeats } = gate()
+        expect(coreSeats.length).toBeGreaterThan(1)
         const cases: unknown[] = [null, undefined, {}, { verdict: '' }, 'APPROVE', 42, { verdict: 'APPROVE' }]
-        for (const c of cases) {
-          const blocked = missingCoreReviewers([c, { verdict: 'APPROVE' }], coreSeats).length === 1
-          const saysDead = corePanelLine('A', 'Claude rubric', c).includes('DID NOT COMPLETE')
-          expect(saysDead).toBe(blocked)
+        for (const seat of coreSeats) {
+          for (const c of cases) {
+            const verdicts = coreSeats.map((s) => (s.slot === seat.slot ? c : { verdict: 'APPROVE' }))
+            const missing = missingCoreReviewers(verdicts, coreSeats)
+            const blocked = missing.length === 1 && missing[0]?.name === seat.name
+            const saysDead = corePanelLine(seat.letter, seat.panelLabel, c).includes('DID NOT COMPLETE')
+            expect(saysDead).toBe(blocked)
+          }
         }
       })
     })
@@ -716,7 +1133,7 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
 
     test('missingCore reaches the gate on BOTH the CI-pending and CI-settled branches', () => {
       // One branch carrying the peers and the other not is how half a gate ships.
-      expect(SRC).toContain('missingCoreReviewers(verdicts, CORE_REVIEWER_SEATS)')
+      expect(SRC).toContain('missingCoreReviewers(verdicts, coreSeats)')
       expect(SRC).toContain('[...missingCore, ...deferred, ciDeferredPeer(ci)]')
       expect(SRC).toContain('[...missingCore, ...deferred]')
     })

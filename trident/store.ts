@@ -145,7 +145,7 @@ export interface CreateTridentRunInput {
   task: string
   /** Defaults to 'forge-init'. */
   phase?: TridentPhase
-  /** Defaults to 8 (the skill's default round cap). */
+  /** Defaults to 10 — the review-round cap the fix loop bounds on. See `create`. */
   max_rounds?: number
   /** Defaults to false. */
   ralph?: boolean
@@ -244,7 +244,14 @@ export class TridentRunStore {
       project_slug: input.project_slug,
       phase: input.phase ?? 'forge-init',
       round: 1,
-      max_rounds: input.max_rounds ?? 8,
+      // THE EFFECTIVE REVIEW-ROUND CAP. This is the value the fix loop actually
+      // bounds on: it is written to the run row, `buildWorkflowArgs` threads it to
+      // the inner workflow as `maxRounds`, and `round < maxRounds` gates re-Forge.
+      // The `DEFAULT 8` on the column (migrations/0077) is dead for runs created
+      // here — this path always supplies the field — and the migration is left
+      // alone because an applied migration is not edited. Raising the fallback in
+      // `inner-workflow.mjs` alone would have changed NOTHING for a real lane.
+      max_rounds: input.max_rounds ?? 10,
       ralph: input.ralph ?? false,
       ralph_round: 0,
       max_ralph_rounds: input.max_ralph_rounds ?? 20,
