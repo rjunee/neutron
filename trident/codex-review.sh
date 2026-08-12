@@ -102,9 +102,16 @@ else
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
 DIFF=$(printf '%s\n' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")
-# The FULL size, for the disclosure text only — `awk END{print NR}` counts a final
-# unterminated line too, which `wc -l` would drop. Truncation itself is decided
-# WITHOUT it (below), so a missing/broken awk cannot silence the disclosure.
+# The FULL size, for the disclosure text only. The `printf '%s\n'` is what makes the
+# count exact, NOT the choice of counter: `$(...)` already ate FULL_DIFF's trailing
+# newline, and re-terminating it counts a final unterminated line that the FILE's own
+# newline count (`wc -l < "$NEUTRON_CODEX_DIFF_FILE"`, the shape git writes for
+# "\ No newline at end of file") is one short of. Through THIS pipeline `wc -l` counts
+# the same (measured) — the counter is not the load-bearing part and no claim is made
+# for awk over it; the `case` below is what rejects whatever a counter prints if it is
+# not a bare integer.
+# Truncation itself is decided WITHOUT this count (below), so a missing/broken awk
+# degrades the disclosure's NUMBERS and can never silence the disclosure.
 DIFF_TOTAL_LINES=$(printf '%s\n' "$FULL_DIFF" | awk 'END { print NR }' 2>/dev/null)
 case "$DIFF_TOTAL_LINES" in
   '' | *[!0-9]*) DIFF_TOTAL_LINES='' ;;

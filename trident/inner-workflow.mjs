@@ -1198,9 +1198,23 @@ function deferredCrossModelPeers(statuses) {
 // line limit and tells the MODEL so; but the model's answer still arrives as a
 // verdict with no scope attached, and the synthesis then read "codex APPROVE" as a
 // cross-model approval of the whole change when codex had seen its first 3000 lines.
-// `codexTruncated` comes from a deterministic grep of the wrapper's stderr (see
-// codexReviewerPrompt), so the re-scoping happens HERE, in code, rather than
-// depending on GPT-5 having remembered to hedge.
+// The FACT itself is decided by a grep the bridge command runs (see
+// codexReviewerPrompt), not by GPT-5 judging its own coverage — so the re-scoping
+// stops depending on the reviewer having remembered to hedge.
+//
+// WHAT THIS IS AND IS NOT. Be precise about the strength of this guard, because the
+// comment that used to sit here ("deterministic") overstated it: the flag still
+// TRAVELS through the codex agent copying the CODEX_TRUNCATED line into a schema
+// field, and what it buys is PROMPT TEXT for the synthesis model. It is NOT a hard
+// gate like 'deferred' (enforceCrossModelGate / deferredCrossModelPeers), and a
+// truncated codex APPROVE with every other seat APPROVE can still merge.
+//
+// Which is exactly why the DEFAULT is fail-safe. The "full third panelist" framing
+// — the one that lets a codex APPROVE offset another reviewer's doubt — is earned
+// ONLY by an explicit boolean `false`. A missing field, a stringified 'true'/'false',
+// null: every one of those is a flag that did not arrive, and an unknown scope is
+// read as a PARTIAL one. This mirrors crossModelPeerStatus, where a configured seat
+// with no status defaults to 'deferred' rather than to the permissive answer.
 function codexPanelLine(status, review) {
   if (status === 'deferred') {
     return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, or the diff was EMPTY so there was nothing to review). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
@@ -1210,6 +1224,9 @@ function codexPanelLine(status, review) {
   }
   if (review && review.codexTruncated === true) {
     return `Verdict C (codex cross-model, GPT-5) — PARTIAL, SCOPED TO PART OF THE DIFF: ${JSON.stringify(review)}. The wrapper TRUNCATED the diff at its line cap (CODEX_REVIEW_DIFF_TRUNCATED), so codex read only the FIRST lines of this change and NEVER SAW the rest. Its blockers still VETO APPROVE, but a codex APPROVE here means ONLY "no blocker in the portion codex read" — do NOT record it as a whole-change cross-model approval, do NOT let it offset a finding in code codex never saw, and SAY in your findings that the cross-model review covered only part of the diff.`
+  }
+  if (!review || typeof review.codexTruncated !== 'boolean') {
+    return `Verdict C (codex cross-model, GPT-5) — PARTIAL, SCOPE UNKNOWN: ${JSON.stringify(review)}. The bridge did NOT report whether the wrapper truncated the diff (codexTruncated is missing or not a boolean), so it is UNKNOWN whether codex saw the whole change. Treat it exactly as a truncated review: its blockers still VETO APPROVE, but its APPROVE is NOT a whole-change cross-model approval, must not offset a finding elsewhere in the diff, and you must SAY in your findings that the cross-model review's coverage could not be confirmed.`
   }
   return `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(review)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
 }

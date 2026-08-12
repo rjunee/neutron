@@ -321,10 +321,12 @@ describe('trident/codex-review.sh — TRUNCATION is disclosed to the model', () 
     expect(codexStdin).not.toContain('TRUNCATED')
   })
 
-  test('the last line counts even without a trailing newline (wc -l would drop it)', () => {
-    // 6 lines, the 6th unterminated, limit 5 → truncated. `wc -l` reports 5 here and
-    // the disclosure would vanish for exactly the diff shape git produces with
-    // "\\ No newline at end of file".
+  test('a diff whose FINAL line is unterminated is counted in full in the disclosure', () => {
+    // 6 lines, the 6th unterminated, limit 5 → truncated. This pins the re-termination,
+    // not the counter: counting the FILE's newlines (`wc -l < file`) reports 5 for
+    // exactly the shape git writes with "\\ No newline at end of file", and the
+    // disclosure would then read the absurd "the FIRST 5 lines of a 5-line diff".
+    // (The truncation FACT is a string comparison and never depends on this count.)
     const { codexStdin } = run({
       authed: true,
       codexLoginExit: 0,
