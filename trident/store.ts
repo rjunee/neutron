@@ -43,6 +43,13 @@ export type TridentPhase =
  */
 export type MergeMode = 'local' | 'pr'
 
+export class TridentRunReferenceAmbiguousError extends Error {
+  constructor(reference: string) {
+    super(`trident run reference is ambiguous: ${reference}`)
+    this.name = 'TridentRunReferenceAmbiguousError'
+  }
+}
+
 /**
  * Status of the currently in-flight sub-agent, persisted on the run row
  * (NOT in the disconnected generic `runtime/subagent/` registry) so a
@@ -138,7 +145,7 @@ export interface CreateTridentRunInput {
   task: string
   /** Defaults to 'forge-init'. */
   phase?: TridentPhase
-  /** Defaults to 8 (the skill's default round cap). */
+  /** Defaults to 10 — the review-round cap the fix loop bounds on. See `create`. */
   max_rounds?: number
   /** Defaults to false. */
   ralph?: boolean
@@ -237,7 +244,14 @@ export class TridentRunStore {
       project_slug: input.project_slug,
       phase: input.phase ?? 'forge-init',
       round: 1,
-      max_rounds: input.max_rounds ?? 8,
+      // THE EFFECTIVE REVIEW-ROUND CAP. This is the value the fix loop actually
+      // bounds on: it is written to the run row, `buildWorkflowArgs` threads it to
+      // the inner workflow as `maxRounds`, and `round < maxRounds` gates re-Forge.
+      // The `DEFAULT 8` on the column (migrations/0077) is dead for runs created
+      // here — this path always supplies the field — and the migration is left
+      // alone because an applied migration is not edited. Raising the fallback in
+      // `inner-workflow.mjs` alone would have changed NOTHING for a real lane.
+      max_rounds: input.max_rounds ?? 10,
       ralph: input.ralph ?? false,
       ralph_round: 0,
       max_ralph_rounds: input.max_ralph_rounds ?? 20,
@@ -316,6 +330,29 @@ export class TridentRunStore {
     return row === null ? null : rowToRun(row)
   }
 
+  /** Resolve the user-facing run references emitted by `/code`: full id, id
+   * prefix, or slug. Full ids are globally unique in this single-owner DB;
+   * shorthand references resolve only when unambiguous across all projects. */
+  resolveReference(reference: string): TridentRun | null {
+    if (reference.length === 0) return null
+    const exact = this.get(reference)
+    if (exact !== null) return exact
+    const rows = this.db
+      .prepare<TridentRunDbRow, [string, string, string]>(
+        `SELECT ${COLS} FROM code_trident_runs
+          WHERE id LIKE ? ESCAPE '\\' OR slug = ?
+          ORDER BY CASE WHEN slug = ? THEN 0 ELSE 1 END, last_advanced_at DESC
+          LIMIT 2`,
+      )
+      .all(`${reference.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')}%`, reference, reference)
+      .map(rowToRun)
+    if (rows.length === 0) return null
+    const first = rows[0]
+    if (first === undefined) return null
+    if (rows.length > 1) throw new TridentRunReferenceAmbiguousError(reference)
+    return first
+  }
+
   /**
    * The MOST-RECENTLY-advanced run for a project scope, or null when the scope
    * has never run a build. M1 UX REDESIGN: the rail's durable failure signal — a
@@ -356,6 +393,34 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /** Durably latch one dead launcher generation and crash only its workflows. */
+  async crashRunningByLauncher(session_key: string, failure_reason: string): Promise<void> {
+    await this.db.transaction((tx) => {
+      const now = this.now()
+      tx.runSync(
+        `INSERT INTO trident_launcher_crashes (session_key, failure_reason, crashed_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_key) DO UPDATE SET failure_reason = excluded.failure_reason`,
+        [session_key, failure_reason, now],
+      )
+      // Generation keys are unique per spawn. Keep the short race window needed
+      // by an in-flight launcher completion, while bounding durable tombstones.
+      tx.runSync(
+        `DELETE FROM trident_launcher_crashes
+          WHERE datetime(crashed_at) < datetime(?, '-7 days')`,
+        [now],
+      )
+      tx.runSync(
+        `UPDATE code_trident_runs
+            SET subagent_status = 'crashed', failure_reason = ?, last_advanced_at = ?
+          WHERE workflow_run_id = ?
+            AND subagent_status = 'running'
+            AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+        [failure_reason, now, session_key],
+      )
+    })
+  }
+
   /**
    * Apply a partial update by id, re-stamping `last_advanced_at`. Only the
    * provided fields are written. Returns the reloaded row (or `null` if
@@ -386,8 +451,11 @@ export class TridentRunStore {
     // Always advance the cursor timestamp.
     push('last_advanced_at', this.now())
     params.push(id)
+    const statusGuard = patch.subagent_status !== undefined && patch.subagent_status !== 'crashed'
+      ? ` AND subagent_status IS NOT 'crashed'`
+      : ''
     await this.db.run(
-      `UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id = ?`,
+      `UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id = ?${statusGuard}`,
       params,
     )
     return this.get(id)
@@ -422,6 +490,65 @@ export class TridentRunStore {
         sets.push('failure_reason = ?')
         params.push(patch.failure_reason)
       }
+      // RETRACT A STALE IN-FLIGHT CLAIM. `subagent_status` is documented as the
+      // CURRENTLY in-flight subagent (migration 0077), so a terminal row that still
+      // says 'running' asserts something false about THIS RUN: the run is over —
+      // nothing will advance it again — and the column still presents it as working.
+      // Observed live on 2026-08-10: a cancelled run sat at `phase='stopped'` with
+      // `subagent_status='running'`.
+      //
+      // Note what is deliberately NOT claimed: that the child process is dead. It
+      // very often is not (see DURABILITY below). The column is wrong about the RUN,
+      // not necessarily about the process — which is why the fix is two-part rather
+      // than a one-line write here.
+      //
+      // WHICH READERS THIS PROTECTS — the honest list, because the obvious
+      // candidates do NOT apply and it would be easy to write a confident wrong
+      // rationale here. #143's harvest/terminal gate (`orchestrator.ts` step (1)/(1a))
+      // and orphan recovery are both UNREACHABLE on a terminal row: `step()` returns
+      // early on `isTerminalPhase(run.phase)` before either one. The hang watchdog
+      // keys on `last_advanced_at`, not on this column. What IS load-bearing is
+      // `update()`'s CRASH VETO (`AND subagent_status IS NOT 'crashed'`, above): on a
+      // terminal row it is the only thing latching a crash, because `update()` is the
+      // only writer REACHABLE on such a row that both lacks a
+      // `phase NOT IN (terminal)` predicate and carries the veto. The other two writers
+      // are each excluded for their own reason, and it is worth naming which:
+      // `saveIfActive()` (below) has the identical veto but ALSO the phase predicate, so
+      // it cannot land on a terminal row whatever this column says — its veto is
+      // unreachable here. `save()` (below) likewise has no phase predicate AND no veto
+      // at all, so it would clobber a 'crashed' latch outright — it is harmless only
+      // because it has ZERO production callers (every production commit goes through
+      // `saveIfActive`, `trident/tick.ts:263`); if one is ever added it needs the
+      // predicate. Beyond `update()`, the readers that matter are every human or tool
+      // read of a finished row, which is where the false claim was first spotted.
+      //
+      // ONLY A LIVE CLAIM IS CLEARED ('running' / 'pending'), and that restriction is
+      // load-bearing: nulling unconditionally would erase a 'crashed' marker whenever
+      // anything terminated an already-crashed run as 'failed', silently disarming
+      // `update()`'s veto while looking like a cleanup.
+      // 'completed'/'failed'/'crashed' are OUTCOMES worth keeping; 'running' and
+      // 'pending' are the only values that ASSERT a child is in flight, so they are
+      // the only ones a terminal transition has any business touching.
+      //
+      // NULL rather than a new 'cancelled' enum value: the column carries a CHECK
+      // constraint (migration 0077:107-108) that SQLite cannot alter without a table
+      // rebuild, and `null` already means "nothing in flight" here
+      // (`trident/orchestrator.ts` writes it on the no-subagent paths). No
+      // information is lost — the reason for the stop lives in `failure_reason`, and
+      // `subagent_run_id` is deliberately NOT cleared, so "was a child in flight when
+      // this run was cancelled?" stays answerable structurally. That matters because
+      // `/code stop` and board-cancel supply no reason at all.
+      //
+      // DURABILITY: this write alone is not enough. Cancelling does not kill the
+      // detached workflow (rjunee/neutron#177 — it keeps running to completion),
+      // whose next checkpoint would put 'running' straight back — so
+      // `trident/checkpoint.sh` freezes the same two liveness columns on a terminal
+      // row, and the two halves must stay in sync. It freezes ONLY those two: the
+      // orphan's branch/pr/result still land there, because while #177 stands they
+      // are the only trail back to a PR it opened after the cancel.
+      sets.push(
+        `subagent_status = CASE WHEN subagent_status IN ('running', 'pending') THEN NULL ELSE subagent_status END`,
+      )
       sets.push('last_advanced_at = ?')
       params.push(this.now())
       params.push(id)
@@ -503,7 +630,16 @@ export class TridentRunStore {
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
                 last_advanced_at = ?
-          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND (subagent_status IS NOT 'crashed' OR ? = 'crashed')
+            AND (
+              ? IS NOT 'running'
+              OR ? IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM trident_launcher_crashes
+                 WHERE session_key = ?
+              )
+            )`,
         [
           run.phase,
           run.round,
@@ -521,8 +657,26 @@ export class TridentRunStore {
           run.harvested_at,
           this.now(),
           run.id,
+          run.subagent_status,
+          run.subagent_status,
+          run.workflow_run_id,
+          run.workflow_run_id,
         ],
       )
+      if (res.changes === 0 && run.subagent_status === 'running' && run.workflow_run_id !== null) {
+        const crash = tx.get<{ failure_reason: string }>(
+          `SELECT failure_reason FROM trident_launcher_crashes WHERE session_key = ?`,
+          [run.workflow_run_id],
+        )
+        if (crash !== null) {
+          tx.runSync(
+            `UPDATE code_trident_runs
+                SET subagent_status = 'crashed', failure_reason = ?, last_advanced_at = ?
+              WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+            [crash.failure_reason, this.now(), run.id],
+          )
+        }
+      }
       return res.changes > 0
     })
   }

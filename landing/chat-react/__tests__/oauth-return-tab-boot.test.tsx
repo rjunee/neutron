@@ -288,9 +288,22 @@ describe('OAuth return → the shell opens on the connected-accounts view', () =
     // the redirect. Asserting the tab BUTTON looked selected would pass against
     // a shell that highlighted Admin while still rendering Chat.
     expect(container.textContent).toContain('owner@example.com')
-    // And the Admin tab is the one marked active in the bar.
-    const active = container.querySelector('[aria-selected="true"], [aria-current="page"]')
-    expect(active?.textContent ?? '').toContain('Admin')
+    // …and the CHAT panel is hidden, which is the discriminator the comment above
+    // is about: a shell that merely highlighted Admin while still rendering Chat
+    // would fail here.
+    //
+    // This used to assert the Admin TAB BUTTON was aria-selected. Admin left the tab
+    // band on 2026-08-07 — settings-shaped views moved into the top-right ☰ so web
+    // and mobile agree about what settings is (owner ask) — so there is no button to
+    // be selected, and the assertion moved to the outcome rather than being dropped.
+    const chatPanel = container.querySelector('.car-tabpanel') as HTMLElement
+    expect(chatPanel.hasAttribute('hidden')).toBe(true)
+    // And no band button claims to be Admin, so the move is asserted, not just the
+    // absence of the old assertion.
+    const bandLabels = Array.from(container.querySelectorAll('button[role="tab"]')).map(
+      (b) => b.textContent ?? '',
+    )
+    expect(bandLabels).not.toContain('Admin')
 
     await unmount()
   })

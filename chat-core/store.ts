@@ -102,6 +102,12 @@ export function mergeMessage(existing: ChatMessage, incoming: ChatMessage): Chat
     role: existing.role,
     project_id: incoming.project_id ?? existing.project_id,
     attachments: incoming.attachments ?? existing.attachments,
+    // The transcript NEVER regresses to null. A later partial (a receipt update, a
+    // re-delivery from a server that has not been migrated yet) carries no
+    // transcript, and blanking it there would silently un-index a voice note the
+    // device had already learned the words for — the same "never regress a known
+    // value" rule the server-assigned fields above follow.
+    transcript: incoming.transcript ?? existing.transcript ?? null,
     // Keep the original optimistic timestamp so the bubble doesn't jump.
     created_at: existing.created_at !== 0 ? existing.created_at : incoming.created_at,
     // Status only ever advances queued → sent → acked.

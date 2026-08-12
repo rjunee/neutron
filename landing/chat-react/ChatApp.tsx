@@ -914,7 +914,20 @@ function buildEditIndex(
   return map
 }
 
-function TypingIndicator(): React.JSX.Element {
+function TypingIndicator({
+  activity,
+}: {
+  activity?: { label: string } | null
+}): React.JSX.Element {
+  // SAY WHAT IT IS DOING, not just that it is doing something. Three dots for
+  // four minutes is indistinguishable from a hang — the owner watched exactly
+  // that on 2026-08-11 and asked for "some kind of response in the chat to say
+  // that it's actually working".
+  //
+  // The dots STAY. They are the "alive" signal and they animate; the label is
+  // additive, and absent for the window before the first tool call, so the
+  // indicator must still read correctly with no label at all.
+  const label = activity?.label
   return (
     <div className="car-row car-row-agent" aria-live="polite">
       <div className="car-avatar" aria-hidden="true">
@@ -924,6 +937,11 @@ function TypingIndicator(): React.JSX.Element {
         <span className="car-dot" />
         <span className="car-dot" />
         <span className="car-dot" />
+        {label !== undefined && label.length > 0 ? (
+          // `title` carries the collapsed one-liner on hover without spending a
+          // second line in the transcript on it.
+          <span className="car-typing-label">{label}</span>
+        ) : null}
       </div>
     </div>
   )
@@ -1517,6 +1535,7 @@ function Composer({
   const hasText = useComposer((s) => s.text.trim().length > 0)
   const composerRuntime = useComposerRuntime()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const sendInFlightRef = useRef(false)
 
   const canSend = hasText || draft.hasReady
 
@@ -1531,7 +1550,29 @@ function Composer({
     // value) so this component needn't re-render per keystroke.
     const body = composerRuntime.getState().text.trim()
     const urls = draft.readUrls()
+    if (sendInFlightRef.current) return
+    if (!canSend) return
     if (body.length === 0 && urls.length === 0) return
+    if (controller.getViewModel().isRunning) {
+      // assistant-ui intentionally refuses `runtime.send()` while running;
+      // bypass that client-only gate because the persistent REPL supports
+      // adding context to its active turn.
+      // Clear synchronously so two Enter key events cannot submit the same
+      // text while uploads/send are awaiting.
+      composerRuntime.setText('')
+      sendInFlightRef.current = true
+      void (async () => {
+        const ready = await draft.waitForUploads()
+        await controller.send(body, ready.length > 0 ? ready : undefined)
+        draft.clear()
+      })().catch(() => {
+        const newer = composerRuntime.getState().text.trim()
+        composerRuntime.setText(newer.length === 0 ? body : `${body}\n\n${newer}`)
+      }).finally(() => {
+        sendInFlightRef.current = false
+      })
+      return
+    }
     if (body.length > 0) {
       // Text (optionally + attachments): route through the runtime so Enter and
       // the Send button share ONE path — `onNew` waits for in-flight uploads,
@@ -1541,12 +1582,15 @@ function Composer({
       // Attachment-only: assistant-ui won't send an empty composer, so hand the
       // staged URLs to the controller directly. Await any still-uploading items
       // first (don't drop them), then clear the draft.
+      sendInFlightRef.current = true
       void (async () => {
         const ready = await draft.waitForUploads()
         if (ready.length === 0) return
         await controller.send('', ready)
         draft.clear()
-      })()
+      })().catch(() => undefined).finally(() => {
+        sendInFlightRef.current = false
+      })
     }
   }
 
@@ -1575,7 +1619,19 @@ function Composer({
           className="car-file-input"
           onChange={onPick}
         />
-        <ComposerPrimitive.Input className="car-input" placeholder="Message Neutron…" autoFocus rows={1} />
+        <ComposerPrimitive.Input
+          className="car-input"
+          placeholder="Message Neutron…"
+          autoFocus
+          rows={1}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && canSend) {
+              event.preventDefault()
+              event.stopPropagation()
+              send()
+            }
+          }}
+        />
         {/*
           There is deliberately NO Stop/cancel control here. One used to render
           in this slot (`ComposerPrimitive.Cancel`) and it was permanently
@@ -1591,25 +1647,18 @@ function Composer({
           the owner twice for asking it to stop. Decision + full reasoning:
           SPEC.md Decisions Log 2026-08-03.
 
-          While a turn is running the send button stays PRESENT but disabled,
-          rather than unmounting, so the composer doesn't reflow on every turn.
+          Claude Code accepts additional context during a running turn, so Send
+          remains live while the typing indicator is present.
         */}
-        <ThreadPrimitive.If running={false}>
-          <button
-            type="button"
-            className="car-send"
-            aria-label="Send"
-            disabled={!canSend}
-            onClick={send}
-          >
-            Send
-          </button>
-        </ThreadPrimitive.If>
-        <ThreadPrimitive.If running>
-          <button type="button" className="car-send" aria-label="Send" disabled>
-            Send
-          </button>
-        </ThreadPrimitive.If>
+        <button
+          type="button"
+          className="car-send"
+          aria-label="Send"
+          disabled={!canSend}
+          onClick={send}
+        >
+          Send
+        </button>
       </ComposerPrimitive.Root>
     </div>
   )
@@ -1815,13 +1864,19 @@ function ChatSurface({
             )}
           </ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={MESSAGE_COMPONENTS} />
-          {/* Chat-typing persistence — show the standard typing dots for the WHOLE
-              processing window, not just the pre-first-token wait. `hasActiveWork`
-              (the active project's Work Board has an `in_progress` item — the same
-              signal as the flashing Work-tab dot) keeps the dots visible while a
-              long/background build runs on after the ack turn settles, and stops
-              them the moment the board reports the work done. */}
-          {vm.awaitingFirstToken || vm.hasActiveWork ? <TypingIndicator /> : null}
+          {/* TURN-ONLY. `hasActiveWork` (a board item still `in_progress`) was
+              deliberately OR'd in here so the dots spanned a background build that
+              outlives the ack turn — and the owner rejected that on 2026-08-11:
+              "The turn has finished, according to the inspector, but I'm still
+              seeing a typing indicator... It feels like I should be expecting a
+              chat message from the agent soon. There is already a progress
+              indicator for work board items."
+
+              He is right about what the signal MEANS: typing dots promise an
+              incoming message. Board work has its own progress affordance, and
+              conflating them makes the dots lie. `hasActiveWork` stays on the view
+              model — the Work-tab dot uses it — it just no longer drives this. */}
+          {vm.awaitingFirstToken ? <TypingIndicator activity={vm.liveActivity} /> : null}
         </ThreadPrimitive.Viewport>
         <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
           ↓

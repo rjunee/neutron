@@ -30,7 +30,7 @@ import { groupReactions, isColdStartAck, spentChoiceValue } from '@neutronai/cha
 
 import type { ProjectTab } from './config.ts'
 import { parseWorkBoardItems, type WorkBoardItem } from './work-board-client.ts'
-import { parseActivityRow, type ActivityRow } from './activity-client.ts'
+import { activityScopeKey, parseActivityRow, type ActivityRow } from './activity-client.ts'
 import type {
   ChatMessage,
   ChatMessageOption,
@@ -145,16 +145,47 @@ export interface ChatViewModel {
    */
   awaitingFirstToken: boolean
   /**
+   * What the agent is doing RIGHT NOW, for the waiting indicator — the human tool
+   * label plus its collapsed one-liner, or null when nothing is in flight.
+   *
+   * Owner-asked 2026-08-11 after a 277-second turn showed him nothing: "I need
+   * some kind of response in the chat to say that it's actually working... like is
+   * it breaking down and scoping the work or what?"
+   *
+   * The data always existed — an ActivityInspector fed by a Pre/PostToolUse tap —
+   * but it was fanned to the inspector PANEL only. This surfaces the newest row in
+   * the chat thread itself.
+   */
+  liveActivity: { label: string; detail?: string } | null
+  /**
    * Chat-typing persistence — true while the active project's Work Board has at
-   * least one `in_progress` item (the SAME signal that flashes the Work-tab
-   * active-work dot). The typing indicator ORs this in with `awaitingFirstToken`
-   * so the dots stay visible for the WHOLE processing window — including a long
-   * or background build that continues AFTER the ack turn settles (the agent
-   * acks, dispatches the build, `awaitingReply` clears, but the board still shows
-   * work in flight). Clears the moment the board reports no `in_progress` item
-   * (work marked done), so the dots stop exactly when the work completes.
+   * least one `in_progress` item — the SAME signal that flashes the Work-tab
+   * active-work dot, which is now its ONLY consumer.
+   *
+   * It USED to be OR'd into the chat typing indicator so the dots spanned a
+   * background build that outlives the ack turn. The owner rejected that on
+   * 2026-08-11: the turn had finished and the dots were still spinning, which
+   * reads as "a message is coming" when none is. Board work has its own progress
+   * affordance. The indicator is turn-only now (`ChatApp.tsx`), so do not
+   * reintroduce the OR without re-deciding that with him.
    */
   hasActiveWork: boolean
+  /**
+   * Bumps whenever the ACTIVE project's board GAINS items. The shell watches it
+   * and reveals the Work tab, so a plan that materialises while the owner is
+   * looking at Chat does not sit unseen behind a tab.
+   *
+   * A monotonic counter rather than a boolean because the shell needs to
+   * distinguish "grew again" from "is still grown" — a boolean would fire once
+   * and then never again, and re-deriving it from a count in the shell would
+   * re-fire on every unrelated re-render.
+   *
+   * Bumped ONLY on growth, and never on the first frame for a board (see the
+   * handler): a fresh subscription delivers the whole board as one snapshot, and
+   * treating that as growth would yank the owner off Chat every time he opened a
+   * project that already had items.
+   */
+  workBoardGrewNonce: number
   status: ConnStatus
   /** Count of sends still queued/unacked (offline tail). */
   pending: number
@@ -445,6 +476,8 @@ export class NeutronChatController {
   private switchConnectingTimer: ReturnType<typeof setTimeout> | null = null
   private readonly switchConnectingGraceMs: number
   private awaitingReply = false
+  /** Newest activity row for the ACTIVE scope while a turn is in flight. */
+  private liveActivity: { label: string; detail?: string } | null = null
   private pending = 0
   private projectId: string | null
   /** FIX 1 — reactive project list (seeded from bootstrap, updated on frame). */
@@ -487,6 +520,14 @@ export class NeutronChatController {
    * updates this; cleared on project switch.
    */
   private activeWorkBoardItems: WorkBoardItem[] | null = null
+  /**
+   * Item count of the last ACTIVE-board frame, or null when no frame has been
+   * seen for the current board yet. Separate from `activeWorkBoardItems` because
+   * the null-vs-empty distinction is load-bearing: null means "no frame yet" (the
+   * next frame is a baseline, not growth) while [] means "a frame said zero".
+   */
+  private activeWorkBoardCount: number | null = null
+  private workBoardGrewNonce = 0
   private vm: ChatViewModel
   private seq = 0
   /** P1b — render id → the option `value` the user tapped (optimistic collapse). */
@@ -659,6 +700,7 @@ export class NeutronChatController {
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
     this.activeWorkBoardItems = null
+    this.activeWorkBoardCount = null
     if (this.importProgressTimer !== null) {
       clearTimeout(this.importProgressTimer)
       this.importProgressTimer = null
@@ -756,6 +798,8 @@ export class NeutronChatController {
    */
   async send(body: string, attachments?: readonly string[]): Promise<void> {
     this.awaitingReply = true
+    // A new turn starts clean: never inherit the previous turn's last step.
+    this.liveActivity = null
     // FIX #347 — a new turn begins: allow this turn's cold-start pill to show
     // (until its real reply starts), and clear any stale pill from the prior turn.
     this.replyStartedThisTurn = false
@@ -963,6 +1007,52 @@ export class NeutronChatController {
             /* a throwing panel subscriber must not wedge the frame loop */
           }
         }
+        // SURFACE IT IN THE CHAT TOO — under two guards, because the comment above
+        // records a deliberate decision NOT to publish() here: a keepalive tick
+        // arriving as an activity event would re-render the whole transcript.
+        //
+        //   1. only while a turn is IN FLIGHT — an idle session never re-renders,
+        //      which is exactly the case that comment protects.
+        //   2. only when the LABEL actually changed — repeated rows for the same
+        //      step are dropped, so a chatty tool cannot cause a render per event.
+        //
+        // Together these bound re-renders to real step transitions during a turn.
+        // Only STEP-MEANINGFUL kinds. `keepalive` is a real row kind and arrives
+        // DURING a turn, so without this filter a keepalive would overwrite the
+        // label with noise — and `token` fires per chunk, which would defeat the
+        // change-guard below. `error` is included deliberately: "it failed" is the
+        // most useful thing the indicator can say.
+        const STEP_KINDS = new Set(['tool_start', 'thinking', 'status', 'turn_start', 'error'])
+        if (
+          this.awaitingReply &&
+          STEP_KINDS.has(row.kind) &&
+          scopeKey === activityScopeKey(this.projectId)
+        ) {
+          // PREFER `detail` OVER `label`, because for the most common row kind the
+          // label is a KIND WORD and the meaning is in the detail.
+          // `activity-inspector.ts:417` emits `{kind:'status', label:'status',
+          // detail: summarize(message)}` — so the substrate's `message:'working'`
+          // arrives with the useful half in `detail`. Rendering `label` showed the
+          // owner a bubble reading literally "status" (screenshot, 2026-08-11) and
+          // hid "working" behind a hover nobody would find on a phone.
+          //
+          // The guard below compares the DISPLAYED text, not `label`. Comparing
+          // `label` was the second half of that bug: every status row carries the
+          // identical label, so the first one latched and no later status could
+          // ever replace it — the indicator froze on one word for the whole turn.
+          // Prefer `detail` ONLY when the label is a GENERIC KIND-WORD (label ===
+          // kind), which is exactly the `status` case. A `tool_start` label is the
+          // humanized TOOL NAME and must always win over any detail it carries —
+          // blanket detail-preference would replace "Reading files" with a file
+          // path, which is less informative, not more.
+          const generic = row.label === row.kind
+          const text =
+            generic && row.detail !== undefined && row.detail.length > 0 ? row.detail : row.label
+          if (this.liveActivity?.label !== text) {
+            this.liveActivity = { label: text }
+            this.publish()
+          }
+        }
       }
       return
     }
@@ -982,6 +1072,15 @@ export class NeutronChatController {
       // per-tab filter, but cached here so `computeHasActiveWork` survives
       // interleaved foreign frames.
       if ((framePid ?? '') === (this.projectId ?? '')) {
+        // GROWTH DETECTION, for revealing the Work tab. Compared against the
+        // PREVIOUS active-board count, and deliberately skipped when there was no
+        // previous count for this board (`null`) — the first frame after
+        // subscribing carries the entire board, and calling that "growth" would
+        // pull the owner off Chat every time he opened a project that already had
+        // items. Only a board that gains items WHILE he is watching counts.
+        const prev = this.activeWorkBoardCount
+        if (prev !== null && items.length > prev) this.workBoardGrewNonce += 1
+        this.activeWorkBoardCount = items.length
         this.activeWorkBoardItems = items
       }
       for (const fn of this.workBoardListeners) {
@@ -1370,7 +1469,11 @@ export class NeutronChatController {
       messages,
       isRunning: this.awaitingReply || liveStreams.length > 0,
       awaitingFirstToken: this.awaitingReply && liveStreams.length === 0,
+      // A settled turn reports null rather than freezing the last step on screen,
+      // which would read as "still working" forever.
+      liveActivity: this.awaitingReply ? this.liveActivity : null,
       hasActiveWork: this.computeHasActiveWork(),
+      workBoardGrewNonce: this.workBoardGrewNonce,
       // Chat-rail stability — present a project-switch's initial `connecting` as
       // `idle` so `ConnectionBanner` stays hidden across a warm switch. A real
       // disconnect (which clears `switchConnecting`) still reports its true

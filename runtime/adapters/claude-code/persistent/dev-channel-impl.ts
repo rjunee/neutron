@@ -243,6 +243,7 @@ const httpServer = Bun.serve({
         const body = (await req.json()) as {
           text: string
           turn_id?: string
+          additional?: boolean
           meta?: Record<string, string>
         }
         // Carry the turn_id in the notification `meta` so the PRIMARY echo path
@@ -266,7 +267,12 @@ const httpServer = Bun.serve({
         // Record the injected turn AFTER the notify resolves (poison-free). A prior
         // un-replied (abandoned) turn banks one unit of stale-reply debt inside
         // `onInject` so its in-order late reply is skipped, not mis-tagged.
-        turnEcho.onInject(typeof body.turn_id === 'string' ? body.turn_id : undefined)
+        // An additional message belongs to the already-running turn. It carries
+        // that turn's id for reply correlation, but must not look like a new
+        // outstanding turn to the fallback echo (which would bank phantom debt).
+        if (body.additional !== true) {
+          turnEcho.onInject(typeof body.turn_id === 'string' ? body.turn_id : undefined)
+        }
         return Response.json({ status: 'delivered' })
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)

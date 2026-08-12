@@ -34,7 +34,9 @@ describe('resolveActiveCredential', () => {
   it('prefers the env subscription token', () => {
     expect(
       resolveActiveCredential({ ...bareEnv(), CLAUDE_CODE_OAUTH_TOKEN: TOKEN }, noCredentialsOnDisk()),
-    ).toEqual({ kind: 'measurable', token: TOKEN })
+      // `account_label` is null because no sidecar names the account — the ordinary
+      // case, and the reason the series column stayed empty until something wrote one.
+    ).toEqual({ kind: 'measurable', token: TOKEN, account_label: null })
   })
 
   it('calls an API key unmeasurable — it is billed per token, not per window', () => {
@@ -48,6 +50,7 @@ describe('resolveActiveCredential', () => {
     expect(resolveActiveCredential(bareEnv(), { readFile: () => blob })).toEqual({
       kind: 'measurable',
       token: TOKEN,
+      account_label: null,
     })
   })
 

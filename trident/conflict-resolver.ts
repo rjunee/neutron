@@ -91,6 +91,14 @@ const NO_INTERACTIVE_RULE =
 const REDIRECT_RULE =
   'For ANY long or verbose command (a full test run), redirect stdout+stderr to a log file and read ONLY the summary tail — never let raw output flood your context.'
 
+// Same rule, same wording, as `NO_PATTERN_KILL_RULE` in trident/inner-workflow.mjs
+// (duplicated rather than shared because that file is an unimportable Workflow
+// script — the two other rules above are duplicated from it for the same reason).
+// This resolver is a FORGE with Bash running mid-rebase on the SHARED box, which is
+// exactly when an agent reaches for `pkill` to clear something it thinks is stuck.
+const NO_PATTERN_KILL_RULE =
+  'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match the whole machine, not your worktree, and one such command has already SIGTERMed every concurrent lane on this box including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
+
 /** The Forge contract for a mid-rebase conflict resolution. */
 function conflictPrompt(input: {
   repo_path: string
@@ -100,7 +108,7 @@ function conflictPrompt(input: {
   task: string
 }): string {
   const files = input.conflicted_files.length > 0 ? input.conflicted_files.join(', ') : '(run `git status` to find them)'
-  return `You are FORGE — Neutron's autonomous build sub-agent — resolving a git REBASE CONFLICT. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+  return `You are FORGE — Neutron's autonomous build sub-agent — resolving a git REBASE CONFLICT. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 
 Your cwd (${input.repo_path}) is a git working tree PART-WAY THROUGH \`git rebase ${input.base_branch}\` of branch \`${input.branch}\`. Another build in this same project merged first; your branch is being replayed on top of it and hit conflicts.
 

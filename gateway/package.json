@@ -46,6 +46,7 @@
     "@neutronai/tools": "workspace:*",
     "@neutronai/trident": "workspace:*",
     "@neutronai/watchdog": "workspace:*",
+    "@neutronai/wire-types": "workspace:*",
     "@neutronai/work-board": "workspace:*",
     "jose": "^5.9.0"
   }

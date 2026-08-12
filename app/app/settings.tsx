@@ -371,6 +371,44 @@ export default function SettingsScreen() {
           <Text style={styles.navRowChevron}>›</Text>
         </Pressable>
 
+        {/* A registered route nothing pushes is the ISSUES #385 defect, so this row
+            is part of the feature, not decoration —
+            `__tests__/server-editor-reachability.test.ts` guards the class. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Code generation"
+          testID="settings-codegen"
+          onPress={() => router.push('/codegen')}
+          style={({ pressed }) => [styles.navRow, pressed && styles.pressed]}
+        >
+          <View style={styles.navRowText}>
+            <Text style={styles.navRowTitle}>Code generation</Text>
+            <Text style={styles.navRowSubtitle}>
+              Which model and effort run each phase of a build.
+            </Text>
+          </View>
+          <Text style={styles.navRowChevron}>›</Text>
+        </Pressable>
+
+        {/* Placed directly above Code generation's sibling rows on purpose: the only
+            reason to read quota in a settings pane is to decide where to spend it, and
+            the control that spends it is the Code generation row. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Model usage"
+          testID="settings-usage"
+          onPress={() => router.push('/usage')}
+          style={({ pressed }) => [styles.navRow, pressed && styles.pressed]}
+        >
+          <View style={styles.navRowText}>
+            <Text style={styles.navRowTitle}>Model usage</Text>
+            <Text style={styles.navRowSubtitle}>
+              How much quota is left, and whether it will hold.
+            </Text>
+          </View>
+          <Text style={styles.navRowChevron}>›</Text>
+        </Pressable>
+
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Integrations"

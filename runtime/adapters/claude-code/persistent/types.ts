@@ -194,6 +194,10 @@ export interface PersistentReplSubstrateOptions {
    *  seam (mirrors `onRecoveredReply`/`postWedgeAlert`). Default: a structured
    *  stderr notice. */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
+  /** Called when the crash watchdog observes that this substrate's pooled child
+   *  exited. Runtime consumers use this durable failure edge to reap detached
+   *  work owned by the dead child. */
+  onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
   /** Rate-limit / overload BANNER notice sink (master-table row #10). Fired on the
    *  rising edge when the output scanner sees a `temporary` (429/529/overload/502)
    *  or `usage-cap` (subscription window) banner in the ring — NOTIFY-ONLY, no
@@ -449,6 +453,8 @@ export interface ActiveTurn {
    *      `incarnation` nonce makes `<oldNonce>:1` ≠ `<newNonce>:1`, so a straggler
    *      from a prior incarnation can never complete a turn in the new one. */
   turnId: string
+  /** Serializes additional user messages so concurrent sends preserve wire order. */
+  injectionTail?: Promise<void>
   /** Set true by `onDeath` when the REPL process exited mid-turn — signals the
    *  driver to enqueue this turn's dropped inbound for replay-after-resume
    *  (pending-respawns queue, brief § 2 row #11 / § 6 acceptance #1). */

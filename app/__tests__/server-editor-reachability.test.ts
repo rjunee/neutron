@@ -89,8 +89,25 @@ describe('#385 — /settings is navigable (the only signed-in server editor)', (
     expect([...navTargets()]).toContain('/admin');
   });
 
+  it('/codegen is reachable — the build-model settings hang off Settings too', () => {
+    // The per-phase model config had a live endpoint and no way to reach it from a
+    // phone. Adding the screen without this row would have recreated #385 exactly:
+    // a registered route nothing pushes.
+    const settings = read('app', 'settings.tsx');
+    expect(settings).toContain('settings-codegen');
+    expect(settings).toContain("router.push('/codegen')");
+    expect([...navTargets()]).toContain('/codegen');
+  });
+
   it('/settings is still registered on the Stack (a push at a dead route routes nowhere)', () => {
     expect(read('app', '_layout.tsx')).toContain('<Stack.Screen name="settings" />');
+  });
+
+  it('/codegen is registered on the Stack too — the other half of the same pair', () => {
+    // The row and the registration fail INDEPENDENTLY: a push at an unregistered
+    // route goes nowhere, and a registered route nothing pushes is unreachable.
+    // Both are asserted because either alone leaves a dead control.
+    expect(read('app', '_layout.tsx')).toContain('<Stack.Screen name="codegen" />');
   });
 });
 

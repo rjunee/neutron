@@ -85,6 +85,10 @@ export interface ReplRegistryRecord {
   /** Epoch ms the hard cap tripped — auto-recovery OFF until an operator clears
    *  it via the admin endpoint. */
   capped_at?: number
+  /** Epoch ms after the durable child-crash sink committed for this PID edge. */
+  child_crash_notified_at?: number
+  /** Unique ownership token for this spawned child incarnation. */
+  child_generation?: string
 }
 
 /** All records keyed by `sessionKey`. */

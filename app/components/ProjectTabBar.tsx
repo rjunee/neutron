@@ -13,11 +13,14 @@
  *     sidebar on the left of the tab content area. Each tab is a full-
  *     width row.
  *
- * BOTH layouts terminate in the usage meter. The reading belongs to the
- * credential, not to a viewport, so neither branch is allowed to be the one
- * without it — the `usage` prop's "unknown" default made a call site that forgot
- * to pass it look deliberate rather than broken, and the wide branch shipped
- * with no meter at all for exactly that reason.
+ * BOTH layouts USED TO terminate in the usage meter, and neither may draw it now:
+ * the owner asked for that reading to sit above the message input instead ("move
+ * the hairline session status bar to instead be on the top of the message input
+ * box, rather than at the top of the screen"), so it is published by the composer
+ * dock and this component no longer takes a `usage` prop at all. The narrow band
+ * therefore draws its own bottom hairline again — it had stopped, because the
+ * meter WAS that seam. The wide sidebar needed no restoration: its visible
+ * boundary is the RIGHT border, which never depended on the meter.
  *
  * Pure presentation — receives the active tab + an `onSelect` callback.
  * The opacity-fade Slot transition lives in the layout (so the fade
@@ -30,8 +33,6 @@ import { Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimen
 import { BREAKPOINTS, DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
 import { PHASE } from '../lib/theme';
 import { PROJECT_TABS, type ProjectTabSpec } from '../lib/project-tabs';
-import { UsageMeter } from './UsageMeter';
-import { USAGE_UNKNOWN, type UsagePayload } from '../lib/usage-client';
 
 /**
  * The builtin native-tab keys the loading default ({@link PROJECT_TABS})
@@ -61,12 +62,11 @@ export interface ProjectTabBarProps {
    */
   badges?: ReadonlyMap<string, number>;
   /**
-   * The active credential's usage standing. Drawn as the band's bottom seam.
+   * (removed) the usage reading used to be drawn here as the band's bottom seam.
    * Defaults to "unknown", which renders as the plain hairline — so a caller
    * that has not wired the meter yet gets exactly the divider that was there
    * before it existed.
    */
-  usage?: UsagePayload;
 }
 
 export function ProjectTabBar({
@@ -74,19 +74,17 @@ export function ProjectTabBar({
   onSelect,
   tabs = PROJECT_TABS,
   badges,
-  usage = USAGE_UNKNOWN,
 }: ProjectTabBarProps) {
   const { width } = useWindowDimensions();
   const wide = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
   return wide ? (
-    <WideTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} usage={usage} />
+    <WideTabBar tabs={tabs} active={active} onSelect={onSelect} badges={badges} />
   ) : (
     <NarrowTabBar
       tabs={tabs}
       active={active}
       onSelect={onSelect}
       badges={badges}
-      usage={usage}
     />
   );
 }
@@ -113,13 +111,11 @@ function NarrowTabBar({
   active,
   onSelect,
   badges,
-  usage,
 }: {
   tabs: readonly ProjectTabSpec[];
   active: string | null;
   onSelect: (key: string) => void;
   badges?: ReadonlyMap<string, number>;
-  usage: UsagePayload;
 }) {
   return (
     <View style={styles.narrowBand} testID="project-tab-bar-narrow">
@@ -153,9 +149,6 @@ function NarrowTabBar({
           );
         })}
       </ScrollView>
-      {/* The band's bottom edge. Two 1px lines when there is a reading, a plain
-          hairline when there is not. */}
-      <UsageMeter usage={usage} />
     </View>
   );
 }
@@ -165,13 +158,11 @@ function WideTabBar({
   active,
   onSelect,
   badges,
-  usage,
 }: {
   tabs: readonly ProjectTabSpec[];
   active: string | null;
   onSelect: (key: string) => void;
   badges?: ReadonlyMap<string, number>;
-  usage: UsagePayload;
 }) {
   return (
     <View style={styles.wideBar} testID="project-tab-bar-wide">
@@ -202,11 +193,6 @@ function WideTabBar({
           );
         })}
       </View>
-      {/* The sidebar's bottom edge, same object as the narrow band's: the reading
-          belongs to the credential, not to a viewport, so it is drawn wherever
-          the tab band is. Full sidebar width — the item padding moved inside
-          `wideItems` so this line is not inset from the rail it terminates. */}
-      <UsageMeter usage={usage} />
     </View>
   );
 }
@@ -220,12 +206,16 @@ const styles = StyleSheet.create({
   // Seated tab band (M1 UX REDESIGN PR-6, mirror of PR-3 web `.tabs`): a
   // `surface` band with a bottom hairline; tabs sit on it as top-rounded
   // sheets, the active one fused to the content sheet below.
-  // The band no longer draws its own bottom hairline: `UsageMeter` renders as
-  // the band's last child and IS that seam, whether or not there is a reading to
-  // show. One line, one owner.
+  // THE BAND DRAWS ITS OWN BOTTOM HAIRLINE AGAIN. It had stopped, because
+  // `UsageMeter` rendered as the band's last child and WAS that seam — "one line,
+  // one owner". The meter has moved to sit above the message input at the owner's
+  // request, so the band would otherwise lose its edge entirely; the issue that
+  // recorded the move called this consequence out, and this is it being honoured.
   narrowBand: {
     flexGrow: 0,
     backgroundColor: THEME.surface,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: THEME.hairline,
   },
   narrowContent: {
     paddingHorizontal: SPACING.sm,
@@ -287,8 +277,10 @@ const styles = StyleSheet.create({
     borderRightWidth: 1,
     borderRightColor: THEME.hairline,
   },
-  // The tab rows own the sidebar's padding so the meter beneath them can run the
-  // full width of the rail rather than sitting inset inside it.
+  // The tab rows own the sidebar's padding. This dates from when the usage meter
+  // sat beneath them and had to run the rail's full width; the meter has since
+  // moved above the message input, and the padding is left here because the
+  // sidebar's visible boundary is its RIGHT border, which never depended on it.
   wideItems: {
     paddingTop: SPACING.sm,
     paddingHorizontal: SPACING.sm,

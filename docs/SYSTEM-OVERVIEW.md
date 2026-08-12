@@ -5199,12 +5199,45 @@ deleted, no dual path):
   the dedicated warm `cc-trident-fire-*` substrate (one warm pool entry per repo
   cwd, since the persistent pool keys on instance not cwd, and the workflow's
   `isolation:'worktree'` forks from the fire turn's git cwd).
-- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` scans `git
-  worktree list` for the deterministic `trident/<slug>` branch and removes it on
-  every path (independent of Forge's return value — the harness only auto-cleans
-  an UNCHANGED worktree, and a Forge build always commits). `merge.ts` adds the
-  OUTER backstop (best-effort `git worktree remove --force` + `prune` after a
-  landed merge), flipping the old "NO `git worktree remove`" lock.
+- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` runs the
+  checked-in `trident/worktree-cleanup.sh` against the deterministic
+  `trident/<slug>` branch on every path (independent of Forge's return value —
+  the harness only auto-cleans an UNCHANGED worktree, and a Forge build always
+  commits). `merge.ts` adds the OUTER backstop (best-effort `git worktree remove`
+  + `prune` after a landed merge), flipping the old "NO `git worktree remove`"
+  lock.
+- **…but cleanup is NEVER destructive (ISSUES #541):** that `finally{}` also
+  fires on THROW and ABORT — exactly when Forge died mid-edit — and it used to be
+  a cheap-model agent told to "ignore individual command failures" while running
+  `git worktree remove --force` + `git branch -D`. On PR #171 it destroyed 197
+  insertions across 7 files. The decision is now deterministic shell with no LLM
+  judgement in it: a worktree that is DIRTY (uncommitted changes **including
+  untracked files**) or unverifiable is PRESERVED, its paths printed, exit 3; a
+  clean one is removed with a plain `git worktree remove` (no `--force`, so git's
+  own dirty check is a second gate); the pr-mode `git branch -D` runs only once
+  `git ls-remote` proves origin holds the same sha (local mode never deletes it).
+  `merge.ts` applies the same gate to every worktree removal it does, and fails
+  the merge with "trident PRESERVED uncommitted work at `<path>`" rather than
+  letting git's raw "already checked out at `<path>`" be the operator's notice.
+  Preserve-by-default only works if it never cries wolf, so: git's stderr is kept
+  out of both probes (a warning on a clean tree is not a dirty path), the SHARED
+  CHECKOUT is skipped entirely (git refuses to remove a main working tree, and
+  `merge.ts` legitimately parks it on a feature branch — a branch it still holds
+  is reported `KEPT … reason=checked-out` at exit 0), the dirt probe requires
+  `rev-parse --show-toplevel` to name the path itself **in both copies** (else a
+  registered path that has stopped being a worktree root reports the enclosing
+  repo's dirt as its own; the shell says `SKIPPED … reason=not-a-worktree-root`),
+  and **only exit 3** means preserved work — 2 is a usage error, 127 a bad script
+  path, and the caller reports those as a cleanup FAILURE that inspected nothing.
+  The gate also cannot break itself: the script's output is capped (a 20k-line
+  dirty tree would push the `RESULT` line out of the transcribing agent's window
+  and invert the alarm), the exit code is read from two sources so a string `"3"`
+  or a dropped field still counts, and the lone network call (`ls-remote`) runs
+  with `GIT_TERMINAL_PROMPT=0` plus a `timeout` deadline so a black-holed origin
+  cannot hang a `finally{}` nobody is watching. A preserved DIRTY merge worktree
+  does wedge every retry — the path is run-keyed and stable — which is the
+  deliberate trade: a wedged merge is recoverable, a force-removed conflict
+  resolution is not, and the error names the path and the way out.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
@@ -5286,7 +5319,7 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   (`trident/state-machine.ts`): the phase graph
   `forge-init → {argus | ralph-plan} → ralph-task → … → argus ⇄ forge-fix
   → done` with terminal `done | failed | stopped`, the Argus round cap
-  (`max_rounds`, default 8) and the Ralph plan↔task round cap
+  (`max_rounds`, default 10) and the Ralph plan↔task round cap
   (`max_ralph_rounds`, default 20). The pure `computeTransition` owns the
   control flow; `deps.classify` reads the sub-agent outcome. PR-2 shipped
   `stubAdvanceDeps` (always "running"); PR-3 supersedes it with a real
@@ -5325,8 +5358,12 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   atlas/sentinel SYSTEM personas (`prompts/{atlas,sentinel}.md` via
   `@neutronai/prompts` `loadPrompt`, `trident/agent-prompts.ts` → `dispatchAgent`).
   `trident/merge.ts` fills the
-  `'pr'` (`gh pr merge --squash`) and `'local'` (`git merge --no-ff`) merge
-  bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
+  `'pr'` (`gh pr merge --squash --match-head-commit <reviewed OID>` — #545: the
+  merge is PINNED to the commit the reviewed diff was generated from — the
+  building agent's reported `commitSha`, never a fresh head probe — carried in
+  `inner_result.reviewedHead`, so a head that moved after the APPROVE fails
+  LOUDLY instead of shipping unreviewed code) and
+  `'local'` (`git merge --no-ff`) merge bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
   tested the legacy harness fixes are mapped (see `trident/legacy-fixes.test.ts`): no
   phantom-id poll, no silent exit, loud fail on a missing Ralph
   `REMAINING_TASKS`, the `max_rounds`/`max_ralph_rounds` caps, the

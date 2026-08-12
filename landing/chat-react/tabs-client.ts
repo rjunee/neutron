@@ -116,6 +116,30 @@ const GENERAL_WORK_TAB_LITERAL: TabDescriptor = {
 }
 export const GENERAL_WORK_TAB: TabDescriptor = Object.freeze(GENERAL_WORK_TAB_LITERAL)
 
+/**
+ * The Documents descriptor injected into GENERAL's tab set.
+ *
+ * Same shape of gap as the Work tab above, and found the same way: the owner had a
+ * General work card whose plan-doc link did nothing, because General's tab set was
+ * Chat + Work + Admin and the doc-link resolver waits for a `docs` tab that never
+ * arrived. The engine's global set is Admin-only, so no `documents` descriptor was
+ * ever produced for General even though its docs ARE backend-reachable — the store
+ * roots them at `<owner_home>/Projects/general/docs`, the same rule every named
+ * project follows.
+ *
+ * `order: 6` puts it directly after Work, so General reads chat → work → docs, which
+ * is the ordering named projects already have and the one the owner asked for.
+ */
+const GENERAL_DOCS_TAB_LITERAL: TabDescriptor = {
+  key: 'documents',
+  label: 'Docs',
+  scope: 'global',
+  source: 'builtin',
+  order: 6,
+  mount: { kind: 'builtin', target: 'docs' },
+}
+export const GENERAL_DOCS_TAB: TabDescriptor = Object.freeze(GENERAL_DOCS_TAB_LITERAL)
+
 export class WebTabsClient {
   private readonly base_url: string
   private readonly token: string

@@ -56,7 +56,7 @@ describe('Code-Gen Core — manifest', () => {
     expect(fromManifest).toEqual(fromConst)
   })
 
-  test('codegen_status output enum locks the full pending/running/completed/failed/cancelled surface', () => {
+  test('codegen_status output enum declares both legacy task and Trident run phases', () => {
     const m = loadManifest()
     const status = m.tools.find((t) => t.name === 'codegen_status')
     expect(status).toBeDefined()
@@ -65,8 +65,20 @@ describe('Code-Gen Core — manifest', () => {
     const statusProp = props?.['status'] as { enum?: string[] } | undefined
     expect(statusProp).toBeDefined()
     expect(statusProp?.enum?.sort()).toEqual(
-      ['cancelled', 'completed', 'failed', 'pending', 'running'],
+      [
+        'argus', 'cancelled', 'completed', 'done', 'failed', 'forge-fix',
+        'forge-init', 'pending', 'ralph-plan', 'ralph-task', 'running', 'stopped',
+      ],
     )
+  })
+
+  test('MUTATION: codegen_fetch preserves required fields for both result variants', () => {
+    const fetch = loadManifest().tools.find((tool) => tool.name === 'codegen_fetch')
+    const schema = fetch?.output_schema as { oneOf?: Array<{ required?: string[] }> }
+    expect(schema.oneOf?.map((variant) => variant.required)).toEqual([
+      ['pr_number', 'branch', 'worktree', 'summary'],
+      ['status', 'dispatch_path', 'run_id', 'phase', 'reason', 'already_terminal'],
+    ])
   })
 
   test('UI surfaces — launcher_icon + app_tab both declared', () => {

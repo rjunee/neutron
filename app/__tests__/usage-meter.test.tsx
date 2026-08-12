@@ -31,6 +31,7 @@ installNativeHarness();
 setHarnessPlatform('ios');
 
 const { mountScreen } = await import('./support/mount');
+const { ComposerDock, ComposerDockProvider } = await import('../lib/composer-dock');
 const { UsageMeter } = await import('../components/UsageMeter');
 const { ProjectTabBar } = await import('../components/ProjectTabBar');
 const { THEME } = await import('../lib/theme');
@@ -118,28 +119,33 @@ describe('UsageMeter', () => {
 });
 
 describe('the tab band', () => {
-  it('renders the meter as its own bottom edge', async () => {
-    const screen = await mountScreen(
-      createElement(ProjectTabBar, {
-        active: 'chat',
-        onSelect: () => undefined,
-        usage: available(0.9, 0.2),
-      }),
-    );
-    expect(screen.byTestId('project-tab-bar-narrow')).not.toBeNull();
-    expect(screen.byTestId('usage-meter')).not.toBeNull();
-    expect(normalizeColor(screen.byTestId('usage-meter-session-fill')?.style.backgroundColor)).toBe(
-      normalizeColor(THEME.usage_warning),
-    );
-    screen.unmount();
-  });
-
-  it('degrades to the plain divider when the caller has no reading to give', async () => {
+  it('does NOT render the meter any more — it moved above the message input', async () => {
+    // The owner asked for the reading to sit above the input rather than at the top
+    // of the screen. This test used to assert the opposite, deliberately; it is
+    // inverted rather than deleted so the move is visible in the history.
     const screen = await mountScreen(
       createElement(ProjectTabBar, { active: 'chat', onSelect: () => undefined }),
     );
-    expect(screen.byTestId('usage-meter')).not.toBeNull();
-    expect(screen.byTestId('usage-meter-session-fill')).toBeNull();
+    expect(screen.byTestId('project-tab-bar-narrow')).not.toBeNull();
+    expect(screen.byTestId('usage-meter')).toBeNull();
+    screen.unmount();
+  });
+
+  it('draws its OWN bottom hairline again, or the band loses its edge', async () => {
+    // THE RECORDED CONSEQUENCE of the move (ISSUES #519 called it out): the band had
+    // stopped drawing a bottom hairline precisely because the meter WAS that seam.
+    // Move the meter without this and the band silently loses its boundary.
+    const screen = await mountScreen(
+      createElement(ProjectTabBar, { active: 'chat', onSelect: () => undefined }),
+    );
+    const band = screen.byTestId('project-tab-bar-narrow');
+    expect(band).not.toBeNull();
+    // READ THE PAINT, NOT THE PROP. RNW compiles styles into atomic CSS classes, so
+    // `band.style.borderBottomColor` is the empty string even when the border is
+    // applied — measured. `getComputedStyle` is what actually answers.
+    const painted = band!.ownerDocument.defaultView!.getComputedStyle(band!);
+    expect(normalizeColor(painted.borderBottomColor)).toBe(normalizeColor(THEME.hairline));
+    expect(painted.borderBottomWidth).not.toBe('');
     screen.unmount();
   });
 });
@@ -192,9 +198,8 @@ function withWideViewport(width = 1200, height = 900): () => void {
 }
 
 describe('the wide tab band (web, ≥800px)', () => {
-  // The wide sidebar IS the tab band at desktop width, so it owns the same seam.
-  // It shipped without one because the layout's wide call site never passed the
-  // prop and the default made that look intentional.
+  // The wide sidebar IS the tab band at desktop width. It no longer owns the meter
+  // either — see the narrow block — and its own boundary is the right border.
   let restoreViewport: (() => void) | null = null;
   beforeAll(() => {
     setHarnessPlatform('web');
@@ -212,29 +217,14 @@ describe('the wide tab band (web, ≥800px)', () => {
     expect(Dimensions.get('window').width).toBeGreaterThan(BREAKPOINTS.narrow_max);
   });
 
-  it('renders the meter as the sidebar own bottom edge', async () => {
-    const screen = await mountScreen(
-      createElement(ProjectTabBar, {
-        active: 'chat',
-        onSelect: () => undefined,
-        usage: available(0.96, 0.2),
-      }),
-    );
-    expect(screen.byTestId('project-tab-bar-wide')).not.toBeNull();
-    expect(screen.byTestId('usage-meter')).not.toBeNull();
-    expect(normalizeColor(screen.byTestId('usage-meter-session-fill')?.style.backgroundColor)).toBe(
-      normalizeColor(THEME.usage_critical),
-    );
-    screen.unmount();
-  });
-
-  it('degrades to the plain divider when there is no reading', async () => {
+  it('does NOT render the meter either, and needs no seam restored', async () => {
+    // The wide sidebar's visible boundary is its RIGHT border, which never depended
+    // on the meter — so unlike the narrow band it loses nothing by the move.
     const screen = await mountScreen(
       createElement(ProjectTabBar, { active: 'chat', onSelect: () => undefined }),
     );
     expect(screen.byTestId('project-tab-bar-wide')).not.toBeNull();
-    expect(screen.byTestId('usage-meter')).not.toBeNull();
-    expect(screen.byTestId('usage-meter-session-fill')).toBeNull();
+    expect(screen.byTestId('usage-meter')).toBeNull();
     screen.unmount();
   });
 });
@@ -249,20 +239,52 @@ describe('the wide tab band (web, ≥800px)', () => {
  * one reads the layout and requires EVERY `<ProjectTabBar>` in it to hand over a
  * reading, so a third call site cannot be added silently either.
  */
-describe('every ProjectTabBar call site supplies a reading', () => {
-  it('passes `usage` at every render path in the project layout', async () => {
+describe('the composer dock is the meter\'s new owner', () => {
+  it('renders the meter above the published input', async () => {
+    // THE MOVE ITSELF, driven: mount the dock with a reading and the meter is there.
+    const screen = await mountScreen(
+      createElement(ComposerDockProvider, null, createElement(ComposerDock, { usage: available(0.9, 0.2) })),
+    );
+    expect(screen.byTestId('composer-dock')).not.toBeNull();
+    expect(screen.byTestId('usage-meter')).not.toBeNull();
+    // The colour bands still belong to the meter wherever it lives.
+    expect(normalizeColor(screen.byTestId('usage-meter-session-fill')?.style.backgroundColor)).toBe(
+      normalizeColor(THEME.usage_warning),
+    );
+    screen.unmount();
+  });
+
+  it('renders NOTHING extra when no reading is threaded', async () => {
+    // The harness mounts a bare dock, and so does any caller that has no reading
+    // yet. An "unknown" meter drawn there would put a stray hairline above the
+    // input on every such mount.
+    const screen = await mountScreen(
+      createElement(ComposerDockProvider, null, createElement(ComposerDock)),
+    );
+    expect(screen.byTestId('composer-dock')).not.toBeNull();
+    expect(screen.byTestId('usage-meter')).toBeNull();
+    screen.unmount();
+  });
+
+  it('the LAYOUT actually threads the reading to the dock', async () => {
+    // The anti-"built but not wired" half, and the reason this guard exists at all:
+    // it used to require every `<ProjectTabBar>` to be handed a reading, because a
+    // call site that forgot made the wide branch ship with no meter. Same shape, new
+    // owner — the dock is now the single call site that must carry it.
     const { join } = await import('node:path');
     const source = await Bun.file(
       join(import.meta.dir, '..', 'app', 'projects', '[id]', '_layout.tsx'),
     ).text();
-    // `\s` after the name keeps the doc-comment mention (`<ProjectTabBar>`) out
-    // of the match set; every real call site opens with a newline of props.
-    const elements = source.match(/<ProjectTabBar\s[\s\S]*?\/>/g) ?? [];
-    // Both layouts — wide sidebar and narrow band. Fewer means the regex stopped
-    // matching the source, not that the layout got simpler.
-    expect(elements.length).toBe(2);
-    const missing = elements.filter((el) => !/\busage=/.test(el));
-    expect(missing).toEqual([]);
+    const docks = source.match(/<ComposerDock\s[\s\S]*?\/>/g) ?? [];
+    expect(docks.length).toBe(1);
+    expect(docks.filter((el) => !/\busage=/.test(el))).toEqual([]);
+    // And the tab bar must NOT have regained it — one owner, or the hairline doubles
+    // up. Scoped to each ELEMENT: my first attempt was `/<ProjectTabBar[\s\S]*?usage=/`
+    // over the whole file, which matched from the tab bar to the DOCK's own `usage=`
+    // and failed on correct code. Same lazy-but-unbounded mistake as reaching for
+    // `indexOf` when the target is the second occurrence.
+    const bars = source.match(/<ProjectTabBar\s[\s\S]*?\/>/g) ?? [];
+    expect(bars.filter((el) => /\busage=/.test(el))).toEqual([]);
   });
 });
 

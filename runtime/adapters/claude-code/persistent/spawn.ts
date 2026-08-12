@@ -177,7 +177,8 @@ async function spawnSession(
 
   // Construct + register the session BEFORE spawning so a fast /channel-ready
   // POST from the dev-channel can never race ahead of the sink registration.
-  const session = new ReplSession(sessionKey, sessionId, channelName, cwd)
+  const childGeneration = randomUUID()
+  const session = new ReplSession(sessionKey, childGeneration, sessionId, channelName, cwd)
   session.toolSurface = toolSurface.join(',')
   // Stamp the active project scope this REPL serves (folded into the pool key, so
   // it is stable for the session's whole lifetime). The `/tool-call` sink reads
@@ -624,6 +625,7 @@ async function spawnSession(
           : resume !== undefined,
       model,
       pid: child.pid,
+      child_generation: childGeneration,
       first_ready_at: Date.now(),
     }
     if (session.channelPort !== undefined) record.devchannel_port = session.channelPort
@@ -633,7 +635,11 @@ async function spawnSession(
       // must not survive to block the next tick's recovery (Codex P2-3).
       withRegistry(options.replRegistryPath, (registry) => {
         const prev = registry[sessionKey]
-        const { respawn_in_flight_at: _drop, ...merged } = prev ? { ...prev, ...record } : record
+        const {
+          respawn_in_flight_at: _drop,
+          child_crash_notified_at: _oldCrashEdge,
+          ...merged
+        } = prev ? { ...prev, ...record } : record
         registry[sessionKey] = merged
         return { registry, result: undefined }
       })
@@ -881,13 +887,18 @@ export async function waitForReplIdle(session: ReplSession, quietMs: number, max
   }
 }
 
-export async function injectMessage(channelPort: number, text: string, turnId: string): Promise<void> {
+export async function injectMessage(
+  channelPort: number,
+  text: string,
+  turnId: string,
+  additional = false,
+): Promise<void> {
   const resp = await fetch(`http://127.0.0.1:${channelPort}/message`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Sink-Token': sink.token },
     // `turn_id` round-trips through the dev-channel onto the matching reply so
     // `onReply` can correlate the completion to this exact turn (Argus r5 fix).
-    body: JSON.stringify({ text, turn_id: turnId }),
+    body: JSON.stringify({ text, turn_id: turnId, additional }),
   })
   if (!resp.ok) {
     throw new Error(`persistent-repl: inject failed (${resp.status})`)

@@ -326,9 +326,28 @@ const ATTACHMENT_TRANSCRIPT_MAX_CHARS = 4000
  * CONSTANT-surface change: it is present on EVERY turn, so the reuse guard below
  * is satisfied (a constant surface, just a larger one).
  *
+ * `WebSearch` + `WebFetch` are here because an assistant that cannot look anything
+ * up is a materially different product from one that can, and this surface is the
+ * ONLY thing that decides. Their absence was not a policy — nothing anywhere
+ * declined web access; the two names had simply never been added to this array, and
+ * the effect was invisible because a missing built-in produces no error, only an
+ * agent that says it cannot search.
+ *
+ * ⚠️ IT ALSO MADE AN APPROVAL PROMPT LIE. A ritual declaring `WebSearch` must be
+ * approved for `egress: 'web'` through a SEPARATE grant whose prompt says the ritual
+ * "may reach the public internet" — and the owner granted it for `kaizen`. But a
+ * ritual composes on THIS surface and cannot apply its own (`reminders/ritual-fire.ts`
+ * module header: the warm-session reuse guard would evict the session), so the tool
+ * was never present and the grant could never do anything. An approval prompt that
+ * overstates what is being granted costs more than a missing feature: it spends the
+ * credibility the entire gate depends on. The gate is now truthful in the only way
+ * that matters — the capability it names exists.
+ *
  * Constant across turns (the persistent substrate's reuse guard refuses to serve
  * a turn whose `--tools` surface differs from the warm REPL's, so a varying
- * surface would thrash the pool).
+ * surface would thrash the pool). Adding to this array is safe for that reason and
+ * that reason only: it is a bigger CONSTANT, not a varying one. The first turn after
+ * a deploy respawns the warm child once, as any deploy does.
  */
 export const LIVE_AGENT_TOOL_NAMES = [
   'Read',
@@ -339,6 +358,8 @@ export const LIVE_AGENT_TOOL_NAMES = [
   'Bash',
   'Skill',
   'Workflow',
+  'WebSearch',
+  'WebFetch',
 ] as const
 
 /**
@@ -615,6 +636,8 @@ export interface BuildLiveAgentTurnInput {
    * is per-dispatch and therefore race-free across concurrent topics.
    */
   substrate: Substrate
+  /** Deliver text into the active persistent-REPL turn; false when none is live. */
+  injectActiveTurn?: (turn: LiveAgentTurnRequest, text: string) => Promise<boolean>
   /**
    * ACTIVITY INSPECTOR tee (SPEC § WAVE 3.5). When wired by the composer, EVERY
    * substrate event for this turn is handed over as it arrives — including the
@@ -924,6 +947,8 @@ export function buildLiveAgentTurn(
    * either is pooled — that gap is what this chain closes.
    */
   const turnChains = new Map<string, Promise<void>>()
+  const activeTopics = new Set<string>()
+  const queuedTurnCount = new Map<string, number>()
 
   // The REPL `--tools` allow-list only consumes `t.name`; the rest of the
   // ToolDef shape is contract filler for the locked AgentSpec interface.
@@ -945,8 +970,71 @@ export function buildLiveAgentTurn(
    */
   function runLiveAgentTurn(turn: LiveAgentTurnRequest): Promise<LiveAgentTurnResult> {
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
+    if (
+      activeTopics.has(topicKey) &&
+      queuedTurnCount.get(topicKey) === 1 &&
+      input.injectActiveTurn !== undefined &&
+      turn.seed_turn !== true &&
+      turn.button_prompt_id === undefined &&
+      turn.user_text !== RETRY_TURN_VALUE &&
+      turn.user_text !== RECONNECT_AUTH_VALUE
+    ) {
+      const attachmentsFragment = buildAttachmentsFragment(
+        turn.attachments,
+        input.resolveAttachment,
+        (event, meta) => moduleLog.warn(event, { project: turn.project_slug, topic: turn.topic_id, ...meta }),
+      )
+      const injectedText = attachmentsFragment === null
+        ? turn.user_text
+        : `${attachmentsFragment}\n\n${turn.user_text}`
+      const persistedText = turn.user_text.length > 0
+        ? turn.user_text
+        : (turn.attachments ?? []).map((attachment) => `[Attachment: ${attachment}]`).join('\n')
+      return Promise.resolve().then(() => input.injectActiveTurn!(turn, injectedText)).catch(() => false).then(async (injected) => {
+        if (!injected) {
+          return enqueueTurn(turn, topicKey)
+        }
+        try {
+          await input.buttonStore.persistInertUserTurn({
+            topic_id: turn.topic_id,
+            text: persistedText,
+            speaker_user_id: turn.user_id,
+            channel_kind: 'app_socket',
+            observed_at: turn.observed_at ?? now(),
+          })
+        } catch (err) {
+          moduleLog.warn('injected_user_turn_persist_failed', {
+            project: turn.project_slug,
+            topic: turn.topic_id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+        try {
+          input.transcript?.append({ role: 'user', body: persistedText, phase: 'completed' })
+        } catch {
+          /* audit-trail only */
+        }
+        return { outcome: 'replied', reply_prompt_id: null }
+      })
+    }
+    return enqueueTurn(turn, topicKey)
+  }
+
+  function enqueueTurn(turn: LiveAgentTurnRequest, topicKey: string): Promise<LiveAgentTurnResult> {
     const prior = turnChains.get(topicKey) ?? Promise.resolve()
-    const run = prior.then(() => runTurnBody(turn))
+    queuedTurnCount.set(topicKey, (queuedTurnCount.get(topicKey) ?? 0) + 1)
+    const run = prior.then(async () => {
+      const acceptsInjection = turn.seed_turn !== true &&
+        turn.button_prompt_id === undefined &&
+        turn.user_text !== RETRY_TURN_VALUE &&
+        turn.user_text !== RECONNECT_AUTH_VALUE
+      if (acceptsInjection) activeTopics.add(topicKey)
+      try {
+        return await runTurnBody(turn)
+      } finally {
+        if (acceptsInjection) activeTopics.delete(topicKey)
+      }
+    })
     const tail = run.then(
       () => undefined,
       () => undefined,
@@ -956,6 +1044,9 @@ export function buildLiveAgentTurn(
     // the per-topic chain map — no rejection to surface (the real turn error is
     // returned to the caller via `run`). Silent neutralize, not fireAndForget.
     neutralizeAbandonedSettle(tail.then(() => {
+      const remaining = (queuedTurnCount.get(topicKey) ?? 1) - 1
+      if (remaining === 0) queuedTurnCount.delete(topicKey)
+      else queuedTurnCount.set(topicKey, remaining)
       if (turnChains.get(topicKey) === tail) turnChains.delete(topicKey)
     }))
     return run

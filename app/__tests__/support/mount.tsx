@@ -137,9 +137,33 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       await settle();
     },
     async press(accessibilityLabel: string): Promise<void> {
-      const target = Array.from(host.querySelectorAll('*')).find(
+      // HOST FIRST, THEN THE DOCUMENT — and the order is the whole point.
+      //
+      // A `Modal` renders into its own portal OUTSIDE the mounted subtree, which is
+      // exactly the property that stops Android clipping it, so a container-scoped
+      // search cannot reach a control inside one. The reachability probe went red for
+      // precisely that reason when the header menu became a Modal.
+      //
+      // But searching the document FIRST is worse than the bug it fixes. Most tests
+      // in this suite never call `unmount()`, so every earlier mount's host is still
+      // in the document — a document-wide search silently matches a control belonging
+      // to a PREVIOUS test. That is not hypothetical: scoping `byTestId` to the
+      // document made `chat-jump-to-bottom` fail in CI (and only in CI, where file
+      // order differs), because a button that was correctly absent from THIS mount was
+      // found in a stale one. A cross-test match is the worst kind of green.
+      //
+      // So: this mount's subtree is authoritative, and the document is consulted only
+      // when the control is genuinely not in it — which is the portal case and nothing
+      // else. `byTestId` deliberately does NOT do this: an assertion that a control is
+      // ABSENT must never be satisfied by a portal, stale or otherwise.
+      const inHost = Array.from(host.querySelectorAll('*')).find(
         (el) => el.getAttribute('aria-label') === accessibilityLabel,
       ) as HTMLElement | undefined;
+      const target =
+        inHost ??
+        (Array.from(host.ownerDocument.body.querySelectorAll('*')).find(
+          (el) => el.getAttribute('aria-label') === accessibilityLabel,
+        ) as HTMLElement | undefined);
       if (target === undefined) {
         throw new Error(`no control labelled "${accessibilityLabel}" is in the tree`);
       }
@@ -154,6 +178,12 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       await settle();
     },
     byTestId(testId: string): HTMLElement | null {
+      // CONTAINER-SCOPED, deliberately. Most tests here never unmount, so a
+      // document-wide lookup matches earlier mounts — see the long note in `press`.
+      // Callers use this to assert ABSENCE as often as presence, and an absence
+      // assertion satisfied by another test's DOM is a false green. A test that needs
+      // to see inside a Modal's portal should query `host.ownerDocument` explicitly at
+      // the call site, where the risk is visible.
       return host.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
     },
     unmount(): void {

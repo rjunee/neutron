@@ -45,7 +45,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
 
 describe('ChatApp render (happy-dom)', () => {
-  it('renders optimistic user sends and streamed agent replies', async () => {
+  it('kills disabled-composer, IME-submit, and concurrent-send mutations while streaming', async () => {
     // Dynamic imports AFTER the DOM globals exist (React reads them at import).
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
@@ -57,6 +57,7 @@ describe('ChatApp render (happy-dom)', () => {
     const { ChatApp } = await import('../ChatApp.tsx')
     const React = await import('react')
 
+    const sentFrames: string[] = []
     const sockets: Array<{
       open: () => void
       deliver: (o: unknown) => void
@@ -73,7 +74,7 @@ describe('ChatApp render (happy-dom)', () => {
         onmessage: null as null | ((ev: { data: unknown }) => void),
         onclose: null as null | (() => void),
         onerror: null as null | (() => void),
-        send: () => {},
+        send: (data: string) => { sentFrames.push(data) },
         close: () => {},
         open() {
           this.onopen?.()
@@ -147,13 +148,32 @@ describe('ChatApp render (happy-dom)', () => {
       sockets[0]!.deliver({ v: 1, type: 'agent_message_partial', message_id: 'm1', body_delta: 'Sam', ts: 2 })
       await tick()
     })
-    // While streaming there is NO Stop control (ISSUES #450 — it was inert and
-    // was removed on the owner's instruction). The send button stays MOUNTED
-    // but disabled, so the composer does not reflow on every turn.
+    // Kills the mid-turn-disabled mutation: Claude accepts additional context
+    // while this first response is still streaming.
     expect(container.textContent).not.toContain('Stop')
     const streamingSend = container.querySelector<HTMLButtonElement>('.car-send')
     if (streamingSend === null) throw new Error('send button unmounted while streaming')
-    expect(streamingSend.disabled).toBe(true)
+    const input = container.querySelector<HTMLTextAreaElement>('.car-input')
+    if (input === null) throw new Error('composer input missing while streaming')
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input) as object, 'value')?.set
+      setter?.call(input, 'one more detail')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
+    expect(streamingSend.disabled).toBe(false)
+    const beforeMidTurnSend = sentFrames.length
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }))
+      await tick()
+    })
+    expect(sentFrames).toHaveLength(beforeMidTurnSend)
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await tick()
+    })
+    expect(sentFrames.slice(beforeMidTurnSend).filter((raw) => raw.includes('one more detail'))).toHaveLength(1)
 
     await act(async () => {
       sockets[0]!.deliver({ v: 1, type: 'agent_message', message_id: 'm1', seq: 1, body: 'Hi Sam', ts: 3 })
@@ -334,11 +354,19 @@ describe('ChatApp render (happy-dom)', () => {
     })
   })
 
-  it('chat-typing persistence — dots STAY through a background build after the ack, then stop when work is done', async () => {
-    // Ryan live-test 2026-07-01: an ack turn settles (agent_message) but a
-    // long/background build keeps running. The typing dots must stay visible the
-    // whole time work is in flight (the same signal as the flashing Plan-tab
-    // dot) and stop the moment the board reports the work done.
+  it('chat typing is TURN-ONLY — board work in flight does NOT keep the dots up', async () => {
+    // OVERRIDES the 2026-07-01 behaviour this test used to assert. Back then the
+    // dots were deliberately kept up for the whole processing window, spanning a
+    // background build that outlives the ack turn.
+    //
+    // The owner rejected that on 2026-08-11, looking at exactly this state: "The
+    // turn has finished, according to the inspector, but I'm still seeing a typing
+    // indicator... It feels like I should be expecting a chat message from the
+    // agent soon. There is already a progress indicator for work board items."
+    //
+    // He is right about what the signal MEANS: typing dots promise an incoming
+    // message. So the assertion below is INVERTED from what it was — an
+    // in_progress board item must NOT raise the dots.
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
     const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
@@ -461,9 +489,11 @@ describe('ChatApp render (happy-dom)', () => {
       })
       await tick()
     })
-    expect(typingUp()).toBe(1)
+    // INVERTED (2026-08-11): board work is not a chat turn. The dots are already
+    // down because the ack settled, and an in_progress item must not raise them.
+    expect(typingUp()).toBe(0)
 
-    // Build completes: the item flips to done → the dots stop.
+    // And completion changes nothing here — there were no dots to stop.
     await act(async () => {
       sockets[0]!.deliver({
         v: 1,

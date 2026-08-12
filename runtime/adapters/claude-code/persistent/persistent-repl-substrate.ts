@@ -60,6 +60,7 @@ export {
   poolKeyFor,
   spawnEphemeralSession,
   createPersistentReplSubstrate,
+  injectPersistentReplActiveTurn,
   shutdownAllPersistentRepls,
 } from './pool.ts'
 export {

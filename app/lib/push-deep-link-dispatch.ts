@@ -21,7 +21,9 @@
  *     reminder push tokens just start working when the listener lands
  *     — no gateway-side payload change required.
  *
- *   - `{kind: 'wow_fired', project_id}` → `/projects/<pid>/chat`
+ *   - `{kind: 'wow_fired', project_id}` → `/projects/<pid>/chat` (no sender today)
+ *   - `{kind: 'calendar_pre_meeting_brief', project_id, event_id}` → `/projects/<pid>/chat`
+ *   - `{kind: 'email_daily_triage', project_id}` → `/projects/<pid>/chat`
  *
  *   - `{kind: 'agent_message', project_id, message_id?}`
  *       → `/projects/<pid>/chat[?message_id=<mid>]`
@@ -36,7 +38,13 @@
  *     the user's last route).
  */
 
-export type PushPayloadKind = 'reminder' | 'wow_fired' | 'agent_message' | string;
+import type { PushKind } from '@neutronai/wire-types/push-kind.ts';
+
+export type PushPayloadKind =
+  | PushKind
+  /** No sender today; kept as the shape a chat push will take. */
+  | 'agent_message'
+  | string;
 
 /**
  * The raw `request.content.data` Expo hands the listener. Typed as
@@ -108,6 +116,12 @@ export function resolvePushRoute(
     );
   }
 
+  // NOTE: nothing sends `wow_fired` today either (grep-verified). The branch and
+  // its tests are LEFT IN PLACE rather than deleted — removing tested behaviour is
+  // a separate cleanup, not something to slip into a routing bugfix. Like
+  // `agent_message`, it is deliberately absent from `PUSH_KINDS`, so the
+  // exhaustiveness test covers only what is genuinely sent and cannot be padded by
+  // a kind no gateway emits.
   if (kind === 'wow_fired') {
     if (project_id === null) {
       warn('wow_fired payload missing project_id', { project_id });
@@ -116,6 +130,22 @@ export function resolvePushRoute(
     return `/projects/${encodeURIComponent(project_id)}/chat`;
   }
 
+  // The two kinds the Cores actually send. Both carry `project_id` and both used
+  // to fall through to the "unknown kind" branch below — the app opened and
+  // nothing routed. See `wire-types/push-kind.ts` for how the sent list and this
+  // one had drifted apart.
+  if (kind === 'calendar_pre_meeting_brief' || kind === 'email_daily_triage') {
+    if (project_id === null) {
+      warn(`${kind} payload missing project_id`, { project_id });
+      return null;
+    }
+    return `/projects/${encodeURIComponent(project_id)}/chat`;
+  }
+
+  // NOTE: nothing sends `agent_message` today. The branch is kept because it is
+  // the shape a chat push will take, and `PUSH_KINDS` deliberately does NOT list
+  // it — the exhaustiveness test walks what is SENT, so an unsent kind here is
+  // dead-but-harmless rather than a false claim of coverage.
   if (kind === 'agent_message') {
     if (project_id === null) {
       warn('agent_message payload missing project_id', { project_id });

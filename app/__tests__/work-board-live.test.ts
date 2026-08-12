@@ -112,6 +112,114 @@ describe('startWorkBoardLive', () => {
     return { sockets, snapshots, timers, handle };
   }
 
+  // ── onConnect: the catch-up hook ─────────────────────────────────────────
+  //
+  // A push-only board permanently loses any item written while the socket was
+  // down — nothing re-asks, so the pane stays empty until a manual reload. That
+  // happened to the owner on 2026-08-11: every project session closed at
+  // 19:36:43 and the first of five board items was written at 19:36:47.
+  //
+  // These assert the hook FIRES ON RECONNECT, not just on the first connect,
+  // because "fires once at startup" is indistinguishable from the mount-time
+  // fetch that already existed and did not fix this.
+  function setupWithConnect() {
+    const sockets: FakeSocket[] = [];
+    const timers: Array<() => void> = [];
+    let connects = 0;
+    const handle = startWorkBoardLive({
+      base_url: 'https://t.neutron.test',
+      token: 'dev:sam',
+      project_id: 'p',
+      device_id: 'dev-1',
+      onSnapshot: () => {},
+      onConnect: () => {
+        connects += 1;
+      },
+      socketFactory: (_url) => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+      setTimer: (fn) => {
+        timers.push(fn);
+        return timers.length;
+      },
+      clearTimer: () => {},
+    });
+    return { sockets, timers, handle, count: () => connects };
+  }
+
+  it('fires onConnect on the FIRST connect', () => {
+    const { sockets, count } = setupWithConnect();
+    expect(count()).toBe(0); // not until the socket actually opens
+    sockets[0]!.onopen?.({});
+    expect(count()).toBe(1);
+  });
+
+  it('fires onConnect AGAIN after a reconnect — the whole point', () => {
+    const { sockets, timers, count } = setupWithConnect();
+    sockets[0]!.onopen?.({});
+    expect(count()).toBe(1);
+    sockets[0]!.drop();
+    timers[0]!(); // fire the scheduled reconnect
+    expect(sockets).toHaveLength(2);
+    expect(count()).toBe(1); // the new socket has not opened yet
+    sockets[1]!.onopen?.({});
+    expect(count()).toBe(2); // ← without this, an item written while down is lost forever
+  });
+
+  it('replays the real incident: an item written while the socket was DOWN is recoverable', () => {
+    const { sockets, timers, count } = setupWithConnect();
+    sockets[0]!.onopen?.({});
+    // The socket goes down...
+    sockets[0]!.drop();
+    // ...and the item is written on the server here. No frame can arrive: there
+    // is no socket. The client has no way to learn about it except by re-asking.
+    timers[0]!();
+    sockets[1]!.onopen?.({});
+    // A second connect notification is the ONLY signal the caller gets, and it
+    // is what makes the re-fetch happen.
+    expect(count()).toBe(2);
+  });
+
+  it('a STALE socket opening after we moved on does not fire onConnect', () => {
+    const { sockets, timers, count } = setupWithConnect();
+    const stale = sockets[0]!;
+    stale.drop();
+    timers[0]!();
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.onopen?.({}); // the current socket
+    expect(count()).toBe(1);
+    stale.onopen?.({}); // a late open from the abandoned socket
+    expect(count()).toBe(1); // unchanged — not attributed to the live connection
+  });
+
+  it('onConnect is optional — a caller that omits it still connects fine', () => {
+    const { sockets } = setup();
+    expect(() => sockets[0]!.onopen?.({})).not.toThrow();
+  });
+
+  // THE WIRING HALF. The hook is useless unless the screen actually passes it and
+  // points it at a re-fetch — a capability that exists and is never connected is
+  // this repo's most-repeated defect. This is a SOURCE assertion by necessity:
+  // the screen builds its subscription inline, so `socketFactory` cannot be
+  // injected from a render test today, and the existing screen test does not mock
+  // the socket. Weaker than the behavioural tests above, and it still fails if
+  // someone deletes the wiring.
+  it('the SCREEN passes onConnect and points it at refresh', async () => {
+    const src = await Bun.file(
+      new URL('../app/projects/[id]/workboard.tsx', import.meta.url),
+    ).text();
+    const call = src.slice(src.indexOf('startWorkBoardLive({'));
+    const body = call.slice(0, call.indexOf('});'));
+    expect(body).toContain('onConnect:');
+    expect(body).toContain('refresh()');
+    // `refresh` must be in the effect's dep array, or the closure pins a stale
+    // one and the re-fetch silently targets the previous project.
+    const effectTail = src.slice(src.indexOf('startWorkBoardLive({'));
+    expect(effectTail.slice(0, effectTail.indexOf('\n\n'))).toContain('refresh');
+  });
+
   it('delivers a parsed snapshot on a work_board_changed frame', () => {
     const { sockets, snapshots } = setup();
     expect(sockets).toHaveLength(1);

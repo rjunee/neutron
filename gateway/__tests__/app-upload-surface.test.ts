@@ -636,6 +636,83 @@ describe('app-upload gateway surface — audio voice notes (task 5)', () => {
     }
   })
 
+  // ── The transcript comes BACK on the response ────────────────────────────
+  // A user's own message is never persisted server-side, so the client owns it —
+  // which makes the upload response the only point at which the client can learn
+  // the transcript and put it on the message it is about to send. Without that,
+  // the words are transcribed, durable on disk, and unfindable in chat search.
+
+  it('(f) returns the transcript in the upload response', async () => {
+    const h = await startAudioGateway({ transcript: 'renegotiate the warehouse lease' })
+    try {
+      const res = await fetch(`${h.base}/api/app/upload`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer dev:sam' },
+        body: makeMultipart(wavBytes(), 'voice.wav', 'audio/wav'),
+      })
+      const json = (await res.json()) as { transcript?: string }
+      expect(json.transcript).toBe('renegotiate the warehouse lease')
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(g) returns it on a RE-upload too, reading the sidecar without re-transcribing', async () => {
+    // The idempotent path is the trap. It deliberately does not re-invoke the ASR
+    // seam, so returning only what THIS call transcribed would make the same audio
+    // searchable the first time and silently not the second — worse than never
+    // working, because it looks like the feature is flaky rather than absent.
+    const h = await startAudioGateway({ transcript: 'the second upload still knows' })
+    try {
+      await uploadWav(h.base)
+      expect(h.calls).toBe(1)
+      const res = await fetch(`${h.base}/api/app/upload`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer dev:sam' },
+        body: makeMultipart(wavBytes(), 'voice.wav', 'audio/wav'),
+      })
+      const json = (await res.json()) as { transcript?: string }
+      expect(h.calls).toBe(1) // still not re-transcribed
+      expect(json.transcript).toBe('the second upload still knows')
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(h) OMITS the key entirely on a keyless box, rather than sending null', async () => {
+    // An absent key keeps the response shape identical to what every existing
+    // client already parses; `transcript: null` would be a new field to reason
+    // about on every non-audio upload for no gain.
+    const h = await startAudioGateway({ keyless: true })
+    try {
+      const res = await fetch(`${h.base}/api/app/upload`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer dev:sam' },
+        body: makeMultipart(wavBytes(), 'voice.wav', 'audio/wav'),
+      })
+      const json = (await res.json()) as Record<string, unknown>
+      expect('transcript' in json).toBe(false)
+      expect(typeof json['url']).toBe('string')
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('(i) OMITS the key when the transcriber returns null', async () => {
+    const h = await startAudioGateway({ transcript: null })
+    try {
+      const res = await fetch(`${h.base}/api/app/upload`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer dev:sam' },
+        body: makeMultipart(wavBytes(), 'voice.wav', 'audio/wav'),
+      })
+      const json = (await res.json()) as Record<string, unknown>
+      expect('transcript' in json).toBe(false)
+    } finally {
+      await h.close()
+    }
+  })
+
   it('(e) GET serves the audio blob with Content-Type audio/wav', async () => {
     const h = await startAudioGateway({ transcript: 'x' })
     try {

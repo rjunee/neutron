@@ -67,7 +67,8 @@
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -78,12 +79,13 @@
       },
       {
         "name": "codegen_status",
-        "description": "Look up the current state of a code-generation task. Returns one of pending / running / completed / failed / cancelled.",
+        "description": "Look up the real state of a legacy code-generation task or foundational Trident run.",
         "input_schema": {
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -100,9 +102,21 @@
                 "running",
                 "completed",
                 "failed",
-                "cancelled"
+                "cancelled",
+                "forge-init",
+                "ralph-plan",
+                "ralph-task",
+                "argus",
+                "forge-fix",
+                "done",
+                "stopped"
               ]
-            }
+            },
+            "dispatch_path": { "type": "string", "enum": ["trident"] },
+            "run_id": { "type": "string" },
+            "phase": { "type": "string" },
+            "reason": { "type": ["string", "null"] },
+            "already_terminal": { "type": "boolean" }
           },
           "required": [
             "status"
@@ -112,12 +126,13 @@
       },
       {
         "name": "codegen_fetch",
-        "description": "Fetch the result of a completed code-generation task. Returns the PR number, branch name, worktree path, and a short summary for a completed task; throws CodegenTaskFailedError carrying { code, message } for a failed task; throws CodegenTaskNotFoundError for an unknown task_id; throws CodegenTaskPendingError when the task hasn't reached a terminal state yet.",
+        "description": "Fetch a legacy code-generation result or the current persisted state of a foundational Trident run.",
         "input_schema": {
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -138,25 +153,30 @@
             },
             "summary": {
               "type": "string"
-            }
+            },
+            "status": { "type": "string" },
+            "dispatch_path": { "type": "string", "enum": ["trident"] },
+            "run_id": { "type": "string" },
+            "phase": { "type": "string" },
+            "reason": { "type": ["string", "null"] },
+            "already_terminal": { "type": "boolean" }
           },
-          "required": [
-            "pr_number",
-            "branch",
-            "worktree",
-            "summary"
+          "oneOf": [
+            { "required": ["pr_number", "branch", "worktree", "summary"] },
+            { "required": ["status", "dispatch_path", "run_id", "phase", "reason", "already_terminal"] }
           ]
         },
         "capability_required": "read:codegen_core.tasks"
       },
       {
         "name": "codegen_cancel",
-        "description": "Cancel an in-flight code-gen task. Calls into the sub-agent control surface to cancel the sub-agent run, then marks the task `cancelled` in the sidecar.",
+        "description": "Cancel a legacy code-gen task or foundational Trident run. Returns the real terminal state and reason when the target already finished.",
         "input_schema": {
           "type": "object",
           "properties": {
             "task_id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             }
           },
           "required": [
@@ -176,13 +196,22 @@
                 "running",
                 "completed",
                 "failed",
-                "cancelled"
+                "cancelled",
+                "trident_run"
               ]
-            }
+            },
+            "dispatch_path": {
+              "type": "string",
+              "enum": ["legacy_codegen", "trident"]
+            },
+            "phase": { "type": "string" },
+            "reason": { "type": ["string", "null"] },
+            "already_terminal": { "type": "boolean" }
           },
           "required": [
             "cancelled",
-            "prior_status"
+            "prior_status",
+            "dispatch_path"
           ]
         },
         "capability_required": "write:codegen_core.tasks"

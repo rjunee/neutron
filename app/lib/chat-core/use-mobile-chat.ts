@@ -108,7 +108,12 @@ export interface UseMobileChatResult {
    * a send that fails leaves the typed text where the owner can retry it instead
    * of destroying it silently.
    */
-  send: (body: string, attachments?: readonly string[]) => Promise<boolean>;
+  send: (
+    body: string,
+    attachments?: readonly string[],
+    /** Auto-transcript of an audio attachment — indexed for search, never rendered. */
+    transcript?: string,
+  ) => Promise<boolean>;
   /**
    * Non-null when the LAST send could not even be queued locally — i.e. it
    * produced no bubble, no frame and no row anywhere.
@@ -481,15 +486,26 @@ export function useMobileChat(railId: string): UseMobileChatResult {
   }, []);
 
   const send = useCallback(
-    async (body: string, attachments?: readonly string[]): Promise<boolean> => {
+    async (
+      body: string,
+      attachments?: readonly string[],
+      transcript?: string,
+    ): Promise<boolean> => {
       const trimmed = body.trim();
       const hasAttachments = attachments !== undefined && attachments.length > 0;
       // An image attachment send carries an empty body (the attachment URL is the
       // payload), so only bail when there's neither text NOR an attachment.
       if (trimmed.length === 0 && !hasAttachments) return false;
-      const opts: { project_id?: string; attachments?: readonly string[] } = {};
+      const opts: {
+        project_id?: string;
+        attachments?: readonly string[];
+        transcript?: string;
+      } = {};
       if (projectId.length > 0) opts.project_id = projectId;
       if (hasAttachments) opts.attachments = attachments;
+      if (transcript !== undefined && transcript.trim().length > 0) {
+        opts.transcript = transcript.trim();
+      }
       const session = sessionRef.current;
       // NOT `session?.send(...)`. An absent session means the tap did nothing at
       // all, and the owner has to be told — an optional chain here is a silent

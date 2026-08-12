@@ -2,6 +2,117 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — a dirty worktree is preserved, never force-removed (#541)
+
+The inner workflow's `finally{}` cleanup is now the checked-in
+`trident/worktree-cleanup.sh`, and every worktree removal in `trident/merge.ts`
+goes through the same gate: a tree with uncommitted changes — **including
+untracked files** — or one whose `git status` cannot be read at all is
+PRESERVED, its paths printed, exit 3. A clean tree is still removed, with a
+plain `git worktree remove` rather than `--force`, so git's own dirty check is a
+second gate behind ours.
+
+What it replaces was a cheap-model agent handed "MUST succeed on every path;
+ignore individual command failures … `git worktree remove --force` … `git branch
+-D`". That block runs on success, on REQUEST_CHANGES, on throw and on abort, and
+the last two are precisely when Forge died mid-edit and the worktree holds the
+only copy of the work. On this repo's PR #171 it took 197 insertions across 7
+files, none of them recoverable. There is no LLM judgement left in the
+destructive path: the workflow's agent runs one fixed command and reports its
+output through a schema, the same shape as the head and CI probes, and is told
+that a non-zero exit means work was preserved on purpose rather than something
+to retry around.
+
+`git branch -D` was closed as the same loophole, since it loses commits just as
+thoroughly. In pr-mode the local branch is deleted only when `git ls-remote`
+proves origin holds that exact sha; never pushed, behind, or an unreachable
+origin all keep it and say why. Local mode never touches the branch — it is the
+only copy of the build and the outer loop merges it. `merge.ts` inherits the
+gate at all three of its removal sites, including the lingering build worktree
+`freeBranchFromWorktrees` used to force away; a dirty one there now fails the
+merge loudly instead, naming the path in the operator's words ("trident
+PRESERVED uncommitted work … recover or delete it, then re-run the merge")
+rather than letting git's raw "already checked out at `<path>`" reach chat.
+That is the right trade when the alternative is deleting work to make a merge
+convenient.
+
+Four ways a preserve-by-default gate can turn into a nuisance, all closed:
+
+- **Only stdout decides.** `git status` and `ls-remote` are read with stderr
+  captured separately. Folded together (`2>&1`), any warning git prints on a
+  perfectly clean tree — an unreadable subdirectory, a trace — parsed as a dirty
+  path: worktrees leaked forever, pr-mode branch teardown never ran, and the
+  alarm fired on runs that had preserved nothing.
+- **The shared checkout is never a candidate — in BOTH copies.** git refuses
+  `worktree remove` on a main working tree, and `merge.ts` legitimately leaves it
+  on a feature branch after a stale-rebase recovery; scoring that refusal as a
+  preservation pinned the exit at 3 for good. It is skipped, and a branch git
+  won't delete because it is checked out there is reported as
+  `KEPT … reason=checked-out` at exit 0 — origin already has the sha, so nothing
+  is at risk. The cross-model reviewer caught that only the shell twin skipped
+  it: `freeBranchFromWorktrees` would have scored the refusal as preserved work
+  and thrown, failing the merge over a checkout holding nothing uncommitted, on
+  every retry. It is unreachable today only because `mergeLocal` step (0a) moves
+  the checkout onto base first — too thin a guarantee to leave the twins
+  disagreeing about, so `merge.ts` now skips the first `worktree` record exactly
+  as the shell twin's `n > 1` does.
+- **The probe must point at a worktree ROOT — in BOTH copies.** `git -C <dir>
+  status` walks up to the enclosing repo, so a registered path that has stopped
+  being a worktree root (an empty leftover directory, a `.git` file deleted while
+  the directory survived) reports the shared checkout's dirt as its own:
+  recovery instructions naming files that are not in the named tree, exit 3 on a
+  run that preserved nothing, and pr-mode branch teardown pinned at 3 for as long
+  as the stale directory sits there. `rev-parse --show-toplevel` must name the
+  path itself, in the shell script (`SKIPPED … reason=not-a-worktree-root`) as
+  well as in `merge.ts`. A rev-parse that says *nothing* is a different answer
+  from one naming another repo, and still preserves — absence of evidence is not
+  evidence of absence when the failure mode is unrecoverable.
+- **Only exit 3 means preserved work.** Usage errors exit 2 (documented, and now
+  actually 2 rather than bash's `${1:?}` 1) and a wrong script path exits 127 —
+  the caller reports those as a cleanup FAILURE, because a script that never ran
+  inspected nothing. But the *reading* of that code is generous, because it comes
+  back through a transcribing agent: a string `"3"` counts, a missing field falls
+  back to the `___EXIT=` marker in the output, and an output full of `PRESERVED`
+  records with no code at all still raises the alarm rather than the "NOTHING was
+  inspected" line. A wasted look costs a minute; the inverse costs the work.
+
+Two ways the gate could have failed *itself*, also closed. The output is bounded
+by construction — a 20k-line dirty tree (one un-ignored `dist/`) would otherwise
+push the `RESULT` line and the exit marker out of the transcriber's window, so
+the dirty list is capped at 50 paths with a count and the exact command for the
+rest. And the one network call cannot hang: the cleanup runs from a `finally{}`
+that fires on throw and abort with nobody at a keyboard, so `ls-remote` runs with
+`GIT_TERMINAL_PROMPT=0` and, where coreutils `timeout` exists, a 20s deadline —
+blowing it is just another unreachable origin, which keeps the branch.
+
+One thing this fix deliberately does NOT do: unwedge itself. `runWorktreePath` is
+keyed on `run.id` + `run.slug`, both stable across retries, so a preserved dirty
+merge worktree makes every retry fail at the same path until a human clears it.
+That is the trade, stated where it is made rather than papered over: a wedged
+merge is recoverable, a force-removed conflict resolution is not. The error names
+the path and the two ways out.
+
+Tested against real git repos rather than a mocked host — the bug is only
+observable on a real working tree — covering untracked-only, modified, staged,
+unreadable, ignored-files-only, clean, already-gone, and other-branch trees, an
+untracked file inside an untracked DIRECTORY (what `--untracked-files=all`
+actually buys: the individual paths, not one collapsed `?? feature/`), a clean
+tree whose git warns on stderr, a shared checkout parked on the branch, and the
+four branch-teardown outcomes, a registered path that is no longer a worktree
+root sitting next to a dirty shared checkout, a 600-file dirty tree, and an
+`origin` whose transport never answers. The exit-code reader is EXECUTED, lifted
+out of the shipped `inner-workflow.mjs` rather than grepped for.
+Mutation-verified, 20 mutations applied and killed: dropping
+`--untracked-files=all` (both copies), folding stderr back into either probe,
+un-skipping the main working tree, exiting 1 on a usage error, restoring
+`--force` (both copies), downgrading exit 3 to 0, dropping the worktree-root
+guard (both copies), treating an unverifiable status as clean, treating
+rev-parse silence as "not ours", dropping the `existsSync` gate, dropping the
+operator-facing throw, calling every non-zero cleanup exit a preservation,
+rejecting a string exit code, dropping the `___EXIT=` fallback, dropping the
+PRESERVED-records fallback, removing the dirty-list cap, and dropping
+`GIT_TERMINAL_PROMPT=0` / the `ls-remote` deadline.
+
 ## 2026-08-11 — an important email now reaches the owner's chat within five minutes
 
 Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation
@@ -110,6 +221,112 @@ guard is green again.
 **Out of scope, deliberately:** the twice-daily brief/digest, the
 `email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
 fan-out migration. Those are P2/P3.
+
+## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
+
+`PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through
+`buildLlmCallSubstrate` and the Claude Code adapter to
+`PersistentReplSubstrateOptions.turnTimeoutMs`.
+
+Both owner attempts at the Email Core P1 build died on this (2026-08-07,
+2026-08-10), and the cause was in the launcher rather than in trident's review
+half. The workflow's agents run as sidechains of the fire session, so the
+launching turn stays open for the whole build; that session was guarded by a 90s
+window advanced by PTY bytes from the child; a reasoning-heavy step emits none;
+and on a trip the pool poisons and respawns the warm session, killing the
+detached build it hosts. The Aug 7 planner transcript ends with
+`[Request interrupted by user]` at 23:19:21 with the respawn logged 8 seconds
+later — no checkpoint, no PR, no parseable result, surfacing to the owner as
+"terminal result missing/garbled". Since Ralph mode's first step is `plan:fable`
+at max effort over SPEC.md plus a governed plan doc, a larger plan died more
+reliably.
+
+The new window sits below the 45-minute absolute ceiling, which remains the
+terminal authority, so a genuinely wedged launcher still dies. Every other
+profile is unaffected, and that is asserted rather than assumed.
+
+Worth recording: this watchdog replaced a fixed 180s cap that was removed on
+2026-07-01 because it killed one of the owner's working builds. The replacement
+killed one too, by a different mechanism, because "actively working" was measured
+as terminal chatter.
+
+Tested against the production composer's output rather than a hand-built config
+literal, so it fails if `substrates.ts` stops passing the profile.
+Mutation-verified: removing the window from the profile fails four tests, and
+keeping it while the factory silently stops threading it fails two.
+## 2026-08-11 — a nit may not cost a round (#184)
+
+`enforceSeverityGate` in `trident/inner-workflow.mjs` now enforces
+deterministically what the synthesis prompt has always merely asserted: a
+non-blocking finding does not block a merge on its own. A `REQUEST_CHANGES` is
+downgraded to `APPROVE` only when every finding is explicitly `minor` or `nit`,
+and the findings survive on the returned verdict. Nothing posts them to the PR:
+they reach the next round's fix prompt if a later gate re-blocks, and on a clean
+downgrade they are dropped, since the APPROVE-path terminal result carries no
+findings.
+
+The rule had no enforcement, so it held only as far as one model's obedience.
+It did not hold: PR #171 saw a reviewer seat return APPROVE with four MINOR/NIT
+findings while the synthesis returned REQUEST_CHANGES, and on 2026-08-11 six of
+six capped lanes terminated REQUEST_CHANGES with none converging — a reviewer
+asked for findings always finds some, so a loop that blocks on non-blocking
+findings cannot terminate by construction.
+
+The gate can only turn a rejection into a pass, so it refuses whenever anything
+is ambiguous. It enumerates the NON-blocking severities rather than the blocking
+ones, which makes an unknown, absent or misspelled severity block rather than
+pass; a rejection carrying no findings at all is left untouched; and it runs
+first in the chain so the CI gate and the cross-model gate both retain the last
+word. Red CI and a deferred reviewer still veto an `APPROVE`, and a rejection
+carrying a `blocker` or `major` is never downgraded.
+
+What `blocker` and `major` do NOT do is veto an `APPROVE`. `enforceSeverityGate`
+returns early on any verdict that is not `REQUEST_CHANGES` and no later gate
+reads severities, so an `APPROVE` carrying a blocker finding merges on green CI
+with no deferred peer — asked for only by the synthesis prompt, which is the
+same unenforced-rule shape this section exists to remove. Known gap, recorded
+rather than papered over.
+
+Tested against the real function extracted from the `.mjs` and evaluated rather
+than a hand-copied duplicate. 18 tests, 55 assertions, mutation-verified:
+admitting `major` to the non-blocking set fails two of them, and dropping the
+empty-findings guard fails one.
+
+The prose guards that police the docblock are mutation-verified too, and the
+carve-out that exempts the one past-tense record of #184's claim is bounded by a
+literal at BOTH ends. It used to run to the next `)`, which meant deleting the
+citation's closing paren — an ordinary copy-edit — silently stretched the
+exemption over the entire IMPLEMENTED section: a present-tense "the mutation
+prover still vetoes a bad APPROVE today" written in the swallowed region passed
+at 17 pass / 0 fail. An exemption that widens on its own is a gate that stops
+firing with nobody watching, so an edit to either end now throws instead.
+
+## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
+
+The `codegen_status`, `codegen_fetch`, and `codegen_cancel` tools now keep their
+legacy Code-Gen tracker behavior and fall through to the foundational Trident run
+store when the reference is not a legacy task. References accept the globally
+unique full run id, or an unambiguous displayed id prefix / run slug across the
+single-owner database. This reaches General and project-board runs even though
+the Core factory context carries only the owner handle. Blank and ambiguous
+references are rejected without changing any run. A live
+Trident run is atomically moved to `stopped` through the existing terminal-write
+chokepoint. A run that already reached `done`, `failed`, or `stopped` is returned
+truthfully with its phase and persisted failure reason; it is not mislabeled as
+an unknown run. Malformed tool payloads retain the Code-Gen input-error contract
+instead of leaking native property-access errors. Tool cancel uses a dedicated
+terminal-observer composition: delivery is a no-op because the tool result is the
+user notification, while board reconciliation and skill-forge audit still run.
+This is a run-lifecycle control only and
+does not add chat-turn cancel or a Stop button. An already-started inner workflow
+cannot currently be killed; the durable run is stopped so its eventual output
+cannot advance or merge through the Trident loop.
+
+Mutation-named gateway tests pin the contract: removing Trident termination
+leaves the durable row live; hiding an already-terminal row restores the false
+alarm; bypassing the legacy tracker breaks the path that already worked; and
+removing read routing, prefix resolution, project scope, or production factory
+wiring makes the corresponding test fail.
 
 ## 2026-08-06 — push registration self-heals on foreground, so a signed-in device stops going dark
 
@@ -8078,3 +8295,996 @@ delivery-semantics arm; dropping the reminder hatch reds the escape-hatch arm; a
 short-circuiting `assistantCalledReply` reds 8, confirming the pre-existing
 no-reply gate is untouched. No feature flag — the gate ships on as default
 behaviour.
+## Mid-turn message injection (#516)
+
+The web composer keeps Send enabled while the agent is typing. A second message
+for the same topic bypasses the completed-turn chain and is posted immediately to
+the persistent REPL dev-channel as additional context for the active turn. It
+reuses the active turn id without advancing fallback reply-correlation state, so
+the running turn's eventual reply remains correlated normally. If no active turn
+exists at the injection instant, the message falls back to the existing ordered
+turn path instead of being dropped.
+
+Mutation-named tests pin all three boundaries: the gateway test fails if the
+second send is queued until completion, the persistent-REPL test asserts the
+additional `/message` reached the wire before the first reply, and the React test
+fails if the composer is disabled while streaming or IME composition Enter is
+submitted. General chat uses the same `general` route key for registration and
+lookup. A successful dev-channel delivery stays successful if the turn settles
+while its response is returning, preventing a duplicate queued turn; failed
+delivery leaves Retry text and attachment state untouched. Injection is offered
+only while exactly one turn is active: a queued turn, Retry, seed, reconnect, or
+button-prompt answer always follows the normal ordered path. Injected history is
+stamped with the inbound observation time so a racing agent reply cannot render
+before it; attachment-only sends persist their inbound reference while resolved
+local paths remain confined to the REPL payload. Active-turn routes include the
+non-secret credential identity and refuse ambiguous credential-rotation matches.
+Typing refcounts have a fail-safe beyond the turn's forty-five-minute absolute
+ceiling that clears a lost `end`, fans the matching ephemeral end frame, and
+refreshes the rail working state instead of wedging that topic until restart.
+The composer clears the
+submitted text before awaiting the send, then restores it only when delivery
+fails (ahead of any newer draft text). An in-flight send claim prevents two
+Enter presses from reusing the same staged attachment URLs before the first
+upload/send clears them.
+
+## 2026-08-09 — the typing refcount's guard is now killable by a test
+
+PR #145's last open finding was exact: *"Typing-refcount suppression guard and
+46-minute fail-safe have zero killing test coverage, and depth can leak
+permanently."* Both halves were true, and neither was reachable — the logic was a
+closure inside `wireAppWs` keyed on a real `setTimeout(…, 46 * 60_000)`. No test
+waits 46 minutes, and a test that reaches into a closure is not testing the
+production path.
+
+The decision logic moved to `open/wiring/typing-refcount.ts`, pure apart from an
+INJECTED scheduler; `open/wiring/app-ws.ts` is the only caller and passes the real
+one. `open/__tests__/typing-refcount.test.ts` fires the captured timer, so the
+46-minute path runs under test with only the caller changed.
+
+Behaviour is unchanged and now pinned: the outermost `start` and the final `end`
+are the only visible edges (an inner pair emits nothing, so a fast second turn
+cannot clear the first turn's dots); a stray `end` never drives depth negative; the
+window is re-armed on every transition that leaves the count positive; a
+cancelled-but-still-running timer cannot clear an entry a newer start re-armed; and
+a lost `end` expires instead of suppressing every future typing start until
+restart. Mutants killed: removing the fail-safe fails 3, making every transition
+emit fails 2.
+
+
+## 2026-08-09 — `codegen_cancel`'s terminator is a required argument, and the composition path is covered
+
+The review's remaining blocker on the tool-initiated cancel was that the
+production observer composition had no coverage — "both the composer bind and the
+mountOpenCores path".
+
+The reason that mattered was a DEFAULT PARAMETER. `routeCodegenCancel` took
+`terminator: TridentTerminator = buildTridentTerminator({ store: trident })` — a
+terminator with no observer and no `onTransition`. If either hop broke, a cancel
+still flipped the phase and still returned `cancelled: true`, while the Work Board
+never reconciled, the skill-forge hook never ran, and no `projects_changed` reached
+the rail. No unit test could catch it, because each builds its own terminator; only
+the production composition could, and that was the untested part.
+
+The default is GONE. The parameter is required, so a missing thread is a typecheck
+failure — which it immediately was, on nine call sites. The one caller that
+legitimately has no observers to run (`boot-cores-factories.ts`, when no composer
+threaded one) now fabricates it EXPLICITLY via `codegenCancelTerminator` and logs
+`codegen_cancel_terminator_unwired`, the same precedent as the neighbouring
+`codegen_orchestrator_not_wired`. Verified firing, with a control.
+
+`open/__tests__/codegen-cancel-composition.test.ts` covers the pass-through
+behaviourally — a cancel through the MOUNTED backend must reach the terminator the
+caller supplied, and deleting the `mountOpenCores` forward reds it — plus three
+source-scoped assertions for the composer's bind, labelled weaker with the reason
+(the bind is inside the composer's closure; reaching it behaviourally needs the
+whole composition AND the Code-Gen Core installed).
+
+Also fixed: the codegen holder's unbound-deref error read "board terminator is not
+bound" — the SIBLING holder's name — which would send a reader to the wrong bind.
+
+Also on this branch: `TridentRunReferenceAmbiguousError` no longer escapes the
+Code-Gen tool contract. `resolveReference` throws it when a short prefix matches
+more than one run; the MCP guard maps the Core's own error types to structured tool
+failures and lets anything else out as a raw internal error, so an ambiguous prefix
+produced a stack-shaped failure instead of "pass more of the id". It is translated
+at the router boundary to `CodegenInputError` on `task_id`. An existing test had
+pinned the LEAKED message (`'reference is ambiguous'`) — updated to the contract
+error, with its real guarantee (an ambiguous prefix must not select by recency)
+left exactly as it was. Mutant: removing the translation reds three tests.
+
+# Trident child-crash reaping (#514)
+
+## 2026-08-09 — Trident child-crash reaping (#514)
+
+The persistent REPL watchdog now commits a retryable, edge-latched durable-work callback before replacing any dead or alive-but-wedged child. Each spawn receives a unique generation token that is persisted in the REPL registry, returned with launcher completion, and stored on its detached Trident run. The store records that generation's crash before marking only matching live rows `crashed`; a racing launcher completion cannot persist `running`, while a later child reusing the same warm pool slot has a different token and is unaffected. Tombstones older than seven days are pruned on crash writes. A gateway-restart tick can use the registry's persisted generation with the substrate-level callback even before the exact pool entry is rebuilt. The next `trident/tick.ts` sweep performs the normal terminal failure and Work Board reconciliation, so the board indicator clears within one tick interval. Transient store failures retry on the next watchdog tick before respawn, rather than losing the crash edge.
+
+## 2026-08-09 — a crash before the launch save no longer fires a build every tick
+
+A reviewer reproduced this live on the branch, with their own probe: make the
+firer record its crash tombstone BEFORE it returns `{ status: 'fired',
+launcher_session_key }` — the window `trident/store.test.ts` already covers — then
+tick. `fires=3` after three ticks, `phase='forge-init'`,
+`subagent_status='crashed'`, `subagent_run_id=null`. Three real detached builds,
+with no ceiling: one more every tick, forever, burning credentials and able to open
+duplicate PRs.
+
+The chain: `saveIfActive` is vetoed by the tombstone, so the dispatch id the firer
+returned is never written and `subagent_run_id` stays NULL. Harvest, the
+terminal-status guard, the hang watchdog and orphan recovery were ALL gated on
+`subagent_run_id !== null`, so nothing observed the `crashed` status — and control
+reached `if (run.subagent_run_id === null) return launch(run)`, which is
+unconditional.
+
+The fix is one widened gate: `subagent_status === 'crashed'` also opens the
+harvest/terminal block, because a crashed launcher is a dead run whether or not we
+ever learned its subagent id. Harvest still runs FIRST inside it, so a workflow that
+wrote its terminal result and only then lost its launcher still harvests instead of
+being reaped — a fix that reaped those would have traded an infinite loop for
+silently discarded results.
+
+`trident/crash-before-launch-save.test.ts` pins it. The guarantee is that the loop
+is BOUNDED, not instant: the tombstone lands during tick 1's fire and the phase is
+classified at the top of a tick, so the reap happens on tick 2. The test says so
+rather than asserting something the fix does not claim. Mutant: reverting the gate
+reds two of four.
+
+## 2026-08-09 — General's documents became reachable, on both surfaces
+
+The owner reported one symptom (a General work card whose plan link did nothing,
+and no documents in General) that was **four independent gaps**: the web never
+injected a `documents` tab for General; `ProjectShell` deliberately suppressed the
+doc link there *because* of that missing tab; `docs-client.ts` interpolated the
+scope id into nine URLs raw, so General (`''`) would have requested
+`/api/app/projects//docs/…`; and on mobile nothing ever passed `WorkBoardRow`'s
+long-declared `onOpenDoc`, leaving the ▸ chip inert on every phone.
+
+Fixing any ONE changes nothing observable — the shape worth remembering. None was
+a mistake when written; the web guard in particular encoded a fact about another
+module's tab set with no mechanical link back to it, so changing that tab set
+could not fail there.
+
+`landing/chat-react/general-scope.ts` is new — the one place General changes
+spelling on the web, mirroring `app/lib/general-scope.ts`. The work-board client's
+private normaliser now delegates to it instead of keeping a second copy, since
+having one client with the rule and one without is exactly why one surface worked
+and the other 400'd. Routing deliberately keeps two ids: the board client is
+scope-addressed (General ⇒ `''`), the route is rail-addressed (⇒ `~general`), and
+a push built from the scope yields the dead `/projects//docs`.
+
+Detail: `docs/as-built/2026-08-09-general-docs-reachable.md`.
+
+## 2026-08-09 — which model runs which phase became configuration
+
+`trident/phase-models.ts` defines a stable owner-facing phase vocabulary (decomposition ·
+build · build-mechanical · rubric review · adversarial review · synthesis/arbitration ·
+bookkeeping) with per-phase default tier + effort and strict validation; validated
+overrides thread to the workflow as `phaseModels` and its router applies them over its own
+table. Every default is unchanged and the key is OMITTED when nothing is configured, so an
+untouched instance produces byte-identical args.
+
+The settings keys are deliberately NOT the agent labels — several labels are dynamic
+(`forge:fix-round-3`, `head-probe-round-2`), so exposing them would reshape the settings
+surface whenever the workflow's internals changed.
+
+The coverage test found a real defect on its first run: **`head-probe-round-N` had escaped
+the routing table** and was resolving to the fallback — the most expensive tier at high
+effort — for a step that runs one `git` command and reports a sha. A missing entry and a
+deliberate entry are indistinguishable when the fallback is silent, which is the argument
+for the test rather than just the fix.
+
+Also removed a FALSE docblock from `gateway/wiring/resolve-llm-credentials.ts`, which
+asserted the ambient pool had "NO FAILOVER" as a KNOWN LIMITATION. The single
+credential-less entry is the mechanism, not a defect; rotation swaps the credential file
+underneath the child. Retracted in place, with the generalisable lesson kept.
+
+Detail: `docs/as-built/2026-08-09-per-phase-model-config.md`.
+
+## 2026-08-09 — a spoken word is findable in chat search
+
+A voice note was transcribed at upload, written durably beside the audio, and delivered
+to memory — and **search could not see any of it**, because the index mirrors the
+message `body` and a voice note's body is the attachment placeholder.
+
+The transcript now rides back on the UPLOAD RESPONSE. A user's own message is never
+persisted server-side, so the client owns it, and the response is the only point at
+which the client can learn the transcript without a new frame. `transcript` is a field
+of its own rather than appended to `body`: the body is what renders, and appending would
+change how every existing voice note displays. Both search paths were updated through
+one shared `searchableText`, since two independent searches over one model is how a
+field gets indexed on one platform and not the other.
+
+Two details each of which would have produced a search that passes its tests and is
+useless in the hand: `snippet(tbl, -1, …)` (FTS5's "column with the most matches" —
+pinned at `body` a voice hit renders an unhighlighted placeholder), and reading the
+sidecar on the IDEMPOTENT re-upload path (which deliberately skips the ASR seam, so the
+same audio would be searchable once and then silently not).
+
+The FTS DDL was split out of the schema array so column migrations run before the
+triggers that name the new column — otherwise a fresh install works and every upgrade
+fails. Rebuild is detected from `sqlite_master` DDL, not by probing a query.
+
+Detail: `docs/as-built/2026-08-09-voice-transcript-searchable.md`.
+
+## 2026-08-09 — a voice note's words survive the device (correcting the same day's fix)
+
+The earlier half (#158) shipped on a FALSE belief: that a user's own messages are not
+persisted server-side. They are — `app_chat_messages` holds user rows, and `replayAfter`
+is how a fresh or reconnecting device rebuilds its history. So the fix worked only on the
+phone that performed the upload; a reinstall brought voice notes back with their audio and
+none of their words.
+
+Migration 0117 adds a nullable `transcript` column; the store persists it, the replay
+envelope carries it, and the client merges it without ever regressing a known value to
+null. The SERVER resolves it from its own sidecar rather than accepting it from the
+client — the text is already ours, and trusting the client would let any client write into
+a field that is indexed and read by the agent. Deliberately not `meta_json`, whose
+contract says it is never populated for user messages.
+
+Four mutants; the first pass caught only ONE. The three that survived were: the column
+never written, the server never resolving it, and the composer never wiring the seam —
+that last being the repeat defect shape SPEC names, with every other test green while the
+feature was dead.
+
+Also lands two arbiter design docs (multi-substrate build agent; model usage dashboard),
+both awaiting owner decisions rather than implementation.
+
+Detail: `docs/as-built/2026-08-09-voice-transcript-survives-device.md`.
+
+## 2026-08-09 — the per-phase model config gets a producer
+
+The vocabulary, the workflow argument and the router were all built and correct, and
+**nothing ever supplied a value** — the orchestrator never passed one and no surface
+wrote one, so every run used the defaults regardless of configuration and nothing could
+go red. Found by an independent design review hours after the config landed.
+
+Migration 0118 adds `trident_phase_models` to `instance_metadata` (the documented home
+for instance-level settings); read/write helpers; a per-launch `resolve_phase_models`
+resolver threaded orchestrator → composition → composer; and
+`GET`/`PUT /api/app/trident/phase-models` registered across all four required places.
+
+The write fails WHOLE on any invalid entry while the read degrades quietly — the
+asymmetry is deliberate: at the settings boundary the owner can be told, deeper in
+nobody is listening. `PUT` replaces rather than merges so clearing a pin is an omission,
+but an absent `overrides` key is a 400 rather than an accidental wipe.
+
+Three mutants, one per link, each caught by exactly one test. The UI is still missing —
+this is the producer, not the pane.
+
+Detail: `docs/as-built/2026-08-09-phase-model-producer.md`.
+
+## 2026-08-09 — Codex and Kimi are connectable from a phone
+
+The gateway's Codex surface is app-scoped (`/api/app/codex-auth`) and the WEB client has
+used it since it was built. **Mobile had no client and no screen**, so an owner with only
+a phone could not connect the cross-model reviewer at all — the reference deployment
+works only because provisioning wrote the credential to disk directly.
+
+Adds a **Model providers** section to mobile Integrations (above Shared credentials, so
+the free-text form reads as the escape hatch): Codex status + paste `auth.json` +
+disconnect via a new `app/lib/codex-credential-client.ts`, and a named Kimi K3 row.
+
+The Kimi row writes through the SAME global-credential store the free-text form uses and
+DERIVES its status from that list — a named row with its own storage path would mean a
+key entered here behaved differently from one entered there. The service id is a
+repeated literal (the app bundle carries no workspace deps), which makes that string
+load-bearing: a mismatch stores the key where nothing reads it and the reviewer stays
+silent, so the test asserts it.
+
+12 tests that PRESS the real controls; four mutants each caught, including "the Connect
+button is rendered but inert" — the failure a source check cannot see.
+
+Detail: `docs/as-built/2026-08-09-mobile-model-providers.md`.
+
+## 2026-08-09 — the Kimi key comes from the store, and only the store
+
+Owner-directed: the env var *"was a temporary hack, not a production-grade decision."*
+`resolveKimiApiKey` read `KIMI_API_KEY` first and fell back to the store, which made the
+environment a second resolution path — the same settings screen behaving differently on
+two boxes, failing in the direction nobody checks (paste a key, see it saved, every
+review keeps using the shell's).
+
+The env argument is gone from the signature. `ensureKimiKeyExported` still writes the
+resolved key into the CHILD's env — that indirection keeps the key out of prompt text and
+stays. The variable is now purely an output, never an input. Two behaviours flipped: a
+pre-set env value is now OVERWRITTEN, and clearing the key in settings CLEARS the export
+(without which a stale key survives and the reviewer runs on a credential the owner
+believes they removed).
+
+The live key was migrated into the store BEFORE shipping — the box had it only in the unit
+env and `project_credentials` was empty, so store-only would have silenced K3. Migration
+printed only lengths and outcomes, never the value.
+
+Lesson from that migration: it failed twice with an opaque "failed to open SQLite" that
+looked like permissions or locking; the cause was `{ create: false }`, an option
+production never passes. A probe that does not use the production call shape fails in a
+way that sends you debugging the wrong system.
+
+Detail: `docs/as-built/2026-08-09-kimi-store-only.md`.
+
+## 2026-08-09 — the build-phase models are settable from a phone
+
+Completes the per-phase model/effort chain: vocabulary → store + resolver + endpoint →
+**a surface a human can use**. Chat header ☰ → Settings → Code generation, one row per
+phase with model and effort chips.
+
+The phase list is SERVER-SUPPLIED (a phase added to the engine appears without an app
+release, and neither client keeps its own copy of a list they must agree on). Choosing a
+value equal to the default CLEARS the override rather than pinning it — otherwise the
+owner freezes a phase against a future default change they never intended. A rejected
+save KEEPS the local edits and shows the server's message verbatim, since the server
+rejects the whole set and names every fault. Nothing auto-saves.
+
+Reachability is part of the feature: a registered route nothing pushes and a push at an
+unregistered route fail INDEPENDENTLY, so the nav row and the Stack registration each got
+their own assertion in the #385 guard.
+
+12 press-the-control tests + 2 guard tests; three mutants each caught, including "the
+effort chips are rendered but inert".
+
+DEFERRED AND NAMED: the web half (`SettingsTab.tsx`) — same endpoint, no new server work,
+but genuinely not done.
+
+Detail: `docs/as-built/2026-08-09-codegen-settings-mobile.md`.
+
+## 2026-08-09 — the build-phase models are settable on the web too
+
+Closes the half #163 named as deferred: a Code generation section in the web Settings tab
+over the same endpoint, mirroring the three decisions (server-supplied phase list;
+choosing the default CLEARS the override; a rejected save KEEPS the edits and shows the
+server message verbatim).
+
+The interesting part is a PARITY test. `effectiveRow`/`applyRowEdit` now exist twice
+because each client bundle is free of the other's workspace — correct, and also the risk,
+since those two functions encode product DECISIONS. A divergence is the failure nobody
+reports: each surface stays self-consistent and the owner just gets a different answer
+depending on the device. The copies are executed side by side over ten edit shapes and
+seven display shapes.
+
+WHERE it lives was not the first attempt: it began in `landing/` importing the mobile
+client relatively, the lint rule caught it, and the workspace specifier then failed to
+resolve — because `landing` does not depend on `@neutronai/app` and MUST NOT, that
+independence being why the helpers are duplicated. `gateway` declares both, and already
+hosts `doc-links-parity` for the same reason.
+
+Four mutants each caught, two of which SURVIVED the first pass (the web component's error
+behaviour was untested — found by mutation, not by reading). Also fixed a CSS token that
+would have shipped an invisible chip border: `--hairline` is not a token here, `--border`
+is, and it is defined for both themes.
+
+Detail: `docs/as-built/2026-08-09-codegen-settings-web.md`.
+
+## 2026-08-09 — a review panel cannot see a red build, so now something else does
+
+Four reviewers read the DIFF and none runs the tests, so a change that type-errors or reds
+a shard could be unanimously APPROVED and merged. The reference deployment never showed
+this because a GitHub setting blocks it there — which is the problem: the discipline lived
+in repository CONFIGURATION, so every self-hoster and every local-merge run had nothing.
+
+DETERMINISTIC, NEVER INTERPRETED: the agent reports `gh pr checks --json` output verbatim
+and every judgement happens in JS. ONE GATE, PEERS AS DATA: red → code blockers that force
+REQUEST_CHANGES so the fix loop re-Forges; pending/unreadable → a deferred peer on the
+EXISTING list, so the loop exits infra-only rather than editing code to fix a timer;
+green/none → nothing. `none` is distinct from `green` (a repo with no CI has nothing to
+wait for), and local mode short-circuits before spending an agent.
+
+THE HOLE IT NEARLY SHIPPED WITH: `enforceCrossModelGate` returns the synthesis untouched
+when there are no deferred peers, so attaching CI findings without setting the verdict
+would have APPROVED a red build carrying a "CI FAILING" finding. Red now forces the
+verdict. A second near-miss: an unreadable exit-0 reply first classified as `none` — the
+unsafe direction; my own test caught it, not my reading.
+
+22 tests against the REAL functions extracted from the .mjs. FIVE MUTANTS, all fail-open,
+each caught. The new agent label was caught by #157's coverage test and routed to the
+cheap tier — leaving it to the fallback is how head-probe sat on the most expensive tier
+for months.
+
+Detail: `docs/as-built/2026-08-09-trident-ci-gate.md`.
+
+## 2026-08-09 — the usage readings are remembered, and turned into a pace
+
+The monitor has always probed the active credential every 60s, cached ONE reading, and
+aged it out at five minutes — so the product measured utilisation continuously and
+remembered nothing. "Which pool can take this build?" is a question about a TREND, which
+is why the dashboard needed a migration before a chart.
+
+Migration 0119 + `persistence/usage-samples-store.ts` + a fail-soft `onSample` hook wired
+beside the existing `onStanding` observer. Prune rides on the same call (a cleanup job
+that can fall out of step with its writer grows forever or deletes something in use).
+PACE = fraction consumed ÷ fraction of window elapsed, computed at read time and never
+stored.
+
+TWO THINGS THE TESTS FOUND THAT READING DID NOT. The exhaustion projection divided by
+pace TWICE — plausible-looking and wrong; now derived, and pinned by a hand-checkable
+case (5h window, half elapsed, 75% used → pace 1.5 → 50 minutes). And an `at < reset_at`
+guard turned out to be MATHEMATICALLY UNREACHABLE: pace > 1 implies the projection is
+always earlier than the reset. Removed with the proof written down — a dead branch dressed
+as safety cannot be tested, so it reads as protection never exercised.
+
+`account_label` exists and is always NULL today: rotation happens outside this process, so
+the instance cannot name the account. An inferred name shown as a measurement would be
+worse than none.
+
+Six mutants; five caught immediately and the sixth exposed the dead branch. The wiring
+tests had to move from `persistence/` to `open/__tests__/` — `open` depends on
+`persistence`, never the reverse, and the lint refusal was the architecture talking.
+
+Detail: `docs/as-built/2026-08-09-usage-sample-series.md`.
+
+## 2026-08-09 — Usage dashboard: the endpoint and the web card
+
+`GET /api/app/usage/dashboard` + the Model usage card in web Settings. The endpoint
+went into the EXISTING usage surface rather than a new one: same owner gate, same
+subject, and a second near-identical surface is how one stops being wired. The cost
+of that is a prefix hazard — the meter's path is a strict prefix of the dashboard's —
+pinned in both directions.
+
+What the card refuses to say is the substance. An unreachable route draws no bar
+(a 0% bar invents a measurement); a null pace renders as an em dash, never `0.0×`;
+a null projection OMITS its row, because null is the common good case and a
+permanent dash trains the eye to hunt for an absent warning; and a null account
+label reads "active credential" and never guesses.
+
+The wiring test now checks the READ half separately from the write half — the write
+assertion had passed for a whole PR during which nothing read the series.
+
+Detail: `docs/as-built/2026-08-09-usage-dashboard-card.md`.
+
+## 2026-08-09 — The chat agent can search the web
+
+`LIVE_AGENT_TOOL_NAMES` had never contained `WebSearch` or `WebFetch`, and that array
+is the only thing that decides. Reported via a ritual, but it was never ritual-specific:
+ordinary chat could not look anything up either. A missing built-in produces no error,
+only an agent that says it has no such tool, which is why nothing upstream noticed.
+
+The worse half: a ritual declaring a web tool must be approved for `egress: 'web'`
+through a separate grant reading "may reach the public internet". That grant was given
+for `kaizen` over a capability the code could not exercise. An approval prompt that
+overstates what it grants spends the credibility the whole gate rests on.
+
+Guarded by a new test asserting every bundled ritual's declared built-ins are a subset
+of the live surface — the join between two green suites whose union was broken, the same
+shape as the push-kind drift.
+
+Detail: `docs/as-built/2026-08-09-live-agent-web-tools.md`.
+
+## 2026-08-09 — Model usage on the phone
+
+☰ → Settings → Model usage. Same two windows, same pace, same refusals as the web card.
+Both wiring points present (nav row + Stack.Screen — they fail independently) and the
+screen test presses real controls.
+
+A first draft re-declared `usageBand`/`clampFraction` on the phone with a bundle-
+independence justification that `app/components/UsageMeter.tsx:20` disproves — it already
+imports both from `@neutronai/contracts`. Both now come from the contract and the parity
+test asserts neither client exports its own. The formatters stay twinned, correctly:
+production code in `app/lib` never imports `landing`.
+
+Every refusal mutation-tested separately, including one attempt that was NOT faithful and
+proved nothing until rewritten.
+
+Detail: `docs/as-built/2026-08-09-mobile-usage-card.md`.
+
+## 2026-08-10 — the builder gets the spec doc's BODY, not its YAML frontmatter
+
+`WorkBoardSpecDocService.resolveTaskForItem` returned `doc.content.trim()` — the whole
+document. `buildSpecDocMarkdown` prepends a frontmatter block (`type` / `title` /
+`created`), so **the builder's first instruction was YAML metadata** rather than the scope.
+
+Observed live on two separate email-core runs, whose dispatch branches came out
+`trident/type-plan-title-p1-email-pipeline-s`. The slug is derived from the task text, so
+the leak was visible in the BRANCH NAME while the real damage — a builder opening its
+brief on `type: plan` — was invisible.
+
+`stripFrontmatter` is exported and deliberately narrow:
+
+* the fence must **open on line 1** (leading blank lines tolerated). A `---` further down
+  is a horizontal rule, and this repo's plan docs use those constantly — treating one as a
+  closing fence would silently truncate the brief from the top, strictly worse than
+  leaving the header on.
+* the fence is a line that is **exactly** `---` after trimming, not one that merely starts
+  with it.
+* an **unclosed** opener is returned untouched; guessing where it ends would discard content.
+* a doc that is **only** frontmatter strips to empty, and `resolveTaskForItem` already
+  treats empty as "no usable spec" and falls back to the card title — so it degrades to
+  the title rather than dispatching a blank brief.
+
+### The tests were worthless on the first pass, and the mutation run is what caught it
+
+Seven cases passed, and **both mutants survived**:
+
+* **Reverting `resolveTaskForItem` to raw content passed all seven** — every case tested
+  the pure helper and none called the function actually being fixed. **The fix's own call
+  site had zero coverage.** Now covered by a real round-trip: create a card with a spec,
+  read the task back, assert no `type: plan` and no `created:` reach it, and assert it does
+  not merely begin past the header by accident.
+* **The "mid-document `---` is a rule, not a fence" case had ONE `---`** — so a mutant that
+  scans for a fence *anywhere* still finds no closer and returns the input unchanged. The
+  fixture could not distinguish the correct rule from the broken one. It has two rules now.
+
+Each mutant now dies on a **different** test.
+
+📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
+it looks identical to the real thing in a green run.** Second occurrence today. The
+mutation step is the only thing that separates them.
+## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
+
+Observed live: the owner cancelled a running email-core build and the row settled at
+`phase='stopped'` with **`subagent_status='running'`**. The child was already dead — the
+column was asserting something false.
+
+> ⚠️ **"The child was already dead" is WRONG too, and is kept only as the record of what
+> was believed.** Cancelling does NOT kill the detached workflow (#177): it keeps running
+> and keeps checkpointing. This incident held by TIMING — the workflow happened not to
+> checkpoint again before the row was read — not by construction, which is exactly why the
+> fix needs the durability half in `trident/checkpoint.sh`. What is true of EVERY cancel is
+> narrower: the column is wrong about the RUN (nothing will advance it again), not
+> necessarily about the process. Corrected in round 3 below; marked here because the
+> ⚠️ block that follows scopes only the paragraph after it, and a reader who stops at the
+> opening would carry away two false claims rather than one.
+
+`subagent_status` is documented (migration 0077) as the CURRENTLY in-flight subagent, and
+gates key on it: #143's fix widened the harvest/terminal block on
+`subagent_status === 'crashed'`, and the hang-watchdog and orphan-recovery read it too. A
+terminal row reading `running` is precisely the stale field those readers can act on, so
+this is not tidiness.
+
+> ⚠️ **That paragraph is WRONG and is kept only as the record of what was believed.** All
+> three named readers are unreachable on a terminal row — `step()` no-ops on
+> `isTerminalPhase` before the harvest gate or orphan recovery run, and the hang watchdog
+> keys on `last_advanced_at`. The reader that is actually load-bearing is `update()`'s crash
+> veto. Corrected in "Two corrections to the round-1 text" ~110 lines below; the correction
+> is repeated here because a reader who stops after the opening rationale would otherwise
+> carry away the false one.
+
+`TridentRunStore.terminalTransition` now clears it **in the same atomic UPDATE** that
+writes the terminal phase:
+
+```sql
+-- as of round 2 the set is IN ('running', 'pending') — see the round-2 note below
+subagent_status = CASE WHEN subagent_status = 'running' THEN NULL ELSE subagent_status END
+```
+
+**Only `'running'` is cleared, and that restriction is the load-bearing half.** Nulling
+unconditionally would erase a `'crashed'` marker whenever anything terminated an
+already-crashed run as `'failed'` — deleting the signal #143 added a gate for, while
+looking like a cleanup. `completed`/`failed`/`crashed` are OUTCOMES worth keeping;
+`running` is the only value that is a live CLAIM, so it is the only one a terminal
+transition has business touching.
+
+`NULL` rather than a new `'cancelled'` enum value because the column carries a CHECK
+constraint (`migrations/0077_code_trident_runs.sql:107-108`) that SQLite cannot alter
+without a table rebuild — heavier than the defect warrants — and `null` already means
+"nothing in flight" here (`trident/orchestrator.ts` writes it on the no-subagent paths).
+The reason for the stop survives in `failure_reason`, so nothing is lost.
+
+**Verification:** 6 cases in `trident/store.test.ts` against a REAL migrated DB, each with
+a non-empty precondition asserting the row actually carried the status first. Two mutants
+killing DIFFERENT tests — dropping the retraction reds the cancel case; nulling
+unconditionally reds the `crashed` AND `completed` cases — so both halves of the CASE are
+proven necessary. A loser transition (second terminate on an already-terminal row) is
+covered too: it must not clear a status on its way past.
+
+📌 **The first draft of these tests went in the wrong file.** `trident/terminate.test.ts`
+uses a FAKE store, so a SQL-level fix is invisible there — the tests would have passed
+without exercising the change at all. Test the SQL where the SQL lives.
+
+**Review pass (3-lane panel) added two cases and corrected one claim above.**
+
+The blast-radius question resolved clean: the only production path into
+`terminalTransition` is `terminate.ts:143`, its four callers read `.phase`/`.failure_reason`
+only, and no reader of `subagent_status` exists outside
+`trident/{orchestrator,state-machine,store,inner-loop-sim}.ts`. The tick loop is a separate
+terminal writer (`saveIfActive`), so the hang watchdog and orphan recovery — which set the
+column explicitly in their outcome — are untouched.
+
+Two gaps the original 6 cases left:
+
+1. **The SHORT `params` branch was unpinned.** Omitting `failure_reason` makes `params` one
+   element shorter, and the board X-cancel (`work-board-surface.ts:531`) and `/code stop`
+   (`code-command.ts:281`) BOTH terminate without a reason — two of the four callers take
+   the branch no test covered. It binds correctly, but nothing held it there. Now pinned
+   column-by-column, killed by a mutant that pushes the parameter unconditionally.
+
+2. **The stated reason the `'running'`-only restriction is load-bearing is not the real
+   one.** The comment credits #143's harvest gate, but `step()` no-ops on an already-terminal
+   phase (`orchestrator.ts:680-683`), so that gate is unreachable once the row is terminal.
+   The path where preserving `'crashed'` actually bites is `update()` — the ONE writer with
+   no `phase NOT IN (terminal)` guard, whose `subagent_status IS NOT 'crashed'` veto
+   (`store.ts:447-449`) is all that latches a crash on a terminal row. Nulling
+   unconditionally would lift that veto. The restriction is right; the justification was
+   aimed at the wrong mechanism, so a future "simplify to NULL" could have cleared the
+   cited-but-unreachable gate and still broken the real one.
+
+Both `'running'`-clearing guards elsewhere are also gated on `phase NOT IN (terminal)`
+(`store.ts:411`, `:638`), so clearing the claim at terminal time makes no guard unreachable:
+`crashRunningByLauncher` could never sweep a terminal row regardless.
+
+📌 **A placeholder/parameter arity mismatch is LOUD, not silent** — sqlite throws, and the
+mutant that introduced one reddened eleven tests. The dangerous shape is a same-count
+REORDER, which is why the new case asserts each column separately instead of just the status.
+
+**Round 2 — the retraction was not DURABLE. `trident/checkpoint.sh` now refuses a terminal row.**
+
+The panel's blocker: the retraction held by TIMING, not by construction. Cancelling a build
+writes the terminal phase but does not kill the detached inner workflow — nothing in the
+cancel path reaps the child. That workflow keeps going, and every per-phase checkpoint pushes
+`subagent_status running` (`trident/inner-workflow.mjs:567`) through `trident/checkpoint.sh`,
+whose UPDATE was `WHERE id='<run-id>'` with no phase predicate. So the sequence `/code stop`
+mid-Build → row goes terminal with the claim retracted → next inner checkpoint → the claim is
+back, on a terminal row, with `branch` and `last_advanced_at` re-stamped. The exact state this
+work exists to remove, recreated by the only writer that had no terminal guard.
+
+The fix is the matching predicate, so the terminal chokepoint and the out-of-band writer agree:
+
+```sql
+UPDATE code_trident_runs SET <fields> WHERE id='<run-id>'
+  AND phase NOT IN ('done', 'failed', 'stopped')
+```
+
+Nothing useful is dropped, because `step()` returns early on `isTerminalPhase`
+(`trident/orchestrator.ts:679-683`): no reader ever consults a value a post-terminal
+checkpoint would have written, `inner_result` included — a terminal row is never harvested. A
+skipped write stays exit-0 (the checkpoint step must never fail a build) but now reports on
+stderr, because a silently-dropped checkpoint is exactly the kind of absence that costs hours;
+`changes()` is read in the same sqlite3 invocation and `tail -1` drops the busy_timeout
+PRAGMA's own echo.
+
+**Two corrections to the round-1 text above.**
+
+1. The docblock in `trident/store.ts` still justified the retraction via #143's harvest gate,
+   the hang watchdog and orphan recovery — all three unreachable on a terminal row (`step()`
+   no-ops first; the watchdog keys on `last_advanced_at`). Round 1 corrected that in this log
+   and left the comment saying it. Now the comment names what is actually load-bearing: the
+   CRASH VETO on the two write paths (`store.ts` `update()` and `saveIfActive()`), plus the
+   human read of a finished row, which is where the false claim was spotted in the first place.
+   Rule 3a shape — a confidently specific wrong rationale is worse than none, because the next
+   reader trusts it.
+2. The loser-transition test could not prove what it claimed. It set the already-terminal row
+   to `'crashed'`, which the CASE preserves anyway, so the assertion passed whether the loser
+   wrote nothing or wrote the preserving CASE. It now puts back `'running'` — the one value the
+   CASE *would* clear — and asserts row state before `won`, so a leaked write cannot hide
+   behind the `won` assertion. Killed by the mutant that drops the terminal predicate.
+
+`'pending'` is cleared too now. No production path writes it (the orchestrator writes only
+running/completed/failed/crashed/null), but it is in the type and in migration 0077's CHECK,
+and it ASSERTS a child just as `'running'` does. The split that matters is claim vs outcome,
+not one enum value.
+
+**Verification:** 613 trident tests green. Five new cases in `trident/checkpoint-sh.test.ts`
+against a real throwaway sqlite db — a per-phase checkpoint against `stopped`/`failed`/`done`
+writes nothing and re-stamps nothing, the terminal-result write is refused too, a non-terminal
+phase is unaffected (the guard is not a blanket refusal). Mutant: deleting the predicate reds
+four of them. That suite needed a `phase` column added to its fixture table, which is its own
+small lesson — a hand-rolled fixture schema silently omits the column your new guard reads.
+
+📌 **A SQL-level guard on the read side is only half a fix when an unreaped process still holds
+a pen.** The question that found this was not "is the write correct?" but "who else can write
+this row after it is terminal, and what stops them?" — and the answer was a shell script three
+directories away that no one had thought of as part of the state machine.
+
+**Round 3 — the freeze was too WIDE, and two of its tests could not fail.**
+
+Round 2's guard was `AND phase NOT IN (terminal)` on the whole UPDATE, which threw away the
+orphan's `branch`/`pr`/`inner_checkpoint`/`inner_result` along with its liveness claim — and the
+comment asserting "nothing useful is dropped" was false in exactly the case this work is about.
+The cancel does not kill the workflow, so it can push a branch and open a PR **after** the
+cancel; those columns are the only trail from the run row to that PR, and `run-progress.ts:188`
+surfaces `pr` to the board. On a first launch this script is the ONLY writer of either — the
+launch persist carries `branch`/`pr` forward but cannot invent them (a fresh run's `branch` is
+null and `detectExistingPr` probes a branch that does not exist yet). Blanket-refusing them left
+an untraceable orphan PR.
+
+The freeze is now SCOPED to the two liveness columns, and nothing else:
+
+```sql
+subagent_status  = CASE WHEN phase IN ('done','failed','stopped') THEN subagent_status ELSE '<new>' END
+last_advanced_at = CASE WHEN phase IN ('done','failed','stopped') THEN last_advanced_at ELSE '<now>' END
+```
+
+`subagent_status` is the claim; `last_advanced_at` is the hang watchdog's heartbeat. Everything
+else lands: inert on a terminal row (`step()` no-ops, so nothing resumes from a checkpoint or
+harvests a result) but readable, which is the point. A cancelled row carrying a stale parseable
+`inner_result` is an ANTICIPATED state rather than one this change introduces —
+`isTridentHarvestTerminal` keys on the durable `harvested_at` marker that `terminalTransition`
+never sets, explicitly so such a row emits no handoff (RC2, `orchestrator.ts:220-235`). The `inner_result_file` path nests both
+guards — terminal freeze outermost, then the original readfile column-consistency CASE. Because
+the freeze now lives in the SET expressions rather than the WHERE clause, a terminal row still
+matches and `changes()` still reports 1, so the stderr report re-reads the phase in the same
+sqlite3 invocation and distinguishes *frozen* from *run not found*.
+
+The un-reaped workflow itself is now filed as **rjunee/neutron#177** and cited from both halves
+of the fix — this PR makes the record honest, it does not stop the orphan.
+
+**Two blockers in the round-2 TESTS — both were assertions that could not fail.**
+
+1. **`checkpoint-sh.test.ts` seeded `phase='Build'` / `'Review'`** — values migration 0077's
+   `CHECK` rejects. The terminal guard was therefore never once exercised against a legal ACTIVE
+   phase: a mutant guard that froze only `('Build','Review')` passed the entire suite while
+   freezing every phase production can actually hold. The throwaway fixture table now carries
+   0077's real `phase` CHECK (so an illegal seed throws — pinned by its own case), the terminal
+   cases iterate `TERMINAL_PHASES`, and the "not a blanket refusal" control iterates **all five**
+   active phases.
+2. **The `subagent_status` matrix omitted `'failed'`** — the fifth and last value the CHECK
+   admits. A mutant clearing `IN ('running','pending','failed')` survived the whole suite while
+   erasing the subagent-level outcome of every failed build. Covered now; the matrix is complete
+   against the CHECK.
+
+Three mutants killed on the scoped freeze: removing it (4 red), applying it to every phase (7
+red), extending it to `branch`/`inner_checkpoint`/`inner_verdict` — i.e. regressing to round 2's
+blanket refusal (4 red).
+
+Two smaller corrections. The store docblock credited `saveIfActive()`'s crash veto as
+load-bearing alongside `update()`'s; it is not — `saveIfActive` also carries
+`phase NOT IN (terminal)`, so on a terminal row it cannot land whatever the column says, and only
+`update()` (the ONE writer with no phase predicate) actually latches a crash there. And the
+short-params test's rationale claimed a shifted parameter "would be silent": a timestamp bound to
+`phase` is rejected loudly by the CHECK — `failure_reason` is the column that shape would quietly
+hit, which is why the case pins each column separately.
+
+The terminal-set literal in `checkpoint.sh` is a fourth copy of `TERMINAL_PHASES`, so
+`inner-workflow.test.ts` — which already asserts that script's SQL as text — now pins the literal
+against the constant and asserts it appears exactly once.
+
+📌 **A test can be green because the code is right, or because the fixture made the wrong answer
+unreachable.** Both blockers here were the second kind, and both were invisible in review until
+someone compared the fixture's values against the production CHECK constraint. When a guard keys
+on an enum, the fixture must carry that enum's constraint — otherwise the test is asserting over
+a value space production never has.
+
+**Round 3 — the docblock's OPENING claim was false, and the fixture was still laxer than
+production in two more columns.**
+
+1. **"The child is dead" contradicted the same docblock's own DURABILITY paragraph.** The
+   comment above `terminalTransition` opened by asserting that after a cancel the child
+   process is dead, while its DURABILITY paragraph — twelve lines below — correctly stated
+   that cancelling does NOT kill the detached workflow, which keeps checkpointing
+   (#177). Both cannot be true. The observed incident held by TIMING, not by
+   construction: the workflow happened not to checkpoint again before the row was read.
+   The opening now claims only what is actually true of every cancel — the column is wrong
+   about the RUN (nothing will advance it again), and explicitly NOT that the process is
+   gone. The same false sentence was corrected in the PR description.
+
+   The round-2 correction of the *reader* rationale (crash veto, not #143's harvest gate)
+   was already in the code at this round's start; only the opening sentence was outstanding.
+
+2. **`last_advanced_at` was declared nullable and seeded NULL — a state production cannot
+   hold** (`migrations/0077_code_trident_runs.sql:118` is `TEXT NOT NULL`, re-stamped on
+   every transition). The fixture also seeded `subagent_status='pending'` in every single
+   case, never NULL — even though NULL is exactly what `terminalTransition` itself leaves
+   on a cancelled row, so it is the value the very next checkpoint after a cancel sees.
+   The throwaway table now carries the NOT NULL and the `subagent_status` CHECK, seeds a
+   real timestamp, and seeds the claim BOTH ways.
+
+Two mutants that the laxer fixture let live, each **executed** rather than reasoned about:
+
+| mutant (one extra AND-clause on the OLD value in `frozen()`) | old fixture | new fixture |
+| --- | --- | --- |
+| (a) freeze `subagent_status` only when it was `'pending'` | survives, 23 pass / 0 fail | dies, **3** red at `expect(r.subagent_status).toBeNull()` |
+| (b) freeze `last_advanced_at` only when it was NULL | survives, 23 pass / 0 fail | dies, 8 red at `expect(r.last_advanced_at).toBe(SEEDED_HEARTBEAT)` |
+
+(a) would have written `'running'` straight back onto a row a cancel had just cleared —
+re-creating the exact reported bug through the one writer with no terminal guard. (b) is
+the sharper one: its condition can NEVER hold in production, so the mutant refreshes the
+heartbeat of every real finished run — and under a NULL-seeded fixture the condition always
+held, so the suite stayed green while the guard did nothing.
+
+📌 **The two failure shapes in this PR are the same shape at different altitudes.** A
+fixture laxer than production puts the wrong answer out of the test's reach; a comment that
+justifies a design via a path that cannot execute puts the wrong reason out of the reader's
+reach. Both survive review by looking like the finished article — a green suite, and prose
+that reads as design documentation. The control that catches the first is running the mutant
+against BOTH fixtures and showing it survives one; the control that catches the second is
+grepping for the code that enters the mode the comment describes.
+
+**Round 4 — the mutation EVIDENCE was itself a claim, and one of the two guards has no
+reachable failure on this platform.** Both findings are about the same thing: prose that
+asserts coverage it does not have.
+
+1. **A comment claimed a test killed a mutant that in fact passes it.** The terminal-result
+   case in `trident/checkpoint-sh.test.ts` was annotated "the value mutant (a) would let
+   through here". It would not: that case passes only `inner_result_file` + `inner_verdict`,
+   so its `subagent_status` comes from the freeze arm built INLINE in
+   `trident/checkpoint.sh` (the `inner_result_file` branch), which is a second,
+   hand-written copy of the terminal predicate and does not route through `frozen()` at
+   all. Executed: mutant (a) takes **3** tests red and this is not one of them.
+
+   Re-measuring it also caught a stale number in the round-3 table above: it recorded
+   mutant (a) as "4 red", and the count on that same commit is **3** (the three terminal
+   phases of the already-retracted case). Corrected in place, and in the PR description.
+   The number was wrong when it was written, not made wrong by a later edit — the suite
+   count is unchanged at 27 either side of this round.
+
+   The second copy does need its own mutants, so the comment now names the ones this case
+   actually kills, both executed:
+
+   | mutant on the INLINE readfile freeze arm | result |
+   | --- | --- |
+   | (c) drop the `WHEN phase IN (terminal) THEN subagent_status` arm | dies, 2 red |
+   | (c2) narrow it with `AND subagent_status = 'pending'` | dies, **1** red — ONLY the already-NULL case |
+
+   (c2) is the one that justifies the case existing: its sibling seeds `'pending'`, which
+   the narrowed arm still freezes, so the sibling stays green and a row whose claim a
+   cancel had ALREADY retracted is the only thing that catches it.
+
+2. **A guard was pinned by a test that could not fail, so the test was deleted.** The
+   stderr diagnostics parse sqlite3's list-mode `N|state` line, and the invocation now
+   carries `-init /dev/null -list -separator '|'` so a host rc file cannot mute them. A
+   fixture pointing `HOME` at a hostile `.sqliterc` was written, and then removed after
+   the negative control: measured on sqlite3 3.43.2 (Apple), an rc file changes the format
+   when passed as `-init <file>` (`'c;s\n0;active\n'`) but is NOT picked up from a `HOME`
+   override — so the fixture passed **identically with the pins removed**. Covering it for
+   real would mean writing into a developer's actual home directory. The pins stay as
+   environment hardening for builds that do read an rc; both files now say so, including
+   that no test covers it.
+
+Doc-accuracy fixes in the same pass: the "`update()` is the ONE writer with no terminal
+predicate" claim was false — `save()` has neither the predicate nor the crash veto, and is
+inert only because it has ZERO production callers (production commits go through
+`saveIfActive`, `trident/tick.ts:263`); the claim now says "the only writer REACHABLE on a
+terminal row that both lacks the predicate and carries the veto" and names why each of the
+other two is excluded. `trident/store.test.ts` had also kept the superseded rationale
+attributing the load-bearing veto to `saveIfActive()`, contradicting the same branch's
+docblock two files over. And the opening line of this entry — "the child was already dead"
+— carries its own ⚠️ retraction above, because the existing marker scoped only the
+paragraph after it.
+
+📌 **Mutation evidence decays into folklore the moment it is written down next to the wrong
+test.** "Kills mutant (a)" is checkable prose that nobody rechecks, and the failure mode is
+specific: a guard that exists in TWO independently-built copies gets one copy's evidence
+pasted onto the other's test, and the untested copy is then defended by a citation. The
+control is mechanical — run the named mutant and read WHICH tests go red, not how many.
+
+## 2026-08-09 — Naming the account behind a usage reading
+
+The `account_label` column has been null on every row since it was created. This reads an
+optional `.credentials.meta.json` sidecar beside the credential, written by whatever swaps
+it, and uses the label ONLY when its fingerprint matches the token actually resolved.
+
+A missing label is harmless — it renders "active credential". A STALE one is not: it would
+attach the previous account's name to the current account's reading and send the owner to
+move quota away from an account that was never under load. Mismatch degrades to null.
+
+Token and label come from ONE `resolveActiveCredential` call, so a swap landing between two
+calls cannot pair one account's reading with another's name.
+
+The instructive mutant: dropping the fingerprint check fails immediately, but making the
+MONITOR persist a null label while the resolver stayed correct passed everything — "resolved
+but never carried", one layer along from "built but never wired". Now covered.
+
+Nothing writes a sidecar yet, so every label is still null and behaviour is unchanged.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the credential fingerprint is scrypt (CodeQL `js/insufficient-password-hash`)
+
+`credentialFingerprint` hashed the live OAuth token with a bare SHA-256; CodeQL flagged it
+and, being a required check on Open's `main`, blocked the PR. The finding is right in form
+— a bare digest of a credential is one dictionary from reversible — and while it is not
+exploitable here (long random tokens, 0600 sidecar beside the credentials file), that
+rests on three facts a later change could remove. Now `scryptSync` at `N=4096, r=8, p=1`,
+output shape unchanged at 12 hex. The salt is fixed because two processes must derive the
+same value sharing only the token; it buys domain separation and nothing more, and says so.
+
+The header's prose description of the algorithm was deleted: a cross-process contract
+spelled out in prose drifts silently, and a writer trusting the stale line would produce a
+digest the reader rejects with no symptom but missing labels. Writers import the function.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the sidecar contract drifted in the DOCS, which are its only interface
+
+The scrypt change corrected the algorithm in `open/credential-label.ts` and left both
+writer-facing docs stating a recipe the reader silently rejects: the as-built detail file's
+§ The sidecar still printed `sha256(token)`, and
+`docs/plans/2026-08-09-model-usage-dashboard.md` Tier 1 still described a bare
+`{"label": "acct-2"}` with no fingerprint at all.
+
+Half of this contract runs in ANOTHER PROCESS and has nothing but the docs, so a stale
+sentence there is a defect in the feature, not a typo. Proven by following each documented
+recipe literally against the real reader: sha256 slice → null, bare label → null,
+`credentialFingerprint` → `"acct-2"`. The symptom of getting it wrong is that labels never
+appear, which is indistinguishable from the ordinary unlabelled case — so nobody would have
+found it from the outside.
+
+Both docs now point at the function instead of restating an algorithm, and a test pins the
+CONTRACT statements — the fenced JSON block and the Tier-1 bullet — rather than the prose,
+because the as-built file legitimately discusses SHA-256 and scrypt in its history section
+and a guard tripping on that would be a false positive on the document it protects. Each
+stale form was restored as a mutant and killed the test.
+
+📌 **The 📌 note recording a lesson is not exempt from the lesson.** This drifted a second
+time inside the very change that wrote "a cross-process contract described in prose will
+drift", and it survived in the MORE load-bearing of the two places: a rotator author reads
+the sidecar doc, not the module header. Fixing the code and leaving the doc is not half a
+fix — where the only consumer is an external writer, the doc IS the interface.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-10 — the label reached the monitor and stopped there: the PRODUCTION sink was unpinned
+
+Review round on the account-label reader. Three defects, none of them in the refusal itself
+— that part holds: deleting the fingerprint check fails
+`REFUSES a label whose fingerprint describes a different token` immediately.
+
+**The surviving mutant was one layer past the one the feature was proud of catching.** The
+commit message records that "the MONITOR persists a null label" passed the whole suite and
+is now killed. It is. But the tests that prove the label is *carried* supply their OWN
+`onSample`, so they pin the monitor and say nothing about the sink that actually runs.
+Rewriting `open/composer.ts` to name columns one at a time —
+`record({ pool, ts, session, weekly })` instead of `record({ pool, ...reading })` — dropped
+`account_label` on every production row and passed **36/36** tests across all three of the
+feature's files. Repo-wide: only `open/__tests__/usage-sample-persistence.test.ts` covers
+that wiring at all. Its composer guard asserted `usageSamplesStore.record(` was *present*,
+never that the reading rode along whole. Now it asserts the spread, and the mutant dies.
+
+📌 **A test that supplies its own seam proves the layer above the seam, not the seam.** Both
+mutants here are the same "resolved but never carried" shape; killing it at the monitor made
+the next copy of it downstream *look* covered, because the assertion that died was about a
+sink the test wrote itself.
+
+**`slice(at, -1)` is not a failure, it is a silent widening.** The doc-drift guard added to
+stop the sidecar contract rotting a third time scoped itself with
+`doc.slice(at, doc.indexOf(to, …))` and checked only that the START was found. Renaming the
+plan's Tier-2 heading made the terminator unfindable, `indexOf` returned -1, and the
+"Tier 1 bullet" grew from **982 to 11328 characters** — the rest of the document — with all
+three assertions still green. Verified both ways: the mutant passes 15/15 against the
+original helper and fails against the guarded one. Same pattern fixed at both composer-block
+slice sites.
+
+**The scrypt cost docblock described a system that does not exist.** It claimed N=4096 stayed
+"invisible on the tick" and that ~100 ms was what the *default* N would have cost. Measured
+under bun: **~73 ms steady-state, ~280 ms on the first call, synchronous, on the event
+loop**; the default N=16384 is ~534 ms, and N=1024 is the setting that would cost the "few
+milliseconds" the comment implied. What actually bounds the cost is placement, not size —
+the fingerprint is computed only after a sidecar is found and parsed, so no box pays it
+today. Left at N=4096 deliberately rather than changing a security parameter inside a review
+round; the comment now carries the real numbers so whoever ships the writer decides with
+them. Behaviour unchanged: comments and tests only.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+## 2026-08-11 — the account-label reader's REAL path had no positive test (review round 2)
+
+Every positive test for the sidecar injected its own reader. That left the two things which
+can only ever be wrong in production asserted by nothing: WHERE the sidecar is looked for,
+and whether the default reader is wired to look there at all. The one test that used the
+default reader pointed at a directory that does not exist and expected null — an assertion a
+completely wrong path satisfies exactly as well as a correct one.
+
+Two tests now write real files into a temp dir and pass no deps: one proves a good sidecar is
+found and used, one proves a STALE sidecar is refused *through the same wiring that accepts
+the good one*. The refusal is the whole value of the feature, and until now it was only ever
+proven against a stub.
+
+Mutants run, not asserted: renaming the sidecar basename (dies), looking for it inside the
+credentials path instead of beside it (dies), and replacing the fingerprint comparison with a
+check that only rejects an empty string — the refusal replaced by a guess — which now dies at
+BOTH layers instead of only against the injected reader.
+
+**The 0600 sidecar permission was a security argument that asked nothing of anyone.** The case
+for scrypt over a bare digest cites a mode-0600 sidecar as one of three facts making a weak
+digest unexploitable, while the writer-facing contract required no permission at all. The
+reader cannot check the mode, and refusing a loose one would drop the label silently — the one
+failure mode this feature is arranged to avoid — so the requirement now lives in the contract
+where a writer reads it, and a doc guard asserts it stays there. Mutant: softening the
+requirement to prose fails the guard.
+
+**The label limit was 64 with no test at 64.** A 200-character rejection is satisfied by any
+off-by-one version of the check. Boundary covered; the `>` → `>=` mutant now dies.
+
+**Three current-state docs claimed the feature was impossible.** `docs/as-built/…-usage-sample-series.md`
+said the column is "always null today" and the instance "genuinely cannot name the account";
+both dashboard clients' docblocks said nothing on the box can name it. All true before this
+branch and false after it — the aspirational-docblock hazard in reverse. The dated entries keep
+their text with a superseded note (they are a log, not current state); the live docblocks now
+say null means *nothing named it, or the name on disk described a different token*, which is
+what the code does.
+
+Behaviour unchanged in this round: tests, comments and docs only.
+
+Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
+
+Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
+(adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
+failed, so this is not a four-lane APPROVE and should not be read as one.

@@ -39,6 +39,14 @@ export interface EnqueueInput {
   client_msg_id?: string
   project_id?: string | null
   attachments?: readonly string[] | null
+  /**
+   * The auto-transcript of an audio attachment, when the upload produced one.
+   *
+   * Carried here so it lands on the persisted row and therefore in the local search
+   * index. A user message is never stored server-side, so this is the only path by
+   * which the spoken words can become findable.
+   */
+  transcript?: string
 }
 
 /** A function that hands one envelope to the transport. May throw/reject
@@ -77,6 +85,7 @@ export class SendQueue {
       attachments: input.attachments ?? null,
       created_at: this.now(),
       status: 'queued',
+      ...(input.transcript !== undefined ? { transcript: input.transcript } : {}),
     }
     await this.store.upsert(msg)
     return msg

@@ -110,4 +110,16 @@ if ! bun "$HERE/wall-clock-bound-check.mjs"; then
   fail=1
 fi
 
+# ── CHECK 6: the app manifest matches what installs (ISSUES #513) ──────
+# In CI this catches an `app/package.json` entry the lockfile cannot satisfy —
+# declared, unresolvable, and therefore absent after a clean install. Locally it
+# catches the state that actually shipped the bug: a dependency added to the
+# manifest without re-installing, so `eas build` computed the runtime fingerprint
+# from a tree that did not contain its own new native module. Same check, two
+# failure modes, one root cause — the manifest and the install tree disagreeing.
+# The submit-time runner is `scripts/eas-build.sh`.
+if ! bun "$HERE/eas-build-preflight.ts" "$HERE/../.."; then
+  fail=1
+fi
+
 exit "$fail"

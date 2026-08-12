@@ -67,6 +67,12 @@ export class SyncEngine {
     // set-unions it onto any existing row (the optimistic bubble, or a prior
     // delivery). Only set when present so we never clobber accumulated receipts
     // with an empty list on a later partial.
+    // The words of a replayed voice note. Set only when present, so a replay that
+    // predates the column can never blank a transcript the local row already has —
+    // the same merge posture the receipts below use, and for the same reason.
+    if (typeof env.transcript === 'string' && env.transcript.trim().length > 0) {
+      msg.transcript = env.transcript
+    }
     if (env.delivered_to !== undefined && env.delivered_to !== null) {
       msg.delivered_to = env.delivered_to
     }

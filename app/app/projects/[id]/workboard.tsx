@@ -34,7 +34,7 @@
  * guard, then the body. All sizing flows from `theme.ts` tokens.
  */
 
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
@@ -66,7 +66,11 @@ import {
   workActivityIndicator,
   workActivityState,
 } from '../../../lib/work-board-activity';
-import { WorkBoardClient, type WorkBoardItem } from '../../../lib/work-board-client';
+import {
+  WorkBoardClient,
+  docPathFromDesignRef,
+  type WorkBoardItem,
+} from '../../../lib/work-board-client';
 import { boardErrorCopy, dragReorderTarget, splitBoard } from '../../../lib/work-board-helpers';
 import { startWorkBoardLive } from '../../../lib/work-board-live';
 
@@ -96,10 +100,27 @@ export default function WorkBoardTab() {
     );
   }
 
-  return <WorkBoardBody projectId={railIdToScope(railId)} token={user.token} />;
+  return <WorkBoardBody projectId={railIdToScope(railId)} railId={railId} token={user.token} />;
 }
 
-function WorkBoardBody({ projectId, token }: { projectId: string; token: string }) {
+/**
+ * `projectId` is the API SCOPE (General ⇒ `''`); `railId` is the ROUTE segment
+ * (General ⇒ `~general`). Both are needed and they are not interchangeable: the
+ * work-board client is scope-addressed, but a `router.push` built from the scope
+ * would produce `/projects//docs` for General — a dead route on the one board
+ * that most needed the link. `docs.tsx` builds its own self-links from the route
+ * id for the same reason.
+ */
+function WorkBoardBody({
+  projectId,
+  railId,
+  token,
+}: {
+  projectId: string;
+  railId: string;
+  token: string;
+}) {
+  const router = useRouter();
   const config = useMemo(() => loadAppConfig(), []);
   const deviceId = useMemo(() => makeDeviceId(), []);
   const client = useMemo(
@@ -178,9 +199,19 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
       onActivity: (row) => {
         setActivityRows((prev) => mergeActivityRow(prev, row, ACTIVITY_ROW_CAP));
       },
+      // RE-FETCH ON EVERY (RE)CONNECT — not only on mount. A push-only board
+      // permanently loses any item written while the socket was down: nothing
+      // re-asks, so the pane stays empty until the owner reloads by hand. That
+      // is not hypothetical — on 2026-08-11 his sessions all closed at 19:36:43
+      // and the first of five items was written at 19:36:47, and the board sat
+      // empty until he reloaded. The mount fetch cannot cover this, because a
+      // reconnect is not a mount.
+      onConnect: () => {
+        refresh();
+      },
     });
     return () => live.stop();
-  }, [config.base_url, token, projectId, deviceId]);
+  }, [config.base_url, token, projectId, deviceId, refresh]);
 
   // The AUTHORITATIVE half of the liveness signal: only the server knows
   // `turns_in_flight`, and only a re-fetch can retire a turn whose `completion`
@@ -264,6 +295,27 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
       });
   }, [client, projectId, newTitle, adding, refresh]);
 
+  // A card's ▸ spec-doc chip opens that doc in this project's Documents tab.
+  //
+  // RETURNS `undefined`, NOT A NO-OP HANDLER, when the card has no in-app doc.
+  // `WorkBoardRow` keys three things off `onOpenDoc === undefined` — the
+  // accessibility role (`button` vs `text`), `disabled`, and the press handler —
+  // so handing it a function that does nothing would announce a button to a
+  // screen reader and give a sighted owner a chip that swallows taps. The
+  // absence IS the signal.
+  const openDoc = useCallback(
+    (ref: string | null): (() => void) | undefined => {
+      const path = docPathFromDesignRef(ref);
+      if (path === null) return undefined;
+      return () => {
+        router.push(
+          `/projects/${encodeURIComponent(railId)}/docs?path=${encodeURIComponent(path)}`,
+        );
+      };
+    },
+    [router, railId],
+  );
+
   const { active, completed } = splitBoard(items);
   const indicator = workActivityIndicator(activityState);
 
@@ -335,6 +387,7 @@ function WorkBoardBody({ projectId, token }: { projectId: string; token: string 
               onPlay={() =>
                 runMutation(it.id, client.start(projectId, it.id))
               }
+              onOpenDoc={openDoc(it.design_doc_ref)}
             />
           ))}
 

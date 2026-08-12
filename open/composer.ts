@@ -84,6 +84,7 @@ import {
   PREWARM_AWAIT_CAP_MS_DEFAULT,
 } from '@neutronai/onboarding/interview/llm-timeouts.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
+import { injectPersistentReplActiveTurn } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { SubagentRegistryStore } from '@neutronai/runtime/subagent/store.ts'
 import { sweepOrphanedDispatchesOnBoot } from '@neutronai/runtime/subagent/boot-sweep.ts'
@@ -159,12 +160,18 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import {
+  ensureKimiKeyExported,
+  KIMI_CREDENTIAL_SERVICE,
+} from '@neutronai/trident/kimi-key.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interview/personality-character-suggester.ts'
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
+import { UsageSamplesStore } from '@neutronai/persistence/usage-samples-store.ts'
+import { readTridentPhaseModels, writeTridentPhaseModels } from '@neutronai/gateway/storage/owner-metadata.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 // The OVERNIGHT-WORK report (`onboarding/overnight/morning-brief.ts`). It used to
@@ -229,6 +236,7 @@ export type OpenComposition = CompositionInput &
       | 'app_tasks_surface'
       | 'app_upload_surface'
       | 'app_voice_transcription_surface'
+      | 'app_trident_phase_models_surface'
     >
   >
 
@@ -387,6 +395,7 @@ import {
   freeBytesAt,
 } from '@neutronai/gateway/transcription/whisper-install.ts'
 import { createVoiceTranscriptionSurface } from '@neutronai/gateway/http/voice-transcription-surface.ts'
+import { createTridentPhaseModelsSurface } from '@neutronai/gateway/http/trident-phase-models-surface.ts'
 import { createAppDiagnosticsSurface } from '@neutronai/gateway/http/app-diagnostics-surface.ts'
 import { composeDiagnostics } from '@neutronai/gateway/diagnostics/diagnostics-report.ts'
 import { buildInstanceDiagnosticsSources } from '@neutronai/gateway/diagnostics/instance-sources.ts'
@@ -560,19 +569,29 @@ export interface BuildOpenGraphComposerOptions {
  *     single-entry `env_vars` list so the shared-tier gate never classifies it
  *     as a cross-instance shared key — it is the per-owner box key.
  *     (tier 4 — `resolveApiKeyEnvTier`)
- *   - else, if `claude` is already AMBIENT/Keychain-authed (the owner ran
- *     `claude` login on this Mac; creds live in the macOS "Claude Code-credentials"
- *     Keychain item, NOT in env) → `kind: 'ambient'`. The substrate spawns
- *     `claude` threading NO token (the ambient pool's secret is the empty
- *     string), so the child auths via its own Keychain. This closes the
- *     fresh-install 503: a Mac self-hoster with `claude` already logged in no
- *     longer hits a Day-1 "Authenticate Claude" wall even though `claude -p`
+ *   - else, if `claude` is already AMBIENT-authed → `kind: 'ambient'`. The
+ *     substrate spawns `claude` threading NO token (the ambient pool's secret is
+ *     the empty string), so the child auths from its own ambient credential. This
+ *     closes the fresh-install 503: a self-hoster with `claude` already logged in
+ *     no longer hits a Day-1 "Authenticate Claude" wall even though `claude -p`
  *     works headlessly. The probe is fast + cached + never-hanging
- *     (`detectAmbientClaudeAuthCached`); a timeout/failure → not-authed → the
- *     gate stays up. SINGLE-OWNER ONLY: this resolver runs only on the Open
- *     composer, where an ambient Keychain login is the box owner's own — which
- *     is why the shared table gates the ambient tier behind `allowAmbient`, set
- *     TRUE only here. (tier 5 — `resolveAmbientTier`)
+ *     (`detectAmbientClaudeAuthCached`); a timeout/failure → not-authed → the gate
+ *     stays up. (tier 5 — `resolveAmbientTier`)
+ *
+ *     WHERE THE CREDENTIAL ACTUALLY LIVES DEPENDS ON THE PLATFORM, and the previous
+ *     wording here said "the macOS Keychain item" and "the box owner's own" as
+ *     though only a Mac self-hoster could reach this. That is wrong, and being
+ *     wrong about it cost an investigation (ISSUES #517): the probe branches on
+ *     platform, and on every non-macOS host it reads
+ *     `$HOME/.claude/.credentials.json`. On a hosted Linux deployment that file is
+ *     written by the credential rotator, so this tier is a NORMAL production path
+ *     there — measured on a live hosted install as the ONLY tier that resolved, because
+ *     tiers 2 and 4 were unset. A reader who believed the old comment would
+ *     conclude the install was misconfigured and "fix" it by disabling ambient,
+ *     which would leave that deployment with no credential at all.
+ *
+ *     `allowAmbient: true` is set only here, which is a statement about which
+ *     COMPOSER enables the tier — not about which deployment runs that composer.
  *   - else `null` → the box boots LLM-less and onboarding walks its static
  *     phase prompts.
  *
@@ -1565,8 +1584,21 @@ export function buildOpenGraphComposer(
     // `gateway/boot-cores-factories-types.ts:31` had no implementation), so the
     // factory's write was skipped and `/task` had no deps to dispatch against.
     const tasksCoreRegistry = new InMemoryTasksCoreOwnerRegistry()
+    const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
+    const codegenTerminatorHolder = late<TridentTerminator>('codegen_terminator')
     const coresWiring = await mountOpenCores({
       projectDb: db,
+      tridentTerminator: {
+        terminate: async (id, phase, opts) => {
+          const pending = codegenTerminatorHolder.deref((terminator) =>
+            terminator.terminate(id, phase, opts),
+          )
+          // Names THIS holder. It said 'board terminator' — the sibling's name —
+          // which would have sent a reader to the wrong bind entirely.
+          if (pending === undefined) throw new Error('codegen terminator is not bound')
+          return pending
+        },
+      },
       canonicalTaskStore,
       tasksCoreRegistry,
       owner_home,
@@ -3182,6 +3214,14 @@ export function buildOpenGraphComposer(
       neutron_home: owner_home,
       free_bytes: freeBytesAt,
     })
+    // The read/write pair for the per-phase build models. Read PER REQUEST, like
+    // the transcription choice beside it: the setting is a live control, so a
+    // change must reach the next build with no restart and no cache to go stale.
+    const tridentPhaseModelsSurface = createTridentPhaseModelsSurface({
+      auth: appOwnerAuth,
+      read: (scope) => readTridentPhaseModels(db, scope),
+      write: (scope, input) => writeTridentPhaseModels(db, scope, input),
+    })
     const voiceTranscriptionSurface = createVoiceTranscriptionSurface({
       auth: appOwnerAuth,
       installer: whisperInstaller,
@@ -3442,7 +3482,6 @@ export function buildOpenGraphComposer(
     // is built later in `wireAppWs`, so the terminator is bound below once it exists
     // (mirrors the `dispatchBoardHolder` two-phase seam). Every runtime DELETE lands
     // long after composition, so the holder is always bound by request time.
-    const boardTerminatorHolder = late<TridentTerminator>('board_terminator')
     // The run-access facade the work-board surface reads: live-progress reads +
     // the item-3 delete-cancel, now routed through the chokepoint when bound.
     const boardRunAccess = {
@@ -3454,7 +3493,11 @@ export function buildOpenGraphComposer(
           t.terminate(id, phase, { ...(reason !== undefined ? { reason } : {}) }),
         )
         // No terminator bound (board-less / observer-less boot): the bare
-        // unconditional update always writes — pre-F6a behaviour → report won.
+        // unconditional update always writes — pre-F6a behaviour → report won. It
+        // also does NOT retract a stale `subagent_status='running'` (only
+        // `terminalTransition` does), so such a boot can leave a cancelled run
+        // reading as in-flight. Unreachable here in practice: the holder below is
+        // bound unconditionally.
         if (pending === undefined) {
           await boardRunStore.update(id, { phase })
           return { won: true }
@@ -3498,7 +3541,32 @@ export function buildOpenGraphComposer(
           ...(framePid !== undefined ? { project_id: framePid } : {}),
           ts: nowMs,
         }
-        appWsRegistry.send(appWsTopicId(OWNER_USER_ID), frame)
+        // FAN TO THE BASE TOPIC **AND** EVERY LIVE PER-PROJECT TOPIC.
+        //
+        // THE DEFECT: this addressed the snapshot to `appWsTopicId(OWNER)` — the
+        // BASE topic — and only that. A board open on a project lives on
+        // `<base>:<project_id>`, so the snapshot never reached it and the pane
+        // only ever changed on a manual reload (which re-fetches over HTTP).
+        //
+        // The `activity_event` fan a few hundred lines below has ALWAYS done this
+        // correctly (base + every scoped topic). That asymmetry is exactly what
+        // the owner saw on 2026-08-11: the activity dot pulsed while the board sat
+        // dead, because the two frames travel different paths and only one of them
+        // was addressed to where he was looking. He reported it as "the work board
+        // is not responding at all to realtime changes" — including a `clear` that
+        // appeared only after a refresh.
+        //
+        // Widening the fan cannot cross-apply one board onto another: every client
+        // re-checks the frame's `project_id` tag against its own view before
+        // applying it (`app/lib/work-board-live.ts` `decodeWorkBoardFrame`,
+        // `WorkBoardTab.tsx`), and each socket lives on exactly one topic, so
+        // nothing receives the frame twice.
+        const base = appWsTopicId(OWNER_USER_ID)
+        const scopedPrefix = `${base}:`
+        appWsRegistry.send(base, frame)
+        for (const topic of appWsRegistry.topics()) {
+          if (topic.startsWith(scopedPrefix)) appWsRegistry.send(topic, frame)
+        }
       } catch (err) {
         log.warn('work_board_push_failed', {
           project: changedKey,
@@ -3508,6 +3576,15 @@ export function buildOpenGraphComposer(
     }
     const workBoardStore = new WorkBoardStore(db, {
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
+      // SAFETY INVARIANT — nothing may mark an item done while its build runs.
+      // `boardRunStore` is the same store the tick loop reconciles from, so this
+      // reads the one authoritative phase. A run that has VANISHED (get → null)
+      // counts as not-live: it cannot be reconciled either, so refusing forever
+      // would strand the card. See `WorkBoardStoreOptions.isRunLive`.
+      isRunLive: (run_id: string): boolean => {
+        const run = boardRunStore.get(run_id)
+        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+      },
     })
     // M2 task 3 — bind the `/status` snapshot reader now that every source store
     // exists (projects reader / reminder store / work-board / Trident run store).
@@ -3711,7 +3788,11 @@ export function buildOpenGraphComposer(
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
-      create_card: (slug, input) => workBoardSpecDoc.createCardWithOptionalSpec(slug, input),
+      // The board scope and the DOCS project id are separate arguments on purpose:
+      // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a
+      // phantom project directory.
+      create_card: (scope, docsProjectId, input) =>
+        workBoardSpecDoc.createCardWithOptionalSpec(scope, docsProjectId, input),
       // M1 — ▶ start/retry a build from the card's saved spec (undefined = 501).
       ...(boardStartBuild !== undefined ? { start_build: boardStartBuild } : {}),
       // #379 — ▶ start/retry a RESEARCH card via Atlas (undefined = 501).
@@ -3812,9 +3893,21 @@ export function buildOpenGraphComposer(
     // durably (it is waiting for him with nothing connected), exactly once per
     // lapse, and never on a transient network failure. See
     // `credential-lapse-notice.ts` for why each of those three is load-bearing.
+    const usageSamplesStore = new UsageSamplesStore({ db })
     const credentialUsageMonitor = new CredentialUsageMonitor({
       env,
       onStanding: createCredentialLapseNotifier({ deliver, topic_id: ownerNoticeTopic }),
+      // PERSIST every reading, so the series outlives the 60-second tick. Before this
+      // the monitor measured continuously and remembered nothing: it could say a window
+      // was 72% full and never whether that was climbing or flat.
+      //
+      // The prune rides on the SAME call rather than a separate schedule — a cleanup
+      // job that can fall out of step with its writer eventually either grows forever
+      // or deletes something in use. It is cheap: one indexed DELETE per minute.
+      onSample: async (reading): Promise<void> => {
+        await usageSamplesStore.record({ pool: 'anthropic', ...reading })
+        await usageSamplesStore.prune()
+      },
     })
     realmodeCleanups.push(async () => {
       try {
@@ -3826,6 +3919,12 @@ export function buildOpenGraphComposer(
     const appUsageSurface = createAppUsageSurface({
       auth: appOwnerAuth,
       snapshot: () => credentialUsageMonitor.snapshot(),
+      // The SAME store the monitor writes into, read back as a summary. The
+      // dashboard is the only reason the series is kept at all — a persisted
+      // reading nothing reads is just disk — so these two are deliberately
+      // constructed next to each other, and a change that unwires one should be
+      // impossible to make without seeing the other.
+      dashboard: () => [usageSamplesStore.summarise('anthropic')],
     })
 
     // `POST /api/app/system-notice` — the seam an out-of-process caller uses to
@@ -4525,6 +4624,12 @@ export function buildOpenGraphComposer(
       liveAgentSubstrate !== null
         ? buildLiveAgentTurn({
             substrate: liveAgentSubstrate,
+            injectActiveTurn: (turn, text) => injectPersistentReplActiveTurn({
+              substrate_instance_id: `cc-agent-${owner_handle}`,
+              user_id: OWNER_USER_ID,
+              project_id: turn.project_id ?? 'general',
+              text,
+            }),
             // ACTIVITY INSPECTOR — tee EVERY substrate event for the live chat turn
             // into the shared ring, and bracket the dispatch so the inspector can
             // tell a resting `idle` session from a `wedged` one. This is the seam
@@ -4907,6 +5012,23 @@ export function buildOpenGraphComposer(
         // tick loop fires (`on_run_transition` below), so a connected rail drops
         // the cancelled run from `live_runs` immediately instead of retaining it
         // until the next unrelated event. Same two best-effort, diff-gated fans.
+        onTransition: {
+          onTransition: async (run): Promise<void> => {
+            fanWorkBoardChanged(run.project_slug)
+            emitProjectsChangedIfChanged(OWNER_USER_ID)
+          },
+        },
+      }),
+    )
+    codegenTerminatorHolder.bind(
+      buildTridentTerminator({
+        store: boardRunStore,
+        observer: composeTerminalHook(
+          { onTerminal: async (): Promise<void> => {} },
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+            (o): o is (run: TridentRun) => Promise<void> => o !== null,
+          ),
+        ),
         onTransition: {
           onTransition: async (run): Promise<void> => {
             fanWorkBoardChanged(run.project_slug)
@@ -5554,9 +5676,47 @@ export function buildOpenGraphComposer(
               // workflow — the key is read by `trident/kimi-review-cli.ts` in its own
               // process, so it never enters prompt text. Unset → the panelist is
               // skipped and the review notes it, never blocks.
-              resolve_kimi_configured: (): boolean => {
-                const key = env['KIMI_API_KEY']
-                return typeof key === 'string' && key.length > 0
+              // A key entered in SETTINGS counts too, not only one exported into the
+              // service unit. Reading env alone meant a self-hoster could not enable
+              // the second model family at all — there is no supported way to set a
+              // gateway env var from inside the product, so K3 was reachable only by
+              // whoever could edit the unit file. Env still WINS, so a deployment that
+              // already exports the key is bit-for-bit unchanged.
+              //
+              // `ensureKimiKeyExported` also puts a stored key into the environment,
+              // and that is load-bearing rather than incidental: the reviewer runs in
+              // its own process and reads `KIMI_API_KEY` from ITS env (the indirection
+              // that keeps the key out of prompt text). Reporting `configured: true`
+              // for a key the child cannot see would be WORSE than not configured — a
+              // deferred reviewer blocks the verdict, so every review would return
+              // REQUEST_CHANGES for a reason invisible to the owner.
+              resolve_kimi_configured: (): boolean =>
+                ensureKimiKeyExported(env, () => {
+                  // Global scope: a Kimi subscription is one account for the whole
+                  // instance, not a per-project token, and this resolver is handed no
+                  // run to scope by. `resolve` with no project id consults the global
+                  // default only.
+                  const found = projectCredentialStore.resolve(
+                    asOwnerHandle(owner_handle),
+                    undefined,
+                    KIMI_CREDENTIAL_SERVICE,
+                  )
+                  return found?.plaintext ?? null
+                }),
+              // THE PRODUCER for the per-phase model/effort config. Read per launch
+              // from `instance_metadata` (migration 0118) so a setting changed after
+              // boot takes effect on the next run rather than the next restart, and
+              // re-validated by the reader so a row written by an older build cannot
+              // reach the workflow. Empty object → `buildWorkflowArgs` omits the
+              // argument entirely and every phase keeps its default.
+              resolve_phase_models: (): Record<string, { model?: string; effort?: string }> => {
+                try {
+                  return readTridentPhaseModels(db, owner_handle)
+                } catch {
+                  // A settings read must never take down a build launch. No config
+                  // means the defaults, which is a working run.
+                  return {}
+                }
               },
               // RB2 (b) — thread the owner's structured CORRECTIONS into the inner
               // workflow so the FORGE BUILDER (forge:build + fix rounds) re-grounds on
@@ -5710,6 +5870,7 @@ export function buildOpenGraphComposer(
       // Local voice transcription (`/api/app/voice-transcription`) — the
       // Settings-tab install/remove control for the keyless whisper.cpp backend.
       app_voice_transcription_surface: { handler: voiceTranscriptionSurface.handler },
+      app_trident_phase_models_surface: { handler: tridentPhaseModelsSurface.handler },
       // O5 — read-only diagnostics (`GET /api/app/admin/diagnostics`),
       // owner-gated. Additive; mounts no write route.
       app_diagnostics_surface: { handler: appDiagnosticsSurface.handler },
