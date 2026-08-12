@@ -3,7 +3,7 @@
  *
  * The DEFAULT classification prompt: deliberately GENERIC. There is no owner
  * taxonomy, no real sender, no real domain anywhere in this file — the
- * per-owner category set is instance data learned at runtime (P2.5's inbox
+ * per-owner category set is owner data learned at runtime (P2.5's inbox
  * survey + owner interview writes it), never shipped in the tree.
  *
  * The template asks for strict JSON so `classify.ts` can parse a verdict from

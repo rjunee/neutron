@@ -326,7 +326,7 @@ export interface GmailMessageModifyResult {
 /**
  * Generalized label-ensure input: any label NAME, not just the per-project
  * `Neutron/<project_id>` shape `ensureProjectLabel` mints. The pipeline's
- * processed label (`Neutron/processed`) is instance-level and belongs to no
+ * processed label (`Neutron/processed`) is owner-level and belongs to no
  * project.
  */
 export interface GmailEnsureLabelInput {
@@ -394,7 +394,7 @@ export interface GmailClient {
    * Ensure an ARBITRARY Gmail user-label exists, by name. Same create-first /
    * list-and-match idempotency `ensureProjectLabel` has (which now delegates
    * here); `label_name` in the result echoes `input.name`. The pipeline uses
-   * it for the instance-level `Neutron/processed` label.
+   * it for the owner-level `Neutron/processed` label.
    */
   ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult>
   /**

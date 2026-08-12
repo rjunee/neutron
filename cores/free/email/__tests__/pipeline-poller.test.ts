@@ -127,7 +127,7 @@ function tick(
               },
             }
           : over.push,
-      project_slug: 'instance',
+      project_slug: 'owner',
     },
     now: () => NOW,
   })
@@ -162,7 +162,11 @@ function seedBacklog(h: Harness): void {
 async function goLiveOverBacklog(h: Harness): Promise<void> {
   seedBacklog(h)
   const sweep = await tick(h)
-  expect(sweep.backlog_sweeping).toBe(true)
+  // `backlog_sweeping` reports the state the tick ENDED in, and this sweep
+  // FINISHED — it then falls through to steady state on the same tick, which is
+  // the whole point of not making the owner wait another interval. `precutoff`
+  // is what evidences that the sweep ran.
+  expect(sweep.backlog_sweeping).toBe(false)
   expect(sweep.precutoff).toBe(1)
   expect(h.store.getCheckpoint(CHECKPOINT_BACKLOG_DONE)).toBe('1')
 }
@@ -221,7 +225,7 @@ describe('runEmailPipelineTick', () => {
 
       // Push fired ALONGSIDE — same text, never a substitute.
       expect(h.pushed).toHaveLength(1)
-      expect(h.pushed[0]?.project_slug).toBe('instance')
+      expect(h.pushed[0]?.project_slug).toBe('owner')
       expect(h.pushed[0]?.body).toBe(post?.body)
     } finally {
       h.close()
@@ -297,7 +301,9 @@ describe('runEmailPipelineTick', () => {
       const r = await tick(h)
 
       expect(h.store.getCheckpoint(CHECKPOINT_GO_LIVE_AFTER)).toBe(String(NOW))
-      expect(r.backlog_sweeping).toBe(true)
+      // The sweep COMPLETED on this tick, so it did not end mid-sweep; the
+      // three marked messages are the evidence that it ran.
+      expect(r.backlog_sweeping).toBe(false)
       expect(r.precutoff).toBe(3)
 
       // NOTHING was classified, escalated, or said.
@@ -403,7 +409,7 @@ describe('runEmailPipelineTick', () => {
           },
           topic_id: 'app:owner',
           push: null,
-          project_slug: 'instance',
+          project_slug: 'owner',
         },
         now: () => NOW,
       })

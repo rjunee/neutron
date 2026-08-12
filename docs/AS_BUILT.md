@@ -262,19 +262,35 @@ An escalated message deliberately KEEPS `INBOX` (the owner still has to act on
 it in their mail client), so the label set cannot double as "handled"; the row
 in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
 failed chat delivery increments `escalation_attempts`, records `last_error`, and
-is retried by the next tick's resume step under an attempt cap.
+is retried by the next tick's resume step under an attempt cap. Exhausting that
+cap is NOT silent: the row stops matching the resume query, so the tick counts
+it (`abandoned`) and logs it on every tick for as long as it holds — an
+important email nobody was told about must not be visible only as an absence.
 
-**The sidecar is instance-level, with its own migration tree.**
+**The sidecar is owner-level, with its own migration tree.**
 `<owner_home>/email/pipeline.db`, opened `openSidecar` +
 `applyProjectScopedMigrations` exactly like `cache.ts:328-329` but with no
-`project_id` and no `ProjectSidecarResolver` — the inbox is instance-scoped
-because the multi-account client merges accounts into one stream. The tree is
+`project_id` and no `ProjectSidecarResolver` — the inbox belongs to the owner
+and the multi-account client merges their accounts into one stream. The tree is
 `cores/free/email/migrations-pipeline/0001_email_pipeline.sql` and it starts at
 0001, not 0002: a migration namespace is per-DB-FILE
 (`migrations/runner.ts:58-63`), and reusing the per-project cache tree would
 drag `triage_cache` into the pipeline DB. `sender_rules` ships EMPTY — there is
 no seed row anywhere in the tree, because every rule is owner data and lands at
 runtime only (P2.5's survey/interview, or the P4 importer).
+
+**The steady-state walk reads the HEAD first, then continues where it paused.**
+An escalated message keeps `INBOX`, so the top of the inbox fills with mail the
+pipeline has already handled and a single-page poll starves behind it. The tick
+therefore walks pages under a budget (20 x 25 by default) and, when the budget
+runs out, saves a continuation cursor so the next tick resumes there instead of
+giving up in the same place forever. That cursor alone then delayed NEW mail,
+which lands at the TOP: a 1,200-message inbox takes three ticks to walk, so an
+important email arriving during the first waited fifteen minutes against an
+acceptance criterion of ONE poll interval. So a resuming tick spends its first
+`DEFAULT_POLL_HEAD_PAGES` (2) on the newest pages and the REST on the
+continuation — never the whole budget on either, so neither half starves the
+other. `pipeline-boundaries.test.ts` pins both directions.
 
 **Contract additions.** `modifyMessage` (`users.messages.modify`) and a
 generalized `ensureLabel({name})` on both Gmail backends and the multi-account

@@ -5396,8 +5396,8 @@ export function buildOpenGraphComposer(
       //   - the substrate one-shot LLM — the ONLY model seam (no provider dep,
       //     no new secret). Null on an LLM-less box, where the cascade
       //     classifies deterministically instead of crashing.
-      //   - `readOwnerTimezone` — accepted now for P2's owner-local brief
-      //     windows; the P1 tick body is event-driven and does not read it.
+      // No timezone resolver: escalation is event-driven, not clock-driven. P2's
+      // owner-local brief windows will thread one when there is a reader for it.
       email_pipeline: {
         gmail: coresWiring.gmailClient,
         owner_home,
@@ -5406,8 +5406,6 @@ export function buildOpenGraphComposer(
         escalation_topic_id: reminderGeneralTopic,
         push: push_dispatcher,
         llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
-        resolveTimezone: (slug: string): string | undefined =>
-          readOwnerTimezone(db, slug) ?? undefined,
         register_cleanup: (fn: () => void): void => {
           realmodeCleanups.push(fn)
         },

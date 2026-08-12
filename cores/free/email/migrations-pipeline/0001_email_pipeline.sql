@@ -1,4 +1,4 @@
--- 0001_email_pipeline.sql — the INSTANCE-level email pipeline sidecar.
+-- 0001_email_pipeline.sql — the OWNER-level email pipeline sidecar.
 --
 -- Per docs/plans/2026-08-06-email-core-consolidation-plan.md § 5. Lives under
 -- cores/free/email/migrations-pipeline/ — its OWN migration tree, applied via
@@ -13,8 +13,8 @@
 -- schema's numbering to a file it shares nothing with. Numbering restarts
 -- at 0001 for the same reason the comments sidecar does.
 --
--- WHY INSTANCE-LEVEL (not per-project): the inbox is instance-scoped. The
--- multi-account client MERGES accounts into one stream, so a per-project
+-- WHY OWNER-LEVEL (not per-project): the inbox belongs to the owner. The
+-- multi-account client MERGES their accounts into one stream, so a per-project
 -- sidecar would have to answer "which project owns this message?" before the
 -- classifier has run. Per-project sidecars (triage/summary/draft caches) are
 -- untouched by this tree.
@@ -60,8 +60,6 @@ CREATE TABLE IF NOT EXISTS emails (
   -- owner had already triaged that mail by hand (decision 2026-08-12), which
   -- SUPERSEDES the original archive-on-cutoff design.
   handling             TEXT NOT NULL,
-  -- Reserved for the P2 twice-daily brief (the brief this row was reported in).
-  brief_id             INTEGER,
   -- FOLDED ESCALATION STATE. Replaces the old standalone
   -- `email_processing_state` table AND the audit-log-based notification
   -- dedup: `escalated_at IS NOT NULL` IS the "already told the owner" guard,
@@ -145,8 +143,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   --   backlog_cursor(s)  — resume cursors for an in-flight sweep.
   --   last_poll_at       — epoch-ms of the last successful tick.
   --   consecutive_errors — tick-level failure streak.
-  --   scribe_watermark   — reserved for P3 (the email→memory fan-out moves
-  --                        off the daily scheduler onto this poller).
+  --   poll_cursor(s)     — continuation cursors for the steady-state walk.
   key    TEXT PRIMARY KEY,
   value  TEXT NOT NULL
 );

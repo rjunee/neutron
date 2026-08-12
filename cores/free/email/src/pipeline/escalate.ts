@@ -61,12 +61,33 @@ export interface EscalationSubject {
 }
 
 /**
+ * How much of each interpolated field the escalation text may carry.
+ *
+ * `sender` and `subject` are RFC 5322 headers — the REMOTE SENDER picks them and
+ * may make them arbitrarily long — and `reason` is model free text on the paths
+ * where the LLM answered. Unclamped, one message could push a multi-megabyte
+ * chat row and a push payload the phone would reject, burying the one line the
+ * owner needs. The limits are far above any real header (Gmail's own compose
+ * field is 998 bytes) so a genuine escalation is never truncated.
+ */
+export const ESCALATION_FIELD_LIMIT = 200
+
+/** Single-line, bounded, and ellipsised so a truncation is visible as one. */
+function clamp(value: string, limit = ESCALATION_FIELD_LIMIT): string {
+  const flat = value.replace(/\s+/g, ' ').trim()
+  return flat.length <= limit ? flat : `${flat.slice(0, limit)}…`
+}
+
+/**
  * The escalation text. It MUST name the sender, the subject and the importance
  * reason — an escalation that fires but says nothing is worse than silence,
  * because the owner now has to go find out what it was about.
+ *
+ * Every field is remote or model text, so every field is clamped: see
+ * `ESCALATION_FIELD_LIMIT`.
  */
 export function composeEscalationText(e: EscalationSubject): string {
-  return `Important email from ${e.sender}: "${e.subject}" — ${e.reason}.`
+  return `Important email from ${clamp(e.sender)}: "${clamp(e.subject)}" — ${clamp(e.reason)}.`
 }
 
 export interface EscalateDeps {

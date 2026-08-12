@@ -93,7 +93,7 @@ function tick(gmail: GmailClient, store: EmailPipelineStore): ReturnType<typeof 
       },
       topic_id: 'app:owner',
       push: null,
-      project_slug: 'instance',
+      project_slug: 'owner',
     },
     now: () => NOW,
     // These arms are about the CURSOR logic, so they hold the sweep to one page
@@ -135,7 +135,10 @@ describe('backlog sweep completion', () => {
       expect(store.getCheckpoint(CHECKPOINT_BACKLOG_DONE)).not.toBe('1')
 
       const second = await tick(gmail, store)
-      expect(second.backlog_sweeping).toBe(true)
+      // The sweep FINISHED on this tick, so the flag — which reports the state
+      // the tick ended in — is false; the completion checkpoint is the fact
+      // that matters here.
+      expect(second.backlog_sweeping).toBe(false)
       expect(store.getCheckpoint(CHECKPOINT_BACKLOG_DONE)).toBe('1')
 
       // The second page resumed each account from ITS OWN cursor.
@@ -223,7 +226,10 @@ describe('a mailbox connected AFTER the sweep gets its own sweep', () => {
 
       // THE REGRESSION: this used to skip the sweep entirely and treat b-old as
       // new mail — classified, labelled and escalated into the owner's chat.
-      expect(second.backlog_sweeping).toBe(true)
+      // The re-opened sweep both ran AND completed here, so what proves it ran
+      // is b-old's `preexisting` handling, not the end-of-tick flag.
+      expect(second.backlog_sweeping).toBe(false)
+      expect(second.precutoff).toBeGreaterThan(0)
       expect(store.getEmail('b-old', 'acct-b')?.handling).toBe('preexisting')
       expect(second.escalated).toBe(0)
     })
@@ -341,7 +347,8 @@ describe('mailboxes of UNEQUAL depth converge', () => {
       const third = await tick(gmail, store)
 
       expect(store.getCheckpoint(CHECKPOINT_BACKLOG_DONE)).toBe('1')
-      expect(third.backlog_sweeping).toBe(true)
+      // Converged and FINISHED on this tick — so it did not end mid-sweep.
+      expect(third.backlog_sweeping).toBe(false)
       // A is carried forward as EXHAUSTED once it runs out, rather than being
       // dropped from the map and restarted.
       expect(gmail.calls[2]?.page_tokens?.['acct-a']).toBe('__neutron_exhausted__')
@@ -436,7 +443,7 @@ describe('the sweep does not hold live mail hostage', () => {
           },
           topic_id: 'app:owner',
           push: null,
-          project_slug: 'instance',
+          project_slug: 'owner',
         },
         now: () => NOW,
       })
@@ -503,7 +510,7 @@ describe("a late-joining mailbox's backlog is ITS history, not new mail", () => 
             },
             topic_id: 'app:owner',
             push: null,
-            project_slug: 'instance',
+            project_slug: 'owner',
           },
           now: () => clock,
           max_backlog_pages: 1,

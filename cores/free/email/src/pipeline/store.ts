@@ -1,9 +1,9 @@
 /**
  * @neutronai/email-managed-core — the email pipeline sidecar store.
  *
- * Opens `<owner_home>/email/pipeline.db` — INSTANCE-level, not per-project.
- * The inbox is instance-scoped (the multi-account client merges accounts into
- * one stream), so there is no `project_id` and no `ProjectSidecarResolver`
+ * Opens `<owner_home>/email/pipeline.db` — OWNER-level, not per-project. The
+ * inbox belongs to the owner (the multi-account client merges their accounts
+ * into one stream), so there is no `project_id` and no `ProjectSidecarResolver`
  * here; the per-project sidecars (`cache.ts`) are untouched.
  *
  * Open mechanics are exactly `cache.ts`'s: `openSidecar(path)` +
@@ -30,7 +30,7 @@ import { applyEmailSidecarMigrations } from '../cache.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-/** Instance-level sidecar dir name, under `<owner_home>`. No leading dot —
+/** Owner-level sidecar dir name, under `<owner_home>`. No leading dot —
  *  same user-visible convention the per-project `email/` dir uses. */
 export const EMAIL_PIPELINE_DIR = 'email'
 export const EMAIL_PIPELINE_DB = 'pipeline.db'
@@ -64,7 +64,6 @@ export interface EmailRow {
   /** NULL ⇒ never classified (pre-cutoff mail). */
   category: string | null
   handling: EmailHandling
-  brief_id: number | null
   escalated_at: number | null
   escalation_attempts: number
   last_error: string | null
@@ -167,12 +166,39 @@ export class EmailPipelineStore {
       .get(id, account_id ?? '')
   }
 
+  /**
+   * Record a SEEN message.
+   *
+   * ── WHY NOT `INSERT OR REPLACE` ──────────────────────────────────────────────
+   * `OR REPLACE` deletes the conflicting row and inserts a new one, and this
+   * statement names 12 of the 17 columns — so the five it does not name
+   * (`escalated_at`, `mutated_at`, `pushed_at`, and both attempt counters) would
+   * silently reset to their defaults. That RE-ARMS a message that was already
+   * escalated and already labelled: the owner is told a second time and their
+   * phone buzzes a second time, for an email they have already seen. Today every
+   * caller checks `hasEmail` first so no path reaches it, but "safe because of
+   * where it is called from" is not a property of this statement.
+   *
+   * `ON CONFLICT DO UPDATE` names exactly the columns a re-record may change —
+   * the message content and the classification verdict — and the delivery marks
+   * survive by construction rather than by luck.
+   */
   insertEmail(input: InsertEmailInput): void {
     this.db.run(
-      `INSERT OR REPLACE INTO emails (
+      `INSERT INTO emails (
          id, thread_id, account_id, sender, subject, snippet, body_text,
          received_at, processed_at, category, handling, escalation_attempts
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(account_id, id) DO UPDATE SET
+         thread_id    = excluded.thread_id,
+         sender       = excluded.sender,
+         subject      = excluded.subject,
+         snippet      = excluded.snippet,
+         body_text    = excluded.body_text,
+         received_at  = excluded.received_at,
+         processed_at = excluded.processed_at,
+         category     = excluded.category,
+         handling     = excluded.handling`,
       [
         input.id,
         input.thread_id,
@@ -217,6 +243,28 @@ export class EmailPipelineStore {
           ORDER BY received_at ASC`,
       )
       .all(max_attempts)
+  }
+
+  /**
+   * Escalations that have used up the attempt cap — important mail the owner
+   * was never told about and nothing retries any more.
+   *
+   * The cap belongs there (a row that fails forever must not be retried
+   * forever), but it made abandonment SILENT: the row simply stops matching
+   * `listPendingEscalations`, and no count, log or status says an email was
+   * dropped. The poll tick reports this number every tick so the failure is
+   * visible while it lasts, not only in the moment it happened.
+   */
+  countAbandonedEscalations(max_attempts: number): number {
+    const row = this.db
+      .query<{ n: number }, [number]>(
+        `SELECT COUNT(*) AS n FROM emails
+          WHERE handling = 'escalate'
+            AND escalated_at IS NULL
+            AND escalation_attempts >= ?`,
+      )
+      .get(max_attempts)
+    return row?.n ?? 0
   }
 
   /** The best-effort push has gone out for this message; never send it again. */
@@ -387,7 +435,7 @@ export class EmailPipelineStore {
 }
 
 /**
- * Open (creating on first use) the instance-level pipeline sidecar and apply
+ * Open (creating on first use) the owner-level pipeline sidecar and apply
  * its migration tree. Same two-line open `cache.ts:328-329` performs, minus
  * the per-project resolver.
  */

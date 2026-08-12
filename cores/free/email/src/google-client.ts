@@ -508,7 +508,7 @@ export function buildGoogleGmailClient(
    *
    * Generalized from the former project-only `ensureLabelImpl(project_id)`:
    * `ensureProjectLabel` now passes `projectLabelName(project_id)` and the
-   * pipeline passes its instance-level `Neutron/processed`. Same mechanics.
+   * pipeline passes its owner-level `Neutron/processed`. Same mechanics.
    */
   async function ensureLabelByName(labelName: string): Promise<GmailLabelEnsureResult> {
     // Try create first (one round-trip when the label is new). On

@@ -68,14 +68,16 @@ function fixture(): Fixture {
 function tick(
   f: Fixture,
   deliver: (topic_id: string, envelope: { body: string; durability: 'reply' }) => Promise<unknown>,
+  log?: (message: string, meta?: Record<string, unknown>) => void,
 ): ReturnType<typeof runEmailPipelineTick> {
   return runEmailPipelineTick({
     gmail: f.gmail,
     store: f.store,
     classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
-    escalate: { deliver, topic_id: 'app:owner', push: null, project_slug: 'instance' },
+    escalate: { deliver, topic_id: 'app:owner', push: null, project_slug: 'owner' },
     now: () => NOW,
     max_escalation_attempts: 3,
+    ...(log !== undefined ? { log } : {}),
   })
 }
 
@@ -162,13 +164,34 @@ describe('escalation resume', () => {
         throw new Error('socket closed')
       }
       // max_escalation_attempts: 3 → the poll attempt plus two resumes.
-      await tick(f, boom)
-      await tick(f, boom)
-      await tick(f, boom)
-      await tick(f, boom)
+      const lines: string[] = []
+      const log = (message: string): void => {
+        lines.push(message)
+      }
+      await tick(f, boom, log)
+      await tick(f, boom, log)
+      await tick(f, boom, log)
+      const over = await tick(f, boom, log)
       expect(attempts).toBe(3)
       expect(f.store.getEmail('important-1')?.escalation_attempts).toBe(3)
       expect(f.store.listPendingEscalations(3)).toHaveLength(0)
+
+      // STOPPING IS NOT RESOLVING. The cap is right — a permanently broken sink
+      // must not be retried forever — but the owner was never told about an
+      // important email, and this used to be the end of it: the row simply stops
+      // matching the resume query, and nothing counts, logs or reports it. The
+      // pipeline-dedup test that asserted only the empty queue PINNED that
+      // silence. So the tick reports it, every tick, for as long as it holds.
+      expect(over.abandoned).toBe(1)
+      expect(
+        lines.filter((l) => l.includes('over the attempt cap')).length,
+      ).toBeGreaterThan(0)
+
+      // ...and it stays visible on later ticks, not only on the one where the
+      // cap happened to be reached.
+      const later = await tick(f, boom, log)
+      expect(later.abandoned).toBe(1)
+      expect(attempts).toBe(3)
     } finally {
       f.close()
     }

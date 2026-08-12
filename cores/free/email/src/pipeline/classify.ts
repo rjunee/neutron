@@ -78,10 +78,12 @@ export const BODY_EXCERPT_LIMIT = 2000
  * This used to be `/<([^>]*)>/.exec(from)`, and CodeQL was right to call it
  * `js/polynomial-redos`. `[^>]` matches `<` as well, so on a `From:` header of
  * N `<` characters and no `>` the engine consumes to end-of-string from EVERY
- * one of the N starting positions: quadratic. Measured on the pre-fix code,
- * 32 KB of `<` took 867 ms and each doubling of the input quadrupled the time,
- * so a 1 MB header — well inside what a sender may legally emit — is minutes of
- * pegged CPU. `from` is an RFC 5322 header, which means the REMOTE SENDER
+ * one of the N starting positions: quadratic. Measured on the pre-fix code on
+ * ONE developer box — 8 KB → 104 ms, 16 KB → 437 ms, 32 KB → 1.6 s, 64 KB →
+ * 6.8 s (`pipeline-classify-redos.test.ts` carries the same series; the
+ * absolute figures vary several-fold by machine, the QUADRUPLING per doubling
+ * does not). A 1 MB header — well inside what a sender may legally emit — is
+ * therefore minutes of pegged CPU. `from` is an RFC 5322 header, so the REMOTE SENDER
  * chooses this string; on a public, self-hostable project that is a
  * denial-of-service anyone can post to any self-hoster's mail path.
  *
@@ -129,10 +131,32 @@ export function matchImportancePattern(subject: string, body: string): PatternHi
   return null
 }
 
-/** The mass-mailer signal: an unsubscribe affordance, or the promotions bucket. */
+const UNSUBSCRIBE = 'unsubscribe'
+
+/**
+ * The mass-mailer signal: an unsubscribe affordance, or the promotions bucket.
+ *
+ * ── WHY TWO BOUNDED SPANS AND NOT THE WHOLE BODY ─────────────────────────────
+ * This used to be `body.toLowerCase().includes(...)` over the FULL remote body,
+ * while every other read of that body is bounded to `BODY_EXCERPT_LIMIT`. Two
+ * problems, both on text a remote sender chooses: `toLowerCase()` allocates a
+ * second copy of an arbitrarily large body on every message, and a token past
+ * the excerpt limit could downgrade a message whose importance patterns had only
+ * ever seen the first 2,000 characters — an asymmetry nothing declared.
+ *
+ * The head alone is not enough: an unsubscribe affordance lives in the FOOTER of
+ * a marketing mail, which is exactly the part a head-only scan drops, and losing
+ * it puts bulk mail back in the owner's chat. So both ENDS are scanned, each
+ * bounded by the same limit, with the spans overlapping by the needle length so
+ * a token straddling an edge is still seen. Allocation is bounded by the limit,
+ * not by what the sender sent.
+ */
 export function hasUnsubscribeSignal(body: string, label_ids: readonly string[]): boolean {
-  if (body.toLowerCase().includes('unsubscribe')) return true
-  return label_ids.includes(PROMOTIONS_LABEL)
+  if (label_ids.includes(PROMOTIONS_LABEL)) return true
+  const span = BODY_EXCERPT_LIMIT + UNSUBSCRIBE.length
+  if (body.slice(0, span).toLowerCase().includes(UNSUBSCRIBE)) return true
+  if (body.length <= span) return false
+  return body.slice(-span).toLowerCase().includes(UNSUBSCRIBE)
 }
 
 /** Pull the first `{...}` block out of a model answer and parse it. */

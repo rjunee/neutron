@@ -97,7 +97,6 @@ describe('Open email-pipeline composition wiring', () => {
     // Push is ALONGSIDE chat, never instead of it — but it must be present.
     expect(pipeline?.push).not.toBeNull()
     expect(typeof pipeline?.push?.pushAll).toBe('function')
-    expect(typeof pipeline?.resolveTimezone).toBe('function')
     expect(pipeline?.owner_home).toBe(tmpDir)
 
     cleanup(composition)

@@ -117,7 +117,7 @@ describe('steady-state polling does not starve behind handled mail', () => {
           },
           topic_id: 'app:owner',
           push: null,
-          project_slug: 'instance',
+          project_slug: 'owner',
         },
         now: () => NOW,
         max_results: 3,
@@ -176,7 +176,7 @@ describe('a delivered escalation is never re-posted', () => {
           },
           topic_id: 'app:owner',
           push: null,
-          project_slug: 'instance',
+          project_slug: 'owner',
           store: broken,
           now: () => NOW,
         },
@@ -231,7 +231,7 @@ describe('a resolved deliver call is not automatically a delivered escalation', 
           deliver: async (): Promise<unknown> => ({ persisted: false, delivered_live: false }),
           topic_id: 'app:owner',
           push: null,
-          project_slug: 'instance',
+          project_slug: 'owner',
           store,
           now: () => NOW,
         },
@@ -381,7 +381,7 @@ describe('the page budget pauses the walk, it does not end it', () => {
             },
             topic_id: 'app:owner',
             push: null,
-            project_slug: 'instance',
+            project_slug: 'owner',
           },
           now: () => NOW,
           max_results: 1,
@@ -398,6 +398,100 @@ describe('the page budget pauses the walk, it does not end it', () => {
       expect(second.scanned).toBe(1)
       expect(delivered).toHaveLength(1)
       expect(store.getEmail('deep-new')).not.toBeNull()
+    })
+  })
+
+  test('a NEW email at the top is delivered on the NEXT tick, mid-deep-walk', async () => {
+    await withStore(async (store) => {
+      // The continuation cursor fixed starvation and introduced a latency bug of
+      // its own: a tick that spent its whole budget deep in the mailbox never
+      // looked at the top, where new mail lands. At the shipped defaults
+      // (20 pages x 25) a 1,200-message inbox takes three ticks to walk, so an
+      // important email arriving during the first waited FIFTEEN minutes —
+      // against an acceptance criterion of one poll interval. Here the walk is
+      // five pages deep with a budget of two, so the deep walk is still running
+      // when the new mail arrives.
+      for (const id of ['handled-1', 'handled-2', 'handled-3', 'handled-4', 'handled-5']) {
+        const m = meta(id)
+        store.insertEmail({
+          id: m.id,
+          thread_id: m.thread_id,
+          account_id: null,
+          sender: m.from,
+          subject: m.subject,
+          snippet: m.snippet,
+          body_text: 'x',
+          received_at: NOW,
+          processed_at: NOW,
+          category: 'billing action',
+          handling: 'escalate',
+        })
+        store.markEscalated(m.id, NOW, null)
+      }
+
+      const byCursor: Record<string, GmailListResult> = {
+        START: { results: [meta('handled-1')], next_page_token: 'p2' },
+        p2: { results: [meta('handled-2')], next_page_token: 'p3' },
+        p3: { results: [meta('handled-3')], next_page_token: 'p4' },
+        p4: { results: [meta('handled-4')], next_page_token: 'p5' },
+        p5: { results: [meta('handled-5')], next_page_tokens: {} },
+      }
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          return byCursor[input.page_token ?? 'START'] as GmailListResult
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const run = (): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (_t, e): Promise<unknown> => {
+              delivered.push(e.body)
+              return { prompt_id: 'p1', persisted: true, delivered_live: true }
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'owner',
+          },
+          now: () => NOW,
+          max_results: 1,
+          max_poll_pages: 2,
+        })
+
+      // Tick one walks pages 1-2 of five and pauses at p3.
+      const first = await run()
+      expect(first.scanned).toBe(0)
+      expect(delivered).toHaveLength(0)
+
+      // An important email now arrives at the TOP of the inbox, where new mail
+      // always arrives — while the deep walk still has three pages to go.
+      byCursor['START'] = { results: [meta('new-important')], next_page_token: 'p2' }
+
+      const second = await run()
+      // THE REGRESSION: spending the whole budget on the continuation walked
+      // p3 and p4 and delivered nothing. The owner's email would have waited
+      // two more ticks — ten minutes — for a five-page inbox, and far longer
+      // for a real one.
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]).toContain('Action required: payment failed')
+      expect(store.getEmail('new-important')).not.toBeNull()
+
+      // And the deep walk still ADVANCED on the same tick — the head is a
+      // reservation out of the budget, not a replacement for the continuation.
+      expect(store.getCheckpoint('poll_cursor')).toBe('p4')
     })
   })
 })
@@ -430,7 +524,7 @@ describe('a retried escalation does not buzz the phone again', () => {
             return { sent: 1 }
           },
         },
-        project_slug: 'instance',
+        project_slug: 'owner',
         store,
         now: () => NOW,
       }
@@ -523,7 +617,7 @@ describe('a crash between the insert and the delivery is recoverable', () => {
             },
             topic_id: 'app:owner',
             push: null,
-            project_slug: 'instance',
+            project_slug: 'owner',
           },
           now: () => NOW,
         })
@@ -576,7 +670,7 @@ describe('one unreadable message is not a wall across the mailbox', () => {
           },
           topic_id: 'app:owner',
           push: null,
-          project_slug: 'instance',
+          project_slug: 'owner',
         },
         now: () => NOW,
       })
@@ -633,7 +727,7 @@ describe('a busy first page does not hide a later one', () => {
           },
           topic_id: 'app:owner',
           push: null,
-          project_slug: 'instance',
+          project_slug: 'owner',
         },
         now: () => NOW,
       })

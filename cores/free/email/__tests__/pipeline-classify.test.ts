@@ -116,6 +116,37 @@ describe('classifyEmail — the mass-mailer downgrade', () => {
     expect(c.reason).toBe('mass mailer')
   })
 
+  test('a footer PAST the excerpt limit still downgrades — the tail is scanned', async () => {
+    // The unsubscribe affordance lives at the BOTTOM of a marketing mail, which
+    // is exactly the part a head-only scan drops. Bounding this read to the
+    // first `BODY_EXCERPT_LIMIT` characters (as everything else is bounded)
+    // would put every long bulk mail back in the owner's chat, so both ENDS are
+    // scanned and each end is bounded.
+    const c = await classifyEmail(
+      message({
+        subject: 'This week at the shop',
+        body_text: `${'Lots of news. '.repeat(5_000)}\nUnsubscribe here.`,
+      }),
+      deps(),
+    )
+    expect(c.category).toBe('newsletter')
+    expect(c.important).toBe(false)
+  })
+
+  test('a body far longer than both spans does NOT downgrade on the gap', async () => {
+    // The middle of a very long body is not read — deliberately, and this pins
+    // it, because "we scan the whole body" was the unbounded allocation on
+    // sender-chosen text that this replaced. A word buried a megabyte in is not
+    // a mass-mailer signal anybody can act on.
+    const middle = `${'x'.repeat(200_000)}unsubscribe${'x'.repeat(200_000)}`
+    const c = await classifyEmail(
+      message({ subject: 'Personal note', body_text: middle }),
+      deps(),
+    )
+    expect(c.category).toBe('other')
+    expect(c.important).toBe(false)
+  })
+
   test('the promotions label alone downgrades', async () => {
     const c = await classifyEmail(
       message({ subject: 'Sale', label_ids: ['INBOX', PROMOTIONS_LABEL] }),

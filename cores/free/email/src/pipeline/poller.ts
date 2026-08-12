@@ -57,9 +57,12 @@ export const CHECKPOINT_BACKLOG_CURSOR = 'backlog_cursor'
 export const CHECKPOINT_BACKLOG_CURSORS = 'backlog_cursors'
 /**
  * STEADY-STATE continuation cursors. Set only when a tick exhausted its page
- * budget without reaching unhandled mail, so the next tick resumes there
- * instead of re-walking the same opening pages forever. Cleared the moment the
- * walk finds mail or runs out of pages.
+ * budget without reaching the end of the mailbox, so the next tick resumes the
+ * DEEP part of the walk there instead of re-walking the same opening pages
+ * forever. Cleared the moment a walk reaches the end of the mailbox.
+ *
+ * They never delay new mail: a resuming tick reads the HEAD pages first (see
+ * `DEFAULT_POLL_HEAD_PAGES`) and only then continues from here.
  */
 export const CHECKPOINT_POLL_CURSOR = 'poll_cursor'
 export const CHECKPOINT_POLL_CURSORS = 'poll_cursors'
@@ -80,6 +83,20 @@ export const DEFAULT_MAX_ESCALATION_ATTEMPTS = 5
  * before a tick reports it ran out of budget.
  */
 export const DEFAULT_MAX_POLL_PAGES = 20
+/**
+ * How many pages of the NEWEST mail a tick re-reads before it resumes a deep
+ * continuation walk.
+ *
+ * New mail lands at the TOP of the inbox, so a tick that spends its whole
+ * budget deep in the mailbox delivers none of it. With the shipped defaults
+ * (20 pages x 25) a 1,200-message inbox takes three ticks to walk, so an
+ * important email arriving during the first of them waited fifteen minutes
+ * against an acceptance criterion of ONE poll interval — and a 10,000-message
+ * inbox waited an hour and a half. The head is therefore re-read first, on
+ * EVERY tick, and only the remaining budget continues the deep walk; the deep
+ * walk still advances every tick, so neither half starves the other.
+ */
+export const DEFAULT_POLL_HEAD_PAGES = 2
 /**
  * How many backlog pages ONE tick may sweep. At the 100-per-page default that
  * is 5,000 messages a tick, so a large inbox is marked in a couple of ticks
@@ -106,6 +123,9 @@ export interface EmailPipelineTickDeps {
   backlog_page_size?: number
   /** List pages one steady-state tick may walk before giving up for now. */
   max_poll_pages?: number
+  /** Pages of the newest mail a resuming tick reads before it continues the
+   *  deep walk. See `DEFAULT_POLL_HEAD_PAGES`. */
+  poll_head_pages?: number
   /** Backlog pages one tick may sweep before pausing until the next tick. */
   max_backlog_pages?: number
 }
@@ -123,7 +143,23 @@ export interface EmailPipelineTickResult {
   /** Messages seen mid-sweep that arrived AFTER go-live, so were left for the
    *  steady-state pass rather than being filed as history. */
   arrived_during_sweep: number
-  /** True while the backlog sweep is still running — no mail is processed yet. */
+  /**
+   * Important messages that have used up `max_escalation_attempts` and are no
+   * longer retried by anything.
+   *
+   * The attempt cap has to exist (a permanently failing row must not be retried
+   * forever), but hitting it used to be SILENT: the row drops out of
+   * `listPendingEscalations`, so the owner is never told about that email and
+   * nothing anywhere says so. Counting it here — and logging it — is what makes
+   * an abandoned escalation a visible fact instead of an absence.
+   */
+  abandoned: number
+  /**
+   * True when this tick ENDED with the backlog sweep still running — no mail was
+   * processed. A sweep that COMPLETES mid-tick falls through to steady state, so
+   * this reads false: the flag reports the state the tick ended in, not that a
+   * sweep page happened to run.
+   */
   backlog_sweeping: boolean
 }
 
@@ -256,6 +292,7 @@ export async function runEmailPipelineTick(
     remutated: 0,
     errors: 0,
     arrived_during_sweep: 0,
+    abandoned: 0,
     backlog_sweeping: false,
   }
 
@@ -320,7 +357,6 @@ export async function runEmailPipelineTick(
     let sweepPages = 0
     const sweep_budget = deps.max_backlog_pages ?? DEFAULT_MAX_BACKLOG_PAGES
     while (backlogPending && sweepPages < sweep_budget) {
-      result.backlog_sweeping = true
       sweepPages++
       const cursor = store.getCheckpoint(CHECKPOINT_BACKLOG_CURSOR)
       const perAccount = parseCursorMap(store.getCheckpoint(CHECKPOINT_BACKLOG_CURSORS))
@@ -484,6 +520,12 @@ export async function runEmailPipelineTick(
       }
     }
 
+    // The flag reports the state the tick ENDED in. Setting it per sweep page
+    // left it true on a tick whose sweep finished and which then went on to
+    // classify and escalate live mail — a "no mail was processed yet" flag on a
+    // tick that processed mail.
+    result.backlog_sweeping = backlogPending
+
     if (backlogPending) {
       // Still sweeping and out of budget for this tick. Live mail is not
       // processed yet — that is the price of not escalating history — but the
@@ -494,6 +536,21 @@ export async function runEmailPipelineTick(
       })
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
       return result
+    }
+
+    // (2a) ABANDONED escalations — over the attempt cap, retried by nothing.
+    // The cap is right (a row that fails forever must not be retried forever),
+    // but falling out of the resume query is not a resolution: that email is
+    // important, the owner was never told, and without this count and log the
+    // only trace is a row nobody reads. Reported every tick while it holds, so
+    // it cannot be missed by having happened during one.
+    const abandoned = store.countAbandonedEscalations(max_attempts)
+    result.abandoned = abandoned
+    if (abandoned > 0) {
+      log?.('email pipeline has escalations over the attempt cap; the owner was NOT told', {
+        abandoned,
+        max_attempts,
+      })
     }
 
     // (2) RESUME — escalations whose chat delivery failed on an earlier tick.
@@ -691,84 +748,130 @@ export async function runEmailPipelineTick(
       result.archived++
     }
 
-    const page_budget = deps.max_poll_pages ?? DEFAULT_MAX_POLL_PAGES
-    // RESUME WHERE THE LAST TICK RAN OUT. A budget that always restarts at the
-    // top is not a bound on work, it is permanent starvation: with more than
-    // `page_budget × max_results` handled messages retained above it, an
-    // unhandled message is never reached, because every tick re-walks the same
-    // opening pages and gives up in the same place. The continuation cursor is
-    // what turns "bounded per tick" into "bounded per tick AND eventually
-    // reached". It is cleared as soon as the walk finds mail or runs out, so
-    // the next tick starts at the top again where new mail arrives.
-    const savedCursor = store.getCheckpoint(CHECKPOINT_POLL_CURSOR)
-    const savedCursors = parseCursorMap(store.getCheckpoint(CHECKPOINT_POLL_CURSORS))
-    let cursor: string | undefined =
-      savedCursor !== null && savedCursor.length > 0 ? savedCursor : undefined
-    let cursors: Record<string, string> = savedCursors
-    let pages = 0
-    let exhausted = false
-
-    while (pages < page_budget) {
-      const listed = await gmail.listMessages({
-        label: DEFAULT_LABEL,
-        max_results,
-        exhaustive: true,
-        ...(cursor !== undefined ? { page_token: cursor } : {}),
-        ...(Object.keys(cursors).length > 0 ? { page_tokens: cursors } : {}),
-      })
-      pages++
-
-      let handledOnThisPage = 0
-      for (const meta of listed.results) {
-        if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
-        result.scanned++
-        try {
-          await handleMessage(meta)
-          handledOnThisPage++
-        } catch (err) {
-          result.errors++
-          log?.('email pipeline message failed', {
-            email_id: meta.id,
-            error: err instanceof Error ? err.message : String(err),
-          })
-        }
-      }
-
-      // DO NOT STOP JUST BECAUSE THIS PAGE HAD WORK. Two earlier versions
-      // stopped early and both starved deeper mail:
-      //
-      //   - stopping on `scanned > 0` counted ATTEMPTS, so one permanently
-      //     unreadable message became a wall across the whole mailbox;
-      //   - stopping on real progress starved page 2 whenever page 1 kept
-      //     receiving mail. A busy inbox would never reach the important
-      //     message sitting behind the busy part.
-      //
-      // The page BUDGET is what bounds a tick, not an early exit. So the walk
-      // continues to the end of the budget or the end of the cursors, and if it
-      // runs out of budget it remembers where it was.
-      void handledOnThisPage
-      cursor = listed.next_page_token
-      cursors = nextCursorMap(
-        accountsOnThisPage(listed, false),
-        listed.next_page_tokens ?? {},
-        cursors,
-        failedAccounts(listed),
-      )
-      if (cursor === undefined && !anyCursorsRemain(cursors)) {
-        exhausted = true
-        break
-      }
+    interface WalkOutcome {
+      cursor: string | undefined
+      cursors: Record<string, string>
+      /** The walk reached the END of the mailbox — there is nothing to resume. */
+      exhausted: boolean
+      pages: number
     }
 
-    if (!exhausted) {
+    /** Walk list pages from `from`, handling every unhandled message, up to `budget`. */
+    async function walkPages(
+      from: { cursor: string | undefined; cursors: Record<string, string> },
+      budget: number,
+    ): Promise<WalkOutcome> {
+      let cursor = from.cursor
+      let cursors = from.cursors
+      let pages = 0
+      let exhausted = false
+
+      while (pages < budget) {
+        const listed = await gmail.listMessages({
+          label: DEFAULT_LABEL,
+          max_results,
+          exhaustive: true,
+          ...(cursor !== undefined ? { page_token: cursor } : {}),
+          ...(Object.keys(cursors).length > 0 ? { page_tokens: cursors } : {}),
+        })
+        pages++
+
+        for (const meta of listed.results) {
+          if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
+          result.scanned++
+          try {
+            await handleMessage(meta)
+          } catch (err) {
+            result.errors++
+            log?.('email pipeline message failed', {
+              email_id: meta.id,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+
+        // DO NOT STOP JUST BECAUSE THIS PAGE HAD WORK. Two earlier versions
+        // stopped early and both starved deeper mail:
+        //
+        //   - stopping on `scanned > 0` counted ATTEMPTS, so one permanently
+        //     unreadable message became a wall across the whole mailbox;
+        //   - stopping on real progress starved page 2 whenever page 1 kept
+        //     receiving mail. A busy inbox would never reach the important
+        //     message sitting behind the busy part.
+        //
+        // The page BUDGET is what bounds a walk, not an early exit.
+        cursor = listed.next_page_token
+        cursors = nextCursorMap(
+          accountsOnThisPage(listed, false),
+          listed.next_page_tokens ?? {},
+          cursors,
+          failedAccounts(listed),
+        )
+        if (cursor === undefined && !anyCursorsRemain(cursors)) {
+          exhausted = true
+          break
+        }
+      }
+      return { cursor, cursors, exhausted, pages }
+    }
+
+    const page_budget = deps.max_poll_pages ?? DEFAULT_MAX_POLL_PAGES
+    // THE HEAD FIRST, THEN THE CONTINUATION. Two failures pull in opposite
+    // directions and a tick has to answer both:
+    //
+    //  - Always restarting at the top is not a bound on work, it is permanent
+    //    starvation: with more than `page_budget × max_results` handled
+    //    messages retained above it, an unhandled message is never reached
+    //    because every tick gives up in the same place. Hence the continuation
+    //    cursor.
+    //  - Spending the WHOLE budget on the continuation delays NEW mail, which
+    //    arrives at the top, by however many ticks the deep walk takes — three
+    //    ticks (fifteen minutes) on a 1,200-message inbox at the shipped
+    //    defaults, against an acceptance criterion of one poll interval.
+    //
+    // So a resuming tick reads the newest `head_pages` FIRST — that is where an
+    // important email that just arrived is — and only then continues the deep
+    // walk with the rest of the budget. Both halves advance on every tick.
+    //
+    // The head never takes the LAST page of the budget: a head that consumed
+    // the whole budget would leave the deep walk zero pages, which is the
+    // starvation above wearing the other hat.
+    const head_pages = Math.max(
+      0,
+      Math.min(deps.poll_head_pages ?? DEFAULT_POLL_HEAD_PAGES, page_budget - 1),
+    )
+    const savedCursor = store.getCheckpoint(CHECKPOINT_POLL_CURSOR)
+    const savedCursors = parseCursorMap(store.getCheckpoint(CHECKPOINT_POLL_CURSORS))
+    const resume = {
+      cursor: savedCursor !== null && savedCursor.length > 0 ? savedCursor : undefined,
+      cursors: savedCursors,
+    }
+    const resuming = resume.cursor !== undefined || anyCursorsRemain(resume.cursors)
+
+    let walked: WalkOutcome
+    if (!resuming) {
+      // Nothing owed: one walk from the top with the whole budget.
+      walked = await walkPages({ cursor: undefined, cursors: {} }, page_budget)
+    } else {
+      const head = await walkPages({ cursor: undefined, cursors: {} }, head_pages)
+      // A head walk that reached the end of the mailbox has just walked the
+      // whole thing — the saved cursor points into a mailbox that is now
+      // shorter than the head, so it is stale and must not be resumed.
+      walked = head.exhausted
+        ? head
+        : await walkPages(resume, page_budget - head.pages)
+    }
+
+    if (!walked.exhausted) {
       // Out of budget: REMEMBER the place. Discarding the cursor here is what
       // made the budget a wall instead of a pause — the next tick would restart
       // at the top and give up in exactly the same spot, forever.
-      store.setCheckpoint(CHECKPOINT_POLL_CURSOR, cursor ?? '')
-      store.setCheckpoint(CHECKPOINT_POLL_CURSORS, JSON.stringify(cursors))
+      store.setCheckpoint(CHECKPOINT_POLL_CURSOR, walked.cursor ?? '')
+      store.setCheckpoint(CHECKPOINT_POLL_CURSORS, JSON.stringify(walked.cursors))
       log?.('email pipeline poll hit its page budget; will resume from here', {
-        pages,
+        pages: walked.pages,
         page_budget,
+        head_pages: resuming ? head_pages : 0,
         scanned: result.scanned,
       })
     } else {

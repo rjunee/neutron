@@ -32,7 +32,7 @@ import {
   type EmailPipelineCompositionConfig,
 } from '../email-pipeline-wiring.ts'
 
-const CTX = { job_name: EMAIL_PIPELINE_POLL_JOB_NAME, owner_slug: 'instance', fired_at: 0 }
+const CTX = { job_name: EMAIL_PIPELINE_POLL_JOB_NAME, owner_slug: 'owner', fired_at: 0 }
 
 function config(over: Partial<EmailPipelineCompositionConfig> = {}): {
   cfg: EmailPipelineCompositionConfig
@@ -43,7 +43,7 @@ function config(over: Partial<EmailPipelineCompositionConfig> = {}): {
   const cfg: EmailPipelineCompositionConfig = {
     gmail: gmail as GmailClient,
     owner_home: home,
-    project_slug: 'instance',
+    project_slug: 'owner',
     deliver: async () => ({ prompt_id: null, persisted: true, delivered_live: false }),
     escalation_topic_id: 'app:owner',
     push: null,
@@ -98,15 +98,25 @@ describe('registerEmailPipelineCron', () => {
     }
   })
 
-  test('the handler is registered once — a second registration is safe', () => {
+  test('a second registration adds NOTHING — one job, one handler, one poller', () => {
     const { cfg, cleanup } = config()
     try {
+      // The registries are the SAME ones both times, which is the only way this
+      // says anything: a fresh `CronJobRegistry` per call cannot observe a
+      // double registration, and `not.toThrow()` alone would pass while the
+      // mailbox got polled twice per interval.
+      const jobs = new CronJobRegistry()
       const handlers = new CronHandlerRegistry()
       const handler = buildEmailPipelinePollHandler(cfg)
-      registerEmailPipelineCron({ jobs: new CronJobRegistry(), handlers, handler })
-      expect(() =>
-        registerEmailPipelineCron({ jobs: new CronJobRegistry(), handlers, handler }),
-      ).not.toThrow()
+      registerEmailPipelineCron({ jobs, handlers, handler })
+      expect(jobs.size()).toBe(1)
+      expect(handlers.list()).toHaveLength(1)
+
+      expect(() => registerEmailPipelineCron({ jobs, handlers, handler })).not.toThrow()
+      expect(jobs.size()).toBe(1)
+      expect(jobs.list().filter((j) => j.name === EMAIL_PIPELINE_POLL_JOB_NAME)).toHaveLength(1)
+      expect(handlers.list()).toEqual([EMAIL_PIPELINE_POLL_HANDLER_NAME])
+      expect(handlers.get(EMAIL_PIPELINE_POLL_HANDLER_NAME)).toBe(handler)
     } finally {
       cleanup()
     }
@@ -247,6 +257,88 @@ describe('the tick reports every kind of work it does', () => {
       const result = await buildEmailPipelinePollHandler(cfg)(CTX)
       expect(result.detail).toContain('remutated=1')
       expect(result.status).toBe('ok')
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("the tick's diagnostics REACH a log — the production caller passed none", async () => {
+    // `log` is optional on the tick, and this — the only production caller —
+    // omitted it. All ten of the tick's diagnostics went nowhere: a paged-out
+    // poll, a re-opened sweep, a failed message and a failed resume were all
+    // silent, while the cron line said `skipped`.
+    const lines: Array<{ message: string; meta?: Record<string, unknown> }> = []
+    const { cfg, cleanup } = config({
+      log: (message, meta) => lines.push({ message, ...(meta !== undefined ? { meta } : {}) }),
+    })
+    try {
+      await buildEmailPipelinePollHandler(cfg)(CTX)
+      // The first fire stamps the go-live checkpoint, which is a logged fact.
+      expect(lines.length).toBeGreaterThan(0)
+      expect(lines.some((l) => l.message.includes('go-live'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('a tick whose every message FAILED is not reported as skipped', async () => {
+    // `skipped` has to mean "found nothing to do". A tick that scanned mail and
+    // failed on all of it did the opposite, and reporting it as skipped is the
+    // under-reporting above wearing its other hat.
+    const seeded = buildSeededInMemoryGmailClient()
+    const gmail = {
+      ...seeded,
+      listMessages: seeded.listMessages.bind(seeded),
+      async getMessage(): Promise<never> {
+        throw new Error('gmail 500 on body fetch')
+      },
+    } as unknown as GmailClient
+    const { cfg, cleanup } = config({ gmail })
+    try {
+      const store = openEmailPipelineStore({ owner_home: cfg.owner_home })
+      store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
+      store.setCheckpoint(backlogDoneKey(null), '1')
+      store.close()
+      seeded.seed({
+        id: 'unreadable-1',
+        thread_id: 't-unreadable',
+        subject: 'Action required: payment failed',
+        from: 'Vendor Billing <billing@vendor.example.com>',
+        snippet: 's',
+        body_text: 'Your card was declined.',
+        internal_date: new Date(Date.now() + 5_000).toISOString(),
+        label_ids: ['INBOX'],
+      })
+
+      const result = await buildEmailPipelinePollHandler(cfg)(CTX)
+      expect(result.detail).toContain('errors=1')
+      expect(result.status).toBe('error')
+    } finally {
+      cleanup()
+    }
+  })
+
+  test('the detail line carries EVERY counter the result has', async () => {
+    // The one counter left out was `backlog_sweeping`, and it is the one that
+    // explains why a tick did nothing else. A reader of this line should never
+    // have to go and read the tick body to find a field it dropped.
+    const { cfg, cleanup } = config()
+    try {
+      const result = await buildEmailPipelinePollHandler(cfg)(CTX)
+      for (const key of [
+        'scanned',
+        'escalated',
+        'archived',
+        'precutoff',
+        'resumed',
+        'remutated',
+        'arrived_during_sweep',
+        'abandoned',
+        'backlog_sweeping',
+        'errors',
+      ]) {
+        expect(result.detail).toContain(`${key}=`)
+      }
     } finally {
       cleanup()
     }

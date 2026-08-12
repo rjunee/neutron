@@ -25,9 +25,12 @@ import { runEmailPipelineTick } from '@neutronai/email-managed-core/pipeline/pol
 
 import type { CronHandler, CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import type { CronJobDef, CronJobRegistry } from '@neutronai/cron/jobs.ts'
+import { createLogger, type LogFields } from '@neutronai/logger'
 
 import type { Deliver } from '../http/deliver.ts'
 import type { PushDispatcher } from '../push/dispatcher.ts'
+
+const moduleLog = createLogger('email-pipeline')
 
 export const EMAIL_PIPELINE_POLL_HANDLER_NAME = 'email.pipeline_poll'
 export const EMAIL_PIPELINE_POLL_JOB_NAME = 'email-pipeline-poll'
@@ -60,13 +63,13 @@ export interface EmailPipelineCompositionConfig {
    */
   llm: ((prompt: string) => Promise<string>) | null
   /**
-   * Per-fire owner-timezone resolution, the `withTickTimezone` shape the
-   * proactive crons use. Accepted NOW for P2 parity: the twice-daily brief's
-   * windows are owner-local and DST-correct, and threading the resolver at the
-   * seam in P1 means P2 changes the tick body only. THE P1 TICK BODY DOES NOT
-   * READ IT — escalation is event-driven, not clock-driven.
+   * Where the tick's diagnostics go. Defaults to this module's logger — the
+   * tick's ten log lines are the ONLY account of a mailbox that is failing,
+   * being paged through, or holding an undelivered escalation, and a default of
+   * "nowhere" made every one of them dead in production while the cron line said
+   * `skipped`. Tests pass their own to assert on it.
    */
-  resolveTimezone?: (owner_slug: string) => string | undefined
+  log?: (message: string, meta?: Record<string, unknown>) => void
   interval_ms?: number
   now?: () => number
   /** Register the store's close on the composer's cleanup list. */
@@ -82,6 +85,24 @@ export function buildEmailPipelinePollHandler(
   cfg: EmailPipelineCompositionConfig,
 ): CronHandler {
   const now = cfg.now ?? ((): number => Date.now())
+  // The tick's `log` is OPTIONAL, and this — the only production caller —
+  // omitted it, so all ten of its diagnostics went nowhere: a paged-out poll, a
+  // re-opened sweep, a failed message and a failed resume all ran silently.
+  const log =
+    cfg.log ?? ((message: string, meta?: Record<string, unknown>): void => {
+      // The tick's meta is `unknown`-valued (one line carries an account list);
+      // the logger takes primitives, so anything else is serialised rather than
+      // dropped — a diagnostic that omits its own detail is the defect above,
+      // one level down.
+      const fields: LogFields = {}
+      for (const [k, v] of Object.entries(meta ?? {})) {
+        fields[k] =
+          typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || v === null
+            ? v
+            : JSON.stringify(v)
+      }
+      moduleLog.info(message, fields)
+    })
   let store: EmailPipelineStore | null = null
 
   return async () => {
@@ -113,6 +134,7 @@ export function buildEmailPipelinePollHandler(
           project_slug: cfg.project_slug,
         },
         now,
+        log,
       })
       // Every kind of work the tick can do has to appear in BOTH lines. A tick
       // that only finished an owed Gmail write reported `skipped` while having
@@ -122,9 +144,24 @@ export function buildEmailPipelinePollHandler(
       const detail =
         `scanned=${r.scanned} escalated=${r.escalated} archived=${r.archived} ` +
         `precutoff=${r.precutoff} resumed=${r.resumed} remutated=${r.remutated} ` +
-        `arrived_during_sweep=${r.arrived_during_sweep} errors=${r.errors}`
+        `arrived_during_sweep=${r.arrived_during_sweep} abandoned=${r.abandoned} ` +
+        `backlog_sweeping=${r.backlog_sweeping} errors=${r.errors}`
+      // `skipped` has to mean the tick FOUND NOTHING TO DO. It was also reporting
+      // the ticks that did the most: a tick still sweeping the backlog, a tick
+      // that deferred mail arriving mid-sweep, and a tick whose every message
+      // FAILED all read `skipped` — so the one cron line a reader consults said
+      // "nothing happening" precisely while an important email sat undelivered.
       const acted =
-        r.escalated + r.archived + r.precutoff + r.resumed + r.remutated > 0
+        r.escalated +
+          r.archived +
+          r.precutoff +
+          r.resumed +
+          r.remutated +
+          r.arrived_during_sweep >
+          0 || r.backlog_sweeping
+      // A tick that caught per-message failures did not fail as a tick, but it
+      // did not succeed either, and `ok` is the one word that would hide it.
+      if (r.errors > 0) return { status: 'error', detail }
       return { status: acted ? 'ok' : 'skipped', detail }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -159,7 +196,14 @@ export function registerEmailPipelineCron(input: {
   const job = buildEmailPipelinePollJob(
     input.interval_ms !== undefined ? { interval_ms: input.interval_ms } : {},
   )
-  input.jobs.register(job)
+  // BOTH halves are guarded, and for the same reason. Registering the handler
+  // twice is a no-op the guard already covered; registering the JOB twice threw
+  // — so a second call was neither idempotent nor safe, it just failed at the
+  // other registry. A double registration must not double-poll the mailbox
+  // either, which is why this checks rather than overwrites.
+  if (input.jobs.get(job.name) === undefined) {
+    input.jobs.register(job)
+  }
   if (input.handlers.get(EMAIL_PIPELINE_POLL_HANDLER_NAME) === undefined) {
     input.handlers.register(EMAIL_PIPELINE_POLL_HANDLER_NAME, input.handler)
   }

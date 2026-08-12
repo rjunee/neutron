@@ -190,7 +190,7 @@ function tick(
       },
       topic_id: 'app:owner',
       push: null,
-      project_slug: 'instance',
+      project_slug: 'owner',
     },
     now: () => NOW,
     // One page per tick: this suite steps the sweep deliberately to assert each

@@ -5,9 +5,12 @@
  * `bareAddress` used to be `/<([^>]*)>/.exec(from)`, which CodeQL flagged as
  * `js/polynomial-redos`. `[^>]` matches `<` too, so a `From:` header of N `<`
  * and no `>` makes the engine scan to end-of-string from all N start positions.
- * Measured on the pre-fix code: 8 KB → 104 ms, 16 KB → 437 ms, 32 KB → 1.6 s,
- * 64 KB → 6.8 s. Each doubling QUADRUPLED the time, which is the signature of a
- * quadratic scan and not of a slow machine.
+ * Measured on the pre-fix code on ONE developer box: 8 KB → 104 ms, 16 KB →
+ * 437 ms, 32 KB → 1.6 s, 64 KB → 6.8 s. The absolute figures vary several-fold
+ * with the machine (a reviewer measured 2.1 s for the 32 KB case) and are quoted
+ * here and in `classify.ts` only as one attributed measurement; the QUADRUPLING
+ * per doubling is the machine-independent part, and it is the signature of a
+ * quadratic scan rather than of a slow box.
  *
  * That input is not hypothetical or local: `from` is an RFC 5322 header, so the
  * REMOTE SENDER picks the string. On a public, self-hostable project this is a
@@ -21,16 +24,46 @@
  * quadratic one. Elapsed time is the only observable that separates them, which
  * is what the `WALL-CLOCK-BOUND-OK` markers below argue.
  *
- * This file pins the whole CLASS, not just the one instance CodeQL named: every
- * regex in `classify.ts` runs here against input shaped to be its worst case, so
- * "the others are fine" is an evidenced claim rather than an assumption.
+ * ── THE WHOLE CLASS, NOT JUST THE ONE CodeQL NAMED ───────────────────────────
+ * Every regex this pipeline adds or touches is enumerated here, with its input's
+ * provenance and its verdict, so "no others" is an evidenced claim rather than
+ * an assumption. Each one that reads remote input is exercised below against
+ * input shaped to be its worst case.
+ *
+ *   classify.ts  `/<([^>]*)>/`        REMOTE (From: header)  FIXED — deleted;
+ *                                     `bareAddress` is two `indexOf` calls.
+ *   classify.ts  AUTH_CODE            REMOTE (subject+body)  CLEARED — an
+ *   classify.ts  BILLING_ACTION       REMOTE (subject+body)  alternation of
+ *   classify.ts  DEADLINE             REMOTE (subject+body)  LITERALS with no
+ *                                     nested or adjacent quantifier, so a
+ *                                     failed alternative advances the start
+ *                                     position instead of re-deriving a span.
+ *                                     Pinned below.
+ *   escalate.ts  `/\s+/g`             REMOTE (subject/sender) + model text.
+ *                                     CLEARED — one character class, one
+ *                                     quantifier, no ambiguity. Pinned below.
+ *   in-memory.ts `split(/\s+/)` (x2)  LOCAL — the test double's query parser;
+ *                                     the string is caller-chosen, never a
+ *                                     remote header. Same non-ambiguous shape.
+ *
+ * `poller.ts`, `store.ts`, `prompts.ts` and the gateway wiring add NO regex at
+ * all — the remaining string work there is `slice`, `indexOf` and `includes`.
+ * The non-regex scans over remote bodies are pinned here too, because an
+ * unbounded ALLOCATION on sender-chosen text is the same denial-of-service by a
+ * different mechanism.
  *
  * Every fixture address is `*.example.com`.
  */
 
 import { describe, expect, test } from 'bun:test'
 
-import { addressDomain, bareAddress, matchImportancePattern } from '../src/pipeline/classify.ts'
+import {
+  addressDomain,
+  bareAddress,
+  hasUnsubscribeSignal,
+  matchImportancePattern,
+} from '../src/pipeline/classify.ts'
+import { composeEscalationText } from '../src/pipeline/escalate.ts'
 
 /** Big enough that a quadratic rescan is seconds, small enough that a linear one
  *  is microseconds. The pre-fix regex needed ~66 s for this input. */
@@ -94,6 +127,49 @@ describe('classifier regexes are linear on attacker-chosen input', () => {
     // The body's repeated phrase is a real billing hit, so this also proves the
     // scan actually ran to a verdict rather than bailing out early.
     expect(hit).toEqual({ category: 'important', reason: 'billing action' })
+  })
+
+  test('the escalation text flattener is linear on a remote subject', () => {
+    // `composeEscalationText` clamps each field with `.replace(/\s+/g, ' ')`.
+    // That regex is UNAMBIGUOUS — one character class, one quantifier, no
+    // nesting and no alternation — so a failed match at a position advances by
+    // one rather than re-deriving the span. Worst case is a subject that is
+    // ALL whitespace: every character is in the class, so the single match spans
+    // the whole string.
+    const subject = ' '.repeat(PATHOLOGICAL)
+
+    const start = performance.now()
+    const text = composeEscalationText({
+      sender: 'Vendor Billing <billing@vendor.example.com>',
+      subject,
+      reason: 'billing action',
+    })
+    // WALL-CLOCK-BOUND-OK: same COMPLEXITY argument as the bounds above. This
+    // regex runs on an RFC 5322 subject and on model free text — both remote or
+    // untrusted — and it is on the escalation path, so the same threat position
+    // as `bareAddress`. Measured in the low single-digit milliseconds; the
+    // budget is 1000 ms, three orders of magnitude above it.
+    expect(performance.now() - start).toBeLessThan(1000)
+
+    // And the output is BOUNDED, so a megabyte subject cannot become a megabyte
+    // chat row: an all-whitespace subject flattens to nothing at all.
+    expect(text.length).toBeLessThan(600)
+    expect(text).toContain('billing@vendor.example.com')
+  })
+
+  test('the unsubscribe scan is bounded on a huge remote body', () => {
+    // No regex here — the check is `indexOf` over two bounded spans — but it
+    // reads the same attacker-chosen body, and it used to lower-case ALL of it,
+    // allocating a second copy of whatever the sender sent.
+    const body = 'x'.repeat(5_000_000)
+
+    const start = performance.now()
+    const hit = hasUnsubscribeSignal(body, [])
+    // WALL-CLOCK-BOUND-OK: an ALLOCATION bound rather than a backtracking one,
+    // and elapsed time is again the only observable — the answer (`false`) is
+    // identical whether 4 KB or 5 MB was copied to get it.
+    expect(performance.now() - start).toBeLessThan(1000)
+    expect(hit).toBe(false)
   })
 
   test('addressDomain inherits the linear scan through bareAddress', () => {
