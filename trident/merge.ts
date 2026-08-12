@@ -323,8 +323,9 @@ async function worktreeDirt(run_host: RunHostCommand, wt: string): Promise<strin
  * `prune` is safe either way: it only drops admin entries whose working directory
  * is already gone — it never deletes a working tree.
  *
- * @returns the dirty output when the worktree was PRESERVED, `null` when it was
- *          removed (or was already absent).
+ * @returns the reason the worktree was PRESERVED — its dirty paths, or why the
+ *          removal was refused — and `null` when it was removed (or was already
+ *          absent, or was never a worktree of ours).
  */
 async function removeWorktreePath(
   run_host: RunHostCommand,
@@ -344,7 +345,38 @@ async function removeWorktreePath(
       })
       return dirt
     }
-    await run_host(['git', '-C', repo, 'worktree', 'remove', wt], repo)
+    // A REFUSED REMOVAL IS NOT A REMOVAL. `git worktree remove` declines a locked
+    // tree, one with submodules, or one that was dirtied in the window between the
+    // probe above and this call (the plain — never `--force` — remove is exactly
+    // the second gate that catches that race). Ignoring the result reported those
+    // survivors as removed: `freeBranchFromWorktrees` then skipped its preservation
+    // error and the merge died three lines later on git's raw "already checked out
+    // at <path>", the confusing message this file exists to replace. The SHELL twin
+    // already scored a declined remove as `PRESERVED … reason=unverifiable`; this is
+    // the same rule on this side.
+    //
+    // ESCALATE ONLY FOR A WORKTREE ROOT THAT SURVIVED, because `remove` also fails
+    // (exit 128, "is not a working tree") for a path that was never a worktree —
+    // which is the ORDINARY provisioning case, where nothing is at that path at all.
+    // Treating that as preserved work would throw on every clean merge. The same
+    // `--show-toplevel` test `worktreeDirt` uses tells the two apart: a leftover
+    // PLAIN directory is rooted in the enclosing repo, not itself, and holds no work
+    // of ours to preserve.
+    const removal = await run_host(['git', '-C', repo, 'worktree', 'remove', wt], repo)
+    if (!removal.ok && existsSync(wt)) {
+      const top = await run_host(['git', '-C', wt, 'rev-parse', '--show-toplevel'], wt)
+      const top_path = top.ok ? top.stdout.trim() : ''
+      if (top_path === wt || top_path === realpathOrSelf(wt)) {
+        const why =
+          removal.stderr || removal.stdout || `git worktree remove exited ${removal.exit_code}`
+        log.warn('worktree_preserved_unverifiable', {
+          worktree: wt,
+          reason: why,
+          action: `trident could not remove ${wt} and did NOT force it — the tree is still there; unlock or clear it by hand`,
+        })
+        return why
+      }
+    }
     await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
     return null
   } catch {
@@ -384,7 +416,7 @@ async function provisionRunWorktree(
   const preserved = await removeWorktreePath(run_host, repo, wt)
   if (preserved !== null) {
     throw new TridentMergeError(
-      `refusing to reuse the merge worktree ${wt}: it has uncommitted changes that exist nowhere else. Every retry re-derives this same path, so the merge will keep failing until a human clears it: rescue whatever is in that directory, then \`git -C ${repo} worktree remove --force ${wt}\` and re-run the merge`,
+      `refusing to reuse the merge worktree ${wt}: it has uncommitted changes that exist nowhere else, or could not be removed. Every retry re-derives this same path, so the merge will keep failing until a human clears it: rescue whatever is in that directory, then \`git -C ${repo} worktree remove --force ${wt}\` and re-run the merge`,
       'git worktree add',
       { ok: false, stdout: preserved, stderr: '', exit_code: -1 },
     )
