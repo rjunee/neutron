@@ -2,6 +2,46 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — a dirty worktree is preserved, never force-removed (#541)
+
+The inner workflow's `finally{}` cleanup is now the checked-in
+`trident/worktree-cleanup.sh`, and every worktree removal in `trident/merge.ts`
+goes through the same gate: a tree with uncommitted changes — **including
+untracked files** — or one whose `git status` cannot be read at all is
+PRESERVED, its paths printed, exit 3. A clean tree is still removed, with a
+plain `git worktree remove` rather than `--force`, so git's own dirty check is a
+second gate behind ours.
+
+What it replaces was a cheap-model agent handed "MUST succeed on every path;
+ignore individual command failures … `git worktree remove --force` … `git branch
+-D`". That block runs on success, on REQUEST_CHANGES, on throw and on abort, and
+the last two are precisely when Forge died mid-edit and the worktree holds the
+only copy of the work. On this repo's PR #171 it took 197 insertions across 7
+files, none of them recoverable. There is no LLM judgement left in the
+destructive path: the workflow's agent runs one fixed command and reports its
+output through a schema, the same shape as the head and CI probes, and is told
+that a non-zero exit means work was preserved on purpose rather than something
+to retry around.
+
+`git branch -D` was closed as the same loophole, since it loses commits just as
+thoroughly. In pr-mode the local branch is deleted only when `git ls-remote`
+proves origin holds that exact sha; never pushed, behind, or an unreachable
+origin all keep it and say why. Local mode never touches the branch — it is the
+only copy of the build and the outer loop merges it. `merge.ts` inherits the
+gate at all three of its removal sites, including the lingering build worktree
+`freeBranchFromWorktrees` used to force away; a dirty one there now fails the
+merge loudly instead, which is the right trade when the alternative is deleting
+work to make a merge convenient.
+
+Tested against real git repos rather than a mocked host — the bug is only
+observable on a real working tree — covering untracked-only, modified, staged,
+unreadable, ignored-files-only, clean, already-gone, and other-branch trees, plus
+the four branch-teardown outcomes. Mutation-verified, 11 of 11 killed: dropping
+`--untracked-files=all` (both copies), removing the dirty check, restoring
+`--force` (both copies), downgrading exit 3 to 0, deleting the branch without the
+`ls-remote` proof, deleting it in local mode, bypassing the script from the
+workflow, and dropping the script path from the launcher args.
+
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 
 `PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through
