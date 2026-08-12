@@ -422,6 +422,40 @@ describe('worktree-cleanup.sh — the probe must point at a WORKTREE ROOT', () =
     expect(res.out).not.toContain('SKIPPED')
     expect(existsSync(join(wt, 'built.txt'))).toBe(true)
   })
+
+  test('a FAILED `worktree list` is unverifiable, not "no worktrees" — it must not exit 0', () => {
+    // The most invisible version of the failure this script exists to prevent.
+    // The enumeration's exit status was discarded, so a `worktree list` that FAILED
+    // yielded an empty string — indistinguishable from a repo with nothing to
+    // clean. The loop never ran, `preserved` stayed 0, branch teardown proceeded,
+    // and the script exited 0 announcing "nothing needed preserving" WITHOUT having
+    // inspected a single tree. Here a dirty worktree holds the only copy of
+    // `precious.ts` and is never even looked at.
+    const repo = makeRepo()
+    const wt = addBuildWorktree(repo)
+    writeFileSync(join(wt, 'precious.ts'), 'exists nowhere else\n')
+    git(repo, 'push', '-q', 'origin', BRANCH)
+
+    // A `git` shim on PATH that fails ONLY `worktree list` and passes everything
+    // else through, so the rest of the script runs exactly as it normally would.
+    const bin = mkdtempSync(join(tmpdir(), 'trident-wtclean-bin-'))
+    created.push(bin)
+    writeFileSync(
+      join(bin, 'git'),
+      `#!/usr/bin/env bash\nprev=""\nfor a in "$@"; do\n  if [ "$prev" = "worktree" ] && [ "$a" = "list" ]; then echo "fatal: simulated enumeration failure" >&2; exit 128; fi\n  prev="$a"\ndone\nexec ${JSON.stringify(Bun.which('git') ?? '/usr/bin/git')} "$@"\n`,
+      { mode: 0o755 },
+    )
+
+    const res = run(repo, BRANCH, 'delete-branch', { PATH: `${bin}:${process.env.PATH ?? ''}` })
+
+    expect(res.code).toBe(3)
+    expect(res.out).toContain(`PRESERVED worktree ${repo} reason=unenumerable`)
+    // BEHAVIOUR, not bookkeeping: nothing was torn down while we were blind.
+    expect(existsSync(join(wt, 'precious.ts'))).toBe(true)
+    expect(branchExists(repo, BRANCH)).toBe(true)
+    expect(res.out).not.toContain('DELETED branch')
+    expect(res.out).not.toContain('REMOVED ')
+  })
 })
 
 describe('worktree-cleanup.sh — the output is BOUNDED, so the RESULT line survives', () => {

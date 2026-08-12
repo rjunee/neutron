@@ -56,7 +56,7 @@
 #
 # Output is machine-greppable, one record per line:
 #   REMOVED <path>
-#   PRESERVED worktree <path> reason=<dirty|unverifiable>
+#   PRESERVED worktree <path> reason=<dirty|unverifiable|unenumerable>
 #   PRESERVED branch <name> reason=<worktree-preserved|not-on-origin|unpushed|ls-remote-failed>
 #   SKIPPED <path> reason=not-a-worktree-root
 #   KEPT branch <name> reason=checked-out
@@ -129,23 +129,6 @@ fi
 preserved=0
 removed=0
 
-# Every LINKED worktree that has THIS branch checked out. `worktree list
-# --porcelain` emits a `worktree <path>` line followed by that entry's
-# attributes, so the branch match is attributed to the most recent path line
-# (same parse as merge.ts `freeBranchFromWorktrees`).
-#
-# `n > 1` skips the FIRST entry, which git documents as the main working tree —
-# the shared checkout (git-worktree(1): "The main worktree is listed first").
-# It is not ours to remove: `git worktree remove` refuses it, and scoring that
-# refusal as a preservation pins the exit at 3 and blocks branch teardown for
-# good whenever the shared checkout is parked on the build branch.
-worktrees="$(
-  git -C "$repo" worktree list --porcelain 2>/dev/null | awk -v want="refs/heads/$branch" '
-    /^worktree /{ w = substr($0, 10); n++; next }
-    /^branch /{ if (substr($0, 8) == want && n > 1) print w }
-  '
-)"
-
 # `git status`'s STDERR is captured HERE, apart from its stdout. Folding the two
 # together (`2>&1`) made anything git writes to stderr on a perfectly CLEAN tree
 # — `warning: could not open directory 'x/': Permission denied`, a GIT_TRACE line
@@ -159,6 +142,40 @@ worktrees="$(
 # probe fails, which lands on PRESERVE — the safe direction, by construction.
 git_err="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/worktree-cleanup-err.$$")"
 trap 'rm -f "$git_err"' EXIT
+
+# Every LINKED worktree that has THIS branch checked out. `worktree list
+# --porcelain` emits a `worktree <path>` line followed by that entry's
+# attributes, so the branch match is attributed to the most recent path line
+# (same parse as merge.ts `freeBranchFromWorktrees`).
+#
+# `n > 1` skips the FIRST entry, which git documents as the main working tree —
+# the shared checkout (git-worktree(1): "The main worktree is listed first").
+# It is not ours to remove: `git worktree remove` refuses it, and scoring that
+# refusal as a preservation pins the exit at 3 and blocks branch teardown for
+# good whenever the shared checkout is parked on the build branch.
+#
+# THE ENUMERATION'S OWN FAILURE IS UNVERIFIABLE, NOT "NO WORKTREES". Discarding
+# the status (the substitution just yields an empty string) made a `worktree
+# list` that FAILED indistinguishable from a repo with nothing to clean: the
+# loop below never ran, `preserved` stayed 0, branch teardown proceeded, and the
+# script exited 0 — announcing "nothing needed preserving" without having
+# inspected a single tree. A dirty worktree holding the only copy of the work
+# was never even mentioned, which is the one failure mode this script exists to
+# prevent, in its most invisible form. `pipefail` (set at the top) makes the
+# pipeline carry git's status past awk, so the `if !` below actually sees it.
+if ! worktrees="$(
+  git -C "$repo" worktree list --porcelain 2>"$git_err" | awk -v want="refs/heads/$branch" '
+    /^worktree /{ w = substr($0, 10); n++; next }
+    /^branch /{ if (substr($0, 8) == want && n > 1) print w }
+  '
+)"; then
+  # Nothing was inspected, so nothing may be torn down: the branch is left alone
+  # too (its commits could be the base of an un-inspected dirty tree).
+  echo "PRESERVED worktree $repo reason=unenumerable"
+  echo "worktree-cleanup.sh: 'git worktree list' failed in '$repo' — NOTHING was inspected, so nothing is removed and the branch is kept: $(head -c "$max_stderr_bytes" "$git_err")" >&2
+  echo "RESULT preserved=1 removed=0"
+  exit 3
+fi
 
 while IFS= read -r wt; do
   [ -n "$wt" ] || continue

@@ -379,9 +379,26 @@ async function removeWorktreePath(
     }
     await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
     return null
-  } catch {
-    // Swallow — a cleanup miss is cosmetic; the merge/refs are already durable.
-    return null
+  } catch (err) {
+    // A THROWN removal is not a removal either — the same rule as the REFUSED one
+    // above, which this used to contradict. Swallowing the throw and returning
+    // `null` told `provisionRunWorktree` the path was clear, and it went straight
+    // on to `git worktree add --force` over a tree that is still sitting there.
+    // (`add` then refuses a non-empty directory, so nothing was destroyed — but
+    // the operator got git's "already exists" instead of the preservation error
+    // this function promises, which is the confusing message it exists to replace.)
+    //
+    // A path that is GONE is still safely "removed": there is no working tree
+    // there to preserve. Anything else is UNVERIFIABLE — we cannot re-probe with a
+    // host that is throwing — and unverifiable preserves, by construction.
+    if (!existsSync(wt)) return null
+    const why = err instanceof Error ? err.message : String(err)
+    log.warn('worktree_preserved_unverifiable', {
+      worktree: wt,
+      reason: why,
+      action: `trident could not remove ${wt} and did NOT force it — the tree is still there; unlock or clear it by hand`,
+    })
+    return why
   }
 }
 

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cleanupAfterMerge } from './git-mode.ts'
@@ -780,6 +780,36 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     const joined = calls.map((c) => c.join(' '))
     expect(joined.some((c) => c === `git -C /shared worktree remove ${stray}`)).toBe(true)
     expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(true)
+  })
+
+  test('a host that THROWS on the removal preserves the tree — a throw is not a removal either', async () => {
+    // Sibling of "a refused removal is not a removal". `removeWorktreePath` caught
+    // EVERY exception and returned null, which means "removed/absent" to
+    // provisioning — so a host that threw on `git worktree remove` sent the merge
+    // straight on to `worktree add --force` over a tree still sitting on disk, and
+    // the preservation error this function promises never fired.
+    const stray = realDir() // exists on disk: the tree survived the throw
+    const run = makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/shared' })
+    const calls: string[] = []
+    const host: RunHostCommand = async (cmd) => {
+      calls.push(cmd.join(' '))
+      if (cmd.includes('worktree') && cmd.includes('list')) {
+        return ok(`worktree /shared\nHEAD m0\nbranch refs/heads/main\n\nworktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
+      }
+      if (cmd.includes('--show-toplevel') && cmd.includes(stray)) return ok(`${stray}\n`)
+      if (cmd.includes('status') && cmd.includes(stray)) return ok('') // provably CLEAN
+      if (cmd.includes('worktree') && cmd.includes('remove')) throw new Error('spawn EAGAIN')
+      if (cmd.includes('--abort')) return fail()
+      return ok()
+    }
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    // The merge is REFUSED, naming the path — not silently carried past it.
+    await expect(cleanupAfterMerge(run, deps)).rejects.toThrow(/PRESERVED uncommitted work/)
+    await expect(cleanupAfterMerge(run, deps)).rejects.toThrow(new RegExp(stray))
+    // BEHAVIOUR: it never blundered on into provisioning or the merge itself.
+    expect(calls.some((c) => c.includes('worktree add'))).toBe(false)
+    expect(calls.some((c) => c.includes('merge --no-ff'))).toBe(false)
+    expect(existsSync(stray)).toBe(true)
   })
 
   test('the SHARED CHECKOUT parked on the branch is SKIPPED, not scored as preserved work', async () => {
