@@ -13,7 +13,11 @@ import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+// The REAL decoder the outer merge pins on — the resume-path assertions below run
+// it against the shape this script writes, rather than restating the rule.
+import { reviewedHeadOid } from './merge.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
+import type { TridentRun } from './store.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -262,9 +266,68 @@ describe('inner-workflow.mjs — #545: the reviewed head is resolved at REVIEW t
     expect(SRC.slice(start, end)).toContain('reviewedHead,')
   })
 
-  test('the crash-resume shortcut carries one too (it merges without re-reviewing)', () => {
-    expect(SRC).toContain('const resumeHead = await readBranchHead(0)')
-    expect(SRC).toContain('reviewedHead: resumeHead')
+  // THE CRASH-RESUME SHORTCUT RECORDS NO HEAD, ON PURPOSE.
+  //
+  // It runs only when the prior process reached 'argus-approved' and its terminal
+  // result was never harvested — and the terminal result is the ONLY place a
+  // reviewed OID is written, so by construction none exists to resume from.
+  // Probing the head at resume and labelling it `reviewedHead` would certify an
+  // unreviewed commit: reviewers approve A, B is pushed into the crash window,
+  // resume reads B, and the merge pins to B and SUCCEEDS. The pin then vouches for
+  // a commit nobody read, which is worse than no pin at all.
+  describe('the crash-resume shortcut records NO reviewed head (fail-closed)', () => {
+    // The resume block's CODE, sliced out so these assertions cannot be satisfied
+    // by an unrelated part of the file. Comment lines are stripped: the docblock
+    // there names `reviewedHead` to explain why it is deliberately absent, and a
+    // naive check would fail on the documentation of the very fix it verifies.
+    const resumeBlock = (): string => {
+      const at = SRC.indexOf("if (resumeCheckpoint === 'argus-approved') {")
+      expect(at).toBeGreaterThan(-1)
+      const end = SRC.indexOf('return resumeResult', at)
+      expect(end).toBeGreaterThan(at)
+      return SRC.slice(at, end)
+        .split('\n')
+        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+        .join('\n')
+    }
+
+    test('it does NOT probe the branch head and pass it off as reviewed', () => {
+      const block = resumeBlock()
+      expect(block).not.toContain('readBranchHead')
+      expect(block).not.toContain('reviewedHead')
+    })
+
+    test('the resume result omits the field entirely, so `reviewedHeadOid` yields null', () => {
+      // Mirrors the object the resume path builds. merge.ts must refuse this.
+      const resumeResult = {
+        ok: true,
+        prNumber: 42,
+        branch: 'feat-x',
+        verdict: 'APPROVE',
+        round: 0,
+        checkpoint: 'argus-approved',
+      }
+      expect('reviewedHead' in resumeResult).toBe(false)
+      // The REAL decoder, on the REAL shape — not a restatement of the rule.
+      expect(reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)).toBeNull()
+    })
+
+    test('A approved → crash → B pushed → resume must not merge B', () => {
+      // The boundary the shortcut used to get wrong, end to end through the real
+      // decoder: whatever B is, a resume result cannot name it as reviewed.
+      const B = 'b'.repeat(40)
+      const resumeResult = {
+        ok: true,
+        prNumber: 42,
+        branch: 'feat-x',
+        verdict: 'APPROVE',
+        round: 0,
+        checkpoint: 'argus-approved',
+      }
+      const pinned = reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)
+      expect(pinned).toBeNull()
+      expect(pinned).not.toBe(B)
+    })
   })
 })
 

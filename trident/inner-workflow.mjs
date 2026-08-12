@@ -1635,12 +1635,25 @@ try {
   if (resumeCheckpoint === 'argus-approved') {
     log(`trident-v2 resume: prior run reached 'argus-approved' for ${forgeBranch} — skipping build+review`)
     finalVerdict = 'APPROVE'
-    // The crashed process approved a head it never recorded, so the best available
-    // pin (#545) is the head as it stands NOW, at resume: it still narrows the
-    // merge window from "whatever is pushed at merge time" to "what this run saw",
-    // and an empty probe fails closed (the outer loop refuses to merge unpinned).
-    const resumeHead = await readBranchHead(0)
-    const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved', reviewedHead: resumeHead }
+    // NO `reviewedHead` ON THIS PATH — DELIBERATELY, so the merge FAILS CLOSED (#545).
+    //
+    // This shortcut runs precisely when the prior process reached 'argus-approved'
+    // but never got its terminal result harvested — so BY CONSTRUCTION there is no
+    // recorded reviewed OID anywhere: the only place one is written is the terminal
+    // result this resume is standing in for. Probing the head HERE and calling the
+    // answer `reviewedHead` would be a LIE with a safety label on it: reviewers
+    // approved commit A, someone pushes B into the crash window, resume reads B,
+    // and the outer merge pins to B and SUCCEEDS — shipping a commit no reviewer
+    // saw while `--match-head-commit` certifies it as reviewed. A pinned merge of
+    // an unreviewed commit is WORSE than an unpinned one, because the pin
+    // manufactures confidence nobody earned.
+    //
+    // So this path records nothing. `reviewedHeadOid` returns null, `mergePr`
+    // refuses, and the run fails LOUDLY — the operator re-fires and gets a real
+    // review of whatever is actually on the branch. That is the same fail-closed
+    // rule the rest of #545 follows: a merge we cannot prove was reviewed is a
+    // merge we do not make.
+    const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
     // Re-write the terminal result so a re-fired run whose prior process crashed
     // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
     // — the merge gate downstream is a no-op once the run is already terminal).
