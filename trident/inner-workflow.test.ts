@@ -240,23 +240,50 @@ describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
   })
 })
 
-describe('inner-workflow.mjs — #545: the reviewed head is resolved at REVIEW time and CARRIED', () => {
+describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF CAME FROM, and is CARRIED', () => {
   // The OUTER merge pins `gh pr merge --match-head-commit` to this exact field
-  // (`reviewedHeadOid`, merge.ts). If the workflow stops recording it, or records
-  // it AFTER the review, the pin degrades to "whatever was pushed last" — the
-  // very window (#545) this closes. Both properties are asserted structurally.
-  test('the head is read BEFORE the first review — a push DURING the review is not "reviewed"', () => {
-    const probe = SRC.indexOf('let reviewedHead = (await readBranchHead(round))')
+  // (`reviewedHeadOid`, merge.ts), so whatever is recorded here is what the merge
+  // certifies as reviewed.
+  //
+  // IT MUST NEVER COME FROM A FRESH HEAD PROBE. `forge.commitSha` and `diffFile`
+  // are reported by the SAME agent run, so the sha names exactly the tree the
+  // reviewers read. A remote head probe does not: a third party's push satisfies
+  // it just as well, and recording THAT as `reviewedHead` makes the merge pin to —
+  // and thereby vouch for — a commit no reviewer saw. Binding to the reported sha
+  // can only ever fail CLOSED: a merely stale sha makes `--match-head-commit`
+  // refuse, which is the safe direction.
+
+  /** Every assignment to `reviewedHead` anywhere in the script. */
+  const reviewedHeadAssignments = (): string[] =>
+    SRC.split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^(let )?reviewedHead\s*=/.test(l))
+
+  test("round 1 pins to Forge's reported commit sha, fixed BEFORE the review that judges it", () => {
+    const decl = SRC.indexOf('let reviewedHead = branchHead')
     const firstReview = SRC.indexOf('let synthesis = await reviewAndSynthesize(')
-    expect(probe).toBeGreaterThan(-1)
-    expect(firstReview).toBeGreaterThan(probe)
+    expect(decl).toBeGreaterThan(-1)
+    expect(firstReview).toBeGreaterThan(decl)
   })
 
-  test('every fix round re-pins to the head THAT round was reviewed at', () => {
-    const rePin = SRC.indexOf('reviewedHead = headAfter')
+  test('NO assignment of reviewedHead is ever derived from a head probe (the fail-open)', () => {
+    const assigns = reviewedHeadAssignments()
+    expect(assigns.length).toBeGreaterThan(0)
+    for (const line of assigns) {
+      // `readBranchHead`/`headAfter` answer "did the branch move?", NOT "what did
+      // the reviewers read?" — pinning to either certifies an unreviewed push.
+      expect(line).not.toContain('readBranchHead')
+      expect(line).not.toContain('headAfter')
+    }
+  })
+
+  test("every fix round re-pins to the sha THAT round's fix agent reported committing", () => {
+    const rePin = SRC.indexOf('reviewedHead = typeof fix?.commitSha')
     const loopReview = SRC.indexOf('synthesis = await reviewAndSynthesize(diffFile, round, pr)\n    finalVerdict')
     expect(rePin).toBeGreaterThan(-1)
     expect(loopReview).toBeGreaterThan(rePin)
+    // The fix agent is asked for that sha under the same schema round 1 uses.
+    expect(SRC).toContain('const fix = await agent(')
   })
 
   test('the terminal result carries `reviewedHead` (the field merge.ts pins on)', () => {

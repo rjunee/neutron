@@ -1757,15 +1757,24 @@ ${task}${reflectionGuidance}`,
   let branchHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
   let roundLostItsWork = null
 
-  // THE HEAD THE REVIEWERS ARE ABOUT TO JUDGE (#545). Read BEFORE the review, from
-  // the REMOTE in pr mode (`readBranchHead`) — the same authority `gh pr merge`
-  // will see — so a commit pushed DURING the review can never be mistaken for
-  // reviewed code. Carried out in the terminal result and passed to
-  // `--match-head-commit` at merge, which makes a moved head fail LOUDLY instead
-  // of silently shipping code no reviewer saw (observed on PR #171: the head went
-  // clean → dirty mid-review). Falls back to Forge's own commit sha only if the
-  // probe reads nothing; a wrong sha cannot mis-merge — it can only refuse.
-  let reviewedHead = (await readBranchHead(round)) || branchHead
+  // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
+  // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
+  // (both are required FORGE_SCHEMA fields, so this is always populated on a
+  // healthy build). Carried out in the terminal result and passed to
+  // `--match-head-commit` at merge, so a head that moved fails LOUDLY instead of
+  // silently shipping code no reviewer saw (observed on PR #171: the head went
+  // clean → dirty mid-review).
+  //
+  // DELIBERATELY NOT A FRESH PROBE OF THE REMOTE HEAD. A commit pushed between
+  // Forge's push and the probe would be read back and recorded as `reviewedHead`,
+  // and the merge would then pin to it and SUCCEED — certifying as reviewed a
+  // commit whose code is not in the diff anyone read. That is the same lie the
+  // crash-resume shortcut was fixed to stop telling, and a pinned merge of an
+  // unreviewed commit is worse than an unpinned one because the pin manufactures
+  // confidence nobody earned. A sha that is merely STALE cannot mis-merge:
+  // `--match-head-commit` just REFUSES. Empty (Forge reported no sha) records
+  // nothing and the outer merge refuses too — fail-closed either way.
+  let reviewedHead = branchHead
 
   // First review + synthesis.
   let synthesis = await reviewAndSynthesize(diffFile, round, pr)
@@ -1789,7 +1798,7 @@ ${task}${reflectionGuidance}`,
     // Fix round (> 1): the branch/PR were created in round 1, so ALWAYS re-enter
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
     // reuses the PR (no duplicate). Codex [P1] fix.
-    await agent(
+    const fix = await agent(
       `${forgeBuildContract(true)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
@@ -1816,8 +1825,13 @@ ${task}${reflectionGuidance}`,
       break
     }
     branchHead = headAfter
-    // Same probe, so the same fact: the head THIS round's review judges (#545).
-    reviewedHead = headAfter
+    // …and the commit THIS round's review judges is, exactly as in round 1, the
+    // one the fix agent reported committing — NOT `headAfter` (#545). The remote
+    // probe above answers a different question ("did the branch move?"), and a
+    // third party's push satisfies it just as well as the fix agent's own commit;
+    // recording that push as `reviewedHead` would pin the merge to code the
+    // upcoming review never sees. Empty → fail-closed, same as round 1.
+    reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
     synthesis = await reviewAndSynthesize(diffFile, round, pr)
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })

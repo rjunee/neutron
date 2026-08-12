@@ -30,8 +30,11 @@
  * reviewed: between the APPROVE and this call anyone (a human, another agent, a
  * lingering Forge worktree) can push, and the merge would ship code no reviewer
  * ever saw. That window is not theoretical — it was OBSERVED on this repo (PR
- * #171 went clean → dirty mid-review). So the inner workflow resolves the head
- * OID AT REVIEW TIME and carries it in the typed terminal result
+ * #171 went clean → dirty mid-review). So the inner workflow records the OID OF
+ * THE COMMIT THE REVIEWED DIFF WAS GENERATED FROM — the building agent reports
+ * its `commitSha` alongside that diff, never a fresh head probe (a third party's
+ * push satisfies a probe just as well, and pinning to it would certify code no
+ * reviewer read) — and carries it in the typed terminal result
  * (`reviewedHead`); `mergePr` reads it back off the run and passes
  * `--match-head-commit`, so a moved head makes GitHub REFUSE the merge and the
  * run fails LOUDLY. Fail-CLOSED: no recorded reviewed OID → no merge (an
