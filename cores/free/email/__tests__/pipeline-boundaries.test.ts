@@ -408,6 +408,100 @@ describe('the page budget pauses the walk, it does not end it', () => {
       expect(store.getEmail('deep-new')).not.toBeNull()
     })
   })
+
+  test('mail arriving at the TOP is seen while a continuation is still open', async () => {
+    // The cost of the fix above, if it is left alone. A tick that resumes
+    // mid-inbox never looks at page one — and page one is where new mail lands.
+    // With a budget of one page and enough retained history to keep the walk
+    // going, an important email arriving now waits for the whole walk, which
+    // breaks the one-poll-interval acceptance the Core exists for.
+    await withStore(async (store) => {
+      const handled = (n: number): GmailMessageMeta[] => [meta(`old-${n}`)]
+      for (const n of [1, 2]) {
+        const m = handled(n)[0] as GmailMessageMeta
+        store.insertEmail({
+          id: m.id,
+          thread_id: m.thread_id,
+          account_id: null,
+          sender: m.from,
+          subject: m.subject,
+          snippet: m.snippet,
+          body_text: 'x',
+          received_at: NOW,
+          processed_at: NOW,
+          category: 'billing action',
+          handling: 'escalate',
+        })
+        store.markEscalated(m.id, NOW, null)
+      }
+
+      // Page one is mutable: the second tick finds a NEW message sitting on top
+      // of it, exactly as a real inbox would.
+      let top: GmailMessageMeta[] = handled(1)
+      const byCursor = (): Record<string, GmailListResult> => ({
+        START: { results: top, next_page_token: 'p2' },
+        p2: { results: handled(2), next_page_token: 'p3' },
+        p3: { results: [meta('deep-old')], next_page_tokens: {} },
+      })
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          return byCursor()[input.page_token ?? 'START'] as GmailListResult
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const run = (): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (_t, e): Promise<unknown> => {
+              delivered.push(e.body)
+              return { prompt_id: 'p1', persisted: true, delivered_live: true }
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'instance',
+          },
+          now: () => NOW,
+          max_results: 2,
+          // ONE page per tick: the walk is now parked at p2 and will stay
+          // parked for another tick.
+          max_poll_pages: 1,
+        })
+
+      const first = await run()
+      expect(first.scanned).toBe(0)
+
+      // The message the owner actually cares about arrives at the top NOW.
+      top = [meta('urgent-now'), ...handled(1)]
+
+      // THE REGRESSION: the tick resumes at p2, never reads page one, and this
+      // message waits for the walk to reach the end of a large mailbox — many
+      // intervals, not one.
+      const second = await run()
+      expect(second.scanned).toBe(1)
+      expect(store.getEmail('urgent-now')?.escalated_at).toBe(NOW)
+      expect(delivered).toHaveLength(1)
+
+      // …and the deep walk still ADVANCED on the same tick. The probe is extra,
+      // not a replacement for the walk's page — charging it to a one-page
+      // budget would restore the starvation the cursor fixed.
+      const third = await run()
+      expect(store.getEmail('deep-old')).not.toBeNull()
+      void third
+    })
+  })
 })
 
 describe('a retried escalation does not buzz the phone again', () => {

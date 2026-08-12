@@ -41,7 +41,7 @@
  */
 
 import { DEFAULT_LABEL, PAGE_TOKEN_EXHAUSTED, PROCESSED_LABEL_NAME } from '../contract.ts'
-import type { GmailClient, GmailMessageMeta } from '../contract.ts'
+import type { GmailClient, GmailListResult, GmailMessageMeta } from '../contract.ts'
 import { classifyEmail, type ClassifyDeps, type Classification } from './classify.ts'
 import { escalateEmail, type EscalateDeps } from './escalate.ts'
 import type { EmailPipelineStore } from './store.ts'
@@ -934,18 +934,9 @@ export async function runEmailPipelineTick(
     let pages = 0
     let exhausted = false
 
-    while (pages < page_budget) {
-      const listed = await gmail.listMessages({
-        label: DEFAULT_LABEL,
-        ...listScope,
-        max_results,
-        exhaustive: true,
-        ...(cursor !== undefined ? { page_token: cursor } : {}),
-        ...(Object.keys(cursors).length > 0 ? { page_tokens: cursors } : {}),
-      })
-      pages++
-
-      let handledOnThisPage = 0
+    /** Scan one listing page. Shared by the freshness probe and the deep walk. */
+    async function scanPage(listed: GmailListResult): Promise<number> {
+      let handled = 0
       for (const meta of listed.results) {
         // The LAST gate before the classifier, and the one that matters most:
         // everything past this line can post to the owner's chat and write to
@@ -960,7 +951,7 @@ export async function runEmailPipelineTick(
         result.scanned++
         try {
           await handleMessage(meta)
-          handledOnThisPage++
+          handled++
         } catch (err) {
           result.errors++
           log?.('email pipeline message failed', {
@@ -969,6 +960,57 @@ export async function runEmailPipelineTick(
           })
         }
       }
+      return handled
+    }
+
+    // THE NEWEST PAGE, EVERY TICK, BEFORE THE DEEP WALK.
+    //
+    // The continuation cursor ended starvation and introduced STALENESS. A tick
+    // that resumes mid-inbox never looks at the top, and the top is where new
+    // mail is — so with a small page budget and a retained inbox deep enough to
+    // keep a continuation open, a message arriving NOW waits for the walk to
+    // finish, which can be many intervals. That breaks the acceptance this Core
+    // exists for: an important email reaches chat within one poll interval.
+    //
+    // So a resuming tick reads page one first, unpaged, and only then continues
+    // from where it ran out. The two failure modes are opposites — top-only
+    // starves deep mail, cursor-only starves new mail — and the fix has to cover
+    // both, which is why the probe is an ADDITION to the walk rather than a
+    // replacement for its first page.
+    //
+    // THE PROBE IS NOT CHARGED TO THE BUDGET, deliberately. Charging it would
+    // spend a one-page budget entirely on the top and the deep walk would never
+    // advance again — the exact starvation the cursor was added to end.
+    // Freshness costs one extra listing per tick while a continuation is open,
+    // and nothing at all once the walk has exhausted the mailbox.
+    //
+    // No probe while sweeping: that pass is already pinned to the top page and
+    // ignores the cursor, so a probe would re-read the page it just read.
+    if (!sweeping && (cursor !== undefined || Object.keys(cursors).length > 0)) {
+      const top = await gmail.listMessages({
+        label: DEFAULT_LABEL,
+        ...listScope,
+        max_results,
+        exhaustive: true,
+      })
+      // Its cursors are DISCARDED. This page is a freshness check, not a
+      // position: adopting its next-page token would rewind the deep walk to
+      // page two on every tick and re-create the starvation it just fixed.
+      await scanPage(top)
+    }
+
+    while (pages < page_budget) {
+      const listed = await gmail.listMessages({
+        label: DEFAULT_LABEL,
+        ...listScope,
+        max_results,
+        exhaustive: true,
+        ...(cursor !== undefined ? { page_token: cursor } : {}),
+        ...(Object.keys(cursors).length > 0 ? { page_tokens: cursors } : {}),
+      })
+      pages++
+
+      const handledOnThisPage = await scanPage(listed)
 
       // DO NOT STOP JUST BECAUSE THIS PAGE HAD WORK. Two earlier versions
       // stopped early and both starved deeper mail:
