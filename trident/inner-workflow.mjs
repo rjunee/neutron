@@ -708,11 +708,32 @@ function enforceSeverityGate(synthesis) {
 // finding, sending the fix loop off to re-Forge a network timeout.
 const LANE_FINDING_KIND = 'lane'
 
+// IT STAMPS ON EVERY VERDICT, NOT ONLY ON AN APPROVE. This used to early-return the
+// synthesis UNTOUCHED whenever it was already REQUEST_CHANGES — "already blocked, so
+// there is nothing to do" — and that reasoning was wrong twice over, on the path the
+// prompt itself makes the LIKELY one (`corePanelLine` tells the model, verbatim, "do
+// NOT return APPROVE" on a dead seat, so a COMPLIANT synthesis arrives here already
+// REQUEST_CHANGES):
+//
+//   1. THE DETERMINISTIC BLOCKER WAS DROPPED. The whole point of computing panel
+//      completeness in code is that the PR says WHICH seat produced nothing. On the
+//      early-return path the model's own findings shipped alone and "argus:adversarial
+//      never ran" was never written down anywhere — the operator sees a code review,
+//      not an incomplete panel.
+//   2. THE BLOCK WAS MISCLASSIFIED AS 'code'. `classifyBlock` reads `kind`, and the
+//      only site that stamps `kind` is this one. Un-stamped model findings therefore
+//      counted as code findings, so the fix loop re-Forged the diff — burning a full
+//      round of four reviewers to "fix" a reviewer that never ran, with the panel
+//      still down a seat.
+//
+// So an incomplete panel now FORCES the verdict and INJECTS its blockers on every
+// path, exactly like the red-CI branch at the call site. Forcing a REQUEST_CHANGES
+// that is already REQUEST_CHANGES is a no-op in the safe direction; the findings are
+// what actually change.
 function enforceCrossModelGate(synthesis, deferredPeers) {
-  if (deferredPeers.length === 0 || !synthesis || synthesis.verdict !== 'APPROVE') {
-    return synthesis
-  }
+  if (deferredPeers.length === 0) return synthesis
   return {
+    ...(synthesis && typeof synthesis === 'object' ? synthesis : {}),
     verdict: 'REQUEST_CHANGES',
     findings: [
       ...deferredPeers.map((p) => ({
@@ -789,10 +810,22 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // message format is a contract nothing enforces; reword the title in the gate and
 // this classifier silently reads every lane blocker as a CODE finding, sending the
 // fix loop to re-Forge a network timeout. The field is what the gate actually sets.
+// A NIT MAY NOT COST A ROUND HERE EITHER. This filtered on `kind` alone, so a dead
+// seat plus a single `nit` classified as 'code' and re-Forged a whole round — four
+// reviewers and a fresh diff — over a finding the severity gate exists to declare
+// non-blocking. Worse, the round runs with the panel still down a seat, so it cannot
+// converge. Explicit 'minor'/'nit' are therefore not code work, and the direction of
+// failure matches `enforceSeverityGate`: only the two LISTED severities are skipped,
+// so an unknown/absent/misspelled severity still counts as code and still re-Forges,
+// and a malformed (null) finding does too.
 function classifyBlock(synthesis, deferredPeers) {
   if (!deferredPeers || deferredPeers.length === 0) return 'code'
   const findings = (synthesis && synthesis.findings) || []
-  const codeFindings = findings.filter((f) => !(f && f.kind === LANE_FINDING_KIND))
+  const codeFindings = findings.filter((f) => {
+    if (f && f.kind === LANE_FINDING_KIND) return false
+    if (f && NON_BLOCKING_SEVERITIES.has(f.severity)) return false
+    return true
+  })
   return codeFindings.length === 0 ? 'infra-only' : 'code'
 }
 
@@ -1097,11 +1130,24 @@ function crossModelPeerStatus(slot, verdicts, statusKey) {
  * So completeness is computed HERE, in code, and fed to the same single gate the
  * cross-model peers use. Being data rather than a second guard is the point: a seat
  * added later is enforced by construction.
+ *
+ * THE SEAT LIST IS NO LONGER A HARD-CODED `[{ slot: 0 }, { slot: 1 }]`. That was the
+ * SAME positional-index pattern this file already documents as a latent bug for the
+ * cross-model peers ("POSITIONAL INDEXING WAS A LATENT BUG" — codexSlot is recorded
+ * as `reviewers.length` at push time for exactly this reason). Insert a reviewer at
+ * the HEAD of the panel and the literals point at the wrong seats: the new reviewer
+ * is ungated (fail-OPEN, the shape of #536 all over again) and the panel labels are
+ * misassigned, so Verdict A is described to the synthesis model as the wrong review.
+ * The claim "a seat added later is enforced by construction" was only true if the
+ * slot was DERIVED, so it is: `pushCoreReviewer` records `reviewers.length` at the
+ * moment it pushes, and carries the seat's prompt letter + label with it.
+ *
+ * `statusKey: 'verdict'` is the field whose presence proves the seat ANSWERED — the
+ * core analogue of `codexStatus`/`kimiStatus` — so a dead core seat is retryable by
+ * the same `retryDeferredPeers` the peers use, rather than ending the run on one
+ * transient crash.
  */
-const CORE_REVIEWER_SEATS = [
-  { slot: 0, name: 'Argus rubric (core reviewer)' },
-  { slot: 1, name: 'Argus adversarial (core reviewer)' },
-]
+const CORE_SEAT_STATUS_KEY = 'verdict'
 
 // DID THIS SEAT ACTUALLY REVIEW? A usable verdict is an object carrying a `verdict`
 // string (VERDICT_SCHEMA's required field). Anything else — null, undefined, a stray
@@ -1253,7 +1299,18 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
   // and could force an APPROVE. Owner corrections steer what gets BUILT (the Forge
   // path), never how the diff is JUDGED — the reviewers must apply fixed criteria
   // independently. (argus:codex was already excluded — see its note.)
-  const reviewers = [
+  const reviewers = []
+  // THE CORE SEATS RECORD THEIR OWN SLOT, like codexSlot/kimiSlot below — never a
+  // literal 0/1 written down elsewhere (see CORE_SEAT_STATUS_KEY's docblock). The
+  // seat carries everything the three readers need: the gate's blocker `name`, the
+  // synthesis prompt's `letter`/`label`, and the `statusKey` the lane retry reads.
+  const coreSeats = []
+  const pushCoreReviewer = (seat, run) => {
+    coreSeats.push({ ...seat, slot: reviewers.length, statusKey: CORE_SEAT_STATUS_KEY })
+    reviewers.push(run)
+  }
+  pushCoreReviewer(
+    { name: 'Argus rubric (core reviewer)', letter: 'A', panelLabel: 'Claude rubric' },
     () =>
       agent(
         `${ARGUS_RUBRIC}
@@ -1261,6 +1318,9 @@ Review the diff at ${diffFile} for the TASK below. Return your verdict + finding
 TASK: ${task}`,
         withModel({ label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
+  )
+  pushCoreReviewer(
+    { name: 'Argus adversarial (core reviewer)', letter: 'B', panelLabel: 'Claude adversarial' },
     () =>
       agent(
         `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
@@ -1268,7 +1328,7 @@ Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-
 TASK: ${task}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
-  ]
+  )
   let codexSlot = null
   let kimiSlot = null
   if (codexConfigured) {
@@ -1316,16 +1376,29 @@ TASK: ${task}`,
   // Retry ONLY a cross-model lane that came back `deferred`, before any of this is
   // read. A flaked lane costs one more call here; letting it through costs a whole
   // round of four reviewers plus a pointless re-Forge (see retryDeferredPeers).
+  //
+  // THE CORE SEATS ARE RETRIED TOO. They were omitted, so the retry rationale above
+  // ("an infra failure should not trigger four fresh LLM reviews") applied to the two
+  // OPTIONAL peers and not to the two seats that always run: one transient
+  // argus:claude crash produced an infra-only block, exited the loop on round 1, and
+  // threw away the entire Forge build — the most expensive possible response to the
+  // cheapest possible failure. A core seat's `statusKey` is `verdict` itself, so a
+  // real review ('APPROVE'/'REQUEST_CHANGES') is never retried and only a seat that
+  // produced nothing is. The retry re-runs the SEAT'S OWN THUNK rather than a second
+  // copy of the prompt, so the retried review cannot drift from the original.
   verdicts = await retryDeferredPeers({
     verdicts,
     slots: [
+      ...coreSeats,
       { name: 'codex', slot: codexSlot, statusKey: 'codexStatus' },
       { name: 'kimi', slot: kimiSlot, statusKey: 'kimiStatus' },
     ],
     attempts: LANE_RETRY_ATTEMPTS,
     log,
-    invoke: async (name) =>
-      name === 'codex'
+    invoke: async (name) => {
+      const core = coreSeats.find((s) => s.name === name)
+      if (core) return await reviewers[core.slot]()
+      return name === 'codex'
         ? await agent(codexReviewerPrompt(diffFile), {
             label: 'argus:codex-retry',
             phase: 'Review',
@@ -1335,7 +1408,8 @@ TASK: ${task}`,
             label: 'argus:kimi-retry',
             phase: 'Review',
             schema: KIMI_VERDICT_SCHEMA,
-          }),
+          })
+    },
   })
   // POSITIONAL INDEXING WAS A LATENT BUG. This read `verdicts[2]` for codex,
   // which held only while codex was the sole CONDITIONAL panelist. With a second
@@ -1354,7 +1428,7 @@ TASK: ${task}`,
   // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
   // default applied to a missing verdict, which is how a crashed reviewer used to read
   // as one that was never set up. See `crossModelPeerStatus` / `missingCoreReviewers`.
-  const missingCore = missingCoreReviewers(verdicts, CORE_REVIEWER_SEATS)
+  const missingCore = missingCoreReviewers(verdicts, coreSeats)
   const codexStatus = crossModelPeerStatus(codexSlot, verdicts, 'codexStatus')
   const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, 'kimiStatus')
   // Only read for the 'connected' panel line, where the verdict is present by
@@ -1385,14 +1459,19 @@ TASK: ${task}`,
         : `Verdict D (kimi K3 cross-model): NOT CONNECTED — no Kimi key for this instance. Note it and proceed on the other verdicts (do NOT block on kimi).`
   // A CORE SEAT THAT DIED MUST NOT ARRIVE AS THE TOKEN `null` — see `corePanelLine`,
   // which is top-level (and behaviourally tested) rather than inlined here.
+  // DERIVED FROM THE SAME `coreSeats` THE GATE READS, so a seat inserted at the head
+  // of the panel cannot label Verdict A with the wrong reviewer's review (and cannot
+  // be described to the model at all without also being gated).
+  const corePanelLines = coreSeats
+    .map((seat) => corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot]))
+    .join('\n')
   const synthesisRaw = await agent(
     `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
-${corePanelLine('A', 'Claude rubric', verdicts[0])}
-${corePanelLine('B', 'Claude adversarial', verdicts[1])}
+${corePanelLines}
 ${codexPanelLine}
 ${kimiPanelLine}`,
     withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
