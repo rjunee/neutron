@@ -453,3 +453,34 @@ describe('the sweep does not hold live mail hostage', () => {
     })
   })
 })
+
+describe('mail arriving DURING the sweep is not filed as history', () => {
+  test('a message that lands mid-pagination is left for the steady-state pass', async () => {
+    await withStore(async (store) => {
+      // Page 1 is history. Between page 1 and page 2 a real billing message
+      // arrives — it is NEWER than the go-live stamp taken before the sweep
+      // began. Marking it `preexisting` would file it as something the owner
+      // had already triaged: never classified, never escalated, and
+      // indistinguishable from a decade-old newsletter.
+      const fresh = {
+        ...msg('arrived-mid-sweep'),
+        internal_date: new Date(NOW + 60_000).toISOString(),
+      } as GmailMessageMeta
+      const gmail = scriptedClient([
+        { results: [msg('old-1')], next_page_token: 'p2' },
+        { results: [fresh], next_page_tokens: {} },
+      ])
+
+      const first = await tick(gmail, store)
+      expect(first.precutoff).toBe(1)
+
+      const second = await tick(gmail, store)
+      expect(second.arrived_during_sweep).toBe(1)
+
+      // History marked; the mid-sweep arrival deliberately NOT recorded, so the
+      // steady-state pass will pick it up and classify it normally.
+      expect(store.getEmail('old-1')?.handling).toBe('preexisting')
+      expect(store.getEmail('arrived-mid-sweep')).toBeNull()
+    })
+  })
+})

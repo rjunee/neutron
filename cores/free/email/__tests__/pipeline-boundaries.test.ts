@@ -539,3 +539,51 @@ describe('a crash between the insert and the delivery is recoverable', () => {
     })
   })
 })
+
+describe('one unreadable message is not a wall across the mailbox', () => {
+  test('a permanently failing message on page 1 does not hide page 2 forever', async () => {
+    await withStore(async (store) => {
+      // `poison` can never be read. It sits alone on page 1; an important
+      // message sits on page 2. Counting ATTEMPTS as progress ended the walk
+      // here on every tick, so page 2 was never reached — not late, never.
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          return input.page_token === 'p2'
+            ? { results: [meta('important-2')], next_page_tokens: {} }
+            : { results: [meta('poison')], next_page_token: 'p2' }
+        },
+        async getMessage(input: { message_id: string }): Promise<unknown> {
+          if (input.message_id === 'poison') throw new Error('gmail 500')
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const r = await runEmailPipelineTick({
+        gmail,
+        store,
+        classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+        escalate: {
+          deliver: async (_t, e): Promise<unknown> => {
+            delivered.push(e.body)
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
+          },
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+        },
+        now: () => NOW,
+      })
+
+      expect(r.errors).toBe(1)
+      expect(r.escalated).toBe(1)
+      expect(delivered).toHaveLength(1)
+    })
+  })
+})

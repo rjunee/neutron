@@ -120,6 +120,9 @@ export interface EmailPipelineTickResult {
   /** Gmail label/archive writes that failed earlier and succeeded on this tick. */
   remutated: number
   errors: number
+  /** Messages seen mid-sweep that arrived AFTER go-live, so were left for the
+   *  steady-state pass rather than being filed as history. */
+  arrived_during_sweep: number
   /** True while the backlog sweep is still running — no mail is processed yet. */
   backlog_sweeping: boolean
 }
@@ -238,18 +241,26 @@ export async function runEmailPipelineTick(
     resumed: 0,
     remutated: 0,
     errors: 0,
+    arrived_during_sweep: 0,
     backlog_sweeping: false,
   }
 
   const escalateDeps: EscalateDeps = { ...deps.escalate, store, now }
 
   try {
-    // (1) The go-live stamp. Recorded once for provenance (P2 reports from it);
-    // it is NOT a per-message gate — see invariant 1.
-    if (store.getCheckpoint(CHECKPOINT_GO_LIVE_AFTER) === null) {
-      const go_live_after = now()
+    // (1) The go-live stamp. Recorded once, BEFORE the first sweep page, and it
+    // is the sweep's boundary: everything older is the owner's existing inbox,
+    // everything newer arrived after we started and is real mail. It is NOT a
+    // per-message gate in steady state — see invariant 1.
+    const stamped = store.getCheckpoint(CHECKPOINT_GO_LIVE_AFTER)
+    let go_live_after: number
+    if (stamped === null) {
+      go_live_after = now()
       store.setCheckpoint(CHECKPOINT_GO_LIVE_AFTER, String(go_live_after))
       log?.('email pipeline go-live checkpoint stamped', { go_live_after })
+    } else {
+      const parsed = Number(stamped)
+      go_live_after = Number.isNaN(parsed) ? now() : parsed
     }
 
     // (1b) THE BACKLOG SWEEP. Until every message already in the inbox is
@@ -339,6 +350,26 @@ export async function runEmailPipelineTick(
         if (!sweepTargets.has(meta.account_id ?? '')) continue
         if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
         const received_at = Date.parse(meta.internal_date)
+        // MAIL THAT ARRIVED WHILE WE WERE SWEEPING IS NOT HISTORY. The sweep
+        // can span several pages and several ticks, and a message landing
+        // mid-sweep would otherwise be marked `preexisting` — filed as
+        // something the owner had already triaged, never classified, never
+        // escalated, and indistinguishable from a decade-old newsletter.
+        //
+        // `go_live_after` is stamped before the first page, so it is exactly
+        // the "everything older than this is the owner's existing inbox" line.
+        // NOTE this is the ONE place a date is still compared, and it is a
+        // one-time migration boundary — not the per-message gate on every
+        // incoming email forever that this design deliberately removed.
+        //
+        // An unparseable date is treated as HISTORY here: during a sweep the
+        // overwhelming majority of mail is history, and wrongly escalating the
+        // owner's back-catalogue is the failure the sweep exists to prevent.
+        // Such a message is still recorded, so it reaches the P2 brief.
+        if (!Number.isNaN(received_at) && received_at > go_live_after) {
+          result.arrived_during_sweep++
+          continue
+        }
         store.insertEmail({
           id: meta.id,
           thread_id: meta.thread_id,
@@ -654,11 +685,13 @@ export async function runEmailPipelineTick(
       })
       pages++
 
+      let handledOnThisPage = 0
       for (const meta of listed.results) {
         if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
         result.scanned++
         try {
           await handleMessage(meta)
+          handledOnThisPage++
         } catch (err) {
           result.errors++
           log?.('email pipeline message failed', {
@@ -668,11 +701,18 @@ export async function runEmailPipelineTick(
         }
       }
 
-      // Stop as soon as this tick has done real work: the remaining pages are
-      // older mail that is not going anywhere, and the next tick resumes from
-      // the top in five minutes. Only a page that was ENTIRELY already-handled
-      // forces the walk onward — that is the starvation case.
-      if (result.scanned > 0) {
+      // Stop when this tick has done real WORK — not merely when it TRIED. The
+      // stop used to key on `scanned`, which counts attempts including ones
+      // that threw and left no row behind. A single permanently unreadable
+      // message (Gmail 500s on `getMessage`, say) therefore ended the walk on
+      // page one of every tick, forever, and everything behind it — including
+      // genuinely important mail — was never reached. A message we cannot read
+      // must not become a wall across the whole mailbox.
+      //
+      // Progress means a message was actually handled. Otherwise the walk
+      // continues to the next page, and the bad message is retried next tick
+      // alongside everything else.
+      if (handledOnThisPage > 0) {
         exhausted = true
         break
       }
