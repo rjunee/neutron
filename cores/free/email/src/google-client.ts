@@ -468,10 +468,17 @@ export function buildGoogleGmailClient(
       if (input.remove_label_ids !== undefined && input.remove_label_ids.length > 0) {
         body['removeLabelIds'] = [...input.remove_label_ids]
       }
+      // THE TYPED 404 IS LOAD-BEARING, not cosmetic. An UNQUALIFIED mutation
+      // (no `account_id`) is routed by probing: the multi-account client tries
+      // one account, and moves to the next ONLY on MessageNotFoundError. Without
+      // this mapping a primary-account 404 arrives as a generic
+      // GoogleGmailApiError, the probe aborts, and a message living in any
+      // non-primary mailbox can never be labelled or archived at all.
       const raw = (await call(
         'POST',
         `/messages/${encodeURIComponent(input.message_id)}/modify`,
         body,
+        { message_id_for_not_found: input.message_id },
       )) as { id?: string; labelIds?: string[] }
       return {
         message_id: input.message_id,
@@ -488,10 +495,13 @@ export function buildGoogleGmailClient(
       if (input.remove_label_ids !== undefined && input.remove_label_ids.length > 0) {
         body['removeLabelIds'] = [...input.remove_label_ids]
       }
+      // Same reason as `modifyMessage` above — thread-level probing branches on
+      // ThreadNotFoundError.
       const raw = (await call(
         'POST',
         `/threads/${encodeURIComponent(input.thread_id)}/modify`,
         body,
+        { thread_id_for_not_found: input.thread_id },
       )) as { id?: string; labelIds?: string[] }
       return {
         thread_id: input.thread_id,
