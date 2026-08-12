@@ -75,12 +75,14 @@ const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
 const noDrift = (cmd: string[]): HostCommandResult | null =>
   (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
     ? ok(NO_DRIFT_SHA)
-    : // …and the head lives in THIS repository. pr mode holds a fork head (it
-      // cannot be scored against `origin`), and a host that answers this probe
-      // with an empty string is indistinguishable from one. `makeRun`'s default
-      // branch, so the two agree for a test that leaves `branch` unset.
-      cmd.includes('headRefName,isCrossRepository')
-      ? ok('feat-x\nfalse')
+    : // …and the head lives in THIS repository, on the base every trident PR
+      // targets. pr mode holds a fork head (it cannot be scored against
+      // `origin`) and holds a PR whose base GitHub will not name, and a host
+      // that answers this probe with an empty string is indistinguishable from
+      // both. `feat-x` is `makeRun`'s default branch, so the two agree for a
+      // test that leaves `branch` unset.
+      cmd.includes('headRefName,baseRefName,isCrossRepository')
+      ? ok('feat-x\nmain\nfalse')
       : null
 
 describe('detectBaseBranch', () => {
@@ -187,9 +189,15 @@ describe('#545 — the pr merge is PINNED to the reviewed commit', () => {
     // … and nothing was torn down / retried unpinned after the refusal.
     expect(joined.some((c) => c.includes('branch -D') || c.includes('--delete'))).toBe(false)
     // Exactly ONE merge attempt: the refusal is terminal, never retried unpinned.
-    // (Counted on `gh pr merge`, not on every `gh` call — the drift gate's own
-    // read-only `gh pr view` head-location probe runs first and merges nothing.)
-    expect(calls.filter((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'merge')).toHaveLength(1)
+    // Pinned as the EXACT `gh` SEQUENCE rather than a count of merges, so a
+    // future extra `gh` call on the refusal path — a retry, a comment, a
+    // `pr edit` — fails here instead of slipping past a merge-only filter. The
+    // drift gate's read-only `gh pr view` probe is the only other one allowed,
+    // and it must come FIRST: the gate that runs after the merge guards nothing.
+    expect(calls.filter((c) => c[0] === 'gh').map((c) => c.slice(0, 4).join(' '))).toEqual([
+      'gh pr view 42',
+      'gh pr merge 42',
+    ])
   })
 
   test('no recorded reviewed head → refuses to merge before any host call (fail-closed)', async () => {
@@ -663,6 +671,9 @@ function driftHost(shape: {
   /** `gh pr view … headRefName` answer. Unset ⇒ the run's own `branch`; `null`
    *  models a PR that names no head at all (the field comes back empty). */
   pr_head_branch?: string | null
+  /** `gh pr view … baseRefName` answer — the branch GitHub will land the PR on.
+   *  Unset ⇒ `shape.base`; `null` models a base GitHub would not name. */
+  pr_base_branch?: string | null
   /** `isCrossRepository`. Unset ⇒ `false` (same repo, the trident-built shape);
    *  `true` is a fork head; `null` prints a value the parser must not believe. */
   pr_cross_repo?: boolean | null
@@ -707,10 +718,12 @@ function driftHost(shape: {
     }
     if (cmd[0] === 'gh' && cmd.includes('pr') && cmd.includes('view')) {
       if (shape.break_pr_view === true) return fail('no such PR')
-      // The real probe asks for BOTH fields in one call and reads two lines.
+      // The real probe asks for ALL THREE fields in one call and reads three
+      // lines — head name, base name, fork flag, in that order.
       const name = shape.pr_head_branch === undefined ? shape.branch : (shape.pr_head_branch ?? '')
+      const prBase = shape.pr_base_branch === undefined ? shape.base : (shape.pr_base_branch ?? '')
       const cross = shape.pr_cross_repo === undefined ? 'false' : String(shape.pr_cross_repo)
-      return ok(`${name}\n${cross}`)
+      return ok(`${name}\n${prBase}\n${cross}`)
     }
     if (cmd.includes('fetch')) return shape.break_fetch === true ? fail('could not read from remote') : ok()
     if (cmd.includes('log')) {
@@ -1016,6 +1029,31 @@ describe('baseDriftHoldMessage (#542)', () => {
     )
     expect(msg).toContain('have in common')
     expect(msg).not.toContain('could not establish where')
+  })
+
+  test('does NOT prescribe a re-run for a fork point that no re-run can find', () => {
+    // Both refs resolved and git still found no common ancestor: on a shallow
+    // checkout that is the checkout's SHAPE, not a transient failure, so every
+    // re-run lands back here. A fail-closed hold whose only instruction cannot
+    // clear it reads as a broken tool, which is how a correct hold gets waved
+    // through by hand.
+    const msg = baseDriftHoldMessage('feat-x', 'main', { ...assessed, moved: false, assessable: false }, [])
+    expect(msg).not.toContain('re-run the build')
+    expect(msg).toContain('--unshallow')
+    expect(msg).toContain('by hand')
+  })
+
+  test('DOES prescribe a re-run for a ref that merely would not resolve', () => {
+    // The counterweight: a missing ref is exactly what a re-run's fetch fixes,
+    // so that advice must survive.
+    const msg = baseDriftHoldMessage(
+      'feat-x',
+      'main',
+      { ...assessed, branch_head_sha: null, moved: false, assessable: false },
+      [],
+    )
+    expect(msg).toContain('re-run the build')
+    expect(msg).not.toContain('--unshallow')
   })
 
   test('says so plainly when materiality could not be assessed', () => {
@@ -1698,6 +1736,209 @@ describe('buildMergeCleanupDeps — base-drift hold, pr mode (#542)', () => {
     expect(calls).toContain(
       'git -C /drift-pr fetch origin +refs/heads/main:refs/remotes/origin/main +refs/heads/feat-x:refs/remotes/origin/feat-x',
     )
+  })
+
+  test('a head GitHub will not name does NOT fall back to `run.branch`', async () => {
+    // The other half of the same principle. `run.branch` was still trusted as a
+    // FALLBACK, so a row carrying `main` (the adopted shape) whose PR named no
+    // head scored `origin/main` against `origin/main` — a ref compared with
+    // itself, which is the silent all-clear, reached by the exact rows least
+    // likely to be right. An unnamed head is now a refusal.
+    const staleRow = makeRun({
+      merge_mode: 'pr',
+      pr: 42,
+      branch: 'main',
+      repo_path: '/drift-pr',
+      inner_result: innerResult(REVIEWED_HEAD),
+    })
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_A,
+      pr_head_branch: null,
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await expect(cleanupAfterMerge(staleRow, deps)).rejects.toBeInstanceOf(TridentMergeError)
+    // BEHAVIOUR: nothing merged, and nothing was scored against the row's name —
+    // no `origin/main` vs `origin/main` comparison was even attempted.
+    expect(calls.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+    expect(calls.some((c) => c.includes('merge-base'))).toBe(false)
+    expect(calls.some((c) => c.includes('fetch'))).toBe(false)
+  })
+})
+
+// The gate scored `detectBaseBranch` — the REPOSITORY's default branch, with a
+// hardcoded `main` fallback — while `gh pr merge` lands the PR on the PR's OWN
+// base. For every PR trident opens those agree, which is what made the gap
+// invisible: it only opens for a PR opened against, or retargeted onto, some
+// other branch. Both directions are wrong and one is silent.
+describe('buildMergeCleanupDeps — the gate scores the PR\'s OWN base (#542)', () => {
+  const prRun = makeRun({
+    merge_mode: 'pr',
+    pr: 42,
+    branch: 'feat-x',
+    repo_path: '/drift-pr',
+    inner_result: innerResult(REVIEWED_HEAD),
+  })
+
+  test('drift in the PR\'s real base HOLDS, even though config says `main`', async () => {
+    // `release/1.x` is where this PR lands and where the drift is. `main` is
+    // what the old code would have measured — and this host cannot even resolve
+    // `origin/main`, so scoring it could only have produced an answer about a
+    // ref that has nothing to do with this merge.
+    const { host, calls } = driftHost({
+      base: 'release/1.x',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['shared.ts'],
+      reviewed_files: ['shared.ts'],
+    })
+    // Deliberately WRONG for this PR, and deliberately the value the old code
+    // preferred above all others.
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    const err = await cleanupAfterMerge(prRun, deps).catch((e: unknown) => e)
+    // BEHAVIOUR: the real base's drift was found and the merge was REFUSED.
+    expect(err).toBeInstanceOf(TridentBaseDriftHold)
+    expect((err as TridentBaseDriftHold).detail.silent_overlap).toEqual(['shared.ts'])
+    expect(calls.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+    // …measured against `release/1.x` on BOTH the fetch and the comparison …
+    expect(calls).toContain(
+      'git -C /drift-pr fetch origin +refs/heads/release/1.x:refs/remotes/origin/release/1.x ' +
+        '+refs/heads/feat-x:refs/remotes/origin/feat-x',
+    )
+    expect(calls).toContain('git -C /drift-pr merge-base origin/release/1.x origin/feat-x')
+    // … and `main` was never named at all: not fetched, not rev-parsed, and not
+    // even looked up via `origin/HEAD`.
+    expect(calls.some((c) => c.includes('main'))).toBe(false)
+    expect(calls.some((c) => c.includes('symbolic-ref'))).toBe(false)
+    // The hold text names the branch the owner would actually go look at.
+    expect((err as TridentBaseDriftHold).message).toContain('`release/1.x`')
+  })
+
+  test('a PR on a release base still LANDS — `main` moving is not its problem', async () => {
+    // The silent direction, and the counterweight. Here `release/1.x` has not
+    // moved, so the merge must go through: a gate that scored `main` would
+    // either hold on movement irrelevant to this PR, or — with `main` sitting
+    // unresolvable in this checkout — hold forever on a PR no re-run can clear.
+    const { host, calls } = driftHost({
+      base: 'release/1.x',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_A,
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(prRun, deps)
+    expect(calls).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
+    expect(calls).toContain('git -C /drift-pr merge-base origin/release/1.x origin/feat-x')
+    expect(calls.some((c) => c.includes('main'))).toBe(false)
+  })
+
+  test('a base GitHub will not name HOLDS — it is not assumed to be `main`', async () => {
+    // The field being ABSENT must not read as "the default branch, then". A base
+    // nobody can name cannot be measured, and the merge it guards runs on
+    // GitHub's side where nothing downstream would catch a wrong answer.
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_A,
+      pr_base_branch: null,
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    const err = await cleanupAfterMerge(prRun, deps).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TridentBaseDriftHold)
+    expect((err as TridentBaseDriftHold).message).toContain('would not name the branch')
+    // BEHAVIOUR: it did not merge, and it did not pretend to measure anything.
+    expect(calls.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+    expect(calls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(calls.some((c) => c.includes('merge-base'))).toBe(false)
+  })
+
+  test('the probe reads three lines in order — a base is never read as a fork flag', async () => {
+    // `prHead` splits on newlines by position, so the ORDER of the three fields
+    // is load-bearing. If the base's slot were ever read as the fork flag the
+    // parser would see a branch name where it expects `true`/`false`, refuse to
+    // believe it, and hold every same-repo PR forever. Pinned by asking for a
+    // shape where all three answers are distinguishable.
+    const { host, calls } = driftHost({
+      base: 'release/1.x',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_A,
+      pr_head_branch: 'feat-x',
+      pr_base_branch: 'release/1.x',
+      pr_cross_repo: false,
+    })
+    const deps = buildMergeCleanupDeps(host)
+    await cleanupAfterMerge(prRun, deps)
+    // All three fields are asked for in ONE call, in the order the reader
+    // assumes — and the same-repo PR landed, which is only possible if the fork
+    // flag was read from the third line.
+    expect(
+      calls.some(
+        (c) =>
+          c.startsWith('gh pr view 42') && c.includes('--json headRefName,baseRefName,isCrossRepository'),
+      ),
+    ).toBe(true)
+    expect(calls).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
+  })
+})
+
+// The teardown deletes a branch, which is the one irreversible thing this file
+// does — and it was reading the very column the gate above proves can be stale.
+// A row carrying `main` (the adopted shape) aimed `push origin --delete` at the
+// default branch, saved only by whatever protection the remote happened to have.
+describe('buildMergeCleanupDeps — teardown deletes the branch GitHub named (#542)', () => {
+  test('a STALE `run.branch` does not decide what gets DELETED', async () => {
+    const staleRow = makeRun({
+      merge_mode: 'pr',
+      pr: 42,
+      branch: 'main', // stale, and stale in the direction that deletes the base
+      repo_path: '/drift-pr',
+      inner_result: innerResult(REVIEWED_HEAD),
+    })
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x', // what the PR actually merges, and what may be deleted
+      review_base: SHA_A,
+      current_base: SHA_A,
+      pr_head_branch: 'feat-x',
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(staleRow, deps)
+    // BEHAVIOUR: the merge landed, the PR's head branch was torn down …
+    expect(calls).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
+    expect(calls).toContain('git -C /drift-pr push origin --delete feat-x')
+    expect(calls).toContain('git -C /drift-pr branch -D feat-x')
+    // … and NOTHING aimed a delete at the base branch the stale row named.
+    expect(calls).not.toContain('git -C /drift-pr push origin --delete main')
+    expect(calls).not.toContain('git -C /drift-pr branch -D main')
+  })
+
+  test('a run that never claimed a branch still deletes NOTHING', async () => {
+    // The teardown is not widened by knowing the head's name: an adopted PR
+    // someone else opened gets its drift assessed and its branch left alone.
+    const nullBranch = makeRun({
+      merge_mode: 'pr',
+      pr: 42,
+      branch: null,
+      repo_path: '/drift-pr',
+      inner_result: innerResult(REVIEWED_HEAD),
+    })
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_A,
+      pr_head_branch: 'feat-x',
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(nullBranch, deps)
+    expect(calls).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
+    expect(calls.some((c) => c.includes('push origin --delete'))).toBe(false)
+    expect(calls.some((c) => c.includes('branch -D'))).toBe(false)
   })
 })
 

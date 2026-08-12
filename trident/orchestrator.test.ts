@@ -55,11 +55,12 @@ const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
 const driftFreeHost = (cmd: string[]): HostCommandResult =>
   (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
     ? ok(NO_DRIFT_SHA)
-    : // …and the PR's head lives in THIS repository, not a fork. pr mode cannot
-      // score a fork head against `origin`, so it holds one — and a stub that
-      // answers this probe with an empty string reads as exactly that.
-      cmd.includes('headRefName,isCrossRepository')
-      ? ok('feat-x\nfalse')
+    : // …and the PR's head lives in THIS repository, not a fork, on the base it
+      // says it targets. pr mode cannot score a fork head against `origin` (so
+      // it holds one) and will not guess a base GitHub declines to name — a stub
+      // that answers this probe with an empty string reads as both.
+      cmd.includes('headRefName,baseRefName,isCrossRepository')
+      ? ok('feat-x\nmain\nfalse')
       : ok()
 
 interface Harness {
@@ -209,7 +210,7 @@ describe('orchestrator — #545: a head that MOVED after the review never merges
         // Only the MERGE is refused. The gate's read-only head-location probe
         // (`gh pr view … isCrossRepository`) must keep answering, or this test
         // stops at the gate instead of at the merge it is about.
-        cmd[0] === 'gh' && !cmd.includes('headRefName,isCrossRepository')
+        cmd[0] === 'gh' && !cmd.includes('headRefName,baseRefName,isCrossRepository')
           ? {
               ok: false,
               stdout: '',

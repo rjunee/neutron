@@ -76,7 +76,13 @@ function orchestrator(fire: ReturnType<typeof crashingFirer>) {
       stdout:
         (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
           ? '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
-          : '',
+          : // …and whose head-location probe answers like every other drift-gate
+            // harness: same repo, `feat-x`, onto `main`. This test never reaches
+            // the merge, but a stub that answers this probe with an empty string
+            // is a stub that would hold if it ever did.
+            cmd.includes('headRefName,baseRefName,isCrossRepository')
+            ? 'feat-x\nmain\nfalse'
+            : '',
       stderr: '',
       exit_code: 0,
     }),
