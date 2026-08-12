@@ -153,6 +153,20 @@ export function backlogDoneKey(account_id: string | null): string {
  * "arrived while we were sweeping", handed it to the classifier, and escalated
  * it. Each mailbox's history is history relative to when THAT mailbox joined.
  */
+/**
+ * A stored cutoff, or null when there isn't one.
+ *
+ * `Number('')` is 0, not NaN — so a cleared checkpoint read through a bare
+ * `Number()` looks like a cutoff at the epoch, which makes every message in the
+ * mailbox "newer than the boundary" and hands an entire back-catalogue to the
+ * classifier. Every read of this value goes through here.
+ */
+export function parseCutoff(raw: string | null): number | null {
+  if (raw === null || raw.length === 0) return null
+  const n = Number(raw)
+  return Number.isNaN(n) ? null : n
+}
+
 export function backlogCutoffKey(account_id: string | null): string {
   return `backlog_cutoff:${account_id ?? ''}`
 }
@@ -355,14 +369,31 @@ export async function runEmailPipelineTick(
       // mailbox whose probe errors is still connected; skipping it here left it
       // unswept while the same tick's steady-state list read its history as new
       // mail the moment it recovered.
-      const unmarked = accountsOnThisPage(probe, false).filter(
-        (id) => store.getCheckpoint(backlogDoneKey(id)) !== '1',
-      )
+      const unmarked = accountsOnThisPage(probe, false).filter((id) => {
+        if (store.getCheckpoint(backlogDoneKey(id)) !== '1') return true
+        // A RE-ENABLED MAILBOX IS A NEW ONE. Turning an account off and on
+        // again leaves its old completion marker behind, and that marker
+        // suppressed the sweep the owner was just promised — so everything
+        // that accumulated while it was off entered steady-state
+        // classification and could post to chat. The comparison is against
+        // the RECORDED cutoff rather than a boolean, because that is the fact
+        // the promise is about: "only mail after you turned it on".
+        const enabled_at = store.getAccountSetting(id)?.enabled_at ?? null
+        if (enabled_at === null) return false
+        const recorded = parseCutoff(store.getCheckpoint(backlogCutoffKey(id)))
+        return recorded === null || enabled_at > recorded
+      })
       if (unmarked.length > 0) {
         backlogPending = true
-        log?.('email pipeline backlog sweep re-opened for newly connected accounts', {
-          accounts: unmarked,
-        })
+        // Clear the stale marks so the sweep genuinely re-runs for these
+        // accounts AND re-stamps their boundary at the new `enabled_at`.
+        // Leaving the old cutoff in place would re-sweep against a line drawn
+        // before the account was ever turned off.
+        for (const id of unmarked) {
+          store.setCheckpoint(backlogDoneKey(id), '')
+          store.setCheckpoint(backlogCutoffKey(id), '')
+        }
+        log?.('email pipeline backlog sweep re-opened', { accounts: unmarked })
       }
     }
 
@@ -430,8 +461,8 @@ export async function runEmailPipelineTick(
       for (const id of sweepTargets) {
         const key = backlogCutoffKey(id)
         const stored = store.getCheckpoint(key)
-        const parsed = stored === null ? Number.NaN : Number(stored)
-        if (Number.isNaN(parsed)) {
+        const parsed = parseCutoff(stored)
+        if (parsed === null) {
           // AN ACCOUNT TURNED ON LATER IS SWEPT FROM WHEN IT WAS TURNED ON.
           // `enabled_at` is the exact moment the owner took responsibility for
           // that mailbox; falling back to `now()` would draw the line at
@@ -641,12 +672,23 @@ export async function runEmailPipelineTick(
     }): Promise<void> {
       const account_id = row.account_id === null || row.account_id === '' ? undefined : row.account_id
       const label_id = await processedLabelId(account_id)
-      await gmail.modifyMessage({
-        message_id: row.id,
-        add_label_ids: [label_id],
-        ...(row.handling === 'archive' ? { remove_label_ids: [DEFAULT_LABEL] } : {}),
-        ...(account_id !== undefined ? { account_id } : {}),
-      })
+      try {
+        await gmail.modifyMessage({
+          message_id: row.id,
+          add_label_ids: [label_id],
+          ...(row.handling === 'archive' ? { remove_label_ids: [DEFAULT_LABEL] } : {}),
+          ...(account_id !== undefined ? { account_id } : {}),
+        })
+      } catch (err) {
+        // EVERY ATTEMPT COUNTS, INCLUDING THE FIRST. The initial write happens
+        // inside `handleMessage`, whose generic catch counted an error but not
+        // an ATTEMPT — only the retry pass incremented the counter. So a cap of
+        // N allowed N+1 real calls against Gmail: the first one was free.
+        // Recording here, at the one place the write is actually made, is what
+        // makes the cap mean what it says.
+        store.recordMutationFailure(row.id, err instanceof Error ? err.message : String(err), row.account_id)
+        throw err
+      }
       store.markMutated(row.id, now(), row.account_id)
     }
 
@@ -663,8 +705,9 @@ export async function runEmailPipelineTick(
         await applyMutation(pending)
         result.remutated++
       } catch (err) {
+        // The attempt was already recorded inside `applyMutation` — counting it
+        // again here would halve the effective cap.
         const error = err instanceof Error ? err.message : String(err)
-        store.recordMutationFailure(pending.id, error, pending.account_id)
         result.errors++
         log?.('email pipeline mutation retry failed', { email_id: pending.id, error })
       }
@@ -790,9 +833,7 @@ export async function runEmailPipelineTick(
      * EARLIER tick, and the boundary has to mean the same thing on every one.
      */
     function cutoffForAccount(account_id: string | null): number {
-      const stored = store.getCheckpoint(backlogCutoffKey(account_id))
-      const parsed = stored === null ? Number.NaN : Number(stored)
-      return Number.isNaN(parsed) ? go_live_after : parsed
+      return parseCutoff(store.getCheckpoint(backlogCutoffKey(account_id))) ?? go_live_after
     }
 
     /**

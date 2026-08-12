@@ -69,6 +69,9 @@ interface FakeMailbox {
   modified: Array<{ id: string; add: string[]; remove: string[] }>
   /** Every message body this mailbox served. */
   read: string[]
+  /** Every modify CALL, including the ones that threw. The stored counter and
+   *  the real call count are different facts, and the cap is about the second. */
+  modify_attempts: () => number
 }
 
 function toMeta(m: FakeMessage): GmailMessageMeta {
@@ -139,7 +142,7 @@ function fakeMailbox(account: FakeAccount): FakeMailbox {
       return { message_id: input.message_id, label_ids: [...input.add_label_ids] }
     },
   }
-  return { client, modified, read }
+  return { client, modified, read, modify_attempts: (): number => modifyCalls }
 }
 
 function fanOut(accounts: FakeAccount[]): {
@@ -406,6 +409,13 @@ describe('an owed Gmail write is finished, not forgotten', () => {
       // Bounded by max_escalation_attempts (5), not unbounded.
       expect(attempts).toBe(5)
       expect(store.getEmail('m-1', 'solo')?.mutated_at).toBe(null)
+      // AND THE CAP IS ABOUT REAL CALLS, not the counter. The first write
+      // happens inside the poll path, whose generic catch counted an error but
+      // not an attempt — so a cap of 5 quietly allowed 6 requests against
+      // Gmail. Asserting the stored number alone cannot see that; asserting
+      // what the mailbox was actually asked to do can.
+      const solo = live.mailboxes.get('solo') as FakeMailbox
+      expect(solo.modify_attempts()).toBe(5)
     })
   })
 })

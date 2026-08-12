@@ -245,6 +245,39 @@ describe('per-account enablement', () => {
     })
   })
 
+  test('OFF then ON again is a new sweep — mail that piled up while it was off is history', async () => {
+    // The stale completion marker is the trap. An account that has already been
+    // swept carries `backlog_marked:<id>='1'` forever, and the sweep only
+    // re-opens for accounts WITHOUT that mark — so a re-enabled mailbox skipped
+    // straight to steady state and everything that accumulated while it was off
+    // went to the classifier, and to chat.
+    await withStore(async (store) => {
+      const delivered: string[] = []
+      store.setAccountEnabled(DROP, true, `${DROP}@example.com`, BOOT)
+
+      // Swept once, while on.
+      const first = accountFake([meta('d-original', BOOT - 86_400_000)])
+      await tick(fanOut({ [DROP]: first }), store, delivered)
+      expect(store.getEmail('d-original', DROP)?.handling).toBe('preexisting')
+
+      // Off for a fortnight. Important mail arrives during the silence.
+      const OFF_AT = BOOT + 86_400_000
+      const BACK_ON = BOOT + 14 * 86_400_000
+      store.setAccountEnabled(DROP, false, null, OFF_AT)
+      const whileOff = meta('d-while-off', BOOT + 7 * 86_400_000)
+
+      store.setAccountEnabled(DROP, true, null, BACK_ON)
+      const after = accountFake([whileOff, meta('d-original', BOOT - 86_400_000)])
+      await tick(fanOut({ [DROP]: after }), store, delivered, () => BACK_ON + 60_000)
+
+      // The CLI promises "only mail arriving after you turned it on". A message
+      // from the silent fortnight is not that.
+      expect(delivered).toEqual([])
+      expect(store.getEmail('d-while-off', DROP)?.handling).toBe('preexisting')
+      expect(after.modified).toEqual([])
+    })
+  })
+
   test('an owed escalation for a disabled account is left alone, not delivered', async () => {
     await withStore(async (store) => {
       store.setAccountEnabled(KEEP, true, `${KEEP}@example.com`, BOOT)
