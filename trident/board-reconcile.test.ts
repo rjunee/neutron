@@ -99,7 +99,11 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
         stdout:
           (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
             ? '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
-            : '',
+            : // …and the head is in THIS repo, not a fork: pr mode holds a fork
+              // head, and an empty answer here reads as exactly that.
+              cmd.includes('headRefName,isCrossRepository')
+              ? 'feat-x\nfalse'
+              : '',
         stderr: '',
         exit_code: 0,
       }),

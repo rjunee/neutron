@@ -343,16 +343,53 @@ async function revParseCommit(
   return res.ok && SHA_RE.test(sha) ? sha : null
 }
 
-/** The PR's head branch per GitHub, or null when it cannot be determined. Used
- *  only to make the drift gate answerable for a run whose `branch` column is
- *  null — never to widen what the merge then deletes. */
-async function prHeadBranch(run_host: RunHostCommand, repo: string, pr: number): Promise<string | null> {
+/** What GitHub says about a PR's head: its branch name, and whether that head
+ *  lives in a FORK rather than in `origin`. */
+interface PrHead {
+  /** `headRefName`, or null when it cannot be determined. Used only to make the
+   *  drift gate answerable for a run whose `branch` column is null — never to
+   *  widen what the merge then deletes. */
+  branch: string | null
+  /** `true` fork, `false` same repo, `null` GitHub would not say. */
+  cross_repo: boolean | null
+}
+
+/**
+ * Ask GitHub where the PR's head actually is.
+ *
+ * `cross_repo` is the load-bearing half. The gate scores `origin/<headRefName>`,
+ * which only names the reviewed head when the head is IN `origin`. For a FORK
+ * PR it does not, and the two ways that goes wrong pull in opposite directions:
+ *   • head named something `origin` does not have → the fetch fails → hold, over
+ *     and over, for a PR no re-run can ever clear.
+ *   • head named the SAME as the base (fork `main` → `main`, the ordinary shape
+ *     of a drive-by contribution) → BOTH refspecs resolve to `origin/<base>`,
+ *     the assessment compares the base tip with ITSELF, and it reports
+ *     `moved: false` with total confidence about a head it never looked at.
+ * The second is the silent fail-open this whole gate exists to prevent, so a
+ * fork head is refused explicitly instead of being scored against the wrong ref.
+ */
+async function prHead(run_host: RunHostCommand, repo: string, pr: number): Promise<PrHead> {
   const res = await run_host(
-    ['gh', 'pr', 'view', String(pr), '--json', 'headRefName', '-q', '.headRefName'],
+    [
+      'gh',
+      'pr',
+      'view',
+      String(pr),
+      '--json',
+      'headRefName,isCrossRepository',
+      '-q',
+      '.headRefName + "\\n" + (.isCrossRepository|tostring)',
+    ],
     repo,
   )
-  const name = res.stdout.trim()
-  return res.ok && name.length > 0 ? name : null
+  if (!res.ok) return { branch: null, cross_repo: null }
+  const [name = '', cross = ''] = res.stdout.split(/\r?\n/).map((s) => s.trim())
+  // Only the two literals `tostring` can print are believed. Anything else — an
+  // empty line, a `null` from a field that was not there, a future shape — is
+  // "GitHub would not say", which HOLDS rather than assuming same-repo.
+  const cross_repo = cross === 'true' ? true : cross === 'false' ? false : null
+  return { branch: name.length > 0 ? name : null, cross_repo }
 }
 
 /**
@@ -1055,11 +1092,29 @@ export function buildMergeCleanupDeps(
       // never render as "we checked and it was fine".
       {
         const base = opts.base_branch ?? (await detectBaseBranch(run_host, repo))
+        // WHERE IS THE HEAD? Asked ALWAYS, not only when `run.branch` is null:
+        // an adopted run carries the fork's branch NAME in that column, which
+        // says nothing about which repo holds it. Everything below scores
+        // `origin/<name>`, so a head that is not in `origin` is scored against
+        // the wrong ref — silently, when the fork's branch happens to share the
+        // base's name (see `prHead`). A head this repo's refs cannot name is
+        // refused, in the same direction as every other degraded path here.
+        const head = await prHead(run_host, repo, run.pr)
+        if (head.cross_repo !== false) {
+          throw new TridentBaseDriftHold(
+            `I'm holding the merge of PR #${run.pr} into \`${base}\`: its head lives in a fork ` +
+              `of this repository (or GitHub would not say where it lives), and I can only ` +
+              `measure drift against refs this repository holds. I will not report a base I ` +
+              `never compared as unchanged — land this one by hand after a look at the ` +
+              `combination.`,
+            { review_base_sha: null, current_base_sha: null, silent_overlap: [] },
+          )
+        }
         // The branch is what makes the gate answerable. `run.branch` is nullable
         // (a resumed/adopted run may carry the PR but not the branch), so
         // recover it from the PR itself rather than skipping the gate — skipping
         // it was a hole big enough to drive the whole un-reviewed merge through.
-        const branchForGate = branch ?? (await prHeadBranch(run_host, repo, run.pr))
+        const branchForGate = branch ?? head.branch
         if (branchForGate === null) {
           throw new TridentMergeError(
             'pr-mode merge could not determine the PR head branch, so base drift could not be assessed',

@@ -44,7 +44,12 @@ const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
 const driftFreeHost = (cmd: string[]): HostCommandResult =>
   (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
     ? ok(NO_DRIFT_SHA)
-    : ok()
+    : // …and the PR's head lives in THIS repository, not a fork. pr mode cannot
+      // score a fork head against `origin`, so it holds one — and a stub that
+      // answers this probe with an empty string reads as exactly that.
+      cmd.includes('headRefName,isCrossRepository')
+      ? ok('feat-x\nfalse')
+      : ok()
 
 const fail = (): HostCommandResult => ({ ok: false, stdout: '', stderr: 'boom', exit_code: 1 })
 
