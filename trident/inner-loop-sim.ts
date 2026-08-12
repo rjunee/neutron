@@ -34,7 +34,17 @@ export interface SimResult {
   /** RALPH RE-FIRE (#362) — tasks still unbuilt after this iteration; `> 0` drives
    *  an outer re-fire. Omit (→ undefined, serialized absent) for single-task runs. */
   remainingTasks?: number | null
+  /** #545 — the head OID the review judged, which the pr-mode merge pins with
+   *  `--match-head-commit`. Defaults to `SIM_REVIEWED_HEAD` (the workflow always
+   *  records one); set `null` to simulate a workflow that recorded NO head — the
+   *  merge must then REFUSE (fail-closed). */
+  reviewedHead?: string | null
 }
+
+/** The stand-in reviewed head OID a simulated workflow records (#545). Real
+ *  40-hex shape, because `--match-head-commit` only accepts a full OID; exported
+ *  so tests can assert the exact pinned merge command. */
+export const SIM_REVIEWED_HEAD = '0123456789abcdef0123456789abcdef01234567'
 
 /** Build the compact JSON the workflow writes into `inner_result`. */
 export function simResultJson(sim: SimResult): string {
@@ -48,6 +58,10 @@ export function simResultJson(sim: SimResult): string {
     // Only emit when the test set it (mirrors the .mjs, which omits it for
     // non-Ralph runs); `parseInnerResult` treats an absent field as null.
     ...(sim.remainingTasks !== undefined ? { remainingTasks: sim.remainingTasks } : {}),
+    // #545 — production ALWAYS records the reviewed head, so the default models
+    // that; an explicit null models the workflow that failed to (and the pr-mode
+    // merge must then refuse rather than merge an unpinned head).
+    reviewedHead: sim.reviewedHead === undefined ? SIM_REVIEWED_HEAD : sim.reviewedHead,
   })
 }
 

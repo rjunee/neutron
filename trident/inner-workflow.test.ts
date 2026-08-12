@@ -236,6 +236,38 @@ describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
   })
 })
 
+describe('inner-workflow.mjs — #545: the reviewed head is resolved at REVIEW time and CARRIED', () => {
+  // The OUTER merge pins `gh pr merge --match-head-commit` to this exact field
+  // (`reviewedHeadOid`, merge.ts). If the workflow stops recording it, or records
+  // it AFTER the review, the pin degrades to "whatever was pushed last" — the
+  // very window (#545) this closes. Both properties are asserted structurally.
+  test('the head is read BEFORE the first review — a push DURING the review is not "reviewed"', () => {
+    const probe = SRC.indexOf('let reviewedHead = (await readBranchHead(round))')
+    const firstReview = SRC.indexOf('let synthesis = await reviewAndSynthesize(')
+    expect(probe).toBeGreaterThan(-1)
+    expect(firstReview).toBeGreaterThan(probe)
+  })
+
+  test('every fix round re-pins to the head THAT round was reviewed at', () => {
+    const rePin = SRC.indexOf('reviewedHead = headAfter')
+    const loopReview = SRC.indexOf('synthesis = await reviewAndSynthesize(diffFile, round, pr)\n    finalVerdict')
+    expect(rePin).toBeGreaterThan(-1)
+    expect(loopReview).toBeGreaterThan(rePin)
+  })
+
+  test('the terminal result carries `reviewedHead` (the field merge.ts pins on)', () => {
+    const start = SRC.indexOf('const terminalResult = {')
+    const end = SRC.indexOf('await writeTerminalResult(terminalResult)')
+    expect(start).toBeGreaterThan(-1)
+    expect(SRC.slice(start, end)).toContain('reviewedHead,')
+  })
+
+  test('the crash-resume shortcut carries one too (it merges without re-reviewing)', () => {
+    expect(SRC).toContain('const resumeHead = await readBranchHead(0)')
+    expect(SRC).toContain('reviewedHead: resumeHead')
+  })
+})
+
 describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthesis', () => {
   test('parallel() runs argus-claude + argus-adversarial, each with VERDICT_SCHEMA', () => {
     // The reviewer thunks are collected into a `reviewers` array (codex is pushed

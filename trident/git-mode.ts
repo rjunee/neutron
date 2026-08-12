@@ -241,8 +241,9 @@ export function makeLazyCredentialedHostRunner(
  * Both modes get a stub now so the state machine's `done` transition has a
  * concrete call site; PR-3 fills in the bodies:
  *
- *   • `'pr'`   → `gh pr merge <pr> --squash`, then remove the worktree +
- *               delete the local branch.
+ *   • `'pr'`   → `gh pr merge <pr> --squash --match-head-commit <reviewed OID>`
+ *               (#545 — pinned to the commit the review judged), then remove the
+ *               worktree + delete the local branch.
  *   • `'local'`→ merge the branch into the base locally, then remove the
  *               worktree + delete the branch.
  *

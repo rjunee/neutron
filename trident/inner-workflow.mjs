@@ -1635,7 +1635,12 @@ try {
   if (resumeCheckpoint === 'argus-approved') {
     log(`trident-v2 resume: prior run reached 'argus-approved' for ${forgeBranch} — skipping build+review`)
     finalVerdict = 'APPROVE'
-    const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
+    // The crashed process approved a head it never recorded, so the best available
+    // pin (#545) is the head as it stands NOW, at resume: it still narrows the
+    // merge window from "whatever is pushed at merge time" to "what this run saw",
+    // and an empty probe fails closed (the outer loop refuses to merge unpinned).
+    const resumeHead = await readBranchHead(0)
+    const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved', reviewedHead: resumeHead }
     // Re-write the terminal result so a re-fired run whose prior process crashed
     // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
     // — the merge gate downstream is a no-op once the run is already terminal).
@@ -1739,6 +1744,16 @@ ${task}${reflectionGuidance}`,
   let branchHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
   let roundLostItsWork = null
 
+  // THE HEAD THE REVIEWERS ARE ABOUT TO JUDGE (#545). Read BEFORE the review, from
+  // the REMOTE in pr mode (`readBranchHead`) — the same authority `gh pr merge`
+  // will see — so a commit pushed DURING the review can never be mistaken for
+  // reviewed code. Carried out in the terminal result and passed to
+  // `--match-head-commit` at merge, which makes a moved head fail LOUDLY instead
+  // of silently shipping code no reviewer saw (observed on PR #171: the head went
+  // clean → dirty mid-review). Falls back to Forge's own commit sha only if the
+  // probe reads nothing; a wrong sha cannot mis-merge — it can only refuse.
+  let reviewedHead = (await readBranchHead(round)) || branchHead
+
   // First review + synthesis.
   let synthesis = await reviewAndSynthesize(diffFile, round, pr)
   finalVerdict = normalizeVerdict(synthesis.verdict)
@@ -1788,6 +1803,8 @@ ${task}${reflectionGuidance}`,
       break
     }
     branchHead = headAfter
+    // Same probe, so the same fact: the head THIS round's review judges (#545).
+    reviewedHead = headAfter
     synthesis = await reviewAndSynthesize(diffFile, round, pr)
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
@@ -1809,6 +1826,11 @@ ${task}${reflectionGuidance}`,
     verdict: finalVerdict,
     round,
     checkpoint: finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes',
+    // THE REVIEWED COMMIT (#545) — the OUTER merge pins to exactly this OID
+    // (`gh pr merge --match-head-commit`), so anything pushed after the review
+    // makes the merge fail loudly rather than ship unreviewed. Empty means the
+    // probe read nothing: the outer loop then REFUSES to merge (fail-closed).
+    reviewedHead,
     // 0 here (the FINAL Ralph task, or a non-Ralph run) → the outer loop does NOT
     // re-fire; it runs the normal merge (APPROVE) / fail (REQUEST_CHANGES) path.
     remainingTasks: ralphRemaining,
