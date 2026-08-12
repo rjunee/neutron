@@ -64,6 +64,41 @@ with D3 — the interview seeds the rules, the feedback loop refines them.
 Worker crons are poll / brief / cleanup). So "propose delete" was a scope judgement, never a
 claim that it fails. Carry it as its own decision rather than folding it into this refactor.
 
+**D6 — THE PIPELINE IS OPT-IN PER MAILBOX, AND THAT IS A SETUP STEP, NOT A DEFAULT
+(2026-08-12).** Owner, after being shown the fork explicitly: *"'A — fail closed (what you
+literally asked for)' - do this"*, following *"Right now I only want it enabled for
+&lt;one address&gt;, no other accounts"*. Connecting a Google account and asking the agent to READ
+that mailbox are two different decisions; a grant taken out for Calendar or Drive must never
+enrol its inbox. So **absence of a row means DISABLED**, and an install where nothing has been
+enabled polls nothing at all.
+
+**This changes P1's acceptance and the change is deliberate.** SPEC § Email Core
+consolidation reads *"an important message arriving in the real mailbox produces an escalation
+in chat within a poll interval."* Under D6 that holds for an **enabled** mailbox, and a
+connected-but-not-enabled one is silent BY DESIGN. The SPEC line is not edited here — the
+owner froze the spec for this work — so this paragraph is the authoritative reading, in the
+same way § 0 as a whole supersedes the sections below it.
+
+**The supported setup flow, in full:**
+
+1. Connect the Google account as usual (Integrations surface). Nothing is polled yet.
+2. The poller's next tick enumerates the connected grants — a read of the GRANT SET, no mail —
+   and records each as a switched-off row. Discovery can only ever create a DISABLED row; it
+   never enables and never moves an existing boundary.
+3. `bun scripts/email-accounts.ts list` shows the discovered ids. Before the first tick it
+   says so explicitly rather than reporting an empty table.
+4. `bun scripts/email-accounts.ts enable <account_id>` switches one on. It refuses an id
+   discovery has not seen, because an allow-list row for a mailbox that does not exist is a
+   standing permission, not a typo. The `''` sentinel — a single-backend install's only
+   mailbox — is the one exemption.
+5. From that moment the mailbox's existing mail is swept as history and only mail arriving
+   after the enable can escalate.
+
+Every tick with nothing enabled LOGS that fact and distinguishes *no mailboxes discovered yet*
+from *mailboxes known, none switched on* — the two have different remedies. The operator CLI
+is the surface **until an in-app pane exists**; that pane is the obvious follow-on and is not
+in P1.5's scope.
+
 ## 1. Verdict
 
 This is a **selective port wrapped in a large deletion**, not a rewrite and not a full port.
