@@ -50,8 +50,27 @@ records every message already there as `handling='preexisting'` with
 archive, nothing classified, nothing escalated. The owner's existing mail was
 triaged by hand and stays exactly where they left it (owner decision,
 2026-08-12). The sweep is resumable across ticks via a `backlog_cursor`
-checkpoint and completes at `backlog_marked='1'`; until then the tick returns
-early, so the code path that could escalate old mail is never entered.
+checkpoint and completes at `backlog_marked='1'`.
+
+**The boundary is BOOT, not the first fire, and a paused sweep no longer
+blocks live mail.** Two ways switch-on could swallow the owner's first
+important message, both found by review rather than by tests:
+
+- An `interval_ms` cron waits a full period before its first execution, so a
+  cutoff stamped inside the tick is drawn five minutes late and everything that
+  arrived in that window is filed as history. `buildEmailPipelinePollHandler`
+  captures `activated_at` where the handler is BUILT and threads it in as
+  `activation_at`. A mailbox connected LATER keeps `now()` as its own cutoff —
+  using activation for a late-joining account would escalate months of its
+  back-catalogue.
+- The sweep is bounded per tick (`max_backlog_pages × backlog_page_size`), and
+  it used to return before the live pass. An inbox larger than that budget
+  therefore pushed new mail to the next cron fire, breaking the one-poll-interval
+  acceptance criterion on exactly the installs where switch-on is most visible.
+  A paused sweep now continues into a RESTRICTED pass: the newest page only,
+  and only messages that arrived after the account's cutoff. History is excluded
+  by the same one-time migration boundary the sweep itself uses — explicit
+  rather than structural, and the restricted pass writes no continuation cursor.
 
 Afterwards, "is this history?" is a ROW LOOKUP — `store.hasEmail(id)` — not a
 date comparison re-run on every message for the life of the install. The
@@ -64,6 +83,22 @@ it in their mail client), so the label set cannot double as "handled"; the row
 in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
 failed chat delivery increments `escalation_attempts`, records `last_error`, and
 is retried by the next tick's resume step under an attempt cap.
+
+**The dedup guarantee had to be extended into the gateway to be true.** Every
+escalation carries a deterministic `idempotency_key`, and `ButtonStore.emit`
+collapses the durable row on it — but `gateway/http/deliver.ts` pushed live
+UNCONDITIONALLY underneath that collapse. So the retry `escalate.ts`
+deliberately permits (deliver succeeded, `markEscalated` threw, row still
+eligible) re-notified an online owner on every attempt while the transcript
+stayed correctly deduped. `deliver` now implements the predicate its own
+`EmitResult` docstring specifies and the onboarding engine already used
+(`engine.ts:1186`): re-render only when the row is NEW or when it landed in the
+DB and never reached a client. The second clause needs a writer, so a
+successful `durability:'reply'` push stamps `markDelivered`; without that write
+`was_delivered` is false forever and the guard is dead code. Pinned by an
+integration boundary test (`tests/integration/email-escalation-live-dedup.test.ts`)
+using the real store and the real seam — the unit tests on either side both
+pass while the bug is present, which is why neither found it.
 
 **The sidecar is instance-level, with its own migration tree.**
 `<owner_home>/email/pipeline.db`, opened `openSidecar` +
