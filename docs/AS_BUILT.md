@@ -40,7 +40,10 @@ keeping it while the factory silently stops threading it fails two.
 deterministically what the synthesis prompt has always merely asserted: a
 non-blocking finding does not block a merge on its own. A `REQUEST_CHANGES` is
 downgraded to `APPROVE` only when every finding is explicitly `minor` or `nit`,
-and the findings survive on the verdict so they reach the PR as comments.
+and the findings survive on the returned verdict. Nothing posts them to the PR:
+they reach the next round's fix prompt if a later gate re-blocks, and on a clean
+downgrade they are dropped, since the APPROVE-path terminal result carries no
+findings.
 
 The rule had no enforcement, so it held only as far as one model's obedience.
 It did not hold: PR #171 saw a reviewer seat return APPROVE with four MINOR/NIT
@@ -54,13 +57,29 @@ is ambiguous. It enumerates the NON-blocking severities rather than the blocking
 ones, which makes an unknown, absent or misspelled severity block rather than
 pass; a rejection carrying no findings at all is left untouched; and it runs
 first in the chain so the CI gate and the cross-model gate both retain the last
-word. `blocker` and `major` still veto, as does red CI, a deferred reviewer, and
-the mutation-prover phase.
+word. Red CI and a deferred reviewer still veto an `APPROVE`, and a rejection
+carrying a `blocker` or `major` is never downgraded.
+
+What `blocker` and `major` do NOT do is veto an `APPROVE`. `enforceSeverityGate`
+returns early on any verdict that is not `REQUEST_CHANGES` and no later gate
+reads severities, so an `APPROVE` carrying a blocker finding merges on green CI
+with no deferred peer — asked for only by the synthesis prompt, which is the
+same unenforced-rule shape this section exists to remove. Known gap, recorded
+rather than papered over.
 
 Tested against the real function extracted from the `.mjs` and evaluated rather
-than a hand-copied duplicate. 13 tests, 38 assertions, mutation-verified:
+than a hand-copied duplicate. 18 tests, 55 assertions, mutation-verified:
 admitting `major` to the non-blocking set fails two of them, and dropping the
 empty-findings guard fails one.
+
+The prose guards that police the docblock are mutation-verified too, and the
+carve-out that exempts the one past-tense record of #184's claim is bounded by a
+literal at BOTH ends. It used to run to the next `)`, which meant deleting the
+citation's closing paren — an ordinary copy-edit — silently stretched the
+exemption over the entire IMPLEMENTED section: a present-tense "the mutation
+prover still vetoes a bad APPROVE today" written in the swallowed region passed
+at 17 pass / 0 fail. An exemption that widens on its own is a gate that stops
+firing with nobody watching, so an edit to either end now throws instead.
 
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
 

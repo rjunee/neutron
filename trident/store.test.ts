@@ -40,7 +40,7 @@ describe('TridentRunStore', () => {
     })
     expect(run.phase).toBe('forge-init')
     expect(run.round).toBe(1)
-    expect(run.max_rounds).toBe(8)
+    expect(run.max_rounds).toBe(10)
     expect(run.ralph).toBe(false)
     expect(run.max_ralph_rounds).toBe(20)
     expect(run.merge_mode).toBe('local')

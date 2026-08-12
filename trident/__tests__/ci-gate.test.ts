@@ -45,7 +45,7 @@ function grab(name: string): string {
 function loadReal(): {
   classifyCi: (probe: unknown) => CiResult
   ciBlockerFindings: (ci: CiResult) => Array<{ severity: string; title: string; evidence: string }>
-  ciDeferredPeer: (ci: CiResult) => { name: string; evidence: string }
+  ciDeferredPeer: (ci: CiResult) => { name: string; title: string; evidence: string }
 } {
   // The state sets are consts the functions close over, so they come along.
   const consts = SRC.slice(
@@ -215,6 +215,20 @@ describe('what the gate DOES with each answer', () => {
     const peer = ciDeferredPeer(classifyCi({ raw: 'gh: not found', exit_code: 127 }))
     expect(peer.name).toBe('CI')
     expect(peer.evidence).toContain('could not be read')
+  })
+
+  // THE TITLE IS THE PRODUCER'S CONTRACT. `enforceCrossModelGate` posts `title: p.title`
+  // verbatim, so a producer that omits it ships a PR blocker reading `title: undefined`
+  // — and deleting the `title:` line here used to survive the whole suite green,
+  // because nothing asserted it. The title is the line a human reads first.
+  test('BOTH deferred-CI peers carry a distinct, non-empty title naming the reason', () => {
+    const { classifyCi, ciDeferredPeer } = loadReal()
+    const pending = ciDeferredPeer(classifyCi(probe([{ name: 'a', state: 'IN_PROGRESS' }])))
+    const unknown = ciDeferredPeer(classifyCi({ raw: 'gh: not found', exit_code: 127 }))
+    expect(pending.title).toBe('CI status UNREADABLE (still running) — refusing to silently APPROVE')
+    expect(unknown.title).toBe('CI status UNREADABLE — refusing to silently APPROVE')
+    // Distinct, so "still running" is never reported as "cannot read checks at all".
+    expect(pending.title).not.toBe(unknown.title)
   })
 })
 

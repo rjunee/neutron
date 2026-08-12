@@ -23,7 +23,7 @@ import {
 } from './code-command.ts'
 import type { TridentBoardBinder } from './board-dispatch.ts'
 import type { HostCommandResult } from './git-mode.ts'
-import { buildSimFirer } from './inner-loop-sim.ts'
+import { buildSimFirer, SIM_REVIEWED_HEAD } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
@@ -458,6 +458,9 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
 
     expect(final.phase).toBe('done')
     expect(final.pr).toBe(101)
-    expect(hostCalls.map((c) => c.join(' '))).toContain('gh pr merge 101 --squash')
+    // #545 — pinned to the reviewed head, end to end through the real loop.
+    expect(hostCalls.map((c) => c.join(' '))).toContain(
+      `gh pr merge 101 --squash --match-head-commit ${SIM_REVIEWED_HEAD}`,
+    )
   })
 })

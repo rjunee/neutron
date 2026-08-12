@@ -6,6 +6,7 @@ import {
   baseDriftHoldMessage,
   buildMergeCleanupDeps,
   detectBaseBranch,
+  reviewedHeadOid,
   shouldHoldForBaseDrift,
   TridentBaseDriftHold,
   TridentMergeError,
@@ -94,16 +95,36 @@ describe('detectBaseBranch', () => {
   })
 })
 
+/** A full (40-hex) OID — the only shape `--match-head-commit` accepts. */
+const REVIEWED_HEAD = '0123456789abcdef0123456789abcdef01234567'
+
+/** The typed terminal result the inner workflow writes into `inner_result`,
+ *  carrying the head OID the reviewers judged (#545). */
+function innerResult(reviewedHead: string | null): string {
+  return JSON.stringify({
+    ok: true,
+    prNumber: 42,
+    branch: 'feat-x',
+    verdict: 'APPROVE',
+    round: 1,
+    checkpoint: 'argus-approved',
+    ...(reviewedHead === null ? {} : { reviewedHead }),
+  })
+}
+
 describe('buildMergeCleanupDeps — pr mode', () => {
-  test('gh pr merge --squash, then delete remote + local branch (NO worktree remove)', async () => {
+  test('gh pr merge --squash pinned to the reviewed head, then delete remote + local branch (NO worktree remove)', async () => {
     const { host, calls } = recordingHost((cmd) => noDrift(cmd) ?? ok())
     const deps = buildMergeCleanupDeps(host)
-    const res = await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x' }), deps)
+    const res = await cleanupAfterMerge(
+      makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', inner_result: innerResult(REVIEWED_HEAD) }),
+      deps,
+    )
     expect(res.performed).toBe(true)
     expect(res.mode).toBe('pr')
 
     const joined = calls.map((c) => c.join(' '))
-    expect(joined).toContain('gh pr merge 42 --squash')
+    expect(joined).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
     expect(joined).toContain('git -C /repo push origin --delete feat-x')
     expect(joined).toContain('git -C /repo branch -D feat-x')
     // Ryan-locked: never a worktree remove.
@@ -116,7 +137,7 @@ describe('buildMergeCleanupDeps — pr mode', () => {
     )
     const deps = buildMergeCleanupDeps(host)
     await expect(
-      cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42 }), deps),
+      cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, inner_result: innerResult(REVIEWED_HEAD) }), deps),
     ).rejects.toBeInstanceOf(TridentMergeError)
     const joined = calls.map((c) => c.join(' '))
     expect(joined.some((c) => c.includes('branch -D'))).toBe(false)
@@ -129,6 +150,67 @@ describe('buildMergeCleanupDeps — pr mode', () => {
       TridentMergeError,
     )
     expect(calls).toHaveLength(0)
+  })
+})
+
+describe('#545 — the pr merge is PINNED to the reviewed commit', () => {
+  // The observed failure (PR #171): the head moves between the APPROVE and the
+  // merge. GitHub rejects a `--match-head-commit` that no longer matches, so the
+  // merge must FAIL — never fall back to merging whatever is on the branch now.
+  test('a head that MOVED after the review refuses to merge (no branch teardown)', async () => {
+    const { host, calls } = recordingHost(
+      (cmd) =>
+        noDrift(cmd) ??
+        (cmd[0] === 'gh'
+          ? fail('failed to merge pull request: Head branch was modified. Review and try the merge again.')
+          : ok()),
+    )
+    const deps = buildMergeCleanupDeps(host)
+    await expect(
+      cleanupAfterMerge(
+        makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', inner_result: innerResult(REVIEWED_HEAD) }),
+        deps,
+      ),
+    ).rejects.toThrow(/Head branch was modified/)
+    const joined = calls.map((c) => c.join(' '))
+    // The merge was attempted PINNED (that is what made GitHub refuse) …
+    expect(joined).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
+    // … and nothing was torn down / retried unpinned after the refusal.
+    expect(joined.some((c) => c.includes('branch -D') || c.includes('--delete'))).toBe(false)
+    expect(calls.filter((c) => c[0] === 'gh')).toHaveLength(1)
+  })
+
+  test('no recorded reviewed head → refuses to merge before any host call (fail-closed)', async () => {
+    for (const inner_result of [null, innerResult(null), '{"ok":true,"verdict":"APPRO', 'null']) {
+      const { host, calls } = recordingHost()
+      const deps = buildMergeCleanupDeps(host)
+      await expect(
+        cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', inner_result }), deps),
+      ).rejects.toBeInstanceOf(TridentMergeError)
+      expect(calls).toHaveLength(0)
+    }
+  })
+
+  test('an ABBREVIATED sha is not a pin — refuses rather than merging unpinned', async () => {
+    const { host, calls } = recordingHost()
+    const deps = buildMergeCleanupDeps(host)
+    await expect(
+      cleanupAfterMerge(
+        makeRun({ merge_mode: 'pr', pr: 42, inner_result: innerResult(REVIEWED_HEAD.slice(0, 12)) }),
+        deps,
+      ),
+    ).rejects.toBeInstanceOf(TridentMergeError)
+    expect(calls).toHaveLength(0)
+  })
+
+  test('reviewedHeadOid decodes the carried OID (and only a real one)', () => {
+    const run = makeRun({ inner_result: innerResult(REVIEWED_HEAD.toUpperCase()) })
+    // Case-normalised — git prints lowercase, but a carried uppercase OID is the
+    // same commit and must still pin.
+    expect(reviewedHeadOid(run)).toBe(REVIEWED_HEAD)
+    expect(reviewedHeadOid(makeRun({ inner_result: innerResult('') }))).toBeNull()
+    expect(reviewedHeadOid(makeRun({ inner_result: JSON.stringify({ reviewedHead: 42 }) }))).toBeNull()
+    expect(reviewedHeadOid(makeRun({ inner_result: '   ' }))).toBeNull()
   })
 })
 
@@ -1240,7 +1322,16 @@ describe('buildMergeCleanupDeps — base-drift hold, local mode (#542)', () => {
 })
 
 describe('buildMergeCleanupDeps — base-drift hold, pr mode (#542)', () => {
-  const prRun = makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', repo_path: '/drift-pr' })
+  // Every pr-mode run carries the reviewed head OID (#545) — without one
+  // `mergePr` refuses before the drift gate ever runs, which would make these
+  // tests pass for the wrong reason.
+  const prRun = makeRun({
+    merge_mode: 'pr',
+    pr: 42,
+    branch: 'feat-x',
+    repo_path: '/drift-pr',
+    inner_result: innerResult(REVIEWED_HEAD),
+  })
 
   test('HOLDS before `gh pr merge` when origin/base drifted into a reviewed file', async () => {
     const { host, calls } = driftHost({
@@ -1279,7 +1370,7 @@ describe('buildMergeCleanupDeps — base-drift hold, pr mode (#542)', () => {
     })
     const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
     await cleanupAfterMerge(prRun, deps)
-    expect(calls).toContain('gh pr merge 42 --squash')
+    expect(calls).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
   })
 
   test('a FAILED fetch holds — a stale origin/base reports no drift, confidently', async () => {
@@ -1367,11 +1458,17 @@ describe('buildMergeCleanupDeps — base-drift hold, pr mode (#542)', () => {
     })
     const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
     await cleanupAfterMerge(prRun, deps)
-    expect(calls).toContain('gh pr merge 42 --squash')
+    expect(calls).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
   })
 
   test('a null branch does NOT skip the gate — the head branch comes from the PR', async () => {
-    const nullBranch = makeRun({ merge_mode: 'pr', pr: 42, branch: null, repo_path: '/drift-pr' })
+    const nullBranch = makeRun({
+      merge_mode: 'pr',
+      pr: 42,
+      branch: null,
+      repo_path: '/drift-pr',
+      inner_result: innerResult(REVIEWED_HEAD),
+    })
     const { host, calls } = driftHost({
       base: 'main',
       branch: 'feat-x',
@@ -1390,7 +1487,13 @@ describe('buildMergeCleanupDeps — base-drift hold, pr mode (#542)', () => {
   })
 
   test('a null branch the PR cannot name FAILS — it never merges ungated', async () => {
-    const nullBranch = makeRun({ merge_mode: 'pr', pr: 42, branch: null, repo_path: '/drift-pr' })
+    const nullBranch = makeRun({
+      merge_mode: 'pr',
+      pr: 42,
+      branch: null,
+      repo_path: '/drift-pr',
+      inner_result: innerResult(REVIEWED_HEAD),
+    })
     const { host, calls } = driftHost({
       base: 'main',
       branch: 'feat-x',

@@ -81,7 +81,28 @@ const {
   task,
   baseBranch = 'main',
   slug = 'trident-run',
-  maxRounds = 3,
+  // THIS DEFAULT IS A FALLBACK, NOT THE CAP THE FLEET RUNS ON — do not read it as
+  // "trident retries ten times". Every real launch goes through
+  // `buildWorkflowArgs` (trident/inner-loop.ts), which ALWAYS sets `maxRounds`
+  // from the run row's `max_rounds`; that column is `NOT NULL` (migrations/0077)
+  // and `createRun` always supplies it. So on the production path this literal is
+  // never reached and the effective cap is the one in `trident/store.ts`
+  // (`max_rounds: input.max_rounds ?? 10`). Both are 10 deliberately: they must
+  // agree, because a reader who finds only one of them will believe it.
+  //
+  // It is kept at the same value rather than deleted because the one path that
+  // DOES reach it is the args-lost path — `normalizeWorkflowArgs` returns `{}`
+  // for a non-object/unparseable `args` (the 2026-06-28 stringified-args
+  // incident noted above), and every field falls back at once. A fallback that
+  // silently disagreed with the real cap would make that already-confusing
+  // failure report a round budget the fleet never uses.
+  //
+  // The cap is a bound, not a target: it exists so a loop that cannot converge
+  // STOPS and reports instead of spending forever. Note that hitting it is not
+  // loud — the terminal result still carries `ok: true`, which means only "the
+  // workflow did not crash". The honest signal is `verdict`, which stays
+  // REQUEST_CHANGES, and that is what the outer loop keys on (orchestrator.ts).
+  maxRounds = 10,
   laneRetryAttempts = 1,
   ralph = false,
   // Git-mode threaded from the run (`local` | `pr`). Defaults to `pr` for any
@@ -365,15 +386,22 @@ const VERDICT_SCHEMA = {
 // The codex reviewer's verdict carries an extra `codexStatus` so the synthesis
 // can distinguish a real cross-model verdict ('connected') from the graceful
 // never-set-up path ('not_connected') and the never-silent-downgrade path
-// ('deferred' — configured but the codex call failed/timed out).
+// ('deferred' — configured but the codex call failed/timed out), plus
+// `codexTruncated` so a verdict formed from PART of the diff can never be
+// recorded as one about the whole change.
 const CODEX_VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['verdict', 'findings', 'codexStatus'],
+  required: ['verdict', 'findings', 'codexStatus', 'codexTruncated'],
   properties: {
     verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
     findings: VERDICT_SCHEMA.properties.findings,
     codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
+    codexTruncated: {
+      type: 'boolean',
+      description:
+        'true when the wrapper capped the diff (CODEX_TRUNCATED=1) — codex saw only its first N lines, so its verdict covers only that portion.',
+    },
   },
 }
 
@@ -439,6 +467,30 @@ const NO_INTERACTIVE_RULE =
 const REDIRECT_RULE =
   'For ANY long or verbose command (builds, full test runs), redirect stdout+stderr to a log file and read ONLY the summary tail — never let raw output flood your context.'
 
+// YOU SHARE THIS MACHINE WITH SIBLING LANES, AND A PATTERN-KILL IS FRATRICIDE.
+//
+// Incident of record, 2026-08-12 06:05:46, diagnosed record-by-record: a fix-round
+// agent decided a stale typecheck was holding its worktree and ran
+// `pkill -f typecheck-all.sh`. `pkill -f` matches on the FULL COMMAND LINE and is
+// scoped to the user, not the worktree — so it SIGTERM'd all ELEVEN lanes running
+// on the box, including the lane that issued it, because each lane's launcher
+// passed its task brief as an argv and every brief contains the literal string
+// `scripts/ci/typecheck-all.sh` (the launchers now pipe the brief on stdin, which
+// removes them from that particular blast radius — but not from this one).
+//
+// EVEN WITH CLEAN ARGV THIS RULE IS LOAD-BEARING: a pattern like
+// `-f typecheck-all.sh` still legitimately matches SIBLING LANES' REAL typecheck
+// children, so a pattern-kill silently poisons other builds' test runs and they
+// fail for reasons invisible in their own logs. The failure is remote, delayed and
+// unattributable — the worst shape a build failure can have.
+//
+// The rule is therefore about PROVENANCE, not about which binary you call: kill
+// only what you started and can name by pid. `$!` after a background start, or a
+// pid file you wrote yourself, is legitimate. A pattern is never legitimate,
+// because the pattern cannot distinguish your process from someone else's.
+const NO_PATTERN_KILL_RULE =
+  'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `kill $(pgrep …)`. Those match the whole machine, not your worktree, and one such command has already SIGTERMed every concurrent lane on this box including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
+
 // Forge build contract (from prompts/forge.md): smallest-correct-change,
 // push + open-PR, PR_NUMBER/BRANCH/WORKTREE last-lines discipline. With
 // `schema: FORGE_SCHEMA` the agent ALSO returns the structured fields, but the
@@ -476,6 +528,7 @@ function forgeBuildContract(reenter) {
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, ${isPr ? 'push, and open a PR' : 'and commit'} without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
+${NO_PATTERN_KILL_RULE}
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
@@ -490,7 +543,7 @@ CONTRACT
 
 // Argus review rubric (from prompts/argus.md): APPROVE / REQUEST_CHANGES /
 // COMMENT, blockers/important/nits, oversized-diff guard, NEVER a silent exit.
-const ARGUS_RUBRIC = `You are ARGUS — Neutron's autonomous code-review sub-agent (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+const ARGUS_RUBRIC = `You are ARGUS — Neutron's autonomous code-review sub-agent (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Apply the Argus rubric: correctness, security, spec/as-built drift, and TEST-QUALITY discipline (reject toHaveBeenCalled-style gap tests; demand boundary/edge coverage). Identify blockers (must-fix before merge), important issues (should-fix), and minor nits (optional). Every finding AND every dismissal needs EVIDENCE (file:line or a concrete repro — verify before you assert). Do NOT modify files.
 OVERSIZED-DIFF GUARD: never read a >~3000-line diff in one shot (the documented silent-exit trigger) — review the meaty commits one by one instead and STATE what you could not verify.
 NEVER EXIT SILENTLY: if you cannot complete the review, return a TRUNCATED verdict explaining exactly what you could NOT verify — do not vanish.`
@@ -517,7 +570,7 @@ function planFablePrompt(resuming) {
   const resumeNote = resuming
     ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
-  return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+  return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):${resumeNote}
 1. Read SPEC.md (the master spec) at the repo root and the changelog docs/AS_BUILT.md if present, and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
 2. Diff the SPEC against the code to find what is still MISSING or WRONG. Regenerate the full IMPLEMENTATION_PLAN.md body as a PRIORITIZED '- [ ] <task>' checklist (mark already-satisfied items '- [x]'). Return it as \`implementationPlan\` (do NOT write it to disk — the executor persists it).
@@ -660,11 +713,62 @@ function normalizeVerdict(v) {
 //     get the last word and can re-block anything it let through. A gate that
 //     forces REQUEST_CHANGES must never be undoable by this one.
 //
-// The findings are NOT discarded — they ride along on the verdict and reach the
-// PR as comments. The quality floor is unchanged: any blocker or major still
-// vetoes, red CI still vetoes, a deferred reviewer still vetoes, and the
-// mutation-prover phase still stands between APPROVE and merge.
+// This gate does NOT discard the findings — it returns them on the verdict. What
+// happens to them after that is a GAP, described here so nobody cites it as a
+// safeguard: NOTHING in this repo posts findings to the PR, and the APPROVE-path
+// `terminalResult` carries no `findings` key, so on a clean downgrade they are
+// seen by no one. They survive only into a round-N+1 fix prompt, and only if a
+// LATER gate re-blocks — and that path has its own cost, also unfixed: a
+// surviving nit is not a deferral finding, so `classifyBlock` reads the round as
+// 'code' rather than 'infra-only' and the loop re-Forges to "fix" what may be
+// nothing but a peer timeout.
+//
+// WHAT THIS BLOCK MAY CLAIM. Every claim below must name the code that enforces
+// it; a claim no code enforces is a lie that outlives the reviewer who believed
+// it. (PR #184 asserted here that a "mutation-prover phase" stood between APPROVE
+// and merge. No such phase ever existed, and the false claim was used to justify
+// removing nit-blocking. It is deleted; do not reintroduce it in any form.)
+//
+// IMPLEMENTED — the quality floor these actually hold:
+//   • red CI still vetoes — the `ci.status === 'red'` branch in
+//     `reviewAndSynthesize` REPLACES the verdict with REQUEST_CHANGES after this
+//     gate runs.
+//   • a deferred reviewer still vetoes an APPROVE — `enforceCrossModelGate` below.
+//   • this gate REFUSES TO DOWNGRADE a rejection carrying a blocker or major —
+//     `NON_BLOCKING_SEVERITIES` below, which every finding must be in before the
+//     downgrade happens. (Backticks here mean "this names real code": the test
+//     resolves each one to a DECLARATION elsewhere in this file, so an English
+//     word may not wear them.)
+//
+// NOT IMPLEMENTED — a known, deliberate gap, stated so it is not mistaken for the
+// bullet above it:
+//   • a blocker or major does NOT veto an APPROVE. `enforceSeverityGate` returns
+//     early on any verdict that is not REQUEST_CHANGES, and no gate after it
+//     inspects severities, so a synthesis of APPROVE carrying a blocker finding
+//     reaches merge unchanged when CI is green and no peer deferred. Only the
+//     synthesis prompt asks for that — i.e. one LLM's obedience, which is the
+//     exact failure mode PR #171 recorded. `NON_BLOCKING_SEVERITIES` narrows one
+//     direction only; it vetoes nothing.
 const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
+
+// DID THIS FIELD ACTUALLY ANSWER? Returns the status STRING, or '' for anything that
+// is not one — the single notion of "answered" shared by the lane retry and the
+// completeness gate.
+//
+// TRUTHINESS IS NOT THAT NOTION, and splitting the two is what this closes. The retry
+// read `current[statusKey]` for truthiness while `hasUsableVerdict` required a
+// non-empty STRING, so a malformed core result — `{ verdict: 42 }`, the shape a
+// schema-violating or half-serialised agent reply takes — was truthy enough to look
+// like a completed review to the retry (skipped, `break`) and NOT a verdict to the
+// gate (seat declared missing). The seat was therefore BLOCKED BUT NEVER RETRIED: the
+// run ended `infra-only` on round 1 and discarded the whole Forge build, which is the
+// exact cost retrying core seats exists to remove. It fails closed, so nothing merges
+// — but the recovery path silently never fires, and that invisibility is the point.
+//
+// One predicate, three readers, agreeing by construction rather than by convention —
+// the same argument `LANE_FINDING_KIND` makes below for reading a FIELD instead of
+// re-deriving a string.
+const usableStatus = (v, key) => (v && typeof v[key] === 'string' && v[key].length > 0 ? v[key] : '')
 
 function enforceSeverityGate(synthesis) {
   if (!synthesis || synthesis.verdict !== 'REQUEST_CHANGES') return synthesis
@@ -708,11 +812,32 @@ function enforceSeverityGate(synthesis) {
 // finding, sending the fix loop off to re-Forge a network timeout.
 const LANE_FINDING_KIND = 'lane'
 
+// IT STAMPS ON EVERY VERDICT, NOT ONLY ON AN APPROVE. This used to early-return the
+// synthesis UNTOUCHED whenever it was already REQUEST_CHANGES — "already blocked, so
+// there is nothing to do" — and that reasoning was wrong twice over, on the path the
+// prompt itself makes the LIKELY one (`corePanelLine` tells the model, verbatim, "do
+// NOT return APPROVE" on a dead seat, so a COMPLIANT synthesis arrives here already
+// REQUEST_CHANGES):
+//
+//   1. THE DETERMINISTIC BLOCKER WAS DROPPED. The whole point of computing panel
+//      completeness in code is that the PR says WHICH seat produced nothing. On the
+//      early-return path the model's own findings shipped alone and "argus:adversarial
+//      never ran" was never written down anywhere — the operator sees a code review,
+//      not an incomplete panel.
+//   2. THE BLOCK WAS MISCLASSIFIED AS 'code'. `classifyBlock` reads `kind`, and the
+//      only site that stamps `kind` is this one. Un-stamped model findings therefore
+//      counted as code findings, so the fix loop re-Forged the diff — burning a full
+//      round of four reviewers to "fix" a reviewer that never ran, with the panel
+//      still down a seat.
+//
+// So an incomplete panel now FORCES the verdict and INJECTS its blockers on every
+// path, exactly like the red-CI branch at the call site. Forcing a REQUEST_CHANGES
+// that is already REQUEST_CHANGES is a no-op in the safe direction; the findings are
+// what actually change.
 function enforceCrossModelGate(synthesis, deferredPeers) {
-  if (deferredPeers.length === 0 || !synthesis || synthesis.verdict !== 'APPROVE') {
-    return synthesis
-  }
+  if (deferredPeers.length === 0) return synthesis
   return {
+    ...(synthesis && typeof synthesis === 'object' ? synthesis : {}),
     verdict: 'REQUEST_CHANGES',
     findings: [
       ...deferredPeers.map((p) => ({
@@ -755,7 +880,7 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
       // 'not_connected' and the panel could reach APPROVE with an empty seat.
       // A missing status on a configured slot is therefore `deferred` — and
       // retryable, which is the cheapest possible remedy for a crashed lane.
-      const status = current && current[statusKey] ? current[statusKey] : 'deferred'
+      const status = usableStatus(current, statusKey) || 'deferred'
       // Only a DEFERRED lane is retried. `connected` is a real answer and
       // `not_connected` is the deliberate graceful path — retrying either would
       // spend a call to learn something already known.
@@ -769,7 +894,7 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
       }
       // Keep the ORIGINAL deferred verdict when the retry produced nothing, so
       // the gate still blocks and the evidence still names the first failure.
-      if (next && next[statusKey]) out[slot] = next
+      if (usableStatus(next, statusKey)) out[slot] = next
     }
   }
   return out
@@ -789,10 +914,22 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // message format is a contract nothing enforces; reword the title in the gate and
 // this classifier silently reads every lane blocker as a CODE finding, sending the
 // fix loop to re-Forge a network timeout. The field is what the gate actually sets.
+// A NIT MAY NOT COST A ROUND HERE EITHER. This filtered on `kind` alone, so a dead
+// seat plus a single `nit` classified as 'code' and re-Forged a whole round — four
+// reviewers and a fresh diff — over a finding the severity gate exists to declare
+// non-blocking. Worse, the round runs with the panel still down a seat, so it cannot
+// converge. Explicit 'minor'/'nit' are therefore not code work, and the direction of
+// failure matches `enforceSeverityGate`: only the two LISTED severities are skipped,
+// so an unknown/absent/misspelled severity still counts as code and still re-Forges,
+// and a malformed (null) finding does too.
 function classifyBlock(synthesis, deferredPeers) {
   if (!deferredPeers || deferredPeers.length === 0) return 'code'
   const findings = (synthesis && synthesis.findings) || []
-  const codeFindings = findings.filter((f) => !(f && f.kind === LANE_FINDING_KIND))
+  const codeFindings = findings.filter((f) => {
+    if (f && f.kind === LANE_FINDING_KIND) return false
+    if (f && NON_BLOCKING_SEVERITIES.has(f.severity)) return false
+    return true
+  })
   return codeFindings.length === 0 ? 'infra-only' : 'code'
 }
 
@@ -1097,11 +1234,24 @@ function crossModelPeerStatus(slot, verdicts, statusKey) {
  * So completeness is computed HERE, in code, and fed to the same single gate the
  * cross-model peers use. Being data rather than a second guard is the point: a seat
  * added later is enforced by construction.
+ *
+ * THE SEAT LIST IS NO LONGER A HARD-CODED `[{ slot: 0 }, { slot: 1 }]`. That was the
+ * SAME positional-index pattern this file already documents as a latent bug for the
+ * cross-model peers ("POSITIONAL INDEXING WAS A LATENT BUG" — codexSlot is recorded
+ * as `reviewers.length` at push time for exactly this reason). Insert a reviewer at
+ * the HEAD of the panel and the literals point at the wrong seats: the new reviewer
+ * is ungated (fail-OPEN, the shape of #536 all over again) and the panel labels are
+ * misassigned, so Verdict A is described to the synthesis model as the wrong review.
+ * The claim "a seat added later is enforced by construction" was only true if the
+ * slot was DERIVED, so it is: `pushCoreReviewer` records `reviewers.length` at the
+ * moment it pushes, and carries the seat's prompt letter + label with it.
+ *
+ * `statusKey: 'verdict'` is the field whose presence proves the seat ANSWERED — the
+ * core analogue of `codexStatus`/`kimiStatus` — so a dead core seat is retryable by
+ * the same `retryDeferredPeers` the peers use, rather than ending the run on one
+ * transient crash.
  */
-const CORE_REVIEWER_SEATS = [
-  { slot: 0, name: 'Argus rubric (core reviewer)' },
-  { slot: 1, name: 'Argus adversarial (core reviewer)' },
-]
+const CORE_SEAT_STATUS_KEY = 'verdict'
 
 // DID THIS SEAT ACTUALLY REVIEW? A usable verdict is an object carrying a `verdict`
 // string (VERDICT_SCHEMA's required field). Anything else — null, undefined, a stray
@@ -1117,7 +1267,7 @@ const CORE_REVIEWER_SEATS = [
 // seat, which is exactly #536. This is the same "a field's name is not a contract" trap
 // that `LANE_FINDING_KIND` above exists to close.
 function hasUsableVerdict(v) {
-  return Boolean(v) && typeof v.verdict === 'string' && v.verdict.length > 0
+  return usableStatus(v, CORE_SEAT_STATUS_KEY).length > 0
 }
 
 function missingCoreReviewers(verdicts, seats) {
@@ -1169,7 +1319,7 @@ function deferredCrossModelPeers(statuses) {
       name: 'Codex',
       title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
       evidence:
-        'codex was configured (CODEX_HOME set) but the review call failed/timed out; per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Re-run once codex auth is restored.',
+        'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
     })
   }
   if (statuses.kimi === 'deferred') {
@@ -1181,6 +1331,47 @@ function deferredCrossModelPeers(statuses) {
     })
   }
   return out
+}
+
+// What the synthesis is TOLD about Verdict C. Hoisted out of the synthesis call for
+// the same reason `deferredCrossModelPeers` is: the mapping status → panel text is
+// the load-bearing part, and it is testable on its own.
+//
+// THE TRUNCATED CASE IS WHY THIS IS A FUNCTION. The wrapper caps the diff at its
+// line limit and tells the MODEL so; but the model's answer still arrives as a
+// verdict with no scope attached, and the synthesis then read "codex APPROVE" as a
+// cross-model approval of the whole change when codex had seen its first 3000 lines.
+// The FACT itself is decided by a grep the bridge command runs (see
+// codexReviewerPrompt), not by GPT-5 judging its own coverage — so the re-scoping
+// stops depending on the reviewer having remembered to hedge.
+//
+// WHAT THIS IS AND IS NOT. Be precise about the strength of this guard, because the
+// comment that used to sit here ("deterministic") overstated it: the flag still
+// TRAVELS through the codex agent copying the CODEX_TRUNCATED line into a schema
+// field, and what it buys is PROMPT TEXT for the synthesis model. It is NOT a hard
+// gate like 'deferred' (enforceCrossModelGate / deferredCrossModelPeers), and a
+// truncated codex APPROVE with every other seat APPROVE can still merge.
+//
+// Which is exactly why the DEFAULT is fail-safe. The "full third panelist" framing
+// — the one that lets a codex APPROVE offset another reviewer's doubt — is earned
+// ONLY by an explicit boolean `false`. A missing field, a stringified 'true'/'false',
+// null: every one of those is a flag that did not arrive, and an unknown scope is
+// read as a PARTIAL one. This mirrors crossModelPeerStatus, where a configured seat
+// with no status defaults to 'deferred' rather than to the permissive answer.
+function codexPanelLine(status, review) {
+  if (status === 'deferred') {
+    return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, or the diff was EMPTY so there was nothing to review). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
+  }
+  if (status !== 'connected') {
+    return `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+  }
+  if (review && review.codexTruncated === true) {
+    return `Verdict C (codex cross-model, GPT-5) — PARTIAL, SCOPED TO PART OF THE DIFF: ${JSON.stringify(review)}. The wrapper TRUNCATED the diff at its line cap (CODEX_REVIEW_DIFF_TRUNCATED), so codex read only the FIRST lines of this change and NEVER SAW the rest. Its blockers still VETO APPROVE, but a codex APPROVE here means ONLY "no blocker in the portion codex read" — do NOT record it as a whole-change cross-model approval, do NOT let it offset a finding in code codex never saw, and SAY in your findings that the cross-model review covered only part of the diff.`
+  }
+  if (!review || typeof review.codexTruncated !== 'boolean') {
+    return `Verdict C (codex cross-model, GPT-5) — PARTIAL, SCOPE UNKNOWN: ${JSON.stringify(review)}. The bridge did NOT report whether the wrapper truncated the diff (codexTruncated is missing or not a boolean), so it is UNKNOWN whether codex saw the whole change. Treat it exactly as a truncated review: its blockers still VETO APPROVE, but its APPROVE is NOT a whole-change cross-model approval, must not offset a finding elsewhere in the diff, and you must SAY in your findings that the cross-model review's coverage could not be confirmed.`
+  }
+  return `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(review)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
 }
 
 // The codex cross-model reviewer prompt. It shells out to the wrapper
@@ -1201,13 +1392,22 @@ function codexReviewerPrompt(diffFile) {
   // `git diff` in repoPath — repoPath is still on the base branch (Forge builds in
   // an isolated worktree), so a git-diff there would be empty/stale and codex
   // could approve without reviewing the change (Codex review [P2]).
-  return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+  //
+  // The command also GREPS the wrapper's stderr for the truncation marker and echoes
+  // CODEX_TRUNCATED=0/1. The wrapper caps the diff at its line limit and discloses
+  // that IN THE PROMPT, but a disclosure only the model sees is a disclosure the
+  // WORKFLOW cannot act on: exit 0 is exit 0, so a review of the first 3000 lines of
+  // an 11k-line diff came back as a clean whole-change APPROVE. The grep is what
+  // makes it a FACT the synthesis is handed (see codexPanelLine), not a hope about
+  // how GPT-5 worded its answer.
+  return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"
+  CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
+- codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.
-- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
+- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, or the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
 
@@ -1222,7 +1422,7 @@ function kimiReviewerPrompt(diffFile) {
   // Reviews the SAME diff FILE Forge wrote, for the same reason codex does:
   // repoPath is still on the base branch, so a `git diff` there would be empty
   // and the reviewer could approve without having reviewed the change.
-  return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+  return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
   bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
@@ -1253,7 +1453,18 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
   // and could force an APPROVE. Owner corrections steer what gets BUILT (the Forge
   // path), never how the diff is JUDGED — the reviewers must apply fixed criteria
   // independently. (argus:codex was already excluded — see its note.)
-  const reviewers = [
+  const reviewers = []
+  // THE CORE SEATS RECORD THEIR OWN SLOT, like codexSlot/kimiSlot below — never a
+  // literal 0/1 written down elsewhere (see CORE_SEAT_STATUS_KEY's docblock). The
+  // seat carries everything the three readers need: the gate's blocker `name`, the
+  // synthesis prompt's `letter`/`label`, and the `statusKey` the lane retry reads.
+  const coreSeats = []
+  const pushCoreReviewer = (seat, run) => {
+    coreSeats.push({ ...seat, slot: reviewers.length, statusKey: CORE_SEAT_STATUS_KEY })
+    reviewers.push(run)
+  }
+  pushCoreReviewer(
+    { name: 'Argus rubric (core reviewer)', letter: 'A', panelLabel: 'Claude rubric' },
     () =>
       agent(
         `${ARGUS_RUBRIC}
@@ -1261,14 +1472,17 @@ Review the diff at ${diffFile} for the TASK below. Return your verdict + finding
 TASK: ${task}`,
         withModel({ label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
+  )
+  pushCoreReviewer(
+    { name: 'Argus adversarial (core reviewer)', letter: 'B', panelLabel: 'Claude adversarial' },
     () =>
       agent(
-        `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+        `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do NOT modify files. NEVER exit silently — if you cannot verify part of it, say so.
 TASK: ${task}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
-  ]
+  )
   let codexSlot = null
   let kimiSlot = null
   if (codexConfigured) {
@@ -1316,16 +1530,29 @@ TASK: ${task}`,
   // Retry ONLY a cross-model lane that came back `deferred`, before any of this is
   // read. A flaked lane costs one more call here; letting it through costs a whole
   // round of four reviewers plus a pointless re-Forge (see retryDeferredPeers).
+  //
+  // THE CORE SEATS ARE RETRIED TOO. They were omitted, so the retry rationale above
+  // ("an infra failure should not trigger four fresh LLM reviews") applied to the two
+  // OPTIONAL peers and not to the two seats that always run: one transient
+  // argus:claude crash produced an infra-only block, exited the loop on round 1, and
+  // threw away the entire Forge build — the most expensive possible response to the
+  // cheapest possible failure. A core seat's `statusKey` is `verdict` itself, so a
+  // real review ('APPROVE'/'REQUEST_CHANGES') is never retried and only a seat that
+  // produced nothing is. The retry re-runs the SEAT'S OWN THUNK rather than a second
+  // copy of the prompt, so the retried review cannot drift from the original.
   verdicts = await retryDeferredPeers({
     verdicts,
     slots: [
+      ...coreSeats,
       { name: 'codex', slot: codexSlot, statusKey: 'codexStatus' },
       { name: 'kimi', slot: kimiSlot, statusKey: 'kimiStatus' },
     ],
     attempts: LANE_RETRY_ATTEMPTS,
     log,
-    invoke: async (name) =>
-      name === 'codex'
+    invoke: async (name) => {
+      const core = coreSeats.find((s) => s.name === name)
+      if (core) return await reviewers[core.slot]()
+      return name === 'codex'
         ? await agent(codexReviewerPrompt(diffFile), {
             label: 'argus:codex-retry',
             phase: 'Review',
@@ -1335,7 +1562,8 @@ TASK: ${task}`,
             label: 'argus:kimi-retry',
             phase: 'Review',
             schema: KIMI_VERDICT_SCHEMA,
-          }),
+          })
+    },
   })
   // POSITIONAL INDEXING WAS A LATENT BUG. This read `verdicts[2]` for codex,
   // which held only while codex was the sole CONDITIONAL panelist. With a second
@@ -1354,7 +1582,7 @@ TASK: ${task}`,
   // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
   // default applied to a missing verdict, which is how a crashed reviewer used to read
   // as one that was never set up. See `crossModelPeerStatus` / `missingCoreReviewers`.
-  const missingCore = missingCoreReviewers(verdicts, CORE_REVIEWER_SEATS)
+  const missingCore = missingCoreReviewers(verdicts, coreSeats)
   const codexStatus = crossModelPeerStatus(codexSlot, verdicts, 'codexStatus')
   const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, 'kimiStatus')
   // Only read for the 'connected' panel line, where the verdict is present by
@@ -1368,12 +1596,7 @@ TASK: ${task}`,
   // cross-model verdict is a full panelist when connected; a 'not_connected' codex
   // is noted + ignored; a 'deferred' codex is hard-gated below.
   phase('Synthesis')
-  const codexPanelLine =
-    codexStatus === 'connected'
-      ? `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(codexReview)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
-      : codexStatus === 'deferred'
-        ? `Verdict C (codex cross-model): DEFERRED — codex was configured but the review call FAILED/timed out. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
-        : `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+  const codexPanel = codexPanelLine(codexStatus, codexReview)
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
   // how the panel's verdicts are merged (see the trust-boundary note above).
@@ -1385,15 +1608,20 @@ TASK: ${task}`,
         : `Verdict D (kimi K3 cross-model): NOT CONNECTED — no Kimi key for this instance. Note it and proceed on the other verdicts (do NOT block on kimi).`
   // A CORE SEAT THAT DIED MUST NOT ARRIVE AS THE TOKEN `null` — see `corePanelLine`,
   // which is top-level (and behaviourally tested) rather than inlined here.
+  // DERIVED FROM THE SAME `coreSeats` THE GATE READS, so a seat inserted at the head
+  // of the panel cannot label Verdict A with the wrong reviewer's review (and cannot
+  // be described to the model at all without also being gated).
+  const corePanelLines = coreSeats
+    .map((seat) => corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot]))
+    .join('\n')
   const synthesisRaw = await agent(
     `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
-${corePanelLine('A', 'Claude rubric', verdicts[0])}
-${corePanelLine('B', 'Claude adversarial', verdicts[1])}
-${codexPanelLine}
+${corePanelLines}
+${codexPanel}
 ${kimiPanelLine}`,
     withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
   )
@@ -1453,6 +1681,34 @@ try {
   if (resumeCheckpoint === 'argus-approved') {
     log(`trident-v2 resume: prior run reached 'argus-approved' for ${forgeBranch} — skipping build+review`)
     finalVerdict = 'APPROVE'
+    // NO `reviewedHead` ON THIS PATH — DELIBERATELY, so the merge FAILS CLOSED (#545).
+    //
+    // This shortcut runs precisely when the prior process reached 'argus-approved'
+    // but never got its terminal result harvested — so BY CONSTRUCTION there is no
+    // recorded reviewed OID anywhere: the only place one is written is the terminal
+    // result this resume is standing in for. Probing the head HERE and calling the
+    // answer `reviewedHead` would be a LIE with a safety label on it: reviewers
+    // approved commit A, someone pushes B into the crash window, resume reads B,
+    // and the outer merge pins to B and SUCCEEDS — shipping a commit no reviewer
+    // saw while `--match-head-commit` certifies it as reviewed. A pinned merge of
+    // an unreviewed commit is WORSE than an unpinned one, because the pin
+    // manufactures confidence nobody earned.
+    //
+    // So this path records nothing. `reviewedHeadOid` returns null, `mergePr`
+    // refuses, and the run fails LOUDLY. That is the same fail-closed rule the
+    // rest of #545 follows: a merge we cannot prove was reviewed is a merge we do
+    // not make.
+    //
+    // HOW THAT RUN IS RECOVERED, precisely — the failure is loud and ONE-SHOT, not
+    // a silent gate that never fires again. The refusal puts the run in `failed`,
+    // which is TERMINAL, so it is never re-ticked or retried into a loop (and
+    // orphan redispatch is separately bounded to one per run per process). Note
+    // that recovery is a FRESH run, not a re-fire of this row: this row's
+    // `inner_checkpoint` is still 'argus-approved', so re-dispatching IT would
+    // re-enter this same shortcut and refuse again — correctly, since there is
+    // still no reviewed OID. A new run starts with a null checkpoint and so does
+    // a real build + review, which is the only thing that can legitimately
+    // produce one.
     const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
     // Re-write the terminal result so a re-fired run whose prior process crashed
     // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
@@ -1557,6 +1813,25 @@ ${task}${reflectionGuidance}`,
   let branchHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
   let roundLostItsWork = null
 
+  // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
+  // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
+  // (both are required FORGE_SCHEMA fields, so this is always populated on a
+  // healthy build). Carried out in the terminal result and passed to
+  // `--match-head-commit` at merge, so a head that moved fails LOUDLY instead of
+  // silently shipping code no reviewer saw (observed on PR #171: the head went
+  // clean → dirty mid-review).
+  //
+  // DELIBERATELY NOT A FRESH PROBE OF THE REMOTE HEAD. A commit pushed between
+  // Forge's push and the probe would be read back and recorded as `reviewedHead`,
+  // and the merge would then pin to it and SUCCEED — certifying as reviewed a
+  // commit whose code is not in the diff anyone read. That is the same lie the
+  // crash-resume shortcut was fixed to stop telling, and a pinned merge of an
+  // unreviewed commit is worse than an unpinned one because the pin manufactures
+  // confidence nobody earned. A sha that is merely STALE cannot mis-merge:
+  // `--match-head-commit` just REFUSES. Empty (Forge reported no sha) records
+  // nothing and the outer merge refuses too — fail-closed either way.
+  let reviewedHead = branchHead
+
   // First review + synthesis.
   let synthesis = await reviewAndSynthesize(diffFile, round, pr)
   finalVerdict = normalizeVerdict(synthesis.verdict)
@@ -1579,7 +1854,7 @@ ${task}${reflectionGuidance}`,
     // Fix round (> 1): the branch/PR were created in round 1, so ALWAYS re-enter
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
     // reuses the PR (no duplicate). Codex [P1] fix.
-    await agent(
+    const fix = await agent(
       `${forgeBuildContract(true)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
@@ -1606,6 +1881,13 @@ ${task}${reflectionGuidance}`,
       break
     }
     branchHead = headAfter
+    // …and the commit THIS round's review judges is, exactly as in round 1, the
+    // one the fix agent reported committing — NOT `headAfter` (#545). The remote
+    // probe above answers a different question ("did the branch move?"), and a
+    // third party's push satisfies it just as well as the fix agent's own commit;
+    // recording that push as `reviewedHead` would pin the merge to code the
+    // upcoming review never sees. Empty → fail-closed, same as round 1.
+    reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
     synthesis = await reviewAndSynthesize(diffFile, round, pr)
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
@@ -1627,6 +1909,11 @@ ${task}${reflectionGuidance}`,
     verdict: finalVerdict,
     round,
     checkpoint: finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes',
+    // THE REVIEWED COMMIT (#545) — the OUTER merge pins to exactly this OID
+    // (`gh pr merge --match-head-commit`), so anything pushed after the review
+    // makes the merge fail loudly rather than ship unreviewed. Empty means the
+    // probe read nothing: the outer loop then REFUSES to merge (fail-closed).
+    reviewedHead,
     // 0 here (the FINAL Ralph task, or a non-Ralph run) → the outer loop does NOT
     // re-fire; it runs the normal merge (APPROVE) / fail (REQUEST_CHANGES) path.
     remainingTasks: ralphRemaining,
