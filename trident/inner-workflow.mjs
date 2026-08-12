@@ -1049,7 +1049,8 @@ const CLEANUP_SCHEMA = {
  *   * With NO usable exit code at all, the script's own `PRESERVED` records in
  *     the transcript still decide. Announcing preserved work that was in fact
  *     removed costs the operator one wasted look; the reverse costs them the work.
- *   * A reported 0 does NOT outrank a transcript that says `PRESERVED`. The script
+ *   * NO reported code outranks a transcript that says `PRESERVED` — not 0, and not
+ *     a mis-transcribed 1/2/127 either. The script
  *     increments its counter at every one of those records and ends on
  *     `[ "$preserved" -eq 0 ] || exit 3`, so "exit 0" and "PRESERVED …" cannot both
  *     be true of one real run — the pair is only ever a mis-transcription. Reading
@@ -1085,11 +1086,20 @@ function classifyCleanupOutcome(reported, raw) {
       ? Number(markers[markers.length - 1].slice('___EXIT='.length))
       : null
   if (exit === 3) return { exit, outcome: 'preserved' }
-  // The two readings that would otherwise SILENCE the alarm — no exit code at all,
-  // and a reported 0 that the transcript itself contradicts.
-  if ((exit === null || exit === 0) && /^PRESERVED /m.test(text)) {
-    return { exit, outcome: 'preserved-unmarked' }
-  }
+  // A `PRESERVED` RECORD OUTRANKS ANY TRANSCRIBED CODE — not just a 0 or a missing
+  // one. Gating this on `exit === null || exit === 0` was the rule's own exception:
+  // a mis-transcribed 1/2/127 alongside a faithful copy of the script's
+  // `PRESERVED worktree … reason=dirty` records fell through to 'failed', which
+  // tells the operator "NOTHING was inspected or removed (this is not a
+  // preservation)" — the exact opposite of what the transcript in front of them
+  // says, and the reading that sends them away without their work. The script
+  // increments its counter at every one of those records and ends on
+  // `[ "$preserved" -eq 0 ] || exit 3`, so a PRESERVED record and any non-3 code
+  // cannot both be true of one real run; the pair is only ever a mis-transcription,
+  // and it resolves toward the alarm. It cannot cry wolf: a genuine clean run emits
+  // no `PRESERVED` line at all (it says REMOVED/DELETED/KEPT/SKIPPED), and the
+  // usage-error and wrong-path exits print none either, so they still read 'failed'.
+  if (/^PRESERVED /m.test(text)) return { exit, outcome: 'preserved-unmarked' }
   if (exit === 0) return { exit, outcome: 'ok' }
   return { exit, outcome: 'failed' }
 }

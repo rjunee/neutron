@@ -1323,6 +1323,29 @@ describe('inner-workflow.mjs — worktree cleanup on ALL paths, destructive on N
       expect(SRC).toContain('cleanup:worktree FAILED')
       expect(SRC).toContain('this is not a preservation')
     })
+
+    test('a mis-transcribed NON-ZERO code does not outrank PRESERVED records either', () => {
+      // The 'reported 0' case above was fixed by letting the transcript win — but
+      // only for 0 and "no code at all". Every OTHER mis-transcription (1, 2, 127,
+      // a negative, a stringified one) still fell through to 'failed', whose log
+      // line reads "NOTHING was inspected or removed (this is not a preservation)".
+      // That is the opposite of what the transcript in the same log says, and it
+      // sends the operator away from work that is sitting on disk.
+      const raw = 'PRESERVED worktree /wt reason=dirty\n  ?? brand-new.ts\nRESULT preserved=1 removed=0'
+      for (const reported of [1, 2, 127, -1, '2', 3.5]) {
+        expect(classify(reported, raw).outcome).toBe('preserved-unmarked')
+      }
+      // The script's OWN marker saying 3 while the agent typed something else is
+      // the same story: the records decide.
+      expect(classify(2, `${raw}\n___EXIT=3`).outcome).toBe('preserved-unmarked')
+      // The log line names the mis-reported number so the operator can see the
+      // disagreement rather than being quietly overruled.
+      expect(SRC).toContain('mis-reported as')
+      // NO CRY WOLF: the genuine never-ran exits emit no PRESERVED record at all,
+      // so they are untouched by this and still read as a cleanup FAILURE.
+      expect(classify(2, 'worktree-cleanup.sh: usage: …').outcome).toBe('failed')
+      expect(classify(127, 'bash: no such file').outcome).toBe('failed')
+    })
   })
 
   test('the top-level return carries the Workflow result API shape', () => {
