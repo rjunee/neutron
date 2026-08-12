@@ -203,17 +203,33 @@ list is reported as *could not read* rather than classified.
 
 Required whenever the PR changes **executable surface**: any
 executable-suffix file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
-`.cjs`, `.sh`, `.py`, `.sql`, `.awk`) that is not a `*.test.*` file and not
+`.cjs`, `.sh`, `.py`, `.sql`, `.awk`, matched **case-insensitively** — the
+suffixes are spelled lowercase and were compared against the raw basename, so
+`app/Thing.TSX` classified as prose) that is not a `*.test.*` file and not
 inside a `__tests__/` or `docs/` subtree; any **extensionless** file directly
 under `bin/` or `scripts/` (a shebang script has no extension by convention, so
 suffix matching alone classified `bin/neutron` — the CLI entry point — as prose);
-anything under `.github/workflows/` or `.githooks/` (an edit there can disable
-gating outright); and repo-root test-selection config (`package.json`,
-`bunfig.toml`, `tsconfig.json`, `tsconfig.base.json`, `eslint.config.mjs`,
-`.dependency-cruiser.cjs`) — because an edit there can deselect a suite, and the
-exemption has to be judged on the file's power rather than on its typical diff.
+anything under `.github/workflows/`, `.github/actions/` or `.githooks/` (an edit
+in any of them can disable gating outright — a composite action is the body of a
+step, i.e. workflow code one directory over); and test-selection config
+(`package.json`, `bunfig.toml`, `tsconfig.json`, `tsconfig.base.json`,
+`eslint.config.mjs`, `.dependency-cruiser.cjs`) matched **by basename at any
+depth** — because an edit there can deselect a suite, and the exemption has to be
+judged on the file's power rather than on its typical diff.
 `tsconfig.base.json` is the config every other one extends, so it sets the type
-surface for the whole tree.
+surface for the whole tree. The any-depth rule is the same correction one level
+out: the set used to be consulted only for single-segment paths, so
+`tsconfig.json` gated and `app/tsconfig.json` did not, while this tree carries
+dozens of per-package configs holding exactly that power (a package's `test`
+script, its `include`, its `exclude`). The `__tests__/`, `node_modules/` and root
+`docs/` exemptions are applied **first**, so a vendored or prose copy of one of
+those filenames still does not gate.
+
+The `*.test.*` exemption is deliberately left **case-sensitive**, which is the one
+asymmetry here: relaxing it is the fail-*open* direction (it would let a
+production module renamed `Thing.TEST.ts` stop owing evidence), while the strict
+form only asks a differently-capitalised test file for evidence a reviewer can
+waive.
 
 A **rename** is classified by both ends. GitHub reports one under its destination
 path only, so judging the destination alone let

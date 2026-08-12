@@ -217,6 +217,39 @@ describe('the gate rejects an unreviewed PR and accepts a reviewed one', () => {
     expect(h.output()).toContain(OLD.slice(0, 12))
   })
 
+  test('a NEAR-MISS sha does not satisfy the head — the comparison is over the whole 40, not a prefix', async () => {
+    // WHY THIS CASE AND NOT THE ONE ABOVE. Every other sha fixture in this file
+    // differs from HEAD at character 0 (`a`/`b`/`c`/`f` repeated), so a comparison
+    // truncated to the abbreviated form CI logs — `.slice(0, 7)`, the shape a
+    // "make the log and the check agree" refactor reaches for — rejected all of
+    // them and survived the entire suite green. A reviewer ran exactly that mutant
+    // and it lived. The premise of this gate is that a verdict names THE commit it
+    // examined, so a sha sharing 39 characters with the head is a different tree
+    // and must be refused like any other.
+    const nearMiss = `${'b'.repeat(39)}c`
+    expect(nearMiss).not.toBe(HEAD)
+    expect(nearMiss.slice(0, 12)).toBe(HEAD.slice(0, 12))
+    const h = harness({ comments: [verdictBlock(nearMiss)] })
+    expect(await runGate(h.deps)).toBe(1)
+    expect(h.output()).toContain('the reviewed tree is not the tree being merged')
+    // Through the pure function too, at both ends of the sha: a mutant that
+    // compares only a prefix and one that compares only a suffix are both refused.
+    expect(verdictFailures(parseVerdict(verdictBlock(nearMiss)), HEAD, { touchesSource: false })).toHaveLength(1)
+    expect(
+      verdictFailures(parseVerdict(verdictBlock(`c${'b'.repeat(39)}`)), HEAD, { touchesSource: false }),
+    ).toHaveLength(1)
+    // And the near-miss is a genuine near-miss: the ONLY reason it fails is the sha.
+    expect(verdictFailures(parseVerdict(verdictBlock(HEAD)), HEAD, { touchesSource: false })).toHaveLength(0)
+  })
+
+  test('case is not a difference — a verdict may spell the sha in either case', () => {
+    // The comparison lowercases both sides on purpose (git and the API disagree on
+    // casing in places), and that is the one difference it is allowed to ignore.
+    expect(
+      verdictFailures(parseVerdict(verdictBlock(HEAD.toUpperCase())), HEAD, { touchesSource: false }),
+    ).toHaveLength(0)
+  })
+
   test('the newest verdict wins, so a re-review supersedes a stale one', async () => {
     const h = harness({ comments: [verdictBlock(OLD), 'discussion', verdictBlock(HEAD)] })
     expect(await runGate(h.deps)).toBe(0)
@@ -398,6 +431,59 @@ describe('mutation evidence is owed by executable surface, not by prose', () => 
 
   test('the shared base tsconfig is gated — it sets the type surface every other config extends', () => {
     expect(touchesGatedSurface('tsconfig.base.json')).toBe(true)
+  })
+
+  test('test-selection config is gated at ANY depth, not only at the repo root', () => {
+    // The set was consulted only for single-segment paths, so `tsconfig.json` gated
+    // and `app/tsconfig.json` did not — and this tree carries dozens of per-package
+    // `tsconfig.json` and `package.json` files holding exactly the power the root
+    // ones are gated for: a package's `test` script, its `include`, its `exclude`.
+    // Same hole class already closed at the root when `tsconfig.base.json` was added.
+    for (const gated of [
+      'app/tsconfig.json',
+      'open/package.json',
+      'packages/core/tsconfig.base.json',
+      'tools/bunfig.toml',
+    ]) {
+      expect(touchesGatedSurface(gated)).toBe(true)
+    }
+    // The root spellings still gate, which is the control for the change above.
+    for (const gated of ['tsconfig.json', 'package.json', 'bunfig.toml']) {
+      expect(touchesGatedSurface(gated)).toBe(true)
+    }
+    // …and the exemptions still win, because a vendored or prose copy selects
+    // nothing that runs here.
+    expect(touchesGatedSurface('node_modules/left-pad/package.json')).toBe(false)
+    expect(touchesGatedSurface('docs/examples/package.json')).toBe(false)
+  })
+
+  test('a composite action is workflow code one directory over, and gates like one', () => {
+    // `.github/actions/**` is the BODY of a step. None exists in this tree today,
+    // which is precisely when the hole is cheapest to close: the classifier should
+    // not depend on nobody having made the directory yet — the same reasoning that
+    // put `open/docs/handler.ts` on the gated side.
+    expect(touchesGatedSurface('.github/actions/setup/action.yml')).toBe(true)
+    expect(touchesGatedSurface('.github/actions/setup/run.js')).toBe(true)
+    // And the rest of `.github` is not workflow code: an issue template is prose.
+    expect(touchesGatedSurface('.github/ISSUE_TEMPLATE/bug.md')).toBe(false)
+  })
+
+  test('an UPPERCASE extension is the same extension — capitalisation is not an exemption', () => {
+    // `EXEC_SUFFIXES` is spelled lowercase and was compared against the raw
+    // basename, so `app/Thing.TSX` and `scripts/Run.SH` classified as prose. A
+    // classifier that can be walked around by holding shift is one that can be
+    // walked around.
+    for (const gated of ['app/Thing.TSX', 'scripts/Run.SH', 'open/Composer.TS', 'tools/Gen.MJS']) {
+      expect(touchesGatedSurface(gated)).toBe(true)
+    }
+    // A genuinely non-executable suffix is still prose in any case.
+    expect(touchesGatedSurface('app/assets/Icon.PNG')).toBe(false)
+    // The `*.test.*` EXEMPTION stays case-sensitive on purpose: relaxing it is the
+    // fail-OPEN direction. A differently-capitalised test file is asked for
+    // evidence it can decline in review; the reverse would let a production module
+    // renamed `Thing.TEST.ts` stop owing any.
+    expect(touchesGatedSurface('open/Thing.TEST.ts')).toBe(true)
+    expect(touchesGatedSurface('open/thing.test.ts')).toBe(false)
   })
 
   test('a rename cannot hide the surface it moved off', async () => {
@@ -1560,7 +1646,14 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     // required context instead of satisfying it, which is the inversion of what a
     // required check normally does with a skip.
     expect(aggregator).toMatch(/github\.event_name\s*\}\}"\s*=\s*"pull_request"/)
-    expect(aggregator).toMatch(/needs\.trident-verdict\.result\s*\}\}"\s*!=\s*"success"/)
+    // THE WHOLE LINE, anchored at both ends. A substring match is satisfied by
+    // `… != "success" ] && [ "…" != "skipped" ]`, which is the exact widening this
+    // assertion exists to refuse: `skipped` treated as a failure is the inversion
+    // the comment in ci.yml claims and nothing was checking it. A reviewer appended
+    // that clause and the suite stayed green.
+    expect(aggregator).toMatch(
+      /^ +&& \[ "\$\{\{ needs\.trident-verdict\.result \}\}" != "success" \];\s*then[ \t]*$/m,
+    )
     // AND THE BRANCH EXITS NON-ZERO, asserted against THAT branch rather than the
     // whole aggregator. An unanchored `/exit 1/` over the whole step is satisfied by
     // the shard loop's own `exit 1` twenty lines above, so flipping this one to

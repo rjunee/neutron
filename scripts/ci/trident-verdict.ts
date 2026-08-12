@@ -452,11 +452,25 @@ const EXEMPT_SEGMENTS = new Set(['__tests__', 'node_modules'])
  */
 const ROOT_EXEMPT_DIRS = new Set(['docs'])
 /**
- * Repo-root files that can select or deselect what CI runs. An edit here can
- * deselect a suite, so the file's POWER is what gates it, not its typical diff
- * (the common edit really is a harmless dependency bump).
+ * Files that can select or deselect what CI runs. An edit here can deselect a
+ * suite, so the file's POWER is what gates it, not its typical diff (the common
+ * edit really is a harmless dependency bump).
+ *
+ * MATCHED BY BASENAME AT ANY DEPTH, which is the correction from the previous
+ * round. The set was consulted only when the path had ONE segment, so
+ * `tsconfig.json` gated and `app/tsconfig.json` did not — and this tree carries
+ * dozens of per-package `tsconfig.json` and `package.json` files that hold exactly
+ * the power the root ones are gated for (a package's `test` script, its `include`,
+ * its `exclude`). That is the same hole class already closed at the root when
+ * `tsconfig.base.json` was added beside `tsconfig.json`: the root-only spelling
+ * gated the file people think of and left the ones that actually select the tests
+ * of a package classified as prose.
+ *
+ * Lowercased on both sides for the same reason the executable suffixes are — a
+ * classifier that can be walked around by capitalisation is a classifier that can
+ * be walked around.
  */
-const ROOT_TEST_SELECTION = new Set([
+const TEST_SELECTION_CONFIG = new Set([
   'package.json',
   'bunfig.toml',
   'tsconfig.json',
@@ -480,11 +494,22 @@ const EXECUTABLE_DIRS = new Set(['bin', 'scripts'])
 /**
  * True when a changed file is on the surface that owes mutation evidence.
  *
- * Gated: `.github/workflows/**` and `.githooks/**` (an edit there can disable
- * gating outright); repo-root test-selection config; and any executable-suffix
- * file that is not a `*.test.*` file, not inside a `__tests__/` subtree at any
- * depth, and not under the root `docs/` tree. A `docs` directory NESTED somewhere
- * else is not prose and does not exempt — `open/docs/handler.ts` gates.
+ * Gated: `.github/workflows/**`, `.github/actions/**` and `.githooks/**` (an edit
+ * in any of them can disable gating outright — a composite action is the body of a
+ * step, so it is workflow code living one directory over, and none exists in this
+ * tree today, which is exactly when a classifier hole is cheapest to close);
+ * test-selection config by BASENAME AT ANY DEPTH; and any executable-suffix file
+ * that is not a `*.test.*` file, not inside a `__tests__/` subtree at any depth,
+ * and not under the root `docs/` tree. A `docs` directory NESTED somewhere else is
+ * not prose and does not exempt — `open/docs/handler.ts` gates.
+ *
+ * SUFFIXES ARE MATCHED CASE-INSENSITIVELY. `EXEC_SUFFIXES` is spelled lowercase and
+ * was compared against the raw basename, so `app/Thing.TSX` and `scripts/Run.SH`
+ * classified as prose. Nothing in this tree is spelled that way, and "no file is
+ * currently named like that" is not a guard. The `*.test.*` EXEMPTION is left
+ * case-sensitive on purpose: relaxing it is the fail-OPEN direction (it would let
+ * `open/Thing.TEST.ts` stop owing evidence), and the strict form merely asks a
+ * differently-capitalised test file for evidence it can decline in review.
  *
  * NOT gated, deliberately rather than silently: prose (`**\/*.md`, including
  * normative documents — their overclaims are review's to catch), lockfiles (they
@@ -495,14 +520,17 @@ const EXECUTABLE_DIRS = new Set(['bin', 'scripts'])
  */
 export function touchesGatedSurface(path: string): boolean {
   const parts = path.split('/')
-  if (parts.length === 1 && ROOT_TEST_SELECTION.has(parts[0]!)) return true
-  if (parts[0] === '.github' && parts[1] === 'workflows') return true
+  if (parts[0] === '.github' && (parts[1] === 'workflows' || parts[1] === 'actions')) return true
   if (parts[0] === '.githooks') return true
   const base = parts[parts.length - 1]!
+  const lowerBase = base.toLowerCase()
   if (/\.test\.[a-z]+$/.test(base)) return false
   if (parts.length > 1 && ROOT_EXEMPT_DIRS.has(parts[0]!)) return false
   if (parts.slice(0, -1).some((seg) => EXEMPT_SEGMENTS.has(seg))) return false
-  if (EXEC_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true
+  // After the exemptions, not before: a `node_modules/**/package.json` is vendored
+  // and a `docs/**` one is prose, and neither selects what CI runs here.
+  if (TEST_SELECTION_CONFIG.has(lowerBase)) return true
+  if (EXEC_SUFFIXES.some((suffix) => lowerBase.endsWith(suffix))) return true
   // Extensionless file in an executable directory: a shebang script or the CLI
   // entry point. `.`-less is the test, so `bin/neutron` gates and `bin/logo.svg`
   // still falls through to the suffix rule above.

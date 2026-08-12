@@ -670,5 +670,74 @@ does. It now runs both files.
   vote, is the evidence. Re-run the kimi lane before any approval on this PR calls
   itself four-lane.
 
+### Round 9 — the guards were right and four of them were unproven
+
+Nothing in this round is a live fail-open. Every finding is a guard whose *direction*
+no test pinned, which is the same defect one level out: a guard with code and no
+coverage is a guard a later refactor removes to applause. Each was reproduced by
+running the mutant before the fix was written.
+
+1. **The head-SHA comparison was pinned only against shas that differ at character
+   0.** Every fixture in the suite is `'a'`/`'b'`/`'c'`/`'f'` repeated forty times, so
+   `verdict.commit.slice(0, 7) !== headSha.slice(0, 7)` — the shape a "make the check
+   agree with the abbreviated form the log prints" refactor reaches for — rejected all
+   of them and **survived the whole suite green**. That comparison is the entire
+   premise of this gate. A near-miss fixture (`'b'.repeat(39) + 'c'`, sharing the first
+   39 characters with the head) now fails it, at both ends of the sha, with a
+   same-verdict control proving the sha is the *only* reason the near-miss fails and a
+   case-difference control proving casing is still the one difference it ignores.
+2. **Test-selection config was gated only at the repo root.** `parts.length === 1 &&
+   TEST_SELECTION_CONFIG.has(...)` meant `tsconfig.json` gated and `app/tsconfig.json`
+   did not, across ~52 `tsconfig.json` and ~40 `package.json` files in this tree that
+   each hold exactly the power the root ones are gated for. This is the same hole the
+   PR itself closed one level in when it added `tsconfig.base.json` beside
+   `tsconfig.json`. Matched by basename at any depth now, *after* the `__tests__`,
+   `node_modules` and root-`docs` exemptions, so a vendored or prose copy still does
+   not gate. Bounded either way: a verdict was always required — only the mutation
+   -evidence clause was waivable through this hole.
+3. **`.github/actions/**` was not gated surface.** A composite action is the body of a
+   step: workflow code one directory over. None exists in this tree, which is when the
+   hole is cheapest to close — the same reasoning that put `open/docs/handler.ts` on
+   the gated side while no such file existed either.
+4. **Suffix classification was case-sensitive**, so `app/Thing.TSX` and
+   `scripts/Run.SH` classified as prose. The `*.test.*` *exemption* is deliberately
+   left case-sensitive and that asymmetry is now written down: relaxing it is the
+   fail-open direction.
+5. **The aggregator's `!= "success"` was pinned by a substring**, so appending
+   `&& [ "…" != "skipped" ]` — the exact widening the condition exists to refuse —
+   survived green. Anchored to the whole line now. Not live today (the job's `if:` is
+   always true on PRs), but the skipped-as-failure rationale ci.yml states in prose
+   had no coverage at all.
+6. **The battery's summary line called STALE-PATTERN and BROKEN mutants "survived".**
+   Three different facts under one word, in the line whose whole job is to be pasted
+   into this file as evidence. It reports `N NOT caught (S survived, R stale or
+   broken)` now.
+
+| mutant | test that goes RED |
+| --- | --- |
+| `sha-comparison-prefix-only` | a NEAR-MISS sha does not satisfy the head — the comparison is over the whole 40, not a prefix |
+| `test-selection-config-root-only` | test-selection config is gated at ANY depth, not only at the repo root |
+| `github-actions-dir-not-gated` | a composite action is workflow code one directory over, and gates like one |
+| `exec-suffix-case-sensitive` | an UPPERCASE extension is the same extension — capitalisation is not an exemption |
+| `ci-aggregator-excuses-a-skipped-verdict` | the aggregator demands success on a PR — a skipped verdict job cannot satisfy it |
+
+### Verification (round 9)
+
+* `bun test scripts/ci/trident-verdict.test.ts scripts/ci/ci-workflow.test.ts` —
+  **161 pass, 0 fail**.
+* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **69 applied, 69 caught, 0
+  NOT caught**. The five new rows above were read off that run.
+* **The two load-bearing mutants were re-run BY HAND on this tip**, off the battery,
+  because the adoption instruction for this round required verifying them rather than
+  taking an earlier round on trust:
+  * `ci.yml`'s verdict step gutted to `run: echo "skipped"` — the defect that once
+    left **118 pass / 0 fail and a SUCCEEDING job** — now reds 1 test (`ci.yml defines
+    a trident-verdict job that RUNS the gate script`) at 160 pass / 1 fail.
+  * the paginator's `if (batch.length < PER_PAGE) return items` reduced to `return
+    items`, the shape under which a >100-file PR failed open — reds 4 tests at 157
+    pass / 4 fail, across both the files list and the comments list.
+* `bash scripts/ci/typecheck-all.sh` — 51 tsconfigs, all pass. `bash
+  scripts/ci/lint.sh` — 0 found across every gate.
+
 **Managed needs the same gate**, and that is a separate PR in that repository —
 never one change spanning both trees.

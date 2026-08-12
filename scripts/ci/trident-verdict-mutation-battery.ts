@@ -52,6 +52,16 @@ const TESTS = ['scripts/ci/trident-verdict.test.ts', 'scripts/ci/ci-workflow.tes
 const MUTANTS: [string, string, string][] = [
   // ---- the SHA keying, which is the whole premise -----------------------------
   ['sha-comparison-dropped', 'if (verdict.commit.toLowerCase() !== headSha.toLowerCase()) {', 'if (false) {'],
+  [
+    // The comparison WEAKENED rather than removed — a "make the check agree with the
+    // abbreviated form the log prints" refactor. Every sha fixture in the suite used
+    // to differ at character 0, so this mutant rejected all of them and survived the
+    // whole suite green while accepting any verdict sharing a 7-char prefix with the
+    // head.
+    'sha-comparison-prefix-only',
+    'if (verdict.commit.toLowerCase() !== headSha.toLowerCase()) {',
+    'if (verdict.commit.toLowerCase().slice(0, 7) !== headSha.toLowerCase().slice(0, 7)) {',
+  ],
   ['full-sha-unchecked', 'if (!FULL_SHA.test(commit)) {', 'if (false) {'],
   // ---- the review actually happened and reported clean ------------------------
   ['codex-ran-unchecked', 'if (!verdict.codexRan) {', 'if (false) {'],
@@ -93,6 +103,25 @@ const MUTANTS: [string, string, string][] = [
     'nested-docs-dir-exempted',
     "if (parts.length > 1 && ROOT_EXEMPT_DIRS.has(parts[0]!)) return false",
     "if (parts.slice(0, -1).some((seg) => ROOT_EXEMPT_DIRS.has(seg))) return false",
+  ],
+  [
+    // Test-selection config back to root-only, which leaves the ~52 per-package
+    // `tsconfig.json` and ~40 `package.json` files in this tree classified as prose.
+    'test-selection-config-root-only',
+    'if (TEST_SELECTION_CONFIG.has(lowerBase)) return true',
+    'if (parts.length === 1 && TEST_SELECTION_CONFIG.has(lowerBase)) return true',
+  ],
+  [
+    // A composite action is the body of a step: workflow code one directory over.
+    'github-actions-dir-not-gated',
+    "if (parts[0] === '.github' && (parts[1] === 'workflows' || parts[1] === 'actions')) return true",
+    "if (parts[0] === '.github' && parts[1] === 'workflows') return true",
+  ],
+  [
+    // Suffix matching back to case-sensitive, so `app/Thing.TSX` is prose.
+    'exec-suffix-case-sensitive',
+    'if (EXEC_SUFFIXES.some((suffix) => lowerBase.endsWith(suffix))) return true',
+    'if (EXEC_SUFFIXES.some((suffix) => base.endsWith(suffix))) return true',
   ],
   [
     // MEMBER back in the trusted set: on an org-owned repository that is a read-only
@@ -272,6 +301,16 @@ const CI_WORKFLOW_MUTANTS: [string, string, string][] = [
     '&& [ "${{ needs.trident-verdict.result }}" != "success" ]; then',
     '&& [ "${{ needs.trident-verdict.result }}" = "failure" ]; then',
   ],
+  [
+    // The condition WIDENED rather than inverted. `skipped` treated as a failure is
+    // the inversion ci.yml's own comment claims and the only assertion on it was a
+    // substring, which this clause leaves satisfied — so a verdict job that never
+    // ran would satisfy the required context on a PR.
+    'ci-aggregator-excuses-a-skipped-verdict',
+    '&& [ "${{ needs.trident-verdict.result }}" != "success" ]; then',
+    '&& [ "${{ needs.trident-verdict.result }}" != "success" ] \\\n' +
+      '             && [ "${{ needs.trident-verdict.result }}" != "skipped" ]; then',
+  ],
   ['ci-issues-scope-deleted', '      issues: read\n', ''],
   [
     // The job's `if:` has the same shape as the re-run workflow's predicate: every
@@ -447,7 +486,17 @@ for (const [file, name, from, to] of CASES) {
 }
 
 const caught = results.filter((r) => r.verdict === 'CAUGHT').length
-console.log(`\n${results.length} mutants applied, ${caught} caught, ${results.length - caught} survived`)
+const survived = results.filter((r) => r.verdict === 'SURVIVED').length
+// "NOT CAUGHT", not "survived". The three non-CAUGHT verdicts are different facts:
+// SURVIVED is a hole in the tests, STALE-PATTERN is a mutant that no longer applies,
+// BROKEN is a measurement that did not happen. Lumping them under "survived"
+// overstated the first and hid the other two behind it — in a summary line whose
+// whole job is to be pasted into an as-built entry as evidence. The exact split
+// follows on the next line, and the per-mutant detail above it.
+console.log(
+  `\n${results.length} mutants applied, ${caught} caught, ${results.length - caught} NOT caught ` +
+    `(${survived} survived, ${results.length - caught - survived} stale or broken)`,
+)
 for (const { name, verdict } of results) {
   if (verdict !== 'CAUGHT') console.log(`  ${verdict}: ${name}`)
 }
