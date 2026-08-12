@@ -573,7 +573,7 @@ export class InterviewEngine implements EngineInternals {
    * (`onboarding/interview/import-running-cron.ts`) on that module's
    * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS`, or whatever `interval_ms` the
    * composer input overrides it with — read the figure there, it has been
-   * lowered once — while an instance is at `phase=import_running` with
+   * lowered once — while a project is at `phase=import_running` with
    * `import_job_id` set. It:
    *
    *   1. Reads state. If the instance is not at `import_running` OR has no

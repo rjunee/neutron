@@ -157,7 +157,7 @@ export interface ImportRunningHandlerDeps {
  * `ONBOARDING_IMPORT_RUNNING_HANDLER_NAME`.
  *
  * Behavior:
- *   1. Scan `onboarding_state` for THIS instance's rows, filtering to
+ *   1. Scan `onboarding_state` for THIS project's rows, filtering to
  *      `phase = 'import_running'` AND `import_job_id` non-empty in the
  *      phase_state JSON. The primary key is `(project_slug, user_id)`
  *      (`migrations/0043_onboarding_state_wow_pushed_at.sql`), so the
@@ -217,7 +217,7 @@ export function buildImportRunningHandler(
     // not as a live alarm.)
     //
     // ── WHY THIS IS NO LONGER LOGGED UNCONDITIONALLY (2026-08-10) ──────────
-    // It was, and on an idle instance that is a tick every 5s forever with
+    // It was, and with no import in flight that is a tick every 5s forever with
     // `in_flight_imports=0` — measured at ~17k lines/day on the owner's box,
     // where it BURIED everything else: diagnosing a live turn meant discovering
     // the flood first and filtering it out, and the turn's own activity was
@@ -260,10 +260,11 @@ export function buildImportRunningHandler(
     // `input.project_slug`), so that is one window in practice; the key is
     // scoping, not a claim that anything sweeps more than one. It is in-memory on
     // purpose: a restart SHOULD log immediately, since "did it come back up?" is
-    // exactly the question a heartbeat answers — pinned by 'a restarted process logs
-    // its first idle tick at once' in tests/integration/import-running-cron-tick.test.ts,
-    // which stands in for the process boundary by clearing the module-level window and
-    // rebuilding the handler (it does not spawn a process).
+    // exactly the question a heartbeat answers — pinned by 'a CLEARED window and a
+    // rebuilt handler log the first idle tick at once' in
+    // tests/integration/import-running-cron-tick.test.ts, which stands in for the
+    // process boundary by clearing the module-level window and rebuilding the handler
+    // (it does not spawn a process).
     const idle = rows.length === 0
     const tickEmitter = idle
       ? tickLog.rateLimited(`idle_tick:${ctx.owner_slug}`, IDLE_TICK_LOG_INTERVAL_MS)

@@ -20,12 +20,11 @@
  * `logger/__tests__/logger.test.ts` is where the behavior is pinned; this
  * docblock is not. Read a case rather than a sentence, and when you change the
  * behavior, change a case rather than adding a sentence. It is not a COMPLETE
- * specification, and one gap is worth DISCLOSING rather than characterizing: no
- * case there uses a throwing sink (`grep -n throw
- * logger/__tests__/logger.test.ts` returns nothing, while the same grep for
- * `rateLimited` over that file returns many hits — so the empty result is a
- * gap, not a blind tool). The attempt-vs-delivery note below therefore rests on
- * an execution check recorded in `docs/AS_BUILT.md`, not on the suite.
+ * specification. Until this round it did not cover the throwing-sink half at
+ * all, and the attempt-vs-delivery note below rested on a one-off execution
+ * check written into `docs/AS_BUILT.md` — a normative claim with nothing under
+ * it that had to be kept green. `a THROWING sink CONSUMES the window` is now
+ * that claim, executable.
  *
  * This docblock states INTENT on purpose. Earlier revisions restated the
  * predicate in prose, then enumerated the deviations from the originals, then
@@ -77,7 +76,8 @@
  *     let a persistently-throwing sink re-attempt on every single call,
  *     precisely the flood the window exists to prevent. A caller that needs a
  *     DELIVERY bound must make its own sink non-throwing; this primitive will
- *     not do it for them.
+ *     not do it for them. Pinned by `a THROWING sink CONSUMES the window` —
+ *     which is what a swap of the two lines in `emit` now has to redden.
  *
  *     AN UNCOMPUTABLE WINDOW COUNTS AS DUE, NOT AS SILENCE. `ms` used to be
  *     unvalidated, and `rateLimited(key, NaN)` therefore suppressed the key
@@ -177,9 +177,8 @@ export interface Logger extends LogEmitter {
    * input only: a finite `ms` is honoured as written, however large, so
    * picking a window that is not effectively forever is the caller's job. The head
    * docblock gives the reasons, the condition itself is in the implementation
-   * below, and `logger/__tests__/logger.test.ts` holds the pinned cases — not
-   * including the throwing-sink half, which is the gap the head docblock
-   * discloses.
+   * below, and `logger/__tests__/logger.test.ts` holds the pinned cases — all
+   * three of these included, the throwing-sink one as of this round.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }

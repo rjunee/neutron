@@ -500,15 +500,56 @@ describe('rateLimited', () => {
     // clock advanced by centuries — so that the prose and the condition cannot
     // drift apart again, in either direction: a future round that adds a size
     // cap to make the universal true has to come here and say so.
+    //
+    // `Number.isFinite(Number.MAX_VALUE) === true` is a fact about the language,
+    // not about this repo, so it is stated here and NOT asserted: an expect() that
+    // no change to this tree could ever redden proves nothing and inflates the
+    // count this file's measurements quote. The five-attempt/one-line assertion
+    // below is the whole of the discrimination.
     let now = 0
     const { sink, lines } = capture()
     const log = createLogger('max-ms', { sink, now: () => now })
-    expect(Number.isFinite(Number.MAX_VALUE)).toBe(true)
     for (let i = 0; i < 5; i += 1) {
       log.rateLimited('k', Number.MAX_VALUE).info('beat')
       now += 6_307_200_000_000 // ~200 years per attempt
     }
     expect(lines.map((l) => l.line)).toEqual(['[max-ms] event=beat'])
+  })
+
+  test('a THROWING sink CONSUMES the window — the bound is on attempts, not deliveries', () => {
+    // The head docblock's "THE BOUND IS ON ATTEMPTS, NOT ON DELIVERED LINES" clause had
+    // nothing executable under it: moving `onEmit?.()` to AFTER the `sink(...)` call in
+    // `emit` survived the entire suite, and the docblock disclosed that gap rather than
+    // closing it. This case closes it, on the wired path.
+    //
+    // The behaviour, not the bookkeeping: attempt 1 reaches the sink and throws; the
+    // attempt inside the window is REFUSED before the sink is reached, so it does not
+    // throw and the sink is not called a second time. That refusal is only possible if
+    // the window was stamped by an attempt that delivered nothing.
+    let now = 0
+    let sinkCalls = 0
+    const log = createLogger('throwing-sink', {
+      now: () => now,
+      sink: () => {
+        sinkCalls += 1
+        throw new Error('sink is down')
+      },
+    })
+
+    expect(() => log.rateLimited('k', 1_000).info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(1)
+
+    // Inside the window. With the stamp moved after the sink this line throws again and
+    // `sinkCalls` reaches 2 — a broken sink re-attempting on every single call, which is
+    // precisely the flood the window exists to stop.
+    now = 999
+    expect(() => log.rateLimited('k', 1_000).info('beat')).not.toThrow()
+    expect(sinkCalls).toBe(1)
+
+    // The window still expires normally: consuming it is not latching it.
+    now = 1_000
+    expect(() => log.rateLimited('k', 1_000).info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(2)
   })
 })
 

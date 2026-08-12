@@ -6,7 +6,7 @@
  * `ImportJobRunner` reaches `completed`. The original wiring polled
  * once inside `notifyImportUpload`, leaving the engine stranded at
  * `import_running` after Pass-1+Pass-2 finished. This test pins the
- * cron-tick fix: a per-instance cron that polls on the interval named by
+ * cron-tick fix: a per-project cron that polls on the interval named by
  * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` (lowered once, in 2026-05-21 — read
  * the figure there, not here) and advances the phase the
  * moment the runner's status flips to `completed`.
@@ -381,10 +381,20 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
   // Each case uses its OWN slug: the rate window is keyed by subsystem × key and the
   // key carries the slug, so distinct slugs keep the cases independent of EACH OTHER.
   // That is not enough on its own — the window is PROCESS-global state that outlives a
-  // test, so the reset below is what keeps the file independent of ITSELF. Without it a
-  // second pass in the same process (`bun test --rerun-each 2`) reuses run 1's stamps
-  // and some of these cases go red. (Not a count: the number depends on how many cases
-  // this block holds, and a number written here rots the next time one is added.)
+  // test, so the reset below is what keeps the file independent of ITSELF: a second pass
+  // in the same process reuses run 1's stamps for the same slug.
+  //
+  // The command that SHOWS it is filtered, and the distinction is the whole point of
+  // naming one here. Comment this reset out and
+  //
+  //   bun test tests/integration/import-running-cron-tick.test.ts \
+  //     -t 'the FIRST idle tick into an empty window logs' --rerun-each 2
+  //
+  // goes red on the second pass. The unfiltered `--rerun-each 2` over this file stays
+  // GREEN on that same mutant — the restart case below calls `resetLoggerStateForTests()`
+  // inline, which launders every earlier case's stamps before pass 2 reaches them. So a
+  // whole-file rerun does NOT prove this reset is load-bearing, and an earlier revision of
+  // this comment claimed it did. Reach for the filtered form when checking that claim.
   beforeEach(resetLoggerStateForTests)
 
   const T0 = 1_700_000_000_000
@@ -469,16 +479,18 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     expect(tickLines()).toEqual([tickLine(slug, 0), tickLine(slug, 0)])
   })
 
-  test('a restarted process logs its first idle tick at once — the window does not survive', async () => {
-    // The handler comment says the in-memory window is deliberate because "did it come
-    // back up?" is the question a heartbeat answers. This is that claim, executable.
+  test('a CLEARED window and a rebuilt handler log the first idle tick at once', async () => {
+    // The name states the seam this case actually drives, because the name is what gets
+    // quoted elsewhere: it clears module-level state and builds a second ticker. It
+    // spawns NOTHING. An earlier name said "a restarted process", which claimed an
+    // executable process boundary this body never crosses.
     //
-    // What a restart IS at this seam: the window lives in module-level state a new
-    // process starts empty, and the handler is rebuilt at boot
-    // (build-core-modules.ts). Clearing that state and building a second ticker is
-    // therefore a faithful stand-in — it is NOT a real process spawn, and this case
-    // does not claim to be one. It goes red if the window is ever moved somewhere a
-    // restart does not wipe.
+    // What it stands in FOR: the handler comment says the in-memory window is deliberate
+    // because "did it come back up?" is the question a heartbeat answers. A new process
+    // starts that module-level state empty and rebuilds the handler at boot
+    // (build-core-modules.ts), so clearing it and rebuilding is a faithful stand-in for
+    // the restart — and it goes red if the window is ever moved somewhere a restart does
+    // not wipe, which is the property worth pinning.
     const slug = 'idle-restart'
     const tick = makeTicker(slug)
     captureLogLines()

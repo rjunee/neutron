@@ -9334,13 +9334,17 @@ presents as the "it died" alarm the heartbeat exists to rule out. Negative elaps
 as due, and the emit re-stamps, so the window self-heals. Every `rateLimited` caller gets it.
 
 ⚠️ **The counts and the mutant table in this block describe THIS round and have since gone
-stale — read them as history, not as the current measurement.** Rounds 10 and 11 both touched
-both suites; the file total is now 11, not 10, and the table below predates the finite-window
-guard entirely. The re-measured figures and the current mutant set live in the round-11
-Verification block at the end of this entry. Left standing rather than rewritten because
-editing a past round's measurement to match today's tree destroys the record of what was
-actually run then — the forward pointer is the fix, and the rule this entry states two
-paragraphs below (re-run in the round that touches the tests) is the one that was missed.
+stale — read them as history, not as the current measurement.** Every later round touched
+both suites, and the table below predates the finite-window guard entirely. The current
+figures and mutant set live in the LAST **Verification** block of this entry — that is the
+pointer, and it is deliberately not a round number and not a count. **This banner itself
+shipped stale twice:** it named a file total ("now 11, not 10") that the next round's case
+falsified, and it named the round-11 block while round 12 was the last one. A banner whose
+job is to say "the number below rotted" cannot carry a number of its own. Left standing
+rather than rewritten because editing a past round's measurement to match today's tree
+destroys the record of what was actually run then — the forward pointer is the fix, and the
+rule this entry states two paragraphs below (re-run in the round that touches the tests) is
+the one that was missed.
 
 **Verification:** 7 new cases — 6 in `tests/integration/import-running-cron-tick.test.ts`
 (file total 4 → 10), five of which drive the REAL handler and assert on the REAL emitted line
@@ -10177,3 +10181,65 @@ restart case) — 132 pass, 0 fail, 244 expect() calls under `bun test --rerun-e
 caught the process-global window state. `scripts/ci/typecheck-all.sh` exit 0 across all 51
 tsconfigs, not `tsc -p .` alone; `scripts/ci/lint.sh` exit 0. ⚠️ The **kimi** lane was DEFERRED in
 round 11 as well — configured, called, and the call failed. This entry records no APPROVE either.
+
+**Round 13 — the disclosed mutation gap becomes a case, and three claims that were checkable were
+checked (PR #174).**
+
+📌 **A DISCLOSED gap is still a gap.** The head docblock's `THE BOUND IS ON ATTEMPTS, NOT ON
+DELIVERED LINES` clause had nothing executable under it, and the docblock said so in careful prose
+rather than closing it — honest, and still a normative claim about the ordering of two lines in
+`emit` that any refactor could silently invert. It is now `a THROWING sink CONSUMES the window —
+the bound is on attempts, not deliveries`, which drives a sink that throws and asserts the
+BEHAVIOUR: attempt 1 reaches the sink and throws, the attempt inside the window is refused before
+the sink is reached (so it does NOT throw, and the sink is not called twice), and the window still
+expires normally afterwards. Consuming a window is not latching it, and both halves are asserted.
+Disclosure was the right call while the gap stood; closing it is better, and it deletes the three
+sentences of prose that existed to apologise for it.
+
+📌 **The staleness banner on the round-9 block had itself gone stale — twice.** It read "the file
+total is now 11, not 10" while the file held 12, and pointed at the round-11 Verification block
+while round 12's was the last. A banner whose whole job is "the number below rotted" cannot carry a
+number of its own, so it now carries none: it points at *the LAST Verification block of this entry*,
+which is a pointer that no future round can falsify. Same class as everything else this entry has
+been fixing, one level up.
+
+📌 **A justification that names a command must name one that reproduces.** The comment over
+`beforeEach(resetLoggerStateForTests)` said removing the reset turns `bun test --rerun-each 2` red.
+It does not — measured 24 pass / 0 fail, because the restart case calls `resetLoggerStateForTests()`
+inline and launders every earlier case's stamps before pass 2 reaches them. The reset IS
+load-bearing; the command was wrong. The comment now names the FILTERED form that goes red
+(`-t 'the FIRST idle tick into an empty window logs' --rerun-each 2`, 1 fail) and states why the
+whole-file form does not, so the next reader who checks gets the red they were promised.
+
+Also in this round: the restart case was renamed to `a CLEARED window and a rebuilt handler log the
+first idle tick at once` — the old name claimed "a restarted process" and the body spawns nothing;
+the name is what gets quoted, and the handler comment in `import-running-cron.ts` quotes it. The
+tautological `expect(Number.isFinite(Number.MAX_VALUE)).toBe(true)` was deleted — an assertion no
+change to this repo could redden, inflating a count these blocks quote as a measurement; the fact is
+now stated in the comment where it belongs. And the `instance` vocabulary this diff had ADDED
+(`per-instance cron` in `onboarding-input.ts`, `while an instance is at` in `engine.ts`, `THIS
+instance's rows` and `on an idle instance` in the cron module, `per-instance cron` in the test
+header) is gone in favour of `per-project` / "no import in flight", matching the wording the same
+diff already used. Pre-existing `instance` prose on untouched lines was left alone.
+
+**Mutants, each asserted APPLIED by grep BEFORE its run was believed, each reverted by `cp` from a
+pre-edit backup with the grep re-run at 0:**
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| `onEmit?.()` moved to AFTER `sink(...)` in `emit` (stamp-after-sink) | post-edit form `grep -c` = 1 and pre-edit form = 0, then reversed on revert | **1 red — the new throwing-sink case alone**, where this same mutant survived the WHOLE suite last round |
+| `beforeEach(resetLoggerStateForTests)` commented out | `grep -c '// MUTANT beforeEach'` = 1 | **0 red unfiltered (24 pass)**, **1 red filtered** — the measurement that corrected the comment |
+| `resetLoggerStateForTests` stops clearing `rateLimitState` | `grep -c '^  rateLimitState.clear()'` = 0 | 2 red, including the RENAMED restart case — so the rename did not hollow it out |
+
+**Verification (round 13), re-measured this round:** `logger.test.ts` **53** (52 + the throwing-sink
+case), `import-running-cron-tick.test.ts` **12**, `import-running-cron-scheduler-boot.test.ts` **2**
+— **67 pass, 0 fail, 127 expect() calls** across the 3 files (one expect() fewer than the case count
+would suggest, because the tautological one was deleted). `scripts/ci/typecheck-all.sh` exit 0
+across all **51** tsconfigs, not `tsc -p .` alone; `scripts/ci/lint.sh` exit 0 on every gate.
+`ctx.owner_slug` — the field the new throttle keys on — was checked on a REAL emitted artifact
+rather than trusted by name: `[import-running-cron] event=tick project=alice in_flight_imports=0`,
+and it is a required non-optional `string` on `CronHandlerContext` (`cron/handlers.ts`) fed from the
+scheduler's `project_slug`, so there is no absent-field path that could silently disable the
+throttle. ⚠️ Cross-model lanes: this entry records no cross-model APPROVE. The **codex** and **kimi**
+lanes were DEFERRED in round 12 — configured, called, and the calls failed — and a configured
+reviewer that died leaves the panel INCOMPLETE.
