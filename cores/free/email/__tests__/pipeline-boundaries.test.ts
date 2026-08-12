@@ -27,6 +27,7 @@ import type {
 import { buildMultiAccountGmailClient } from '../src/multi-account.ts'
 import { escalateEmail } from '../src/pipeline/escalate.ts'
 import {
+  backlogCutoffKey,
   backlogDoneKey,
   CHECKPOINT_BACKLOG_DONE,
   runEmailPipelineTick,
@@ -50,9 +51,16 @@ function meta(id: string, subject = 'Action required: payment failed'): GmailMes
 function withStore(run: (store: EmailPipelineStore) => Promise<void>): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'email-boundary-'))
   const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
-  // These exercise the STEADY state, past the one-time backlog sweep.
+  // The pipeline is opt-in per account; `''` is the single-account sentinel.
+  store.setAccountEnabled('', true, null, NOW)
+  // These exercise the STEADY state, past the one-time backlog sweep. A
+  // finished sweep leaves BOTH marks — the completion flag AND the boundary it
+  // drew — and the fixture has to leave both: a completion with no recorded
+  // boundary is the shape of a mailbox that was turned off and on again, which
+  // correctly re-opens the sweep.
   store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
   store.setCheckpoint(backlogDoneKey(null), '1')
+  store.setCheckpoint(backlogCutoffKey(null), String(NOW))
   return run(store).finally(() => {
     store.close()
     rmSync(home, { recursive: true, force: true })

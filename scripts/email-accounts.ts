@@ -60,11 +60,12 @@ function main(): number {
     if (command === 'list') {
       const rows = store.listAccountSettings()
       if (rows.length === 0) {
-        // UNCONFIGURED IS NOT DISABLED, and saying "none" here would read as
-        // "nothing is being polled" — the opposite of what is happening.
+        // The allow-list is empty, so the pipeline is doing NOTHING. Say that
+        // outright: an operator reading "no settings" would reasonably assume
+        // the default is on, and the whole point of opting in is that it isn't.
         process.stdout.write(
-          'no per-account settings recorded — the pipeline currently polls EVERY connected account.\n' +
-            'enable one account to switch to the allow-list.\n',
+          'no accounts are enabled — the pipeline polls NOTHING.\n' +
+            'enable a mailbox to switch it on; anything not enabled stays invisible to it.\n',
         )
         return 0
       }
@@ -78,6 +79,9 @@ function main(): number {
       if (on === 0) {
         process.stdout.write('\nevery account is OFF — the pipeline polls nothing.\n')
       }
+      process.stdout.write(
+        `\nonly the accounts marked ON are polled; any connected mailbox not listed above is off.\n`,
+      )
       return 0
     }
 
@@ -87,20 +91,11 @@ function main(): number {
         return 2
       }
       const enable = command === 'enable'
-      // DISABLING INTO AN EMPTY LIST SILENCES EVERYTHING. Until the owner has
-      // enabled something, the pipeline polls every connected account; the
-      // first settings row is what flips it into allow-list mode. So
-      // `disable typo` on a fresh install would report that one imaginary
-      // account had been turned off while actually stopping every real
-      // mailbox. Refuse, and say which way round it works.
-      if (!enable && !store.hasCuratedAccounts()) {
-        process.stderr.write(
-          'nothing is enabled yet, so nothing can be disabled: the pipeline currently polls EVERY\n' +
-            'connected account. enable the ones you want first — the list becomes authoritative as\n' +
-            'soon as one account is on, and everything not on it is off.\n',
-        )
-        return 2
-      }
+      // A `disable typo` needs no guard under an opt-in default: an id nobody
+      // enabled is already off, so the mistake changes nothing and is reported
+      // as changing nothing. (It DID need one while absence meant "poll
+      // everything" — the first row flipped the pipeline into allow-list mode
+      // and silenced every real mailbox. That hazard is gone with the default.)
       const prior = store.getAccountSetting(account_id)
       const was_on = prior !== null && prior.enabled === 1
       if (enable || prior !== null) store.setAccountEnabled(account_id, enable, address ?? null)

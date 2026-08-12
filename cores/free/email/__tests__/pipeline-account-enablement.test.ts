@@ -12,6 +12,13 @@
  * the setting does — so the assertion is on the per-account client's call log,
  * not on the merged rows.
  *
+ * IT FAILS CLOSED (owner decision, 2026-08-12). Absence of a row means DISABLED,
+ * so an install where nothing has been enabled polls nothing at all. The first
+ * cut defaulted the other way to keep a fresh install from looking broken; the
+ * defaults are not symmetric, because a mailbox that posts to chat uninvited
+ * cannot be un-posted while a quiet one costs a switch. The price is paid by
+ * being LOUD, which is itself pinned here rather than left to a comment.
+ *
  * Every fixture address is `*.example.com`.
  */
 
@@ -110,10 +117,12 @@ function tick(
   store: EmailPipelineStore,
   delivered: string[],
   now: () => number = () => FIRST_FIRE,
+  log?: (message: string, fields?: Record<string, unknown>) => void,
 ): ReturnType<typeof runEmailPipelineTick> {
   return runEmailPipelineTick({
     gmail,
     store,
+    ...(log !== undefined ? { log } : {}),
     classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
     escalate: {
       deliver: async (_topic, envelope): Promise<unknown> => {
@@ -130,26 +139,64 @@ function tick(
 }
 
 describe('per-account enablement', () => {
-  test('UNCONFIGURED is not disabled — with no rows, every account is read', async () => {
+  test('UNCONFIGURED IS DISABLED — with no rows, no mailbox is read at all', async () => {
+    // THE DEFAULT, and the whole point of the owner's 2026-08-12 decision. A
+    // mailbox connected for Calendar or Drive must not become one the agent
+    // reads just because it is reachable. The cost — a fresh install that does
+    // nothing — is real and is paid by the log arm below, not by the default.
     await withStore(async (store) => {
       const fakes = {
         [KEEP]: accountFake([meta('k-1', BOOT - 86_400_000)]),
         [DROP]: accountFake([meta('d-1', BOOT - 86_400_000)]),
       }
-      await tick(fanOut(fakes), store, [])
-      // A fresh install must not silently do nothing.
-      expect(fakes[KEEP].lists.length).toBeGreaterThan(0)
-      expect(fakes[DROP].lists.length).toBeGreaterThan(0)
+      const r = await tick(fanOut(fakes), store, [])
+
+      expect(fakes[KEEP].lists).toEqual([])
+      expect(fakes[DROP].lists).toEqual([])
+      expect(r.scanned).toBe(0)
+      expect(r.precutoff).toBe(0)
+      // Not one row recorded either — an unenabled mailbox leaves no trace.
+      expect(store.getEmail('k-1', KEEP)).toBeNull()
+      expect(store.getEmail('d-1', DROP)).toBeNull()
     })
   })
 
-  test('a row that was never enabled does NOT flip the pipeline into allow-list mode', async () => {
-    // Defence in depth for the CLI's destructive-typo case: even if a
-    // disabled-only row reaches the store by some other path, it must not
-    // silence every real mailbox. Curation is proven by `enabled_at`, which is
-    // stamped only when something is actually turned ON.
+  test('an unconfigured pipeline SAYS SO on every tick', async () => {
+    // Failing closed is only defensible if the closed state is legible. A
+    // pipeline that is deliberately silent and one that is broken look
+    // identical in a log that reports only work done, and under an opt-in
+    // default the silent case is where every new install starts.
+    await withStore(async (store) => {
+      const logged: string[] = []
+      await tick(fanOut({ [KEEP]: accountFake([]) }), store, [], () => FIRST_FIRE, (m) =>
+        logged.push(m),
+      )
+      const line = logged.find((m) => m.includes('no enabled accounts'))
+      expect(line).toBeDefined()
+      // It must distinguish "never configured" from "all switched off" — the
+      // remedy differs, and a single message for both sends the owner looking
+      // for a setting they never made.
+      expect(line).toContain('none configured')
+
+      // …and the other case says the other thing.
+      const off: string[] = []
+      store.setAccountEnabled(KEEP, true, null, BOOT)
+      store.setAccountEnabled(KEEP, false, null, BOOT + 1_000)
+      await tick(fanOut({ [KEEP]: accountFake([]) }), store, [], () => FIRST_FIRE, (m) =>
+        off.push(m),
+      )
+      expect(off.find((m) => m.includes('every configured account is off'))).toBeDefined()
+    })
+  })
+
+  test('a disabled-only row enables nothing — a typo is inert, not load-bearing', async () => {
+    // Under the opt-out default this WAS destructive: the first row flipped the
+    // pipeline into allow-list mode, so `disable typo` silenced every real
+    // mailbox. Failing closed removes the hazard outright — a row nobody
+    // enabled is indistinguishable from a row that does not exist.
     await withStore(async (store) => {
       store.setAccountEnabled('never-enabled-typo', false, null, BOOT)
+      store.setAccountEnabled(KEEP, true, `${KEEP}@example.com`, BOOT)
       const fakes = {
         [KEEP]: accountFake([meta('k-1', BOOT - 86_400_000)]),
         [DROP]: accountFake([meta('d-1', BOOT - 86_400_000)]),
@@ -158,7 +205,57 @@ describe('per-account enablement', () => {
       await tick(fanOut(fakes), store, [])
 
       expect(fakes[KEEP].lists.length).toBeGreaterThan(0)
-      expect(fakes[DROP].lists.length).toBeGreaterThan(0)
+      expect(fakes[DROP].lists).toEqual([])
+    })
+  })
+
+  test('a backend that IGNORES account_ids still cannot reach a disabled mailbox', async () => {
+    // The allow-list is applied at the QUERY, which is the property worth
+    // having — a disabled mailbox is never contacted. But a guarantee that
+    // depends on a remote honouring a request parameter is not a guarantee, so
+    // the ingest path re-checks. Here the fan-out is replaced by a client that
+    // returns rows for a mailbox that was never enabled.
+    await withStore(async (store) => {
+      store.setAccountEnabled(KEEP, true, `${KEEP}@example.com`, BOOT)
+      const delivered: string[] = []
+      const leaky = {
+        async listMessages(): Promise<GmailListResult> {
+          return {
+            results: [
+              // Old enough for the SWEEP to want to record it as history…
+              { ...meta('leaked-old', BOOT - 300 * 86_400_000), account_id: DROP },
+              // …and new enough for the LIVE pass to want to classify it.
+              { ...meta('leaked-new', FIRST_FIRE + 1_000), account_id: DROP },
+            ] as GmailMessageMeta[],
+          }
+        },
+        async getMessage(): Promise<GmailMessageFull> {
+          throw new Error('a disabled mailbox must never be read')
+        },
+        async ensureLabel(): Promise<{ label_id: string }> {
+          return { label_id: 'Label_processed' }
+        },
+        async modifyMessage(): Promise<unknown> {
+          throw new Error('a disabled mailbox must never be written')
+        },
+      } as unknown as GmailClient
+
+      const r = await tick(leaky, store, delivered)
+
+      expect(delivered).toEqual([])
+      expect(r.scanned).toBe(0)
+      // NOT EVEN A ROW. Recording someone's mail as history is not a harmless
+      // read — it is a durable record of a mailbox the owner never turned on.
+      expect(r.precutoff).toBe(0)
+      expect(store.getEmail('leaked-old', DROP)).toBeNull()
+      expect(store.getEmail('leaked-new', DROP)).toBeNull()
+
+      // And a disabled mailbox appearing on a page must not drag the whole
+      // pipeline back into a sweep on the next tick either: "this account has
+      // no completion mark" is only a question worth asking about an account
+      // that is switched on.
+      const second = await tick(leaky, store, delivered)
+      expect(second.backlog_sweeping).toBe(false)
     })
   })
 

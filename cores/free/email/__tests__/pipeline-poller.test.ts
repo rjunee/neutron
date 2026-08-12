@@ -50,6 +50,12 @@ interface Harness {
 function harness(opts: { deliverThrows?: () => boolean; pushThrows?: boolean } = {}): Harness {
   const home = mkdtempSync(join(tmpdir(), 'email-pipeline-poll-'))
   const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
+  // OPT-IN DEFAULT: the pipeline polls nothing until a mailbox is enabled, so
+  // every tick fixture must turn one on. `''` is the single-account sentinel
+  // the in-memory backend stamps. Enabling AT `NOW` puts this account's
+  // history boundary exactly where activation used to put it, so these cases
+  // still assert the same line.
+  store.setAccountEnabled('', true, null, NOW)
   const seeded = buildSeededInMemoryGmailClient({ now: () => NOW })
   const bodiesRead: string[] = []
   const ensured: string[] = []

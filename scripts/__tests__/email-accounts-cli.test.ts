@@ -1,12 +1,17 @@
 /**
  * scripts/email-accounts.ts — the operator surface for per-account enablement.
  *
- * The arm that matters is the DESTRUCTIVE TYPO. The pipeline polls every
- * connected account until the owner enables one; the first settings row is what
- * flips it into allow-list mode. So a mistyped `disable` on a fresh install
- * would create that first row with nothing enabled — reporting that one
- * imaginary account had been turned off while actually silencing every real
- * mailbox. A CLI whose worst outcome is invisible is worse than no CLI.
+ * The arms that matter are the ones where the owner is TOLD THE WRONG THING.
+ * The pipeline is opt-in per account and fails closed, so `list` on a fresh
+ * install must say the pipeline is polling NOTHING rather than reporting an
+ * empty settings table and letting the operator infer the default. Likewise
+ * every mutation reports the consequence it just caused, not `ok`.
+ *
+ * (Under the earlier opt-out default a mistyped `disable` was DESTRUCTIVE: the
+ * first settings row flipped the pipeline into allow-list mode, so `disable
+ * typo` silenced every real mailbox while reporting it had turned off one
+ * imaginary account. Failing closed removed the hazard; the arm below now pins
+ * that the same typo is inert.)
  *
  * These run the script as a subprocess rather than importing it, because the
  * behaviour under test includes the exit code and what the owner is told.
@@ -56,20 +61,23 @@ function settings(): ReturnType<ReturnType<typeof openEmailPipelineStore>['listA
 }
 
 describe('email-accounts CLI', () => {
-  test('a mistyped disable on a fresh install REFUSES instead of silencing everything', async () => {
+  test('a mistyped disable on a fresh install is inert — it changes nothing', async () => {
     const r = await run('disable', 'typo')
 
-    expect(r.code).toBe(2)
-    expect(r.err).toContain('nothing is enabled yet')
-    // The assertion the blocker was really about: no row was written, so the
-    // pipeline is still in its unconfigured "poll everything" state.
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('was not on the list')
+    // Under the opt-in default an id nobody enabled is ALREADY off, so the typo
+    // has nothing to do — and it must not leave a junk row behind either.
     expect(settings()).toEqual([])
   })
 
-  test('list on a fresh install says the pipeline polls EVERYTHING, not nothing', async () => {
+  test('list on a fresh install says the pipeline polls NOTHING', async () => {
     const r = await run('list')
     expect(r.code).toBe(0)
-    expect(r.out).toContain('EVERY connected account')
+    expect(r.out).toContain('polls NOTHING')
+    // The remedy in the same breath as the state: an operator told only "no
+    // settings recorded" would reasonably assume the default is on.
+    expect(r.out).toContain('enable a mailbox')
   })
 
   test('enable records the account and reports the boundary it just drew', async () => {

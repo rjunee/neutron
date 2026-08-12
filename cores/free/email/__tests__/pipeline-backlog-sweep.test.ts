@@ -93,9 +93,19 @@ function scriptedClient(
   } as unknown as GmailClient & { calls: GmailListInput[]; live_calls: GmailListInput[] }
 }
 
-function withStore(run: (store: EmailPipelineStore) => Promise<void>): Promise<void> {
+function withStore(
+  run: (store: EmailPipelineStore) => Promise<void>,
+  // Which mailboxes are switched ON, and WHEN. Defaults to every id these arms
+  // script, enabled at `NOW` — which leaves each account's history boundary
+  // exactly where activation used to put it, so the cursor assertions are
+  // unchanged. The late-joining arm overrides it, because "connected later" is
+  // now expressed as "enabled later".
+  enabled: readonly string[] = ['', 'acct-a', 'acct-b'],
+): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'email-sweep-'))
   const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
+  // OPT-IN DEFAULT: nothing is polled until a mailbox is enabled.
+  for (const id of enabled) store.setAccountEnabled(id, true, null, NOW)
   return run(store).finally(() => {
     store.close()
     rmSync(home, { recursive: true, force: true })
@@ -507,6 +517,7 @@ describe('mail arriving DURING the sweep is not filed as history', () => {
 
 describe("a late-joining mailbox's backlog is ITS history, not new mail", () => {
   test('B connected later: mail newer than the ORIGINAL go-live is still backlog', async () => {
+    // B is deliberately NOT enabled up front — it joins at T2 below.
     await withStore(async (store) => {
       // A moving clock, because this bug only exists in the gap between two
       // moments: the pipeline goes live at T0, and account B is connected a
@@ -549,8 +560,11 @@ describe("a late-joining mailbox's backlog is ITS history, not new mail", () => 
         internal_date: new Date(NOW + fortnight - 1_000).toISOString(),
       } as GmailMessageMeta
 
-      // T2 — B is connected. Its sweep must treat that mail as ITS history.
+      // T2 — B is connected AND switched on. Under the opt-in default those are
+      // the same event: enabling is how a mailbox enters the pipeline at all,
+      // and `enabled_at` is the line its own history is drawn against.
       clock = NOW + fortnight
+      store.setAccountEnabled('acct-b', true, 'b@example.com', clock)
       const r = await runAt(
         scriptedClient([
           {
@@ -570,6 +584,6 @@ describe("a late-joining mailbox's backlog is ITS history, not new mail", () => 
       expect(r.arrived_during_sweep).toBe(0)
       expect(store.getEmail('b-history', 'acct-b')?.handling).toBe('preexisting')
       expect(r.escalated).toBe(0)
-    })
+    }, ['', 'acct-a'])
   })
 })

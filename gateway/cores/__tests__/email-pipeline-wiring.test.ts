@@ -50,6 +50,17 @@ function config(over: Partial<EmailPipelineCompositionConfig> = {}): {
     llm: null,
     ...over,
   }
+  // The pipeline is OPT-IN per account and fails closed, so a wiring fixture
+  // that enables nothing would exercise the early return rather than the tick.
+  // `''` is the single-account sentinel the in-memory backend stamps, and it is
+  // switched on at the config's own clock — i.e. at BOOT for the arms that move
+  // one — so the account's history boundary lands where activation does.
+  const enable = openEmailPipelineStore({ owner_home: home })
+  try {
+    enable.setAccountEnabled('', true, null, cfg.now?.() ?? Date.now())
+  } finally {
+    enable.close()
+  }
   return { cfg, cleanup: () => rmSync(home, { recursive: true, force: true }) }
 }
 

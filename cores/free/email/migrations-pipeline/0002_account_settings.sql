@@ -13,6 +13,14 @@
 -- mailbox they meant to enable stays quiet until they flip it, which costs one
 -- switch. So the table is an ALLOW-LIST and the poller fails closed against it.
 --
+-- OWNER DECISION, 2026-08-12. The first cut of the poller contradicted this
+-- header: it read "no rows at all" as permission to poll every connected
+-- mailbox, so the contract stated opt-in while the code shipped opt-out. The
+-- owner settled it in favour of the contract. The cost is accepted and named:
+-- a FRESH INSTALL POLLS NOTHING until a mailbox is enabled, and the poller
+-- logs that on every tick so an opted-out pipeline can never be mistaken for a
+-- broken one.
+--
 -- ── WHY account_id AND NOT THE ADDRESS ───────────────────────────────────────
 -- `account_id` is the same stable id the multi-account fan-out already stamps
 -- on every message row and the same one `emails.account_id` keys on. Keying the

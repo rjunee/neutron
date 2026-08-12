@@ -382,7 +382,9 @@ export class EmailPipelineStore {
   }
 
   /**
-   * The accounts the owner has turned ON. An ALLOW-LIST: absence is disabled.
+   * The accounts the owner has turned ON. An ALLOW-LIST: absence is disabled,
+   * and an EMPTY result means the pipeline polls nothing — it does not mean
+   * "unconfigured, so poll everything". See `0002_account_settings.sql`.
    *
    * Returned as a Set because every caller asks "is this one in?" — handing
    * back an array invites a `.includes` inside a per-message loop, and the poll
@@ -395,29 +397,6 @@ export class EmailPipelineStore {
       )
       .all()
     return new Set(rows.map((r) => r.account_id))
-  }
-
-  /**
-   * Has the owner actually CURATED the account list?
-   *
-   * Not "does a row exist" — a row that has only ever been disabled is not a
-   * curated list, it is a mistake waiting to be load-bearing. `disable typo` on
-   * a fresh install would otherwise create the first row, flip the pipeline
-   * into allow-list mode with nothing enabled, and silence every real mailbox
-   * while reporting that one imaginary account had been turned off.
-   *
-   * The signal is `enabled_at`: it is stamped only when an account is turned
-   * ON, and it survives being turned off again. So "the owner has enabled
-   * something at some point" is the condition, and turning that one thing off
-   * afterwards is a real decision that DOES silence the pipeline — as it should.
-   */
-  hasCuratedAccounts(): boolean {
-    const row = this.db
-      .query<{ n: number }, []>(
-        `SELECT 1 AS n FROM account_settings WHERE enabled = 1 OR enabled_at IS NOT NULL LIMIT 1`,
-      )
-      .get()
-    return row !== null
   }
 
   listAccountSettings(): AccountSettingRow[] {

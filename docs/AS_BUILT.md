@@ -2,6 +2,64 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — the email pipeline reads only the mailboxes the owner switched on, and defaults to none
+
+Branch `trident/email-pipeline-p1-implement-the-esc` (P1.5, on top of P1 below).
+
+Connecting a Google account and wanting the agent to READ that mailbox are two
+different decisions, and the pipeline conflated them: every connected account
+had its history swept and its new mail escalated into chat. Connecting a
+mailbox for Calendar or Drive silently enrolled its inbox.
+
+`account_settings` (`cores/free/email/migrations-pipeline/0002`) is an
+allow-list keyed on the same stable `account_id` the fan-out already stamps on
+every message and `emails.account_id` already keys on. The address is a
+nullable DISPLAY LABEL only — keying the setting on it would put owner PII in a
+settings table and break the moment a grant is re-pointed at a different
+address.
+
+**The allow-list is applied BEFORE the read.** `GmailListInput.account_ids`
+narrows the fan-out's account set, so a disabled mailbox is never queried.
+Read-then-discard would still hit its API, still surface its read failures in
+the tick, and would be a lie about what the setting does — so the tests assert
+on the per-account client's call log, not on the merged rows.
+
+**It fails CLOSED (owner decision, 2026-08-12).** Absence of a row means
+disabled, so an install where nothing has been enabled polls nothing at all.
+The first cut defaulted the other way — zero rows meant "poll everything" — so
+the migration's stated contract and the code shipped opposite rules; the
+reviewer caught the contradiction and the owner settled it in favour of the
+contract. The defaults are not symmetric: a mailbox that posts to chat
+uninvited cannot be un-posted, while a quiet one costs one switch. The price is
+that a FRESH INSTALL DOES NOTHING until a mailbox is enabled, and it is paid by
+being loud — the tick logs the state on every fire and distinguishes "none
+configured" from "every configured account is off", because the remedy differs.
+
+**The guarantee does not depend on the backend honouring `account_ids`.** The
+probe, the sweep target set and the live ingest loop each re-check enablement,
+so a client that ignores the parameter still cannot reach a mailbox the owner
+never turned on — pinned by an arm that hands the tick a deliberately leaky
+client.
+
+Three defects found by review on the way, each with a mutation-verified test:
+turning an account on LATER sweeps it from `enabled_at` rather than from
+whenever the cron noticed; OFF-then-ON again is a NEW sweep (the stale
+completion marker made the silent interval arrive in chat); and owed
+escalations and owed Gmail writes for a disabled account are skipped and left
+RETRYABLE rather than consumed. Two pre-existing bugs surfaced with it: the
+mutation retry cap allowed N+1 real Gmail calls because the first write was
+counted as an error but not an attempt, and `sender_rules.handling` was free
+text read as "escalate, or else archive" — so a rule typed `esclate` did not
+fail, it INVERTED, guaranteeing silent archival of the exact sender the owner
+had singled out (`0003` adds the `CHECK`, and `addSenderRule` rejects at the
+boundary).
+
+`scripts/email-accounts.ts` is the operator surface (`list` / `enable` /
+`disable`) until an in-app pane exists. It prints the CONSEQUENCE rather than
+`ok`, because enabling schedules a sweep whose boundary is the moment of the
+enable — the difference between "your history stays quiet" and "your history
+arrives in chat".
+
 ## 2026-08-11 — an important email now reaches the owner's chat within five minutes
 
 Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation

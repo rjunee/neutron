@@ -7,11 +7,17 @@
  * (IMPLEMENTATION_PLAN.md P1 acceptance) — failing precisely at the moment the
  * owner is most likely to be watching, the minutes right after they turn it on.
  *
- *   1. BOOT IS NOT THE FIRST FIRE. An `interval_ms` cron waits a full interval
- *      before its first execution, so a cutoff stamped inside the tick is five
- *      minutes late. Mail that arrived in that window is older than the line
- *      and the sweep files it as `preexisting` — history the owner already
+ *   1. SWITCH-ON IS NOT THE FIRST FIRE. An `interval_ms` cron waits a full
+ *      interval before its first execution, so a cutoff stamped inside the tick
+ *      is five minutes late. Mail that arrived in that window is older than the
+ *      line and the sweep files it as `preexisting` — history the owner already
  *      triaged. Nothing ever revisits it.
+ *
+ *      Since per-account enablement became opt-in, the moment being defended is
+ *      the ENABLE (`account_settings.enabled_at`), with instance activation as
+ *      the fallback for a boundary that was never stamped. `BOOT` below is that
+ *      moment and `FIRST_FIRE` is the store's clock, five minutes later — so an
+ *      implementation that reads the clock instead of the decision fails here.
  *
  *   2. A BIG INBOX IS NOT AN EXCUSE. The sweep is bounded per tick, so an inbox
  *      larger than that budget used to push live mail to the NEXT cron fire —
@@ -119,6 +125,12 @@ function paginatingClient(fixtures: Fixture[]): GmailClient & {
 function withStore(run: (store: EmailPipelineStore) => Promise<void>): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'email-activation-'))
   const store = openEmailPipelineStore({ owner_home: home, now: () => FIRST_FIRE })
+  // The mailbox is turned on AT BOOT — that is what makes this the switch-on
+  // window rather than an arbitrary interval. `''` is the single-account
+  // sentinel. Enabling here is not scaffolding: under the opt-in default the
+  // enable moment IS the line these arms are about, and `FIRST_FIRE` (the
+  // store's clock) is deliberately not it.
+  store.setAccountEnabled('', true, null, BOOT)
   return run(store).finally(() => {
     store.close()
     rmSync(home, { recursive: true, force: true })

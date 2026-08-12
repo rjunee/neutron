@@ -37,6 +37,8 @@ interface Fixture {
 function fixture(): Fixture {
   const home = mkdtempSync(join(tmpdir(), 'email-pipeline-dedup-'))
   const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
+  // The pipeline is opt-in per account; `''` is the single-account sentinel.
+  store.setAccountEnabled('', true, null, GO_LIVE)
   store.setCheckpoint(CHECKPOINT_GO_LIVE_AFTER, String(GO_LIVE))
   // These cases exercise the STEADY state, so the one-time backlog sweep is
   // already finished — otherwise every tick would return early having marked

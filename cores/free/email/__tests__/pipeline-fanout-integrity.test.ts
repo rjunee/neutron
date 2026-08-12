@@ -166,6 +166,13 @@ function fanOut(accounts: FakeAccount[]): {
 function withStore(run: (store: EmailPipelineStore) => Promise<void>): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'email-fanout-'))
   const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
+  // OPT-IN DEFAULT: the pipeline polls nothing until a mailbox is enabled.
+  // These arms are about FAN-OUT INTEGRITY, not enablement, so every mailbox
+  // they script is on. Enablement itself is covered in
+  // `pipeline-account-enablement.test.ts`.
+  for (const id of ['', 'acct-a', 'acct-b', 'solo']) {
+    store.setAccountEnabled(id, true, null, NOW)
+  }
   return run(store).finally(() => {
     store.close()
     rmSync(home, { recursive: true, force: true })

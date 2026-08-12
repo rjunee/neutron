@@ -317,38 +317,46 @@ export async function runEmailPipelineTick(
     // entire history read as new mail — classified, labelled and escalated. A
     // cheap probe re-opens the sweep whenever a connected account has no
     // completion mark of its own.
-    // (1a) PER-ACCOUNT ENABLEMENT. The owner connects mailboxes for many
-    // reasons; wanting the agent to READ one is a separate decision. The
-    // allow-list is threaded into every list call as `account_ids`, so a
-    // disabled mailbox is never queried — not queried-then-filtered, which
-    // would still hit its API and still surface its read failures.
+    // (1a) PER-ACCOUNT ENABLEMENT — AN ALLOW-LIST THAT FAILS CLOSED.
     //
-    // UNCONFIGURED IS NOT DISABLED. Zero rows in `account_settings` means the
-    // owner has never expressed a preference, and the pipeline behaves as it
-    // always has (every connected account) rather than silently doing nothing
-    // on a fresh install. The moment ONE row exists the owner has curated, and
-    // from then on the list is authoritative — including when they have turned
-    // everything off, which is a decision, not an absence.
-    const curated = store.hasCuratedAccounts()
+    // The owner connects mailboxes for many reasons; wanting the agent to READ
+    // one is a separate decision. The allow-list is threaded into every list
+    // call as `account_ids`, so a disabled mailbox is never queried — not
+    // queried-then-filtered, which would still hit its API and still surface
+    // its read failures.
+    //
+    // ABSENCE IS DISABLED — the contract `0002_account_settings.sql` states,
+    // now also the one the code implements. This defaulted OPEN until an owner
+    // decision on 2026-08-12 settled it, and the two wrong defaults are not
+    // symmetric: defaulting ON means a mailbox the owner never considered posts
+    // its contents into their chat, which cannot be undone once posted;
+    // defaulting OFF means a mailbox they meant to enable stays quiet until
+    // they flip it, which costs one switch. The price of failing closed is that
+    // a fresh install does nothing until an account is enabled, and that price
+    // is paid HERE — by saying so on every tick — rather than by weakening the
+    // default so the quiet case never happens.
     const enabled_accounts = store.enabledAccounts()
-    const account_filter: readonly string[] | null = curated ? [...enabled_accounts] : null
-    const listScope = account_filter === null ? {} : { account_ids: account_filter }
+    const account_filter: readonly string[] = [...enabled_accounts]
+    const listScope = { account_ids: account_filter }
     /**
-     * Is this row's mailbox still switched on? `null` filter ⇒ unconfigured ⇒
-     * everything, unchanged. The '' single-account sentinel is only ever
-     * enabled explicitly, which is correct: a single-backend install has no
-     * account ids to curate, so it also has no `account_settings` rows and
-     * takes the unconfigured path.
+     * Is this row's mailbox switched on? The '' single-account sentinel is an
+     * id like any other and must be enabled like any other: "this install only
+     * found one mailbox" is not the owner saying yes to it.
      */
     const accountEnabled = (account_id: string | null): boolean =>
-      account_filter === null || enabled_accounts.has(account_id ?? '')
-    if (account_filter !== null && account_filter.length === 0) {
-      // Every account explicitly off. Say so on every tick — a pipeline that is
-      // deliberately silent and one that is broken look identical in a log that
-      // only reports work done.
-      log?.('email pipeline has no enabled accounts; nothing will be polled', {
-        configured: store.listAccountSettings().length,
-      })
+      enabled_accounts.has(account_id ?? '')
+    if (account_filter.length === 0) {
+      // Nothing to poll. Say so on EVERY tick, and say WHICH nothing it is: a
+      // pipeline that is deliberately silent and one that is broken look
+      // identical in a log that only reports work done, and under an opt-in
+      // default the silent case is where every new install starts.
+      const configured = store.listAccountSettings().length
+      log?.(
+        configured === 0
+          ? 'email pipeline has no enabled accounts (none configured) — nothing is polled until a mailbox is enabled'
+          : 'email pipeline has no enabled accounts (every configured account is off) — nothing will be polled',
+        { configured },
+      )
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
       return result
     }
@@ -369,6 +377,10 @@ export async function runEmailPipelineTick(
       // unswept while the same tick's steady-state list read its history as new
       // mail the moment it recovered.
       const unmarked = accountsOnThisPage(probe, false).filter((id) => {
+        // BELT AND BRACES. `account_ids` should already have kept a disabled
+        // mailbox off this page; re-checking here means the guarantee does not
+        // depend on a backend honouring a request parameter.
+        if (!accountEnabled(id)) return false
         if (store.getCheckpoint(backlogDoneKey(id)) !== '1') return true
         // A RE-ENABLED MAILBOX IS A NEW ONE. Turning an account off and on
         // again leaves its old completion marker behind, and that marker
@@ -449,7 +461,10 @@ export async function runEmailPipelineTick(
       // the steady-state pass picks it up normally once the sweep finishes.
       const sweepTargets = new Set(
         accountsOnThisPage(page).filter(
-          (id) => store.getCheckpoint(backlogDoneKey(id)) !== '1',
+          // Enabled FIRST: `account_ids` should have kept a disabled mailbox off
+          // this page entirely, and if a backend ignored it we still refuse to
+          // sweep — recording someone's history is not a harmless read.
+          (id) => accountEnabled(id) && store.getCheckpoint(backlogDoneKey(id)) !== '1',
         ),
       )
       // Stamp each target's own boundary the first time we sweep it. For the
@@ -462,11 +477,18 @@ export async function runEmailPipelineTick(
         const stored = store.getCheckpoint(key)
         const parsed = parseCutoff(stored)
         if (parsed === null) {
-          // AN ACCOUNT TURNED ON LATER IS SWEPT FROM WHEN IT WAS TURNED ON.
-          // `enabled_at` is the exact moment the owner took responsibility for
-          // that mailbox; falling back to `now()` would draw the line at
-          // whichever tick happened to notice, and everything in between would
-          // read as new mail and escalate.
+          // AN ACCOUNT IS SWEPT FROM WHEN IT WAS TURNED ON. `enabled_at` is the
+          // exact moment the owner took responsibility for that mailbox;
+          // falling back to `now()` would draw the line at whichever tick
+          // happened to notice, and everything in between would read as new
+          // mail and escalate.
+          //
+          // Under the opt-in default every swept account has an `enabled_at` by
+          // construction (`sweepTargets` is filtered to enabled ids, and
+          // `setAccountEnabled` stamps the field on every 0→1 transition), so
+          // the fallback is a backstop rather than a live branch — kept because
+          // the alternative to a defensive default here is `NaN` silently
+          // becoming a boundary of epoch 0, which admits everything.
           const enabled_at = store.getAccountSetting(id)?.enabled_at ?? null
           const stamp = enabled_at ?? (initial_sweep ? activation : now())
           store.setCheckpoint(key, String(stamp))
@@ -887,6 +909,12 @@ export async function runEmailPipelineTick(
 
       let handledOnThisPage = 0
       for (const meta of listed.results) {
+        // The LAST gate before the classifier, and the one that matters most:
+        // everything past this line can post to the owner's chat and write to
+        // their mailbox. `account_ids` already narrowed the query, so this only
+        // fires if a backend ignored it — which is exactly when a fail-closed
+        // promise has to hold anyway.
+        if (!accountEnabled(meta.account_id ?? null)) continue
         if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
         // History stays invisible to the classifier while the sweep is still
         // deciding what history is.
