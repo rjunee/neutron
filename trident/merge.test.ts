@@ -618,10 +618,19 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     // `git status --porcelain` (no -uall) would have called clean.
     const { host, calls } = hostWithDirt(wt, '?? brand-new.ts\n')
     const deps = buildMergeCleanupDeps(host)
-    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    await cleanupAfterMerge(
+      makeRun({
+        merge_mode: 'pr',
+        pr: 42,
+        branch: 'feat-x',
+        worktree: wt,
+        inner_result: innerResult(REVIEWED_HEAD),
+      }),
+      deps,
+    )
     const joined = calls.map((c) => c.join(' '))
     // The merge still happened; the worktree simply survived it.
-    expect(joined).toContain('gh pr merge 42 --squash')
+    expect(joined).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
     expect(joined).toContain(`git -C ${wt} status --porcelain --untracked-files=all`)
     expect(joined.some((c) => c.includes('worktree remove'))).toBe(false)
     expect(joined.some((c) => c.includes('worktree prune'))).toBe(false)
@@ -631,7 +640,16 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     const wt = realDir()
     const { host, calls } = hostWithDirt(wt, '')
     const deps = buildMergeCleanupDeps(host)
-    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    await cleanupAfterMerge(
+      makeRun({
+        merge_mode: 'pr',
+        pr: 42,
+        branch: 'feat-x',
+        worktree: wt,
+        inner_result: innerResult(REVIEWED_HEAD),
+      }),
+      deps,
+    )
     const joined = calls.map((c) => c.join(' '))
     expect(joined).toContain(`git -C /repo worktree remove ${wt}`)
     expect(joined).toContain('git -C /repo worktree prune')
@@ -648,7 +666,16 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
           : ok(),
     )
     const deps = buildMergeCleanupDeps(host)
-    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    await cleanupAfterMerge(
+      makeRun({
+        merge_mode: 'pr',
+        pr: 42,
+        branch: 'feat-x',
+        worktree: wt,
+        inner_result: innerResult(REVIEWED_HEAD),
+      }),
+      deps,
+    )
     expect(calls.map((c) => c.join(' ')).some((c) => c.includes('worktree remove'))).toBe(false)
   })
 
@@ -663,7 +690,16 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
       cmd.includes('--show-toplevel') && cmd.includes(wt) ? fail('not a git repository') : ok(),
     )
     const deps = buildMergeCleanupDeps(host)
-    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    await cleanupAfterMerge(
+      makeRun({
+        merge_mode: 'pr',
+        pr: 42,
+        branch: 'feat-x',
+        worktree: wt,
+        inner_result: innerResult(REVIEWED_HEAD),
+      }),
+      deps,
+    )
     const joined = calls.map((c) => c.join(' '))
     expect(joined.some((c) => c.includes('worktree remove'))).toBe(false)
     // …and it never fell through to a status probe it had no right to trust.
@@ -679,7 +715,16 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
       cmd.includes('--show-toplevel') || cmd.includes('status') ? fail('not a git repository') : ok(),
     )
     const deps = buildMergeCleanupDeps(host)
-    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: gone }), deps)
+    await cleanupAfterMerge(
+      makeRun({
+        merge_mode: 'pr',
+        pr: 42,
+        branch: 'feat-x',
+        worktree: gone,
+        inner_result: innerResult(REVIEWED_HEAD),
+      }),
+      deps,
+    )
     const joined = calls.map((c) => c.join(' '))
     // Treated as removable: the removal was ATTEMPTED (and its failure swallowed),
     // which is the "nothing to preserve" path, not the preserve path.
