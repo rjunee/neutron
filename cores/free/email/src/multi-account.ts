@@ -54,6 +54,7 @@
 import {
   DEFAULT_LIST_LIMIT,
   type AccountReadOutcome,
+  type ConnectedAccount,
   type GmailClient,
   type GmailDraftInput,
   type GmailDraftResult,
@@ -414,6 +415,21 @@ export function buildMultiAccountGmailClient(
 
   return {
     listMessagesAcrossAccounts,
+    /**
+     * DISCOVERY — the connected grants, with no mail read and no token used.
+     * Resolved fresh like every other path here, so an account connected after
+     * boot appears without a restart. Deliberately does NOT go through
+     * `accountsOrThrow`: "nothing is connected" is a legitimate answer to this
+     * question, and a settings surface asking what exists should get an empty
+     * list rather than an `OAuthMissingError`.
+     */
+    async listConnectedAccounts(): Promise<readonly ConnectedAccount[]> {
+      const accounts = await options.accounts()
+      return accounts.map((a) => ({
+        account_id: a.account_id,
+        account_email: a.account_email,
+      }))
+    },
     async listMessages(input: GmailListInput): Promise<GmailListResult> {
       const max_results = input.max_results ?? DEFAULT_LIST_LIMIT
       const out = await fanOutList(

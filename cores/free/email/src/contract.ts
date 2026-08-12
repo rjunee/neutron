@@ -446,6 +446,28 @@ export interface GmailClient {
   listMessagesAcrossAccounts?(
     input: GmailListInput,
   ): Promise<GmailListAcrossAccounts>
+  /**
+   * The CONNECTED accounts, without reading a single message. Present only on
+   * the fan-out client, where there is more than one to name.
+   *
+   * This exists because the pipeline's allow-list fails closed, and a
+   * fail-closed allow-list has to be discoverable or it is a lock with no key:
+   * nothing is polled until an `account_id` is enabled, and nothing reveals an
+   * `account_id` until something polls. Enumerating the grants the owner has
+   * ALREADY made is not reading their mail — it is the one question a
+   * switched-off pipeline is still entitled to ask.
+   */
+  listConnectedAccounts?(): Promise<readonly ConnectedAccount[]>
+}
+
+/**
+ * One connected mailbox, as the discovery path reports it. Deliberately
+ * narrower than `GmailAccountDescriptor` — no token accessor — because the
+ * caller is a settings surface, not a reader.
+ */
+export interface ConnectedAccount {
+  account_id: string
+  account_email: string | null
 }
 
 /**

@@ -22,9 +22,15 @@
  *
  * ── ACCOUNT IDS ──────────────────────────────────────────────────────────────
  * `account_id` is the stable id the multi-account fan-out stamps on every
- * message, the same one `emails.account_id` keys on. `list` shows the ids the
- * pipeline has already seen, with the address it recorded as a label. An
- * address is never the identity — it is display only.
+ * message, the same one `emails.account_id` keys on. An address is never the
+ * identity — it is display only.
+ *
+ * `list` shows every mailbox the poller has DISCOVERED, on or off. Discovery is
+ * what makes a fail-closed allow-list usable at all: nothing is polled until an
+ * id is enabled, and nothing would reveal an id until something polled, so each
+ * tick first enumerates the connected grants — reading no mail — and records
+ * them as switched-off rows. A single-backend install has no ids to report and
+ * appears under the `''` sentinel.
  */
 
 // Relative, not by package name: `scripts/` is not a workspace package and has
@@ -36,7 +42,13 @@ const USAGE = `usage:
   bun scripts/email-accounts.ts list                            [--home <owner_home>]
   bun scripts/email-accounts.ts enable  <account_id> [address]  [--home <owner_home>]
   bun scripts/email-accounts.ts disable <account_id>            [--home <owner_home>]
+
+  <account_id> is an id from 'list'. A single-backend install has none, and its
+  one mailbox is the empty id — enable it with a literal empty argument: '' .
 `
+
+/** How the single-account sentinel is shown, since '' prints as nothing. */
+const SOLE_ACCOUNT_LABEL = "''  (this install's only mailbox)"
 
 function main(): number {
   const argv = process.argv.slice(2)
@@ -60,33 +72,41 @@ function main(): number {
     if (command === 'list') {
       const rows = store.listAccountSettings()
       if (rows.length === 0) {
-        // The allow-list is empty, so the pipeline is doing NOTHING. Say that
-        // outright: an operator reading "no settings" would reasonably assume
-        // the default is on, and the whole point of opting in is that it isn't.
+        // NOTHING KNOWN YET, which is not the same as nothing connected. The
+        // ids come from the poller's discovery pass, so an install whose cron
+        // has not fired once has none to show — say which of the two it is,
+        // otherwise "no accounts" reads as "you have no mailboxes".
         process.stdout.write(
           'no accounts are enabled — the pipeline polls NOTHING.\n' +
-            'enable a mailbox to switch it on; anything not enabled stays invisible to it.\n',
+            'no mailboxes discovered yet either: the poller records the connected accounts on\n' +
+            'its first run, so wait one poll interval and run this again to see their ids.\n',
         )
         return 0
       }
       for (const r of rows) {
         const when = r.enabled_at === null ? '' : ` since ${new Date(r.enabled_at).toISOString()}`
+        const id = r.account_id === '' ? SOLE_ACCOUNT_LABEL : r.account_id
         process.stdout.write(
-          `${r.enabled === 1 ? 'ON ' : 'off'}  ${r.account_id}  ${r.account_email ?? '(address unknown)'}${when}\n`,
+          `${r.enabled === 1 ? 'ON ' : 'off'}  ${id}  ${r.account_email ?? '(address unknown)'}${when}\n`,
         )
       }
       const on = rows.filter((r) => r.enabled === 1).length
       if (on === 0) {
-        process.stdout.write('\nevery account is OFF — the pipeline polls nothing.\n')
+        process.stdout.write(
+          '\nevery account is OFF — the pipeline polls nothing. enable one by its id above.\n',
+        )
       }
       process.stdout.write(
-        `\nonly the accounts marked ON are polled; any connected mailbox not listed above is off.\n`,
+        `\nonly the accounts marked ON are polled; anything else here is off.\n`,
       )
       return 0
     }
 
     if (command === 'enable' || command === 'disable') {
-      if (account_id === undefined || account_id.length === 0) {
+      // ABSENT, not EMPTY. `''` is the single-account sentinel and is a real,
+      // enable-able id — rejecting it as "missing" would leave a single-backend
+      // install with a fail-closed pipeline and no way to open it.
+      if (account_id === undefined) {
         process.stderr.write(USAGE)
         return 2
       }
@@ -96,29 +116,33 @@ function main(): number {
       // as changing nothing. (It DID need one while absence meant "poll
       // everything" — the first row flipped the pipeline into allow-list mode
       // and silenced every real mailbox. That hazard is gone with the default.)
+      const shown = account_id === '' ? SOLE_ACCOUNT_LABEL : account_id
       const prior = store.getAccountSetting(account_id)
       const was_on = prior !== null && prior.enabled === 1
-      if (enable || prior !== null) store.setAccountEnabled(account_id, enable, address ?? null)
+      if (enable || was_on) store.setAccountEnabled(account_id, enable, address ?? null)
       const after = store.getAccountSetting(account_id)
 
       if (enable && !was_on) {
         process.stdout.write(
-          `enabled ${account_id}.\n` +
+          `enabled ${shown}.\n` +
             `its existing mail will be marked as history (no chat posts, no labels, no archiving)\n` +
             `and only mail arriving after ${new Date(after?.enabled_at ?? Date.now()).toISOString()} can escalate.\n`,
         )
       } else if (enable) {
-        process.stdout.write(`${account_id} was already enabled — nothing changed.\n`)
-      } else if (prior === null) {
-        // Absence already means disabled in an allow-list, so writing a row for
-        // an id nobody has ever enabled adds a fact that changes nothing and
-        // clutters `list` with the owner's typos.
+        process.stdout.write(`${shown} was already enabled — nothing changed.\n`)
+      } else if (!was_on) {
+        // ALREADY OFF, whether or not a row exists. Discovery writes a row for
+        // every connected mailbox, so "no row" no longer means "unknown id" —
+        // but both cases have the same answer, and reporting a disable that did
+        // not happen is how an operator comes to believe they turned something
+        // off. No row is written for an id nobody enabled either, which keeps
+        // `list` free of the owner's typos.
         process.stdout.write(
-          `${account_id} was not on the list — nothing changed. (run 'list' to see the ids.)\n`,
+          `${shown} was already off — nothing changed. (run 'list' to see the ids.)\n`,
         )
       } else {
         process.stdout.write(
-          `disabled ${account_id}. it will not be polled, classified, escalated or labelled.\n` +
+          `disabled ${shown}. it will not be polled, classified, escalated or labelled.\n` +
             `its existing rows are kept.\n`,
         )
       }

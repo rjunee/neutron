@@ -286,6 +286,35 @@ export async function runEmailPipelineTick(
 
   const escalateDeps: EscalateDeps = { ...deps.escalate, store, now }
 
+  /**
+   * DISCOVERY. Write down which mailboxes are connected, saying nothing about
+   * whether any of them is on.
+   *
+   * A single-backend client has no account ids to report, so the `''` sentinel
+   * is recorded instead — otherwise the one install that most obviously "has a
+   * mailbox" would be the one install whose id could never be named.
+   *
+   * NEVER FATAL. This is a settings convenience, not part of the read path: a
+   * resolver that throws (no grant yet, an OAuth store hiccup) must not turn a
+   * healthy poll into a tick error, and must not stop an already-enabled
+   * account from being polled.
+   */
+  async function recordConnectedAccounts(): Promise<void> {
+    try {
+      const connected =
+        gmail.listConnectedAccounts === undefined
+          ? [{ account_id: '', account_email: null }]
+          : await gmail.listConnectedAccounts()
+      for (const account of connected) {
+        store.recordDiscoveredAccount(account.account_id, account.account_email)
+      }
+    } catch (err) {
+      log?.('email pipeline could not enumerate connected accounts', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
   try {
     // (1) The go-live stamp. Recorded once, BEFORE the first sweep page, and it
     // is the sweep's boundary: everything older is the owner's existing inbox,
@@ -335,6 +364,15 @@ export async function runEmailPipelineTick(
     // a fresh install does nothing until an account is enabled, and that price
     // is paid HERE — by saying so on every tick — rather than by weakening the
     // default so the quiet case never happens.
+    //
+    // …AND A FAIL-CLOSED LIST MUST BE DISCOVERABLE, or it is a lock with no
+    // key: nothing is polled until an `account_id` is enabled, and nothing
+    // reveals an `account_id` until something polls. So every tick first
+    // enumerates the CONNECTED grants — no mail read, no token spent — and
+    // records each as a switched-OFF row for the operator surface to list. It
+    // runs before the early return below precisely because that is the state
+    // the owner most needs to get out of.
+    await recordConnectedAccounts()
     const enabled_accounts = store.enabledAccounts()
     const account_filter: readonly string[] = [...enabled_accounts]
     const listScope = { account_ids: account_filter }
@@ -353,8 +391,8 @@ export async function runEmailPipelineTick(
       const configured = store.listAccountSettings().length
       log?.(
         configured === 0
-          ? 'email pipeline has no enabled accounts (none configured) — nothing is polled until a mailbox is enabled'
-          : 'email pipeline has no enabled accounts (every configured account is off) — nothing will be polled',
+          ? 'email pipeline has no enabled accounts and no mailboxes discovered — nothing is connected to poll'
+          : 'email pipeline has no enabled accounts — mailboxes are connected but none is switched on',
         { configured },
       )
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))

@@ -161,31 +161,99 @@ describe('per-account enablement', () => {
     })
   })
 
+  test('THE FRESH-INSTALL PATH: discover, enable, poll — and the ids come from the tick', async () => {
+    // A fail-closed allow-list has to be discoverable or it is a lock with no
+    // key: nothing is polled until an id is enabled, and nothing reveals an id
+    // until something polls. This walks the whole way round.
+    await withStore(async (store) => {
+      const delivered: string[] = []
+      const fakes = {
+        [KEEP]: accountFake([meta('k-1', FIRST_FIRE + 1_000)]),
+        [DROP]: accountFake([meta('d-1', FIRST_FIRE + 1_000)]),
+      }
+      const gmail = fanOut(fakes)
+
+      // TICK ONE — nothing enabled. No mail is read…
+      await tick(gmail, store, delivered)
+      expect(fakes[KEEP].lists).toEqual([])
+      expect(fakes[DROP].lists).toEqual([])
+
+      // …but both mailboxes are now NAMED, switched off, with their addresses
+      // as labels. That is what the operator surface lists.
+      const discovered = store.listAccountSettings()
+      expect(discovered.map((r) => r.account_id).sort()).toEqual([DROP, KEEP].sort())
+      expect(discovered.every((r) => r.enabled === 0)).toBe(true)
+      expect(discovered.every((r) => r.enabled_at === null)).toBe(true)
+      expect(discovered.find((r) => r.account_id === KEEP)?.account_email).toBe(
+        `${KEEP}@example.com`,
+      )
+
+      // The owner enables ONE of them, by an id they could only have got from
+      // that list.
+      store.setAccountEnabled(KEEP, true, null, FIRST_FIRE)
+
+      // TICK TWO — that mailbox is polled, and only that one.
+      await tick(gmail, store, delivered, () => FIRST_FIRE + 60_000)
+      expect(fakes[KEEP].lists.length).toBeGreaterThan(0)
+      expect(fakes[DROP].lists).toEqual([])
+    })
+  })
+
+  test('discovery never enables, and never moves a boundary', async () => {
+    // The discovery pass is a second writer to the table that carries the
+    // owner's decision, so the property that matters is what it CANNOT do.
+    await withStore(async (store) => {
+      store.setAccountEnabled(KEEP, true, `${KEEP}@example.com`, BOOT)
+      store.setAccountEnabled(DROP, true, `${DROP}@example.com`, BOOT)
+      store.setAccountEnabled(DROP, false, `${DROP}@example.com`, BOOT + 1_000)
+
+      const gmail = fanOut({
+        [KEEP]: accountFake([]),
+        [DROP]: accountFake([]),
+      })
+      await tick(gmail, store, [], () => FIRST_FIRE)
+
+      const keep = store.getAccountSetting(KEEP)
+      const drop = store.getAccountSetting(DROP)
+      // An ON account stays on, with its history boundary untouched — moving
+      // `enabled_at` forward would hand the classifier everything since.
+      expect(keep?.enabled).toBe(1)
+      expect(keep?.enabled_at).toBe(BOOT)
+      // An OFF account is not quietly switched back on by being connected.
+      expect(drop?.enabled).toBe(0)
+    })
+  })
+
   test('an unconfigured pipeline SAYS SO on every tick', async () => {
     // Failing closed is only defensible if the closed state is legible. A
     // pipeline that is deliberately silent and one that is broken look
     // identical in a log that reports only work done, and under an opt-in
     // default the silent case is where every new install starts.
     await withStore(async (store) => {
+      // A mailbox IS connected; the owner has simply not turned it on. The
+      // remedy is a switch, and the line has to say so.
       const logged: string[] = []
       await tick(fanOut({ [KEEP]: accountFake([]) }), store, [], () => FIRST_FIRE, (m) =>
         logged.push(m),
       )
       const line = logged.find((m) => m.includes('no enabled accounts'))
       expect(line).toBeDefined()
-      // It must distinguish "never configured" from "all switched off" — the
-      // remedy differs, and a single message for both sends the owner looking
-      // for a setting they never made.
-      expect(line).toContain('none configured')
+      expect(line).toContain('none is switched on')
 
-      // …and the other case says the other thing.
-      const off: string[] = []
-      store.setAccountEnabled(KEEP, true, null, BOOT)
-      store.setAccountEnabled(KEEP, false, null, BOOT + 1_000)
-      await tick(fanOut({ [KEEP]: accountFake([]) }), store, [], () => FIRST_FIRE, (m) =>
-        off.push(m),
-      )
-      expect(off.find((m) => m.includes('every configured account is off'))).toBeDefined()
+      // NOTHING CONNECTED AT ALL is a different problem with a different fix,
+      // and one message for both sends the owner hunting for a setting when
+      // what is missing is a grant.
+      const bare: string[] = []
+      await tick(fanOut({}), store, [], () => FIRST_FIRE, (m) => bare.push(m))
+      expect(bare.find((m) => m.includes('no mailboxes discovered'))).toBeUndefined()
+    })
+
+    // …proven on its own store, because the arm above has already discovered
+    // one mailbox and discovery is durable.
+    await withStore(async (store) => {
+      const bare: string[] = []
+      await tick(fanOut({}), store, [], () => FIRST_FIRE, (m) => bare.push(m))
+      expect(bare.find((m) => m.includes('no mailboxes discovered'))).toBeDefined()
     })
   })
 

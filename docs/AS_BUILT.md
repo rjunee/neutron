@@ -54,11 +54,27 @@ fail, it INVERTED, guaranteeing silent archival of the exact sender the owner
 had singled out (`0003` adds the `CHECK`, and `addSenderRule` rejects at the
 boundary).
 
+**A fail-closed allow-list must be DISCOVERABLE or it is a lock with no key.**
+The first fail-closed cut returned from the tick before touching Gmail, so
+nothing ever learned an `account_id`; `list` printed no ids, `enable` demanded
+one, and a fresh install had no path from "polls nothing" to "polls the mailbox
+I want". Every tick now begins with `recordConnectedAccounts()` — it enumerates
+the connected grants through `GmailClient.listConnectedAccounts` (a read of the
+grant set, NOT of any mail), and records each as a row with `enabled = 0`. The
+writer can only ever create a switched-off row: `recordDiscoveredAccount`'s
+upsert touches `account_email` and nothing else, so discovery can never enable a
+mailbox and can never move an existing `enabled_at` boundary. It is also never
+fatal — an enumeration failure logs and the tick proceeds. A single-backend
+install has no ids to report and appears under the `''` sentinel, which is a
+real, enable-able id (`enable ''`), not a missing argument.
+
 `scripts/email-accounts.ts` is the operator surface (`list` / `enable` /
 `disable`) until an in-app pane exists. It prints the CONSEQUENCE rather than
 `ok`, because enabling schedules a sweep whose boundary is the moment of the
 enable — the difference between "your history stays quiet" and "your history
-arrives in chat".
+arrives in chat". `list` on a fresh install distinguishes "no mailboxes
+discovered yet — wait one poll interval" from "mailboxes are known and all of
+them are off", because those have different remedies.
 
 ## 2026-08-11 — an important email now reaches the owner's chat within five minutes
 

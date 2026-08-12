@@ -448,6 +448,34 @@ export class EmailPipelineStore {
     )
   }
 
+  /**
+   * Record that a mailbox EXISTS, without saying anything about whether it is
+   * on. Written by the poller's discovery pass so the operator surface has ids
+   * to show.
+   *
+   * `enabled` IS NEVER TOUCHED — not on insert (a discovered account defaults
+   * to off, which is the whole point of an opt-in list) and not on update. A
+   * discovery pass that could flip the flag either way would be a second,
+   * invisible writer of the owner's decision; this one only ever fills in the
+   * display label, and only when it has one. `enabled_at` is likewise left
+   * alone, because it is the sweep's history boundary and nothing but an
+   * explicit enable may move it.
+   */
+  recordDiscoveredAccount(account_id: string, account_email: string | null): void {
+    const now = this.now()
+    this.db.run(
+      `INSERT INTO account_settings (account_id, enabled, account_email, enabled_at, updated_at)
+       VALUES (?, 0, ?, NULL, ?)
+         ON CONFLICT(account_id) DO UPDATE SET
+           account_email = COALESCE(excluded.account_email, account_settings.account_email),
+           updated_at = CASE
+             WHEN excluded.account_email IS NOT NULL
+              AND account_settings.account_email IS NOT excluded.account_email
+             THEN excluded.updated_at ELSE account_settings.updated_at END`,
+      [account_id, account_email, now],
+    )
+  }
+
   listSenderRules(): SenderRule[] {
     return this.db.query<SenderRule, []>(`SELECT * FROM sender_rules ORDER BY id ASC`).all()
   }

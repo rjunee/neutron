@@ -65,7 +65,7 @@ describe('email-accounts CLI', () => {
     const r = await run('disable', 'typo')
 
     expect(r.code).toBe(0)
-    expect(r.out).toContain('was not on the list')
+    expect(r.out).toContain('was already off')
     // Under the opt-in default an id nobody enabled is ALREADY off, so the typo
     // has nothing to do — and it must not leave a junk row behind either.
     expect(settings()).toEqual([])
@@ -75,9 +75,10 @@ describe('email-accounts CLI', () => {
     const r = await run('list')
     expect(r.code).toBe(0)
     expect(r.out).toContain('polls NOTHING')
-    // The remedy in the same breath as the state: an operator told only "no
-    // settings recorded" would reasonably assume the default is on.
-    expect(r.out).toContain('enable a mailbox')
+    // …and WHY there is nothing to enable yet. The ids come from the poller's
+    // discovery pass, so an install whose cron has not fired has none to show —
+    // "no accounts" alone reads as "you have no mailboxes".
+    expect(r.out).toContain('no mailboxes discovered yet')
   })
 
   test('enable records the account and reports the boundary it just drew', async () => {
@@ -97,7 +98,7 @@ describe('email-accounts CLI', () => {
     const r = await run('disable', 'acct-typo')
 
     expect(r.code).toBe(0)
-    expect(r.out).toContain('was not on the list')
+    expect(r.out).toContain('was already off')
     // No junk row for the typo, and the real account is untouched.
     const rows = settings()
     expect(rows.map((x) => x.account_id)).toEqual(['acct-1'])
@@ -112,11 +113,29 @@ describe('email-accounts CLI', () => {
     expect(r.out).toContain('disabled acct-1')
     const rows = settings()
     expect(rows[0]?.enabled).toBe(0)
-    // `enabled_at` SURVIVES the disable: it is what tells the pipeline this
-    // list was curated deliberately rather than created by a typo.
+    // `enabled_at` SURVIVES the disable, because it is the sweep's history
+    // boundary: turning the account back on must not re-draw the line at
+    // whenever that happened without a fresh sweep deciding it.
     expect(rows[0]?.enabled_at).not.toBeNull()
 
     const listed = await run('list')
     expect(listed.out).toContain('every account is OFF')
+  })
+
+  test("a single-backend install can enable its one mailbox — the '' sentinel", async () => {
+    // A single-account install has no ids to name, so its mailbox IS the empty
+    // id. Rejecting an empty argument as "missing" would leave exactly those
+    // installs with a fail-closed pipeline and no way to open it.
+    const r = await run('enable', '')
+
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('only mail arriving after')
+    const rows = settings()
+    expect(rows.map((x) => x.account_id)).toEqual([''])
+    expect(rows[0]?.enabled).toBe(1)
+
+    // …and it is listed legibly rather than as a blank column.
+    const listed = await run('list')
+    expect(listed.out).toContain("this install's only mailbox")
   })
 })
