@@ -268,6 +268,7 @@ export function buildMultiAccountGmailClient(
     mode: 'exhaustive' | 'capped',
     read: (client: GmailClient, account: GmailAccountDescriptor) => Promise<GmailListResult>,
     exhausted: ReadonlySet<string> = new Set(),
+    allow: ReadonlySet<string> | null = null,
   ): Promise<
     GmailListAcrossAccounts & {
       next_page_token?: string
@@ -275,7 +276,17 @@ export function buildMultiAccountGmailClient(
       truncated?: boolean
     }
   > {
-    const accounts = await accountsOrThrow()
+    const connected = await accountsOrThrow()
+    // THE ALLOW-LIST IS APPLIED BEFORE THE READ, not after. A caller that names
+    // accounts (the pipeline, honouring per-account enablement) is promising the
+    // owner that an unnamed mailbox is UNTOUCHED — reading it and discarding the
+    // rows would still hit its API, still surface its read failures in
+    // `accounts`, and still be a lie about what the setting does.
+    //
+    // An EMPTY allow-list is honoured as "none", never widened to "all". The
+    // caller computed it; the fail-open reading is the one that posts a mailbox
+    // the owner never enabled into their chat.
+    const accounts = allow === null ? connected : connected.filter((a) => allow.has(a.account_id))
     // An account the caller marked EXHAUSTED is SKIPPED, not re-read from its
     // newest page. Without this a finished mailbox restarts every time a deeper
     // one is still paging, so the cursor maps alternate and never empty — the
@@ -378,6 +389,15 @@ export function buildMultiAccountGmailClient(
     }
   }
 
+  /**
+   * The caller's account allow-list as a Set, or null when they named none.
+   * An EMPTY array is a Set of size 0 — deliberately NOT null — so "no accounts
+   * are enabled" reads as no accounts rather than as every account.
+   */
+  function allowFrom(account_ids: readonly string[] | undefined): ReadonlySet<string> | null {
+    return account_ids === undefined ? null : new Set(account_ids)
+  }
+
   async function listMessagesAcrossAccounts(
     input: GmailListInput,
   ): Promise<GmailListAcrossAccounts> {
@@ -387,6 +407,8 @@ export function buildMultiAccountGmailClient(
       max_results,
       input.exhaustive === true ? 'exhaustive' : 'capped',
       (client) => client.listMessages({ ...input, max_results }),
+      new Set(),
+      allowFrom(input.account_ids),
     )
   }
 
@@ -409,6 +431,7 @@ export function buildMultiAccountGmailClient(
               : {}),
           }),
         exhaustedFrom(input.page_tokens),
+        allowFrom(input.account_ids),
       )
       return {
         results: out.results,
@@ -426,8 +449,13 @@ export function buildMultiAccountGmailClient(
       const max_results = input.max_results ?? DEFAULT_LIST_LIMIT
       // Search is a display path: it never hands back the per-account cursor
       // map, so nothing can page past a dropped row. Capping is lossless here.
-      const out = await fanOutList('search', max_results, 'capped', (client) =>
-        client.search({ ...input, max_results }),
+      const out = await fanOutList(
+        'search',
+        max_results,
+        'capped',
+        (client) => client.search({ ...input, max_results }),
+        new Set(),
+        allowFrom(input.account_ids),
       )
       return {
         results: out.results,

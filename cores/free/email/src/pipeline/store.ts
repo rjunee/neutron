@@ -86,6 +86,22 @@ export interface InsertEmailInput {
   escalation_attempts?: number
 }
 
+/**
+ * One mailbox's pipeline enablement. Absence of a row is DISABLED — this table
+ * is an allow-list, so a mailbox connected for some other reason is never
+ * silently enrolled.
+ */
+export interface AccountSettingRow {
+  account_id: string
+  /** 1 = polled, classified, escalated, labelled. 0 = invisible to the pipeline. */
+  enabled: number
+  /** Display label only, never the identity. NULL when the address is unknown. */
+  account_email: string | null
+  /** When it was last turned ON — the history boundary for its backlog sweep. */
+  enabled_at: number | null
+  updated_at: number
+}
+
 export interface SenderCacheRow {
   sender: string
   category: string
@@ -346,6 +362,71 @@ export class EmailPipelineStore {
                                            important = excluded.important,
                                            updated_at = excluded.updated_at`,
       [sender, category, important ? 1 : 0, at ?? this.now()],
+    )
+  }
+
+  /**
+   * The accounts the owner has turned ON. An ALLOW-LIST: absence is disabled.
+   *
+   * Returned as a Set because every caller asks "is this one in?" — handing
+   * back an array invites a `.includes` inside a per-message loop, and the poll
+   * path runs this against every row on every page.
+   */
+  enabledAccounts(): Set<string> {
+    const rows = this.db
+      .query<{ account_id: string }, []>(
+        `SELECT account_id FROM account_settings WHERE enabled = 1`,
+      )
+      .all()
+    return new Set(rows.map((r) => r.account_id))
+  }
+
+  listAccountSettings(): AccountSettingRow[] {
+    return this.db
+      .query<AccountSettingRow, []>(`SELECT * FROM account_settings ORDER BY account_id ASC`)
+      .all()
+  }
+
+  getAccountSetting(account_id: string): AccountSettingRow | null {
+    return this.db
+      .query<AccountSettingRow, [string]>(`SELECT * FROM account_settings WHERE account_id = ?`)
+      .get(account_id)
+  }
+
+  /**
+   * Turn an account on or off.
+   *
+   * `enabled_at` is stamped on the 0→1 transition and left alone otherwise,
+   * because it is not decoration — the sweep reads it as that mailbox's history
+   * boundary. Re-stamping it on a no-op re-enable would move the line forward
+   * and hand the classifier whatever arrived in between.
+   *
+   * Disabling deliberately does NOT touch that account's rows. What was seen
+   * was seen; the brief and the audit trail keep it.
+   */
+  setAccountEnabled(
+    account_id: string,
+    enabled: boolean,
+    account_email: string | null = null,
+    at?: number,
+  ): void {
+    const now = at ?? this.now()
+    const prior = this.getAccountSetting(account_id)
+    const was_enabled = prior !== null && prior.enabled === 1
+    const enabled_at = enabled
+      ? was_enabled
+        ? (prior?.enabled_at ?? now)
+        : now
+      : (prior?.enabled_at ?? null)
+    this.db.run(
+      `INSERT INTO account_settings (account_id, enabled, account_email, enabled_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account_id) DO UPDATE SET
+           enabled = excluded.enabled,
+           account_email = COALESCE(excluded.account_email, account_settings.account_email),
+           enabled_at = excluded.enabled_at,
+           updated_at = excluded.updated_at`,
+      [account_id, enabled ? 1 : 0, account_email, enabled_at, now],
     )
   }
 

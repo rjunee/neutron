@@ -74,6 +74,24 @@ export interface GmailListInput {
    */
   page_tokens?: Readonly<Record<string, string>>
   /**
+   * ACCOUNT ALLOW-LIST. When present, the multi-account fan-out reads ONLY
+   * these accounts — the others are not queried at all, not queried-then-
+   * filtered. That distinction is the whole point: the pipeline's per-account
+   * enablement promises a disabled mailbox is untouched, and "we read it and
+   * threw the rows away" is not untouched. It also means one disabled account
+   * with a dead grant cannot contribute a read failure to a tick that never
+   * wanted it.
+   *
+   * An EMPTY array means "no accounts", and the fan-out returns an empty page
+   * rather than falling back to all — a caller that computed an empty allow-list
+   * has said something specific, and the fail-open reading of it is the one that
+   * posts a stranger's mail into the owner's chat.
+   *
+   * Absent ⇒ every connected account, the unchanged default. Single-backend
+   * clients ignore it.
+   */
+  account_ids?: readonly string[]
+  /**
    * ENUMERATION MODE. `max_results` is a PER-ACCOUNT request size, so a
    * fan-out across N accounts legitimately reads up to N×max_results rows.
    * Capping the merged set back to `max_results` while every account's cursor
@@ -154,6 +172,14 @@ export interface GmailSearchInput {
    * across the in-memory and Google backends.
    */
   project_id?: string
+  /**
+   * ACCOUNT ALLOW-LIST — same semantics as {@link GmailListInput.account_ids}:
+   * the fan-out queries only these accounts, an empty array means none, and an
+   * absent field means every connected account. Present on search too because
+   * a scoped read that silently widens on one of the two read paths is not a
+   * scope.
+   */
+  account_ids?: readonly string[]
 }
 
 export interface GmailGetInput {

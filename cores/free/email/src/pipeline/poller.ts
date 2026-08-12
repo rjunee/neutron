@@ -303,6 +303,43 @@ export async function runEmailPipelineTick(
     // entire history read as new mail — classified, labelled and escalated. A
     // cheap probe re-opens the sweep whenever a connected account has no
     // completion mark of its own.
+    // (1a) PER-ACCOUNT ENABLEMENT. The owner connects mailboxes for many
+    // reasons; wanting the agent to READ one is a separate decision. The
+    // allow-list is threaded into every list call as `account_ids`, so a
+    // disabled mailbox is never queried — not queried-then-filtered, which
+    // would still hit its API and still surface its read failures.
+    //
+    // UNCONFIGURED IS NOT DISABLED. Zero rows in `account_settings` means the
+    // owner has never expressed a preference, and the pipeline behaves as it
+    // always has (every connected account) rather than silently doing nothing
+    // on a fresh install. The moment ONE row exists the owner has curated, and
+    // from then on the list is authoritative — including when they have turned
+    // everything off, which is a decision, not an absence.
+    const account_settings = store.listAccountSettings()
+    const enabled_accounts = store.enabledAccounts()
+    const account_filter: readonly string[] | null =
+      account_settings.length === 0 ? null : [...enabled_accounts]
+    const listScope = account_filter === null ? {} : { account_ids: account_filter }
+    /**
+     * Is this row's mailbox still switched on? `null` filter ⇒ unconfigured ⇒
+     * everything, unchanged. The '' single-account sentinel is only ever
+     * enabled explicitly, which is correct: a single-backend install has no
+     * account ids to curate, so it also has no `account_settings` rows and
+     * takes the unconfigured path.
+     */
+    const accountEnabled = (account_id: string | null): boolean =>
+      account_filter === null || enabled_accounts.has(account_id ?? '')
+    if (account_filter !== null && account_filter.length === 0) {
+      // Every account explicitly off. Say so on every tick — a pipeline that is
+      // deliberately silent and one that is broken look identical in a log that
+      // only reports work done.
+      log?.('email pipeline has no enabled accounts; nothing will be polled', {
+        configured: account_settings.length,
+      })
+      store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
+      return result
+    }
+
     // The FIRST sweep — the migration itself — versus a mailbox connected
     // later. They need different cutoffs and the difference matters both ways:
     // the initial accounts' line is ACTIVATION (anything after boot is real
@@ -313,7 +350,7 @@ export async function runEmailPipelineTick(
     const initial_sweep = store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1'
     let backlogPending = store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1'
     if (!backlogPending) {
-      const probe = await gmail.listMessages({ label: DEFAULT_LABEL, max_results: 1 })
+      const probe = await gmail.listMessages({ label: DEFAULT_LABEL, max_results: 1, ...listScope })
       // PRESENCE, not success — include accounts that failed this probe. A new
       // mailbox whose probe errors is still connected; skipping it here left it
       // unswept while the same tick's steady-state list read its history as new
@@ -350,6 +387,7 @@ export async function runEmailPipelineTick(
       const perAccount = parseCursorMap(store.getCheckpoint(CHECKPOINT_BACKLOG_CURSORS))
       const page = await gmail.listMessages({
         label: DEFAULT_LABEL,
+        ...listScope,
         max_results: deps.backlog_page_size ?? DEFAULT_BACKLOG_PAGE_SIZE,
         // Every row that was READ must be marked. `max_results` is per-account,
         // so N mailboxes return up to N pages; a merged set capped back to one
@@ -394,7 +432,13 @@ export async function runEmailPipelineTick(
         const stored = store.getCheckpoint(key)
         const parsed = stored === null ? Number.NaN : Number(stored)
         if (Number.isNaN(parsed)) {
-          const stamp = initial_sweep ? activation : now()
+          // AN ACCOUNT TURNED ON LATER IS SWEPT FROM WHEN IT WAS TURNED ON.
+          // `enabled_at` is the exact moment the owner took responsibility for
+          // that mailbox; falling back to `now()` would draw the line at
+          // whichever tick happened to notice, and everything in between would
+          // read as new mail and escalate.
+          const enabled_at = store.getAccountSetting(id)?.enabled_at ?? null
+          const stamp = enabled_at ?? (initial_sweep ? activation : now())
           store.setCheckpoint(key, String(stamp))
           cutoffFor.set(id, stamp)
           log?.('email pipeline backlog cutoff stamped for account', { account: id, stamp })
@@ -538,6 +582,12 @@ export async function runEmailPipelineTick(
     // (2) RESUME — escalations whose chat delivery failed on an earlier tick.
     // The query's `escalated_at IS NULL` is itself the dedup guard.
     for (const pending of store.listPendingEscalations(max_attempts)) {
+      // A row belonging to a mailbox the owner has since turned OFF is left
+      // exactly where it is: not delivered, not failed, not counted. Turning an
+      // account off is a statement about what should reach the owner from now
+      // on, and finishing an owed escalation from it would be the pipeline
+      // arguing with the setting. Turning it back on resumes the row untouched.
+      if (!accountEnabled(pending.account_id)) continue
       try {
         const outcome = await escalateEmail(
           {
@@ -606,6 +656,9 @@ export async function runEmailPipelineTick(
     // that finishes it — without re-classifying (costly) and without
     // re-escalating (the owner was already told, on the row's own record).
     for (const pending of store.listPendingMutations(max_attempts)) {
+      // Same rule, and here it is a WRITE — a disabled mailbox must not be
+      // labelled or archived by a pipeline the owner has switched off for it.
+      if (!accountEnabled(pending.account_id)) continue
       try {
         await applyMutation(pending)
         result.remutated++
@@ -784,6 +837,7 @@ export async function runEmailPipelineTick(
     while (pages < page_budget) {
       const listed = await gmail.listMessages({
         label: DEFAULT_LABEL,
+        ...listScope,
         max_results,
         exhaustive: true,
         ...(cursor !== undefined ? { page_token: cursor } : {}),
