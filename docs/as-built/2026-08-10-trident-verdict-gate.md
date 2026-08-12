@@ -495,8 +495,12 @@ real line of that shape, `echo "PR #$PR head: …"` in the re-run workflow. A st
 that silently returned its input would restore the whole hole while every test still
 passed, which is why its removal is proven positively rather than assumed. Comments are
 truncated and never dropped, so the `indexOf` slicing that isolates one job from the
-file still lands where it did. Four `ci.yml` mutants are in the battery, including the
-two measured above.
+file still lands where it did. Four `ci.yml` mutants went into the battery in this
+round, including the two measured above. That closed the hole the comments opened and
+NOT the wider class it belongs to — every one of those assertions still reads what the
+job SAYS, and nothing read what makes its conclusion mean anything. Round 8 below is
+that correction, and the sentence that used to sit here ("four mutants", implying the
+unwiring surface was covered) was over-stating a real measurement.
 
 **`DISPATCHER_PARSED_FLAGS` was the unguarded half of the redemption filter.** The
 printed command is checked by extracting every `flag=` shape from it and requiring each
@@ -570,19 +574,81 @@ finding needs the same evidence as an accepted one.
 | `bypass-honoured-on-a-fork-head` | a bypass on a FORK head is refused even from a trusted PR author |
 | `hidden-html-comment-verdict-honoured` | a verdict hidden inside an HTML comment is not a record, so it is not a verdict |
 
+### Round 8 — the job's TEXT was covered; its CONCLUSION was not
+
+Every `ci.yml` assertion this file had accumulated reads a string the job SAYS: the
+`run:` line, the `needs:` list, the `permissions` scopes, the job-level `if:`. None of
+them read what makes the job's conclusion mean anything, and there are four one-line
+edits that leave every asserted string untouched while the gate stops gating. All four
+were run against the suite and all four **SURVIVED at 152 pass / 0 fail**:
+
+1. **`continue-on-error: true` on the verdict step**, and 2. **on the verdict job.**
+   The step or job concludes `success` whatever the gate exits, so
+   `needs.trident-verdict.result` reads `success` over a gate that REFUSED. The
+   aggregator's `!= "success"` check never fires and an unreviewed PR merges with a
+   fully green suite. Both spellings are now mutants; the `${{ … }}` form is a third,
+   because a literal-only check misses an expression that evaluates true.
+3. **`if: false` on the verdict STEP.** The existing predicate test reads
+   `/^ {4}if: (.*)$/` — job-level indentation — so a step-level condition was invisible
+   to it. A skipped step leaves the job green, which is indistinguishable downstream
+   from a step that ran and passed. This is the fail-OPEN twin of round 7's
+   `&& false` on the job, which was fail-closed.
+4. **The aggregator's verdict branch exiting 0.** The assertion was
+   `expect(aggregator).toMatch(/exit 1/)` over the whole step, and the shard loop
+   twenty lines above it also ends in `exit 1` — so the unrelated exit satisfied the
+   regex while the verdict branch printed `FAIL — no trident verdict` and then reported
+   the required `test` context green.
+
+The fix is one detector rather than four string checks, applied to the verdict job, the
+aggregator, and every other job the aggregator reads a result from — because
+`continue-on-error` on `typecheck` launders a failure into `success` by the identical
+route. It is controlled positively: a synthetic job carrying all three directives must
+be reported, and a job name that does not exist must THROW rather than yield an empty
+slice that every assertion passes over. The `exit 1` assertion is now anchored to the
+verdict branch alone, with its own control proving the slice is the branch that refuses
+and not the shard loop.
+
+**A `merge_group` run carries no verdict**, and that was undocumented. `ci.yml` gained
+the trigger after this gate was built; the verdict job is `if:`-restricted to
+`pull_request`, so a queue run reports `test` green with nothing behind it. It is not
+fixable here — a queue run's head is a new commit no reviewer examined, and a verdict is
+bound to the PR head SHA on purpose, so demanding one there would red every queued PR
+forever. That makes it a settings obligation: whoever enables the queue must keep `test`
+required on `pull_request` too. Recorded as limit 9 in `docs/trident-verdict-gate.md`,
+pinned by a test so the trigger and the limits list cannot drift apart, and repeated at
+the aggregator's own condition.
+
+**The battery was measuring a narrower suite than CI runs.** It spawned
+`trident-verdict.test.ts` alone, so a mutant caught only by `ci-workflow.test.ts` read
+as a survivor — a false hole, which corrodes the artifact the same way a false pass
+does. It now runs both files.
+
+| mutant | test that goes RED |
+| --- | --- |
+| `ci-step-continue-on-error` | nothing in the gate job or the aggregator can conclude success while the gate did not run |
+| `ci-job-continue-on-error` | nothing in the gate job or the aggregator can conclude success while the gate did not run |
+| `ci-step-continue-on-error-expression` | nothing in the gate job or the aggregator can conclude success while the gate did not run |
+| `ci-verdict-step-skipped` | nothing in the gate job or the aggregator can conclude success while the gate did not run |
+| `ci-aggregator-verdict-branch-exits-zero` | the aggregator demands success on a PR — a skipped verdict job cannot satisfy it |
+
 ### Verification
 
-* `bun test scripts/ci/trident-verdict.test.ts` — **128 pass, 0 fail**.
-* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **59 applied, 59 caught, 0
+* `bun test scripts/ci/trident-verdict.test.ts` — **132 pass, 0 fail**; with
+  `scripts/ci/ci-workflow.test.ts`, which also asserts over `ci.yml`, **156 pass, 0
+  fail**.
+* `bun scripts/ci/trident-verdict-mutation-battery.ts` — **64 applied, 64 caught, 0
   survived**, reproducible by running it, refusing to report at all unless the
-  unmutated suite is green, and naming the tests each mutant reds. The ten rows above
-  were read off that run.
+  unmutated suite is green, and naming the tests each mutant reds. The rows above were
+  read off that run.
 * The adoption round re-ran the two load-bearing mutants BY HAND, off the battery, so
   the battery is not the only witness to its own coverage: `ci-gate-not-invoked` reds
   1 test and `pagination-stops-after-page-1` reds 4. That round added the 59th mutant,
   `ci-job-predicate-short-circuited-false` — the verdict job's `if:` took `&& false`
   while the suite stayed green at 128/0. Fail-CLOSED (a skipped job reds the
   aggregator), so it stuck the branch red rather than opening the gate; closed anyway.
+* Round 8's five mutants were likewise run BY HAND before the battery saw them —
+  SURVIVED at 152/0 on the previous tip, CAUGHT after the fix — so the battery is
+  confirming a measurement rather than being the only source of it.
 * The gate was also run LIVE against this PR, which is how the failure vocabularies
   were confirmed to be distinct rather than asserted to be: against an unpushed SHA it
   says "could not READ this PR", not "no verdict", and against the pushed head it takes
@@ -597,6 +663,12 @@ finding needs the same evidence as an accepted one.
   plus the codex cross-model lane (five findings, all fixed above; one vetoed with a
   citation). **No kimi lane** — not connected for this run, the owner's K3 quota being
   exhausted. Any approval here is a three-lane approval, not a four-lane one.
+* Round 8's panel was three lanes as well — the kimi lane deferred again (the call did
+  not complete), and two of the four surviving mutants above came from a SINGLE lane
+  each rather than from a majority. Both were reproduced by hand before being believed,
+  which is the only reason a minority finding was acted on; the reproduction, not the
+  vote, is the evidence. Re-run the kimi lane before any approval on this PR calls
+  itself four-lane.
 
 **Managed needs the same gate**, and that is a separate PR in that repository —
 never one change spanning both trees.

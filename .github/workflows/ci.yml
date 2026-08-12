@@ -303,6 +303,18 @@ jobs:
           # which is the whole reason the check is inside this aggregator instead
           # of being a separate context that would need a branch-protection
           # change to become blocking.
+          #
+          # AND NOT ON `merge_group`, WHICH IS A DECISION AND NOT AN OVERSIGHT.
+          # A queue run tests a temporary `gh-readonly-queue/…` branch whose head is
+          # a NEW commit no reviewer ever examined, so a verdict — which is bound to
+          # the PR head SHA on purpose — cannot match it by construction. Demanding
+          # `success` here on merge_group would make the verdict job's permanent
+          # `skipped` a permanent red and no queued PR could ever merge. So the
+          # enforcement point stays the PR run, and enabling a queue REQUIRES keeping
+          # `test` required on `pull_request` as well as on `merge_group` — a queue
+          # configured to require it only on merge_group would merge with no verdict
+          # behind it. Written down at limit 9 in docs/trident-verdict-gate.md
+          # because it is a hole that a settings change opens, not a code change.
           if [ "${{ github.event_name }}" = "pull_request" ] \
              && [ "${{ needs.trident-verdict.result }}" != "success" ]; then
             echo "FAIL — no trident verdict for this PR's head commit (see the trident-verdict job"

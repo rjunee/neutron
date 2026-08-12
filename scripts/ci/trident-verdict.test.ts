@@ -1439,6 +1439,58 @@ const stripYamlComments = (yaml: string): string =>
     })
     .join('\n')
 
+/**
+ * One job's block, from its `  name:` header to the next job's — so an assertion
+ * about the verdict job cannot be satisfied by a line belonging to another job.
+ * It THROWS on a name it cannot find, because returning '' would make every
+ * assertion over the slice pass vacuously the day someone renames a job.
+ */
+const jobSlice = (yaml: string, job: string): string => {
+  const lines = yaml.split('\n')
+  const start = lines.findIndex((l) => l.trimEnd() === `  ${job}:`)
+  if (start < 0) throw new Error(`no job named ${job}`)
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^ {2}[a-z][a-z0-9-]*:\s*$/.test(lines[i]!)) {
+      end = i
+      break
+    }
+  }
+  return lines.slice(start, end).join('\n')
+}
+
+/**
+ * The directives that let a job report `success` without its steps having passed.
+ *
+ * `continue-on-error` makes the CONCLUSION success whatever the step exited, so
+ * `needs.<job>.result` reads `success` over a gate that refused. A step-level `if:`
+ * skips the step and leaves the job green, which is indistinguishable downstream
+ * from a step that ran and passed. Neither touches a single string any other
+ * assertion in this file reads — which is why all three spellings survived the
+ * suite when they were tried.
+ *
+ * A job-level `if:` (4 spaces) is legitimate and is checked by its own test above;
+ * anything deeper belongs to a step.
+ */
+const unwiringDirectives = (slice: string): string[] =>
+  slice
+    .split('\n')
+    .filter((l) => /^\s+continue-on-error\s*:/.test(l) || /^ {5,}if\s*:/.test(l))
+    .map((l) => l.trim())
+
+/**
+ * The aggregator's VERDICT branch alone — `if … != "success"` through its `fi`.
+ * The assertion that it exits non-zero has to be anchored here: the shard loop
+ * above it also ends in `exit 1`, and an unanchored match over the whole step was
+ * satisfied by that one while this branch exited 0.
+ */
+const verdictBranch = (aggregator: string): string => {
+  const start = aggregator.indexOf('if [ "${{ github.event_name }}" = "pull_request" ]')
+  if (start < 0) return ''
+  const end = aggregator.indexOf('\n          fi', start)
+  return end < 0 ? aggregator.slice(start) : aggregator.slice(start, end)
+}
+
 describe('the gate is actually wired into CI and into the pre-push hook', () => {
   // Every assertion below reads the CODE, never the commentary around it.
   const ci = stripYamlComments(read('.github/workflows/ci.yml'))
@@ -1509,7 +1561,84 @@ describe('the gate is actually wired into CI and into the pre-push hook', () => 
     // required check normally does with a skip.
     expect(aggregator).toMatch(/github\.event_name\s*\}\}"\s*=\s*"pull_request"/)
     expect(aggregator).toMatch(/needs\.trident-verdict\.result\s*\}\}"\s*!=\s*"success"/)
-    expect(aggregator).toMatch(/exit 1/)
+    // AND THE BRANCH EXITS NON-ZERO, asserted against THAT branch rather than the
+    // whole aggregator. An unanchored `/exit 1/` over the whole step is satisfied by
+    // the shard loop's own `exit 1` twenty lines above, so flipping this one to
+    // `exit 0` left the suite green over an aggregator that PRINTS the failure and
+    // then reports the required `test` context as passing. A cross-model lane ran
+    // exactly that mutation and it survived.
+    expect(verdictBranch(aggregator)).toMatch(/^ +exit 1$/m)
+    expect(verdictBranch(aggregator)).not.toMatch(/^ +exit 0$/m)
+  })
+
+  test('the verdict branch this file anchors to is the branch that refuses — the control for the assertion above', () => {
+    // The slice is computed by `indexOf`, so a rename upstream could make it empty
+    // and every assertion on it would pass vacuously. Proven both ways: the real
+    // branch contains the verdict condition and NOT the shard loop's exit, and a
+    // synthetic aggregator whose verdict branch exits 0 is rejected.
+    const real = verdictBranch(ci.slice(ci.indexOf('\n  test:')))
+    expect(real).toContain('needs.trident-verdict.result')
+    expect(real).not.toContain('a required gate did not succeed')
+    const mutated = ci.replace(/(no trident verdict[\s\S]*?)exit 1/, '$1exit 0')
+    expect(mutated).not.toBe(ci)
+    expect(verdictBranch(mutated.slice(mutated.indexOf('\n  test:')))).not.toMatch(/^ +exit 1$/m)
+  })
+
+  test('nothing in the gate job or the aggregator can conclude success while the gate did not run', () => {
+    // THE FAIL-OPEN CLASS THAT DOES NOT TOUCH ANY ASSERTED STRING. Every check above
+    // reads what the job SAYS; none of them read what makes the job's conclusion
+    // mean anything. `continue-on-error: true` on the step or on the job makes the
+    // job conclude `success` no matter what the gate exits, so
+    // `needs.trident-verdict.result` reads `success` over a gate that refused — and
+    // a step-level `if: false` skips the gate while leaving the job green, which the
+    // aggregator cannot tell from a gate that ran and passed. All three survived the
+    // suite when a cross-model lane ran them.
+    //
+    // The aggregator is included because it IS the required context, and the gate
+    // jobs are included because `continue-on-error` on any of them launders a
+    // failure into `success` in the same `needs.*.result` the aggregator reads.
+    for (const job of ['trident-verdict', 'typecheck', 'lint', 'purity', 'layering', 'shard', 'test']) {
+      expect(unwiringDirectives(jobSlice(ci, job))).toEqual([])
+    }
+  })
+
+  test('the unwiring detector detects unwiring — the control for the assertion above', () => {
+    // Without this, a detector that matched nothing would pass the test above over a
+    // workflow with `continue-on-error: true` in every job. Both spellings, because
+    // `${{ … }}` is a legal value there and a literal-only check would miss it.
+    const synthetic = [
+      '  trident-verdict:',
+      '    runs-on: ubuntu-latest',
+      "    if: github.event_name == 'pull_request'",
+      '    continue-on-error: true',
+      '    steps:',
+      '      - name: A trident verdict exists',
+      '        if: false',
+      '        continue-on-error: ${{ github.event_name == \'pull_request\' }}',
+      '        run: bun scripts/ci/trident-verdict.ts',
+      '',
+      '  test:',
+    ].join('\n')
+    expect(unwiringDirectives(jobSlice(synthetic, 'trident-verdict'))).toEqual([
+      'continue-on-error: true',
+      'if: false',
+      "continue-on-error: ${{ github.event_name == 'pull_request' }}",
+    ])
+    // And the slicer really slices: a job name that is not there yields nothing,
+    // which would make the loop above vacuous if it ever silently returned ''.
+    expect(() => jobSlice(ci, 'no-such-job')).toThrow()
+  })
+
+  test('a merge_group run carries no verdict, and that is recorded rather than discovered', () => {
+    // `ci.yml` gained a `merge_group:` trigger after this gate was built, and the
+    // verdict job is `if:`-restricted to `pull_request` — so a queue run reports the
+    // required `test` context green with no verdict behind it. It cannot be fixed
+    // here (a queue run's head is a new commit no reviewer examined, so demanding a
+    // verdict would red every queued PR forever), which makes it a SETTINGS
+    // obligation. The obligation is only worth anything if it is written down, and
+    // this is what stops the trigger and the limits list drifting apart.
+    expect(ci).toMatch(/^ {2}merge_group:\s*$/m)
+    expect(read('docs/trident-verdict-gate.md')).toContain('merge_group')
   })
 
   test('the comments fetch has the scope it needs, not the scope it looks like it needs', () => {

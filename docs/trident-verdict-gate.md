@@ -432,3 +432,16 @@ reasons they cannot articulate.
    drift apart. Re-verifying the set against the dispatcher is a review duty
    whenever either side changes, and the set was read off the dispatcher's parse
    step by hand.
+9. **A `merge_group` run carries no verdict, so a merge queue must not be the only
+   place `test` is required.** `ci.yml` gained a `merge_group:` trigger after this
+   gate was built. The verdict job is `if:`-restricted to `pull_request`, so on a
+   queue run it is skipped and the aggregator does not consult it — `test` reports
+   green with nothing behind it. That is deliberate: a queue run tests a temporary
+   `gh-readonly-queue/…` branch whose head is a **new** commit, and a verdict is
+   bound to the PR head SHA precisely so it cannot be inherited by a commit nobody
+   reviewed. Demanding a verdict there would red every queued PR forever rather
+   than gate anything. The consequence is a **settings** obligation, which is why
+   it is written here rather than fixed in code: whoever enables the queue must
+   keep `test` required on `pull_request` too. A ruleset that requires `test` only
+   on `merge_group` merges without a verdict. As of this writing the repository's
+   ruleset has no `merge_queue` rule, so the hole is latent.

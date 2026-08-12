@@ -38,7 +38,15 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const GATE = fileURLToPath(new URL('trident-verdict.ts', import.meta.url))
 const RERUN_WORKFLOW = fileURLToPath(new URL('../../.github/workflows/trident-verdict-rerun.yml', import.meta.url))
 const CI_WORKFLOW = fileURLToPath(new URL('../../.github/workflows/ci.yml', import.meta.url))
-const TEST = 'scripts/ci/trident-verdict.test.ts'
+/**
+ * BOTH files that assert over `ci.yml`, because CI runs both and a battery that
+ * ran one was measuring a narrower suite than the one a change actually has to
+ * get past. A cross-model lane found the gap concretely: an `always()`-dropped
+ * mutant SURVIVED the single-file run and was caught by `ci-workflow.test.ts`, so
+ * the per-guard attribution the battery prints was reading as a hole that was not
+ * one.
+ */
+const TESTS = ['scripts/ci/trident-verdict.test.ts', 'scripts/ci/ci-workflow.test.ts']
 
 /** [name, the exact source to replace, the fail-open replacement] */
 const MUTANTS: [string, string, string][] = [
@@ -280,6 +288,42 @@ const CI_WORKFLOW_MUTANTS: [string, string, string][] = [
     'run: bun scripts/ci/trident-verdict.ts',
     'run: bun scripts/ci/trident-verdict.ts || true',
   ],
+  // ---- the conclusion, which no assertion here used to read ---------------------
+  // Every mutant above rewrites a string some test looks at. These four rewrite
+  // nothing any of them looks at: they leave the job's text intact and change what
+  // its CONCLUSION means. All four survived a full green suite when a cross-model
+  // lane ran them, which is the same fail-open class the gate exists to refuse —
+  // `needs.trident-verdict.result` reads `success` over a gate that never ran.
+  [
+    'ci-step-continue-on-error',
+    '        run: bun scripts/ci/trident-verdict.ts',
+    '        continue-on-error: true\n        run: bun scripts/ci/trident-verdict.ts',
+  ],
+  [
+    'ci-job-continue-on-error',
+    "    if: github.event_name == 'pull_request'\n",
+    "    if: github.event_name == 'pull_request'\n    continue-on-error: true\n",
+  ],
+  [
+    // The `${{ }}` spelling too: a literal-only check would miss it, and an
+    // expression that happens to evaluate true is the same fail-open.
+    'ci-step-continue-on-error-expression',
+    '        run: bun scripts/ci/trident-verdict.ts',
+    '        continue-on-error: ${{ github.event_name == \'pull_request\' }}\n        run: bun scripts/ci/trident-verdict.ts',
+  ],
+  [
+    'ci-verdict-step-skipped',
+    "      - name: A trident verdict exists for this PR's head commit\n",
+    "      - name: A trident verdict exists for this PR's head commit\n        if: false\n",
+  ],
+  [
+    // The aggregator PRINTS the refusal and then exits 0. Survived because the
+    // assertion on it was an unanchored `/exit 1/` over the whole step, satisfied
+    // by the shard loop's exit twenty lines above.
+    'ci-aggregator-verdict-branch-exits-zero',
+    'log: it prints the command that reviews THIS branch without restarting it)."\n            exit 1',
+    'log: it prints the command that reviews THIS branch without restarting it)."\n            exit 0',
+  ],
 ]
 
 /**
@@ -335,7 +379,7 @@ const originals = new Map(CASES.map(([file]) => [file, readFileSync(file, 'utf8'
  * come out of the runner now, so the claim and the artifact are the same thing.
  */
 function runSuite(): { failures: number | null; detail: string; failed: string[] } {
-  const p = spawnSync('bun', ['test', TEST], { cwd: REPO_ROOT, encoding: 'utf8' })
+  const p = spawnSync('bun', ['test', ...TESTS], { cwd: REPO_ROOT, encoding: 'utf8' })
   if (p.error) return { failures: null, detail: `could not run the suite: ${p.error.message}`, failed: [] }
   if (p.status === null) {
     return { failures: null, detail: `the runner was killed by signal ${p.signal}`, failed: [] }
