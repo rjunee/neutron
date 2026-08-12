@@ -155,6 +155,11 @@ if [ "$mode" = "delete-branch" ]; then
         preserved=$((preserved + 1))
       else
         # origin holds this exact sha: the local branch is a disposable copy.
+        # A REFUSED delete needs no handling: git only refuses while some worktree
+        # still has the branch checked out, and any such worktree was already
+        # walked above — it was either removed (so the delete succeeds) or
+        # preserved (so `$preserved` is non-zero and we never reach this branch).
+        # Either way the branch survives, which is the safe direction.
         if git -C "$repo" branch -D "$branch" >/dev/null 2>&1; then
           echo "DELETED branch $branch"
         fi
