@@ -16,9 +16,18 @@
  * at 8. That is a NO-OP for every real lane — the run row still said 8 — while
  * reading, in the diff and in the comment beside it, exactly like a cap change.
  * Nothing in the suite would have gone red. So this file asserts the cap by
- * DRIVING the real chain (real migrations → real store → real launcher → the
- * loop's own predicate) rather than by restating a literal, and it pins the two
- * knobs to each other so they cannot drift apart again.
+ * DRIVING the real chain — real migrations → real store → real launcher — rather
+ * than by restating a literal, and it pins the two knobs to each other so they
+ * cannot drift apart again.
+ *
+ * WHAT IS AND IS NOT EXECUTED HERE. The store and the launcher are the real code.
+ * The fix loop is NOT: `inner-workflow.mjs` cannot run under bun (its
+ * `agent`/`parallel`/`phase` globals are injected by the Workflow runtime and it
+ * ends in a top-level `return` — see the header of inner-workflow.test.ts). The
+ * loop is therefore RE-EXECUTED as a model, and the model is pinned to the script
+ * by source assertions on its three-clause predicate, its strict `<`, and its
+ * `round++` step — so a script that drifts makes those red instead of leaving the
+ * model quietly describing a loop that no longer exists.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -97,20 +106,42 @@ describe('review-round cap — the value a real lane actually gets', () => {
     expect(args['maxRounds']).toBe(EXPECTED_CAP)
   })
 
-  test('the fix loop ADMITS round 3 and every round up to nine, and REFUSES at ten', async () => {
-    // The loop's own predicate is `round < maxRounds` (inner-workflow.mjs). Round
-    // 3 is called out because the fallback used to be 3: under that value `3 < 3`
-    // was false. This asserts admission/refusal, not the literal.
+  test('the fix loop runs rounds 2..10 and then REFUSES — nine fix rounds, no eleventh', async () => {
+    // `inner-workflow.mjs` is NOT executable here — its `agent`/`parallel`/`phase`
+    // globals are injected by the Workflow runtime and it ends in a top-level
+    // `return` (see the header of inner-workflow.test.ts). So the loop is
+    // RE-EXECUTED as a faithful model: the cap comes from the real store, and the
+    // model's shape is pinned to the script by the source assertions in the
+    // describe block below (the three-clause predicate AND the `round++` step).
+    // Without that pinning this would only be arithmetic; with it, a script whose
+    // predicate or step changed makes those tests red.
     const run = await createRun()
     const cap = run.max_rounds
 
-    for (const round of [1, 2, 3, 4, 9]) {
-      expect(round < cap).toBe(true)
+    const visited: number[] = []
+    let round = 1
+    // Verbatim shape of the script's `while`: REQUEST_CHANGES (never converges,
+    // the worst case) + `round < maxRounds` + not infra-only.
+    // Typed as the script's runtime values (plain strings), not literals — the
+    // point is to evaluate the predicate, not to have TS fold it to a constant.
+    const verdict: string = 'REQUEST_CHANGES'
+    const blockKind: string = 'code'
+    while (verdict === 'REQUEST_CHANGES' && round < cap && blockKind !== 'infra-only') {
+      round++ // the script's step — one round per iteration
+      visited.push(round)
     }
-    // Still BOUNDED — a cap that stopped refusing would be the worse bug, because
-    // a non-converging lane would spend forever instead of stopping and reporting.
-    expect(10 < cap).toBe(false)
-    expect(11 < cap).toBe(false)
+
+    // The EXACT rounds a never-converging lane gets. Round 3 is the discriminating
+    // one: under the old fallback of 3, `3 < 3` was false and the lane stopped
+    // there. An off-by-one or a `round += 2` step changes this list.
+    expect(visited).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(visited).toContain(3)
+    // Nine fix rounds after the round-1 build, and the loop TERMINATES: a cap that
+    // stopped refusing would be the worse bug, since a non-converging lane would
+    // spend forever instead of stopping and reporting.
+    expect(visited.length).toBe(9)
+    expect(round).toBe(cap)
+    expect(round < cap).toBe(false)
   })
 })
 
@@ -132,9 +163,29 @@ describe('review-round cap — the two knobs may not drift apart', () => {
     expect(Number(declared?.[1])).toBe(run.max_rounds)
   })
 
-  test('the loop still gates on `round < maxRounds`', () => {
-    // If this predicate is ever rewritten (e.g. to `<=`), the admission and
-    // refusal assertions above are describing a loop that no longer exists.
+  // These three pin the MODEL above to the real script. The script cannot be
+  // executed under bun, so if its predicate or its step drifts, the model silently
+  // stops describing it — that is the way a green suite stops meaning anything.
+  test('the loop still gates on `round < maxRounds` — strictly less-than', () => {
+    // A rewrite to `<=` would give an extra round past the cap while every
+    // arithmetic assertion above still passed.
     expect(SRC).toMatch(/round < maxRounds/)
+    expect(SRC).not.toMatch(/round <= maxRounds/)
+  })
+
+  test('the loop STEPS by exactly one round per iteration', () => {
+    // The concrete drift this catches: `round++` -> `round += 2` would skip
+    // rounds, so a lane would get five fix rounds instead of nine while the cap
+    // literal still read 10.
+    const loop = /while \(\s*\n\s*finalVerdict === 'REQUEST_CHANGES' &&\s*\n\s*round < maxRounds &&\s*\n\s*synthesis\.blockKind !== 'infra-only'\s*\n\s*\) \{\s*\n\s*round\+\+\s*\n/.exec(SRC)
+    // Proved to have MATCHED before anything is concluded from it.
+    expect(loop).not.toBeNull()
+  })
+
+  test('the loop guards all THREE clauses — verdict, cap, and infra-only', () => {
+    // Dropping the infra-only clause would spend the (now larger) round budget
+    // re-Forging against a review that never ran.
+    expect(SRC).toContain("finalVerdict === 'REQUEST_CHANGES' &&")
+    expect(SRC).toContain("synthesis.blockKind !== 'infra-only'")
   })
 })
