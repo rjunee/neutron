@@ -213,10 +213,46 @@ failing quietly. The producer side is pinned too:
 `open/__tests__/open-email-pipeline-wiring.test.ts` boots the REAL composer and
 reads `composition.email_pipeline`, so deleting the composer block reds rather
 than shipping a declared capability nobody wires (the ISSUES #439/#440 lesson).
-Every fixture address is `*.example.com`. Incidental: the
-`open-composition-fields-characterization` expected-key list was already stale
-for `cores_oauth_broker_surface` on `main`; that one line is fixed here so the
-guard is green again.
+Every fixture address is `*.example.com`.
+
+**The classifier's address parse was quadratic on a header the SENDER picks.**
+CodeQL flagged `js/polynomial-redos` at `classify.ts:78`: `bareAddress` was
+`/<([^>]*)>/.exec(from)`, and because `[^>]` also matches `<`, a `From:` of N
+`<` and no `>` scans to end-of-string from all N positions. Measured on the
+pre-fix code, 8/16/32/64 KB took 104 ms / 437 ms / 1.6 s / 6.8 s — a clean
+quadruple per doubling. `from` is an RFC 5322 header, so this was a
+denial-of-service any stranger could post into any self-hoster's mail path, and
+it was the SECOND such regex in this one file (ISSUES #547). Fixed by deleting
+the regex rather than tuning it — two `indexOf` calls cannot backtrack at all —
+with equivalence checked differentially over all 137,267 strings up to length 6
+from an alphabet containing both brackets (zero mismatches). Every other regex
+the branch adds or touches was enumerated and timed on its own worst-case input
+and cleared on the evidence: the three importance alternations are
+attacker-controlled but have no unbounded quantifier (3.3 ms over 200 KB), and
+`in-memory.ts`'s `split(/\s+/)` and `replace(/^p/)` are non-ambiguous over input
+the pipeline composes itself. `pipeline-classify-redos.test.ts` pins LINEARITY,
+which no correctness test can — a ReDoS regression returns the same value, just
+far later — and it is mutation-proven: restoring the old regex turns its two
+`bareAddress` arms red at 53 s each.
+
+**The pipeline sidecar no longer reaches past the Core boundary.**
+`pipeline/store.ts` imported `@neutronai/migrations/runner.ts` directly, which
+`cores-use-sdk-only` calls the "third-party fiction" violation, and the G8
+ratchet lets the grandfathered baseline SHRINK ONLY — so a second module in this
+package holding that edge is a red build, not a second grandfathered line. The
+SDK exposes no migration seam yet (four Cores carry the same baselined edge for
+the same reason), so the Core now funnels through the one module that already
+owns it: `cache.ts` exports `applyEmailSidecarMigrations` and the pipeline store
+calls that. Same shape as `cores/free/calendar/migrations/runner.ts` — one
+module per Core owns the platform seam — and when the SDK grows a migration API
+there is exactly one import in this package to move. Baseline stays at 8.
+
+Also corrected here: an earlier round of this branch added
+`cores_oauth_broker_surface` to `EXPECTED_COMPOSITION_KEYS` and described it as
+pre-existing drift that had already reddened `main`. Checked out and run, `main`
+is green without it — the field is spread in conditionally and needs Google
+OAuth configured, which that boot does not do — so the line reddened the
+characterization rather than fixing it, and is removed.
 
 **Out of scope, deliberately:** the twice-daily brief/digest, the
 `email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe

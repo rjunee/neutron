@@ -20,8 +20,13 @@ import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
 import { openSidecar } from '@neutronai/persistence/index.ts'
+
+// NOT `@neutronai/migrations/runner.ts` directly. A bundled Core may not import
+// `migrations/` (`cores-use-sdk-only`), and the layering baseline that
+// grandfathers `cache.ts`'s edge may only SHRINK, so this module goes through
+// the Core's single owned seam instead. See `applyEmailSidecarMigrations`.
+import { applyEmailSidecarMigrations } from '../cache.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -390,6 +395,6 @@ export function openEmailPipelineStore(input: EmailPipelineStoreOptions): EmailP
   const dir = join(input.owner_home, EMAIL_PIPELINE_DIR)
   mkdirSync(dir, { recursive: true })
   const db = openSidecar(join(dir, EMAIL_PIPELINE_DB))
-  applyProjectScopedMigrations(db, input.migrations_dir ?? EMAIL_PIPELINE_MIGRATIONS_DIR)
+  applyEmailSidecarMigrations(db, input.migrations_dir ?? EMAIL_PIPELINE_MIGRATIONS_DIR)
   return new EmailPipelineStore(db, input.now ?? ((): number => Date.now()))
 }
