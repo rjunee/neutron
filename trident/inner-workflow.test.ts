@@ -64,27 +64,10 @@ const CLEANUP_SH = readFileSync(
   'utf8',
 )
 
-/** `function <name>(…) { … }` lifted verbatim out of `SRC`, brace-matched so the
- *  extraction survives edits inside the body instead of a fixed line count. */
-function grabFunction(name: string): string {
-  const at = SRC.indexOf(`function ${name}(`)
-  if (at === -1) throw new Error(`${name} is missing from inner-workflow.mjs`)
-  let depth = 0
-  let started = false
-  for (let i = at; i < SRC.length; i += 1) {
-    const c = SRC[i]
-    if (c === '{') {
-      depth += 1
-      started = true
-    } else if (c === '}') {
-      depth -= 1
-      if (started && depth === 0) return SRC.slice(at, i + 1)
-    }
-  }
-  throw new Error(`could not brace-match ${name}`)
-}
-
-/** The SHIPPED `classifyCleanupOutcome`, executed rather than grepped (#541). */
+/** The SHIPPED `classifyCleanupOutcome`, executed rather than grepped (#541).
+ *  Uses the module-scope `grabFunction` above — the same extractor the other
+ *  loaders use, so this can never drift into extracting something that does not
+ *  ship. */
 function loadCleanupClassifier(): (
   reported: unknown,
   raw: unknown,
