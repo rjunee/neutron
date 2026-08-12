@@ -666,6 +666,25 @@ function normalizeVerdict(v) {
 // mutation-prover phase still stands between APPROVE and merge.
 const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
 
+// DID THIS FIELD ACTUALLY ANSWER? Returns the status STRING, or '' for anything that
+// is not one — the single notion of "answered" shared by the lane retry and the
+// completeness gate.
+//
+// TRUTHINESS IS NOT THAT NOTION, and splitting the two is what this closes. The retry
+// read `current[statusKey]` for truthiness while `hasUsableVerdict` required a
+// non-empty STRING, so a malformed core result — `{ verdict: 42 }`, the shape a
+// schema-violating or half-serialised agent reply takes — was truthy enough to look
+// like a completed review to the retry (skipped, `break`) and NOT a verdict to the
+// gate (seat declared missing). The seat was therefore BLOCKED BUT NEVER RETRIED: the
+// run ended `infra-only` on round 1 and discarded the whole Forge build, which is the
+// exact cost retrying core seats exists to remove. It fails closed, so nothing merges
+// — but the recovery path silently never fires, and that invisibility is the point.
+//
+// One predicate, three readers, agreeing by construction rather than by convention —
+// the same argument `LANE_FINDING_KIND` makes below for reading a FIELD instead of
+// re-deriving a string.
+const usableStatus = (v, key) => (v && typeof v[key] === 'string' && v[key].length > 0 ? v[key] : '')
+
 function enforceSeverityGate(synthesis) {
   if (!synthesis || synthesis.verdict !== 'REQUEST_CHANGES') return synthesis
   const findings = Array.isArray(synthesis.findings) ? synthesis.findings : []
@@ -776,7 +795,7 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
       // 'not_connected' and the panel could reach APPROVE with an empty seat.
       // A missing status on a configured slot is therefore `deferred` — and
       // retryable, which is the cheapest possible remedy for a crashed lane.
-      const status = current && current[statusKey] ? current[statusKey] : 'deferred'
+      const status = usableStatus(current, statusKey) || 'deferred'
       // Only a DEFERRED lane is retried. `connected` is a real answer and
       // `not_connected` is the deliberate graceful path — retrying either would
       // spend a call to learn something already known.
@@ -790,7 +809,7 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
       }
       // Keep the ORIGINAL deferred verdict when the retry produced nothing, so
       // the gate still blocks and the evidence still names the first failure.
-      if (next && next[statusKey]) out[slot] = next
+      if (usableStatus(next, statusKey)) out[slot] = next
     }
   }
   return out
@@ -1163,7 +1182,7 @@ const CORE_SEAT_STATUS_KEY = 'verdict'
 // seat, which is exactly #536. This is the same "a field's name is not a contract" trap
 // that `LANE_FINDING_KIND` above exists to close.
 function hasUsableVerdict(v) {
-  return Boolean(v) && typeof v.verdict === 'string' && v.verdict.length > 0
+  return usableStatus(v, CORE_SEAT_STATUS_KEY).length > 0
 }
 
 function missingCoreReviewers(verdicts, seats) {

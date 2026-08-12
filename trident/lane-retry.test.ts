@@ -86,7 +86,16 @@ function extractConst(name: string): string {
 // still down a seat cannot converge anyway). Lifted from the source for the same
 // reason as LANE_FINDING_KIND — re-declaring {minor,nit} here would let the classifier
 // and `enforceSeverityGate` drift apart with this file still green.
-const PRELUDE = [extractConst('LANE_FINDING_KIND'), extractConst('NON_BLOCKING_SEVERITIES')].join('\n')
+// `usableStatus` comes along too: it is the shared "did this field actually answer"
+// predicate, and `retryDeferredPeers` closes over it. Restating it here would let the
+// retry and the completeness gate drift apart with this file still green — the very
+// divergence the const exists to close.
+const PRELUDE = [
+  extractConst('LANE_FINDING_KIND'),
+  extractConst('NON_BLOCKING_SEVERITIES'),
+  extractConst('usableStatus'),
+  extractConst('CORE_SEAT_STATUS_KEY'),
+].join('\n')
 
 const load = <T>(name: string, isAsync = false): T =>
   // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
@@ -114,6 +123,9 @@ type GateFn = (
 const retryDeferredPeers = load<RetryFn>('retryDeferredPeers', true)
 const classifyBlock = load<ClassifyFn>('classifyBlock')
 const enforceCrossModelGate = load<GateFn>('enforceCrossModelGate')
+// The gate's half of the shared "did this seat answer" predicate, loaded from the same
+// source as the retry so the two can be asserted to AGREE rather than assumed to.
+const hasUsableVerdict = load<(v: unknown) => boolean>('hasUsableVerdict')
 
 const SLOTS = [
   { name: 'codex', slot: 0, statusKey: 'codexStatus' },
@@ -504,6 +516,44 @@ describe('retryDeferredPeers — a dead CORE seat is retried, not written off', 
       invoke: async () => null,
     })
     expect(out[0]).toBeNull()
+  })
+
+  // THE RETRY AND THE GATE MUST AGREE ON WHAT "ANSWERED" MEANS. Codex [P1] on the
+  // round-3 diff: the retry tested `current[statusKey]` for TRUTHINESS while
+  // `hasUsableVerdict` required a non-empty STRING, so `{ verdict: 42 }` — a
+  // schema-violating / half-serialised agent reply — looked like a completed review to
+  // the retry (skipped) and like an empty seat to the gate (blocked). The seat was
+  // BLOCKED BUT NEVER RETRIED: the run ended infra-only on round 1 and threw the whole
+  // Forge build away, which is precisely the cost retrying core seats exists to remove.
+  // Asserted on BEHAVIOUR at both ends — the recovery was attempted, and the recovered
+  // verdict is the one the panel goes on to read.
+  test('a TRUTHY-but-not-a-string core verdict is retried, not mistaken for a review', async () => {
+    const calls: string[] = []
+    const out = await retryDeferredPeers({
+      verdicts: [{ verdict: 42 }, { verdict: 'APPROVE' }],
+      slots: CORE,
+      invoke: async (n) => {
+        calls.push(n)
+        return { verdict: 'REQUEST_CHANGES', findings: [] }
+      },
+    })
+    expect(calls).toEqual(['Argus rubric (core reviewer)'])
+    expect(out[0]?.['verdict']).toBe('REQUEST_CHANGES')
+    // …and the two readers now agree, which is the property that was actually broken.
+    expect(hasUsableVerdict({ verdict: 42 })).toBe(false)
+    expect(hasUsableVerdict(out[0])).toBe(true)
+  })
+
+  test('a retry that returns a truthy NON-string verdict is refused, so the gate still blocks', async () => {
+    // The same predicate on the write side: a malformed retry result must not be
+    // installed over the dead seat, or the gate reads a "verdict" that never was one.
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict, { verdict: 'APPROVE' }],
+      slots: CORE,
+      invoke: async () => ({ verdict: 42 }),
+    })
+    expect(out[0]).toBeNull()
+    expect(hasUsableVerdict(out[0])).toBe(false)
   })
 
   test('the wiring passes the derived core seats to the retry, ahead of the peers', () => {

@@ -414,6 +414,13 @@ function loadRealGate(): {
       // source for the same reason as LANE_FINDING_KIND: re-declaring {minor,nit}
       // here would let the classifier and the severity gate drift apart green.
       grabConst('NON_BLOCKING_SEVERITIES'),
+      // `usableStatus` is the ONE "did this field answer" predicate the lane retry and
+      // `hasUsableVerdict` now share; `CORE_SEAT_STATUS_KEY` is the field it reads for a
+      // core seat. Both are lifted rather than restated for the same reason as the two
+      // above — restating them here is exactly how the retry and the gate drifted apart
+      // green in the first place.
+      grabConst('usableStatus'),
+      grabConst('CORE_SEAT_STATUS_KEY'),
       grab('enforceCrossModelGate'),
       grab('deferredCrossModelPeers'),
       grab('crossModelPeerStatus'),
