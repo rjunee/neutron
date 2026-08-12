@@ -182,15 +182,46 @@ export async function escalateEmail(
   // dropped; it does not mean it may be repeated.
   if (deps.push !== null && (email.pushed_at ?? null) === null) {
     const push = deps.push
+    // RESERVE BEFORE SENDING, which is the opposite of the chat path above and
+    // deliberately so. Chat sends first and notes after, because a lost note is
+    // harmless there: the retry carries the same idempotency key and the gateway
+    // collapses it. Push has NO key. Send-then-note therefore has a hole — the
+    // send succeeds, the note throws, `pushed_at` stays null, and the next
+    // resume pass buzzes the owner again for the same email, which is the exact
+    // five-buzz failure `pushed_at` was introduced to end.
+    //
+    // Writing the guard FIRST closes it, and the cost is the one this comment
+    // block already accepts: a push may be DROPPED (reserved, then the send
+    // fails, and nothing retries it), it may not be REPEATED. Chat remains the
+    // guaranteed surface, so a dropped buzz costs a few minutes of latency on a
+    // second screen while a repeated one is a real harm the owner cannot undo.
+    //
+    // A FAILED RESERVATION SUPPRESSES THE PUSH ENTIRELY. If the write throws,
+    // the store is not recording anything — almost certainly including
+    // `markEscalated` — so the row stays eligible and every retry would push
+    // unguarded. Sending under those conditions is how one email becomes five
+    // buzzes; not sending is one missed buzz.
+    let reserved = false
     try {
-      await push.pushAll(deps.project_slug, { title: ESCALATION_PUSH_TITLE, body: text })
       deps.store.markPushed(email.id, deps.now(), account)
+      reserved = true
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      deps.log?.('email escalation push failed (chat is unaffected)', {
+      deps.log?.('email escalation push skipped: could not reserve the once-only guard', {
         email_id: email.id,
         error: msg,
       })
+    }
+    if (reserved) {
+      try {
+        await push.pushAll(deps.project_slug, { title: ESCALATION_PUSH_TITLE, body: text })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        deps.log?.('email escalation push failed (chat is unaffected)', {
+          email_id: email.id,
+          error: msg,
+        })
+      }
     }
   }
 

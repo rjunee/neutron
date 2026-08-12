@@ -475,6 +475,89 @@ describe('a retried escalation does not buzz the phone again', () => {
       expect(pushes).toHaveLength(1)
     })
   })
+
+  test('the send succeeds and the MARK fails: still once, because the guard is written first', async () => {
+    // The hole in send-then-note. `pushAll` resolves, `markPushed` throws, and
+    // `pushed_at` is left null — so the guard reads "never pushed" about a
+    // message the owner has already been buzzed for, and every resume pass
+    // buzzes again. The chat path can survive this ordering because its retry
+    // carries an idempotency key; push has none, so the durable fact has to be
+    // written BEFORE the send, not after it.
+    await withStore(async (store) => {
+      store.insertEmail({
+        id: 'msg-mark-fails',
+        thread_id: 't-mark',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+
+      const pushes: string[] = []
+      // Poison the acknowledgement write ONLY — the send itself is healthy, so
+      // any push that goes out really did reach the owner's phone.
+      let poisoned = true
+      const markPushed = store.markPushed.bind(store)
+      const poisonedStore = new Proxy(store, {
+        get(target, prop, receiver) {
+          if (prop === 'markPushed' && poisoned) {
+            return () => {
+              throw new Error('disk full')
+            }
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      })
+      void markPushed
+
+      const deps = {
+        // Chat never persists, so the row stays eligible and IS retried — which
+        // is the only way this bug ever reaches the owner.
+        deliver: async (): Promise<unknown> => ({ persisted: false, delivered_live: false }),
+        topic_id: 'app:owner',
+        push: {
+          async pushAll(_slug: string, m: { body: string }): Promise<unknown> {
+            pushes.push(m.body)
+            return { sent: 1 }
+          },
+        },
+        project_slug: 'instance',
+        store: poisonedStore,
+        now: () => NOW,
+      }
+      const email = {
+        id: 'msg-mark-fails',
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        reason: 'billing action',
+      }
+
+      await escalateEmail(email, deps)
+      // NOT SENT. The reservation failed, so there is no guard; sending anyway
+      // would buzz on this attempt and on every retry after it. One dropped
+      // buzz on a broken store beats an unbounded repeat, and chat is still the
+      // guaranteed surface.
+      expect(pushes).toHaveLength(0)
+      expect(store.getEmail('msg-mark-fails')?.pushed_at).toBeNull()
+
+      // The store recovers; the next attempt reserves and sends exactly once.
+      poisoned = false
+      const second = store.listPendingEscalations(5)[0]
+      await escalateEmail({ ...email, pushed_at: second?.pushed_at ?? null }, deps)
+      expect(pushes).toHaveLength(1)
+      expect(store.getEmail('msg-mark-fails')?.pushed_at).toBe(NOW)
+
+      // …and a third attempt, still failing in chat, does not buzz again.
+      const third = store.listPendingEscalations(5)[0]
+      await escalateEmail({ ...email, pushed_at: third?.pushed_at ?? null }, deps)
+      expect(pushes).toHaveLength(1)
+    })
+  })
 })
 
 describe('a crash between the insert and the delivery is recoverable', () => {

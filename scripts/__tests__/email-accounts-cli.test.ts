@@ -60,6 +60,20 @@ function settings(): ReturnType<ReturnType<typeof openEmailPipelineStore>['listA
   }
 }
 
+/**
+ * Stand in for the poller's discovery pass. `enable` only accepts ids that
+ * discovery has recorded, so every arm that enables a real account has to have
+ * been through one tick first — which is the actual operator sequence.
+ */
+function discover(...accounts: readonly (readonly [string, string | null])[]): void {
+  const store = openEmailPipelineStore({ owner_home: home })
+  try {
+    for (const [id, address] of accounts) store.recordDiscoveredAccount(id, address)
+  } finally {
+    store.close()
+  }
+}
+
 describe('email-accounts CLI', () => {
   test('a mistyped disable on a fresh install is inert — it changes nothing', async () => {
     const r = await run('disable', 'typo')
@@ -82,6 +96,7 @@ describe('email-accounts CLI', () => {
   })
 
   test('enable records the account and reports the boundary it just drew', async () => {
+    discover(['acct-1', 'owner@example.com'])
     const r = await run('enable', 'acct-1', 'owner@example.com')
 
     expect(r.code).toBe(0)
@@ -93,7 +108,25 @@ describe('email-accounts CLI', () => {
     expect(rows[0]?.enabled_at).not.toBeNull()
   })
 
+  test('a mistyped ENABLE is refused, not silently granted', async () => {
+    // The dangerous half of the typo. An allow-list row for an id that does not
+    // exist is a STANDING PERMISSION: it reports success now, and the day
+    // anything is issued that id it is polled without the owner deciding to.
+    discover(['acct-1', 'owner@example.com'])
+    const r = await run('enable', 'acct-typo')
+
+    expect(r.code).toBe(2)
+    expect(r.err).toContain('unknown account id')
+    expect(r.err).toContain("ids come from 'list'")
+    // Nothing written, and the real account left exactly as it was — still off,
+    // because refusing the typo must not be mistaken for enabling anything.
+    const rows = settings()
+    expect(rows.map((x) => x.account_id)).toEqual(['acct-1'])
+    expect(rows[0]?.enabled).toBe(0)
+  })
+
   test('once a list exists, disabling an id that is not on it changes nothing', async () => {
+    discover(['acct-1', 'owner@example.com'])
     await run('enable', 'acct-1', 'owner@example.com')
     const r = await run('disable', 'acct-typo')
 
@@ -106,6 +139,7 @@ describe('email-accounts CLI', () => {
   })
 
   test('disabling the only enabled account IS allowed — that is a real decision', async () => {
+    discover(['acct-1', 'owner@example.com'])
     await run('enable', 'acct-1', 'owner@example.com')
     const r = await run('disable', 'acct-1')
 

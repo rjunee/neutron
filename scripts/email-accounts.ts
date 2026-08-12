@@ -31,6 +31,11 @@
  * tick first enumerates the connected grants — reading no mail — and records
  * them as switched-off rows. A single-backend install has no ids to report and
  * appears under the `''` sentinel.
+ *
+ * `enable` therefore REFUSES an id discovery has not seen (the `''` sentinel
+ * excepted). An allow-list row for a mailbox that does not exist is not a
+ * harmless typo — it is a standing permission that would be honoured the day
+ * something is issued that id.
  */
 
 // Relative, not by package name: `scripts/` is not a workspace package and has
@@ -119,6 +124,27 @@ function main(): number {
       const shown = account_id === '' ? SOLE_ACCOUNT_LABEL : account_id
       const prior = store.getAccountSetting(account_id)
       const was_on = prior !== null && prior.enabled === 1
+
+      // ENABLE ONLY WHAT DISCOVERY HAS SEEN. `enable` used to create a row for
+      // any string handed to it, which quietly broke the fail-closed guarantee
+      // twice over: a typo was reported as an enabled mailbox (so the owner
+      // believed a mailbox was on that was not), and the junk row SURVIVED —
+      // if a later grant were ever issued that id, it would be polled without
+      // anyone having decided to poll it. An allow-list entry for an account
+      // that does not exist is a standing permission, not a no-op.
+      //
+      // The sentinel is the one exemption. A single-backend install has no ids
+      // at all and its mailbox IS `''`, so before the first tick has recorded
+      // anything there is nothing to match against; refusing it would restore
+      // the lock-with-no-key that discovery exists to remove.
+      if (enable && prior === null && account_id !== '') {
+        process.stderr.write(
+          `unknown account id ${JSON.stringify(account_id)} — nothing was enabled.\n` +
+            `ids come from 'list', which shows the mailboxes the poller has discovered.\n` +
+            `if 'list' is empty, the poller has not run yet: wait one poll interval.\n`,
+        )
+        return 2
+      }
       if (enable || was_on) store.setAccountEnabled(account_id, enable, address ?? null)
       const after = store.getAccountSetting(account_id)
 
