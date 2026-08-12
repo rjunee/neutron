@@ -2,6 +2,117 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — a dirty worktree is preserved, never force-removed (#541)
+
+The inner workflow's `finally{}` cleanup is now the checked-in
+`trident/worktree-cleanup.sh`, and every worktree removal in `trident/merge.ts`
+goes through the same gate: a tree with uncommitted changes — **including
+untracked files** — or one whose `git status` cannot be read at all is
+PRESERVED, its paths printed, exit 3. A clean tree is still removed, with a
+plain `git worktree remove` rather than `--force`, so git's own dirty check is a
+second gate behind ours.
+
+What it replaces was a cheap-model agent handed "MUST succeed on every path;
+ignore individual command failures … `git worktree remove --force` … `git branch
+-D`". That block runs on success, on REQUEST_CHANGES, on throw and on abort, and
+the last two are precisely when Forge died mid-edit and the worktree holds the
+only copy of the work. On this repo's PR #171 it took 197 insertions across 7
+files, none of them recoverable. There is no LLM judgement left in the
+destructive path: the workflow's agent runs one fixed command and reports its
+output through a schema, the same shape as the head and CI probes, and is told
+that a non-zero exit means work was preserved on purpose rather than something
+to retry around.
+
+`git branch -D` was closed as the same loophole, since it loses commits just as
+thoroughly. In pr-mode the local branch is deleted only when `git ls-remote`
+proves origin holds that exact sha; never pushed, behind, or an unreachable
+origin all keep it and say why. Local mode never touches the branch — it is the
+only copy of the build and the outer loop merges it. `merge.ts` inherits the
+gate at all three of its removal sites, including the lingering build worktree
+`freeBranchFromWorktrees` used to force away; a dirty one there now fails the
+merge loudly instead, naming the path in the operator's words ("trident
+PRESERVED uncommitted work … recover or delete it, then re-run the merge")
+rather than letting git's raw "already checked out at `<path>`" reach chat.
+That is the right trade when the alternative is deleting work to make a merge
+convenient.
+
+Four ways a preserve-by-default gate can turn into a nuisance, all closed:
+
+- **Only stdout decides.** `git status` and `ls-remote` are read with stderr
+  captured separately. Folded together (`2>&1`), any warning git prints on a
+  perfectly clean tree — an unreadable subdirectory, a trace — parsed as a dirty
+  path: worktrees leaked forever, pr-mode branch teardown never ran, and the
+  alarm fired on runs that had preserved nothing.
+- **The shared checkout is never a candidate — in BOTH copies.** git refuses
+  `worktree remove` on a main working tree, and `merge.ts` legitimately leaves it
+  on a feature branch after a stale-rebase recovery; scoring that refusal as a
+  preservation pinned the exit at 3 for good. It is skipped, and a branch git
+  won't delete because it is checked out there is reported as
+  `KEPT … reason=checked-out` at exit 0 — origin already has the sha, so nothing
+  is at risk. The cross-model reviewer caught that only the shell twin skipped
+  it: `freeBranchFromWorktrees` would have scored the refusal as preserved work
+  and thrown, failing the merge over a checkout holding nothing uncommitted, on
+  every retry. It is unreachable today only because `mergeLocal` step (0a) moves
+  the checkout onto base first — too thin a guarantee to leave the twins
+  disagreeing about, so `merge.ts` now skips the first `worktree` record exactly
+  as the shell twin's `n > 1` does.
+- **The probe must point at a worktree ROOT — in BOTH copies.** `git -C <dir>
+  status` walks up to the enclosing repo, so a registered path that has stopped
+  being a worktree root (an empty leftover directory, a `.git` file deleted while
+  the directory survived) reports the shared checkout's dirt as its own:
+  recovery instructions naming files that are not in the named tree, exit 3 on a
+  run that preserved nothing, and pr-mode branch teardown pinned at 3 for as long
+  as the stale directory sits there. `rev-parse --show-toplevel` must name the
+  path itself, in the shell script (`SKIPPED … reason=not-a-worktree-root`) as
+  well as in `merge.ts`. A rev-parse that says *nothing* is a different answer
+  from one naming another repo, and still preserves — absence of evidence is not
+  evidence of absence when the failure mode is unrecoverable.
+- **Only exit 3 means preserved work.** Usage errors exit 2 (documented, and now
+  actually 2 rather than bash's `${1:?}` 1) and a wrong script path exits 127 —
+  the caller reports those as a cleanup FAILURE, because a script that never ran
+  inspected nothing. But the *reading* of that code is generous, because it comes
+  back through a transcribing agent: a string `"3"` counts, a missing field falls
+  back to the `___EXIT=` marker in the output, and an output full of `PRESERVED`
+  records with no code at all still raises the alarm rather than the "NOTHING was
+  inspected" line. A wasted look costs a minute; the inverse costs the work.
+
+Two ways the gate could have failed *itself*, also closed. The output is bounded
+by construction — a 20k-line dirty tree (one un-ignored `dist/`) would otherwise
+push the `RESULT` line and the exit marker out of the transcriber's window, so
+the dirty list is capped at 50 paths with a count and the exact command for the
+rest. And the one network call cannot hang: the cleanup runs from a `finally{}`
+that fires on throw and abort with nobody at a keyboard, so `ls-remote` runs with
+`GIT_TERMINAL_PROMPT=0` and, where coreutils `timeout` exists, a 20s deadline —
+blowing it is just another unreachable origin, which keeps the branch.
+
+One thing this fix deliberately does NOT do: unwedge itself. `runWorktreePath` is
+keyed on `run.id` + `run.slug`, both stable across retries, so a preserved dirty
+merge worktree makes every retry fail at the same path until a human clears it.
+That is the trade, stated where it is made rather than papered over: a wedged
+merge is recoverable, a force-removed conflict resolution is not. The error names
+the path and the two ways out.
+
+Tested against real git repos rather than a mocked host — the bug is only
+observable on a real working tree — covering untracked-only, modified, staged,
+unreadable, ignored-files-only, clean, already-gone, and other-branch trees, an
+untracked file inside an untracked DIRECTORY (what `--untracked-files=all`
+actually buys: the individual paths, not one collapsed `?? feature/`), a clean
+tree whose git warns on stderr, a shared checkout parked on the branch, and the
+four branch-teardown outcomes, a registered path that is no longer a worktree
+root sitting next to a dirty shared checkout, a 600-file dirty tree, and an
+`origin` whose transport never answers. The exit-code reader is EXECUTED, lifted
+out of the shipped `inner-workflow.mjs` rather than grepped for.
+Mutation-verified, 20 mutations applied and killed: dropping
+`--untracked-files=all` (both copies), folding stderr back into either probe,
+un-skipping the main working tree, exiting 1 on a usage error, restoring
+`--force` (both copies), downgrading exit 3 to 0, dropping the worktree-root
+guard (both copies), treating an unverifiable status as clean, treating
+rev-parse silence as "not ours", dropping the `existsSync` gate, dropping the
+operator-facing throw, calling every non-zero cleanup exit a preservation,
+rejecting a string exit code, dropping the `___EXIT=` fallback, dropping the
+PRESERVED-records fallback, removing the dirty-list cap, and dropping
+`GIT_TERMINAL_PROMPT=0` / the `ls-remote` deadline.
+
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 
 `PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through

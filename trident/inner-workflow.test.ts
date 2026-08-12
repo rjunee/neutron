@@ -48,6 +48,35 @@ function grabFunction(name: string): string {
 // its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
 const CHECKPOINT_SH = readFileSync(fileURLToPath(new URL('./checkpoint.sh', import.meta.url)), 'utf8')
 
+/** `SRC` with whole-line comments stripped. Used ONLY by the assertions that a
+ *  destructive command is GONE: the comments deliberately quote the exact
+ *  `git worktree remove --force` / `git branch -D` line #541 removed, and a
+ *  grep over the raw source could never tell the ban from its own rationale. */
+const CODE = SRC.split('\n')
+  .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+  .join('\n')
+
+// The checked-in worktree cleanup the workflow's finally{} invokes (#541) — its
+// decision table is asserted here; its runtime behavior against real git repos in
+// worktree-cleanup-sh.test.ts.
+const CLEANUP_SH = readFileSync(
+  fileURLToPath(new URL('./worktree-cleanup.sh', import.meta.url)),
+  'utf8',
+)
+
+/** The SHIPPED `classifyCleanupOutcome`, executed rather than grepped (#541).
+ *  Uses the module-scope `grabFunction` above — the same extractor the other
+ *  loaders use, so this can never drift into extracting something that does not
+ *  ship. */
+function loadCleanupClassifier(): (
+  reported: unknown,
+  raw: unknown,
+) => { exit: number | null; outcome: string } {
+  return new Function(
+    `${grabFunction('classifyCleanupOutcome')}; return classifyCleanupOutcome`,
+  )() as (reported: unknown, raw: unknown) => { exit: number | null; outcome: string }
+}
+
 describe('inner-workflow.mjs — meta + phases', () => {
   test('exports a pure meta literal named trident-v2-inner with the three phases', () => {
     expect(SRC).toContain("name: 'trident-v2-inner'")
@@ -1149,24 +1178,174 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
   })
 })
 
-describe('inner-workflow.mjs — mandatory worktree cleanup on ALL paths', () => {
-  test('a finally{} block scans git worktree list for the trident/<slug> branch and removes the WORKTREE on every path (D-1, unconditional)', () => {
+describe('inner-workflow.mjs — worktree cleanup on ALL paths, destructive on NONE', () => {
+  test('a finally{} block cleans up the trident/<slug> worktree on every path (D-1) via the checked-in script', () => {
     expect(SRC).toContain('} finally {')
-    expect(SRC).toContain('git worktree list --porcelain')
-    expect(SRC).toContain('git worktree remove --force')
-    expect(SRC).toContain('git worktree prune')
-    // Independent of Forge's return value — scans for the deterministic branch.
     expect(SRC).toContain("label: 'cleanup:worktree'")
+    // Independent of Forge's return value — the script scans for the
+    // DETERMINISTIC branch, so it holds even when Forge threw before returning.
+    expect(SRC).toContain(
+      'bash ${shSingleQuote(worktreeCleanupSh)} ${shSingleQuote(repoPath)} ${shSingleQuote(forgeBranch)} ${cleanupMode}',
+    )
+    expect(SRC).toContain('worktreeCleanupScript = null')
+    expect(SRC).toMatch(
+      /const worktreeCleanupSh = worktreeCleanupScript \|\| `\$\{repoPath\}\/trident\/worktree-cleanup\.sh`/,
+    )
   })
 
-  test('branch teardown is MODE-AWARE: deleted only in pr-mode; KEPT in local-mode for the outer merge', () => {
-    // D-1 removes the worktree unconditionally, but the branch holds the only
-    // copy of the un-merged commits in local mode — the OUTER loop merges it.
-    expect(SRC).toContain('const branchTeardownStep = isPr')
-    // pr-mode: delete the local branch (work is on origin/the PR).
-    expect(SRC).toContain('git branch -D ${forgeBranch}')
-    // local-mode: KEEP the branch so the outer mergeLocal can merge it.
-    expect(SRC).toMatch(/KEEP the branch '\$\{forgeBranch\}'/)
+  // ISSUES #541 — the cleanup step USED to be a cheap-model agent told to "ignore
+  // individual command failures" while running `git worktree remove --force` +
+  // `git branch -D`, from a finally{} that fires on THROW and ABORT. On PR #171 it
+  // destroyed 197 insertions across 7 files. Both halves of that must stay gone:
+  // the force-removal AND the LLM judgement wrapped around it.
+  test('the finally{} NEVER force-removes a worktree and NEVER deletes a branch itself', () => {
+    expect(CODE).not.toContain('worktree remove --force')
+    expect(CODE).not.toContain('git branch -D')
+    // No "best-effort, ignore failures" licence anywhere near the destructive path.
+    expect(CODE).not.toContain('ignore individual command failures')
+  })
+
+  test('the cleanup agent has NO judgement: one fixed command, output reported verbatim', () => {
+    // Same shape as the head/CI probes: schema'd raw+exit_code, an explicit ban on
+    // running anything else, and an explicit ban on "fixing" the non-zero exit that
+    // MEANS work was preserved.
+    expect(SRC).toContain('const CLEANUP_SCHEMA = {')
+    expect(SRC).toContain('schema: CLEANUP_SCHEMA')
+    expect(SRC).toContain('Run EXACTLY this single Bash command')
+    expect(SRC).toMatch(/do NOT remove or modify any worktree, branch or file yourself/)
+    expect(SRC).toMatch(/exit 3 means the script PRESERVED work ON PURPOSE/)
+    // A preservation is logged in full — it is the operator's only notice.
+    expect(SRC).toContain('cleanup:worktree PRESERVED WORK')
+  })
+
+  test('branch teardown is MODE-AWARE: delete-branch only in pr-mode; keep-branch in local-mode', () => {
+    // The branch holds the only copy of the un-merged commits in local mode — the
+    // OUTER loop merges it — so the mode is passed to the script as a flag and the
+    // script (not a model) decides whether the pr-mode branch is safe to delete.
+    expect(SRC).toContain("const cleanupMode = isPr ? 'delete-branch' : 'keep-branch'")
+    expect(CLEANUP_SH).toContain('PRESERVED branch $branch reason=not-on-origin')
+    expect(CLEANUP_SH).toContain('PRESERVED branch $branch reason=unpushed')
+  })
+
+  test("the script SOURCE still carries the two lines an edit is likeliest to 'simplify' away", () => {
+    // NAME SAYS WHAT THIS IS: two greps over the shell source, executing nothing.
+    // The behavior — untracked work preserved, individual paths named, exit 3 —
+    // is proven against real git in worktree-cleanup-sh.test.ts ("untracked files
+    // inside an untracked DIRECTORY are named INDIVIDUALLY", "UNTRACKED-ONLY work
+    // is preserved"). These greps only guard the exact spelling those tests rely on.
+    expect(CLEANUP_SH).toContain('git -C "$wt" status --porcelain --untracked-files=all')
+    expect(CLEANUP_SH).toContain('[ "$preserved" -eq 0 ] || exit 3')
+  })
+
+  describe('the cleanup verdict survives its trip through the transcribing agent', () => {
+    // EXECUTED, not grepped: `classifyCleanupOutcome` is lifted out of the shipped
+    // source and run. The script's verdict is deterministic; getting it back into
+    // the run log is not, because an LLM types the answer out — and every way that
+    // transcription can go wrong lands on the SAME failure, the run reporting
+    // "NOTHING was inspected or removed" over work that was in fact preserved.
+    const classify = loadCleanupClassifier()
+
+    test('exit 3 is a preservation; 0 is a clean run', () => {
+      expect(classify(3, 'PRESERVED worktree /wt reason=dirty\nRESULT preserved=1 removed=0').outcome)
+        .toBe('preserved')
+      expect(classify(0, 'RESULT preserved=0 removed=1').outcome).toBe('ok')
+    })
+
+    test('a STRING "3" is still a preservation (Number.isFinite("3") is false)', () => {
+      // The schema says integer, but the value comes from a model. Rejecting the
+      // string reclassified a real preservation as a cleanup FAILURE — the exact
+      // inversion of the operator's only data-loss alarm.
+      expect(classify('3', 'PRESERVED worktree /wt reason=dirty').outcome).toBe('preserved')
+      expect(classify('3', '').exit).toBe(3)
+      expect(classify('0', 'RESULT preserved=0 removed=0').outcome).toBe('ok')
+    })
+
+    test('a MISSING exit_code falls back to the ___EXIT= marker in the transcript', () => {
+      const raw = 'PRESERVED worktree /wt reason=dirty\nRESULT preserved=1 removed=0\n___EXIT=3'
+      expect(classify(undefined, raw).outcome).toBe('preserved')
+      expect(classify(null, raw).exit).toBe(3)
+      expect(classify('', raw).exit).toBe(3)
+      // An agent that echoed the command it was told to run puts the UNEXPANDED
+      // `___EXIT=$?` in front of the real marker; only the expanded one counts.
+      expect(classify(null, `bash cleanup.sh 2>&1; echo "___EXIT=$?"\n${raw}`).exit).toBe(3)
+      // The marker is APPENDED, so the LAST one is the real one. Anything earlier
+      // is content — and the dirty list is arbitrary filenames chosen by whoever
+      // was editing, not a namespace this script controls.
+      expect(
+        classify(
+          null,
+          'PRESERVED worktree /wt reason=dirty\n  ?? notes/___EXIT=0.txt\n___EXIT=3',
+        ).exit,
+      ).toBe(3)
+    })
+
+    test('no exit code ANYWHERE, but PRESERVED records in the output → still the alarm', () => {
+      // The 20k-line-dirty-tree case: the marker fell off the end of the agent's
+      // window. A wasted look costs the operator a minute; the inverse costs them
+      // the work, so the transcript's own records decide.
+      const got = classify(undefined, 'PRESERVED worktree /wt reason=dirty\n  ?? brand-new.ts')
+      expect(got.outcome).toBe('preserved-unmarked')
+      expect(got.exit).toBe(null)
+    })
+
+    test('a reported 0 does NOT outrank PRESERVED records in the transcript', () => {
+      // THE ONE READING THAT FAILS SILENTLY. Every other mis-transcription lands on
+      // 'failed', which logs LOUDLY; this one lands on 'ok', so the operator's only
+      // notice that a worktree still holds uncommitted work is simply never printed
+      // and the lost-work alarm is invisible rather than wrong.
+      //
+      // The pair is impossible in a real run: the script increments `preserved` at
+      // every PRESERVED record and ends on `[ "$preserved" -eq 0 ] || exit 3`, so
+      // exit 0 and a PRESERVED line cannot both be true — asserted against the
+      // SHIPPED script above, not assumed. So the record is believed over the number.
+      const raw = 'PRESERVED worktree /wt reason=dirty\n  ?? brand-new.ts\nRESULT preserved=1 removed=0'
+      expect(classify(0, raw).outcome).toBe('preserved-unmarked')
+      expect(classify('0', raw).outcome).toBe('preserved-unmarked')
+      expect(classify(0, `${raw}\n___EXIT=0`).outcome).toBe('preserved-unmarked')
+      // …and a GENUINE clean run still reads as ok — the script emits no PRESERVED
+      // line at all when it preserved nothing, so believing the record cannot cry wolf.
+      expect(classify(0, 'REMOVED /wt\nDELETED branch b\nRESULT preserved=0 removed=1').outcome).toBe('ok')
+      expect(classify(0, 'SKIPPED /wt reason=not-a-worktree-root\nRESULT preserved=0 removed=0').outcome)
+        .toBe('ok')
+      expect(classify(0, 'KEPT branch b reason=checked-out\nRESULT preserved=0 removed=0').outcome).toBe('ok')
+    })
+
+    test('a cleanup that never ran is a FAILURE, never a preservation', () => {
+      // Exit 2 (usage), 127 (wrong script path) and a silent agent all mean the
+      // script inspected NOTHING. Calling those "PRESERVED WORK" points the
+      // operator at work that does not exist and drowns the real alarm in noise.
+      expect(classify(2, 'worktree-cleanup.sh: usage: …').outcome).toBe('failed')
+      expect(classify(127, 'bash: no such file').outcome).toBe('failed')
+      expect(classify(undefined, '').outcome).toBe('failed')
+      expect(classify(undefined, 'REMOVED /wt\nRESULT preserved=0 removed=1').outcome).toBe('failed')
+      expect(classify('not-a-number', 'REMOVED /wt').outcome).toBe('failed')
+      // …and the log line for those says so, rather than crying preservation.
+      expect(SRC).toContain('cleanup:worktree FAILED')
+      expect(SRC).toContain('this is not a preservation')
+    })
+
+    test('a mis-transcribed NON-ZERO code does not outrank PRESERVED records either', () => {
+      // The 'reported 0' case above was fixed by letting the transcript win — but
+      // only for 0 and "no code at all". Every OTHER mis-transcription (1, 2, 127,
+      // a negative, a stringified one) still fell through to 'failed', whose log
+      // line reads "NOTHING was inspected or removed (this is not a preservation)".
+      // That is the opposite of what the transcript in the same log says, and it
+      // sends the operator away from work that is sitting on disk.
+      const raw = 'PRESERVED worktree /wt reason=dirty\n  ?? brand-new.ts\nRESULT preserved=1 removed=0'
+      for (const reported of [1, 2, 127, -1, '2', 3.5]) {
+        expect(classify(reported, raw).outcome).toBe('preserved-unmarked')
+      }
+      // The script's OWN marker saying 3 while the agent typed something else is
+      // the same story: the records decide.
+      expect(classify(2, `${raw}\n___EXIT=3`).outcome).toBe('preserved-unmarked')
+      // The log line names the mis-reported number so the operator can see the
+      // disagreement rather than being quietly overruled.
+      expect(SRC).toContain('mis-reported as')
+      // NO CRY WOLF: the genuine never-ran exits emit no PRESERVED record at all,
+      // so they are untouched by this and still read as a cleanup FAILURE.
+      expect(classify(2, 'worktree-cleanup.sh: usage: …').outcome).toBe('failed')
+      expect(classify(127, 'bash: no such file').outcome).toBe('failed')
+    })
   })
 
   test('the top-level return carries the Workflow result API shape', () => {

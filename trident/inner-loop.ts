@@ -192,6 +192,17 @@ export const DEFAULT_INNER_WORKFLOW_PATH = fileURLToPath(new URL('./inner-workfl
  *  resolution and the TARGET repo need not contain trident/). */
 export const CHECKPOINT_SCRIPT_PATH = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
 
+/** The abs path of the sibling worktree-cleanup script (ISSUES #541). The
+ *  workflow's `finally{}` invokes it instead of asking a cheap-model agent to
+ *  `git worktree remove --force` + `git branch -D`: it PRESERVES a dirty
+ *  worktree (including untracked files) and exits 3 rather than destroying work
+ *  that exists nowhere else. Threaded via args for the same reason as
+ *  CHECKPOINT_SCRIPT_PATH (no module resolution; the TARGET repo need not
+ *  contain trident/). */
+export const WORKTREE_CLEANUP_SCRIPT_PATH = fileURLToPath(
+  new URL('./worktree-cleanup.sh', import.meta.url),
+)
+
 /**
  * The `--tools` surface the WARM fire substrate needs. Includes `Workflow` (the
  * launcher fires it) PLUS the build/review tools — because the inner-workflow's
@@ -246,6 +257,10 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // The checked-in checkpoint-writer the workflow's Bash steps invoke for
     // every code_trident_runs checkpoint/terminal-result UPDATE (P10).
     checkpointScript: CHECKPOINT_SCRIPT_PATH,
+    // The checked-in deterministic worktree cleanup the workflow's `finally{}`
+    // runs on every path — dirty worktrees are preserved, never force-removed
+    // (#541).
+    worktreeCleanupScript: WORKTREE_CLEANUP_SCRIPT_PATH,
     resumeCheckpoint: input.resume_checkpoint ?? null,
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
