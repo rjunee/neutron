@@ -226,7 +226,7 @@ export async function detectBaseBranch(
 // base), not the resolver (never invoked) — ever looked at the combination.
 //
 // WHAT THIS DELIBERATELY DOES NOT CATCH, stated so nobody reads more into a
-// green merge than is there. Four holes, all chosen:
+// green merge than is there. Five holes, all chosen:
 //
 //   1. CROSS-FILE SEMANTIC COUPLING. If the base changes the behaviour of a
 //      helper in `a.ts` and the branch adds a caller in `b.ts`, the file sets do
@@ -288,9 +288,28 @@ export async function detectBaseBranch(
 //      current base. That setting was turned off on this repo 2026-08-11; this
 //      gate is what covers the gap while it is off, and it does not replace it.
 //
+//   5. A BASE THAT MOVES BETWEEN THE SNAPSHOT AND THE LAND (local mode) — the
+//      twin of hole 4, and it must not be mistaken for covered just because
+//      local mode HAS a lock. `withLocalMergeLock` serializes callers IN THIS
+//      PROCESS. It does not stop another process, another checkout, or a person
+//      committing onto `base` between `assessBaseDrift` and the `git merge
+//      --no-ff` at the end: the rebase and the land both re-resolve `base` BY
+//      NAME, so they would replay onto a tip the snapshot never scored while the
+//      hold decision still reasons about the old one.
+//      The fix is to pin the rebase and the land to the snapshot's
+//      `current_base_sha` instead of the name. It is deliberately NOT done here,
+//      because it trades this race for a worse one: a branch rebased onto a
+//      PINNED sha no longer contains the CURRENT base, so the final `git merge
+//      --no-ff` into the shared checkout stops being fast-forwardable and can
+//      conflict THERE — in the one working tree the whole #351/#352 isolation
+//      exists to keep clean. Doing that safely means landing from the throwaway
+//      worktree too, which is a bigger change than this circuit breaker.
+//      Until then: local mode narrows this window to the rebase, and does not
+//      close it.
+//
 // This gate is the circuit breaker for the same-file silent-merge case, at file
 // granularity, against a base that moved FORWARD; it is not a claim of semantic
-// safety, and it is not atomic with the merge it guards.
+// safety, and it is not atomic with the merge it guards in EITHER mode.
 
 /** A base-drift verdict over one (base, branch) pair. Pure data — the decision
  *  to hold is the caller's, because local mode must also subtract the files the
@@ -1255,6 +1274,12 @@ export function buildMergeCleanupDeps(
         //     the fork point equal the tip and erases the drift being measured.
         //     The hold itself is deferred to (2a) because the decision subtracts
         //     the files the rebase raised a conflict on.
+        //
+        //     "INSIDE the lock" means inside THIS PROCESS's lock, and no more.
+        //     Another process, another checkout, or a person can advance `base`
+        //     between this snapshot and the land below, both of which re-resolve
+        //     `base` BY NAME — hole 5 in the section header, which says why
+        //     pinning the sha here would trade this race for a worse one.
         const drift = await assessBaseDrift(run_host, repo, base, branch)
         // (0) DEFENSIVE stale-state recovery (FIX 2): heal any merge/rebase a PRIOR
         //     build left in the shared checkout BEFORE we touch it — else one old
