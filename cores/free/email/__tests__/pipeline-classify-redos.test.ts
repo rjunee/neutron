@@ -124,8 +124,17 @@ describe('bareAddress keeps its exact pre-fix semantics', () => {
     // The greedy `[^>]*` spanned an inner `<`, so the FIRST `<` and the FIRST
     // following `>` bound the address. Preserved deliberately.
     ['a<b c<d>e', 'b c<d'],
+    ['<<person@sender.example.com>', '<person@sender.example.com'],
     // A `<` with no `>` after it failed the whole match and fell back.
     ['<unterminated', '<unterminated'],
+    ['<', '<'],
+    // A `>` BEFORE any `<` is not an opener — the pair that counts is still the
+    // first `<` and the first `>` after it.
+    ['>', '>'],
+    ['>no-open@sender.example.com', '>no-open@sender.example.com'],
+    ['><person@sender.example.com>', 'person@sender.example.com'],
+    // Several bracketed pairs — the FIRST one wins.
+    ['<first@sender.example.com> <second@sender.example.com>', 'first@sender.example.com'],
     // An empty bracket pair is an empty address, not a fallback.
     ['<>', ''],
     ['no brackets here', 'no brackets here'],
