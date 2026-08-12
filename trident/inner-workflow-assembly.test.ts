@@ -316,17 +316,22 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
    * a justification. That inversion — deny-by-default instead of an allow-list of covered
    * labels — is the whole point of this rewrite.
    */
-  const EXCLUDED: Array<{ match: (l: string) => boolean; why: string }> = [
+  const EXCLUDED: Array<{ match: (l: string) => boolean; why: string; proof: RegExp }> = [
     {
       match: (l) => l === 'argus:synthesis',
       why: 'toolless — it merges verdict TEXT and is handed no tools, so it has no shell at all',
+      // Its prompt is a synthesis brief, not a command; it carries none of the shell rules.
+      proof: /You are the ARGUS SYNTHESI[SZ]|synthesi/i,
     },
     // The probe/bookkeeping seats are each handed ONE literal command and told to run
     // EXACTLY it and nothing else, so there is no room in them for a kill of any shape.
-    { match: (l) => l.startsWith('checkpoint:'), why: 'single fixed `bash checkpoint.sh …` command' },
-    { match: (l) => l === 'terminal-result', why: 'single fixed `printf … && bash checkpoint.sh …` command' },
-    { match: (l) => l.startsWith('head-probe-round-'), why: 'single fixed `git ls-remote`/`rev-parse` command' },
-    { match: (l) => l.startsWith('ci-probe-round-'), why: 'single fixed `gh pr checks` command' },
+    // `proof` is what keeps that claim HONEST: if one of these is ever loosened into a
+    // free-form shell seat, its prompt stops matching and this suite fails — the
+    // exclusion cannot quietly rot into a hole.
+    { match: (l) => l.startsWith('checkpoint:'), why: 'single fixed `bash checkpoint.sh …` command', proof: /Run EXACTLY this single Bash command/ },
+    { match: (l) => l === 'terminal-result', why: 'single fixed `printf … && bash checkpoint.sh …` command', proof: /Run EXACTLY this single Bash command/ },
+    { match: (l) => l.startsWith('head-probe-round-'), why: 'single fixed `git ls-remote`/`rev-parse` command', proof: /Run EXACTLY this single Bash command/ },
+    { match: (l) => l.startsWith('ci-probe-round-'), why: 'single fixed `gh pr checks` command', proof: /Run EXACTLY this single Bash command/ },
   ]
 
   let captured: Captured[]
@@ -361,6 +366,25 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
     // The planner exists ONLY in Ralph mode — assert the mode really produced it,
     // or its coverage test below would vacuously pass over an empty call list.
     expect(ralphCaptured.some((c) => c.label === 'plan:fable')).toBe(true)
+  })
+
+  test('every EXEMPT seat still earns its exemption — no exclusion may rot into a hole', () => {
+    // An exclusion list is only as trustworthy as the claim behind each entry. For every
+    // seat that was actually dispatched AND exempted, re-prove the stated reason against
+    // its real prompt. Loosening `head-probe` into a free-form shell seat, say, would keep
+    // it exempt by label while making the exemption false — and this fails on that.
+    const exempted = [...new Set(allCalls.map((c) => String(c.label)))].filter((l) =>
+      EXCLUDED.some((e) => e.match(l)),
+    )
+    expect(exempted.length).toBeGreaterThan(0)
+    for (const label of exempted) {
+      const entry = EXCLUDED.find((e) => e.match(label))
+      expect(entry).toBeDefined()
+      expect(String(entry?.why).length).toBeGreaterThan(0)
+      for (const c of allCalls.filter((x) => String(x.label) === label)) {
+        expect(c.prompt).toMatch(entry!.proof)
+      }
+    }
   })
 
   test('EVERY command-running prompt carries the rule, with the reason and the carve-out', () => {
