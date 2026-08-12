@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   BUILD_ROUTING_DOCTRINE,
   DOCTRINE_PRINCIPLES,
+  MISSING_CREDENTIAL_DOCTRINE,
   buildOperatingDoctrineFragment,
 } from '../operating-doctrine.ts'
 
@@ -98,6 +99,40 @@ describe('operating-doctrine — principle set', () => {
       )
       expect(frag).toContain('a short automatic confirmation is posted to the chat for you')
     }
+  })
+
+  test('missing-credential remedy (#552) — names a surface the owner can reach, never a shell', () => {
+    for (const scope of ['general', 'project'] as const) {
+      const frag = buildOperatingDoctrineFragment(
+        scope === 'project' ? { scope, project_id: 'gondor' } : { scope },
+      )
+      expect(frag).toContain(MISSING_CREDENTIAL_DOCTRINE)
+      // The remedy is a PLACE the owner can get to, named concretely enough to
+      // act on — not "connect your account somewhere".
+      expect(frag).toContain('Integrations')
+      expect(frag).toContain('Connect GitHub')
+      // And the specific failure the owner hit: a push / PR with no token.
+      expect(frag.toLowerCase()).toContain('git push')
+      expect(frag.toLowerCase()).toContain('pull request')
+      // The prohibition is explicit, because the shell is what the agent can see
+      // at the moment it fails and it will reach for it unless told not to.
+      expect(frag).toContain('NEVER offer a terminal command as the remedy')
+    }
+  })
+
+  test('the remedy rule is UNCONDITIONAL — it does not branch on deployment shape', () => {
+    const frag = buildOperatingDoctrineFragment({ scope: 'general' })
+    // Naming the in-product surface is the right answer in EVERY deployment, so a
+    // branch would be longer AND wrong somewhere. The literals below are the words
+    // this repo does not carry, in prose or in code; this array is the one place
+    // they are permitted to appear, because guarding against them requires naming
+    // them exactly once.
+    for (const banned of ['self-host', 'hosted', 'tenan', 'instances']) {
+      expect(frag.toLowerCase()).not.toContain(banned)
+    }
+    // Positive control: the assertion above is only meaningful if the rule under
+    // test is actually in the string being searched.
+    expect(frag).toContain(MISSING_CREDENTIAL_DOCTRINE)
   })
 
   test('the principle body is byte-identical across surfaces (consistency)', () => {

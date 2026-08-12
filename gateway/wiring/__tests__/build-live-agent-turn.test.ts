@@ -22,6 +22,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 import { LIVE_AGENT_TOOL_NAMES } from '../build-live-agent-turn.ts'
 import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
+import { MISSING_CREDENTIAL_DOCTRINE } from '../operating-doctrine.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
 let tmp: string
@@ -443,6 +444,22 @@ describe('build-live-agent-turn — operating-doctrine layer (gap-audit item 10)
     // Same core principles, regardless of surface.
     expect(prompt.toLowerCase()).toContain('truth first')
     expect(prompt.toLowerCase()).toContain('no sycophancy')
+  })
+
+  test('the missing-credential remedy (#552) reaches the COMPOSED prompt, not just the module', async () => {
+    // The point of asserting HERE rather than only in the doctrine unit test: a
+    // module that exports a rule nothing splices in is the same defect one layer
+    // up from the one #551 fixed — real, tested, and never reaching the owner.
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
+    await run(makeTurn({ sent }))
+    const prompt = specs[0]!.prompt
+    expect(prompt).toContain(MISSING_CREDENTIAL_DOCTRINE)
+    // Named concretely enough to act on, and pinned to the failure the owner hit.
+    expect(prompt).toContain('Connect GitHub')
+    expect(prompt).toContain('Integrations')
+    expect(prompt.toLowerCase()).toContain('git push')
   })
 
   test('the doctrine is FIRST-turn-only (warm later turns send only user text)', async () => {

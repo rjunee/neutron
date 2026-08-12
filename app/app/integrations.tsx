@@ -9,6 +9,12 @@
  *     in webviews); Disconnect revokes + deletes the tokens.
  *   - Standalone API keys — per-Core `byo_api_key` slots (e.g. Research
  *     Core's Tavily). Paste a key to store it; Clear removes it.
+ *   - GitHub (#551) — the credential a build needs to push a branch and open a
+ *     pull request. A DEVICE flow, not a redirect and not a paste box: Connect
+ *     asks the gateway for a short code, the code is shown here to be read and
+ *     typed at GitHub on whatever device has a keyboard, and the screen polls
+ *     until the token lands. The whole backend shipped with no client calling
+ *     it on any surface, so this flow could not be started by a human at all.
  *   - Shared credentials — the free-form credential store's GLOBAL defaults:
  *     services the owner names themselves, available to every project. This is
  *     the ONE place they are authored (ISSUES #486). A project's Settings tab
@@ -54,7 +60,10 @@ import { CodexCredentialClient, type CodexStatus } from '../lib/codex-credential
  * settings control can have.
  */
 const KIMI_SERVICE = 'kimi';
+
+import { copyToClipboard } from '../lib/clipboard';
 import { loadAppConfig } from '../lib/config';
+import { GitHubConnectClient, type GitHubConnectState } from '../lib/github-connect-client';
 import { useAuthSession } from '../lib/session';
 import { THEME } from '../lib/theme';
 import {
@@ -70,6 +79,13 @@ import {
   summarizeIntegrations,
   type IntegrationRow,
 } from '../lib/integrations-view';
+
+/**
+ * How often the screen re-reads the GitHub device-flow status while a code is on
+ * screen. GitHub's own device-flow guidance treats 5s as the floor; polling
+ * faster earns a `slow_down`.
+ */
+const GITHUB_POLL_MS = 5_000;
 
 export default function IntegrationsScreen() {
   const router = useRouter();
@@ -91,6 +107,11 @@ export default function IntegrationsScreen() {
     return new CodexCredentialClient({ base_url: config.base_url, token: user.token });
   }, [user, config.base_url]);
 
+  const githubClient = useMemo(() => {
+    if (user === null) return null;
+    return new GitHubConnectClient({ base_url: config.base_url, token: user.token });
+  }, [user, config.base_url]);
+
   const [data, setData] = useState<IntegrationsResponse | null>(null);
   // ── Shared (global-scope) credentials ──
   const [sharedCreds, setSharedCreds] = useState<ProjectCredentialRecord[]>([]);
@@ -106,6 +127,11 @@ export default function IntegrationsScreen() {
   const [codexBusy, setCodexBusy] = useState(false);
   const [codexError, setCodexError] = useState<string | null>(null);
   const [kimiKey, setKimiKey] = useState('');
+  // ── GitHub (device flow — code here, typed wherever there is a keyboard) ──
+  const [github, setGithub] = useState<GitHubConnectState | null>(null);
+  const [githubBusy, setGithubBusy] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
+  const [githubCopied, setGithubCopied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -158,11 +184,75 @@ export default function IntegrationsScreen() {
     }
   }, [codexClient]);
 
+  // ── GitHub: the token a build pushes and opens pull requests with ──
+  const fetchGitHub = useCallback(async () => {
+    if (githubClient === null) return;
+    try {
+      setGithub(await githubClient.status());
+    } catch {
+      // Same rule as Codex: an unreachable server reads as "not connected" and
+      // writes nothing. It must never look like a credential to supply again.
+      setGithub({ status: 'not_connected' });
+    }
+  }, [githubClient]);
+
   useEffect(() => {
     void fetchAll();
     void fetchSharedCreds();
     void fetchCodex();
-  }, [fetchAll, fetchSharedCreds, fetchCodex]);
+    void fetchGitHub();
+  }, [fetchAll, fetchSharedCreds, fetchCodex, fetchGitHub]);
+
+  /**
+   * Poll while a code is on screen — the half that makes this a flow rather than
+   * a wall of instructions. The owner approves at GitHub, usually on another
+   * device, and nothing tells this screen; without the poll the connected state
+   * would arrive only on a manual reload, which reads as "I did what you said
+   * and nothing happened".
+   *
+   * Keyed on the STATUS, not the state object: every poll returns a fresh
+   * `awaiting_owner` (its `expires_in_seconds` ticks down), and depending on the
+   * object would tear the timer down and re-arm it on every tick.
+   */
+  const githubStatus = github?.status ?? null;
+  useEffect(() => {
+    if (githubStatus !== 'awaiting_owner') return;
+    const id = setInterval(() => {
+      void fetchGitHub();
+    }, GITHUB_POLL_MS);
+    return () => clearInterval(id);
+  }, [githubStatus, fetchGitHub]);
+
+  const handleConnectGitHub = useCallback(async () => {
+    if (githubClient === null || githubBusy) return;
+    setGithubBusy(true);
+    setGithubError(null);
+    setGithubCopied(false);
+    try {
+      setGithub(await githubClient.start());
+    } catch (err) {
+      // Shown verbatim: "no client id is configured" and "GitHub refused the
+      // request" need different things from the owner.
+      setGithubError(formatErr(err));
+    } finally {
+      setGithubBusy(false);
+    }
+  }, [githubClient, githubBusy]);
+
+  const handleCopyGitHubCode = useCallback(async (code: string) => {
+    // Best-effort by design (`lib/clipboard.ts`): where there is no programmatic
+    // clipboard the code is still selectable text, so long-press → copy works.
+    const ok = await copyToClipboard(code);
+    setGithubCopied(ok);
+  }, []);
+
+  const handleOpenGitHub = useCallback(async (uri: string) => {
+    try {
+      await Linking.openURL(uri);
+    } catch (err) {
+      setGithubError(formatErr(err));
+    }
+  }, []);
 
   const handleConnectCodex = useCallback(async () => {
     if (codexClient === null) return;
@@ -295,14 +385,22 @@ export default function IntegrationsScreen() {
   // pre-grant status ("Not connected") even though the connect succeeded. A
   // foreground refetch reconciles it. (The web sibling tab has a manual Refresh
   // button for the same reason.)
+  //
+  // The GitHub device flow lands here for the SAME reason and one better: the
+  // owner taps "Open GitHub", approves in the browser, and comes straight back —
+  // the poll would eventually catch it, but a status read on return makes the
+  // screen correct the instant the owner is looking at it.
   const appState = useRef(AppState.currentState);
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
-      if (appStateBecameActive(appState.current, next)) void fetchAll({ silent: true });
+      if (appStateBecameActive(appState.current, next)) {
+        void fetchAll({ silent: true });
+        void fetchGitHub();
+      }
       appState.current = next;
     });
     return () => sub.remove();
-  }, [fetchAll]);
+  }, [fetchAll, fetchGitHub]);
 
   const view = useMemo(
     () => (data !== null ? summarizeIntegrations(data) : null),
@@ -545,6 +643,93 @@ export default function IntegrationsScreen() {
               </View>
             </View>
           ))}
+        </View>
+
+        {/* GITHUB (#551) — a DEVICE flow, so the screen is built around the CODE
+            rather than around the button. The owner reads it here and types it
+            wherever there is a keyboard, which is the whole interaction; Copy and
+            the link exist to make that one step cheap, and the poll means they
+            never have to come back and reload to find out whether it worked. */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>GitHub</Text>
+          <Text style={styles.muted}>
+            Lets a build push a branch and open a pull request as you. Without it, code
+            generation runs and then has nowhere to put the result.
+          </Text>
+
+          {githubError !== null ? (
+            <Text style={styles.bannerError} testID="github-error">
+              {githubError}
+            </Text>
+          ) : null}
+
+          <View style={styles.row}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>GitHub account</Text>
+              <Text style={styles.rowStatus} testID="github-status">
+                {github === null
+                  ? 'Checking…'
+                  : github.status === 'connected'
+                    ? 'Connected — builds can push and open pull requests'
+                    : github.status === 'awaiting_owner'
+                      ? 'Waiting for you to enter the code at GitHub'
+                      : 'Not connected — builds cannot push or open pull requests'}
+              </Text>
+            </View>
+            {github !== null && github.status === 'not_connected' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Connect GitHub"
+                testID="github-connect"
+                disabled={githubBusy}
+                onPress={() => void handleConnectGitHub()}
+                style={({ pressed }) => [
+                  styles.primaryBtn,
+                  githubBusy && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.primaryBtnText}>{githubBusy ? 'Starting…' : 'Connect'}</Text>
+              </Pressable>
+            ) : null}
+          </View>
+
+          {github !== null && github.status === 'awaiting_owner' ? (
+            <View style={styles.keyBlock}>
+              {/* `selectable` is not decoration: where there is no programmatic
+                  clipboard the long-press → copy gesture is the fallback the Copy
+                  button degrades to (`lib/clipboard.ts` returns false there). */}
+              <Text style={styles.deviceCode} selectable testID="github-user-code">
+                {github.user_code}
+              </Text>
+              <View style={styles.keyControls}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Copy code"
+                  testID="github-copy-code"
+                  onPress={() => void handleCopyGitHubCode(github.user_code)}
+                  style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {githubCopied ? 'Copied' : 'Copy code'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Open GitHub"
+                  testID="github-open"
+                  onPress={() => void handleOpenGitHub(github.verification_uri)}
+                  style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+                >
+                  <Text style={styles.secondaryBtnText}>Open GitHub</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.rowDetail} selectable testID="github-verification-uri">
+                Enter the code at {github.verification_uri} — on this phone or any other
+                device. This screen finishes on its own once you approve.
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         {/* MODEL PROVIDERS — named rows for the two credentials the build and review
@@ -846,6 +1031,18 @@ const styles = StyleSheet.create({
   // Monospace for the two inline shell/path references in the Codex guidance. A
   // pasted path is easier to read as code, and `THEME` carries no mono token.
   mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  // The GitHub device code. Big, monospaced and wide-tracked because it is read
+  // off this screen and typed into another one — a 12px status line would make
+  // the single most important step of the flow the hardest part of it.
+  deviceCode: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: THEME.text_primary,
+    fontSize: 28,
+    fontWeight: '700',
+    letterSpacing: 4,
+    textAlign: 'center',
+    paddingVertical: 8,
+  },
   requiredTag: { color: THEME.warning, fontSize: 11, fontWeight: '600' },
   keyBlock: { gap: 10 },
   keyControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },
