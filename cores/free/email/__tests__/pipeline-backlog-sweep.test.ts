@@ -484,3 +484,72 @@ describe('mail arriving DURING the sweep is not filed as history', () => {
     })
   })
 })
+
+describe("a late-joining mailbox's backlog is ITS history, not new mail", () => {
+  test('B connected later: mail newer than the ORIGINAL go-live is still backlog', async () => {
+    await withStore(async (store) => {
+      // A moving clock, because this bug only exists in the gap between two
+      // moments: the pipeline goes live at T0, and account B is connected a
+      // fortnight later at T2.
+      let clock = NOW
+      const runAt = (gmail: GmailClient): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (): Promise<unknown> => {
+              throw new Error('a backlog sweep must never escalate')
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'instance',
+          },
+          now: () => clock,
+          max_backlog_pages: 1,
+        })
+
+      // T0 — only A is connected; its sweep completes and stamps go_live_after.
+      await runAt(
+        scriptedClient([
+          {
+            results: [msg('a-1', 'acct-a')],
+            next_page_tokens: {},
+            accounts: [{ account_id: 'acct-a', account_email: 'a@example.com', ok: true }],
+          },
+        ]),
+      )
+
+      // T1 — a fortnight passes. Mail accumulates in B, which nothing is
+      // watching yet: ordinary history for that mailbox, but all of it NEWER
+      // than the original go-live stamp.
+      const fortnight = 14 * 86_400_000
+      const bBacklog = {
+        ...msg('b-history', 'acct-b'),
+        internal_date: new Date(NOW + fortnight - 1_000).toISOString(),
+      } as GmailMessageMeta
+
+      // T2 — B is connected. Its sweep must treat that mail as ITS history.
+      clock = NOW + fortnight
+      const r = await runAt(
+        scriptedClient([
+          {
+            results: [msg('a-1', 'acct-a'), bBacklog],
+            next_page_tokens: {},
+            accounts: [
+              { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+              { account_id: 'acct-b', account_email: 'b@example.com', ok: true },
+            ],
+          },
+        ]),
+      )
+
+      // THE REGRESSION: against ONE global cutoff, every message B accumulated
+      // in those two weeks read as "arrived while we were sweeping", went on to
+      // the classifier, and woke the owner for all of it.
+      expect(r.arrived_during_sweep).toBe(0)
+      expect(store.getEmail('b-history', 'acct-b')?.handling).toBe('preexisting')
+      expect(r.escalated).toBe(0)
+    })
+  })
+})

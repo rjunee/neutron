@@ -133,6 +133,20 @@ export function backlogDoneKey(account_id: string | null): string {
 }
 
 /**
+ * PER-ACCOUNT sweep boundary: everything in THIS mailbox older than this stamp
+ * is that mailbox's existing inbox.
+ *
+ * It cannot be one global stamp. A mailbox connected weeks after the pipeline
+ * went live has a backlog of its own, all of it NEWER than the original
+ * `go_live_after` — so a global comparison classed that entire backlog as
+ * "arrived while we were sweeping", handed it to the classifier, and escalated
+ * it. Each mailbox's history is history relative to when THAT mailbox joined.
+ */
+export function backlogCutoffKey(account_id: string | null): string {
+  return `backlog_cutoff:${account_id ?? ''}`
+}
+
+/**
  * The accounts a list response covered.
  *
  * `ok_only` distinguishes two different questions, and conflating them let a
@@ -346,6 +360,24 @@ export async function runEmailPipelineTick(
           (id) => store.getCheckpoint(backlogDoneKey(id)) !== '1',
         ),
       )
+      // Stamp each target's own boundary the first time we sweep it. For the
+      // original mailbox this lands beside `go_live_after`; for one connected
+      // later it is that mailbox's join moment, which is the only line that
+      // makes its backlog "history" rather than a fortnight of new mail.
+      const cutoffFor = new Map<string, number>()
+      for (const id of sweepTargets) {
+        const key = backlogCutoffKey(id)
+        const stored = store.getCheckpoint(key)
+        const parsed = stored === null ? Number.NaN : Number(stored)
+        if (Number.isNaN(parsed)) {
+          const stamp = now()
+          store.setCheckpoint(key, String(stamp))
+          cutoffFor.set(id, stamp)
+          log?.('email pipeline backlog cutoff stamped for account', { account: id, stamp })
+        } else {
+          cutoffFor.set(id, parsed)
+        }
+      }
       for (const meta of page.results) {
         if (!sweepTargets.has(meta.account_id ?? '')) continue
         if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
@@ -366,7 +398,8 @@ export async function runEmailPipelineTick(
         // overwhelming majority of mail is history, and wrongly escalating the
         // owner's back-catalogue is the failure the sweep exists to prevent.
         // Such a message is still recorded, so it reaches the P2 brief.
-        if (!Number.isNaN(received_at) && received_at > go_live_after) {
+        const cutoff = cutoffFor.get(meta.account_id ?? '') ?? go_live_after
+        if (!Number.isNaN(received_at) && received_at > cutoff) {
           result.arrived_during_sweep++
           continue
         }
