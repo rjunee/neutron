@@ -75,6 +75,7 @@ import {
 import {
   buildMergeCleanupDeps,
   detectBaseBranch,
+  reviewedHeadOid,
   runWorktreePath,
   TridentMergeConflictEscalation,
   type MergeConflictResolver,
@@ -636,11 +637,22 @@ export function buildTridentOrchestrator(
       // row was written before the build named its branch (`run.branch === null`,
       // or a stale value) the prover would resolve a head off the OLD ref while
       // the merge below took the new one: proving one commit and merging another.
+      //
+      // `expected_head` — the commit `mergePr` will actually take (#545 pins the
+      // merge to `reviewedHead`, the OID the reviewers judged, NOT to whatever
+      // the branch tip happens to be). The prover pins the branch tip. Those are
+      // two independent answers to "which commit is this about", and nothing
+      // compared them: a branch tip that has moved past the reviewed commit gave
+      // a proof of B while the merge took A. Handing the merge's own pin in
+      // makes the gate refuse that instead of certifying the wrong commit.
+      // Null (local mode, or a row with no recorded OID) → no second pin to
+      // check; `mergePr` itself refuses an unpinnable pr-mode merge.
       const proof = await proveMutation({
         run: { ...run, branch },
         claim: result.mutation_claim,
         base_branch: await resolveBase(run),
         run_host: opts.run_host,
+        expected_head: reviewedHeadOid(run),
       })
       if (!proof.ok) {
         // `inner_verdict`/`inner_checkpoint` are left EXACTLY as the review left

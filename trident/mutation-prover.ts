@@ -1057,6 +1057,16 @@ export interface MutationGateInput {
   claim: MutationClaim | null
   base_branch: string
   run_host: RunHostCommand
+  /**
+   * The commit the MERGE will take, when the caller pins one of its own. This
+   * gate pins the branch TIP; `mergePr` pins `reviewedHead` (#545) — the OID the
+   * reviewers judged, which is not always the tip. Two independent pins that
+   * nobody compares is "proved B, merged A" with both halves looking correct in
+   * isolation, so the mismatch is refused here rather than discovered never.
+   * Null/absent → the caller has no second pin (local mode, a legacy row); the
+   * tip is then the only commit in play, exactly as before.
+   */
+  expected_head?: string | null
   /** Runner for the nominated argv. Defaults to the real, killable spawner. */
   run_guard?: RunGuardCommand
   /** Prover override (tests). Production mints a fresh one per gate call. */
@@ -1100,6 +1110,22 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     return {
       ok: false,
       reason: 'mutation proof required but the branch head could not be resolved — a proof cannot be bound to it',
+      exempt: false,
+      evidence: null,
+    }
+  }
+
+  // THE CALLER'S OWN PIN, checked BEFORE the exemption and before the proof: if
+  // the commit that would merge is not the commit at the tip, then neither the
+  // diff read below nor the proof run against it is about the merge, and the
+  // prose-only path would exempt on a diff that is not the one shipping.
+  const expected = input.expected_head?.trim().toLowerCase() ?? ''
+  if (expected.length > 0 && expected !== pinnedSha) {
+    return {
+      ok: false,
+      reason:
+        `mutation proof rejected: the merge would take ${expected.slice(0, 8)} but the branch tip is ` +
+        `${pinnedSha.slice(0, 8)} — a proof of the tip says nothing about the commit that would merge`,
       exempt: false,
       evidence: null,
     }

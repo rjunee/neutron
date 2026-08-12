@@ -1029,10 +1029,11 @@ describe('the post-APPROVE MUTATION PROVER stands between APPROVE and merge', ()
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {
         hostCalls.push(cmd)
-        // The gate PINS the branch head before anything else; answer that with a
-        // real sha so the run reaches the predicate this test is about rather
-        // than stopping at an unresolvable head.
-        if (cmd.includes('rev-parse')) return { ...ok(), stdout: 'a'.repeat(40) }
+        // The gate PINS the branch head before anything else; answer that with
+        // the sha the sim recorded as REVIEWED, so the tip and the commit the
+        // merge would take agree and the run reaches the predicate this test is
+        // about rather than stopping earlier.
+        if (cmd.includes('rev-parse')) return { ...ok(), stdout: SIM_REVIEWED_HEAD }
         // `git diff --name-only` returns nothing readable → the prose-only
         // predicate fails closed → the proof is required → there is no claim.
         return ok()
@@ -1050,5 +1051,42 @@ describe('the post-APPROVE MUTATION PROVER stands between APPROVE and merge', ()
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('nominated no mutation')
     expect(hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
+  })
+
+  test('the proof must be of the commit the MERGE takes, not of whatever the tip is', async () => {
+    // TWO PINS. `mergePr` merges `reviewedHead` (#545 — the OID the reviewers
+    // judged); this gate pins the branch TIP. When a tip has moved past the
+    // reviewed commit, proving the tip certifies a commit that is not the one
+    // shipping — and both halves look right on their own. Real gate, no seam.
+    const hostCalls: string[][] = []
+    const sim = buildSimFirer(store, () => ({
+      result: { verdict: 'APPROVE', prNumber: 78, branch: 'feat-x' },
+    }))
+    const orch = buildTridentOrchestrator({
+      fire_workflow: sim.fire_workflow,
+      db_path: join(tmp, 'project.db'),
+      run_host: async (cmd) => {
+        hostCalls.push(cmd)
+        // The tip has moved on since the review recorded SIM_REVIEWED_HEAD.
+        if (cmd.includes('rev-parse')) return { ...ok(), stdout: 'c'.repeat(40) }
+        return ok()
+      },
+      base_branch: 'main',
+      now: () => new Date(0).toISOString(),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(
+      { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches: [], proofCalls: [] },
+      run.id,
+    )
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain(`the merge would take ${SIM_REVIEWED_HEAD.slice(0, 8)}`)
+    expect(final.failure_reason).toContain('the branch tip is cccccccc')
+    // THE IRREVERSIBLE STEP NEVER RAN — and neither did the proof: no worktree
+    // was provisioned for a commit that was never going to be the merged one.
+    expect(hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
+    expect(hostCalls.some((c) => c.join(' ').includes('worktree add'))).toBe(false)
   })
 })

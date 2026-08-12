@@ -993,6 +993,50 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.evidence).toBeNull()
   })
 
+  test("the caller's OWN pin wins: a tip that is not the commit the merge takes is refused", async () => {
+    // `mergePr` merges `reviewedHead` (#545), this gate pins the branch TIP, and
+    // nothing used to compare them — a tip that had moved past the reviewed
+    // commit produced a valid proof of a commit that was never going to ship.
+    // Refused BEFORE the diff is read: on the prose-only path the stale diff
+    // would otherwise have exempted the merge outright.
+    const calls: string[][] = []
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      expected_head: 'd'.repeat(40),
+      run_host: async (cmd) => {
+        calls.push(cmd)
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        return res(0)
+      },
+      fs,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain(`the merge would take dddddddd but the branch tip is ${HEAD.slice(0, 8)}`)
+    expect(out.evidence).toBeNull()
+    // Nothing was read and nothing was provisioned for the wrong commit.
+    expect(calls.some((c) => c.includes('--name-only'))).toBe(false)
+    expect(calls.some((c) => c.includes('worktree'))).toBe(false)
+  })
+
+  test("the caller's pin AGREEING with the tip changes nothing — the proof still runs", async () => {
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      // Same commit, spelled the way git would NOT: the comparison normalises.
+      expected_head: `  ${HEAD.toUpperCase()}  `,
+      ...gateDeps('src/limit.ts\n'),
+      fs,
+    })
+    expect(out.ok).toBe(true)
+    expect(out.evidence?.observed?.head_sha).toBe(HEAD)
+  })
+
   test('a docs-only diff is exempt WITHOUT running anything', async () => {
     const calls: string[][] = []
     const out = await runMutationProofGate({
