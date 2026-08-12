@@ -114,8 +114,17 @@ export function buildEmailPipelinePollHandler(
         },
         now,
       })
-      const detail = `scanned=${r.scanned} escalated=${r.escalated} archived=${r.archived} precutoff=${r.precutoff} resumed=${r.resumed} errors=${r.errors}`
-      const acted = r.escalated + r.archived + r.precutoff + r.resumed > 0
+      // Every kind of work the tick can do has to appear in BOTH lines. A tick
+      // that only finished an owed Gmail write reported `skipped` while having
+      // changed the mailbox — and a cron log that under-reports its own work is
+      // exactly the surface you later use to conclude, wrongly, that nothing
+      // was happening.
+      const detail =
+        `scanned=${r.scanned} escalated=${r.escalated} archived=${r.archived} ` +
+        `precutoff=${r.precutoff} resumed=${r.resumed} remutated=${r.remutated} ` +
+        `arrived_during_sweep=${r.arrived_during_sweep} errors=${r.errors}`
+      const acted =
+        r.escalated + r.archived + r.precutoff + r.resumed + r.remutated > 0
       return { status: acted ? 'ok' : 'skipped', detail }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

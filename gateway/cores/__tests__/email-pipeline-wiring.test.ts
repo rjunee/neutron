@@ -17,6 +17,11 @@ import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import type { GmailClient } from '@neutronai/email-managed-core/backend'
 import { buildSeededInMemoryGmailClient } from '@neutronai/email-managed-core'
+import {
+  backlogDoneKey,
+  CHECKPOINT_BACKLOG_DONE,
+} from '@neutronai/email-managed-core/pipeline/poller'
+import { openEmailPipelineStore } from '@neutronai/email-managed-core/pipeline/store'
 
 import {
   EMAIL_PIPELINE_POLL_HANDLER_NAME,
@@ -194,6 +199,54 @@ describe('buildEmailPipelinePollHandler', () => {
       expect(posts[0]?.body).toContain('billing@vendor.example.com')
       expect(posts[0]?.body).toContain('Action required: payment failed')
       expect(pushes).toHaveLength(1)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('the tick reports every kind of work it does', () => {
+  test('a mutation-only recovery tick is ok, not skipped', async () => {
+    // A tick that finished an OWED Gmail write changed the mailbox. Reporting
+    // it as `skipped` is how a cron log quietly under-reports itself, and that
+    // log is exactly what you later read to conclude — wrongly — that nothing
+    // was happening.
+    const seeded = buildSeededInMemoryGmailClient()
+    seeded.seed({
+      id: 'owed-1',
+      thread_id: 't-owed',
+      subject: 'This week at the shop',
+      from: 'The Shop <news@list.example.com>',
+      snippet: 's',
+      body_text: 'Lots of news. Unsubscribe any time.',
+      internal_date: new Date(1).toISOString(),
+      label_ids: ['INBOX'],
+    })
+    const { cfg, cleanup } = config({ gmail: seeded as GmailClient })
+    try {
+      const store = openEmailPipelineStore({ owner_home: cfg.owner_home })
+      // Past the sweep, with one row whose label/archive write is still owed.
+      store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
+      store.setCheckpoint(backlogDoneKey(null), '1')
+      store.insertEmail({
+        id: 'owed-1',
+        thread_id: 't-owed',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'This week at the shop',
+        snippet: 's',
+        body_text: 'b',
+        received_at: 1,
+        processed_at: 1,
+        category: 'newsletter',
+        handling: 'archive',
+      })
+      store.markEscalated('owed-1', 1, null)
+      store.close()
+
+      const result = await buildEmailPipelinePollHandler(cfg)(CTX)
+      expect(result.detail).toContain('remutated=1')
+      expect(result.status).toBe('ok')
     } finally {
       cleanup()
     }
