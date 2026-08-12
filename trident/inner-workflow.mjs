@@ -1649,10 +1649,20 @@ try {
     // manufactures confidence nobody earned.
     //
     // So this path records nothing. `reviewedHeadOid` returns null, `mergePr`
-    // refuses, and the run fails LOUDLY — the operator re-fires and gets a real
-    // review of whatever is actually on the branch. That is the same fail-closed
-    // rule the rest of #545 follows: a merge we cannot prove was reviewed is a
-    // merge we do not make.
+    // refuses, and the run fails LOUDLY. That is the same fail-closed rule the
+    // rest of #545 follows: a merge we cannot prove was reviewed is a merge we do
+    // not make.
+    //
+    // HOW THAT RUN IS RECOVERED, precisely — the failure is loud and ONE-SHOT, not
+    // a silent gate that never fires again. The refusal puts the run in `failed`,
+    // which is TERMINAL, so it is never re-ticked or retried into a loop (and
+    // orphan redispatch is separately bounded to one per run per process). Note
+    // that recovery is a FRESH run, not a re-fire of this row: this row's
+    // `inner_checkpoint` is still 'argus-approved', so re-dispatching IT would
+    // re-enter this same shortcut and refuse again — correctly, since there is
+    // still no reviewed OID. A new run starts with a null checkpoint and so does
+    // a real build + review, which is the only thing that can legitimately
+    // produce one.
     const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
     // Re-write the terminal result so a re-fired run whose prior process crashed
     // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
