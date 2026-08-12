@@ -446,6 +446,30 @@ const NO_INTERACTIVE_RULE =
 const REDIRECT_RULE =
   'For ANY long or verbose command (builds, full test runs), redirect stdout+stderr to a log file and read ONLY the summary tail — never let raw output flood your context.'
 
+// YOU SHARE THIS MACHINE WITH SIBLING LANES, AND A PATTERN-KILL IS FRATRICIDE.
+//
+// Incident of record, 2026-08-12 06:05:46, diagnosed record-by-record: a fix-round
+// agent decided a stale typecheck was holding its worktree and ran
+// `pkill -f typecheck-all.sh`. `pkill -f` matches on the FULL COMMAND LINE and is
+// scoped to the user, not the worktree — so it SIGTERM'd all ELEVEN lanes running
+// on the box, including the lane that issued it, because each lane's launcher
+// passed its task brief as an argv and every brief contains the literal string
+// `scripts/ci/typecheck-all.sh` (the launchers now pipe the brief on stdin, which
+// removes them from that particular blast radius — but not from this one).
+//
+// EVEN WITH CLEAN ARGV THIS RULE IS LOAD-BEARING: a pattern like
+// `-f typecheck-all.sh` still legitimately matches SIBLING LANES' REAL typecheck
+// children, so a pattern-kill silently poisons other builds' test runs and they
+// fail for reasons invisible in their own logs. The failure is remote, delayed and
+// unattributable — the worst shape a build failure can have.
+//
+// The rule is therefore about PROVENANCE, not about which binary you call: kill
+// only what you started and can name by pid. `$!` after a background start, or a
+// pid file you wrote yourself, is legitimate. A pattern is never legitimate,
+// because the pattern cannot distinguish your process from someone else's.
+const NO_PATTERN_KILL_RULE =
+  'YOU SHARE THIS MACHINE WITH OTHER BUILD LANES. NEVER kill processes by pattern or by name — no `pkill`, no `killall`, no `pkill -f`, no `kill $(pgrep …)`. Those match the whole machine, not your worktree, and one such command has already SIGTERMed every concurrent lane on this box including the one that issued it. Kill ONLY a pid you started yourself and can name (e.g. captured from `$!`). If a process you did not start seems to be in your way, do NOT kill it — work around it and say so in your report.'
+
 // Forge build contract (from prompts/forge.md): smallest-correct-change,
 // push + open-PR, PR_NUMBER/BRANCH/WORKTREE last-lines discipline. With
 // `schema: FORGE_SCHEMA` the agent ALSO returns the structured fields, but the
@@ -483,6 +507,7 @@ function forgeBuildContract(reenter) {
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, ${isPr ? 'push, and open a PR' : 'and commit'} without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
+${NO_PATTERN_KILL_RULE}
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
@@ -497,7 +522,7 @@ CONTRACT
 
 // Argus review rubric (from prompts/argus.md): APPROVE / REQUEST_CHANGES /
 // COMMENT, blockers/important/nits, oversized-diff guard, NEVER a silent exit.
-const ARGUS_RUBRIC = `You are ARGUS — Neutron's autonomous code-review sub-agent (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+const ARGUS_RUBRIC = `You are ARGUS — Neutron's autonomous code-review sub-agent (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Apply the Argus rubric: correctness, security, spec/as-built drift, and TEST-QUALITY discipline (reject toHaveBeenCalled-style gap tests; demand boundary/edge coverage). Identify blockers (must-fix before merge), important issues (should-fix), and minor nits (optional). Every finding AND every dismissal needs EVIDENCE (file:line or a concrete repro — verify before you assert). Do NOT modify files.
 OVERSIZED-DIFF GUARD: never read a >~3000-line diff in one shot (the documented silent-exit trigger) — review the meaty commits one by one instead and STATE what you could not verify.
 NEVER EXIT SILENTLY: if you cannot complete the review, return a TRUNCATED verdict explaining exactly what you could NOT verify — do not vanish.`
@@ -524,7 +549,7 @@ function planFablePrompt(resuming) {
   const resumeNote = resuming
     ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
-  return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
+  return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):${resumeNote}
 1. Read SPEC.md (the master spec) at the repo root and the changelog docs/AS_BUILT.md if present, and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
 2. Diff the SPEC against the code to find what is still MISSING or WRONG. Regenerate the full IMPLEMENTATION_PLAN.md body as a PRIORITIZED '- [ ] <task>' checklist (mark already-satisfied items '- [x]'). Return it as \`implementationPlan\` (do NOT write it to disk — the executor persists it).
