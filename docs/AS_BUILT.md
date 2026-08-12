@@ -57,7 +57,18 @@ migration gate compares against.
 
 The proof is BOUND, and `verify` enforces the binding rather than documenting it:
 to the run id, and to the branch head as re-read AFTER the proof, so a branch
-that moved mid-proof blocks instead of merging a commit that was never proved.
+that moved mid-proof makes the GATE refuse.
+
+KNOWN GAP, stated here rather than implied away, because the point of this phase
+is that a claim means what it says. The binding holds up to the moment the gate
+returns; it does not reach through the merge itself. `merge.ts` takes a
+`TridentRun` and nothing else, so the proved sha cannot currently be handed to it:
+in PR mode `gh pr merge --squash` carries no `--match-head-commit` (the OUTER
+`merge.sh` does pin the head, so a trident-driven merge is covered — a direct
+orchestrator merge is not), and in local mode the branch is REBASED onto the
+latest base first, which can run the bounded conflict resolver and land bytes
+that were never proved. Closing this needs the merge seam to accept an expected
+head, which is a change to `MergeCleanupDeps` and not to this phase.
 The gate PINS that commit once, up front, and reads everything off the pin — the
 `base...<sha>` diff that binds the proof to this PR, the proof itself, and the
 final head comparison. It used to resolve the branch NAME separately for the diff
