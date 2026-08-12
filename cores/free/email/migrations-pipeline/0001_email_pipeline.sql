@@ -65,6 +65,22 @@ CREATE TABLE IF NOT EXISTS emails (
   escalated_at         INTEGER,
   escalation_attempts  INTEGER NOT NULL DEFAULT 0,
   last_error           TEXT,
+  -- GMAIL-SIDE MUTATION STATE, deliberately SEPARATE from "seen".
+  --
+  -- The row is written BEFORE the label/archive call, so a message can never
+  -- be mutated in Gmail without a durable record of it. But that makes the
+  -- row's existence mean only "seen", not "finished": if the mutation then
+  -- fails, `hasEmail` would skip the message on every future tick, the
+  -- archive would never happen, and — because escalation used to follow the
+  -- mutation — the owner would never be told. A data-loss bug traded for a
+  -- silent-escalation-loss bug.
+  --
+  -- So completion is its own fact. `mutated_at IS NULL` on a row whose
+  -- handling is 'escalate' or 'archive' means the Gmail write is still owed,
+  -- and the poller's retry pass picks it up. `preexisting` rows are complete
+  -- on insert: the backlog is deliberately never mutated at all.
+  mutated_at           INTEGER,
+  mutation_attempts    INTEGER NOT NULL DEFAULT 0,
   -- Identity is (account, message), never the message id alone.
   PRIMARY KEY (account_id, id)
 );
@@ -73,6 +89,11 @@ CREATE TABLE IF NOT EXISTS emails (
 -- (handling='escalate' AND escalated_at IS NULL).
 CREATE INDEX IF NOT EXISTS idx_emails_handling_escalated
   ON emails (handling, escalated_at);
+
+-- The mutation-retry query: rows still owing a Gmail write are
+-- (mutated_at IS NULL AND handling <> 'preexisting').
+CREATE INDEX IF NOT EXISTS idx_emails_mutated
+  ON emails (mutated_at, handling);
 
 CREATE TABLE IF NOT EXISTS sender_cache (
   -- Learned classifications. Bounds LLM cost: a sender classified once is

@@ -73,6 +73,19 @@ export interface GmailListInput {
    * `page_token`.
    */
   page_tokens?: Readonly<Record<string, string>>
+  /**
+   * ENUMERATION MODE. `max_results` is a PER-ACCOUNT request size, so a
+   * fan-out across N accounts legitimately reads up to N×max_results rows.
+   * Capping the merged set back to `max_results` while every account's cursor
+   * advanced past everything it returned makes the dropped rows unreachable
+   * FOREVER — the next page resumes after them. A caller that is enumerating
+   * a whole mailbox (the pipeline's backlog sweep) sets this to receive every
+   * row that was read; display callers leave it unset and get the cap, plus
+   * `truncated: true` and NO cursor, because a cursor that skips dropped rows
+   * is worse than no cursor at all. Single-backend clients never merge, so
+   * they ignore this field.
+   */
+  exhaustive?: boolean
 }
 
 export interface GmailListResult {
@@ -97,6 +110,15 @@ export interface GmailListResult {
    */
   next_page_tokens?: Readonly<Record<string, string>>
   /**
+   * TRUE when the merged set was capped and rows were DROPPED — see
+   * `GmailListInput.exhaustive`. Cursors are withheld on the same result,
+   * because advancing past rows the caller never received is how mail goes
+   * missing. An enumerating caller must treat this as a hard error rather
+   * than as completion: with no cursor there is nothing to resume from, so
+   * "capped" and "exhausted" would otherwise be indistinguishable.
+   */
+  truncated?: boolean
+  /**
    * Per-account read outcomes, present only on the fan-out client. A caller
    * that must enumerate a whole mailbox has to know whether every account
    * actually ANSWERED: one failed account means the merged set is incomplete,
@@ -119,6 +141,16 @@ export interface GmailSearchInput {
 
 export interface GmailGetInput {
   message_id: string
+  /**
+   * WHICH mailbox to read from. Gmail message ids are ACCOUNT-LOCAL, so the id
+   * alone does not identify a message across a multi-account install: the
+   * fan-out's by-id probe returns whichever account recognises it FIRST, which
+   * on a collision reads account A's body for account B's row — classified from
+   * the wrong message, while the label mutation correctly targets B. The poller
+   * knows the account it listed from and names it here. Omitted ⇒ the by-id
+   * probe, which is still correct when only one account is connected.
+   */
+  account_id?: string
 }
 
 export interface GmailThreadGetInput {

@@ -63,6 +63,9 @@ export interface EmailRow {
   escalated_at: number | null
   escalation_attempts: number
   last_error: string | null
+  /** NULL ⇒ the Gmail label/archive write is still owed. See the migration. */
+  mutated_at: number | null
+  mutation_attempts: number
 }
 
 /** The caller-supplied half of an `emails` row; the rest defaults. */
@@ -223,6 +226,52 @@ export class EmailPipelineStore {
               processed_at = ?
         WHERE id = ? AND account_id = ?`,
       [error, at, id, account_id ?? ''],
+    )
+  }
+
+  /**
+   * Rows whose Gmail label/archive write is still OWED, under the attempt cap.
+   *
+   * This is the other half of "record before you mutate": the row is written
+   * first so a mutated message always has a durable record, which means the
+   * row's existence proves only that the message was SEEN. Without this query,
+   * a `modifyMessage` failure would be permanent — `hasEmail` skips the
+   * message forever, the archive never happens, and nothing ever retries.
+   *
+   * `preexisting` is excluded because the backlog is never mutated by design.
+   */
+  listPendingMutations(max_attempts: number): EmailRow[] {
+    return this.db
+      .query<EmailRow, [number]>(
+        `SELECT * FROM emails
+          WHERE mutated_at IS NULL
+            AND handling <> 'preexisting'
+            AND mutation_attempts < ?
+          ORDER BY received_at ASC`,
+      )
+      .all(max_attempts)
+  }
+
+  /** Account-qualified, like `hasEmail` — the id alone is not an identity. */
+  markMutated(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(`UPDATE emails SET mutated_at = ? WHERE id = ? AND account_id = ?`, [
+      at,
+      id,
+      account_id ?? '',
+    ])
+  }
+
+  recordMutationFailure(
+    id: string,
+    error: string,
+    account_id: string | null = null,
+  ): void {
+    this.db.run(
+      `UPDATE emails
+          SET mutation_attempts = mutation_attempts + 1,
+              last_error = ?
+        WHERE id = ? AND account_id = ?`,
+      [error, id, account_id ?? ''],
     )
   }
 

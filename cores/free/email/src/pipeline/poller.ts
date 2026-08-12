@@ -22,6 +22,22 @@
  *    reprocessing it, and `escalated_at` is what stops it re-posting.
  * 3. ONE BAD MESSAGE NEVER KILLS THE TICK. Per-message failures are caught,
  *    counted and logged; the tick keeps going and reports `errors`.
+ *
+ * ── WHY SEEN, TOLD AND MUTATED ARE THREE SEPARATE FACTS ──────────────────────
+ * The row is written BEFORE anything is sent or mutated, so nothing can happen
+ * to a message without a durable record of it. The cost is that the row's
+ * existence proves only that the message was SEEN — so it cannot also be the
+ * test for "finished". Each remaining step therefore carries its own durable
+ * mark, and each has its own resume pass:
+ *
+ *   escalated_at IS NULL  → the owner has not been told  → pass (2)
+ *   mutated_at   IS NULL  → Gmail has not been written   → pass (2b)
+ *
+ * Collapsing either into `hasEmail` is how a failure becomes permanent: the
+ * message is skipped forever, and the step that was owed is silently dropped.
+ * The order within a message is escalate-THEN-mutate for the same reason —
+ * telling the owner is the point, labelling is bookkeeping, and bookkeeping
+ * must never gate delivery.
  */
 
 import { DEFAULT_LABEL, PROCESSED_LABEL_NAME } from '../contract.ts'
@@ -74,6 +90,8 @@ export interface EmailPipelineTickResult {
   /** Backlog messages marked handled by the one-time sweep on this tick. */
   precutoff: number
   resumed: number
+  /** Gmail label/archive writes that failed earlier and succeeded on this tick. */
+  remutated: number
   errors: number
   /** True while the backlog sweep is still running — no mail is processed yet. */
   backlog_sweeping: boolean
@@ -109,6 +127,7 @@ export async function runEmailPipelineTick(
     archived: 0,
     precutoff: 0,
     resumed: 0,
+    remutated: 0,
     errors: 0,
     backlog_sweeping: false,
   }
@@ -136,9 +155,27 @@ export async function runEmailPipelineTick(
       const page = await gmail.listMessages({
         label: DEFAULT_LABEL,
         max_results: deps.backlog_page_size ?? DEFAULT_BACKLOG_PAGE_SIZE,
+        // Every row that was READ must be marked. `max_results` is per-account,
+        // so N mailboxes return up to N pages; a merged set capped back to one
+        // page would leave the rest unmarked while every cursor advanced past
+        // them — and unmarked backlog is exactly what reaches the classifier
+        // once the sweep completes.
+        exhaustive: true,
         ...(cursor !== null && cursor.length > 0 ? { page_token: cursor } : {}),
         ...(Object.keys(perAccount).length > 0 ? { page_tokens: perAccount } : {}),
       })
+      // FAIL LOUD, NEVER COMPLETE. A capped page carries no cursor, so there is
+      // nothing to resume from and "capped" would be indistinguishable from
+      // "exhausted" — the sweep would mark itself done over a partial inbox.
+      // Throwing records a tick error and leaves the sweep pending; the next
+      // tick retries. Unreachable while `exhaustive` is honoured, which is the
+      // point: a client that quietly ignores it is caught here, not in the
+      // owner's chat six months of backlog later.
+      if (page.truncated === true) {
+        throw new Error(
+          'backlog sweep received a TRUNCATED page (cursors withheld) — refusing to mark the backlog complete over a partial inbox',
+        )
+      }
       for (const meta of page.results) {
         if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
         const received_at = Date.parse(meta.internal_date)
@@ -222,11 +259,6 @@ export async function runEmailPipelineTick(
       }
     }
 
-    // (3) POLL. Merged across accounts by the fan-out client; every row is
-    // stamped with the account it was read from.
-    const listed = await gmail.listMessages({ label: DEFAULT_LABEL, max_results })
-    const rules = store.listSenderRules()
-    const classifyDeps: ClassifyDeps = { ...deps.classify, rules }
     /** Processed-label id PER ACCOUNT, cached for the tick. */
     const processedLabels = new Map<string, string>()
 
@@ -242,15 +274,72 @@ export async function runEmailPipelineTick(
       return ensured.label_id
     }
 
+    /**
+     * The Gmail write one row still owes, derived from how it was handled.
+     * An escalated message KEEPS `INBOX` — the owner still has to deal with
+     * it — so only the archive path removes the label.
+     */
+    async function applyMutation(row: {
+      id: string
+      account_id: string | null
+      handling: string
+    }): Promise<void> {
+      const account_id = row.account_id === null || row.account_id === '' ? undefined : row.account_id
+      const label_id = await processedLabelId(account_id)
+      await gmail.modifyMessage({
+        message_id: row.id,
+        add_label_ids: [label_id],
+        ...(row.handling === 'archive' ? { remove_label_ids: [DEFAULT_LABEL] } : {}),
+        ...(account_id !== undefined ? { account_id } : {}),
+      })
+      store.markMutated(row.id, now(), row.account_id)
+    }
+
+    // (2b) RETRY OWED GMAIL WRITES. A message whose label/archive call failed
+    // after its row was written is skipped by `hasEmail` forever, so nothing
+    // in the poll path can ever come back to it. This pass is the only thing
+    // that finishes it — without re-classifying (costly) and without
+    // re-escalating (the owner was already told, on the row's own record).
+    for (const pending of store.listPendingMutations(max_attempts)) {
+      try {
+        await applyMutation(pending)
+        result.remutated++
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err)
+        store.recordMutationFailure(pending.id, error, pending.account_id)
+        result.errors++
+        log?.('email pipeline mutation retry failed', { email_id: pending.id, error })
+      }
+    }
+
+    // (3) POLL. Merged across accounts by the fan-out client; every row is
+    // stamped with the account it was read from. `exhaustive` because every
+    // listed row is processed here — a capped merge would drop rows that no
+    // later tick re-lists once they age out of the newest page.
+    const listed = await gmail.listMessages({
+      label: DEFAULT_LABEL,
+      max_results,
+      exhaustive: true,
+    })
+    const rules = store.listSenderRules()
+    const classifyDeps: ClassifyDeps = { ...deps.classify, rules }
+
     async function handleMessage(meta: GmailMessageMeta): Promise<void> {
       const received_at = Date.parse(meta.internal_date)
-      const label_id = await processedLabelId(meta.account_id)
       const account_id = meta.account_id ?? null
 
       // Anything reaching here is NEW: the backlog sweep has completed, and
       // `store.hasEmail` (below) has already excluded every message it marked.
       // No date comparison is involved or needed.
-      const full = await gmail.getMessage({ message_id: meta.id })
+      //
+      // The account is NAMED. Gmail ids are account-local, so an unqualified
+      // read returns whichever mailbox recognises the id first — on a
+      // collision that is a DIFFERENT message's body, classified as if it were
+      // this one while the label write correctly targets the right mailbox.
+      const full = await gmail.getMessage({
+        message_id: meta.id,
+        ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
+      })
       const body_text = full.body_text.slice(0, STORED_BODY_LIMIT)
       const verdict: Classification = await classifyEmail(
         {
@@ -264,9 +353,17 @@ export async function runEmailPipelineTick(
       )
 
       if (verdict.important) {
-        // Record FIRST (see the ordering note below), then label. KEEP INBOX —
-        // an escalated message is one the owner still has to handle in their
-        // mail client, so only the processed label is added.
+        // RECORD → TELL → LABEL, in that order, and each step durably marked.
+        //
+        // Record first so nothing happens to a message without a row to find
+        // it by. Tell the owner NEXT, ahead of the label write: escalation is
+        // what this pipeline exists to do, and a Gmail API failure must never
+        // be able to swallow it. Label last, marked by `mutated_at`; if that
+        // call fails the row survives with the mark unset and pass (2b)
+        // finishes it on a later tick.
+        //
+        // KEEP INBOX — an escalated message is one the owner still has to
+        // handle in their mail client, so only the processed label is added.
         store.insertEmail({
           id: meta.id,
           thread_id: meta.thread_id,
@@ -280,11 +377,6 @@ export async function runEmailPipelineTick(
           category: verdict.category,
           handling: 'escalate',
         })
-        await gmail.modifyMessage({
-          message_id: meta.id,
-          add_label_ids: [label_id],
-          ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
-        })
         const outcome = await escalateEmail(
           {
             id: meta.id,
@@ -296,18 +388,19 @@ export async function runEmailPipelineTick(
           escalateDeps,
         )
         if (outcome.delivered) result.escalated++
+        await applyMutation({ id: meta.id, account_id, handling: 'escalate' })
         return
       }
 
       // NOT IMPORTANT: record FIRST, then archive. No chat post, no push — the
       // row's existence is what queues it for the P2 brief.
       //
-      // ORDER IS LOad-BEARING. Archiving first would remove `INBOX` and only
+      // ORDER IS LOAD-BEARING. Archiving first would remove `INBOX` and only
       // then try to persist: if the insert throws (disk full, SQLite error),
       // the message is gone from every future poll AND was never queued, so it
       // silently misses the brief with nothing left to find it by. Persisting
-      // first can only fail the other way — a row whose archive did not happen
-      // is re-seen, and `hasEmail` makes the retry a no-op.
+      // first can only fail the other way — an archive that did not happen
+      // leaves `mutated_at` unset, and pass (2b) retries exactly that.
       store.insertEmail({
         id: meta.id,
         thread_id: meta.thread_id,
@@ -321,12 +414,7 @@ export async function runEmailPipelineTick(
         category: verdict.category,
         handling: 'archive',
       })
-      await gmail.modifyMessage({
-        message_id: meta.id,
-        add_label_ids: [label_id],
-        remove_label_ids: [DEFAULT_LABEL],
-        ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
-      })
+      await applyMutation({ id: meta.id, account_id, handling: 'archive' })
       result.archived++
     }
 
