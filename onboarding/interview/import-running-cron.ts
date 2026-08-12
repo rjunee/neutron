@@ -1,10 +1,15 @@
 /**
  * @neutronai/onboarding — import-running cron-tick (S12, 2026-05-16).
  *
- * Per docs/plans/P2-onboarding-v2.md § 3.4 + § S5: `import_running` is a
- * transit phase that advances to `import_analysis_presented` the moment
- * the `ImportJobRunner` reaches `completed` (or `budget-exceeded` /
- * `failed` / `cancelled` / hard-timeout). The original wiring polled the
+ * The contract this module implements — checkable against the code and the
+ * tests below, not quoted from a document: `import_running` is a transit phase
+ * that advances to `import_analysis_presented` the moment the
+ * `ImportJobRunner` reaches `completed` (or `budget-exceeded` / `failed` /
+ * `cancelled` / hard-timeout). (`docs/plans/P2-onboarding-v2.md` § 3.4 + § S5
+ * is where it was originally specified. That file is not in this repository, so
+ * the § numbers are a pointer for whoever holds it; nothing here is a quote,
+ * and the authority for the behaviour is
+ * `tests/integration/import-running-cron-tick.test.ts`.) The original wiring polled the
  * runner exactly ONCE — inside `engine.notifyImportUpload`, immediately
  * after `runner.start(...)`. At that moment the runner is still in
  * `queued` / `pass1-running`, so the engine emits the live status body
@@ -14,7 +19,7 @@
  * `import_running` for 5 min until the test harness gave up.
  *
  * This module closes the gap by registering a per-instance cron handler
- * that scans `onboarding_state` every 15 s for rows at
+ * that scans `onboarding_state` on an interval for rows at
  * `phase = 'import_running'` with `import_job_id` non-null, then calls
  * `engine.pollImportRunningTick(...)` for each one. The engine routes
  * through `pollImportRunningAndAdvance` with the in-progress emit
@@ -25,19 +30,42 @@
  * Wiring shape (per-project cron registration):
  *   - `name`: `onboarding-import-running-<owner_slug>`
  *   - `handler`: `'onboarding.import_running_tick'`
- *   - `schedule`: `{ kind: 'interval_ms', interval_ms: 15s default }`
+ *   - `schedule`: `{ kind: 'interval_ms', interval_ms:
+ *     DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS }` — read the figure off
+ *     {@link DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS}. It was lowered once
+ *     already and an earlier revision of THIS header went stale by restating
+ *     it, which is why this docblock names the constant and states no figure.
+ *     Elsewhere in the tree the cadence is still written as a number in
+ *     several places — arithmetic that needs the value (the lines/day math on
+ *     {@link IDLE_TICK_LOG_INTERVAL_MS}), dated incident narratives, and a
+ *     constant-guard test that asserts it. Those are not authoritative, and
+ *     they are not reliably current either: successive sweeps for this change
+ *     each turned up another site still saying 15 s, including two found only
+ *     after a sweep had been declared complete. **If you change this constant,
+ *     grep for the OLD NUMBER across the repo — not for a phrase, and not
+ *     against any inventory, including this sentence.** Phrase-shaped greps are
+ *     what missed them: the stale sites said "15s sweep" and "15 seconds",
+ *     which none of the patterns aimed at "every 15s" could see.
  *
- * 15 s is the spec-implied cadence ("import_running cron-tick polling"
- * per § S5) and matches the user's perceived "the agent is still
- * thinking" window. The engine's hard-timeout backstop at
- * `IMPORT_RUNNING_HARD_TIMEOUT_MS` (15 min) means the cron stops being
- * relevant after at most 60 ticks per import.
+ * A few-second cadence matches the user's perceived "the agent is still
+ * thinking" window. How long the cron stays relevant for a given import is
+ * decided by the engine's timeout rule, NOT by anything in this file and not
+ * by a flat tick count. Since 2026-06-18 that rule is progress-aware — read
+ * `evaluateImportTimeout` in `engine-internals.ts`. Do not plan tick cost off a
+ * summary of it, including this one: what matters here is only that this file
+ * imposes no bound of its own, so a slow import can legitimately be ticked for
+ * a long time. (Successive revisions of this header stated the bound as "15
+ * min", then "at most 60 ticks per import", then an enumeration of the rule's
+ * windows, then a per-import ceiling — each one either predating a redesign or
+ * contradicted by a short-circuit in the same function. The reason this
+ * paragraph states no bound is that the attempts to state one kept being wrong.)
  *
  * Spec-vs-current diff (the brief's mandatory section):
  *
  *   Intended contract: import_running is a transit phase that advances
  *   to import_analysis_presented when the ImportJobRunner completes.
- *   Detection mechanism: cron-tick polling per § S5.
+ *   Detection mechanism: cron-tick polling (§ S5 in the unavailable spec
+ *   above — the mechanism is pinned by the tests, not by that reference).
  *
  *   CURRENT WIRING (pre-S12): engine.notifyImportUpload polls once. No
  *   periodic poll.
@@ -56,6 +84,21 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InterviewEngine } from './engine.ts'
 
 const log = createLogger('import-running-cron')
+
+/**
+ * How often an IDLE tick may log its heartbeat.
+ *
+ * 10 minutes against a 5 s sweep turns ~17,280 idle lines/day into ~144 — quiet
+ * enough to read a journal, frequent enough that "the line stopped appearing" is
+ * still a signal an operator can act on within a coffee break.
+ *
+ * The ceiling is DETECTION LATENCY: one whole interval has to pass before silence
+ * means anything, so the interval is how long an operator waits before "the cron
+ * stopped" is readable at all. It is NOT related to the 15 min stuck-count window
+ * in the S15 note below — this throttle only ever applies to the idle branch, which
+ * reports `in_flight_imports=0` by definition, so it cannot slow or mask a >0 count.
+ */
+export const IDLE_TICK_LOG_INTERVAL_MS = 10 * 60_000
 
 /**
  * Default sweep cadence — 5 s (lowered from 15 s on 2026-05-21 by the
@@ -114,10 +157,14 @@ export interface ImportRunningHandlerDeps {
  * `ONBOARDING_IMPORT_RUNNING_HANDLER_NAME`.
  *
  * Behavior:
- *   1. Scan `onboarding_state` for THIS instance's row, filtering to
+ *   1. Scan `onboarding_state` for THIS project's rows, filtering to
  *      `phase = 'import_running'` AND `import_job_id` non-empty in the
- *      phase_state JSON. Per-project DB so the result set is at most one
- *      row.
+ *      phase_state JSON. The primary key is `(project_slug, user_id)`
+ *      (`migrations/0043_onboarding_state_wow_pushed_at.sql`), so the
+ *      per-project DB bounds the result set to one row PER USER, not one row
+ *      overall — which is why the scan projects `user_id` and the handler
+ *      loops (ISSUES #2, 2026-05-19). In the single-owner case that is one
+ *      row in practice, but the loop is the contract.
  *   2. For each row, call `engine.pollImportRunningTick(owner_slug)`.
  *      The engine reads its own state, resolves channel context, checks
  *      the runner status, and advances on terminal states (suppressing
@@ -130,6 +177,19 @@ export interface ImportRunningHandlerDeps {
 export function buildImportRunningHandler(
   deps: ImportRunningHandlerDeps,
 ): CronHandler {
+  // ONE logger view per clock, deliberately. `rateLimited` windows are
+  // per-process state keyed `subsystem × key` — the CLOCK is not part of the
+  // key — so two views on `import-running-cron` reading different clocks would
+  // compare one clock's readings against the other's stamps in a single
+  // window. Only the test seam injects a clock, so in production this IS the
+  // module-level `log` and that mix cannot arise at all. A test that injects
+  // one gets a separate VIEW but NOT a separate window — the state is keyed
+  // `subsystem × key` either way — so two same-slug tickers built inside one
+  // test would still share a window; no current case builds two, and
+  // `resetLoggerStateForTests` is what keeps one test's stamps out of the
+  // next test's window.
+  const tickLog =
+    deps.now === undefined ? log : createLogger('import-running-cron', { now: deps.now })
   const now = deps.now ?? ((): number => Date.now())
 
   return async (ctx) => {
@@ -148,14 +208,73 @@ export function buildImportRunningHandler(
       )
       .all(ctx.owner_slug)
 
-    // S15 (2026-05-17) — tick log proves cron is actually firing in
+    // S15 (2026-05-17) — the tick log proves the cron is actually firing in
     // journald. Pre-S15 the scheduler never started, so this line never
-    // appeared; once it stops appearing in steady-state (or the count
-    // stays > 0 for > 15 min on a single instance), operators have a
-    // direct signal pointing at the cron tier rather than the engine.
-    log.info('tick', { project: ctx.owner_slug, in_flight_imports: rows.length })
+    // appeared; once it stops appearing in steady-state, operators have a
+    // direct signal pointing at the cron tier rather than the engine. (S15
+    // also read a count that stayed > 0 for > 15 min as a stuck signal. That
+    // stopped holding on 2026-06-18 — see below; it is quoted here as history,
+    // not as a live alarm.)
+    //
+    // ── WHY THIS IS NO LONGER LOGGED UNCONDITIONALLY (2026-08-10) ──────────
+    // It was, and with no import in flight that is a tick every 5s forever with
+    // `in_flight_imports=0` — measured at ~17k lines/day on the owner's box,
+    // where it BURIED everything else: diagnosing a live turn meant discovering
+    // the flood first and filtering it out, and the turn's own activity was
+    // invisible until then. A log that hides the signal it sits next to has a
+    // negative information value, however cheap each line is.
+    //
+    // Both S15 properties are preserved, deliberately:
+    //   * a tick with WORK still logs every time, so whatever the >0 count is
+    //     worth to an operator is untouched by this change — which is less than
+    //     S15 assumed, and was already less before this change.
+    //     "> 0 for > 15 min" stopped being an alarm on 2026-06-18, when the
+    //     import timeout became progress-aware: the deadline RESETS on forward
+    //     progress, so a legitimately-progressing import sits at count > 0 for
+    //     well past 15 min by design. `evaluateImportTimeout` in
+    //     engine-internals.ts is the rule — read it there rather than trusting
+    //     a set of windows copied out into a comment. Either way this line
+    //     reports only the COUNT, never progress, so it cannot tell a
+    //     slow-healthy import from a stuck one. Read >0 as "work is in
+    //     flight", not as a timer. And
+    //   * an IDLE tick still logs, just at most once per
+    //     {@link IDLE_TICK_LOG_INTERVAL_MS}, so "the line stopped appearing"
+    //     remains a real signal — it is a slower heartbeat, not a silent one.
+    //     ("At most once" is the forward-clock bound; `rateLimited`'s contract
+    //     in logger/index.ts states where that bound does not hold, and it is
+    //     the place to read for it rather than this comment. Do not read the
+    //     bound as a guarantee that a line was DELIVERED — it bounds attempts,
+    //     which is the half that matters to a heartbeat.)
+    // Silencing idle ticks ENTIRELY would have removed the liveness proof this
+    // line exists for, which is the trap: the cheap fix and the correct fix
+    // differ, and only the correct one keeps the original guarantee.
+    //
+    // The throttle is the logger's own `rateLimited` window, not a hand-rolled
+    // one, so there is no check-then-forget-to-mark seam for this call site to
+    // get wrong. The two clauses above are the parts of its contract that bear
+    // on THIS line; the contract itself lives on `rateLimited` in
+    // logger/index.ts. Its clock is this handler's `now`, so the window is
+    // deterministic under test. The key carries `ctx.owner_slug` so the window is
+    // scoped to the same thing the line reports (`project=`) — today's wiring
+    // hands one slug per registration (build-core-modules.ts passes
+    // `input.project_slug`), so that is one window in practice; the key is
+    // scoping, not a claim that anything sweeps more than one. It is in-memory on
+    // purpose: a restart SHOULD log immediately, since "did it come back up?" is
+    // exactly the question a heartbeat answers — pinned by 'a CLEARED window and a
+    // rebuilt handler log the first idle tick at once' in
+    // tests/integration/import-running-cron-tick.test.ts, which stands in for the
+    // process boundary by clearing the module-level window and rebuilding the handler
+    // (it does not spawn a process).
+    const idle = rows.length === 0
+    const tickEmitter = idle
+      ? tickLog.rateLimited(`idle_tick:${ctx.owner_slug}`, IDLE_TICK_LOG_INTERVAL_MS)
+      : tickLog
+    tickEmitter.info('tick', {
+      project: ctx.owner_slug,
+      in_flight_imports: rows.length,
+    })
 
-    if (rows.length === 0) {
+    if (idle) {
       return { status: 'skipped', detail: 'no_in_flight_imports' }
     }
 

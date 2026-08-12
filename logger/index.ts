@@ -14,14 +14,31 @@
  * the level around individual calls.
  *
  * SUPPRESSION HELPERS — these generalize the three hand-rolled patterns O2
- * will swap onto this package; their semantics deliberately match the
- * originals so the swaps are behavior-preserving:
+ * swaps onto this package. They are close to those originals but NOT
+ * bit-for-bit.
+ *
+ * `logger/__tests__/logger.test.ts` is where the behavior is pinned; this
+ * docblock is not. Read a case rather than a sentence, and when you change the
+ * behavior, change a case rather than adding a sentence. It is not a COMPLETE
+ * specification. Until this round it did not cover the throwing-sink half at
+ * all, and the attempt-vs-delivery note below rested on a one-off execution
+ * check written into `docs/AS_BUILT.md` — a normative claim with nothing under
+ * it that had to be kept green. `a THROWING sink CONSUMES the window` is now
+ * that claim, executable.
+ *
+ * This docblock states INTENT on purpose. Earlier revisions restated the
+ * predicate in prose, then enumerated the deviations from the originals, then
+ * enumerated which cases the suite covers — and each enumeration was falsified
+ * by the next reader to grep. A docblock goes stale in silence; a test at least
+ * has to be kept green — though only a test on the WIRED path proves anything.
+ * So this docblock deliberately says less than it knows.
  *
  *   - `once(key)` — the GBrain unavailable latch
  *     (gbrain-memory/GBrainSyncHook.ts `latchIfUnavailable`): the FIRST
  *     passing emit under a key logs and latches; every later emit under that
- *     key is silent for the rest of the process. "Exactly ONE
- *     `gbrain_unavailable` event."
+ *     key is silent until `clearOnce` re-arms it. "Exactly ONE
+ *     `gbrain_unavailable` event" — one ATTEMPT, on the same
+ *     attempts-not-deliveries bound as `rateLimited` below.
  *
  *   - `clearOnce(key)` — the falling edge of an EDGE-TRIGGERED latch
  *     (runtime/adapters/claude-code/persistent/rate-limit-banner.ts head
@@ -32,11 +49,55 @@
  *
  *   - `rateLimited(key, ms)` — the wedge-alert cooldown
  *     (runtime/…/persistent/dead-repl-detector.ts `decideWedgeAction` +
- *     pool-state.ts `wedgeAlertState`): suppressed while
- *     `now - last < ms`; the timestamp is stamped ONLY when a line is
- *     actually sent (the original sets `wedgeAlertState` only inside
- *     `if (action.alert.send)`), so a suppressed/level-gated attempt never
- *     extends the window.
+ *     pool-state.ts `wedgeAlertState`): a throttle for a line that must keep
+ *     appearing without flooding. An attempt the WINDOW suppresses does not
+ *     extend it, and an attempt the LEVEL GATE drops does not start one (the
+ *     original sets `wedgeAlertState` only inside `if (action.alert.send)`).
+ *
+ *     Three consequences that are easy to get wrong — not the whole
+ *     caller-facing contract, and not an inventory of how this differs from
+ *     the original:
+ *
+ *     A CLOCK JUMP MUST NOT BE ABLE TO SILENCE THE KEY FOR THE JUMP PLUS THE
+ *     WINDOW. `Date.now()` can jump backward (an NTP correction, a VM resume),
+ *     and a throttle that trusted the reading would stay silent for the jump
+ *     AND then the window on top: an hour-long jump would silence a 10-minute
+ *     heartbeat for over an hour, which presents as exactly the "it died"
+ *     alarm the heartbeat exists to rule out. That is the failure this guards
+ *     against, and it is the whole of what it promises — a jump can still move
+ *     an individual attempt either way, so `ms` is a rough period and not a
+ *     guaranteed one. WHICH readings emit is decided by the condition in
+ *     `rateLimited` below; read it there. Prose restatements of it have shipped
+ *     false in three consecutive rounds, so this docblock carries none.
+ *
+ *     THE BOUND IS ON ATTEMPTS, NOT ON DELIVERED LINES. State is stamped
+ *     before the sink runs (see `emit`), so a sink that throws consumes a
+ *     window with nothing necessarily delivered. Erring the other way would
+ *     let a persistently-throwing sink re-attempt on every single call,
+ *     precisely the flood the window exists to prevent. A caller that needs a
+ *     DELIVERY bound must make its own sink non-throwing; this primitive will
+ *     not do it for them. Pinned by `a THROWING sink CONSUMES the window` —
+ *     which is what a swap of the two lines in `emit` now has to redden.
+ *
+ *     AN UNCOMPUTABLE WINDOW COUNTS AS DUE, NOT AS SILENCE. `ms` used to be
+ *     unvalidated, and `rateLimited(key, NaN)` therefore suppressed the key
+ *     for as long as the clock moved forward — an invisible failure inside
+ *     the primitive that exists to make a flood visible. A window that is not
+ *     computable as a finite number now counts as DUE, so for THAT input the
+ *     failure direction is an extra line, never a dead one. That makes
+ *     `rateLimited(key, Infinity)` a flood rather than a latch: `once(key)`
+ *     is how "never again" is expressed.
+ *
+ *     That guard covers NON-FINITE input and nothing more. A finite `ms` is
+ *     honoured as written, so a caller that passes an absurdly large one —
+ *     `Number.MAX_VALUE`, or a unit mix-up that multiplies into milliseconds
+ *     twice — gets exactly the permanent silence it asked for, and no guard
+ *     here will save it. Earlier rounds of this docblock stated the universal
+ *     ("nothing a caller passes can silence a key permanently"); it was false
+ *     for every finite window, and `Number.isFinite(Number.MAX_VALUE)` is
+ *     `true`, so what is claimed here is now only the bounded thing the
+ *     condition below actually enforces. Choosing a sane `ms` remains the
+ *     CALLER's obligation.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -59,7 +120,9 @@
  * `sink`; the clock is injectable via `now` for deterministic
  * `rateLimited` windows.
  *
- * O1 scope: package + tests only — NO call sites adopt this yet (that is O2).
+ * O1 built the package and its tests. Call sites have since started adopting
+ * it (that is O2, in progress) — `grep -rn 'createLogger(' ` for the current
+ * set rather than trusting a count written here.
  *
  * F3 addendum: the sibling module `./fire-and-forget.ts` exports
  * `fireAndForget` + the process-level safety net (`installProcessSafetyNet`),
@@ -103,9 +166,19 @@ export interface Logger extends LogEmitter {
    */
   clearOnce(key: string): void
   /**
-   * A view that logs at most once per `ms` window per key (the
-   * wedge-alert `alertDedupeMs` cooldown). The window starts ONLY when a
-   * line is actually emitted; suppressed attempts do not extend it.
+   * A view that throttles a key to roughly one line per `ms` window (the
+   * wedge-alert `alertDedupeMs` cooldown).
+   *
+   * "Roughly" is load-bearing: a clock jump can move an individual attempt in
+   * either direction, a throwing sink consumes a window with no
+   * guarantee that anything was delivered, and a window that is not a finite
+   * number counts as due rather than as forever. All three are deliberate —
+   * and all three err toward an extra line. That last one covers NON-FINITE
+   * input only: a finite `ms` is honoured as written, however large, so
+   * picking a window that is not effectively forever is the caller's job. The head
+   * docblock gives the reasons, the condition itself is in the implementation
+   * below, and `logger/__tests__/logger.test.ts` holds the pinned cases — all
+   * three of these included, the throwing-sink one as of this round.
    */
   rateLimited(key: string, ms: number): LogEmitter
 }
@@ -251,8 +324,11 @@ export function createLogger(subsystem: string, options?: LoggerOptions): Logger
   const clock = options?.now ?? Date.now
 
   /** Emit if the level passes AND `gate()` (checked only after the level
-   *  passes — so suppressed-by-level attempts never consume a latch/window;
-   *  `onEmit` stamps state only when the line actually goes out). */
+   *  passes — so suppressed-by-level attempts never consume a latch/window).
+   *  `onEmit` stamps state once both gates pass, immediately BEFORE the sink
+   *  call: a throwing sink consumes the latch/window, which keeps a broken sink
+   *  from re-attempting on every call. The bound is on attempts, not
+   *  deliveries. */
   function emit(
     level: LogLevel,
     event: string,
@@ -304,7 +380,27 @@ export function createLogger(subsystem: string, options?: LoggerOptions): Logger
       return gatedEmitter(
         () => {
           const last = rateLimitState.get(subsystem)?.get(key)
-          return last === undefined || clock() - last >= ms
+          if (last === undefined) return true
+          const elapsed = clock() - last
+          // An UNCOMPUTABLE window counts as due. Every comparison against a
+          // NaN is false, so without this line a single non-finite input — a
+          // computed `ms`, or a clock reading that is not a number — makes
+          // both halves of the condition below false and silences the key.
+          // That is the fail-CLOSED direction, and it is strictly worse than
+          // the flood this primitive exists to stop: a flood is visible in
+          // the journal, a permanently silenced heartbeat reads as "the thing
+          // died" and shows up nowhere at all. Erring toward an extra line
+          // keeps the failure mode observable. `Infinity` is rejected here
+          // too — see the head docblock for why `once` owns "never again".
+          if (!Number.isFinite(elapsed) || !Number.isFinite(ms)) return true
+          // `Date.now()` is not monotonic (NTP, a VM resume), so the reading
+          // can land BEHIND `last` and a plain `>= ms` would then suppress the
+          // line for the jump plus the window. For a rate-limited heartbeat
+          // that silence reads as "the thing died", so a reading behind the
+          // stamp counts as due now. The condition on the next line is the
+          // whole rule; this comment deliberately does not restate it, because
+          // the rounds that tried kept getting some input wrong.
+          return elapsed < 0 || elapsed >= ms
         },
         () => {
           let windows = rateLimitState.get(subsystem)

@@ -350,6 +350,38 @@ describe('once', () => {
     log.once('never').info('e')
     expect(lines).toHaveLength(1)
   })
+
+  test('a THROWING sink CONSUMES the latch — the bound is on attempts, not deliveries', () => {
+    // The head docblock says `once` latches on the same attempts-not-deliveries bound as
+    // `rateLimited`. Only the `rateLimited` half had a case behind it: moving `onEmit?.()`
+    // to AFTER the `sink(...)` call in `emit` reddened the throwing-sink window case and
+    // NOTHING here, so the `once` half of the claim was prose. This closes that.
+    //
+    // The behaviour, not the bookkeeping: attempt 1 reaches the sink and throws; attempt 2
+    // is REFUSED before the sink is reached, so it does not throw and the sink is not
+    // called again. That refusal is only possible if the latch was set by an attempt that
+    // delivered nothing.
+    let sinkCalls = 0
+    const log = createLogger('throwing-sink-once', {
+      sink: () => {
+        sinkCalls += 1
+        throw new Error('sink is down')
+      },
+    })
+
+    expect(() => log.once('k').info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(1)
+
+    // With the stamp moved after the sink the latch never closes, so this line throws
+    // again and `sinkCalls` reaches 2 — a broken sink re-attempting on every single call.
+    expect(() => log.once('k').info('beat')).not.toThrow()
+    expect(sinkCalls).toBe(1)
+
+    // `clearOnce` still re-arms: consuming the latch is not welding it shut.
+    log.clearOnce('k')
+    expect(() => log.once('k').info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(2)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -357,7 +389,7 @@ describe('once', () => {
 // ---------------------------------------------------------------------------
 
 describe('rateLimited', () => {
-  test('logs at most once per window per key', () => {
+  test('logs at most once per window per key — under a forward-only clock', () => {
     let now = 1_000_000
     const { sink, lines } = capture()
     const log = createLogger('wedge', { sink, now: () => now })
@@ -406,6 +438,28 @@ describe('rateLimited', () => {
     expect(lines.map((l) => l.line)).toEqual(['[wedge] event=shown'])
   })
 
+  test('a BACKWARD clock step does not silence the window for step+ms', () => {
+    // `Date.now()` is not monotonic (NTP correction, VM resume). Without the
+    // negative-elapsed guard a one-hour backward step would suppress a 10-min
+    // rate-limited heartbeat for 70 min — which reads to an operator as "the
+    // thing died", the exact failure a heartbeat exists to rule out.
+    let now = 3_600_000
+    const { sink, lines } = capture()
+    const log = createLogger('backstep', { sink, now: () => now })
+    log.rateLimited('k', 600_000).info('first') // stamps at t=3_600_000
+    now = 0 // clock steps back one hour
+    log.rateLimited('k', 600_000).info('after_step') // due now, and re-stamps
+    now = 599_999
+    log.rateLimited('k', 600_000).info('deduped') // window restarted at t=0
+    now = 600_000
+    log.rateLimited('k', 600_000).info('third')
+    expect(lines.map((l) => l.line)).toEqual([
+      '[backstep] event=first',
+      '[backstep] event=after_step',
+      '[backstep] event=third',
+    ])
+  })
+
   test('the window is shared per-process across logger instances', () => {
     let now = 0
     const { sink, lines } = capture()
@@ -414,6 +468,120 @@ describe('rateLimited', () => {
     a.rateLimited('k', 1000).info('first')
     b.rateLimited('k', 1000).info('deduped')
     expect(lines).toHaveLength(1)
+  })
+
+  // The fail-CLOSED cases, and they cover NON-FINITE input ONLY. Every
+  // comparison against a NaN is false, so before the finite-window guard a
+  // single non-finite input silenced the key for as long as the clock moved
+  // forward — inside the primitive whose whole job is to make a flood visible
+  // without going dark. Each case below asserts the OPPOSITE outcome across a
+  // bounded run of attempts, because a permanently silent heartbeat is the
+  // failure nobody can see. What the guard does NOT cover is a large FINITE
+  // window, which is honoured as written; the last case in this block pins
+  // that, so the docblock's bounded claim has something executable behind it.
+  test('a NaN window emits on each of five successive attempts', () => {
+    let now = 0
+    const { sink, lines } = capture()
+    const log = createLogger('nan-ms', { sink, now: () => now })
+    for (let i = 0; i < 5; i += 1) {
+      now += 1_000
+      log.rateLimited('k', Number.NaN).info('beat')
+    }
+    expect(lines).toHaveLength(5)
+  })
+
+  test('a NaN CLOCK READING emits rather than silencing the key', () => {
+    // The stamp is written from the same clock, so one bad reading poisons
+    // `last` as well as `elapsed` — both sides of the subtraction, forever.
+    let now: number = Number.NaN
+    const { sink, lines } = capture()
+    const log = createLogger('nan-clock', { sink, now: () => now })
+    log.rateLimited('k', 1_000).info('first') // stamps NaN
+    log.rateLimited('k', 1_000).info('second') // NaN - NaN → still due
+    now = 10_000 // clock recovers; `last` is still NaN
+    log.rateLimited('k', 1_000).info('third')
+    expect(lines.map((l) => l.line)).toEqual([
+      '[nan-clock] event=first',
+      '[nan-clock] event=second',
+      '[nan-clock] event=third',
+    ])
+  })
+
+  test('an INFINITE window is a flood, not a latch — `once` owns "never again"', () => {
+    // Deliberate: `rateLimited(key, Infinity)` reads like a latch, and honouring
+    // it would put a permanent per-key silence back within a caller's reach.
+    // `once` is the primitive that expresses it, and it is observable.
+    let now = 0
+    const { sink, lines } = capture()
+    const log = createLogger('inf-ms', { sink, now: () => now })
+    log.rateLimited('k', Number.POSITIVE_INFINITY).info('beat')
+    now = 1
+    log.rateLimited('k', Number.POSITIVE_INFINITY).info('beat')
+    expect(lines).toHaveLength(2)
+    log.once('k').info('latched')
+    log.once('k').info('suppressed')
+    expect(lines).toHaveLength(3)
+  })
+
+  test('a MAX_VALUE window DOES silence the key — the guard is finiteness, not size', () => {
+    // The counter-case to the one above, and the reason the docblock no longer
+    // says "nothing a caller passes can silence a key permanently". That claim
+    // was false the moment it was written: `Number.isFinite(Number.MAX_VALUE)`
+    // is `true`, so the non-finite guard never fires for it and the window is
+    // honoured as asked. Pinned as BEHAVIOUR — one line, then silence across a
+    // clock advanced by centuries — so that the prose and the condition cannot
+    // drift apart again, in either direction: a future round that adds a size
+    // cap to make the universal true has to come here and say so.
+    //
+    // `Number.isFinite(Number.MAX_VALUE) === true` is a fact about the language,
+    // not about this repo, so it is stated here and NOT asserted: an expect() that
+    // no change to this tree could ever redden proves nothing and inflates the
+    // count this file's measurements quote. The five-attempt/one-line assertion
+    // below is the whole of the discrimination.
+    let now = 0
+    const { sink, lines } = capture()
+    const log = createLogger('max-ms', { sink, now: () => now })
+    for (let i = 0; i < 5; i += 1) {
+      log.rateLimited('k', Number.MAX_VALUE).info('beat')
+      now += 6_307_200_000_000 // ~200 years per attempt
+    }
+    expect(lines.map((l) => l.line)).toEqual(['[max-ms] event=beat'])
+  })
+
+  test('a THROWING sink CONSUMES the window — the bound is on attempts, not deliveries', () => {
+    // The head docblock's "THE BOUND IS ON ATTEMPTS, NOT ON DELIVERED LINES" clause had
+    // nothing executable under it: moving `onEmit?.()` to AFTER the `sink(...)` call in
+    // `emit` survived the entire suite, and the docblock disclosed that gap rather than
+    // closing it. This case closes it, on the wired path.
+    //
+    // The behaviour, not the bookkeeping: attempt 1 reaches the sink and throws; the
+    // attempt inside the window is REFUSED before the sink is reached, so it does not
+    // throw and the sink is not called a second time. That refusal is only possible if
+    // the window was stamped by an attempt that delivered nothing.
+    let now = 0
+    let sinkCalls = 0
+    const log = createLogger('throwing-sink', {
+      now: () => now,
+      sink: () => {
+        sinkCalls += 1
+        throw new Error('sink is down')
+      },
+    })
+
+    expect(() => log.rateLimited('k', 1_000).info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(1)
+
+    // Inside the window. With the stamp moved after the sink this line throws again and
+    // `sinkCalls` reaches 2 — a broken sink re-attempting on every single call, which is
+    // precisely the flood the window exists to stop.
+    now = 999
+    expect(() => log.rateLimited('k', 1_000).info('beat')).not.toThrow()
+    expect(sinkCalls).toBe(1)
+
+    // The window still expires normally: consuming it is not latching it.
+    now = 1_000
+    expect(() => log.rateLimited('k', 1_000).info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(2)
   })
 })
 

@@ -109,7 +109,10 @@ function freshTree(): string {
  * commit-message scan, and by any case running in a simulated CI context (where
  * an un-scannable message range is itself a hard failure).
  */
-function gitFixture(commitSubjects: string[] = []): { dir: string; base: string } {
+function gitFixture(
+  commitSubjects: string[] = [],
+  author?: string,
+): { dir: string; base: string } {
   const dir = freshTree()
   const g = (...a: string[]): string =>
     execFileSync('git', ['-C', dir, ...a], {
@@ -126,7 +129,11 @@ function gitFixture(commitSubjects: string[] = []): { dir: string; base: string 
   commitSubjects.forEach((subject, i) => {
     writeFileSync(join(dir, 'src', `c${i}.ts`), `export const c${i} = ${i}\n`)
     g('add', `src/c${i}.ts`)
-    g('commit', '-q', '-m', subject)
+    // `author` overrides ONLY the layered commits, never the base — so a case can
+    // plant an identity inside the scan window and leave the pre-window history
+    // clean, which is the shape the gate has to distinguish.
+    if (author === undefined) g('commit', '-q', '-m', subject)
+    else g('commit', '-q', '-m', subject, `--author=${author}`)
   })
   return { dir, base }
 }
@@ -557,6 +564,108 @@ describe('local denylist FILE — same rules, no secret', () => {
       expect(out).toContain('no denylist file at: /nope/denylist')
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 2026-08-12 — commit AUTHOR identity was a hole the gate could not see.
+ *
+ * `git log --format='%s%n%b'` is the message and nothing else, so a denylisted
+ * name could sail through in `%an`/`%ae` on every commit of a branch while the
+ * gate reported SILENT. It is not a cosmetic field: GitHub's squash merge reads
+ * the author of each squashed commit and writes it into a `Co-authored-by:`
+ * trailer on the merge commit — i.e. straight into main's message body, the
+ * surface this gate does scan, but only once the merge has already published it.
+ * That is the exact route by which an owner address reached this repo's main.
+ * ──────────────────────────────────────────────────────────────────────────── */
+describe('commit AUTHOR identity is scanned, not just the message', () => {
+  test('RED on a denylisted name in the AUTHOR of a commit whose MESSAGE is clean', () => {
+    // The discriminator: the subject and body carry nothing denylisted, so a gate
+    // reading only `%s%n%b` reports SILENT here. Only reading `%an <%ae>` fails it.
+    const { dir, base } = gitFixture(
+      ['feat: a subject with nothing to hide'],
+      `${LOCAL_TERM} maintainer <${LOCAL_TERM}@example.com>`,
+    )
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+      })
+      // The guarded thing was actually REFUSED: a finding, on the author stream,
+      // and a non-zero exit — not merely a line printed somewhere.
+      expect(out).toContain('[pii-denylist-msg]')
+      expect(out).toContain('COMMIT-AUTHOR')
+      expect(code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+
+  test('a clean author on a clean message stays SILENT — the rule is not always-red', () => {
+    const { dir, base } = gitFixture(['feat: a subject with nothing to hide'])
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+      })
+      expect(out).not.toContain('[pii-denylist-msg]')
+      expect(code).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+
+  test('the STRUCTURAL private-path rule is deliberately NOT applied to identity', () => {
+    // `PRIVATE_TOKEN` is the module-level fragment-assembled one, so the literal
+    // still never appears in this tree — only at runtime in a temp fixture.
+    //
+    // This is the decision that the first run of the author rules forced, pinned so
+    // a later "tighten it up" cannot flip it silently: the identity that authors
+    // nearly every commit in this repo contains that token, so applying the
+    // structural path rule to authors would flag EVERY commit of EVERY branch. A
+    // rule that fires on 100% of its inputs stops being read, taking the denylist
+    // findings printed beside it down with it. The denylist rules still cover the
+    // leak this stream exists for — the case above proves that on the same stream.
+    const { dir, base } = gitFixture(
+      ['feat: a subject with nothing to hide'],
+      `agent <${PRIVATE_TOKEN}@example.com>`,
+    )
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+      })
+      expect(out).not.toContain('[private-path-msg]')
+      expect(code).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
+    }
+  })
+
+  test('the pre-push hook path sees it too — this is the PRE-publication control', () => {
+    const { dir, base } = gitFixture(
+      ['feat: a subject with nothing to hide'],
+      `${LOCAL_TERM} maintainer <${LOCAL_TERM}@example.com>`,
+    )
+    const file = localDenylistFile([LOCAL_TERM])
+    try {
+      const { code, out } = runGate(dir, {
+        LEAK_GATE_BASE_SHA: base,
+        LEAK_GATE_PII_DENYLIST_FILE: file,
+        LEAK_GATE_MODE_ARGS: '--messages-only',
+      })
+      expect(out).toContain('COMMIT-AUTHOR')
+      expect(code).toBe(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(file, { force: true })
     }
   })
 })

@@ -156,7 +156,7 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
   {
     field: 'onboarding_import_running_cron',
     provides:
-      'the 15s sweep that advances a finished history import — unset, onboarding stalls at import_running until the owner sends another message',
+      'the periodic sweep that advances a finished history import — unset, onboarding stalls at import_running until the owner sends another message',
   },
   {
     field: 'onboarding_overnight_cron',

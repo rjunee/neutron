@@ -6,8 +6,10 @@
  * `ImportJobRunner` reaches `completed`. The original wiring polled
  * once inside `notifyImportUpload`, leaving the engine stranded at
  * `import_running` after Pass-1+Pass-2 finished. This test pins the
- * cron-tick fix: a per-instance cron that polls every 15 s and advances
- * the phase the moment the runner's status flips to `completed`.
+ * cron-tick fix: a per-project cron that polls on the interval named by
+ * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` (lowered once, in 2026-05-21 — read
+ * the figure there, not here) and advances the phase the
+ * moment the runner's status flips to `completed`.
  *
  * Assertions:
  *   1. The cron handler IS registered against the SHARED CronJobRegistry
@@ -24,7 +26,7 @@
  *      job-naming contract (`onboarding-import-running-<slug>`).
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -38,6 +40,8 @@ import {
   SqliteOnboardingStateStore,
   TranscriptWriter,
   buildImportRunningHandler,
+  DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS,
+  IDLE_TICK_LOG_INTERVAL_MS,
   registerImportRunningCron,
   ONBOARDING_IMPORT_RUNNING_HANDLER_NAME,
 } from '@neutronai/onboarding/index.ts'
@@ -46,6 +50,7 @@ import type { ImportJob, ImportResult } from '@neutronai/onboarding/history-impo
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronScheduler } from '@neutronai/cron/scheduler.ts'
+import { resetLoggerStateForTests } from '@neutronai/logger'
 
 const OWNER = 'alice'
 const TOPIC = 'chat-1'
@@ -342,5 +347,348 @@ describe('import-running cron-tick (S12)', () => {
     expect(r.status).toBe('skipped')
     expect(r.detail ?? '').toContain('no_in_flight_imports')
     expect(sentPrompts.length).toBe(0)
+  })
+})
+
+describe('the idle tick heartbeat is throttled, not silenced', () => {
+  // WHY THIS EXISTS. The tick logged unconditionally, and on an idle install that
+  // is one line every 5 s forever with `in_flight_imports=0` — ~17,280 lines/day,
+  // measured on the owner's box, where it BURIED everything else: diagnosing a live
+  // turn meant discovering the flood first and filtering it out. A log that hides
+  // the signal sitting next to it has negative information value.
+  //
+  // The trap is that the cheap fix and the correct fix differ. Silencing idle ticks
+  // outright would have removed the S15 liveness proof the line exists for — "the
+  // line stopped appearing" is a real operator signal. So idle ticks still log,
+  // just at most once per interval — the forward-clock bound. These cases pin that
+  // bound, through the handler, on a forward clock. The behaviour off that path —
+  // `rateLimited` emitting an extra line once a reading lands BEHIND its last stamp,
+  // which errs toward more heartbeat, not less — is pinned in
+  // `logger/__tests__/logger.test.ts`, on the primitive; nothing here drives a
+  // decreasing clock.
+  //
+  // THEY DRIVE THE HANDLER AND READ THE REAL LINE, deliberately. The first version
+  // of these cases called an exported predicate directly, and deleting the handler's
+  // throttle call left all of them green with the flood fully restored — coverage of
+  // a helper, zero coverage of the fix. Asserting on what actually reaches the sink
+  // is the shape chosen to see that mutation — a module mock counting `rateLimited`
+  // calls would also see it, at the cost of asserting on a call instead of on output.
+  // That does couple these cases to the
+  // logger's transport — the handler builds its own logger, so there is no sink to
+  // inject at this seam and the assertion goes through a `console.log` spy. Deliberate:
+  // coupling to the real output is what buys coverage of the real wiring.
+  //
+  // Each case uses its OWN slug: the rate window is keyed by subsystem × key and the
+  // key carries the slug, so distinct slugs keep the cases independent of EACH OTHER.
+  // That is not enough on its own — the window is PROCESS-global state that outlives a
+  // test, so the reset below is what keeps the file independent of ITSELF: a second pass
+  // in the same process reuses run 1's stamps for the same slug.
+  //
+  // The command that SHOWS it is filtered, and the distinction is the whole point of
+  // naming one here. Comment this reset out and
+  //
+  //   bun test tests/integration/import-running-cron-tick.test.ts \
+  //     -t 'the FIRST idle tick into an empty window logs' --rerun-each 2
+  //
+  // goes red on the second pass. The unfiltered `--rerun-each 2` over this file stays
+  // GREEN on that same mutant — the restart case below calls `resetLoggerStateForTests()`
+  // inline, which launders every earlier case's stamps before pass 2 reaches them. So a
+  // whole-file rerun does NOT prove this reset is load-bearing, and an earlier revision of
+  // this comment claimed it did. Reach for the filtered form when checking that claim.
+  beforeEach(resetLoggerStateForTests)
+
+  const T0 = 1_700_000_000_000
+
+  let logSpy: ReturnType<typeof spyOn<Console, 'log'>> | undefined
+  let logged: string[] = []
+
+  function captureLogLines(): void {
+    logged = []
+    logSpy = spyOn(console, 'log').mockImplementation((...args: unknown[]): void => {
+      logged.push(args.map((a) => String(a)).join(' '))
+    })
+  }
+
+  /** Only this subsystem's tick lines — the scheduler and engine log too. */
+  function tickLines(): string[] {
+    return logged.filter((l) => l.startsWith('[import-running-cron] event=tick '))
+  }
+
+  function tickLine(slug: string, in_flight: number): string {
+    return `[import-running-cron] event=tick project=${slug} in_flight_imports=${in_flight}`
+  }
+
+  afterEach(() => {
+    logSpy?.mockRestore()
+    logSpy = undefined
+  })
+
+  /**
+   * ONE handler plus a mutable clock, fired repeatedly — the production shape
+   * (build-core-modules.ts builds the handler once at boot and the scheduler fires
+   * it forever). The ctx is the same one `CronScheduler.fireOnceInner` passes.
+   */
+  function makeTicker(slug: string): (at: number) => Promise<void> {
+    let clock = T0
+    const handler = buildImportRunningHandler({
+      engine: makeEngine(() => clock),
+      db,
+      now: () => clock,
+    })
+    return async (at: number): Promise<void> => {
+      clock = at
+      await handler({
+        job_name: `onboarding-import-running-${slug}`,
+        owner_slug: slug,
+        fired_at: at,
+      })
+    }
+  }
+
+  test('the FIRST idle tick into an empty window logs', async () => {
+    // The empty window comes from the `beforeEach` reset above, NOT from a process
+    // boundary — this case does not restart anything. The restart claim has its own
+    // case below.
+    const tick = makeTicker('idle-first')
+    captureLogLines()
+    await tick(T0)
+    expect(tickLines()).toEqual([tickLine('idle-first', 0)])
+  })
+
+  test('the NEXT idle tick 5s later does NOT log — this is the flood being cut', async () => {
+    const slug = 'idle-flood'
+    const tick = makeTicker(slug)
+    captureLogLines()
+    await tick(T0)
+    // The real sweep cadence, so this is the exact case that produced 17k lines/day.
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    await tick(T0 + 60_000)
+    expect(tickLines()).toEqual([tickLine(slug, 0)])
+  })
+
+  test('an idle tick logs again once the interval elapses — the heartbeat SURVIVES', async () => {
+    const slug = 'idle-heartbeat'
+    const tick = makeTicker(slug)
+    captureLogLines()
+    await tick(T0)
+    // One millisecond short, then exactly at the boundary: pins the comparison
+    // rather than merely "some later time works".
+    await tick(T0 + IDLE_TICK_LOG_INTERVAL_MS - 1)
+    expect(tickLines()).toEqual([tickLine(slug, 0)])
+    await tick(T0 + IDLE_TICK_LOG_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0), tickLine(slug, 0)])
+  })
+
+  test('a CLEARED window and a rebuilt handler log the first idle tick at once', async () => {
+    // The name states the seam this case actually drives, because the name is what gets
+    // quoted elsewhere: it clears module-level state and builds a second ticker. It
+    // spawns NOTHING. An earlier name said "a restarted process", which claimed an
+    // executable process boundary this body never crosses.
+    //
+    // What it stands in FOR: the handler comment says the in-memory window is deliberate
+    // because "did it come back up?" is the question a heartbeat answers. A new process
+    // starts that module-level state empty and rebuilds the handler at boot
+    // (build-core-modules.ts), so clearing it and rebuilding is a faithful stand-in for
+    // the restart — and it goes red if the window is ever moved somewhere a restart does
+    // not wipe, which is the property worth pinning.
+    const slug = 'idle-restart'
+    const tick = makeTicker(slug)
+    captureLogLines()
+    await tick(T0)
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0)])
+
+    resetLoggerStateForTests()
+    const afterRestart = makeTicker(slug)
+    // Deep inside the window the tick above was suppressed in: this line appears only
+    // because the restart dropped the stamp.
+    await afterRestart(T0 + 2 * DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0), tickLine(slug, 0)])
+  })
+
+  test('the window is keyed per slug, not globally', async () => {
+    const alpha = makeTicker('idle-alpha')
+    const beta = makeTicker('idle-beta')
+    captureLogLines()
+    await alpha(T0)
+    // Under one global key this second line would be suppressed, and whichever slug
+    // ticked first would be the only one you could observe.
+    await beta(T0 + 1_000)
+    expect(tickLines()).toEqual([tickLine('idle-alpha', 0), tickLine('idle-beta', 0)])
+  })
+
+  test('two back-to-back ticks WITH WORK both log — the throttle skips the work branch', async () => {
+    // The half that a blanket throttle would have broken: the throttle must apply
+    // to the IDLE branch only, so a >0 count still reports on consecutive ticks.
+    // The second tick lands one cadence apart, well inside the window that DOES
+    // suppress an idle tick, so it fails if the throttle is applied unconditionally.
+    //
+    // What this does NOT assert: that ">0 for >15 min" is an alarm. It is not —
+    // it stopped being one on 2026-06-18 when the import timeout became
+    // progress-aware, and the deadline now resets on forward progress.
+    // `evaluateImportTimeout` in engine-internals.ts is the rule; it is not a flat
+    // window and the figures are not restated here. Either way this line carries
+    // only the count, never progress, so it cannot separate slow-healthy from
+    // stuck. Read >0 as "work is in flight".
+    //
+    // Scope note: this pins TWO ticks, one of them inside the window that would
+    // have suppressed an idle tick. That is what discriminates "throttle the idle
+    // branch only" from "throttle everything"; it is NOT evidence about
+    // arbitrarily many ticks, so the name claims neither "EVERY" nor "never".
+    const job_id = 'job-heartbeat-busy'
+    await stateStore.upsert({
+      user_id: 'test-user',
+      owner_slug: OWNER,
+      phase: 'import_running',
+      phase_state_patch: {
+        topic_id: TOPIC,
+        user_id: USER,
+        signup_via: 'web',
+        import_job_id: job_id,
+        import_source: 'chatgpt-zip',
+      },
+      advanced_at: T0,
+    })
+    runnerResults.set(job_id, {
+      job_id,
+      owner_slug: OWNER,
+      source: 'chatgpt-zip',
+      status: 'pass1-running',
+      dollars_spent: 0.4,
+      pass1_chunks_done: 2,
+      pass1_chunks_total: 8,
+      chunks_total_known: false,
+      started_at: T0 - 30_000,
+    })
+
+    const tick = makeTicker(OWNER)
+    captureLogLines()
+    await tick(T0)
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(OWNER, 1), tickLine(OWNER, 1)])
+  })
+
+  test('the FIRST idle tick after an import finishes logs — busy ticks do not stamp the window', async () => {
+    // The transition the other cases leave open, and the one an operator meets
+    // every time an import completes: busy → idle. The busy branch never touches
+    // the window, so it neither stamps one nor clears an existing stamp — and
+    // this case starts from an UNSTAMPED window, which is the condition under
+    // which the first post-drain idle tick logs at once. State the bound that
+    // way round: if an earlier idle tick had stamped the window inside the last
+    // IDLE_TICK_LOG_INTERVAL_MS, that stamp still stands across the busy period
+    // and the post-drain line waits out the remainder. That is bounded by the
+    // same interval the heartbeat already permits, and busy ticks log on every
+    // sweep meanwhile, so the gap is never silent — it is not a claim that the
+    // post-drain line is immediate in every ordering.
+    // If the busy branch ever started stamping — the obvious "just throttle the
+    // tick" simplification — this line would be suppressed for up to a full
+    // IDLE_TICK_LOG_INTERVAL_MS after every import even from an unstamped
+    // window, and the only observable difference from a cron that stopped
+    // firing would be the wait.
+    //
+    // The drain is driven the real way: the runner reports `completed`, the tick
+    // advances the phase out of `import_running`, and the SCAN then returns zero
+    // rows on its own. Nothing here rewrites state to fake the idle branch.
+    const job_id = 'job-busy-then-idle'
+    await stateStore.upsert({
+      user_id: 'test-user',
+      owner_slug: OWNER,
+      phase: 'import_running',
+      phase_state_patch: {
+        topic_id: TOPIC,
+        user_id: USER,
+        signup_via: 'web',
+        import_job_id: job_id,
+        import_source: 'chatgpt-zip',
+      },
+      advanced_at: T0,
+    })
+    runnerResults.set(job_id, {
+      job_id,
+      owner_slug: OWNER,
+      source: 'chatgpt-zip',
+      status: 'pass1-running',
+      dollars_spent: 0.4,
+      pass1_chunks_done: 2,
+      pass1_chunks_total: 8,
+      chunks_total_known: false,
+      started_at: T0 - 30_000,
+    })
+
+    const tick = makeTicker(OWNER)
+    captureLogLines()
+    await tick(T0)
+
+    runnerResults.set(job_id, {
+      job_id,
+      owner_slug: OWNER,
+      source: 'chatgpt-zip',
+      status: 'completed',
+      dollars_spent: 1.2,
+      pass1_chunks_done: 8,
+      pass1_chunks_total: 8,
+      chunks_total_known: true,
+      started_at: T0 - 30_000,
+      completed_at: T0 + 1_000,
+      result: completedResult(),
+    })
+    // Still busy at scan time — this is the tick that advances the phase.
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect((await stateStore.get(OWNER, 'test-user'))?.phase).toBe(
+      'import_analysis_presented',
+    )
+
+    // Now idle, one cadence later — deep inside the window that suppresses a
+    // CONSECUTIVE idle tick, so this line only appears because the busy ticks
+    // before it left the window untouched.
+    await tick(T0 + 2 * DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([
+      tickLine(OWNER, 1),
+      tickLine(OWNER, 1),
+      tickLine(OWNER, 0),
+    ])
+  })
+
+  test('the interval is long enough to matter and short enough to notice', async () => {
+    // A guard on the constant, closed by an observation of the handler at both edges
+    // of it: at 5s sweeps this is the difference between ~17,280 and ~144 lines/day.
+    //
+    // Both bounds are a BUDGET, not a derivation. Upper: one interval must pass
+    // before "the line stopped appearing" means anything, so keep that inside a
+    // single sitting. The quarter-hour is CHOSEN, not derived — it does NOT
+    // inherit from the S15 stuck-count window, which the throttle cannot collide
+    // with in the first place, since the throttle applies only to the idle branch
+    // and that branch reports `in_flight_imports=0` by definition. Being chosen
+    // does not make it negotiable in passing: moving the constant past it should
+    // be a deliberate change that moves this bound with it, which is the whole
+    // job of a guard on a chosen budget.
+    const OPERATOR_BUDGET_MS = 15 * 60_000
+    expect(IDLE_TICK_LOG_INTERVAL_MS).toBeLessThan(OPERATOR_BUDGET_MS)
+    const idleLinesPerDay = 86_400_000 / IDLE_TICK_LOG_INTERVAL_MS
+    expect(idleLinesPerDay).toBeLessThan(500)
+    // Lower bound. An earlier round left this out on the reasoning that the
+    // lines/day ceiling already forces ≳ 2.9 min, so a small-ms assertion could not
+    // fail. That is false for anything ≤ 0: at `IDLE_TICK_LOG_INTERVAL_MS = -1` the
+    // division is NEGATIVE and both bounds above stay green, while `elapsed >= -1`
+    // is true for every reading and the throttle is off entirely. A window no longer
+    // than one sweep suppresses nothing, so the cadence is the real floor.
+    expect(IDLE_TICK_LOG_INTERVAL_MS).toBeGreaterThan(
+      DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS,
+    )
+
+    // The three assertions above read the constant back to itself; on their own they
+    // are a statement of the budget, not evidence the handler honours it. So drive
+    // the real handler at both edges of that budget and read the sink.
+    const slug = 'idle-budget'
+    const tick = makeTicker(slug)
+    captureLogLines()
+    await tick(T0)
+    // Floor, observed: one sweep later the line is REFUSED, so a throttle is in force.
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0)])
+    // Ceiling, observed: silence never outlasts the operator's budget, whatever the
+    // constant is set to.
+    await tick(T0 + OPERATOR_BUDGET_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0), tickLine(slug, 0)])
   })
 })

@@ -8786,6 +8786,7 @@ Each mutant now dies on a **different** test.
 📌 **A test that passes against the mutant is not weak coverage, it is ZERO coverage, and
 it looks identical to the real thing in a green run.** Second occurrence today. The
 mutation step is the only thing that separates them.
+
 ## 2026-08-10 — a terminal trident transition retracts a stale "still running" claim
 
 Observed live: the owner cancelled a running email-core build and the row settled at
@@ -9114,6 +9115,7 @@ specific: a guard that exists in TWO independently-built copies gets one copy's 
 pasted onto the other's test, and the untested copy is then defended by a citation. The
 control is mechanical — run the named mutant and read WHICH tests go red, not how many.
 
+
 ## 2026-08-09 — Naming the account behind a usage reading
 
 The `account_label` column has been null on every row since it was created. This reads an
@@ -9267,3 +9269,1101 @@ Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
+
+## 2026-08-10 — the import-running cron stops flooding the journal, without going silent
+
+> ⚠️ **Every round below that describes what a docblock or comment SAYS describes it as of
+> that round.** Rounds 5–7 rewrote the same `logger/index.ts` docblock repeatedly, so those
+> sentences are a record of a decision, not a quotable description of the file. Read the file.
+> That an append-only log cannot keep such a sentence true is itself the Round 7 finding.
+
+`onboarding/interview/import-running-cron.ts` logged its tick unconditionally. On an
+idle install that is one line every **5 s** forever with `in_flight_imports=0` —
+**~17,280 lines/day**, measured on the owner's box, where it did real harm: diagnosing a
+live chat turn meant first *discovering* the flood and filtering it out, and until then
+the turn's own activity was invisible. A log that hides the signal sitting next to it has
+negative information value, however cheap the line is.
+
+**The cheap fix and the correct fix differ here, and that is the point.** That line exists
+for a reason (S15, 2026-05-17): it proves the cron is firing, so "the line stopped
+appearing" is a real operator signal. (The S15 note also called "the count stayed > 0 for
+> 15 min" a signal; that half was already stale before this change — see the correction
+below — and this change neither relies on it nor preserves it as an alarm.) Silencing
+idle ticks would have deleted the liveness proof. So:
+
+* a tick **with work** logs every time — the >0 signal is untouched;
+* an **idle** tick still logs, at most once per `IDLE_TICK_LOG_INTERVAL_MS` (10 min) —
+  ~144 lines/day instead of ~17,280. A slower heartbeat, not a missing one. ("At most once" is
+  the forward-clock bound; a backward wall-clock step emits an extra line, per `rateLimited`'s
+  contract — the harmless direction for a liveness signal.)
+
+The mechanism is `log.rateLimited(key, ms)` — the logger's own suppression primitive
+(`logger/index.ts`), already live in `cron/scheduler.ts` and the app-ws adapter. The
+window key carries the slug the line reports (`project=`), and the clock is the handler's
+injected `now`, so the window is deterministic under test. It is in-memory on purpose — a
+restart *should* log immediately, since "did it come back up?" is exactly what a heartbeat
+answers.
+
+📌 **The first draft hand-rolled the throttle it already owned.** ~43 lines and three new
+exports (an exported pure predicate + a separate mark call + a test-reset hook)
+reimplemented `rateLimited`'s exact contract — same "never logged ⇒ due", same
+stamp-only-on-emit. The justification written down for building it was *"a test that
+asserts on log output would couple to the logger's transport"*, and that was false as a
+reason to reimplement the primitive — `createLogger` takes an injectable `sink` and `now`,
+so the coupling was avoidable in principle. **A wrong reason for a decision is worse than
+no reason — it reads as evidence the alternative was considered.** The reviewer's spot-check
+found the primitive in one grep. Two lines now.
+
+To be exact about what the tests then did with that freedom: they *accept* the coupling on
+purpose. The handler builds its own logger, so there is no sink to inject at that seam, and
+the cases assert through a `spyOn(console, 'log')` — precisely, they replace `console.log` with
+a mock, so what they cover is the real logger→`console` routing the default sink performs, NOT
+a write to the process's actual stdout. That is the trade being made deliberately — coupling to
+the real transport is what buys coverage of the real wiring, and the alternative (inject a sink,
+and with it a fake handler) is exactly the shape that produced zero coverage in round 1.
+
+The reuse also removed the misuse seam that the hand-rolled shape created: a predicate you
+check and a mark you must remember to call. `rateLimited` stamps the window INSIDE the
+emit, so "check and forget to mark" is unrepresentable — and deleting that mark call was
+exactly the mutation the first round of tests could not see.
+
+One fix landed in the primitive itself: `rateLimited` compared `now - last >= ms` against a
+**non-monotonic** clock, so a backward wall-clock step (NTP correction, VM resume) suppressed
+the key for step + window — an hour-long step silences a 10-min heartbeat for 70 min, which
+presents as the "it died" alarm the heartbeat exists to rule out. Negative elapsed now counts
+as due, and the emit re-stamps, so the window self-heals. Every `rateLimited` caller gets it.
+
+⚠️ **The counts and the mutant table in this block describe THIS round and have since gone
+stale — read them as history, not as the current measurement.** Every later round touched
+both suites, and the table below predates the finite-window guard entirely. The current
+figures and mutant set live in the LAST **Verification** block of this entry — that is the
+pointer, and it is deliberately not a round number and not a count. **This banner itself
+shipped stale twice:** it named a file total ("now 11, not 10") that the next round's case
+falsified, and it named the round-11 block while round 12 was the last one. A banner whose
+job is to say "the number below rotted" cannot carry a number of its own. Left standing
+rather than rewritten because editing a past round's measurement to match today's tree
+destroys the record of what was actually run then — the forward pointer is the fix, and the
+rule this entry states two paragraphs below (re-run in the round that touches the tests) is
+the one that was missed.
+
+**Verification:** 7 new cases — 6 in `tests/integration/import-running-cron-tick.test.ts`
+(file total 4 → 10), five of which drive the REAL handler and assert on the REAL emitted line
+while the sixth is a guard on the constant, plus 1 in `logger/__tests__/logger.test.ts`, which
+exercises the primitive directly (the backward-clock case; the integration cases never drive a
+decreasing clock) — including the boundary (one ms
+short of the interval,
+then exactly at it) and a guard on the constant. **Six** mutants, each killed, and each with a
+DISTINCT red set — which is a weaker claim than "each by a different case", and the weaker one
+is the true one; see the note under the table:
+
+| mutant | red |
+|---|---|
+| log unconditionally (drop the throttle) | 2 — the flood case + the boundary case |
+| rate-limit *every* tick, not just idle | 1 — the with-work case |
+| one global window key instead of per-slug | 1 — the per-slug case |
+| drop the `{ now }` clock seam | 1 — the boundary case |
+| widen the interval to 20 min | 1 — the constant guard |
+| revert the `elapsed < 0` guard in `rateLimited` | 1 — the backward-step case |
+
+📌 **The red sets are distinct but NOT disjoint, and the earlier wording ("each killed by a
+DIFFERENT case") claimed disjoint.** Re-run in this round: dropping the throttle gives exactly
+2 red — `the NEXT idle tick 5s later does NOT log` and `an idle tick logs again once the
+interval elapses`; dropping the `{ now }` clock seam gives exactly 1 red — *the second of
+those same two*. So the interval-elapsed case kills two different mutants, and no case is the
+sole executioner of more than one. That is still real discrimination (no two mutants produce
+the same failure set, so no single case is doing all the work), but it is not a bijection, and
+"a different case" reads as one. **A coverage claim should state the weakest thing that is
+true, because the stronger phrasing is what a later reader will rely on** — and the whole
+reason this table exists is that the previous revision's numbers were trusted and wrong.
+
+The counts are re-derived, not remembered: an earlier revision of this entry said "5 new
+cases (4 → 9)" and "five mutants", and put the global-key mutant at 3 red. The first two
+were simply wrong. The third was *true at the time* and stopped being true when the cases
+were made idempotent (below): re-running that mutant with the reset removed reproduces
+exactly 3 red, and with the reset in place it is 1. Under a leaking window the global-key
+mutant took two unrelated cases down with it — which read as strong coverage and was
+actually cross-contamination.
+📌 **A mutation count is a measurement, so it goes stale the moment the suite changes; re-run
+it in the round that touches the tests rather than carrying the number forward.**
+
+📌 **The round-1 tests were zero coverage of the fix and looked identical to real coverage.**
+All 41 stayed green with the mark call deleted and the flood fully restored, because every
+one of them called the exported predicate rather than the handler. **A test that never
+invokes the wired thing cannot see the wiring break, however precisely it pins the helper's
+arithmetic.** Third occurrence in this log; the rewrite drives the handler and reads the
+line that actually reaches the sink.
+
+📌 **"Every case uses its own key" made the cases independent of EACH OTHER and not of
+THEMSELVES.** The `rateLimited` window is process-global state that outlives a test, so a
+second pass in the same process (`bun test --rerun-each 2`) reused the first pass's stamps
+and 3 of the 6 went red — while a single pass stayed green, which is how it survived two
+review rounds. Worse, the comment explaining why no reset was needed cited a constraint that
+does not exist ("without a test-only reset hook in production code"): `resetLoggerStateForTests()`
+is exported from `logger/index.ts` and is already what `logger/__tests__` uses. One
+`beforeEach` fixed it — `--rerun-each 2` went green, **20/20 as measured in THAT round** — and the root `package.json` gained
+the `@neutronai/logger` workspace dep the root-level suite needed to import it. **A
+per-case-unique key HIDES shared state instead of removing it, and only running the file
+twice in one process can tell the two apart.**
+
+📌 **A fresh worktree needs `bun install` before its tests mean anything.** Three runs
+failed with `Export named '<symbol>' not found` while resolving `@neutronai/onboarding` to
+the **main checkout** rather than the worktree. The error names a symbol, so it reads as a
+missing export; it was a missing workspace link.
+
+📌 **The contract for the shared primitive documented the OPPOSITE of the guard, and that
+was the last thing wrong with this branch.** `logger/index.ts` returns
+`elapsed < 0 || elapsed >= ms`, so a backward step EMITS — but the two places a caller
+actually reads the contract from, `logger/AGENTS.md` and the `rateLimited` docblock, both
+said "suppressed while `now - last < ms`", and the interface docblock promised "at most once
+per `ms` window per key" with no exception. With `last = 3_600_000`, `now = 0`,
+`ms = 600_000` the documented predicate says SUPPRESS and the code EMITS. This is not a nit
+because `rateLimited` is SHARED — `cron/scheduler.ts` plus seven sites in
+`channels/adapters/app-ws/adapter.ts` — and any of them reasoning about their own
+suppression from the written predicate would be reasoning from a false one. Both statements
+were changed AT THE TIME to read `0 <= now - last < ms` and to name the backward-step
+exception — wording Round 7 later deleted — with the reason and the
+caller-facing consequence ("at most one line per window" holds under a forward-only clock,
+not across a backward step). The CODE did not change: it was reviewed across three rounds
+and it is right.
+📌 **This is the usual doc-rot failure INVERTED. The known trap is a doc describing a mode
+the code never enters; here the code had a behaviour the doc denied.** Same defect class —
+a doc that reads as authoritative and is wrong — and the inverted form is the harder one to
+catch, because the sentence describes real, long-standing behaviour and only the newly
+added branch falsifies it. **When a change adds a branch to a shared primitive, the diff is
+not done until the primitive's written contract has been re-read against the new predicate**
+— the guard shipped with a correct inline comment three lines above two contract statements
+it contradicted, and the inline comment is what made it look documented.
+
+📌 **The paragraph fixing an over-claim opened with an over-claim of its own: it said "eight
+sites in `channels/adapters/app-ws/adapter.ts`". There are SEVEN** (`adapter.ts:276,453,512,
+552,669,730,853`). The number came from the brief that commissioned the fix and was written
+down without being counted — inside a paragraph whose entire subject is a claim that was
+trusted rather than checked, and in the same round that corrected two other miscounts. A
+cross-model reviewer counted it in one grep. **A number arriving from an upstream brief feels
+like a given rather than a claim, which is exactly what exempts it from the check.** It is a
+claim. `grep -c` costs nothing.
+
+**A second cross-model lane then found three more, and the pattern in them is the finding.**
+None was introduced by this change; all three are claims this change RE-ENDORSED by building
+on them.
+
+1. **"Stamped ONLY when a line is actually sent" was false, in the same sentence that was
+   just corrected.** `logger/index.ts` runs `onEmit?.()` — the stamp — *immediately before*
+   `sink(...)`, so the window records an ATTEMPTED delivery. A `sink` that THROWS consumes the
+   window with no guarantee a line reached anyone. Keeping that ordering is right: stamping after
+   the sink returned would let a persistently-throwing sink re-attempt on every call, which is
+   the un-rate-limited flood these windows exist to prevent. So the CODE stays, and the four
+   statements of it were changed AT THE TIME to say "an attempt that clears both gates", with
+   the throwing-sink case named — wording Round 7 later deleted.
+2. **"The count stayed > 0 for > 15 min" is a stale alarm, and this change re-asserted it as
+   "unchanged".** It was true when S15 wrote it (2026-05-17) and stopped being true on
+   2026-06-18, when the import timeout became progress-aware: a 30-min floor
+   (`IMPORT_RUNNING_HARD_TIMEOUT_MS`), a deadline that RESETS on forward progress inside a
+   5-min no-progress window, and a 4-hour absolute ceiling — all in `engine-internals.ts`. A
+   healthy slow import therefore sits at count > 0 far past 15 min BY DESIGN, and the tick
+   line carries only the count, never progress, so it cannot separate slow-healthy from stuck.
+   An operator following the sentence would have misdiagnosed working imports.
+3. `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` has been **5 s since 2026-05-21**, while the
+   module header and the test header still described a 15 s cadence — a stale number sitting
+   nine lines above the constant that contradicts it.
+
+📌 **Every miss in this round was a claim INHERITED rather than authored — from the S15 note,
+from an earlier revision of this entry, from the brief that commissioned the fix.** Authored
+sentences got checked, because writing one is when you look at the code. Inherited ones were
+load-bearing and unexamined, and two of them ("> 15 min", "eight sites") were quoted while
+CORRECTING a different false claim in the same paragraph. **The act of fixing a doc is when
+you are least likely to audit the sentences you are building the fix on top of, because they
+are the ground you are standing on to see the error.** Cheap countermeasure: when a change
+cites a neighbouring claim as still-true, that citation is a claim of its own — date it
+against the code, especially where the neighbour is older than the subsystem's last redesign.
+
+**Final round — documentation only, no behaviour change. The correction pass introduced its
+own false claims, and each one was a SUMMARY of a correction made correctly one paragraph
+away.** The diff in this round is comments, docblocks, `logger/AGENTS.md`, two test comments
+and this entry. Nothing executable changed; the tests are unchanged in count (10) and green.
+
+1. **"ONE deliberate exception" was wrong the moment the throwing-sink paragraph was added —
+   in the same docblock.** The `logger/index.ts` head said `rateLimited`'s semantics match the
+   wedge-alert original "exactly, with ONE deliberate exception" (the backward clock step),
+   and thirty lines later documented stamp-before-sink. Stamp-before-sink is a second
+   behavioural deviation: the original stamps AFTER its delivery call returns
+   (`runtime/adapters/claude-code/persistent/supervision.ts` — `postAlert?.()` then
+   `wedgeAlertState.set(...)`), so a throwing alert leaves the ORIGINAL's window open while a
+   throwing sink consumes OURS. Same input, different suppression outcome. Both are now
+   enumerated at the top and cross-referenced, and — the part that is worth more than the
+   count — **they break DIFFERENT halves of "exactly one line per window"**: a backward step
+   can yield MORE than one line (no upper bound across the step), a throwing sink can yield
+   ZERO while still consuming the window (no lower bound at all). A caller needs both halves;
+   the previous wording implied one exception to one bound.
+2. **"The default sink is a `console` method, so it only bites an injected one" was false, and
+   it was the sentence that made the throwing-sink hazard sound theoretical.** `defaultSink`
+   dispatches to `console.error/warn/log/debug` — mutable globals, and a test that replaces
+   `console.log` with a throwing mock reaches the hazard with no sink injected. (This entry
+   originally also claimed those globals "throw for real on `EPIPE`". Round 8 refuted it by
+   execution — see that entry.) Executed with NO sink injected, and
+   control-checked by first observing a delivered line: one throwing attempt consumed a 600 s
+   window and a fully recovered `console.log` was still suppressed. The claim appeared in three
+   places (`logger/index.ts`, `logger/AGENTS.md`, and this entry) and is removed from all three.
+   📌 **A hazard note that ends with "but this can't happen to you in practice" is the part most
+   likely to be wrong, because it is the part nobody re-derives.** It was appended to an
+   otherwise-correct correction as reassurance, and reassurance is not a finding.
+3. **The cron header's cadence and its timeout arithmetic were stale in four files, and the
+   previous round recorded them as fixed.** The header carried a hedge saying 5 s is live, then
+   stated the wiring shape as `interval_ms: 15s default` — the hedge did not reach the line a
+   reader would quote. It also derived "at most 60 ticks per import" from a flat 15-min timeout
+   that stopped existing on 2026-06-18. Now: the wiring shape names
+   `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` instead of restating a number that has already
+   moved once, and the tick-count claim is replaced by the real progress-aware bound (30-min
+   floor, deadline resets inside a 5-min no-progress window, 4-h ceiling). Two further sites
+   the previous round missed are fixed with it — `onboarding/interview/engine.ts` and
+   `gateway/composition/build-core-modules.ts` — and a fourth turned out to be worse than
+   stale: `tests/integration/import-running-cron-scheduler-boot.test.ts` attributed "polls
+   every 15s" to **SPEC § 3.4 + § S5**, and the spec never specified a cadence at all
+   (`grep` over `docs/plans/P2-onboarding-v2.md` returns nothing). 15 s was this module's own
+   first shipped default, laundered into a spec citation.
+   📌 **A number given a spec citation stops being audited, so a misattribution outlives the
+   number it protects.** The fix names the constant rather than any figure.
+4. **A new test comment re-asserted the very alarm this PR retracts, ~200 lines from the
+   retraction.** The with-work case was named "logs EVERY time — the S15 stuck-count signal"
+   and explained that the count "has to be visible on every tick for `count stayed > 0 for
+   > 15 min` to be an alarm" — which the handler comment in the same PR documents as false
+   since 2026-06-18. Renamed to what it actually pins (a with-work tick is never throttled),
+   with the retraction restated and a scope note: the body drives TWO ticks, so "EVERY" was
+   also more than the case exercises. The constant guard's `15 * 60_000` bound now states its
+   real provenance (detection latency) instead of silently sharing a number with the retracted
+   stuck-count window.
+5. **Pre-existing, in a docblock this PR edits: "the result set is at most one row" contradicted
+   the row-shape comment 100 lines above it.** `onboarding_state`'s primary key is
+   `(project_slug, user_id)` (`migrations/0043_onboarding_state_wow_pushed_at.sql`), so a
+   per-project DB bounds the scan to one row per USER — which is exactly why the scan projects
+   `user_id` and the handler loops (ISSUES #2). Harmless in the single-owner case and harmless
+   in code, since the handler already iterates; corrected because the docblock is the thing a
+   future change would reason from.
+
+📌 **Every false claim in this round was a SUMMARY of a correction that was itself correct.**
+The enumerating sentence at the top of the docblock ("with ONE deliberate exception"), the
+reassuring clause at the end of a hazard note ("only bites an injected sink"), the round-up in
+this log ("the module header and the test header still described a 15 s cadence" — two of four
+sites), the test name compressing a two-tick case into "EVERY time". The detailed paragraphs
+were right in each case; the headline, the count, and the closing reassurance were wrong.
+**Summaries are written last, from the text rather than the code, and they are what a later
+reader actually quotes** — so they need the same grounding pass as the body, and a count in one
+needs re-deriving after every edit to what it counts.
+
+**A cross-model lane then found four more in the correction ABOVE, and the worst one is the one
+I would defend hardest.** All four are now fixed; the code still has not changed.
+
+* **"TWO deliberate ways" was an exhaustive count, and exhaustive counts are the specific thing
+  this PR keeps getting wrong.** There is a THIRD difference from the original: this
+  gate and the stamp call `clock()` SEPARATELY (the gate's read is skipped on a key's first
+  emit, which short-circuits before reading) while the original captures a single `now` and
+  reuses it for both (`runtime/adapters/claude-code/persistent/supervision.ts`). The anchor
+  written is therefore a later reading than the one eligibility was decided on, which pushes
+  the next boundary out by the gap between the reads — negligible on a real clock, whatever the
+  test makes it under a counter-style injected clock. A first pass at this correction called it
+  "does not change suppression semantics", which the same lane rejected: it shifts boundaries,
+  and "semantics vs timing" was a distinction doing work the sentence had not earned. The
+  docblock was changed AT THE TIME to separate "differences that change which rule applies"
+  (two) from that one, and — **to say outright that the list was the set of differences LOOKED
+  FOR, not a proof no fourth exists.** (Round 7 deleted that separation with the rest of the
+  enumerations.) 📌 Replacing "ONE deliberate exception" with "TWO deliberate ways" repeated the
+  error at a larger number. The defect was never the number; it was asserting completeness
+  about a thing discovered by reading.
+* **"The spec never specified a cadence at all" rested on a grep over a file that does not
+  exist.** The entry cited `docs/plans/P2-onboarding-v2.md` returning no matches — and that
+  path is not in this repository and never has been. The empty grep meant "no such file", not
+  "the spec is silent", and I published it as a finding, then escalated it into an accusation
+  that 15 s had been "laundered into a spec citation" — an accusation resting on an empty result
+  from a path that cannot produce a non-empty one. The header was stale, not fabricated. The fix
+  went through two passes: the first replaced the false negative with a positive claim about what
+  the spec *does* record, which the same lane rejected on the same grounds — that document is not
+  in this repository, so no claim about its contents is checkable from this tree either. The
+  header now makes no cadence claim on the spec's behalf, names the constant as the authority on
+  cadence, and marks the retained § numbers as a pointer for whoever holds that document rather
+  than a quote a reader here can check. 📌 **This is the repo's own tool-negative rule, violated
+  inside a commit
+  whose entire subject is unverified claims: before believing a negative, make the tool prove it
+  can return a POSITIVE on the same input.** One `ls` would have caught it. The accusation was
+  the tell — an empty result licensed a stronger claim than a full one would have.
+* **The timeout summary listed three windows as though they were the whole rule.** It omitted
+  that the no-progress window DIFFERS by phase (`IMPORT_CONSOLIDATE_NO_PROGRESS_WINDOW_MS` once
+  Pass-1 completes, not `IMPORT_NO_PROGRESS_WINDOW_MS`), and — the part that made the summary
+  actively wrong — it said tick cost is "bounded by the ceiling", while the rate-limit statuses
+  return "don't fire" BEFORE the ceiling test, so those imports keep being ticked past it. The
+  header now describes the shape, names `evaluateImportTimeout` as the live rule, and instructs
+  the reader not to restate the figures. 📌 **Correcting a stale number by substituting a fresh
+  number reproduces the original defect one revision later. The durable fix points at the
+  function.** The sites this PR actually edited now name the constant instead of a figure: this
+  module's header, `onboarding/interview/engine.ts`,
+  `gateway/composition/build-core-modules.ts`, and the scheduler-boot test in three places. Two
+  of those three were only found by grepping again AFTER the first fix claimed the sweep was
+  done — a prose header and an inline comment still said "the 15 s production cadence", and the
+  same inline comment described itself as a "50 ms tick" while passing `interval_ms: 200`.
+
+  📌 **The cadence claim was rewritten SIX times and was wrong the first five, each time because
+  the sentence quantified over the tree rather than over what had been read.** In order: "the
+  module header and the test header" (two of four sites); "all four sites" (six); "the figure now
+  lives only on the constant" (three more sites stated it); "descriptions of the SCHEDULE name
+  the constant" (a constant-guard test plus `gateway/upload/import-resume-handler.ts` and
+  `gateway/wiring/build-landing-stack.ts` describe it numerically); "the remaining sites are
+  ACCURATE" — and that one was not a miscount but a live wrong statement, because
+  `gateway/composition/input/onboarding-input.ts` and
+  `open/__tests__/composition-field-coverage-inventory.ts` BOTH still said 15 s. Those two are
+  fixed here; they are the last stale ones found, which is not a claim that they are the last.
+
+  📌 **The mechanism behind the whole sequence was a PHRASE-SHAPED GREP.** Every sweep searched
+  `every 15s` / `15s default` / `every 15 s`, so it could not see `15s sweep`, `15 seconds`, or
+  `the 15s sweep that advances…`. The searches kept returning short, clean, plausible result sets
+  and each one read as completion. **When you are de-duplicating a VALUE, grep the value; a
+  pattern built from the phrasing you remember can only find the sites you were already
+  thinking of** — which is why five successive "that's all of them" claims each survived its own
+  verification step.
+
+  **The rule that finally holds quantifies over nothing:** this docblock names the constant,
+  other sites are neither authoritative nor reliably current, and anyone changing the constant is
+  told to grep the OLD NUMBER rather than trust any inventory — so none is given.
+  📌 **A completeness claim is free to write and expensive to verify, so it gets written at the
+  moment of least verification — the summary — every time. "All", "only", "exactly", "never" and
+  "every" in a summary are load-bearing assertions about code nobody re-read.** Six rounds of
+  evidence here; the scoped sentences ("the sites this PR edited", "the differences looked for")
+  held on first writing every time.
+  📌 **The first attempt at that pointer named a function that does not exist.** It said
+  `decideImportTimeout`; the export is `evaluateImportTimeout`. A cross-reference is a claim, and
+  it went in unchecked *in the very edit whose thesis was "point at the code instead of copying
+  numbers out of it"* — the pointer felt like a gesture rather than an assertion. `grep` costs
+  nothing; a plausible-sounding symbol name is exactly as unverified as a plausible-sounding
+  number.
+* **The with-work test still overstated itself after being renamed to stop overstating itself.**
+  "logs EVERY time" became "is never throttled" — still a universal claim from a two-tick body.
+  Renamed to what it pins: two back-to-back ticks with work both log, which is what
+  discriminates "throttle the idle branch only" from "throttle everything".
+
+📌 **Three of those four were introduced by the fix for the previous three, and each one kept the
+rhetorical SHAPE of the claim it replaced while swapping the content** — one exception became two
+exceptions, a stale figure became a fresh figure, "EVERY time" became "never". **A correction
+that preserves the form of an overclaim tends to preserve the overclaim.** The one that was not
+a reshaping — the grep over a missing file — is the one that produced a false accusation rather
+than merely a false count, and it came from treating an empty tool result as evidence.
+
+**Review panel for this round:** adversarial lane + rubric lane + an independent `codex` lane
+(codex-cli 0.146.0, read-only). The kimi lane was deliberately not run. The codex lane is the
+one that found all four items above, having failed to return a verdict in the prior round —
+which is the argument for not counting a lane's silence as its assent.
+
+**Round 6 — the docs stopped trying to be a model of the code (PR #174).**
+
+Three consecutive documentation rounds each fixed a false claim about `logger/index.ts` and
+introduced a new one, always at the same layer: the sentence that SUMMARISED the mechanism.
+"ONE deliberate exception" (there were two), then "TWO deliberate ways" (there was a third),
+then "the default sink is a `console` method, so this only bites an injected sink" (refuted by
+execution, with no sink injected). Each of the underlying corrections was right. The summary
+of it was wrong.
+
+So this round deletes the model instead of correcting it a fourth time. The `rateLimited`
+prose no longer states the predicate, counts the deviations from the wedge-alert original, or
+describes the clock-read asymmetry. It states what the throttle is FOR, why a heartbeat must
+not be silenceable by a non-monotonic clock, and why the bound is on attempts rather than
+deliveries — then points at `logger/__tests__/logger.test.ts` as the specification of what
+actually happens. Same in `logger/AGENTS.md` and on the `Logger.rateLimited` signature. The
+rounds above record those enumerations as the fix and describe them in the present tense; they
+are gone, and this entry supersedes those sentences the way a later entry in a chronological
+log does.
+
+📌 **A docblock that states a falsifiable behavioural predicate about a SHARED primitive is a
+liability, not documentation.** It is confidently specific, it reads as authoritative, and it
+rots on the next edit to the code — while the tests sitting beside it cannot. Here the
+sentences stating INTENT survived every round unamended; every sentence stating MECHANISM was
+rewritten at least once, and three of those rewrites were themselves wrong. **When a doc and a
+test can carry the same claim, the doc should carry the reason and the test should carry the
+claim.**
+
+The counting was the tell. Each round replaced an exhaustive count with a larger one — one
+exception, then two, then two-plus-a-third-that-does-not-count — and each was falsified by the
+next reader to grep. A count over "differences found by reading the code" can only ever be a
+lower bound, so writing it as a total is the defect, independent of the number.
+
+**And the first draft of THIS round did it again, one layer up.** The replacement pointer said
+the tests specify "the exact predicates, the clock reads, the window boundaries". A cross-model
+lane checked: `logger/__tests__/logger.test.ts` has no throwing-sink case and no clock-read case
+at all (`grep -n "throw"` over the file returns nothing). So the sentence that was supposed to
+END the cycle of false mechanism claims was itself a false claim — about which claims were
+backed. Two other findings from the same lane: "a throwing sink consumes the window and nobody
+receives the line" is unknowable from here, because a sink may deliver and then throw; and
+`logger/AGENTS.md` still said "two of the differences", the same exhaustive count in a new
+sentence.
+
+A second pass then found two more, both the same shape a third time: "where they differ, the
+difference is deliberate and the reason is given below" was itself an exhaustive claim (and one
+that the non-inventory disclaimer twelve lines later contradicted), and "the tests pin which
+attempts stamp" over-read the suite, whose `rateLimited` cases all use a non-throwing sink.
+
+The move that ends it is to stop characterising coverage and DISCLOSE THE GAP instead: say
+outright that nothing in the suite pins the throwing-sink behaviour, rather than describing what
+the suite does cover. A stated gap cannot be an over-claim. (Closing
+it with a throwing-sink case is a cheap follow-up and is deliberately not done here — this
+round is documentation only.)
+
+A third pass caught the enumeration itself blurring two cases — it said a level-gated attempt
+"leaves the window unextended", where `logger/__tests__/logger.test.ts:398` only shows it does
+not START one, a strictly weaker fact. Corrected to distinguish not-extending an open window
+from not-starting one.
+
+📌 **"Point at the tests instead" is only safer than restating the mechanism if you READ the
+tests first.** Otherwise it is the identical defect with a longer blast radius: a reader who
+trusts a false claim about the predicate can check the code in one grep, while a reader who
+trusts a false claim about what the SUITE covers concludes a behaviour is protected when nothing
+tests it. **A pointer is an assertion about another file, and it needs the same grounding pass
+as a claim about this one.** The failure landed in the sentence written last, at the moment of
+least verification, in this round as in the three before it.
+
+📌 **The stable form of "the docs should say less" turned out not to be a shorter description of
+the code — it was a description of the TESTS plus an explicit statement of what they do not
+cover.** Every attempt to summarise coverage ("the exact predicates, the clock reads", "which
+attempts stamp") was falsified in one grep by the next reader, because a summary of coverage is
+an exhaustive claim wearing different clothes. Naming the cases and then naming the gap is the
+only version nobody could falsify.
+
+**Verification:** documentation only; no executable line changed in this round. Test count
+unchanged — 10 in `tests/integration/import-running-cron-tick.test.ts` plus the backward-step
+case in `logger/__tests__/logger.test.ts`. Executed here: those two files plus the
+scheduler-boot test, 60 pass / 0 fail; `scripts/ci/typecheck-all.sh` exit 0;
+`scripts/ci/lint.sh` exit 0.
+
+**Round 7 — a log entry that quotes a docblock's wording is a mechanism claim of its own (PR
+#174).** Documentation only again; no executable line changed.
+
+The false claims that OPENED this round were not in the code's docs at all — they were in the
+entry ABOVE, in the round-5 summary, about the same shared primitive. Two of them:
+
+* **"The `rateLimited` contract also now notes that a NaN `ms` suppresses a key permanently"** —
+  the note being summarised was deleted by the very commit the summary shipped in. `git grep -n
+  NaN -- logger/` returns nothing (control: `rateLimited` returns hits in the same files, so the
+  empty result is a gap and not a blind tool).
+* **"unreachable for all three live callers (all pass literals)"** — there are NINE
+  (`channels/adapters/app-ws/adapter.ts` ×7, `cron/scheduler.ts`, and the one this PR adds in
+  `onboarding/interview/import-running-cron.ts`), and not one of them passes a literal; they pass
+  `PERSIST_WARN_COOLDOWN_MS`, `FIRE_ERROR_COOLDOWN_MS`, `IDLE_TICK_LOG_INTERVAL_MS`. An
+  exhaustive count, wrong in both the number and the property — a few lines below this entry's
+  own warning that exhaustive counts are the thing this PR keeps getting wrong.
+
+The sentence is deleted rather than corrected: it summarised a note that no longer exists, so
+there is nothing left for it to be right about. A third claim in the same block — a throwing
+sink "consumes the window and nobody gets a line" — is narrowed to what is knowable, since a
+sink may deliver and then throw.
+
+📌 **A chronological log entry that describes the CURRENT WORDING of a docblock is a mechanism
+claim with an extra hazard: the log is written by appending, so nothing routinely comes back to
+an old entry, and no edit to the code ever will.** (Round 7 did come back and correct three of
+them by hand — which took a review pass to notice they were wrong, and is the reason the fix is
+a banner rather than a promise to keep sweeping.) Both false claims here were written to
+record a doc fix, describing a doc that changed in the same PR. The fix is structural — an entry
+records the DECISION and the reason, and where round 6 quoted the docblock's shape ("names the
+specific cases the suite has, one by one") it now states the decision instead. The corollary
+bites the sentence a few paragraphs up: "naming the cases and then naming the gap is the only
+version nobody could falsify" is half wrong. Naming the GAP survives — it is an absence, and the
+code can only close it deliberately. Naming the CASES is an inventory that silently expires the
+next time anyone edits the suite.
+
+Also fixed: `logger/index.ts` still carried "O1 scope: package + tests only — NO call sites adopt
+this yet", written when it was true and left standing while nine sites adopted `rateLimited`
+alone — twenty-five lines from text this PR was rewriting. It now names no count and tells the
+reader to grep. The head docblock drops the case-by-case inventory of the suite and the
+internal-ordering sentences (stamp-before-sink; "the emit re-stamps, so the window self-heals"),
+keeping two consequences that are easy to get wrong (not the whole caller-facing contract — a
+computed `ms` still has to be validated, and latch state is shared across `createLogger` calls).
+`logger/AGENTS.md` names those two, says they are not the whole contract, and sends the reader to
+the one docblock that owns the reasons instead of carrying its own copy: three copies of a claim
+is three times the drift surface.
+
+**What was KEPT was verified BY EXECUTION this round, not by reading the comment next to it**
+(the specific failure of the two rounds before): with NO sink injected and a control line
+delivered first through the default sink, a throwing `console.log` produced one throwing
+invocation and a fully recovered `console.log` was still suppressed inside the window — so the
+bound really is on attempts. A one-hour backward clock step emitted where the forward case
+suppressed. A window-suppressed attempt did not push the next boundary out, and a level-gated
+attempt did not open a window. The disclosed gap is real by the same standard: `grep -n throw`
+over `logger/__tests__/logger.test.ts` returns nothing.
+
+One surviving claim was over-general and is narrowed here rather than kept: every round so far
+wrote "a BACKWARD clock step emits", which quantifies over inputs the condition does not treat
+alike. Confirmed by execution: stamp at 100, clock forward to 200, step back to 150, `ms=100` →
+suppressed. (Round 8 then refuted the *replacement* rule this entry first offered — being ahead
+of the stamp is not sufficient for suppression either. The condition in `rateLimited` is the
+only correct statement of it and this log no longer carries a rival one.) Sentences in the
+rounds above still say "a backward step", and the banner at the top of this section covers them.
+📌 **A consequence named by its CAUSE ("a backward step") quantifies over more inputs than the
+code tests; named by the CONDITION the code actually tests, it cannot.** This survived six rounds
+of review of a sentence sitting directly above the condition, because the cause is the
+interesting half of the story and the condition is the true half.
+
+The remaining smaller items are closed with it — the S15 note in the cron handler quoted a
+"> 0 for > 15 min" alarm in the present tense and retracted it twenty lines later, so it now
+quotes it as history where it is first mentioned; and the constant-guard test's rationale is cut
+to the one thing it can claim, that the bound is a budget rather than a derivation.
+
+📌 **A recorded review verdict is a claim about a RUN, and it decays exactly like a claim about
+code.** This PR's body recorded a `codex` APPROVE with an empty findings list against a named
+head; re-run against that same head it did not reproduce, and confirmed false claims were live in
+that tree at the time. The row is replaced in the PR description by the round-7 lane result and
+its head, not restated. A verdict is quotable only with
+the head it ran against, and it has to be re-run before it is quoted.
+
+**The codex lane then found eight more, and the shape repeats one altitude up.** Each is
+addressed below; the code still has not changed. Seven were introduced by this round's own draft;
+the exception is the cron handler's four-hour "absolute backstop", inherited and re-endorsed.
+
+* **"A hot loop of suppressed attempts cannot silence the key forever" is false, because `ms` is
+  not validated.** A probe called `rateLimited('k', NaN)` 100,001 times with the clock advancing
+  and got exactly one line — `NaN` fails both halves of the comparison. The clause is deleted and
+  the consequence is stated where a caller will meet it. (The first attempt at that replacement
+  said "for the life of the process", which a third pass then refuted: a reading BEHIND the last
+  stamp satisfies `elapsed < 0` and emits, so a NaN window holds only while the clock moves
+  forward. Corrected — and it is the same over-general shape as "a backward step", written into
+  the sentence FIXING that shape.) Note what this means about the sentence deleted at the top of this entry: the NaN
+  BEHAVIOUR was real, and what was false was the claim about which file documented it and how
+  many callers could reach it. **Deleting a false sentence can delete a true fact riding along
+  inside it** — this round put the fact back, in the contract, verified by execution.
+* **"`logger/__tests__/logger.test.ts` is the specification of what they actually do"** is a
+  completeness claim about a suite whose gap the NEXT sentence discloses. Now: it is where the
+  behavior is pinned, explicitly not a complete specification.
+* **"One line per key" for `once`** describes an attempt bound as a delivery bound — a throwing
+  sink burns the latch with no guarantee anything was delivered (probe with a sink that throws
+  BEFORE delivering: one sink call, nothing delivered; a sink that delivers and then throws does
+  deliver, which is exactly why the bound cannot be stated as "delivers nothing"). Both helpers
+  now say ATTEMPT.
+* **"The two consequences a caller has to plan around" is a total**, and the same contract
+  carries more caller obligations (validate a computed `ms`; latch state is shared across
+  `createLogger` calls by `subsystem × key`). Now "two consequences that are easy to get wrong",
+  explicitly not the whole contract.
+* **"This file does not restate them" appeared in the sentence that restated them.**
+* **"Every false claim of the last three rounds shipped in a paraphrase, never at the site that
+  owned the claim" is false** — "ONE deliberate exception" shipped in the `logger/index.ts` head
+  docblock itself, as this log records a few entries up. A generalisation drawn from this PR's own
+  history, contradicted by this PR's own history.
+* **"The absolute backstop is 4 h" in the cron handler** — the rate-limit statuses return "don't
+  fire" BEFORE the ceiling test, which round 5 had already recorded one entry earlier. The
+  enumeration is replaced by a pointer to `evaluateImportTimeout`.
+* **This entry quoted the suppression predicate** while the round above records that the prose
+  stopped quoting predicates. The quote is gone; the condition is named in words.
+
+📌 **Four of those eight are the SAME defect as this round's thesis, committed while writing the
+fix for it**: a total, a completeness claim, a self-refuting summary, and an over-general
+induction from this PR's own history. The thesis was right and the sentences carrying it had the
+shape of the ones it condemned. **An over-claiming habit does not get fixed by the prose that
+announces the fix.** What held, again, was the sentence that named a GAP or scoped itself to what
+had actually been read — which is why the durable devices in this round are a disclosed gap, a
+dated banner, and a pointer, not a better description.
+
+**A confirmation pass on the fix discharged seven of the eleven and found the other four had
+SURVIVED it, plus three new ones.** The survivors are instructive: "not restated here" was fixed
+in `logger/AGENTS.md` and left standing in the cron handler, where the same sentence sits directly
+below the restatement; "the two consequences a caller has to plan around" was scoped in the
+docblock and left as a total in this entry and the PR description; "a backward clock step" was
+narrowed in the code comments and left in the prose. 📌 **A finding gets discharged at the site
+the reviewer cited, and the copies go on being wrong** — which is the same three-copies problem
+one level up, and the argument for one owning site rather than a sweep. The three new ones were
+"these cases pin BOTH halves" (the integration cases never drive a decreasing clock — that case
+lives on the primitive), "all eight are fixed" written before the confirmation pass ran, and
+"the log is append-only, so it is designed never to be revisited" — refuted by this very round,
+which came back and revised three earlier entries by hand.
+
+**A THIRD pass then found eleven more, and the two that matter say the same thing about the same
+sentence twice.** "A NaN `ms` suppresses the key for the life of the process" and the inline
+comment's "a backward clock step makes `elapsed` negative" are both the CAUSE-shaped
+over-generalisation this round exists to remove — one written into the sentence that FIXED it for
+the backward step, the other left standing in the code comment three lines above the condition
+itself. Both were narrowed to the sign of `elapsed` — which round 8 found is still only half the
+condition, and deleted in favour of pointing at it. The rest: "the head docblock gives … the rest
+of the caller-facing contract" contradicted the head docblock's own "not the whole caller-facing
+contract"; "a throwing sink … delivers nothing" ignores a sink that delivers and then throws;
+"a test cannot go stale quietly" had a counterexample in this very PR (round 1's suite was green
+with the flood restored — round 8 removed the specific count this sentence used to carry, which
+did not survive being traced); the composer's cron docblocks named the default cadence without the
+`interval_ms` override that three of them forward; and "All are fixed here" was, again, written
+before the pass that checked it. 📌 **A sentence written to correct an over-claim is written at
+speed, from the correction, and inherits its shape** — three rounds running, the fix reproduced
+the defect in the fix. The only wordings that have never had to be corrected are a disclosed gap,
+a dated banner and a pointer, which is why those are what this round leaves behind.
+
+**Review panel for round 7:** adversarial + rubric lanes, plus an independent `codex` lane
+(codex-cli 0.147.0, read-only) run on the draft and again on each fix, at falling severity —
+blockers, then majors, then P2/P3s. Each pass's items were worked in the commit that followed it,
+and the NEXT pass kept finding that some had survived in a copy it had not cited: the second pass
+found four survivors of eleven, the fourth found three of eleven, every one of them a duplicate of
+a sentence that had been corrected at the site the reviewer quoted. 📌 **A review comment names one
+site; a claim lives at as many as somebody copied it to. Discharging a finding is a grep, not an
+edit.** The lane's last verdict on a head it saw was REQUEST_CHANGES, and this entry does NOT
+record an APPROVE, because no lane has returned one against the current head. The kimi lane was
+deliberately not run (owner's K3 quota exhausted) — **absent, not failed**, so this is a
+three-lane round. The codex sandbox could not create temp files, so it verified the unit suite
+and the 51-project typecheck itself and marked the integration-test and lint results UNVERIFIED
+from its side; those were run unsandboxed here.
+
+**Verification (round 7):** `logger/__tests__/logger.test.ts`,
+`tests/integration/import-running-cron-tick.test.ts` and
+`tests/integration/import-running-cron-scheduler-boot.test.ts` pass; `scripts/ci/typecheck-all.sh`
+and `scripts/ci/lint.sh` exit 0. Two items carried in as pre-existing were already fixed earlier
+on this branch and were re-checked here rather than assumed: `gateway/composition/build-core-modules.ts`
+no longer states a 15 s poll, and the "at most one row" claim is gone from the cron handler.
+
+**Round 8 — the replacement rule was wrong too, so the prose stopped stating a rule (PR #174).**
+Documentation only; no executable line changed.
+
+Round 7 replaced "a BACKWARD clock step emits" with "a clock reading BEHIND THE LAST STAMP
+emits — a smaller step that leaves the reading ahead of the stamp is still suppressed", shipped
+that sentence into three files, and recorded it as the fix. It is false. Being ahead of the
+stamp is necessary for suppression, not sufficient: the window also has to be unexpired.
+Executed here — stamp at 100, `ms=100`, clock reads 250, a backward step of 50 that leaves the
+reading 150 ms AHEAD of the stamp: **two lines**, where the sentence predicts one. Control, the
+in-window case the sentence generalised from: stamp 100, reading 150, `ms=100` → one line.
+Control for the other direction: a reading behind the stamp → two lines.
+
+Round after round the sentence SUMMARISING this condition has shipped false, and more than once
+the false sentence was written while fixing the previous one. So this round does not write
+another. `logger/index.ts`, `logger/AGENTS.md` and the `Logger.rateLimited` signature now state
+what the throttle PROMISES — that a clock jump cannot silence a key for the jump plus the window,
+because an hour-long jump silencing a 10-minute heartbeat presents as exactly the "it died" alarm
+the heartbeat exists to rule out — and say that WHICH readings emit is decided by the condition in
+the implementation. The inline comment above that condition no longer paraphrases it either. The
+condition is one line and sits in the one place that cannot drift from itself.
+
+📌 **A prose rule about a shared primitive is falsified by the inputs the author did not think
+of, and the author of a CORRECTION is thinking about the input that produced the correction.**
+Round 7 reasoned from the case in front of it (a small backward step, in-window) and wrote the
+general rule that case suggested; the case one step outside it breaks the rule. Both halves of
+the condition were on screen, three lines below the sentence, in every round. **The durable form
+is not a more careful rule — it is no rule, plus a pointer to the executable one.**
+
+**And this round's own first draft did it a fourth time, in the sentence replacing the third.**
+The replacement read "a non-monotonic clock can produce an extra line rather than a missing one",
+and it went into all three files before being probed. It is false: stamp at 100, `ms=100`, true
+time 250 (which emits), clock jumps back to 150 → **suppressed**, one line where the unjumped
+clock gives two. A backward jump can absolutely cost a line. Caught by probing the draft instead
+of the code it described, and the wording is now the only claim that survives probing — that a
+jump cannot silence a key for the jump PLUS the window, which is what the `elapsed < 0` arm buys,
+with an explicit note that an individual attempt can still move either way. 📌 **"Errs toward an
+extra line" is a claim about a DIRECTION, and a direction is a quantifier over all inputs wearing
+a modest-sounding hat.** Three rounds reached for it. The honest form names the guarantee and
+concedes the rest is rough.
+
+Three more, each an over-claim rather than a mechanism error:
+
+* **"The engine's hard-timeout backstop bounds how long the cron stays relevant per import"** in
+  the cron handler was contradicted eight lines later by the same docblock's note that the
+  rate-limit statuses (`rate_limit_cooling_off` / `rate_limit_paused`) return "don't fire"
+  before the ceiling test — so for those imports the backstop bounds nothing. The header now
+  states that this file imposes no bound of its own and sends the reader to
+  `evaluateImportTimeout`; it enumerates none of that function's windows, which the same
+  docblock's own instruction ("read the function") had already asked for while restating them.
+* **"`console.error/warn/log/debug` … throw for real on `EPIPE`"** in the round-5 entry. Refuted
+  by execution on the CI-pinned bun 1.3.9: 20,000 `console.log` calls with stdout's read end
+  closed produced **0** synchronous throws, while a positive control on the same broken pipe
+  reported 19,791 EPIPE write-callback errors — so the pipe was genuinely broken and EPIPE
+  simply does not surface as a synchronous `console.*` throw. The clause was an unexecuted rider
+  inside a paragraph whose other half WAS executed, which is how it survived a round that
+  claimed everything kept had been verified by execution. 📌 **A verified paragraph confers
+  nothing on the unverified clause someone appended to it for colour.** The throwing-mock path
+  it was decorating is real and is what the probe actually exercised.
+* **The `import_running` contract was attributed to `docs/plans/P2-onboarding-v2.md` § 3.4 /
+  § S5**, which is not in this repository, in both the cron handler and the scheduler-boot test.
+  Round 7 marked the § numbers as an unquotable pointer and left the sentence attributed to the
+  document anyway. Both now attribute the contract to what a reader here can check — the code
+  and `tests/integration/import-running-cron-tick.test.ts` — and name the spec only as a pointer
+  for whoever holds it.
+
+Two smaller ones: the head docblock credited "this refactor's round 1" with a specific green-test
+count, which the review traced to a different change and could not reach from this branch's
+history — the count is deleted rather than corrected, because it was decoration on a point that
+stands without it, and a count already carried forward once is not worth carrying again — and the
+constant-guard test disclaimed its own quarter-hour bound as one "any nearby figure would serve"
+while asserting it, which invites the next reader to move the constant past it in passing; the
+bound is now stated as CHOSEN and the guard's job is stated as holding a chosen budget.
+
+One fact was deleted along with a sentence, deliberately, and is recorded here instead of in the
+contract: an unvalidated `ms` of `NaN` fails both halves of the comparison, so a NaN window holds
+for as long as the clock keeps moving forward. Round 7 put that mechanism into the docblock; this
+round takes it back out, because it is one more prose model of the condition, and keeps the
+caller obligation it exists to justify — a caller that COMPUTES `ms` must validate it. 📌 **The
+log is the right home for a mechanism, and the contract is the right home for the obligation it
+implies.** A log entry is dated and nobody reads it as current; a contract is read as current by
+everyone and is exactly what goes stale.
+
+**Review panel for round 8:** the kimi lane is ABSENT BY DESIGN (owner's K3 quota exhausted) —
+absent, not failed — so no verdict on this round may be read as four-lane. This entry records no
+APPROVE. Every claim kept in this round's prose was executed here rather than read off an
+adjacent comment: the three clock cases above, the attempts-not-deliveries bound (a throwing
+sink produced one sink call, nothing delivered, and a fully recovered sink was still suppressed
+inside the window), a level-gated attempt not opening a window, and the EPIPE probe with its
+positive control.
+
+**Verification (round 8):** `logger/__tests__/logger.test.ts`,
+`tests/integration/import-running-cron-tick.test.ts` and
+`tests/integration/import-running-cron-scheduler-boot.test.ts` pass; `scripts/ci/typecheck-all.sh`
+and `scripts/ci/lint.sh` exit 0. Test count unchanged.
+
+**Round 9 — the mutants were re-proved from scratch, and the PROOF STEP is the point (PR #174).**
+No source line changed this round; the branch was rebased onto `main` and re-verified. Two of the
+mutants this PR claims were re-applied independently, and in each case the mutation was asserted
+PRESENT in the tree before the test run was believed:
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| drop the handler's throttle (`tickEmitter = tickLog` unconditionally) | `grep -n 'rateLimited('` over `onboarding/interview/import-running-cron.ts` returned NOTHING after the edit, where it returns the call before it | 2 cases in `import-running-cron-tick.test.ts` |
+| drop the non-monotonic guard (`elapsed < 0 \|\| elapsed >= ms` → `elapsed >= ms`) | `grep -n 'return elapsed'` showed the mutated line | 1 case in `logger/__tests__/logger.test.ts` |
+
+Distinct red sets, and the tree was confirmed clean (`git diff --quiet`) after each revert. 📌 **A
+mutation test that is not asserted to have APPLIED proves nothing, because the failure mode — the
+edit silently not landing — produces a GREEN run that is indistinguishable from a passing one.**
+Two mutation runs earlier in this repo's history did exactly that. The grep is not ceremony; it is
+the only thing separating "the guard fired" from "the guard was never touched".
+
+Also re-checked, by execution rather than by reading the comment beside it: the tick handler's
+production clock is the real `Date.now` (`gateway/composition/build-core-modules.ts` passes no
+`now` to `buildImportRunningHandler`), which matters because a clock that does not advance would
+suppress the idle heartbeat permanently — the fail-CLOSED direction, and the one that is invisible
+when it happens. The field the throttle keys on was printed on a real artifact rather than assumed:
+the scheduler-boot test drives the REAL `CronScheduler`, and the line it emitted reads
+`project=owner-s15`, so `ctx.owner_slug` does carry a slug. The two greps the head docblock cites
+as its disclosed gap were re-run with their controls and both hold.
+
+**Verification (round 9):** the three suites above pass under `bun test --rerun-each 2` (120/120) —
+the flag that caught the process-global window state two rounds ago, so it is the one that has to
+stay green. `scripts/ci/typecheck-all.sh` exit 0 across the 51-tsconfig matrix, not `tsc -p .`
+alone. Test count unchanged at 10 and 48.
+
+**Round 10 — the caller obligation becomes a guard, because a throttle that can go permanently
+silent is the failure it exists to prevent (PR #174).**
+
+Round 8 kept "a caller that COMPUTES `ms` must validate it" as the contract's answer to the NaN
+window. Two reviewers in round 9 reached the same place independently: that is a mitigation, not a
+fix. `rateLimited`'s condition is `elapsed < 0 || elapsed >= ms`, and every comparison against a
+NaN is false — so one non-finite input (a computed `ms`, or a clock reading that is not a number)
+makes both halves false and suppresses the key while the clock moves forward. Both reviewers also
+verified it is unreachable today: every caller passes a module-level numeric literal
+(30_000 / 60_000 / 600_000, printed here rather than read off the constants' names) and the
+production clock resolves to `Date.now`.
+
+📌 **A gate that fails CLOSED is worse than one that fires wrongly, because the silent failure is
+invisible.** A flood is in the journal and someone complains; a heartbeat that stops presents as
+"the thing died" and produces no artifact at all. So an uncomputable window now counts as DUE —
+the failure direction is an extra line, never a dead one. `Infinity` is rejected with NaN, since
+honouring it puts a permanent per-key silence back within a caller's reach and `once(key)` already
+expresses "never again" observably. The obligation is deleted from the contract, not restated.
+
+📌 **The delegation was documented at the right altitude and was still the wrong control.** Round 8
+reasoned that the log is the home for a mechanism and the contract the home for the obligation it
+implies. That was sound about WHERE to write things and silent about whether the obligation should
+exist at all. A sentence cannot be enforced; a guard makes the state unrepresentable.
+
+Two smaller items from the same review. **The handler built a second logger view on
+`import-running-cron` with a different clock** — windows are keyed `subsystem × key` and the clock
+is not part of the key, so two views could compare one clock's readings against the other's stamps
+in one window. Production passes no clock, so it now reuses the module logger and the mix cannot
+arise there. That is a trap removed, not a bug fixed, and no case pins it. **And busy→idle was the
+one throttle branch no case drove**: the busy branch must not stamp the window, or the first idle
+tick after every import is suppressed for up to a full interval — indistinguishable from a cron
+that stopped. The new case drains the work the real way (the runner completes, the tick advances
+the phase out of `import_running`, the scan then returns zero rows) instead of faking idle.
+
+**Mutants, each asserted APPLIED by grep before its run was believed:** deleting the finite-window
+guard → 3 red in `logger.test.ts`; dropping the handler's throttle → 2 red; throttling the busy
+branch too → 2 red; and **a busy tick burning the idle window → 1 red, the new transition case
+alone**. That last row is why the case was worth adding — the first three are already caught by
+cases that existed, and coverage that only duplicates a red set is not coverage. Tree confirmed
+clean after every revert.
+
+⚠️ One revert used `git checkout <file>` against an UNCOMMITTED tree and discarded the round's own
+edits along with the mutation; it was caught only because the next grep for the guard came back
+empty. The rest ran against a committed tree. 📌 **A mutation harness that reverts to HEAD is safe
+only once the work is at HEAD.**
+
+**Verification (round 10):** `logger.test.ts` (51), `import-running-cron-tick.test.ts` (11) and
+`import-running-cron-scheduler-boot.test.ts` (2) pass, including under `bun test --rerun-each 2`.
+`scripts/ci/lint.sh` exit 0; `scripts/ci/typecheck-all.sh` exit 0 across all 51 tsconfigs, not
+`tsc -p .` alone. ⚠️ The **kimi** lane was DEFERRED in round 9 — configured, called, and the call
+failed. Earlier rounds of this entry record it as absent by design, which it was not: a configured
+reviewer that died leaves the panel INCOMPLETE. This entry records no APPROVE.
+
+**Round 11 — the guard's promise was universal and the guard was not (PR #174).**
+
+Round 10 replaced a caller obligation with a guard and wrote the promise as **"NOTHING A CALLER
+PASSES CAN SILENCE A KEY PERMANENTLY."** That is false, and the counter-example is one call:
+`rateLimited(key, Number.MAX_VALUE)`. `Number.isFinite(Number.MAX_VALUE)` is `true`, so
+`!Number.isFinite(ms)` never fires for it, the window is honoured as asked, and the key is silent
+for longer than the process will ever live. Reproduced with an injected clock advanced ~200 years
+per attempt: 1 line across 5 attempts, where `Infinity` under the same driver emits all 5.
+
+📌 **The guard was right and the sentence over it was wrong, so the sentence moved — not the
+guard.** Both fixes were available: narrow the prose, or add a size cap so the universal becomes
+true. A cap means inventing a threshold nobody asked for, and it would silently retune every
+existing caller's window; the honest boundary is the one the condition already draws, which is
+finiteness. The paragraph now states that boundary and names what it does NOT cover — a large
+finite `ms` "gets exactly the permanent silence it asked for, and no guard here will save it."
+Choosing `ms` goes back to being the caller's obligation for finite values, which is the one place
+round 8's deleted obligation was actually load-bearing.
+
+📌 **A normative claim in a docblock with nothing executable under it is how this shipped false
+for four consecutive rounds.** The head docblock of this primitive is read by 9 call sites, and the
+universal had been copied into the interface docblock, the test-block comment, `logger/AGENTS.md`,
+a commit message, and the round-10 entry above — six copies, zero of them checkable. So the new
+bounded claim is PINNED: `a MAX_VALUE window DOES silence the key — the guard is finiteness, not
+size` asserts one line across five attempts spanning centuries of injected clock. A future round
+that adds the size cap has to come to that case and change it, which is exactly the coupling the
+prose never had.
+
+**Mutant, asserted APPLIED by grep before the run was believed:** adding a size cap
+(`|| ms > 86_400_000`) to the finite-window guard — `grep -c 'ms > 86_400_000'` = 1 at line 396
+before running — gives exactly **1 red, the new MAX_VALUE case alone**, and 51 green. That is the
+discrimination worth having: the mutant makes the round-10 universal TRUE, and only the case that
+pins the boundary notices. Reverted from a committed tree (`cp` from a backup taken before the
+edit, not `git checkout` — see the round-10 warning), and `grep -c` = 0 confirmed after.
+
+Also corrected in this round, all of them the same drift class: `logger/AGENTS.md` still said
+"**Two** consequences" after round 10 made it three in the owning docblock (now three, with the
+non-finite one stated at its true width); the busy→idle case's comment claimed the post-drain idle
+line "must log AT ONCE" when a prior idle stamp inside the window still stands across the busy
+period — the busy branch never stamps, but it never CLEARS either, so the comment now states the
+unstamped precondition and bounds the suppression at one interval, which is the gap the heartbeat
+already permits and during which busy ticks log every sweep; and the handler's second-logger-view
+comment implied a test-injected view is isolated when two views on one subsystem still share a
+window keyed `subsystem × key` (no current case builds two same-slug tickers — now said that way).
+
+**Verification (round 11), re-measured in this round rather than carried forward:**
+`logger.test.ts` **52** (51 + the MAX_VALUE case), `import-running-cron-tick.test.ts` **11**,
+`import-running-cron-scheduler-boot.test.ts` **2** — **65 pass, 0 fail, 117 expect() calls** across
+the 3 files. `scripts/ci/typecheck-all.sh` exit 0 across all 51 tsconfigs, not `tsc -p .` alone;
+`scripts/ci/lint.sh` exit 0. ⚠️ The **kimi** lane was DEFERRED again in round 10 — configured,
+called, and the call failed. A configured reviewer that died leaves the panel INCOMPLETE, and this
+entry likewise records no APPROVE.
+
+**Round 12 — the guard on the constant could not fail on the mutant that disables the throttle (PR
+#174).**
+
+The case named `the interval is long enough to matter and short enough to notice` asserted two
+things about `IDLE_TICK_LOG_INTERVAL_MS` and built nothing: an upper bound
+(`< 15 min`) and a lines/day ceiling (`86_400_000 / interval < 500`). Its comment justified having
+no lower bound with a universal — *"the lines/day ceiling IS the floor, so a separate small-ms
+assertion would be unreachable"* — and that is false for anything ≤ 0. At `IDLE_TICK_LOG_INTERVAL_MS
+= -1` the division is NEGATIVE, so both assertions stay green, while `elapsed >= -1` holds for every
+reading and the throttle is off entirely: the flood is fully restored and the case that exists to
+guard the number does not notice. Two reviewers reached that mutant independently.
+
+📌 **A guard written as an assertion ABOUT a constant is not coverage of the behaviour the constant
+buys, and the two look identical in green.** The lower bound is now the sweep cadence — a window no
+longer than one sweep suppresses nothing, which is a floor derived from the system rather than a
+restatement of the threshold — and the case closes by DRIVING the real handler at both edges of the
+budget: one sweep after the first line the tick is refused (a throttle is in force), and at the
+quarter-hour a line appears (silence never outlasts the operator's budget, whatever the constant is
+set to).
+
+**Two naming/counting corrections in the same class.** `the FIRST idle tick logs — a fresh process
+must prove it came up` restarted nothing; its empty window came from the `beforeEach` reset. The
+name now says what the body does, and the restart claim in the handler's comment — in-memory on
+purpose, because "did it come back up?" is what a heartbeat answers — got its own case instead of
+borrowing that one's title. That case is explicit about what it is: it clears the module-level
+window and rebuilds the handler, which is what a restart looks like at this seam, and it does NOT
+spawn a process. And the describe preamble stated that "three of these cases go red" without the
+reset — a measurement of suite size that rots the next time a case is added, so it no longer states
+a number.
+
+**Mutants, each asserted APPLIED by grep before its run was believed, each reverted by `cp` from a
+pre-edit backup with the grep re-run at 0 and `git diff --quiet` clean:**
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| `IDLE_TICK_LOG_INTERVAL_MS = -1` (throttle disabled) | `grep -c 'IDLE_TICK_LOG_INTERVAL_MS = -1'` = 1 | **4 red, now including the constant guard** — it was GREEN on this mutant before this round |
+| `IDLE_TICK_LOG_INTERVAL_MS = 20 * 60_000` (past the budget) | `grep -c` = 1 | exactly **1 red**, the constant guard alone |
+| drop the handler's throttle (`tickEmitter = tickLog`) | `grep -c 'rateLimited('` = 0, where it is 1 before the edit | 4 red |
+| `resetLoggerStateForTests` stops clearing `rateLimitState` (the window survives the process boundary) | `grep -c 'rateLimitState.clear()'` = 0 | 2 red, **including the new restart case** — so that case is not vacuous |
+
+**Verification (round 12), re-measured this round:** the three files run **66 cases** (65 + the
+restart case) — 132 pass, 0 fail, 244 expect() calls under `bun test --rerun-each 2`, the flag that
+caught the process-global window state. `scripts/ci/typecheck-all.sh` exit 0 across all 51
+tsconfigs, not `tsc -p .` alone; `scripts/ci/lint.sh` exit 0. ⚠️ The **kimi** lane was DEFERRED in
+round 11 as well — configured, called, and the call failed. This entry records no APPROVE either.
+
+**Round 13 — the disclosed mutation gap becomes a case, and three claims that were checkable were
+checked (PR #174).**
+
+📌 **A DISCLOSED gap is still a gap.** The head docblock's `THE BOUND IS ON ATTEMPTS, NOT ON
+DELIVERED LINES` clause had nothing executable under it, and the docblock said so in careful prose
+rather than closing it — honest, and still a normative claim about the ordering of two lines in
+`emit` that any refactor could silently invert. It is now `a THROWING sink CONSUMES the window —
+the bound is on attempts, not deliveries`, which drives a sink that throws and asserts the
+BEHAVIOUR: attempt 1 reaches the sink and throws, the attempt inside the window is refused before
+the sink is reached (so it does NOT throw, and the sink is not called twice), and the window still
+expires normally afterwards. Consuming a window is not latching it, and both halves are asserted.
+Disclosure was the right call while the gap stood; closing it is better, and it deletes the three
+sentences of prose that existed to apologise for it.
+
+📌 **The staleness banner on the round-9 block had itself gone stale — twice.** It read "the file
+total is now 11, not 10" while the file held 12, and pointed at the round-11 Verification block
+while round 12's was the last. A banner whose whole job is "the number below rotted" cannot carry a
+number of its own, so it now carries none: it points at *the LAST Verification block of this entry*,
+which is a pointer that no future round can falsify. Same class as everything else this entry has
+been fixing, one level up.
+
+📌 **A justification that names a command must name one that reproduces.** The comment over
+`beforeEach(resetLoggerStateForTests)` said removing the reset turns `bun test --rerun-each 2` red.
+It does not — measured 24 pass / 0 fail, because the restart case calls `resetLoggerStateForTests()`
+inline and launders every earlier case's stamps before pass 2 reaches them. The reset IS
+load-bearing; the command was wrong. The comment now names the FILTERED form that goes red
+(`-t 'the FIRST idle tick into an empty window logs' --rerun-each 2`, 1 fail) and states why the
+whole-file form does not, so the next reader who checks gets the red they were promised.
+
+Also in this round: the restart case was renamed to `a CLEARED window and a rebuilt handler log the
+first idle tick at once` — the old name claimed "a restarted process" and the body spawns nothing;
+the name is what gets quoted, and the handler comment in `import-running-cron.ts` quotes it. The
+tautological `expect(Number.isFinite(Number.MAX_VALUE)).toBe(true)` was deleted — an assertion no
+change to this repo could redden, inflating a count these blocks quote as a measurement; the fact is
+now stated in the comment where it belongs. And the `instance` vocabulary this diff had ADDED
+(`per-instance cron` in `onboarding-input.ts`, `while an instance is at` in `engine.ts`, `THIS
+instance's rows` and `on an idle instance` in the cron module, `per-instance cron` in the test
+header) is gone in favour of `per-project` / "no import in flight", matching the wording the same
+diff already used. Pre-existing `instance` prose on untouched lines was left alone.
+
+**Mutants, each asserted APPLIED by grep BEFORE its run was believed, each reverted by `cp` from a
+pre-edit backup with the grep re-run at 0:**
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| `onEmit?.()` moved to AFTER `sink(...)` in `emit` (stamp-after-sink) | post-edit form `grep -c` = 1 and pre-edit form = 0, then reversed on revert | **1 red — the new throwing-sink case alone**, where this same mutant survived the WHOLE suite last round |
+| `beforeEach(resetLoggerStateForTests)` commented out | `grep -c '// MUTANT beforeEach'` = 1 | **0 red unfiltered (24 pass)**, **1 red filtered** — the measurement that corrected the comment |
+| `resetLoggerStateForTests` stops clearing `rateLimitState` | `grep -c '^  rateLimitState.clear()'` = 0 | 2 red, including the RENAMED restart case — so the rename did not hollow it out |
+
+**Verification (round 13), re-measured this round:** `logger.test.ts` **53** (52 + the throwing-sink
+case), `import-running-cron-tick.test.ts` **12**, `import-running-cron-scheduler-boot.test.ts` **2**
+— **67 pass, 0 fail, 127 expect() calls** across the 3 files (one expect() fewer than the case count
+would suggest, because the tautological one was deleted). `scripts/ci/typecheck-all.sh` exit 0
+across all **51** tsconfigs, not `tsc -p .` alone; `scripts/ci/lint.sh` exit 0 on every gate.
+`ctx.owner_slug` — the field the new throttle keys on — was checked on a REAL emitted artifact
+rather than trusted by name: `[import-running-cron] event=tick project=alice in_flight_imports=0`,
+and it is a required non-optional `string` on `CronHandlerContext` (`cron/handlers.ts`) fed from the
+scheduler's `project_slug`, so there is no absent-field path that could silently disable the
+throttle. ⚠️ Cross-model lanes: this entry records no cross-model APPROVE. The **codex** and **kimi**
+lanes were DEFERRED in round 12 — configured, called, and the calls failed — and a configured
+reviewer that died leaves the panel INCOMPLETE.
+
+**Round 14 — the leak gate could not see who wrote the commit, and 12 of this branch's own
+commits proved it (PR #174).**
+
+📌 **The gate scanned the MESSAGE and called that "the commit".** `scripts/ci/leak-gate.sh`
+built its message view from `git log --no-merges --format='%s%n%b'` — subject and body, and
+nothing else. `%an`/`%ae` were never in the view, so a branch could carry the owner's personal
+name and address on every commit and the gate would print SILENT ✅ and exit 0. Twelve commits
+on THIS branch did exactly that, and three review rounds went by with the gate green; two
+reviewers found it by reading `git log --format='%an <%ae>'` by hand, which is the tell that no
+automated control was looking.
+
+**It is not a cosmetic field, and the route is already demonstrated on main.** GitHub's
+`--squash` merge reads the AUTHOR of each squashed commit and writes it into a
+`Co-authored-by:` trailer on the merge commit. That trailer lands in main's message body — a
+surface this gate *does* scan, but only on the run AFTER the merge that published it, by which
+point GHArchive/BigQuery have mirrored it and there is no remedy. One such trailer is already
+in this repo's main history, injected by exactly that path. **A gate whose scan window ends one
+commit before the surface it protects is not a gate for that surface.**
+
+Both halves are fixed, because either alone leaves the failure intact:
+  * the HISTORY — every author AND committer on this branch was rewritten to
+    `neutron-agent <agent@example.com>`, so the squash has nothing to inject; and
+  * the GATE — a `COMMIT-AUTHOR` view carrying `%an <%ae>` and `%cn <%ce>`, scanned by the
+    owner-PII denylist rules. Scrubbing the branch without closing the hole would have left the
+    next branch to be caught by hand again, and *the next reviewer who reads `%an` by hand is a
+    control that does not exist.*
+
+📌 **The first run of the new rule set caught something — the agent's own identity — and that
+is what settled the design.** The author lines were first appended to the existing `MSG_VIEW`,
+which put them through every message rule including `private-path-msg`, the STRUCTURAL rule
+whose remedy text is "rename the PATH". The committing identity used across this repo contains
+that rule's token, so the run came back with 40 findings: every commit, on every branch, for as
+long as the agent commits as itself. **A rule that fires on 100% of its inputs is not a control
+— it is the thing people learn to scroll past, and it would have drowned the denylist findings
+printed beside it.** So the author lines got their own view and the owner-PII rules only, with
+the exclusion written down where the rules are and pinned by a case (built with the same
+`'va' + 'jra'`-style split the gate uses on its own copy, so the literal never enters the tree).
+Whether the committing identity is itself a leak is a decision about what the agent commits AS;
+it is not this rule's job, and bolting it on here would have made the gate unusable in the same
+change that gave it sight. *The first run of a new rule is a measurement, not a formality — this
+one changed the design, and shipping the untested-in-anger version would have shipped a gate
+that gets ignored.*
+
+📌 **Then the first CI run answered the question the local run could only defer: the identity
+this repo commits as is ITSELF on the owner-PII denylist.** The denylist is a repository secret,
+so no local run can evaluate it — locally the author stream came back clean and the only
+objection to the old identity was the structural path rule, which is why the paragraph above
+declines to rule on it. In CI, with the real list loaded, the author stream returned **40
+findings, one per author/committer line, all `pii-denylist-msg`** — while the TREE scan of the
+same commit was silent, because the string is not in the tree. It was only ever in `%an`/`%ae`.
+So the answer is not a judgement call after all: **by the owner's own declaration of what may
+never be public, every commit this repo has produced was publishing a denylisted string into a
+surface that cannot be redacted, and the control that would have said so did not look there.**
+The branch is now authored and committed as `neutron-agent <agent@example.com>`, which is the
+convention the tree already uses for example addresses.
+
+*The blocker was raised as "the owner's real name is in 12 authors". It was the smaller half.*
+The gate that was blind to those 12 was equally blind to the 40 — and the 40 are not one
+branch's accident but what the identity in `git config` produces on every commit of every
+branch. Expect other in-flight branches to go red on this rule: that is the finding, not a
+regression, and the remedy is the same `rebase --exec` amend used here. **A control's first
+real run is where you learn whether the thing you were policing was the common case.**
+
+The case that pins it plants a denylisted name in the AUTHOR of a commit whose subject and body
+are clean — so a gate reading only `%s%n%b` reports SILENT on that fixture, and only the author
+stream fails it. It asserts the REFUSAL (`[pii-denylist-msg]`, the `COMMIT-AUTHOR` label, exit
+1), not that a line was printed. A companion case pins the other direction (clean author ⇒ exit
+0), because a rule that is always red is not a rule.
+
+📌 **`once` claimed the same attempts-not-deliveries bound as `rateLimited` and only
+`rateLimited` had a case.** Round 13 closed the window half; the latch half stayed prose, and
+the stamp-after-sink mutant proved it — one red, from the `rateLimited` case alone. The `once`
+half now has the same shape of case: a throwing sink, attempt 1 throws and reaches the sink,
+attempt 2 is refused BEFORE the sink (so it does not throw and the sink is not called twice),
+and `clearOnce` still re-arms. Same mutant is now **2 red**. *A docblock clause that names two
+primitives needs a case per primitive; one case makes the sentence look pinned and pins half of
+it.*
+
+📌 **The typecheck matrix typechecked other agents' worktrees.** `scripts/ci/typecheck-all.sh`
+discovers tsconfigs with a plain `find`, and `.claude/worktrees/` — gitignored scratch space
+holding other lanes' checkouts of this same repo — was inside it. A local matrix run therefore
+reported another lane's in-progress failures as this checkout's: 81 FAIL lines that belonged to
+someone else. CI never has those directories, so the CI matrix was never wrong; the LOCAL gate
+was, in the direction that gets a gate ignored. Skipped by PATH from the repo root in both the
+script and the independent walk in `ci-workflow.test.ts` (which had to move in lockstep or the
+completeness cross-check would fail on any machine with worktrees) — never by directory NAME,
+so a real package called `worktrees` still cannot hide behind it.
+
+**Two stale measurements from earlier rounds, corrected in the round that re-ran them:** the
+round-9 block said `--rerun-each 2` "is now 20/20" in the present tense while the suite measures
+24; it now reads as the measurement of that round, which is what it was. And the round-11
+table's "drop the throttle ⇒ 2 red" was derived against a 6-case suite that is now 8. Re-run
+this round with the mutation asserted applied: it is **4 red**, not 2 — the two cases added
+since redden it too. The table itself is left standing under its staleness banner, because
+editing a past round's number to match today's tree destroys the record of what was actually
+run then; the current figure lives here, in the round that measured it.
+
+**Mutants, each asserted APPLIED by grep BEFORE its run was believed, each reverted by `cp` from
+a pre-edit backup with the grep re-run at 0 and `git diff` clean:**
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| `onEmit?.()` moved to AFTER `sink(...)` in `emit` (stamp-after-sink) | post-edit form `grep -c` = 1, pre-edit form = 0, reversed on revert | **2 red — the `rateLimited` throwing-sink case AND the new `once` one**, where the `once` half survived last round |
+| the `COMMIT-AUTHOR` stream deleted from `build_message_view` | `grep -c 'COMMIT-AUTHOR:%d'` = 0, back to 1 on revert | **2 red — both denylisted-author cases**; the clean-author case and the private-path-exclusion case correctly stayed green |
+| `private-path-msg` ALSO applied to the author view (the version the first run rejected) | `grep -c 'MUTANT strict-author'` = 1, back to 0 on revert | **1 red — the exclusion case**, so the exclusion is pinned rather than merely written down |
+| `const tickEmitter = idle` → `= false` (log unconditionally, i.e. drop the throttle) | `grep -c 'const tickEmitter = false'` = 1, pre-edit form = 0 | **4 red** — the re-derivation of the round-11 row that said 2 |
+
+**Verification (round 14):** `logger/__tests__/logger.test.ts` **54**,
+`import-running-cron-tick.test.ts` **12**, `import-running-cron-scheduler-boot.test.ts` **2**,
+`scripts/ci/ci-workflow.test.ts` **24** — **184 pass, 0 fail, 378 expect() calls** across the 4
+files under `bun test --rerun-each 2`. the three `leak-gate-*` suites **69 pass, 0 fail, 201
+expect() calls**. Run against this branch's OWN range, the gate reports 40 author identity
+lines in the scan window and 0 findings from the rules a local run can evaluate — the denylist
+rules need the CI secret, and it was CI that returned the 40 above. `scripts/ci/typecheck-all.sh` exit 0 across all **51** tsconfigs,
+not `tsc -p .` alone. The field the new gate rule keys on was printed on a real artifact before
+being trusted, not assumed from its name: `git log --format='%an <%ae>'` over this branch's own
+range emitted one `Name <email>` line per commit, which is what the fixture asserts against —
+and the ABSENT case was checked rather than assumed: when `git log` can resolve no range,
+`build_message_view` returns non-zero and the whole message section — author stream included —
+is `exit 2` in CI and `INCOMPLETE`/exit 3 locally, so an unscannable range cannot present as a
+clean one. ⚠️ Cross-model lanes: this
+entry records no cross-model APPROVE. The **kimi** lane was DEFERRED in round 13 — configured,
+called, and the call failed — and a configured reviewer that died leaves the panel INCOMPLETE.

@@ -98,6 +98,7 @@ export {
 
 export {
   DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS,
+  IDLE_TICK_LOG_INTERVAL_MS,
   ONBOARDING_IMPORT_RUNNING_HANDLER_NAME,
   buildImportRunningHandler,
   buildImportRunningJob,

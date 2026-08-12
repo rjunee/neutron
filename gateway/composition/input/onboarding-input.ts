@@ -50,7 +50,9 @@ export interface OnboardingCompositionInput {
   }
   /**
    * S12 (2026-05-16) — import-running cron-tick config. When supplied,
-   * the composer wires a per-instance 15s cron that scans
+   * the composer wires a per-project cron — on
+   * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` unless `interval_ms` below
+   * overrides it — that scans
    * `onboarding_state` for rows at `phase=import_running` with
    * `import_job_id` non-null and calls
    * `engine.pollImportRunningTick(...)` so the runner's terminal status
@@ -66,7 +68,11 @@ export interface OnboardingCompositionInput {
   onboarding_import_running_cron?: {
     /** The per-instance InterviewEngine. */
     engine: InterviewEngine
-    /** Override the 15s sweep cadence (testing seam). */
+    /**
+     * Override the sweep cadence (testing seam). The default is
+     * `DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS` in
+     * `onboarding/interview/import-running-cron.ts` — read the figure there.
+     */
     interval_ms?: number
   }
   /**
