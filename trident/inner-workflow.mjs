@@ -15,12 +15,15 @@
 //
 // Runtime contract (proto-2, 2026-06-28 — every claim backed by a real run):
 //
-//   (A) WORKTREE CLEANUP IS EXPLICIT, ON EVERY PATH. `isolation:'worktree'`
-//       auto-removes a worktree ONLY IF UNCHANGED; a Forge build always commits,
-//       so the worktree is left ORPHANED unless trident removes it. The
-//       `finally{}` block scans `git worktree list` for the DETERMINISTIC
-//       `trident/<slug>` branch and removes it independent of Forge's return
-//       value (so it holds even if Forge threw before returning). This is D-1.
+//   (A) WORKTREE CLEANUP IS EXPLICIT, ON EVERY PATH — AND NEVER DESTRUCTIVE.
+//       `isolation:'worktree'` auto-removes a worktree ONLY IF UNCHANGED; a Forge
+//       build always commits, so the worktree is left ORPHANED unless trident
+//       cleans it up. The `finally{}` block runs the checked-in DETERMINISTIC
+//       `trident/worktree-cleanup.sh` against the `trident/<slug>` branch,
+//       independent of Forge's return value (so it holds even if Forge threw
+//       before returning). This is D-1 — bounded by #541: a DIRTY worktree
+//       (including untracked files) is PRESERVED and reported, never
+//       force-removed, because this block also fires on throw/abort.
 //
 //   (B) LONG-COMMAND OUTPUT MUST BE REDIRECTED TO A FILE. A verbose build/test
 //       run piped inline can overflow an agent's context. Every agent prompt
@@ -134,6 +137,13 @@ const {
   // thread it falls back to the repo-of-record copy (same precedent as
   // codex-review.sh below).
   checkpointScript = null,
+  // Worktree-cleanup script path (ISSUES #541). Same threading contract as
+  // `checkpointScript`: the `finally{}` cleanup is a checked-in DETERMINISTIC
+  // script (dirty → preserve, clean → plain remove) rather than an LLM told to
+  // force-remove, and this script cannot resolve its own path, so the launcher
+  // threads the absolute one. A legacy caller that doesn't thread it falls back
+  // to the repo-of-record copy.
+  worktreeCleanupScript = null,
   // FABLE-ORCHESTRATOR model routing (model routing per the refactor plan protocol,
   // `docs/plans/2026-07-02-world-class-refactor-plan.md` § 1.5).
   // The per-role model IDS, resolved from the single-source-of-truth registry
@@ -171,6 +181,10 @@ const kimiConfigured = kimiConfiguredArg === true
 // launcher that threads those also threads checkpointScript — the repoPath
 // fallback covers only legacy callers.
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
+
+// Resolved worktree-cleanup script path (#541) — the deterministic replacement
+// for the force-removing cleanup agent. Same repoPath fallback as above.
+const worktreeCleanupSh = worktreeCleanupScript || `${repoPath}/trident/worktree-cleanup.sh`
 
 // `pr` mode → push to origin + open/reuse a GitHub PR. `local` mode (the store
 // default when there is no GitHub origin or `gh` is unavailable) → commit on the
@@ -1018,6 +1032,98 @@ const CI_PROBE_SCHEMA = {
     raw: { type: 'string', description: 'stdout+stderr of the command, verbatim' },
     exit_code: { type: 'integer', description: 'the exit status the command printed' },
   },
+}
+
+/**
+ * The `finally{}` cleanup step's report (#541). Identical shape to CI_PROBE_SCHEMA
+ * and for the same reason: the agent runs ONE fixed command and hands back its
+ * output + exit status VERBATIM. The exit code is DATA here, not a failure —
+ * `worktree-cleanup.sh` exits 3 when it deliberately preserved a dirty worktree,
+ * and the workflow logs that rather than letting a model "recover" from it.
+ */
+const CLEANUP_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['raw', 'exit_code'],
+  properties: {
+    raw: { type: 'string', description: 'stdout+stderr of the cleanup script, verbatim' },
+    exit_code: { type: 'integer', description: 'the exit status the script printed (3 = work preserved)' },
+  },
+}
+
+/**
+ * What `worktree-cleanup.sh` actually did, read out of an LLM's transcription of
+ * it (ISSUES #541).
+ *
+ * The script's verdict is deterministic; getting it back into the run log is not,
+ * because the agent that ran it types the answer out. So both halves are read
+ * GENEROUSLY, and every ambiguity resolves toward the alarm:
+ *
+ *   * `exit_code` may arrive as the STRING "3". `Number.isFinite('3')` is false,
+ *     and treating that as "no exit code" flips a real preservation into "NOTHING
+ *     was inspected" — inverting the one alarm this path exists to raise.
+ *   * If the field is missing entirely, the `___EXIT=` marker the caller appends
+ *     to the command is a second, independent source inside `raw`. (The LAST
+ *     marker: an agent that echoed the command it was given would put the
+ *     un-expanded `___EXIT=$?` — no digits, so unmatchable — ahead of the real
+ *     one. The script also caps its own output so the marker cannot be pushed out
+ *     of the agent's window in the first place; this is the backstop.)
+ *   * With NO usable exit code at all, the script's own `PRESERVED` records in
+ *     the transcript still decide. Announcing preserved work that was in fact
+ *     removed costs the operator one wasted look; the reverse costs them the work.
+ *   * NO reported code outranks a transcript that says `PRESERVED` — not 0, and not
+ *     a mis-transcribed 1/2/127 either. The script
+ *     increments its counter at every one of those records and ends on
+ *     `[ "$preserved" -eq 0 ] || exit 3`, so "exit 0" and "PRESERVED …" cannot both
+ *     be true of one real run — the pair is only ever a mis-transcription. Reading
+ *     the number instead of the record is the one way left for this path to fail
+ *     SILENTLY: the log says `ok`, and the operator's only notice that a worktree
+ *     still holds uncommitted work is never printed. Because a genuine clean run
+ *     emits no `PRESERVED` line at all (it says REMOVED/DELETED/KEPT/SKIPPED),
+ *     believing the record here can never cry wolf.
+ *
+ * Only a real 3 (or a transcript that says PRESERVED) is a preservation. Exit 2 is
+ * a usage error and 127 a wrong script path — the script inspected NOTHING on
+ * those, and calling them "PRESERVED WORK" drowns the real alarm in noise. Those
+ * two already log LOUDLY as 'failed', so they are left to that path: the override
+ * above exists only for the reading that would otherwise be silent.
+ *
+ * @param reported the agent's `exit_code` field, in whatever type it arrived as
+ * @param raw the agent's transcription of the script's stdout+stderr
+ * @returns `exit` (null when neither source produced one) and the `outcome` the
+ *          caller logs: 'ok' | 'preserved' | 'preserved-unmarked' | 'failed'
+ */
+function classifyCleanupOutcome(reported, raw) {
+  const coerced =
+    typeof reported === 'number'
+      ? reported
+      : typeof reported === 'string' && reported.trim() !== ''
+        ? Number(reported)
+        : Number.NaN
+  const text = typeof raw === 'string' ? raw : ''
+  const markers = text.match(/___EXIT=(\d+)/g)
+  const exit = Number.isFinite(coerced)
+    ? coerced
+    : markers
+      ? Number(markers[markers.length - 1].slice('___EXIT='.length))
+      : null
+  if (exit === 3) return { exit, outcome: 'preserved' }
+  // A `PRESERVED` RECORD OUTRANKS ANY TRANSCRIBED CODE — not just a 0 or a missing
+  // one. Gating this on `exit === null || exit === 0` was the rule's own exception:
+  // a mis-transcribed 1/2/127 alongside a faithful copy of the script's
+  // `PRESERVED worktree … reason=dirty` records fell through to 'failed', which
+  // tells the operator "NOTHING was inspected or removed (this is not a
+  // preservation)" — the exact opposite of what the transcript in front of them
+  // says, and the reading that sends them away without their work. The script
+  // increments its counter at every one of those records and ends on
+  // `[ "$preserved" -eq 0 ] || exit 3`, so a PRESERVED record and any non-3 code
+  // cannot both be true of one real run; the pair is only ever a mis-transcription,
+  // and it resolves toward the alarm. It cannot cry wolf: a genuine clean run emits
+  // no `PRESERVED` line at all (it says REMOVED/DELETED/KEPT/SKIPPED), and the
+  // usage-error and wrong-path exits print none either, so they still read 'failed'.
+  if (/^PRESERVED /m.test(text)) return { exit, outcome: 'preserved-unmarked' }
+  if (exit === 0) return { exit, outcome: 'ok' }
+  return { exit, outcome: 'failed' }
 }
 
 /** States GitHub reports for a check that has FINISHED and FAILED. */
@@ -2003,34 +2109,58 @@ ${task}${reflectionGuidance}`,
   }
   return failureResult
 } finally {
-  // (A) MANDATORY WORKTREE CLEANUP — runs on success, REQUEST_CHANGES, throw, or
-  // abort. The harness removes a worktree ONLY IF UNCHANGED, and a Forge build
-  // always changes its worktree, so trident MUST remove it explicitly.
+  // (A) WORKTREE CLEANUP — runs on success, REQUEST_CHANGES, throw, or abort.
+  // The harness removes a worktree ONLY IF UNCHANGED, and a Forge build always
+  // changes its worktree, so trident MUST clean it up explicitly.
   //
   // CRITICAL: cleanup CANNOT depend on a valid `forge` result. If Forge mutated
   // its worktree then FAILED before returning JSON (tests fail, `gh pr create`
   // fails, the agent throws → agent() returns null), the changed worktree still
   // exists. So we clean up by SCANNING git state for ANY worktree on the
   // DETERMINISTIC '${forgeBranch}' branch — independent of Forge's return value.
-  // The branch is pushed on the success path, so removing the local worktree +
-  // branch loses nothing. This is what makes the guarantee hold on ALL paths.
-  // BRANCH TEARDOWN IS MODE-AWARE — D-1 (never orphan a CHANGED worktree) is
-  // UNCONDITIONAL, but the branch must NOT be deleted here in LOCAL mode: the
-  // branch holds the ONLY copy of the un-merged commits, and the OUTER loop's
-  // `mergeLocal` (merge.ts) merges that exact branch THEN deletes it post-merge.
-  // Deleting it in this finally stranded every local-mode merge ("not something
-  // we can merge"). In PR mode the work is already pushed to origin and the
-  // OUTER `mergePr` merges the REMOTE PR, so the local branch is disposable here.
-  const branchTeardownStep = isPr
-    ? `3. git branch -D ${forgeBranch}   (ignore "not found" — the work is pushed to origin/the PR, so the local branch is disposable)`
-    : `3. KEEP the branch '${forgeBranch}' — do NOT delete it. This is LOCAL mode: the OUTER loop merges this branch and deletes it post-merge. Deleting it here would lose the build.`
-  await agent(
-    `Cleanup step (MUST succeed on every path; ignore individual command failures). From ${repoPath}:
-1. Find the worktree for branch '${forgeBranch}':  git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch /{ if ($2=="refs/heads/${forgeBranch}") print w }'
-2. For that path (if any):  git worktree remove --force <path>
-${branchTeardownStep}
-4. git worktree prune
-5. Verify with \`git worktree list\` that NO worktree remains on '${forgeBranch}'. Report the final worktree count and whether any orphan remained.`,
-    withModel({ label: 'cleanup:worktree', phase: 'Synthesis' }),
+  //
+  // A DIRTY WORKTREE IS PRESERVED, NOT DESTROYED (ISSUES #541). This block used
+  // to be a cheap-model agent told to "ignore individual command failures" while
+  // running `git worktree remove --force` + `git branch -D` — and it fires on
+  // THROW and ABORT, i.e. exactly when Forge died mid-edit and the worktree holds
+  // the only copy of the work. On PR #171 it destroyed 197 insertions across 7
+  // files. The whole decision now lives in the checked-in, deterministic
+  // `trident/worktree-cleanup.sh`: dirty (INCLUDING untracked) or unverifiable →
+  // preserve + exit 3; clean → plain `git worktree remove`, never `--force`.
+  // There is no LLM judgement left in the destructive path — the agent runs ONE
+  // fixed command and reports its output, the same shape as the head/CI probes.
+  //
+  // BRANCH TEARDOWN IS MODE-AWARE and is passed to the script as a flag: in LOCAL
+  // mode the branch holds the ONLY copy of the un-merged commits and the OUTER
+  // loop's `mergeLocal` (merge.ts) merges that exact branch THEN deletes it
+  // post-merge — deleting it here stranded every local-mode merge ("not something
+  // we can merge"). In PR mode the local branch is disposable ONLY once the
+  // script has proved origin holds the same sha (see the script's branch gate).
+  const cleanupMode = isPr ? 'delete-branch' : 'keep-branch'
+  const cleanupCmd = `bash ${shSingleQuote(worktreeCleanupSh)} ${shSingleQuote(repoPath)} ${shSingleQuote(forgeBranch)} ${cleanupMode} 2>&1; echo "___EXIT=$?"`
+  const cleanup = await agent(
+    `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT run any other command, do NOT remove or modify any worktree, branch or file yourself, and do NOT re-run or "fix" a non-zero exit — exit 3 means the script PRESERVED work ON PURPOSE.
+${cleanupCmd}`,
+    withModel({ label: 'cleanup:worktree', phase: 'Synthesis', schema: CLEANUP_SCHEMA }),
   )
+  // Surface the outcome in the run log — a preservation is the operator's ONLY
+  // notice that a worktree still holds uncommitted work, so it is logged in full.
+  const cleanupRaw = cleanup && typeof cleanup.raw === 'string' ? cleanup.raw.trim() : ''
+  // See `classifyCleanupOutcome` for why the agent's answer is read from two
+  // sources and why every ambiguity resolves toward the alarm.
+  const { exit: cleanupExit, outcome: cleanupOutcome } = classifyCleanupOutcome(
+    cleanup == null ? null : cleanup.exit_code,
+    cleanupRaw,
+  )
+  if (cleanupOutcome === 'ok') {
+    log(`trident-v2 cleanup:worktree ok — ${cleanupRaw.split('\n').pop() || 'no output'}`)
+  } else if (cleanupOutcome === 'preserved') {
+    log(`trident-v2 cleanup:worktree PRESERVED WORK (exit=3) — nothing was force-removed:\n${cleanupRaw}`)
+  } else if (cleanupOutcome === 'preserved-unmarked') {
+    log(
+      `trident-v2 cleanup:worktree PRESERVED WORK (exit code ${cleanupExit === null ? 'unreported' : `mis-reported as ${cleanupExit}`} — read from the output instead) — nothing was force-removed:\n${cleanupRaw}`,
+    )
+  } else {
+    log(`trident-v2 cleanup:worktree FAILED (exit=${cleanupExit === null ? 'unknown' : cleanupExit}) — the cleanup script did not run to completion, so NOTHING was inspected or removed (this is not a preservation):\n${cleanupRaw}`)
+  }
 }

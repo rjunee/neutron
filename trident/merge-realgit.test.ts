@@ -19,13 +19,18 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
 import { cleanupAfterMerge } from './git-mode.ts'
-import { buildMergeCleanupDeps, runWorktreePath, TridentMergeConflictEscalation } from './merge.ts'
+import {
+  buildMergeCleanupDeps,
+  runWorktreePath,
+  TridentMergeConflictEscalation,
+  TridentMergeError,
+} from './merge.ts'
 import type { TridentRun } from './store.ts'
 
 const GIT_ID = ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false']
@@ -299,5 +304,135 @@ describe('REAL git — failure isolation: an unrecoverable conflict never poison
     await cleanupAfterMerge(localRun(repo, 'zzzzzzzz', 'trident/z'), deps)
     await git(repo, 'checkout', '-q', 'main')
     expect(existsSync(join(repo, 'z.txt'))).toBe(true)
+  }, 30_000)
+})
+
+describe('REAL git — a dirty lingering build worktree is PRESERVED (#541)', () => {
+  test('mergeLocal never force-removes it: the uncommitted work survives and the merge fails loudly', async () => {
+    const repo = await makeBaseRepo()
+    const branch = 'trident/mid-edit'
+    // A build that committed once and then DIED mid-edit: its worktree is still
+    // registered on the branch and holds an untracked file that exists nowhere
+    // else. This is the PR #171 state — 197 insertions that only lived here.
+    const wt = join(repo, '.build-mid-edit')
+    await git(repo, 'branch', branch, 'main')
+    await git(repo, 'worktree', 'add', '-q', wt, branch)
+    writeFileSync(join(wt, 'committed.txt'), 'landed\n')
+    await git(wt, 'add', '.')
+    await git(wt, ...GIT_ID, 'commit', '-q', '-m', 'build')
+    writeFileSync(join(wt, 'never-committed.ts'), 'export const insertions = 197\n')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    // The merge cannot check the branch out (it is held by the preserved
+    // worktree), so it fails — LOUDLY, which is the correct trade: an operator
+    // recovers the work, and nothing was destroyed to make the merge convenient.
+    const err = await cleanupAfterMerge(localRun(repo, 'dddddddd', branch), deps).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(TridentMergeError)
+    // …and the failure the OPERATOR reads says trident kept their work and WHERE
+    // it is — not git's raw "already checked out at <path>", which reads like a
+    // trident bug and names no remedy.
+    const msg = err instanceof Error ? err.message : String(err)
+    expect(msg).toContain('trident PRESERVED uncommitted work')
+    expect(msg).toContain(wt)
+    expect(msg).toContain('re-run the merge')
+
+    // THE POINT: the uncommitted work is still there, byte for byte.
+    expect(existsSync(join(wt, 'never-committed.ts'))).toBe(true)
+    expect(await Bun.file(join(wt, 'never-committed.ts')).text()).toBe(
+      'export const insertions = 197\n',
+    )
+    // …and git still knows about the worktree + the branch (nothing was pruned
+    // out from under it, nothing was `branch -D`'d).
+    const list = await gitOut(repo, 'worktree', 'list', '--porcelain')
+    expect(list).toContain(`worktree ${wt}`)
+    expect((await gitOut(repo, 'branch', '--list', branch)).trim()).toContain(branch)
+  }, 30_000)
+
+  test('a CLEAN lingering build worktree is still freed, so the merge lands', async () => {
+    const repo = await makeBaseRepo()
+    const branch = 'trident/clean-linger'
+    const wt = join(repo, '.build-clean-linger')
+    await git(repo, 'branch', branch, 'main')
+    await git(repo, 'worktree', 'add', '-q', wt, branch)
+    writeFileSync(join(wt, 'clean.txt'), 'all committed\n')
+    await git(wt, 'add', '.')
+    await git(wt, ...GIT_ID, 'commit', '-q', '-m', 'build')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    await cleanupAfterMerge(localRun(repo, 'eeeeeeee', branch), deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    expect(existsSync(join(repo, 'clean.txt'))).toBe(true)
+    expect(existsSync(wt)).toBe(false)
+    expect(await worktreeCount(repo)).toBe(1)
+  }, 30_000)
+
+  test('a CLEAN worktree git REFUSES to remove is preserved, not reported as removed', async () => {
+    // A refused removal is not a removal. The tree probes CLEAN, so the dirt gate
+    // lets it through — but `git worktree remove` still declines (locked here;
+    // in the wild also submodules, or the tree being dirtied in the window between
+    // the probe and the call, which the plain — never `--force` — remove catches).
+    // Ignoring the command result scored the survivor as removed, so the merge
+    // skipped its preservation error and died three lines later on git's raw
+    // "already checked out at <path>". Found by the codex cross-model reviewer.
+    const repo = await makeBaseRepo()
+    const branch = 'trident/locked-linger'
+    const wt = join(repo, '.build-locked')
+    await git(repo, 'branch', branch, 'main')
+    await git(repo, 'worktree', 'add', '-q', wt, branch)
+    writeFileSync(join(wt, 'clean.txt'), 'all committed\n')
+    await git(wt, 'add', '.')
+    await git(wt, ...GIT_ID, 'commit', '-q', '-m', 'build')
+    await git(repo, 'worktree', 'lock', wt)
+    // Prove the premise: the tree really is CLEAN (so this is the removal gate
+    // being exercised, not the dirt gate) and git really does refuse it.
+    expect((await gitOut(wt, 'status', '--porcelain', '--untracked-files=all')).trim()).toBe('')
+    const refused = await spawnCapture(['git', '-C', repo, 'worktree', 'remove', wt], repo)
+    expect(refused.ok).toBe(false)
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    const err = await cleanupAfterMerge(localRun(repo, 'cccccccc', branch), deps).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    // BEHAVIOUR, not bookkeeping: the merge is refused, it names the path, and the
+    // tree is demonstrably still on disk and still registered with git.
+    expect(err).toBeInstanceOf(TridentMergeError)
+    const msg = err instanceof Error ? err.message : String(err)
+    expect(msg).toContain('trident PRESERVED uncommitted work')
+    expect(msg).toContain(wt)
+    expect(existsSync(join(wt, 'clean.txt'))).toBe(true)
+    expect(await gitOut(repo, 'worktree', 'list', '--porcelain')).toContain(`worktree ${wt}`)
+
+    await git(repo, 'worktree', 'unlock', wt)
+  }, 30_000)
+
+  test('a leftover PLAIN DIRECTORY at the merge-worktree path never fakes preserved work', async () => {
+    // `git -C <dir> status` walks UP to the enclosing repo, so an empty leftover
+    // directory INSIDE the checkout reports the SHARED checkout's untracked files
+    // as its own. Guarded only by existsSync, that empty dir looked like precious
+    // work and made every merge for this run throw "refusing to reuse".
+    const repo = await makeBaseRepo()
+    const branch = 'trident/plain-dir'
+    await fakeBuild(repo, branch, 'feature.txt', 'shipped\n')
+    const run = localRun(repo, 'ffffffff', branch)
+    const wt = run.worktree as string
+    mkdirSync(wt, { recursive: true })
+    // Untracked dirt in the SHARED checkout — what the plain dir would inherit.
+    writeFileSync(join(repo, 'operator-scratch.txt'), 'the human is mid-edit\n')
+    // Prove the premise (this is why the guard exists, not just that it is there).
+    expect((await gitOut(wt, 'status', '--porcelain', '--untracked-files=all')).trim()).not.toBe('')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    await cleanupAfterMerge(run, deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
+    // The operator's real scratch file in the shared checkout was never touched.
+    expect(existsSync(join(repo, 'operator-scratch.txt'))).toBe(true)
   }, 30_000)
 })
