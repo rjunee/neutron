@@ -268,7 +268,10 @@ describe('the docblock may not claim a safeguard that no code implements (#184 �
     // The block's own rule: a claim must name the code that enforces it. So every
     // symbol it backticks has to actually be in the source — a claim naming a
     // function that does not exist is the same defect wearing a citation.
-    const cited = [...claims.matchAll(/`([^`]+)`/g)].map((m) => m[1])
+    // flatMap, not map: the capture group is `string | undefined` to the type
+    // checker, and a `!` here would silently turn a regex that stopped matching
+    // into a loop over nothing — a guard that cannot fail.
+    const cited = [...claims.matchAll(/`([^`]+)`/g)].flatMap((m) => (m[1] ? [m[1]] : []))
     expect(cited.length).toBeGreaterThan(0)
     for (const symbol of cited) expect(SRC).toContain(symbol)
   })
