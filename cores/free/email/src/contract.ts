@@ -335,9 +335,9 @@ export interface GmailEnsureLabelInput {
 }
 
 /**
- * The label the pipeline stamps on every message it has handled. Instance-
- * level (no project segment) — it marks "Neutron has seen this", which is a
- * property of the mailbox, not of a project.
+ * The label the pipeline stamps on every message it has handled. Owner-level
+ * (no project segment) — it marks "Neutron has seen this", which is a property
+ * of the mailbox, not of a project.
  */
 export const PROCESSED_LABEL_NAME = 'Neutron/processed'
 
