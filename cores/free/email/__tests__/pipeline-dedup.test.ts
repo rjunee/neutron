@@ -16,7 +16,11 @@ import { join } from 'node:path'
 
 import type { GmailClient } from '../src/contract.ts'
 import { buildSeededInMemoryGmailClient } from '../src/in-memory.ts'
-import { CHECKPOINT_GO_LIVE_AFTER, runEmailPipelineTick } from '../src/pipeline/poller.ts'
+import {
+  CHECKPOINT_BACKLOG_DONE,
+  CHECKPOINT_GO_LIVE_AFTER,
+  runEmailPipelineTick,
+} from '../src/pipeline/poller.ts'
 import { openEmailPipelineStore, type EmailPipelineStore } from '../src/pipeline/store.ts'
 
 const GO_LIVE = Date.parse('2026-08-11T09:00:00.000Z')
@@ -33,6 +37,10 @@ function fixture(): Fixture {
   const home = mkdtempSync(join(tmpdir(), 'email-pipeline-dedup-'))
   const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
   store.setCheckpoint(CHECKPOINT_GO_LIVE_AFTER, String(GO_LIVE))
+  // These cases exercise the STEADY state, so the one-time backlog sweep is
+  // already finished — otherwise every tick would return early having marked
+  // the seeded mail as pre-existing.
+  store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
   const gmail = buildSeededInMemoryGmailClient({ now: () => NOW })
   gmail.seed({
     id: 'important-1',

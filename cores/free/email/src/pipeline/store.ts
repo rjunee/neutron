@@ -33,8 +33,18 @@ export const EMAIL_PIPELINE_DB = 'pipeline.db'
 /** This Core's SECOND migration tree — see the module header. */
 export const EMAIL_PIPELINE_MIGRATIONS_DIR = join(HERE, '..', '..', 'migrations-pipeline')
 
-/** How the poller acted on a message. */
-export type EmailHandling = 'escalate' | 'archive'
+/**
+ * How the poller acted on a message.
+ *
+ * `preexisting` is the BACKLOG marker: mail that was already in the inbox when
+ * the pipeline was switched on. The owner has already triaged it by hand, so it
+ * is recorded as handled and then left completely alone — never classified,
+ * never escalated, never briefed, and never label-mutated. Its row exists for
+ * exactly one reason: `hasEmail` is the steady-state "already handled" test, so
+ * a row here is what keeps the backlog out of the pipeline forever after
+ * WITHOUT re-deciding "is this history?" on every future poll.
+ */
+export type EmailHandling = 'escalate' | 'archive' | 'preexisting'
 
 export interface EmailRow {
   id: string

@@ -7,10 +7,15 @@
  * `gateway/cores/email-pipeline-wiring.ts`.
  *
  * ── THREE INVARIANTS ─────────────────────────────────────────────────────────
- * 1. THE GO-LIVE CUTOFF. The first tick stamps `go_live_after`. Mail that
- *    predates it is archived and recorded with `category NULL` — the
- *    classifier is NEVER invoked on it. Without this, turning the pipeline on
- *    would escalate a decade of backlog into the owner's chat in one tick.
+ * 1. THE BACKLOG IS MARKED ONCE, NOT RE-JUDGED FOREVER. Before the pipeline
+ *    processes anything, a one-time sweep records every message already in the
+ *    inbox as `handling='preexisting'` — and touches NOTHING else. No label is
+ *    added, no message is archived, nothing is classified, nothing is
+ *    escalated. The owner has already triaged that mail by hand; it stays
+ *    exactly where they left it. Afterwards, "is this history?" is answered by
+ *    `store.hasEmail(id)` — a row lookup — instead of a date comparison on
+ *    every message for the rest of the install's life. Without this, turning
+ *    the pipeline on would escalate a decade of backlog in one tick.
  * 2. THE ROW IS THE IDEMPOTENCY SPINE. An ESCALATED message deliberately stays
  *    in INBOX (the owner still has to deal with it), so the label set cannot
  *    say "handled". `store.hasEmail(id)` is what stops the next tick
@@ -28,6 +33,13 @@ import type { EmailPipelineStore } from './store.ts'
 export const CHECKPOINT_GO_LIVE_AFTER = 'go_live_after'
 export const CHECKPOINT_LAST_POLL_AT = 'last_poll_at'
 export const CHECKPOINT_CONSECUTIVE_ERRORS = 'consecutive_errors'
+/** Set to '1' once every message already in the inbox has been marked handled. */
+export const CHECKPOINT_BACKLOG_DONE = 'backlog_marked'
+/** Gmail page cursor for an in-flight backlog sweep. */
+export const CHECKPOINT_BACKLOG_CURSOR = 'backlog_cursor'
+
+/** Messages marked per tick while the backlog sweep is running. */
+export const DEFAULT_BACKLOG_PAGE_SIZE = 100
 
 /** How much body text is persisted per message. */
 export const STORED_BODY_LIMIT = 4000
@@ -49,15 +61,20 @@ export interface EmailPipelineTickDeps {
   log?: PipelineLog
   max_results?: number
   max_escalation_attempts?: number
+  /** Backlog messages marked per tick during the one-time sweep. */
+  backlog_page_size?: number
 }
 
 export interface EmailPipelineTickResult {
   scanned: number
   escalated: number
   archived: number
+  /** Backlog messages marked handled by the one-time sweep on this tick. */
   precutoff: number
   resumed: number
   errors: number
+  /** True while the backlog sweep is still running — no mail is processed yet. */
+  backlog_sweeping: boolean
 }
 
 export async function runEmailPipelineTick(
@@ -75,21 +92,62 @@ export async function runEmailPipelineTick(
     precutoff: 0,
     resumed: 0,
     errors: 0,
+    backlog_sweeping: false,
   }
 
   const escalateDeps: EscalateDeps = { ...deps.escalate, store, now }
 
   try {
-    // (1) The go-live cutoff. Absent ⇒ this is the first tick ever; everything
-    // already in the mailbox is backlog and is archived unclassified.
-    const stamped = store.getCheckpoint(CHECKPOINT_GO_LIVE_AFTER)
-    let go_live_after: number
-    if (stamped === null) {
-      go_live_after = now()
+    // (1) The go-live stamp. Recorded once for provenance (P2 reports from it);
+    // it is NOT a per-message gate — see invariant 1.
+    if (store.getCheckpoint(CHECKPOINT_GO_LIVE_AFTER) === null) {
+      const go_live_after = now()
       store.setCheckpoint(CHECKPOINT_GO_LIVE_AFTER, String(go_live_after))
       log?.('email pipeline go-live checkpoint stamped', { go_live_after })
-    } else {
-      go_live_after = Number(stamped)
+    }
+
+    // (1b) THE BACKLOG SWEEP. Until every message already in the inbox is
+    // recorded as `preexisting`, this tick does nothing else — no
+    // classification, no escalation, no label writes. Returning early is what
+    // guarantees the owner's existing mail can never reach the classifier: the
+    // code path that could escalate it has not been entered yet.
+    if (store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1') {
+      result.backlog_sweeping = true
+      const cursor = store.getCheckpoint(CHECKPOINT_BACKLOG_CURSOR)
+      const page = await gmail.listMessages({
+        label: DEFAULT_LABEL,
+        max_results: deps.backlog_page_size ?? DEFAULT_BACKLOG_PAGE_SIZE,
+        ...(cursor !== null && cursor.length > 0 ? { page_token: cursor } : {}),
+      })
+      for (const meta of page.results) {
+        if (store.hasEmail(meta.id)) continue
+        const received_at = Date.parse(meta.internal_date)
+        store.insertEmail({
+          id: meta.id,
+          thread_id: meta.thread_id,
+          account_id: meta.account_id ?? null,
+          sender: meta.from,
+          subject: meta.subject,
+          snippet: meta.snippet,
+          body_text: null,
+          received_at: Number.isNaN(received_at) ? now() : received_at,
+          processed_at: now(),
+          category: null,
+          handling: 'preexisting',
+        })
+        result.precutoff++
+      }
+      const next = page.next_page_token
+      if (next !== undefined && next.length > 0) {
+        store.setCheckpoint(CHECKPOINT_BACKLOG_CURSOR, next)
+        log?.('email pipeline backlog sweep advancing', { marked: result.precutoff })
+      } else {
+        store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
+        store.setCheckpoint(CHECKPOINT_BACKLOG_CURSOR, '')
+        log?.('email pipeline backlog sweep complete', { marked: result.precutoff })
+      }
+      store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
+      return result
     }
 
     // (2) RESUME — escalations whose chat delivery failed on an earlier tick.
@@ -143,33 +201,9 @@ export async function runEmailPipelineTick(
       const label_id = await processedLabelId(meta.account_id)
       const account_id = meta.account_id ?? null
 
-      // PRE-CUTOFF: archive + label, record with category NULL. The classifier
-      // is never invoked, so no backlog message can ever escalate.
-      if (!Number.isNaN(received_at) && received_at < go_live_after) {
-        await gmail.modifyMessage({
-          message_id: meta.id,
-          add_label_ids: [label_id],
-          remove_label_ids: [DEFAULT_LABEL],
-          ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
-        })
-        store.insertEmail({
-          id: meta.id,
-          thread_id: meta.thread_id,
-          account_id,
-          sender: meta.from,
-          subject: meta.subject,
-          snippet: meta.snippet,
-          body_text: null,
-          received_at: Number.isNaN(received_at) ? now() : received_at,
-          processed_at: now(),
-          category: null,
-          handling: 'archive',
-        })
-        result.precutoff++
-        return
-      }
-
-      // POST-CUTOFF: read the body, classify, act.
+      // Anything reaching here is NEW: the backlog sweep has completed, and
+      // `store.hasEmail` (below) has already excluded every message it marked.
+      // No date comparison is involved or needed.
       const full = await gmail.getMessage({ message_id: meta.id })
       const body_text = full.body_text.slice(0, STORED_BODY_LIMIT)
       const verdict: Classification = await classifyEmail(

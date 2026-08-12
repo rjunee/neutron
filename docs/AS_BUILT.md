@@ -43,10 +43,22 @@ caller ONLY (`buildOneShotSubstrateLlm`, now exported); there is no provider
 dependency and no new secret. A `null` LLM or a throwing one falls through to
 the default, so an LLM-less box degrades instead of failing a tick.
 
-**Turning it on does not escalate a decade of backlog.** The first tick stamps
-the `go_live_after` checkpoint. Mail older than it is archived (processed label
-added, `INBOX` removed) and recorded with `category NULL` — the classifier is
-never invoked on it, which is why the pre-cutoff row has no verdict to report.
+**Turning it on does not escalate a decade of backlog — and does not touch it
+either.** Before anything is processed, a ONE-TIME sweep pages the inbox and
+records every message already there as `handling='preexisting'` with
+`category NULL`. It issues NO Gmail writes at all: no processed label, no
+archive, nothing classified, nothing escalated. The owner's existing mail was
+triaged by hand and stays exactly where they left it (owner decision,
+2026-08-12). The sweep is resumable across ticks via a `backlog_cursor`
+checkpoint and completes at `backlog_marked='1'`; until then the tick returns
+early, so the code path that could escalate old mail is never entered.
+
+Afterwards, "is this history?" is a ROW LOOKUP — `store.hasEmail(id)` — not a
+date comparison re-run on every message for the life of the install. The
+earlier design gated each message on `received_at < go_live_after`, which had
+to be right forever and resolved an unparseable date toward "treat as new";
+`go_live_after` is still stamped, but only as provenance for P2. Marking the
+backlog once is what makes the invariant structural instead of conditional.
 An escalated message deliberately KEEPS `INBOX` (the owner still has to act on
 it in their mail client), so the label set cannot double as "handled"; the row
 in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
@@ -81,8 +93,12 @@ and reverted: inverting the `has_unsubscribe` downgrade reds two
 `pipeline-classify.test.ts` arms; an escalation that fires but says nothing
 (boilerplate body) reds two arms across `pipeline-poller` / `pipeline-dedup`;
 removing the `hasEmail` skip reds three dedup arms and removing the
-`escalated_at IS NULL` guard reds the resume arm; dropping the `go_live_after`
-check reds six poller arms. The producer side is pinned too:
+`escalated_at IS NULL` guard reds the resume arm; letting the backlog sweep
+fall through to the processing path reds the two sweep arms, which assert the
+mailbox is untouched (`modified` and `ensured` both empty, `backlog-1` still
+carrying exactly `['INBOX']`) — the seeded backlog message is deliberately
+shaped like the billing escalation, so a regression escalates it rather than
+failing quietly. The producer side is pinned too:
 `open/__tests__/open-email-pipeline-wiring.test.ts` boots the REAL composer and
 reads `composition.email_pipeline`, so deleting the composer block reds rather
 than shipping a declared capability nobody wires (the ISSUES #439/#440 lesson).
