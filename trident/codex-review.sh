@@ -102,7 +102,10 @@ else
   DIFF_TOTAL_LINES=$(printf '%s' "$FULL_DIFF" | awk 'END { print NR }')
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
-if [ -z "$DIFF" ]; then
+# A diff that is only WHITESPACE is nothing to review either. `$(...)` already eats
+# trailing newlines, but spaces/tabs survive and would sail past a bare -z test and
+# hand codex a blank DIFF section — the very approval-about-nothing this guards.
+if [ -z "${DIFF//[[:space:]]/}" ]; then
   # NOTHING TO REVIEW — the diff file failed to write, the base ref resolved wrong,
   # or the branch is empty. This is DEFERRED, never an approval: a reviewer handed
   # nothing to review must not answer, or the cross-model seat returns a confident

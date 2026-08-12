@@ -221,10 +221,24 @@ describe('trident/codex-review.sh — an EMPTY diff is DEFERRED, never an approv
     expect(stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
   })
 
-  test('a WHITESPACE-ONLY diff file is empty too → exit 3, not a blank-prompt approval', () => {
+  test('a NEWLINES-ONLY diff file is empty too → exit 3, not a blank-prompt approval', () => {
     const { status, stderr } = run({ authed: true, codexLoginExit: 0, diffFileContent: '\n\n\n' })
     expect(status).toBe(3)
     expect(stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
+  })
+
+  test('a SPACES/TABS-only diff file is empty too → exit 3, and codex is never invoked', () => {
+    // The case `$(...)`-stripping does NOT cover: trailing newlines vanish on their
+    // own, but spaces and tabs survive, so a bare `[ -z "$DIFF" ]` would call this
+    // content and hand codex a prompt whose DIFF section is blank.
+    const { status, stderr, codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      diffFileContent: '   \n\t\t\n  ',
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
+    expect(codexStdin).toBe('')
   })
 
   test('an empty diff does NOT reach the exec seam either (no exit-0 approval path)', () => {
