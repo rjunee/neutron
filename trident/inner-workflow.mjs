@@ -936,6 +936,48 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // failure matches `enforceSeverityGate`: only the two LISTED severities are skipped,
 // so an unknown/absent/misspelled severity still counts as code and still re-Forges,
 // and a malformed (null) finding does too.
+// A SYNTHESIS WE NEVER GOT IS AN INFRA BLOCK, NOT A CRASH.
+//
+// `agent()` returns null when its subagent dies on a terminal API error after
+// retries — which is exactly what a session-limit 429 looks like from in here. So
+// `reviewAndSynthesize` can hand back null, and reading `.verdict` off it threw:
+// `null is not an object (evaluating 'synthesis.verdict')` killed `adopt-200-r3`
+// and `adopt-201-r4` on 2026-08-12, each recorded only as `checkpoint:
+// "inner-error"` with no verdict at all.
+//
+// The cost is out of all proportion to the cause. One reviewer dying took the whole
+// lane down mid-loop, discarding a completed Forge build and every review already
+// paid for, and left nothing an operator could act on — the lane simply vanished
+// into `inner-error`. Meanwhile the SAME condition arriving as a deferred peer is
+// handled gracefully three lines away, because that path has a shape for "we did
+// not get this review".
+//
+// So normalise it into the shape that already exists. A null synthesis is a lane
+// that could not be judged: it must NEVER read as APPROVE (a review we did not get
+// cannot be treated as one — the same principle `infra-only` is built on), and it
+// must stop rather than re-Forge, because there is no finding for Forge to fix.
+const SYNTHESIS_UNAVAILABLE = Object.freeze({
+  verdict: 'REQUEST_CHANGES',
+  blockKind: 'infra-only',
+  findings: Object.freeze([
+    Object.freeze({
+      kind: LANE_FINDING_KIND,
+      severity: 'blocker',
+      short_summary: 'the synthesis reviewer returned no verdict',
+      summary:
+        'The synthesis agent produced no result — it died on a terminal API error ' +
+        '(a session limit reads exactly like this from inside the workflow). The code ' +
+        'was therefore never judged. This is NOT a finding about the diff: the lane ' +
+        'could not run. Re-run it once the credential has capacity.',
+    }),
+  ]),
+})
+
+/** Never let a dead synthesis agent crash the lane; hand back the infra shape. */
+function synthesisOrInfraBlock(synthesis) {
+  return synthesis && typeof synthesis === 'object' ? synthesis : SYNTHESIS_UNAVAILABLE
+}
+
 function classifyBlock(synthesis, deferredPeers) {
   if (!deferredPeers || deferredPeers.length === 0) return 'code'
   const findings = (synthesis && synthesis.findings) || []
@@ -1939,7 +1981,7 @@ ${task}${reflectionGuidance}`,
   let reviewedHead = branchHead
 
   // First review + synthesis.
-  let synthesis = await reviewAndSynthesize(diffFile, round, pr)
+  let synthesis = synthesisOrInfraBlock(await reviewAndSynthesize(diffFile, round, pr))
   finalVerdict = normalizeVerdict(synthesis.verdict)
   await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
 
@@ -1994,7 +2036,7 @@ ${task}${reflectionGuidance}`,
     // recording that push as `reviewedHead` would pin the merge to code the
     // upcoming review never sees. Empty → fail-closed, same as round 1.
     reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-    synthesis = await reviewAndSynthesize(diffFile, round, pr)
+    synthesis = synthesisOrInfraBlock(await reviewAndSynthesize(diffFile, round, pr))
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
   }
