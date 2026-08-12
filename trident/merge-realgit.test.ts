@@ -579,6 +579,158 @@ describe('REAL git — base-drift hold: a same-file silent reconciliation never 
   }, 30_000)
 })
 
+describe('REAL git — the gate works on a SHALLOW checkout instead of holding everything', () => {
+  /** As above: two edited regions far enough apart that git reconciles them silently. */
+  const lines = (mark1: string, mark20: string): string =>
+    Array.from({ length: 20 }, (_, i) => (i === 0 ? mark1 : i === 19 ? mark20 : `L${i + 1}`)).join('\n') + '\n'
+
+  /**
+   * An `origin` whose fork point sits BELOW a depth-1 boundary, plus a
+   * `--depth=1` clone of it — the shape of a CI checkout, and the shape of the
+   * repository trident itself merges from.
+   *
+   * The clone is where the merge runs. `main` and the branch each arrive with
+   * exactly one commit and NO shared ancestor in the object store, which is what
+   * makes `git merge-base` come back empty.
+   */
+  async function shallowCloneOf(driftFile: string, driftContent: string): Promise<string> {
+    const origin = await makeBaseRepo()
+    writeFileSync(join(origin, 'mod.txt'), lines('L1', 'L20'))
+    await git(origin, 'add', '.')
+    await git(origin, ...GIT_ID, 'commit', '-q', '-m', 'add mod') // ← the fork point
+    await fakeBuild(origin, 'trident/feat', 'mod.txt', lines('L1', 'L20-from-branch'))
+    // The base moves AFTER the review, so the fork point is now history.
+    await git(origin, 'checkout', '-q', 'main')
+    writeFileSync(join(origin, driftFile), driftContent)
+    await git(origin, 'add', '.')
+    await git(origin, ...GIT_ID, 'commit', '-q', '-m', `main moves ${driftFile}`)
+
+    const clone = mkdtempSync(join(tmpdir(), 'trident-shallow-'))
+    created.push(clone)
+    rmSync(clone, { recursive: true, force: true })
+    // `file://` is load-bearing: git IGNORES --depth for a plain-path local clone.
+    const cloned = await spawnCapture(
+      ['git', 'clone', '-q', '--depth', '1', '--no-single-branch', `file://${origin}`, clone],
+      tmpdir(),
+    )
+    if (!cloned.ok) throw new Error(`clone failed: ${cloned.stderr}`)
+    await git(clone, 'config', 'user.email', 'trident-test@neutron.local')
+    await git(clone, 'config', 'user.name', 'Trident Test')
+    // The merge scores the LOCAL branch ref, as a build workspace would have it.
+    await git(clone, 'branch', 'trident/feat', 'origin/trident/feat')
+    return clone
+  }
+
+  test('a shallow clone LANDS an unrelated-drift merge — it does not hold every merge forever', async () => {
+    const repo = await shallowCloneOf('UNRELATED.md', 'unrelated\n')
+
+    // PROVE THE PREMISE on the real artifact, before trusting any verdict about
+    // it: this checkout really is shallow, and git really cannot name a fork
+    // point here. That empty answer is what used to read as "unassessable" and
+    // hold — in BOTH modes, on every merge, with a message saying a re-run could
+    // not clear it.
+    expect((await gitOut(repo, 'rev-parse', '--is-shallow-repository')).trim()).toBe('true')
+    const forkProbe = await spawnCapture(['git', '-C', repo, 'merge-base', 'main', 'trident/feat'], repo)
+    expect(forkProbe.ok).toBe(false)
+    expect(forkProbe.stdout.trim()).toBe('')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    await cleanupAfterMerge(localRun(repo, 'aaaa5501', 'trident/feat'), deps)
+
+    // BEHAVIOUR: the merge LANDED (the drift was in another file), and it landed
+    // because the missing history was fetched — not because the gate was skipped.
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'show', 'main:mod.txt')).toContain('L20-from-branch')
+    expect((await gitOut(repo, 'rev-parse', '--is-shallow-repository')).trim()).toBe('false')
+    expect(await status(repo)).toBe('')
+    expect(await worktreeCount(repo)).toBe(1)
+  }, 60_000)
+
+  test('deepening did not disarm the gate: the SAME shallow clone still HOLDS a real overlap', async () => {
+    // The complement, and the one that matters: making the shallow case
+    // assessable must not be a way of making it always-pass. Same clone shape,
+    // but now the moved base edits the very file the reviewed diff edits, with
+    // no textual conflict to catch it.
+    const repo = await shallowCloneOf('mod.txt', lines('L1-from-main', 'L20'))
+    expect((await gitOut(repo, 'rev-parse', '--is-shallow-repository')).trim()).toBe('true')
+    const mainBeforeMerge = await gitOut(repo, 'rev-parse', 'main')
+    const reviewedTip = await gitOut(repo, 'rev-parse', 'trident/feat')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    const held = (await cleanupAfterMerge(localRun(repo, 'aaaa5502', 'trident/feat'), deps).catch(
+      (e: unknown) => e,
+    )) as TridentBaseDriftHold
+    expect(held).toBeInstanceOf(TridentBaseDriftHold)
+    expect(held.detail.silent_overlap).toEqual(['mod.txt'])
+    // The fork point it found is a REAL commit — the one below the old boundary —
+    // not a fabricated stand-in for history it could not see.
+    expect(held.detail.review_base_sha).not.toBeNull()
+    expect(held.detail.review_base_sha).not.toBe(held.detail.current_base_sha)
+    // …and nothing landed.
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'rev-parse', 'main')).toBe(mainBeforeMerge)
+    expect(await gitOut(repo, 'show', 'main:mod.txt')).not.toContain('L20-from-branch')
+    expect(await gitOut(repo, 'rev-parse', 'trident/feat')).toBe(reviewedTip)
+  }, 60_000)
+})
+
+describe('REAL git — a FAILED land puts the branch ref back, so the next attempt still sees the drift', () => {
+  test('the ref returns to the reviewed commit when `git merge` refuses at the land step', async () => {
+    // THE FAIL-OPEN THIS CLOSES. The rebase moves the SHARED ref
+    // `refs/heads/<branch>` onto the base tip. Only the HOLD path used to put it
+    // back, so any other exit between the rebase and a successful land left the
+    // branch sitting on the tip — and a fork point equal to the tip reads as
+    // "nothing drifted", permanently, for that branch. The damage is invisible
+    // by construction (the evidence is what gets destroyed), so this asserts on
+    // the evidence itself: the ref, and the fork point git derives from it.
+    const repo = await makeBaseRepo()
+    writeFileSync(join(repo, 'mod.txt'), 'base\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'add mod')
+    const forkPoint = (await gitOut(repo, 'rev-parse', 'main')).trim()
+    // The reviewed build adds a NEW file...
+    await fakeBuild(repo, 'trident/feat', 'new.txt', 'from the build\n')
+    const reviewedTip = (await gitOut(repo, 'rev-parse', 'trident/feat')).trim()
+    // ...the base then moves elsewhere (drift, but no overlap → the gate lets it
+    // through to the land, which is the only way to reach the failure below)...
+    await git(repo, 'checkout', '-q', 'main')
+    writeFileSync(join(repo, 'UNRELATED.md'), 'unrelated\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main moves')
+    const mainBeforeMerge = (await gitOut(repo, 'rev-parse', 'main')).trim()
+    // ...and the shared checkout holds an UNTRACKED `new.txt`, which makes the
+    // real `git merge --no-ff` in step (3) refuse. A genuine git failure, not a
+    // stubbed one.
+    writeFileSync(join(repo, 'new.txt'), 'somebody else was here\n')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    const err = await cleanupAfterMerge(localRun(repo, 'bbbb7701', 'trident/feat'), deps).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    // The land really did fail (otherwise this test proves nothing).
+    expect(err).toBeInstanceOf(TridentMergeError)
+    expect((await gitOut(repo, 'rev-parse', 'main')).trim()).toBe(mainBeforeMerge)
+
+    // THE INVARIANT: the branch is back on the commit the review read, and the
+    // fork point is the pre-drift commit again — NOT main's tip, which is what
+    // a left-behind rebase would have made it.
+    expect((await gitOut(repo, 'rev-parse', 'trident/feat')).trim()).toBe(reviewedTip)
+    const fork = await spawnCapture(['git', '-C', repo, 'merge-base', 'main', 'trident/feat'], repo)
+    expect(fork.stdout.trim()).toBe(forkPoint)
+    expect(fork.stdout.trim()).not.toBe(mainBeforeMerge)
+
+    // And the retry is not wedged: clear what blocked the land and it lands.
+    rmSync(join(repo, 'new.txt'), { force: true })
+    await cleanupAfterMerge(localRun(repo, 'bbbb7702', 'trident/feat'), deps)
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'show', 'main:new.txt')).toContain('from the build')
+    expect(await status(repo)).toBe('')
+    expect(await worktreeCount(repo)).toBe(1)
+    expect(noStrayWorktreeDirs(repo)).toBe(true)
+  }, 30_000)
+})
+
 describe('REAL git — a dirty lingering build worktree is PRESERVED (#541)', () => {
   test('mergeLocal never force-removes it: the uncommitted work survives and the merge fails loudly', async () => {
     const repo = await makeBaseRepo()

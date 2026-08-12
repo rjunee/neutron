@@ -662,6 +662,12 @@ function driftHost(shape: {
   unresolvable?: string[]
   /** Make `git merge-base` fail (fork point unknown) WITHOUT breaking any ref. */
   break_merge_base?: boolean
+  /** What `git rev-parse --is-shallow-repository` prints. Unset ⇒ the flag is
+   *  not answered at all (an old git / a failed probe), which must NOT deepen. */
+  shallow?: boolean
+  /** A shallow repo whose `fetch --unshallow` fails (offline, no origin). The
+   *  fork point stays unknown, so the hold must survive. */
+  break_unshallow?: boolean
   /** Make `git log … -- <path>` fail (commit count unknown). */
   break_log?: boolean
   /** Make `git diff --name-only <a> <b>` fail (materiality unassessable). */
@@ -691,8 +697,21 @@ function driftHost(shape: {
   // the branch where the review found it.
   let branchRef = branchHead
   let round = 0
+  // A SHALLOW repo's history stops above the fork point, so `merge-base` answers
+  // nothing until the missing commits are fetched — after which it answers
+  // normally. That before/after is the whole behaviour under test.
+  let deepened = false
   const host: RunHostCommand = async (cmd) => {
     calls.push(cmd.join(' '))
+    if (cmd.includes('--is-shallow-repository')) {
+      if (shape.shallow === undefined) return fail('unknown option')
+      return ok(shape.shallow && !deepened ? 'true' : 'false')
+    }
+    if (cmd.includes('fetch') && cmd.includes('--unshallow')) {
+      if (shape.break_unshallow === true) return fail('could not read from remote')
+      deepened = true
+      return ok()
+    }
     if (cmd.includes('rev-parse') && cmd.includes('--verify')) {
       const ref = (cmd[cmd.length - 1] ?? '').replace('^{commit}', '')
       if ((shape.unresolvable ?? []).includes(ref)) return fail('unknown revision')
@@ -714,6 +733,8 @@ function driftHost(shape: {
     }
     if (cmd.includes('merge-base')) {
       if (shape.break_merge_base === true) return fail('no merge base')
+      // Shallow: the fork point is below the graft boundary until deepened.
+      if (shape.shallow === true && !deepened) return fail('no merge base')
       return ok(shape.review_base)
     }
     if (cmd[0] === 'gh' && cmd.includes('pr') && cmd.includes('view')) {
@@ -947,6 +968,110 @@ describe('assessBaseDrift (#542)', () => {
   })
 })
 
+describe('assessBaseDrift on a SHALLOW clone (#542)', () => {
+  /** The shallow shape: both refs resolve, and `merge-base` answers nothing
+   *  because the fork point is below the graft boundary. Untreated that is
+   *  `assessable:false` on EVERY merge in the checkout, in both modes. */
+  const shallowShape = {
+    base: 'main',
+    branch: 'feat-x',
+    review_base: SHA_A,
+    current_base: SHA_B,
+    base_touched: ['docs/README.md'],
+    reviewed_files: ['trident/merge.ts'],
+    shallow: true,
+  }
+
+  test('the missing history is fetched and the fork point found — no permanent hold', async () => {
+    const { host, calls } = driftHost(shallowShape)
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    // The DEEPEN really happened (not "the fake answered anyway").
+    expect(calls.some((c) => c === 'git -C /repo fetch --unshallow origin')).toBe(true)
+    // …and the answer is a real assessment, so nothing holds on this immaterial drift.
+    expect(a.review_base_sha).toBe(SHA_A)
+    expect(a.assessable).toBe(true)
+    expect(a.moved).toBe(true)
+    expect(shouldHoldForBaseDrift(a)).toBe(false)
+    expect(shouldHoldForBaseDrift(a, new Set(), { hold_when_unassessable: true })).toBe(false)
+  })
+
+  test('deepening does not weaken the gate: material drift found afterwards still HOLDS', async () => {
+    const { host } = driftHost({
+      ...shallowShape,
+      base_touched: ['trident/merge.ts'],
+      reviewed_files: ['trident/merge.ts'],
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(a.overlap).toEqual(['trident/merge.ts'])
+    expect(shouldHoldForBaseDrift(a)).toBe(true)
+  })
+
+  test('a COMPLETE repo is never deepened — a missing fork point there still fails CLOSED', async () => {
+    // The probe is a precondition, not an optimisation: `--unshallow` on a
+    // complete repository is an ERROR, and two genuinely unrelated histories
+    // must keep holding rather than be papered over by a fetch.
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      break_merge_base: true,
+      shallow: false,
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(calls.some((c) => c.includes('--unshallow'))).toBe(false)
+    expect(a.review_base_sha).toBeNull()
+    expect(a.assessable).toBe(false)
+    expect(shouldHoldForBaseDrift(a)).toBe(true)
+    expect(shouldHoldForBaseDrift(a, new Set(), { hold_when_unassessable: true })).toBe(true)
+  })
+
+  test('a git that will not answer the shallow probe is left alone, and still HOLDS', async () => {
+    // `shallow` unset ⇒ the probe itself fails (an old git, a broken checkout).
+    // Anything that is not the literal `true` must not trigger a fetch.
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      break_merge_base: true,
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(calls.some((c) => c.includes('--unshallow'))).toBe(false)
+    expect(a.assessable).toBe(false)
+    expect(shouldHoldForBaseDrift(a)).toBe(true)
+  })
+
+  test('a deepen that FAILS keeps the hold — it never reports an unmeasured base as clean', async () => {
+    const { host, calls } = driftHost({ ...shallowShape, break_unshallow: true })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(calls.some((c) => c.includes('--unshallow'))).toBe(true)
+    expect(a.review_base_sha).toBeNull()
+    expect(a.assessable).toBe(false)
+    expect(a.moved).toBe(false)
+    expect(shouldHoldForBaseDrift(a)).toBe(true)
+    expect(shouldHoldForBaseDrift(a, new Set(), { hold_when_unassessable: true })).toBe(true)
+  })
+
+  test('an unresolvable REF is not a shallow history — nothing is fetched for it', async () => {
+    // Deepening adds commits; it cannot conjure a ref that does not exist. The
+    // retry is gated on BOTH tips having resolved so a broken-ref hold does not
+    // pay for a full history fetch it can never use.
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      unresolvable: ['feat-x'],
+      shallow: true,
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(a.branch_head_sha).toBeNull()
+    expect(calls.some((c) => c.includes('--unshallow'))).toBe(false)
+    expect(a.assessable).toBe(false)
+  })
+})
+
 describe('baseDriftHoldMessage (#542)', () => {
   const assessed = {
     review_base_sha: SHA_A,
@@ -1039,8 +1164,13 @@ describe('baseDriftHoldMessage (#542)', () => {
     // through by hand.
     const msg = baseDriftHoldMessage('feat-x', 'main', { ...assessed, moved: false, assessable: false }, [])
     expect(msg).not.toContain('re-run the build')
-    expect(msg).toContain('--unshallow')
     expect(msg).toContain('by hand')
+    // And it does not prescribe the deepen either: the gate ALREADY ran it
+    // (`deepenShallowHistory`) before any reader can see this text. Telling
+    // someone to go do a fetch that just happened sends them round the same
+    // loop the paragraph above exists to stop.
+    expect(msg).toContain('already tried fetching')
+    expect(msg).not.toContain('deepen it with')
   })
 
   test('DOES prescribe a re-run for a ref that merely would not resolve', () => {

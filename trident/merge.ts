@@ -87,8 +87,18 @@ export class TridentMergeError extends Error {
  * to chat, so the hold is LOUD rather than a silent land.
  *
  * `detail` carries the machine-readable provenance (both shas + the overlapping
- * paths) for the audit trail; `message` is the plain-English, no-raw-git-stderr
- * text the owner reads.
+ * paths) for whoever CATCHES the throw; `message` is the plain-English,
+ * no-raw-git-stderr text the owner reads.
+ *
+ * `message` — not `detail` — is what survives. `applyResult` records the run as
+ * `failed` with the message AS `failure_reason` and drops the error object, so
+ * nothing durable is keyed on these fields: they are for callers and tests in
+ * this process, and calling them an audit trail would promise a record that does
+ * not exist. What the owner-facing text preserves is deliberately less (7-char
+ * shas, the first five paths and a count) because it is posted to chat; if the
+ * full list is ever needed after the fact, it is `git diff --name-only` between
+ * the two shas the message already names, not a field somebody has to remember
+ * to write down.
  */
 export class TridentBaseDriftHold extends Error {
   constructor(
@@ -462,11 +472,74 @@ async function changedPaths(
 }
 
 /**
+ * Fetch the history a SHALLOW clone is missing, so the fork point can be found.
+ * Returns whether the repository was shallow AND is not any more.
+ *
+ * WHY THIS EXISTS. `git merge-base` answers by WALKING history, and a shallow
+ * clone's history stops at the graft boundary. When the fork point is below that
+ * boundary — which for a `--depth=1` checkout of the base is EVERY branch older
+ * than the tip — merge-base prints nothing and exits non-zero. The assessment
+ * cannot tell that apart from "these two histories are genuinely unrelated", so
+ * it reports `assessable:false`, and both modes then HOLD (PR mode via
+ * `hold_when_unassessable`, local mode via the both-refs-resolved rule). On a
+ * shallow checkout that is not an edge case: it is EVERY merge, forever, under a
+ * message that correctly tells the owner a re-run cannot clear it. A gate that
+ * refuses every merge gets switched off, and a switched-off gate protects
+ * nothing — so the missing history is FETCHED and the question asked again.
+ *
+ * It cannot fail open. Deepening only ADDS commits; it can reveal a fork point
+ * that was always there, never invent one. Unrelated histories stay unrelated,
+ * a fetch that fails leaves the original unassessable answer, and a repository
+ * that is not shallow is not touched at all (`--unshallow` is an ERROR there, so
+ * the probe is a precondition, not an optimisation). Nor does a fetch that
+ * succeeds without helping change anything: `--unshallow` follows the remote's
+ * CONFIGURED refspec, so a checkout narrow enough to leave one side truncated
+ * re-asks the same question, gets the same empty answer, and holds as before.
+ *
+ * `--unshallow` over an incremental `--deepen=N`: N is a guess, a wrong guess
+ * costs another round trip apiece, and this runs once per checkout at most — the
+ * repository is complete afterwards, so no later merge pays it again.
+ */
+async function deepenShallowHistory(run_host: RunHostCommand, repo: string): Promise<boolean> {
+  const probe = await run_host(['git', '-C', repo, 'rev-parse', '--is-shallow-repository'], repo)
+  // Only the literal `true` deepens. An old git that does not know this flag, a
+  // probe that failed, anything else — leave the repository alone and keep the
+  // hold, which is the safe direction.
+  if (!probe.ok || probe.stdout.trim() !== 'true') return false
+  const fetched = await run_host(['git', '-C', repo, 'fetch', '--unshallow', 'origin'], repo)
+  return fetched.ok
+}
+
+/**
  * Assess base drift for `branch_ref` against `base_ref` in `repo`. MUST be
  * called BEFORE any rebase: a rebase replays the branch onto the base tip, which
  * makes the fork point equal the tip and ERASES the very drift being measured.
+ *
+ * A missing fork point on a SHALLOW clone is retried ONCE after deepening (see
+ * `deepenShallowHistory`), and the retry re-reads BOTH tips rather than reusing
+ * the first pass's: `fetch --unshallow` also advances the remote-tracking refs,
+ * and scoring a fork point found against a tip that has since moved would report
+ * about a combination that never existed.
  */
 export async function assessBaseDrift(
+  run_host: RunHostCommand,
+  repo: string,
+  base_ref: string,
+  branch_ref: string,
+): Promise<BaseDriftAssessment> {
+  const first = await assessBaseDriftOnce(run_host, repo, base_ref, branch_ref)
+  // Retry ONLY the shallow signature: both refs resolved, and git still found no
+  // commit in common. A null tip is a ref problem that deepening cannot fix.
+  const missingForkPoint =
+    first.review_base_sha === null &&
+    first.current_base_sha !== null &&
+    first.branch_head_sha !== null
+  if (!missingForkPoint) return first
+  if (!(await deepenShallowHistory(run_host, repo))) return first
+  return await assessBaseDriftOnce(run_host, repo, base_ref, branch_ref)
+}
+
+async function assessBaseDriftOnce(
   run_host: RunHostCommand,
   repo: string,
   base_ref: string,
@@ -694,7 +767,11 @@ export function baseDriftHoldMessage(
     // for the fork-point case: both refs resolved and git still found no common
     // ancestor, which on a SHALLOW checkout is not a transient failure but the
     // checkout's shape — every re-run gets the same answer. Sending the reader
-    // around that loop is how a fail-closed hold reads as a broken tool.
+    // around that loop is how a fail-closed hold reads as a broken tool. The
+    // shallow case is now DEEPENED and re-asked automatically before reaching
+    // here (`deepenShallowHistory`), so a reader who gets this far has either a
+    // deepen that would not run or two genuinely unrelated histories — say that,
+    // rather than prescribing the fetch that was already attempted.
     const cause =
       unresolved.length > 0
         ? `I could not establish where ${unresolved.join(' or ')} ` +
@@ -704,9 +781,10 @@ export function baseDriftHoldMessage(
       unresolved.length > 0
         ? `re-run the build to get the diff reviewed against the current \`${base}\`.`
         : `both branches exist, so this is history I cannot see rather than a branch I cannot ` +
-          `find — a shallow checkout (deepen it with \`git fetch --unshallow\`) or two genuinely ` +
-          `unrelated histories. A re-run will reach the same point; land this one by hand after ` +
-          `a look at the combination.`
+          `find. I already tried fetching the history a shallow checkout would be missing and ` +
+          `still found nothing in common, so these are either two unrelated histories or a ` +
+          `checkout I could not deepen. A re-run will reach the same point; land this one by ` +
+          `hand after a look at the combination.`
     return (
       `I'm holding the merge of \`${branch}\` into \`${base}\`: ${cause}, so I cannot tell ` +
       `whether this was reviewed against it. Nothing has confirmed that combination, so I am ` +
@@ -1385,6 +1463,10 @@ export function buildMergeCleanupDeps(
         //     worktree's `git checkout <branch>` fails "already checked out").
         await freeBranchFromWorktrees(run_host, repo, branch, wt)
         await provisionRunWorktree(run_host, repo, wt, base)
+        // Did the land in (3) actually happen? Everything else between here and
+        // the `finally` is a path on which `refs/heads/<branch>` must go BACK to
+        // the reviewed commit — see (3a).
+        let landed = false
         try {
           // (2) REBASE the build's branch onto the LATEST base IN THE WORKTREE so it
           //     replays on top of any sibling build that merged before it. On a real
@@ -1441,7 +1523,33 @@ export function buildMergeCleanupDeps(
             'git merge',
             await run_host(['git', '-C', repo, 'merge', '--no-ff', branch, '-m', `Merge ${branch}`], repo),
           )
+          landed = true
         } finally {
+          // (3a) PUT THE BRANCH BACK ON EVERY PATH THAT DID NOT LAND — not just
+          //     on the hold. The rebase in (2) MOVED the SHARED ref
+          //     `refs/heads/<branch>` onto the current base tip, which is the
+          //     evidence the drift assessment reads: once it points at the tip,
+          //     `merge-base(branch, base)` IS the tip and the next attempt
+          //     measures `moved:false` and lands the combination nothing
+          //     reviewed. The HOLD path used to be the only one that undid it,
+          //     so any OTHER exit between the rebase and a successful land — the
+          //     `git merge` in (3) refusing, the checkout failing, a throw from
+          //     the resolver, a rejected promise anywhere in between — left the
+          //     ref rebased and the gate permanently blind for that branch. That
+          //     is the fail-OPEN direction, so it is undone here, where every
+          //     non-landing path passes.
+          //
+          //     Ordered BEFORE the teardown: the reset is issued from `wt` (the
+          //     rebase left it on `branch`), which stops existing at (4).
+          //     Idempotent, so the hold path having already restored costs one
+          //     no-op reset rather than a second code path to keep in sync.
+          //
+          //     This closes the paths that UNWIND. It cannot close a `SIGKILL`
+          //     between (2) and (3) — no `finally` runs there — which stays the
+          //     residual window: a killed local merge can still leave a rebased
+          //     ref behind. Stating it plainly rather than implying the crash
+          //     case is covered.
+          if (!landed) await restoreBranchRef(run_host, wt, repo, branch, drift.branch_head_sha)
           // (4) Tear down the per-run worktree on EVERY terminal path (success OR a
           //     thrown escalation) — never orphan a changed worktree (the fseventsd
           //     CPU-peg lesson). Frees the branch so the delete below succeeds.
