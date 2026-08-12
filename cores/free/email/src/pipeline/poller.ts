@@ -99,6 +99,17 @@ export interface EmailPipelineTickDeps {
   /** Everything `escalateEmail` needs except `store` / `now`, supplied here. */
   escalate: Omit<EscalateDeps, 'store' | 'now'>
   now: () => number
+  /**
+   * WHEN THE PIPELINE BECAME RESPONSIBLE FOR THIS MAILBOX — captured at BOOT,
+   * not at the first fire. The interval cron waits a full period before its
+   * first execution, so stamping the boundary inside the tick drew the line
+   * five minutes late: mail that arrived in that window was older than the
+   * cutoff and the sweep filed it as `preexisting` — never classified, never
+   * escalated, permanently. The wrapper captures this the moment the handler
+   * is built and threads it here. Absent ⇒ `now()`, the old behaviour, which
+   * is correct only for a caller that fires immediately.
+   */
+  activation_at?: number
   log?: PipelineLog
   max_results?: number
   max_escalation_attempts?: number
@@ -266,10 +277,15 @@ export async function runEmailPipelineTick(
     // is the sweep's boundary: everything older is the owner's existing inbox,
     // everything newer arrived after we started and is real mail. It is NOT a
     // per-message gate in steady state — see invariant 1.
+    // BOOT, NOT FIRST FIRE. `activation_at` is when this pipeline started
+    // being responsible for the mailbox; `now()` is five minutes later on a
+    // default interval cron. The gap is not academic — it is the window right
+    // after switch-on, when the owner is most likely to be watching.
+    const activation = deps.activation_at ?? now()
     const stamped = store.getCheckpoint(CHECKPOINT_GO_LIVE_AFTER)
     let go_live_after: number
     if (stamped === null) {
-      go_live_after = now()
+      go_live_after = activation
       store.setCheckpoint(CHECKPOINT_GO_LIVE_AFTER, String(go_live_after))
       log?.('email pipeline go-live checkpoint stamped', { go_live_after })
     } else {
@@ -287,6 +303,14 @@ export async function runEmailPipelineTick(
     // entire history read as new mail — classified, labelled and escalated. A
     // cheap probe re-opens the sweep whenever a connected account has no
     // completion mark of its own.
+    // The FIRST sweep — the migration itself — versus a mailbox connected
+    // later. They need different cutoffs and the difference matters both ways:
+    // the initial accounts' line is ACTIVATION (anything after boot is real
+    // mail, however late the first fire runs), while an account connected
+    // afterwards has its own untriaged history right up to the moment it was
+    // connected, so its line is NOW. Using activation for a late-joining
+    // mailbox would escalate months of its back-catalogue.
+    const initial_sweep = store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1'
     let backlogPending = store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1'
     if (!backlogPending) {
       const probe = await gmail.listMessages({ label: DEFAULT_LABEL, max_results: 1 })
@@ -370,7 +394,7 @@ export async function runEmailPipelineTick(
         const stored = store.getCheckpoint(key)
         const parsed = stored === null ? Number.NaN : Number(stored)
         if (Number.isNaN(parsed)) {
-          const stamp = now()
+          const stamp = initial_sweep ? activation : now()
           store.setCheckpoint(key, String(stamp))
           cutoffFor.set(id, stamp)
           log?.('email pipeline backlog cutoff stamped for account', { account: id, stamp })
@@ -485,16 +509,31 @@ export async function runEmailPipelineTick(
     }
 
     if (backlogPending) {
-      // Still sweeping and out of budget for this tick. Live mail is not
-      // processed yet — that is the price of not escalating history — but the
-      // budget bounds how long one tick runs, not how long the sweep takes.
+      // Still sweeping and out of budget for this tick.
+      //
+      // THIS USED TO RETURN. The reasoning was sound — never enter the code
+      // path that could escalate history — but the bound it accepted was not:
+      // one tick sweeps at most `max_backlog_pages × backlog_page_size`
+      // messages, so an inbox larger than that made the owner's next important
+      // email wait for the NEXT cron fire, and a big enough inbox made it wait
+      // for many. That breaks the acceptance criterion this phase is written
+      // against ("an important message reaches chat within one poll interval")
+      // precisely on the installs where switch-on is most visible.
+      //
+      // So the tick carries on into a RESTRICTED live pass: the top of the
+      // inbox only, and only messages that arrived after the account's cutoff.
+      // The safety property is unchanged and now explicit rather than
+      // structural — history is excluded by the same one-time migration
+      // boundary the sweep itself uses, not by not looking.
       log?.('email pipeline backlog sweep paused at its page budget', {
         pages: sweepPages,
         marked: result.precutoff,
       })
-      store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
-      return result
+      result.backlog_sweeping = true
     }
+    // Restricted mode: sweep still running, so the live pass sees only the
+    // newest page and only post-cutoff arrivals.
+    const sweeping = backlogPending
 
     // (2) RESUME — escalations whose chat delivery failed on an earlier tick.
     // The query's `escalated_at IS NULL` is itself the dedup guard.
@@ -601,9 +640,10 @@ export async function runEmailPipelineTick(
       const received_at = Date.parse(meta.internal_date)
       const account_id = meta.account_id ?? null
 
-      // Anything reaching here is NEW: the backlog sweep has completed, and
-      // `store.hasEmail` (below) has already excluded every message it marked.
-      // No date comparison is involved or needed.
+      // Anything reaching here is NEW: either the backlog sweep has completed
+      // and `store.hasEmail` (below) has already excluded every message it
+      // marked, or the sweep is still running and the caller has filtered this
+      // page down to post-cutoff arrivals. No date comparison in steady state.
       //
       // The account is NAMED. Gmail ids are account-local, so an unqualified
       // read returns whichever mailbox recognises the id first — on a
@@ -691,7 +731,34 @@ export async function runEmailPipelineTick(
       result.archived++
     }
 
-    const page_budget = deps.max_poll_pages ?? DEFAULT_MAX_POLL_PAGES
+    /**
+     * The account's one-time migration boundary, re-read from the store rather
+     * than carried out of the sweep block — the sweep may have run on an
+     * EARLIER tick, and the boundary has to mean the same thing on every one.
+     */
+    function cutoffForAccount(account_id: string | null): number {
+      const stored = store.getCheckpoint(backlogCutoffKey(account_id))
+      const parsed = stored === null ? Number.NaN : Number(stored)
+      return Number.isNaN(parsed) ? go_live_after : parsed
+    }
+
+    /**
+     * Restricted-mode admission. A message is live mail only if we can PROVE
+     * it arrived after the boundary — an unparseable or missing date is
+     * treated as history, the same direction the sweep errs in, because
+     * escalating the owner's back-catalogue is the failure this design exists
+     * to prevent. Such a message is not lost: the sweep still reaches it.
+     */
+    function arrivedAfterCutoff(meta: GmailMessageMeta): boolean {
+      const received_at = Date.parse(meta.internal_date)
+      if (Number.isNaN(received_at)) return false
+      return received_at > cutoffForAccount(meta.account_id ?? null)
+    }
+
+    // ONE page while the sweep runs. New mail is at the TOP of an INBOX
+    // listing, so the newest page is where it is; walking deeper would just
+    // re-read the history the sweep is already marking, page by page, twice.
+    const page_budget = sweeping ? 1 : deps.max_poll_pages ?? DEFAULT_MAX_POLL_PAGES
     // RESUME WHERE THE LAST TICK RAN OUT. A budget that always restarts at the
     // top is not a bound on work, it is permanent starvation: with more than
     // `page_budget × max_results` handled messages retained above it, an
@@ -700,8 +767,14 @@ export async function runEmailPipelineTick(
     // what turns "bounded per tick" into "bounded per tick AND eventually
     // reached". It is cleared as soon as the walk finds mail or runs out, so
     // the next tick starts at the top again where new mail arrives.
-    const savedCursor = store.getCheckpoint(CHECKPOINT_POLL_CURSOR)
-    const savedCursors = parseCursorMap(store.getCheckpoint(CHECKPOINT_POLL_CURSORS))
+    //
+    // In RESTRICTED mode the continuation cursor is deliberately ignored: it
+    // points wherever the last full walk ran out, and what this pass needs is
+    // the top of the inbox, every tick, for as long as the sweep lasts.
+    const savedCursor = sweeping ? null : store.getCheckpoint(CHECKPOINT_POLL_CURSOR)
+    const savedCursors = sweeping
+      ? {}
+      : parseCursorMap(store.getCheckpoint(CHECKPOINT_POLL_CURSORS))
     let cursor: string | undefined =
       savedCursor !== null && savedCursor.length > 0 ? savedCursor : undefined
     let cursors: Record<string, string> = savedCursors
@@ -721,6 +794,9 @@ export async function runEmailPipelineTick(
       let handledOnThisPage = 0
       for (const meta of listed.results) {
         if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
+        // History stays invisible to the classifier while the sweep is still
+        // deciding what history is.
+        if (sweeping && !arrivedAfterCutoff(meta)) continue
         result.scanned++
         try {
           await handleMessage(meta)
@@ -758,6 +834,16 @@ export async function runEmailPipelineTick(
         exhausted = true
         break
       }
+    }
+
+    if (sweeping) {
+      // Restricted mode writes NO continuation cursor. Its budget of one page
+      // is a deliberate scope, not a place it ran out of — persisting it would
+      // hand the next full walk a cursor into the middle of the inbox and
+      // strand everything above it.
+      store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
+      store.setCheckpoint(CHECKPOINT_CONSECUTIVE_ERRORS, '0')
+      return result
     }
 
     if (!exhausted) {

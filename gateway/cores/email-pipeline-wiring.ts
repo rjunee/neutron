@@ -82,6 +82,16 @@ export function buildEmailPipelinePollHandler(
   cfg: EmailPipelineCompositionConfig,
 ): CronHandler {
   const now = cfg.now ?? ((): number => Date.now())
+  // ACTIVATION IS NOW, NOT THE FIRST FIRE. An `interval_ms` job waits a full
+  // interval before its first execution, so the tick's own `now()` is five
+  // minutes after the pipeline actually took responsibility for the mailbox.
+  // Mail arriving in that window is older than a cutoff stamped inside the
+  // tick, so the backlog sweep files it as history the owner already triaged —
+  // never classified, never escalated, and no later pass ever looks at it
+  // again. Capturing the boundary HERE, where the handler is built, is the
+  // difference between "the line is where we started" and "the line is
+  // wherever we happened to first wake up".
+  const activated_at = now()
   let store: EmailPipelineStore | null = null
 
   return async () => {
@@ -113,6 +123,7 @@ export function buildEmailPipelinePollHandler(
           project_slug: cfg.project_slug,
         },
         now,
+        activation_at: activated_at,
       })
       // Every kind of work the tick can do has to appear in BOTH lines. A tick
       // that only finished an owed Gmail write reported `skipped` while having

@@ -162,6 +162,61 @@ describe('buildEmailPipelinePollHandler', () => {
     }
   })
 
+  test('mail that arrives BETWEEN boot and the first fire is escalated, not filed as history', async () => {
+    // The interval cron waits a full period before its first execution. The
+    // activation boundary therefore has to be captured where the handler is
+    // BUILT — if the tick stamps it on its own first fire, everything that
+    // arrived in the intervening five minutes is older than the line and the
+    // backlog sweep files it as mail the owner already triaged. Nothing looks
+    // at it again: not the sweep, not the poll, not the brief.
+    const BOOT = Date.parse('2026-08-12T09:00:00.000Z')
+    let clock = BOOT
+    const posts: string[] = []
+    const gmail = buildSeededInMemoryGmailClient({ now: () => clock })
+    const { cfg, cleanup } = config({
+      gmail: gmail as GmailClient,
+      now: () => clock,
+      deliver: async (_topic, envelope) => {
+        posts.push(envelope.body)
+        return { prompt_id: 'p', persisted: true, delivered_live: true }
+      },
+    })
+    try {
+      // Boot. The handler exists; the cron has not fired.
+      const handler = buildEmailPipelinePollHandler(cfg)
+
+      // The owner's existing inbox, and then — one minute after boot — the
+      // message this whole phase exists to deliver.
+      gmail.seed({
+        id: 'old-1',
+        subject: 'Action required: payment failed',
+        from: 'Vendor Billing <billing@vendor.example.com>',
+        body_text: 'Last year.',
+        internal_date: new Date(BOOT - 365 * 86_400_000).toISOString(),
+        label_ids: ['INBOX'],
+      })
+      clock = BOOT + 60_000
+      gmail.seed({
+        id: 'window-1',
+        subject: 'Action required: payment failed',
+        from: 'Vendor Billing <billing@vendor.example.com>',
+        body_text: 'Your card was declined.',
+        internal_date: new Date(clock).toISOString(),
+        label_ids: ['INBOX'],
+      })
+
+      // The first fire, a full interval after boot.
+      clock = BOOT + EMAIL_PIPELINE_POLL_INTERVAL_MS
+      const result = await handler(CTX)
+
+      expect(result.status).toBe('ok')
+      expect(posts).toHaveLength(1)
+      expect(posts[0]).toContain('Action required: payment failed')
+    } finally {
+      cleanup()
+    }
+  })
+
   test('a message that classifies as important escalates through the wired deliver', async () => {
     const posts: Array<{ topic_id: string; body: string; durability: string }> = []
     const pushes: string[] = []

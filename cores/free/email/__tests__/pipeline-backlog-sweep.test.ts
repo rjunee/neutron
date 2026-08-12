@@ -29,6 +29,7 @@ import type {
 } from '../src/contract.ts'
 import {
   CHECKPOINT_BACKLOG_DONE,
+  DEFAULT_BACKLOG_PAGE_SIZE,
   runEmailPipelineTick,
 } from '../src/pipeline/poller.ts'
 import { openEmailPipelineStore, type EmailPipelineStore } from '../src/pipeline/store.ts'
@@ -49,15 +50,34 @@ function msg(id: string, account_id?: string): GmailMessageMeta {
 }
 
 /** A page script: each call returns the next entry. */
-function scriptedClient(pages: GmailListResult[]): GmailClient & { calls: GmailListInput[] } {
+function scriptedClient(
+  pages: GmailListResult[],
+): GmailClient & { calls: GmailListInput[]; live_calls: GmailListInput[] } {
   const calls: GmailListInput[] = []
+  const live_calls: GmailListInput[] = []
   let i = 0
   const die = (): never => {
     throw new Error('the backlog sweep must not touch anything but listMessages')
   }
   return {
     calls,
+    live_calls,
     async listMessages(input: GmailListInput): Promise<GmailListResult> {
+      // A PAUSED SWEEP NOW ALSO READS THE TOP OF THE INBOX for post-cutoff
+      // arrivals, so a tick makes TWO list calls, not one. That second call is
+      // not part of the scripted sweep and must not consume a scripted page —
+      // doing so shifted every cursor assertion in this file by one. It is
+      // identified by its page size: the sweep pages at
+      // DEFAULT_BACKLOG_PAGE_SIZE (or the probe's 1), the live pass at
+      // DEFAULT_MAX_RESULTS. These arms have no live mail, so it sees none.
+      // `calls` stays the SWEEP's call log — every cursor assertion in this
+      // file indexes it — so the live call is logged separately.
+      const isSweepCall =
+        input.max_results === DEFAULT_BACKLOG_PAGE_SIZE || input.max_results === 1
+      if (!isSweepCall) {
+        live_calls.push(input)
+        return { results: [], next_page_tokens: {} } as GmailListResult
+      }
       calls.push(input)
       return pages[Math.min(i++, pages.length - 1)] as GmailListResult
     },
@@ -70,7 +90,7 @@ function scriptedClient(pages: GmailListResult[]): GmailClient & { calls: GmailL
     ensureLabel: die,
     modifyThread: die,
     modifyMessage: die,
-  } as unknown as GmailClient & { calls: GmailListInput[] }
+  } as unknown as GmailClient & { calls: GmailListInput[]; live_calls: GmailListInput[] }
 }
 
 function withStore(run: (store: EmailPipelineStore) => Promise<void>): Promise<void> {
