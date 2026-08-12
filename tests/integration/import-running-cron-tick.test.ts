@@ -530,11 +530,20 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
   test('the FIRST idle tick after an import finishes logs — busy ticks do not stamp the window', async () => {
     // The transition the other cases leave open, and the one an operator meets
     // every time an import completes: busy → idle. The busy branch never touches
-    // the window, so the first idle tick after the work drains must log AT ONCE.
+    // the window, so it neither stamps one nor clears an existing stamp — and
+    // this case starts from an UNSTAMPED window, which is the condition under
+    // which the first post-drain idle tick logs at once. State the bound that
+    // way round: if an earlier idle tick had stamped the window inside the last
+    // IDLE_TICK_LOG_INTERVAL_MS, that stamp still stands across the busy period
+    // and the post-drain line waits out the remainder. That is bounded by the
+    // same interval the heartbeat already permits, and busy ticks log on every
+    // sweep meanwhile, so the gap is never silent — it is not a claim that the
+    // post-drain line is immediate in every ordering.
     // If the busy branch ever started stamping — the obvious "just throttle the
     // tick" simplification — this line would be suppressed for up to a full
-    // IDLE_TICK_LOG_INTERVAL_MS after every import, and the only observable
-    // difference from a cron that stopped firing would be the wait.
+    // IDLE_TICK_LOG_INTERVAL_MS after every import even from an unstamped
+    // window, and the only observable difference from a cron that stopped
+    // firing would be the wait.
     //
     // The drain is driven the real way: the runner reports `completed`, the tick
     // advances the phase out of `import_running`, and the SCAN then returns zero

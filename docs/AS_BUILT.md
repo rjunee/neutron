@@ -9333,6 +9333,15 @@ the key for step + window — an hour-long step silences a 10-min heartbeat for 
 presents as the "it died" alarm the heartbeat exists to rule out. Negative elapsed now counts
 as due, and the emit re-stamps, so the window self-heals. Every `rateLimited` caller gets it.
 
+⚠️ **The counts and the mutant table in this block describe THIS round and have since gone
+stale — read them as history, not as the current measurement.** Rounds 10 and 11 both touched
+both suites; the file total is now 11, not 10, and the table below predates the finite-window
+guard entirely. The re-measured figures and the current mutant set live in the round-11
+Verification block at the end of this entry. Left standing rather than rewritten because
+editing a past round's measurement to match today's tree destroys the record of what was
+actually run then — the forward pointer is the fix, and the rule this entry states two
+paragraphs below (re-run in the round that touches the tests) is the one that was missed.
+
 **Verification:** 7 new cases — 6 in `tests/integration/import-running-cron-tick.test.ts`
 (file total 4 → 10), five of which drive the REAL handler and assert on the REAL emitted line
 while the sixth is a guard on the constant, plus 1 in `logger/__tests__/logger.test.ts`, which
@@ -10070,3 +10079,55 @@ only once the work is at HEAD.**
 `tsc -p .` alone. ⚠️ The **kimi** lane was DEFERRED in round 9 — configured, called, and the call
 failed. Earlier rounds of this entry record it as absent by design, which it was not: a configured
 reviewer that died leaves the panel INCOMPLETE. This entry records no APPROVE.
+
+**Round 11 — the guard's promise was universal and the guard was not (PR #174).**
+
+Round 10 replaced a caller obligation with a guard and wrote the promise as **"NOTHING A CALLER
+PASSES CAN SILENCE A KEY PERMANENTLY."** That is false, and the counter-example is one call:
+`rateLimited(key, Number.MAX_VALUE)`. `Number.isFinite(Number.MAX_VALUE)` is `true`, so
+`!Number.isFinite(ms)` never fires for it, the window is honoured as asked, and the key is silent
+for longer than the process will ever live. Reproduced with an injected clock advanced ~200 years
+per attempt: 1 line across 5 attempts, where `Infinity` under the same driver emits all 5.
+
+📌 **The guard was right and the sentence over it was wrong, so the sentence moved — not the
+guard.** Both fixes were available: narrow the prose, or add a size cap so the universal becomes
+true. A cap means inventing a threshold nobody asked for, and it would silently retune every
+existing caller's window; the honest boundary is the one the condition already draws, which is
+finiteness. The paragraph now states that boundary and names what it does NOT cover — a large
+finite `ms` "gets exactly the permanent silence it asked for, and no guard here will save it."
+Choosing `ms` goes back to being the caller's obligation for finite values, which is the one place
+round 8's deleted obligation was actually load-bearing.
+
+📌 **A normative claim in a docblock with nothing executable under it is how this shipped false
+for four consecutive rounds.** The head docblock of this primitive is read by 9 call sites, and the
+universal had been copied into the interface docblock, the test-block comment, `logger/AGENTS.md`,
+a commit message, and the round-10 entry above — six copies, zero of them checkable. So the new
+bounded claim is PINNED: `a MAX_VALUE window DOES silence the key — the guard is finiteness, not
+size` asserts one line across five attempts spanning centuries of injected clock. A future round
+that adds the size cap has to come to that case and change it, which is exactly the coupling the
+prose never had.
+
+**Mutant, asserted APPLIED by grep before the run was believed:** adding a size cap
+(`|| ms > 86_400_000`) to the finite-window guard — `grep -c 'ms > 86_400_000'` = 1 at line 396
+before running — gives exactly **1 red, the new MAX_VALUE case alone**, and 51 green. That is the
+discrimination worth having: the mutant makes the round-10 universal TRUE, and only the case that
+pins the boundary notices. Reverted from a committed tree (`cp` from a backup taken before the
+edit, not `git checkout` — see the round-10 warning), and `grep -c` = 0 confirmed after.
+
+Also corrected in this round, all of them the same drift class: `logger/AGENTS.md` still said
+"**Two** consequences" after round 10 made it three in the owning docblock (now three, with the
+non-finite one stated at its true width); the busy→idle case's comment claimed the post-drain idle
+line "must log AT ONCE" when a prior idle stamp inside the window still stands across the busy
+period — the busy branch never stamps, but it never CLEARS either, so the comment now states the
+unstamped precondition and bounds the suppression at one interval, which is the gap the heartbeat
+already permits and during which busy ticks log every sweep; and the handler's second-logger-view
+comment implied a test-injected view is isolated when two views on one subsystem still share a
+window keyed `subsystem × key` (no current case builds two same-slug tickers — now said that way).
+
+**Verification (round 11), re-measured in this round rather than carried forward:**
+`logger.test.ts` **52** (51 + the MAX_VALUE case), `import-running-cron-tick.test.ts` **11**,
+`import-running-cron-scheduler-boot.test.ts` **2** — **65 pass, 0 fail, 117 expect() calls** across
+the 3 files. `scripts/ci/typecheck-all.sh` exit 0 across all 51 tsconfigs, not `tsc -p .` alone;
+`scripts/ci/lint.sh` exit 0. ⚠️ The **kimi** lane was DEFERRED again in round 10 — configured,
+called, and the call failed. A configured reviewer that died leaves the panel INCOMPLETE, and this
+entry likewise records no APPROVE.

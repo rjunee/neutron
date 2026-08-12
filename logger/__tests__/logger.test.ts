@@ -438,14 +438,16 @@ describe('rateLimited', () => {
     expect(lines).toHaveLength(1)
   })
 
-  // The fail-CLOSED cases. Every comparison against a NaN is false, so before
-  // the finite-window guard a single non-finite input silenced the key for as
-  // long as the clock moved forward — inside the primitive whose whole job is
-  // to make a flood visible without going dark. These assert the OPPOSITE
-  // outcome (a line on every attempt), because a permanently silent heartbeat
-  // is the failure nobody can see. They are not hypothetical inputs to
-  // validate at the call sites: the point is that no call site CAN produce it.
-  test('a NaN window emits every time rather than silencing the key', () => {
+  // The fail-CLOSED cases, and they cover NON-FINITE input ONLY. Every
+  // comparison against a NaN is false, so before the finite-window guard a
+  // single non-finite input silenced the key for as long as the clock moved
+  // forward — inside the primitive whose whole job is to make a flood visible
+  // without going dark. Each case below asserts the OPPOSITE outcome across a
+  // bounded run of attempts, because a permanently silent heartbeat is the
+  // failure nobody can see. What the guard does NOT cover is a large FINITE
+  // window, which is honoured as written; the last case in this block pins
+  // that, so the docblock's bounded claim has something executable behind it.
+  test('a NaN window emits on each of five successive attempts', () => {
     let now = 0
     const { sink, lines } = capture()
     const log = createLogger('nan-ms', { sink, now: () => now })
@@ -487,6 +489,26 @@ describe('rateLimited', () => {
     log.once('k').info('latched')
     log.once('k').info('suppressed')
     expect(lines).toHaveLength(3)
+  })
+
+  test('a MAX_VALUE window DOES silence the key — the guard is finiteness, not size', () => {
+    // The counter-case to the one above, and the reason the docblock no longer
+    // says "nothing a caller passes can silence a key permanently". That claim
+    // was false the moment it was written: `Number.isFinite(Number.MAX_VALUE)`
+    // is `true`, so the non-finite guard never fires for it and the window is
+    // honoured as asked. Pinned as BEHAVIOUR — one line, then silence across a
+    // clock advanced by centuries — so that the prose and the condition cannot
+    // drift apart again, in either direction: a future round that adds a size
+    // cap to make the universal true has to come here and say so.
+    let now = 0
+    const { sink, lines } = capture()
+    const log = createLogger('max-ms', { sink, now: () => now })
+    expect(Number.isFinite(Number.MAX_VALUE)).toBe(true)
+    for (let i = 0; i < 5; i += 1) {
+      log.rateLimited('k', Number.MAX_VALUE).info('beat')
+      now += 6_307_200_000_000 // ~200 years per attempt
+    }
+    expect(lines.map((l) => l.line)).toEqual(['[max-ms] event=beat'])
   })
 })
 

@@ -79,14 +79,25 @@
  *     DELIVERY bound must make its own sink non-throwing; this primitive will
  *     not do it for them.
  *
- *     NOTHING A CALLER PASSES CAN SILENCE A KEY PERMANENTLY. `ms` used to be
+ *     AN UNCOMPUTABLE WINDOW COUNTS AS DUE, NOT AS SILENCE. `ms` used to be
  *     unvalidated, and `rateLimited(key, NaN)` therefore suppressed the key
  *     for as long as the clock moved forward — an invisible failure inside
  *     the primitive that exists to make a flood visible. A window that is not
- *     computable as a finite number now counts as DUE, so the failure
- *     direction is an extra line, never a dead one. That makes
+ *     computable as a finite number now counts as DUE, so for THAT input the
+ *     failure direction is an extra line, never a dead one. That makes
  *     `rateLimited(key, Infinity)` a flood rather than a latch: `once(key)`
  *     is how "never again" is expressed.
+ *
+ *     That guard covers NON-FINITE input and nothing more. A finite `ms` is
+ *     honoured as written, so a caller that passes an absurdly large one —
+ *     `Number.MAX_VALUE`, or a unit mix-up that multiplies into milliseconds
+ *     twice — gets exactly the permanent silence it asked for, and no guard
+ *     here will save it. Earlier rounds of this docblock stated the universal
+ *     ("nothing a caller passes can silence a key permanently"); it was false
+ *     for every finite window, and `Number.isFinite(Number.MAX_VALUE)` is
+ *     `true`, so what is claimed here is now only the bounded thing the
+ *     condition below actually enforces. Choosing a sane `ms` remains the
+ *     CALLER's obligation.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -162,8 +173,9 @@ export interface Logger extends LogEmitter {
    * either direction, a throwing sink consumes a window with no
    * guarantee that anything was delivered, and a window that is not a finite
    * number counts as due rather than as forever. All three are deliberate —
-   * and all three err toward an extra line, because this primitive must not
-   * be able to go permanently silent on any input. The head
+   * and all three err toward an extra line. That last one covers NON-FINITE
+   * input only: a finite `ms` is honoured as written, however large, so
+   * picking a window that is not effectively forever is the caller's job. The head
    * docblock gives the reasons, the condition itself is in the implementation
    * below, and `logger/__tests__/logger.test.ts` holds the pinned cases — not
    * including the throwing-sink half, which is the gap the head docblock

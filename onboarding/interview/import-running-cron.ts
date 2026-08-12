@@ -182,9 +182,12 @@ export function buildImportRunningHandler(
   // key — so two views on `import-running-cron` reading different clocks would
   // compare one clock's readings against the other's stamps in a single
   // window. Only the test seam injects a clock, so in production this IS the
-  // module-level `log` and that mix cannot arise at all; a test that injects
-  // one gets its own view, and `resetLoggerStateForTests` is what keeps its
-  // stamps out of the next test's window.
+  // module-level `log` and that mix cannot arise at all. A test that injects
+  // one gets a separate VIEW but NOT a separate window — the state is keyed
+  // `subsystem × key` either way — so two same-slug tickers built inside one
+  // test would still share a window; no current case builds two, and
+  // `resetLoggerStateForTests` is what keeps one test's stamps out of the
+  // next test's window.
   const tickLog =
     deps.now === undefined ? log : createLogger('import-running-cron', { now: deps.now })
   const now = deps.now ?? ((): number => Date.now())
