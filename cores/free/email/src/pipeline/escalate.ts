@@ -117,14 +117,23 @@ export async function escalateEmail(
       idempotency_key,
     })
     // A RESOLVED CALL IS NOT A DELIVERED ESCALATION. The seam reports a failed
-    // durable write as `persisted: false` rather than throwing, so trusting
-    // the absence of an exception marks the message told when nothing was
-    // written anywhere. Only an explicit `persisted === false` is treated as
-    // failure; a seam that reports nothing (or a test double returning null)
-    // keeps the old permissive behaviour rather than failing every escalation.
+    // durable write as `persisted: false` rather than throwing, so trusting the
+    // absence of an exception marks the message told when nothing was written
+    // anywhere.
+    //
+    // AND ABSENCE OF EVIDENCE IS NOT EVIDENCE. Treating only the literal
+    // `false` as failure still accepted `null`, `undefined` and any malformed
+    // object as success — which is the same mistake one level down. The gateway
+    // contract makes `persisted` a required boolean, so this REQUIRES
+    // `persisted === true`: a reply-durability escalation is delivered when a
+    // durable row exists and not otherwise. Anything else is a failure that
+    // gets retried, which is the safe direction — the retry is idempotent by
+    // key, while a false "delivered" is permanent silence.
     const reported = (outcome ?? {}) as EscalationDeliveryResult
-    if (reported.persisted === false) {
-      throw new Error('deliver reported persisted:false — no durable chat row was written')
+    if (reported.persisted !== true) {
+      throw new Error(
+        `deliver did not confirm a durable chat row (persisted=${String(reported.persisted)})`,
+      )
     }
     delivered = true
   } catch (err) {

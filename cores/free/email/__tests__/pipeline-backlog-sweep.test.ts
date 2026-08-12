@@ -186,3 +186,41 @@ describe('backlog sweep completion', () => {
     })
   })
 })
+
+describe('a mailbox connected AFTER the sweep gets its own sweep', () => {
+  test('acct-b joining later does not have its history escalated', async () => {
+    await withStore(async (store) => {
+      // Sweep completes with only acct-a connected.
+      const withA = scriptedClient([
+        {
+          results: [msg('a-1', 'acct-a')],
+          next_page_tokens: {},
+          accounts: [{ account_id: 'acct-a', account_email: 'a@example.com', ok: true }],
+        },
+      ])
+      await tick(withA, store)
+      expect(store.getCheckpoint(CHECKPOINT_BACKLOG_DONE)).toBe('1')
+
+      // Now acct-b is connected, carrying old mail shaped exactly like the
+      // escalation. The connected set is re-resolved per request, so the global
+      // "backlog done" flag was a claim about a topology that no longer exists.
+      const withBoth = scriptedClient([
+        {
+          results: [msg('a-1', 'acct-a'), msg('b-old', 'acct-b')],
+          next_page_tokens: {},
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: true },
+          ],
+        },
+      ])
+      const second = await tick(withBoth, store)
+
+      // THE REGRESSION: this used to skip the sweep entirely and treat b-old as
+      // new mail — classified, labelled and escalated into the owner's chat.
+      expect(second.backlog_sweeping).toBe(true)
+      expect(store.getEmail('b-old', 'acct-b')?.handling).toBe('preexisting')
+      expect(second.escalated).toBe(0)
+    })
+  })
+})

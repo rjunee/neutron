@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import type { GmailClient } from '../src/contract.ts'
 import { buildSeededInMemoryGmailClient } from '../src/in-memory.ts'
 import {
+  backlogDoneKey,
   CHECKPOINT_BACKLOG_DONE,
   CHECKPOINT_GO_LIVE_AFTER,
   runEmailPipelineTick,
@@ -41,6 +42,7 @@ function fixture(): Fixture {
   // already finished — otherwise every tick would return early having marked
   // the seeded mail as pre-existing.
   store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
+  store.setCheckpoint(backlogDoneKey(null), '1')
   const gmail = buildSeededInMemoryGmailClient({ now: () => NOW })
   gmail.seed({
     id: 'important-1',
@@ -83,7 +85,9 @@ describe('escalation dedup', () => {
     try {
       const ok = async (_t: string, e: { body: string }): Promise<unknown> => {
         f.delivered.push(e.body)
-        return null
+        // The REAL seam reports the durable write; a double that returns
+        // nothing is claiming a delivery it cannot evidence.
+        return { prompt_id: 'p1', persisted: true, delivered_live: true }
       }
       const first = await tick(f, ok)
       expect(first.escalated).toBe(1)
@@ -130,7 +134,9 @@ describe('escalation resume', () => {
       })
       const ok = async (_t: string, e: { body: string }): Promise<unknown> => {
         f.delivered.push(e.body)
-        return null
+        // The REAL seam reports the durable write; a double that returns
+        // nothing is claiming a delivery it cannot evidence.
+        return { prompt_id: 'p1', persisted: true, delivered_live: true }
       }
       const second = await tick(f, ok)
       expect(second.resumed).toBe(1)

@@ -107,6 +107,25 @@ export interface EmailPipelineTickResult {
   backlog_sweeping: boolean
 }
 
+/** Per-account backlog completion. '' is the single-account sentinel. */
+export function backlogDoneKey(account_id: string | null): string {
+  return `${CHECKPOINT_BACKLOG_DONE}:${account_id ?? ''}`
+}
+
+/** The accounts a list response actually covered. */
+function accountsOnThisPage(page: {
+  accounts?: ReadonlyArray<{ account_id: string; ok: boolean }>
+  results: ReadonlyArray<{ account_id?: string }>
+}): string[] {
+  if (page.accounts !== undefined) {
+    return page.accounts.filter((a) => a.ok).map((a) => a.account_id)
+  }
+  // Single-backend client: no per-account reporting, one implicit mailbox.
+  const stamped = new Set<string>()
+  for (const row of page.results) stamped.add(row.account_id ?? '')
+  return stamped.size > 0 ? [...stamped] : ['']
+}
+
 /** Read back the persisted per-account cursor map; a corrupt value restarts the sweep. */
 function parseCursorMap(raw: string | null): Record<string, string> {
   if (raw === null || raw.length === 0) return {}
@@ -158,7 +177,26 @@ export async function runEmailPipelineTick(
     // classification, no escalation, no label writes. Returning early is what
     // guarantees the owner's existing mail can never reach the classifier: the
     // code path that could escalate it has not been entered yet.
-    if (store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1') {
+    // A NEWLY CONNECTED MAILBOX HAS ITS OWN BACKLOG. The global flag alone said
+    // "the backlog is done" forever, so a mailbox connected afterwards had its
+    // entire history read as new mail — classified, labelled and escalated. A
+    // cheap probe re-opens the sweep whenever a connected account has no
+    // completion mark of its own.
+    let backlogPending = store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1'
+    if (!backlogPending) {
+      const probe = await gmail.listMessages({ label: DEFAULT_LABEL, max_results: 1 })
+      const unmarked = accountsOnThisPage(probe).filter(
+        (id) => store.getCheckpoint(backlogDoneKey(id)) !== '1',
+      )
+      if (unmarked.length > 0) {
+        backlogPending = true
+        log?.('email pipeline backlog sweep re-opened for newly connected accounts', {
+          accounts: unmarked,
+        })
+      }
+    }
+
+    if (backlogPending) {
       result.backlog_sweeping = true
       const cursor = store.getCheckpoint(CHECKPOINT_BACKLOG_CURSOR)
       const perAccount = parseCursorMap(store.getCheckpoint(CHECKPOINT_BACKLOG_CURSORS))
@@ -233,10 +271,23 @@ export async function runEmailPipelineTick(
           accounts_pending: outcomes?.filter((a) => !a.ok).length ?? 0,
         })
       } else {
+        // Mark the ACCOUNTS, not just "the backlog". The connected set is
+        // dynamic — the resolver re-reads it per request so a mailbox can be
+        // added after boot — and a single global flag made that new mailbox's
+        // entire history look like new mail: classified, labelled, and
+        // escalated into the owner's chat. Completion is therefore recorded
+        // per account, and `backlogPending` below re-opens the sweep for any
+        // account that has not had one.
+        for (const id of accountsOnThisPage(page)) {
+          store.setCheckpoint(backlogDoneKey(id), '1')
+        }
         store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
         store.setCheckpoint(CHECKPOINT_BACKLOG_CURSOR, '')
         store.setCheckpoint(CHECKPOINT_BACKLOG_CURSORS, '')
-        log?.('email pipeline backlog sweep complete', { marked: result.precutoff })
+        log?.('email pipeline backlog sweep complete', {
+          marked: result.precutoff,
+          accounts: accountsOnThisPage(page),
+        })
       }
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
       return result

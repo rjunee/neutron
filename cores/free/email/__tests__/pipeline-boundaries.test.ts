@@ -27,6 +27,7 @@ import type {
 import { buildMultiAccountGmailClient } from '../src/multi-account.ts'
 import { escalateEmail } from '../src/pipeline/escalate.ts'
 import {
+  backlogDoneKey,
   CHECKPOINT_BACKLOG_DONE,
   runEmailPipelineTick,
 } from '../src/pipeline/poller.ts'
@@ -51,6 +52,7 @@ function withStore(run: (store: EmailPipelineStore) => Promise<void>): Promise<v
   const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
   // These exercise the STEADY state, past the one-time backlog sweep.
   store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
+  store.setCheckpoint(backlogDoneKey(null), '1')
   return run(store).finally(() => {
     store.close()
     rmSync(home, { recursive: true, force: true })
@@ -111,7 +113,7 @@ describe('steady-state polling does not starve behind handled mail', () => {
         escalate: {
           deliver: async (_t, e): Promise<unknown> => {
             delivered.push(e.body)
-            return null
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
           },
           topic_id: 'app:owner',
           push: null,
@@ -167,7 +169,7 @@ describe('a delivered escalation is never re-posted', () => {
         {
           deliver: async (_t, e): Promise<unknown> => {
             posts.push({ body: e.body, ...(e.idempotency_key !== undefined ? { idempotency_key: e.idempotency_key } : {}) })
-            return null
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
           },
           topic_id: 'app:owner',
           push: null,

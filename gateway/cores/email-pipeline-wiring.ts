@@ -97,7 +97,13 @@ export function buildEmailPipelinePollHandler(
         store: handle,
         classify: {
           cache_lookup: (sender) => handle.getSenderCache(sender),
-          cache_store: (sender, category) => handle.upsertSenderCache(sender, category),
+          // Forward the IMPORTANCE decision too. Dropping it here defaulted
+          // every learned sender to not-important, which made the classifier's
+          // own fix inert in production: an important receipt escalated once
+          // and was archived from the cache ever after. The unit test used its
+          // own three-argument double and so could not see this.
+          cache_store: (sender, category, important) =>
+            handle.upsertSenderCache(sender, category, important),
           llm: cfg.llm,
         },
         escalate: {
