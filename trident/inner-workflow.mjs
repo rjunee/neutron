@@ -81,7 +81,28 @@ const {
   task,
   baseBranch = 'main',
   slug = 'trident-run',
-  maxRounds = 3,
+  // THIS DEFAULT IS A FALLBACK, NOT THE CAP THE FLEET RUNS ON — do not read it as
+  // "trident retries ten times". Every real launch goes through
+  // `buildWorkflowArgs` (trident/inner-loop.ts), which ALWAYS sets `maxRounds`
+  // from the run row's `max_rounds`; that column is `NOT NULL` (migrations/0077)
+  // and `createRun` always supplies it. So on the production path this literal is
+  // never reached and the effective cap is the one in `trident/store.ts`
+  // (`max_rounds: input.max_rounds ?? 10`). Both are 10 deliberately: they must
+  // agree, because a reader who finds only one of them will believe it.
+  //
+  // It is kept at the same value rather than deleted because the one path that
+  // DOES reach it is the args-lost path — `normalizeWorkflowArgs` returns `{}`
+  // for a non-object/unparseable `args` (the 2026-06-28 stringified-args
+  // incident noted above), and every field falls back at once. A fallback that
+  // silently disagreed with the real cap would make that already-confusing
+  // failure report a round budget the fleet never uses.
+  //
+  // The cap is a bound, not a target: it exists so a loop that cannot converge
+  // STOPS and reports instead of spending forever. Note that hitting it is not
+  // loud — the terminal result still carries `ok: true`, which means only "the
+  // workflow did not crash". The honest signal is `verdict`, which stays
+  // REQUEST_CHANGES, and that is what the outer loop keys on (orchestrator.ts).
+  maxRounds = 10,
   laneRetryAttempts = 1,
   ralph = false,
   // Git-mode threaded from the run (`local` | `pr`). Defaults to `pr` for any
