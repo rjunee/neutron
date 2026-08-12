@@ -1183,7 +1183,14 @@ mutation-checked test:
   a long-lived tab is enough), so a flaky moment mid-flow would have taken the
   owner's code away and torn down the poll about to see the approval. The web now
   follows the rule the comment describes, held there by a test that re-renders
-  the tab with a rotated token while the network is down.
+  the tab with a rotated token while the network is down. Review found that
+  test's precondition unable to discriminate: the poll effect lists the client in
+  its deps, so rebuilding the client RE-ARMS the poll with the same rotated
+  bearer, and at the 5ms default interval a tick fired inside the rerender —
+  "a request carried the rotated token" was satisfied by the poll alone, and
+  making the mount read fire once-only left the file green. It now mounts at
+  400ms (no tick can fire in that window) and asserts the EXACT set of GitHub
+  requests in the window is one, carrying the rotated bearer.
 - **"STOPS polling once connected" had no precondition that a poll ever armed**,
   on either surface, so it was green against a tab with the poll effect disabled
   entirely. Both now assert polling is live before asserting it stopped: the
@@ -1195,24 +1202,42 @@ mutation-checked test:
   a perfectly good code even after a later tap succeeded. The handler now clears
   it on every attempt.
 
+**An expired code is not a stranded screen**, and that is now asserted rather
+than argued. `awaiting_owner` surviving a failed read, plus a Connect control
+gated OFF while a code is live, leaves exactly one release valve — a SUCCESSFUL
+read. The gateway drops a pending grant once `expires_at_ms` passes
+(`github-connect-surface.ts`) and answers `not_connected`, and the poll armed by
+`awaiting_owner` is what carries that answer back, with no reload and no Refresh.
+A test drives it: the code goes stale, the next poll lands, the code disappears
+and a live Connect control is back on screen.
+
 Two honesty fixes with no runtime behaviour: the doctrine named a **"Connect
 GitHub" control** the phone owner cannot see (the web button reads that, the
 phone's reads "Connect"), and now names the Connect control in the GitHub row —
 true on both; and the doctrine test called `UNCONDITIONAL` only searched for four
 banned words, which a rule that really did branch in neutral wording would pass.
-It is renamed for what it checks and now asserts the structural half too: the
-rule is byte-identical for every input shape the builder accepts. Both test
-fixtures also carry the gateway's real `{ ok: true, … }` / `{ ok: false, code,
-message }` envelope instead of a bare payload, so the fixture is the wire.
+It is renamed for what it checks and asserts the structural half too. Review
+found the first attempt at that still permissive in both halves: `toContain` is
+superset-tolerant, so a scope-branched remedy that APPENDS still contains the
+constant, and the banned-vocabulary sweep ran over `scope: 'general'` only —
+while `weightingTail` is the one thing in the builder that branches on scope, so
+a project-scope branch was the exact shape the sweep could not see. Both halves
+now run per input: the remedy must appear as its own whole paragraph, byte-equal
+to the exported constant (`frag.split('\n\n')` contains it), and the banned
+literals are checked on every fragment the builder can produce.
 
-**Verified.** 16 mobile + 14 web + 41 doctrine/composition tests pass. Every
+**Verified.** 16 mobile + 15 web + 41 doctrine/composition tests pass. Every
 mutation below was grep-confirmed present in the file before its run was
 believed, and reverted after: deleting the status-read failure handler reds the
 failed-read test (1); restoring the positive `=== 'not_connected'` gate reds the
 unrecognised-status test (1); dropping the banner reset reds the Open-retry test
 (1); disabling the mobile poll effect reds 3; disabling the web poll effect reds
 4; reverting the web guard to an unconditional blank reds the mid-flow re-read
-test (1). Full 51-tsconfig matrix, lint and leak gate clean.
+test (1); making the web mount read fire once-only (empty dep array) reds that
+same test (1) — it did NOT before this round; branching the remedy on
+`scope: 'project'` reds the doctrine test both with banned vocabulary and with
+neutral wording (1 each) — the banned-vocabulary form survived the whole suite
+before this round. Full 51-tsconfig matrix and lint clean.
 
 ## 2026-08-12 — the owner can connect GitHub, and the agent stops pointing at a terminal (#551, #552)
 

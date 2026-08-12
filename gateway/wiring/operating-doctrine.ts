@@ -158,8 +158,7 @@ export const MISSING_CREDENTIAL_DOCTRINE =
   'answer is that GitHub is not connected yet and the fix is the Connect control in the ' +
   'GitHub row of the Integrations surface — it shows a short code to enter at GitHub and ' +
   'finishes on its own. The same rule holds for every other credential. If no in-product ' +
-  'surface exists ' +
-  'for one, say exactly that rather than substituting a command.'
+  'surface exists for one, say exactly that rather than substituting a command.'
 
 /**
  * Build the `<operating_doctrine>` fragment for the given surface.

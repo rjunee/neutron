@@ -148,8 +148,14 @@ let rerenderTab: (patch: Record<string, unknown>) => Promise<void> = async () =>
   throw new Error('nothing is mounted')
 }
 
+/** The interval the MOUNTED tab polls at. Set by `mountTab`, read by `pollTicks`
+ *  so a test that needs a poll to be quiet can raise it without the tick helper
+ *  silently waiting less than one interval. */
+let activePollMs = 5
+
 /** Mount the REAL Admin/Integrations tab and let its mount-time reads settle. */
 async function mountTab(pollMs = 5): Promise<HTMLElement> {
+  activePollMs = pollMs
   const { createRoot } = await import('react-dom/client')
   const { act } = await import('react')
   const { IntegrationsTab } = await import('../IntegrationsTab.tsx')
@@ -229,12 +235,12 @@ async function click(root: HTMLElement, sel: string): Promise<void> {
 const githubReqCount = (): number =>
   sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length
 
-/** Let `n` poll intervals elapse (the tab is mounted with a 5ms interval). */
+/** Let `n` poll intervals elapse, at whatever interval this tab was mounted with. */
 async function pollTicks(n: number): Promise<void> {
   const { act } = await import('react')
   for (let i = 0; i < n; i++) {
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 12))
+      await new Promise((r) => setTimeout(r, activePollMs + 7))
     })
   }
 }
@@ -350,30 +356,64 @@ describe('GitHub — the owner can start the flow from the web', () => {
     // on a flaky moment would take the owner's live code away and tear down the
     // poll — the same defect as a dropped poll, one layer up, and the mobile
     // screen's comment claims this surface follows the same rule.
-    const root = await mountTab()
+    //
+    // MOUNTED WITH A POLL INTERVAL LONGER THAN THIS TEST'S WHOLE TIMELINE, on
+    // purpose. The poll effect lists the client in its deps, so rebuilding the
+    // client RE-ARMS the poll with the rotated bearer too — at the 5ms default a
+    // tick fires inside the rerender and "a request carried the rotated token"
+    // is satisfied by the poll alone, which would leave the mount-read guard
+    // deletable with this file still green. At 400ms no tick can fire before the
+    // count is taken, so the request below can ONLY be the mount read.
+    const root = await mountTab(400)
     await click(root, 'button.cint-github-connect')
     expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
 
     networkDown = true
+    const before = sent.length
     await rerenderTab({ token: 'dev:owner-rotated' })
-    // The re-read must have actually gone out — and be THIS one, not a poll tick
-    // that would have fired regardless. Only the rebuilt client carries the
-    // rotated bearer, and `networkDown` means every request it made failed.
-    expect(
-      sent.some((s) => s.url.endsWith('/api/app/github-auth') && s.token === 'Bearer dev:owner-rotated'),
-    ).toBe(true)
+    // EXACTLY ONE GitHub read in that window, and it is the rebuilt client's:
+    // the re-read really went out, it failed (`networkDown`), and no poll tick
+    // is hiding inside the count.
+    const afterRotate = sent.slice(before).filter((s) => s.url.endsWith('/api/app/github-auth'))
+    expect(afterRotate.map((s) => s.token)).toEqual(['Bearer dev:owner-rotated'])
 
     expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
     expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
       'awaiting_owner',
     )
-    // …and the flow still finishes on the next good tick.
+    // …and the poll survived the failed re-read, so the flow still finishes on
+    // the next good tick (two 400ms intervals — slow, but the price of a window
+    // in which the assertion above cannot be satisfied by a poll).
     networkDown = false
     state = { status: 'connected' }
-    await pollTicks(3)
+    await pollTicks(2)
     expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
       'connected',
     )
+  })
+
+  it('an EXPIRED code is not a dead end — the next good read puts Connect back', async () => {
+    // The escape hatch for the rule above. `awaiting_owner` surviving a failed
+    // read plus a Connect control gated OFF while a code is live could strand a
+    // screen on a code that is no longer good — so the release valve has to be
+    // asserted, not argued. The gateway drops a pending grant once it expires
+    // (`github-connect-surface.ts` § `expires_at_ms <= now()`) and answers
+    // `not_connected`; the very poll armed by `awaiting_owner` is what carries
+    // that answer back, with no reload and no Refresh.
+    const root = await mountTab()
+    await click(root, 'button.cint-github-connect')
+    expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
+    expect(q(root, 'button.cint-github-connect')).toBeNull()
+
+    // The grant expires at GitHub; the gateway forgets it.
+    state = { status: 'not_connected' }
+    await pollTicks(3)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'not_connected',
+    )
+    expect(q(root, '.cint-device-code')).toBeNull()
+    // A control the owner can actually press, back on screen.
+    expect(q(root, 'button.cint-github-connect')).not.toBeNull()
   })
 
   it('an ALREADY-CONNECTED account renders as connected, with no code and no Connect', async () => {

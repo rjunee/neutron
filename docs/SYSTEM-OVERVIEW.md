@@ -2793,7 +2793,11 @@ the machine, which is what the agent recommended when a push failed — see
   whenever the client is rebuilt (the token rotating under a long-lived tab is
   enough), so `awaiting_owner` survives any failed read and only a SUCCESSFUL one
   can leave it. Otherwise one flaky moment mid-flow takes the owner's code away
-  and tears down the poll that was about to see the approval.
+  and tears down the poll that was about to see the approval. The release valve
+  is the poll itself: the gateway drops a pending grant once it expires and
+  answers `not_connected`, so a code that goes stale clears on the next tick and
+  a Connect control comes back — no reload, no Refresh. That is what keeps this
+  rule from stranding a screen on a code that is no longer good.
 - **Every state that is not connected and not mid-flow offers Connect.** The
   clients CAST the wire payload to the three-state union without validating it,
   so a gateway that grows a fourth state arrives as a plain string; gating the

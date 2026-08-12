@@ -143,32 +143,34 @@ describe('operating-doctrine — principle set', () => {
     // branch — in neutral wording, or on any input other than the one scope this
     // built — stayed green. Both halves are now here.
     //
-    // STRUCTURAL half: the rule is emitted byte-identically for every input shape
-    // the builder accepts. That is what "does not branch" means; it cannot be
-    // inferred from vocabulary.
+    // STRUCTURAL half: the remedy is emitted as a WHOLE PARAGRAPH equal to the
+    // exported constant, for every input shape the builder accepts.
+    //
+    // Equality, not `toContain`. `toContain` is superset-tolerant: a branch that
+    // APPENDS to the rule on one scope ("…, or, if you are running it yourself,
+    // export the token") still contains the constant, so the search passes on the
+    // exact input that was supposed to red. The fragment separates blocks with a
+    // blank line and the constant is one unbroken line, so it must appear as its
+    // own element of the split — nothing added, nothing branched.
     const inputs: OperatingDoctrineInput[] = [
       { scope: 'general' },
       { scope: 'project' },
       { scope: 'project', project_id: 'gondor' },
       { scope: 'project', project_id: 'minas-tirith' },
     ]
-    for (const input of inputs) {
-      const frag = buildOperatingDoctrineFragment(input)
-      // Positive control: the searches below are only meaningful if the rule
-      // under test is actually in the string being searched.
-      expect(frag).toContain(MISSING_CREDENTIAL_DOCTRINE)
-      // The remedy names ONE place, with no "if you are running it this way".
-      expect(frag).not.toContain('depending on')
-    }
-
     // VOCABULARY half: naming the in-product surface is the right answer in EVERY
     // deployment, so a branch would be longer AND wrong somewhere. The literals
     // below are the words this repo does not carry, in prose or in code; this
     // array is the one place they are permitted to appear, because guarding
-    // against them requires naming them exactly once.
-    const general = buildOperatingDoctrineFragment({ scope: 'general' })
-    for (const banned of ['self-host', 'hosted', 'tenan', 'instances']) {
-      expect(general.toLowerCase()).not.toContain(banned)
+    // against them requires naming them exactly once. Checked per input, not on
+    // one scope: `weightingTail` branches on `scope`, so a scope-conditional
+    // remedy is exactly the shape a single-scope sweep cannot see.
+    for (const input of inputs) {
+      const frag = buildOperatingDoctrineFragment(input)
+      expect(frag.split('\n\n')).toContain(MISSING_CREDENTIAL_DOCTRINE)
+      for (const banned of ['self-host', 'hosted', 'tenan', 'instances', 'depending on']) {
+        expect(frag.toLowerCase()).not.toContain(banned)
+      }
     }
   })
 
