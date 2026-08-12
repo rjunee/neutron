@@ -354,7 +354,7 @@ function loadRealGate(): {
   deferredCrossModelPeers: (statuses: unknown) => Peer[]
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
-  coreSeats: Array<{ slot: number; name: string }>
+  coreSeats: Array<{ slot: number; name: string; letter: string; panelLabel: string }>
   classifyBlock: (s: unknown, peers: unknown[]) => string
   corePanelLine: (letter: string, label: string, verdict: unknown) => string
 } {
@@ -387,17 +387,40 @@ function loadRealGate(): {
     if (line === undefined) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
     return line
   }
-  const grabBlock = (name: string): string => {
-    const at = SRC.indexOf(`const ${name} = [`)
-    if (at === -1) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
-    const end = SRC.indexOf('\n]', at)
-    if (end === -1) throw new Error(`could not close const ${name}`)
-    return SRC.slice(at, end + 2)
+  // THE CORE SEATS ARE NO LONGER A LITERAL TO LIFT. They used to be a top-level
+  // `const CORE_REVIEWER_SEATS = [{ slot: 0 }, { slot: 1 }]`, which is the positional
+  // pattern the file itself documents as a latent bug for codex — inserting a seat at
+  // the head of the panel left the new one ungated (fail-OPEN). The slots are now
+  // DERIVED from `reviewers.length` at push time, so this reconstructs them the same
+  // way: read the `pushCoreReviewer` call sites IN ORDER and number them. The names,
+  // letters, labels and ORDERING therefore still come from the shipped source (a
+  // renamed seat or a reordered panel shows up here), while nothing hard-codes a slot.
+  const grabCoreSeats = (): Array<{ slot: number; name: string; letter: string; panelLabel: string }> => {
+    const sites = [...SRC.matchAll(/pushCoreReviewer\(\s*\{([^}]*)\}/g)]
+    if (sites.length === 0) throw new Error('no pushCoreReviewer(...) sites in inner-workflow.mjs')
+    return sites.map((m, slot) => {
+      const field = (f: string): string => {
+        const hit = new RegExp(`${f}:\\s*'([^']*)'`).exec(m[1] ?? '')
+        if (hit === null) throw new Error(`core seat ${slot} has no ${f}`)
+        return hit[1] as string
+      }
+      return { slot, name: field('name'), letter: field('letter'), panelLabel: field('panelLabel') }
+    })
   }
   const factory = new Function(
     [
       grabConst('LANE_FINDING_KIND'),
-      grabBlock('CORE_REVIEWER_SEATS'),
+      // `classifyBlock` now closes over the severity set too — lifted from the SAME
+      // source for the same reason as LANE_FINDING_KIND: re-declaring {minor,nit}
+      // here would let the classifier and the severity gate drift apart green.
+      grabConst('NON_BLOCKING_SEVERITIES'),
+      // `usableStatus` is the ONE "did this field answer" predicate the lane retry and
+      // `hasUsableVerdict` now share; `CORE_SEAT_STATUS_KEY` is the field it reads for a
+      // core seat. Both are lifted rather than restated for the same reason as the two
+      // above — restating them here is exactly how the retry and the gate drifted apart
+      // green in the first place.
+      grabConst('usableStatus'),
+      grabConst('CORE_SEAT_STATUS_KEY'),
       grab('enforceCrossModelGate'),
       grab('deferredCrossModelPeers'),
       grab('crossModelPeerStatus'),
@@ -405,10 +428,10 @@ function loadRealGate(): {
       grab('missingCoreReviewers'),
       grab('corePanelLine'),
       grab('classifyBlock'),
-      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, coreSeats: CORE_REVIEWER_SEATS, classifyBlock, corePanelLine }',
+      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, classifyBlock, corePanelLine }',
     ].join('\n'),
-  ) as () => ReturnType<typeof loadRealGate>
-  return factory()
+  ) as () => Omit<ReturnType<typeof loadRealGate>, 'coreSeats'>
+  return { ...factory(), coreSeats: grabCoreSeats() }
 }
 
 describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgrade)', () => {
@@ -433,11 +456,49 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     expect(out?.findings.length).toBe(1)
   })
 
-  test('deferred codex + REQUEST_CHANGES synthesis → passes through unchanged (already blocked)', () => {
+  // THE BUG THIS PAIR REPLACES. The gate used to early-return an ALREADY
+  // REQUEST_CHANGES synthesis untouched — "already blocked, nothing to do". But the
+  // synthesis prompt tells the model, verbatim, "do NOT return APPROVE" when a seat is
+  // down, so the COMPLIANT synthesis takes exactly that path: the deterministic
+  // "which seat is missing" blocker was dropped from the PR entirely, and because
+  // nothing stamped `kind`, `classifyBlock` read the model's own findings as CODE and
+  // re-Forged a full round against a panel that was still down a seat.
+  test('deferred codex + REQUEST_CHANGES synthesis → the lane blocker is STILL injected', () => {
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
     const deferredCodex = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
-    const s = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major' }] }
-    expect(enforceCrossModelGate(s, deferredCodex)).toBe(s)
+    const s = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major', title: 'real code bug' }] }
+    const out = enforceCrossModelGate(s, deferredCodex)
+    expect(out?.verdict).toBe('REQUEST_CHANGES')
+    // Prepended, and STAMPED — the model's finding still rides along behind it.
+    expect(out?.findings).toHaveLength(2)
+    expect(out?.findings[0]?.kind).toBe('lane')
+    expect(out?.findings[0]?.title).toContain('Codex')
+    expect(out?.findings[1]?.title).toBe('real code bug')
+  })
+
+  test('a dead CORE seat + a compliant REQUEST_CHANGES classifies as infra-only, NOT code', () => {
+    // End to end on the exact path the prompt makes likely: the synthesis obeys
+    // "do NOT return APPROVE", and the loop must NOT re-Forge code for a reviewer
+    // that never ran. Composed from the real functions, so a gate that forgets to
+    // stamp `kind` fails here rather than silently costing a round.
+    const { missingCoreReviewers, coreSeats, enforceCrossModelGate, classifyBlock } = gate()
+    const peers = missingCoreReviewers([null, { verdict: 'APPROVE' }], coreSeats)
+    const compliant = { verdict: 'REQUEST_CHANGES', findings: [] }
+    const out = enforceCrossModelGate(compliant, peers)
+    expect(out?.findings[0]?.title).toContain('produced NO verdict')
+    expect(classifyBlock(out, peers)).toBe('infra-only')
+  })
+
+  test('a non-object synthesis (a dead synthesis agent) still yields a blocked verdict', () => {
+    // The gate must not read `.findings` off null and crash the round; an absent
+    // synthesis with an incomplete panel is the most blocked state there is.
+    const { missingCoreReviewers, coreSeats, enforceCrossModelGate } = gate()
+    const peers = missingCoreReviewers([null, null], coreSeats)
+    for (const dead of [null, undefined, 'REQUEST_CHANGES']) {
+      const out = enforceCrossModelGate(dead, peers)
+      expect(out?.verdict).toBe('REQUEST_CHANGES')
+      expect(out?.findings).toHaveLength(2)
+    }
   })
 
   test('connected peers + APPROVE → NOT downgraded (both ran fine)', () => {
@@ -472,6 +533,25 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
     expect(out?.verdict).toBe('REQUEST_CHANGES')
     expect(out?.findings.length).toBe(2)
+  })
+
+  // EVERY PRODUCER OWNS ITS TITLE, AND EVERY TITLE IS ASSERTED. The gate posts
+  // `title: p.title` verbatim, so authorship sits with each producer — and deleting
+  // the `title:` line from the codex or kimi branch used to survive the entire suite
+  // green, leaving the gate to post a blocker reading `title: undefined` on the PR.
+  // (Only missingCoreReviewers' title was behaviourally asserted; the others were
+  // covered by a whole-file substring grep, which any producer's title satisfies for
+  // all of them.) The title is the line a human reads first when a lane is down.
+  test('the codex + kimi blockers each carry their OWN non-empty, self-identifying title', () => {
+    const { deferredCrossModelPeers, enforceCrossModelGate } = gate()
+    const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' })
+    const byName = (n: string): Peer => peers.find((p) => p.name === n) as Peer
+    expect(byName('Codex').title).toBe('Codex cross-model review DEFERRED — refusing to silently APPROVE')
+    expect(byName('Kimi K3').title).toBe('Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE')
+    // …and they survive the gate as distinct titles, so the PR names WHICH lane died.
+    const titles = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)?.findings.map((f) => f.title)
+    expect(titles).toEqual([byName('Codex').title, byName('Kimi K3').title])
+    for (const t of titles ?? []) expect(typeof t).toBe('string')
   })
 
   test("the kimi blocker states there is NO Claude-family fallback", () => {
@@ -654,8 +734,37 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
     test('the synthesis prompt no longer hands a dead core reviewer the bare token `null`', () => {
       expect(SRC).not.toContain('Verdict A (Claude rubric): ${JSON.stringify(verdicts[0])}')
       expect(SRC).not.toContain('Verdict B (Claude adversarial): ${JSON.stringify(verdicts[1])}')
-      expect(SRC).toContain("corePanelLine('A', 'Claude rubric', verdicts[0])")
-      expect(SRC).toContain("corePanelLine('B', 'Claude adversarial', verdicts[1])")
+      // Every core panel line is produced by corePanelLine, DERIVED FROM THE SAME
+      // `coreSeats` the gate reads — no `verdicts[0]` / `verdicts[1]` literal to fall
+      // out of step with the seat list (the letter+label ride on the seat).
+      expect(SRC).toContain('corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot])')
+      expect(SRC).toContain('${corePanelLines}')
+    })
+
+    test('the core seats DERIVE their slot at push time — no positional literal anywhere', () => {
+      // The literal `[{ slot: 0 }, { slot: 1 }]` is the pattern this file documents as
+      // a latent bug for the cross-model peers: insert a reviewer at the HEAD of the
+      // panel and the new seat is ungated (fail-OPEN, the shape of #536) while Verdict
+      // A is labelled with the wrong reviewer's review. Its ABSENCE is the fix.
+      expect(SRC).not.toContain('CORE_REVIEWER_SEATS')
+      expect(SRC).toContain('coreSeats.push({ ...seat, slot: reviewers.length')
+      expect(SRC).toContain('missingCoreReviewers(verdicts, coreSeats)')
+      // …and the derived list is the SAME object the retry, the prompt and the gate
+      // all read, so a seat cannot be enforced in one and forgotten in another.
+      expect(SRC).toContain('...coreSeats,')
+    })
+
+    test('a core seat that DIED is retried like any other lane (not thrown away)', () => {
+      // A dead CORE seat had zero retries: the slots list held only codex/kimi, so one
+      // transient argus:claude crash produced an infra-only block, exited the loop on
+      // round 1 and discarded the whole Forge build. `statusKey: 'verdict'` is what
+      // makes a core seat retryable by the same helper — a real verdict is never
+      // 'deferred', so only a seat that produced nothing is re-run.
+      expect(SRC).toContain("const CORE_SEAT_STATUS_KEY = 'verdict'")
+      expect(SRC).toContain('statusKey: CORE_SEAT_STATUS_KEY')
+      // The retry re-runs the seat's OWN thunk, so it cannot drift from the prompt
+      // the seat was originally dispatched with.
+      expect(SRC).toContain('return await reviewers[core.slot]()')
     })
 
     // RUN corePanelLine, DO NOT GREP FOR IT. The assertions above are wiring checks:
@@ -690,12 +799,24 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
         // The dangerous drift is the pair disagreeing: the prompt saying a seat is fine
         // while the gate blocks it, or worse, the prompt saying DID NOT COMPLETE while
         // nothing blocks. Asserted over the same inputs both callers can see.
+        //
+        // EVERY SEAT MEANS EVERY SEAT. This used to place each case at index 0 with slot
+        // 1 always healthy, so the name claimed coverage the body did not have: the
+        // whole B seat went unexercised. Now the case is walked ACROSS the seats — the
+        // one under test is the dead one, and the other seats are healthy — so the
+        // assertion is made once per seat per case, and a seat added to the panel
+        // widens this loop automatically.
         const { corePanelLine, missingCoreReviewers, coreSeats } = gate()
+        expect(coreSeats.length).toBeGreaterThan(1)
         const cases: unknown[] = [null, undefined, {}, { verdict: '' }, 'APPROVE', 42, { verdict: 'APPROVE' }]
-        for (const c of cases) {
-          const blocked = missingCoreReviewers([c, { verdict: 'APPROVE' }], coreSeats).length === 1
-          const saysDead = corePanelLine('A', 'Claude rubric', c).includes('DID NOT COMPLETE')
-          expect(saysDead).toBe(blocked)
+        for (const seat of coreSeats) {
+          for (const c of cases) {
+            const verdicts = coreSeats.map((s) => (s.slot === seat.slot ? c : { verdict: 'APPROVE' }))
+            const missing = missingCoreReviewers(verdicts, coreSeats)
+            const blocked = missing.length === 1 && missing[0]?.name === seat.name
+            const saysDead = corePanelLine(seat.letter, seat.panelLabel, c).includes('DID NOT COMPLETE')
+            expect(saysDead).toBe(blocked)
+          }
         }
       })
     })
@@ -716,7 +837,7 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
 
     test('missingCore reaches the gate on BOTH the CI-pending and CI-settled branches', () => {
       // One branch carrying the peers and the other not is how half a gate ships.
-      expect(SRC).toContain('missingCoreReviewers(verdicts, CORE_REVIEWER_SEATS)')
+      expect(SRC).toContain('missingCoreReviewers(verdicts, coreSeats)')
       expect(SRC).toContain('[...missingCore, ...deferred, ciDeferredPeer(ci)]')
       expect(SRC).toContain('[...missingCore, ...deferred]')
     })
