@@ -68,7 +68,7 @@ same unenforced-rule shape this section exists to remove. Known gap, recorded
 rather than papered over.
 
 Tested against the real function extracted from the `.mjs` and evaluated rather
-than a hand-copied duplicate. 13 tests, 38 assertions, mutation-verified:
+than a hand-copied duplicate. 17 tests, 52 assertions, mutation-verified:
 admitting `major` to the non-blocking set fails two of them, and dropping the
 empty-findings guard fails one.
 

@@ -87,6 +87,41 @@ function implementedClaims(): string {
   return doc.slice(at, end)
 }
 
+/**
+ * The source MINUS the docblock under audit.
+ *
+ * Checking a cited symbol against all of `SRC` is self-satisfying: the citation
+ * itself lives in `SRC`, so `expect(SRC).toContain('enforceImaginaryGate')` passes
+ * on a symbol that exists nowhere else in the repo — a fabricated citation, which
+ * is the exact defect class this file exists to catch. Resolve citations here.
+ */
+function codeOutsideDocblock(): string {
+  const doc = gateDocblock()
+  const at = SRC.indexOf(doc)
+  if (at === -1) throw new Error('the docblock did not come from SRC')
+  return SRC.slice(0, at) + SRC.slice(at + doc.length)
+}
+
+/**
+ * The docblock MINUS its one sanctioned mention of the deleted claim.
+ *
+ * The block is allowed to say the words once, in the past tense, to record WHAT
+ * #184 asserted — deleting that sentence too would leave the next reader unable to
+ * recognise the claim if it came back. Everything outside it is held to a flat ban,
+ * because scoping the ban to the IMPLEMENTED bullets let a plain rewording survive
+ * in the surrounding prose ("the mutation prover still vetoes a bad APPROVE").
+ */
+function docblockOutsideHistory(): string {
+  const doc = gateDocblock()
+  const at = doc.indexOf('(PR #184 asserted here')
+  if (at === -1) {
+    throw new Error('the docblock no longer records what #184 claimed — the ban below has no carve-out to justify')
+  }
+  const end = doc.indexOf(')', at)
+  if (end === -1) throw new Error('the #184 citation is unterminated')
+  return doc.slice(0, at) + doc.slice(end + 1)
+}
+
 function loadReal(): {
   // `undefined` is in the domain deliberately: the gate is fed a synthesis result
   // that can be absent, and the pass-through for it is asserted below.
@@ -251,15 +286,20 @@ describe('the docblock may not claim a safeguard that no code implements (#184 �
   // has ever existed anywhere in this repo. It survived review for one reason:
   // nothing executable read the docblock, so every check stayed green. This is
   // that reader. It is a source assertion by necessity — the defect IS the prose.
-  test('no prover / proving phase is claimed to stand between APPROVE and merge', () => {
+  test('the docblock says "prover" NOWHERE except in the past-tense record of what #184 claimed', () => {
+    // A flat ban, not a pattern match on the phrasing #184 happened to use. Any
+    // regex over the wording is a spelling test: `the mutation-prover phase is
+    // still in place` and `the mutation prover still vetoes a bad APPROVE` both
+    // evade a verb list, and prose outside the IMPLEMENTED bullets was not read
+    // at all. There is no legitimate present-tense use of the word here, so the
+    // rule is: the word appears once, inside the historical citation, or not.
+    expect(docblockOutsideHistory()).not.toMatch(/prover|proving/i)
+    // The carve-out itself stays a record of a DELETED claim, not a live one.
     const doc = gateDocblock()
-    // Any rewording that asserts such a phase as a live gate.
-    expect(doc).not.toMatch(
-      /(prover|proving)[^.\n]*\b(phase|step|pass|stage|gate)\b[^.]*\b(stands?|sits?|runs?|vetoe?s?|blocks?|guards?)\b/i,
-    )
+    expect(doc).toContain('No such phase ever existed')
     expect(doc).not.toMatch(/\b(stands?|sits?)\s+between\s+APPROVE\s+and\s+merge/i)
     // And it may not come back as a promise instead of a statement.
-    expect(doc).not.toMatch(/(TODO|FIXME|XXX|later|planned|will\s+be)[^\n]*(prover|proving)/i)
+    expect(docblockOutsideHistory()).not.toMatch(/(TODO|FIXME|XXX|later|planned|will\s+be)[^\n]*phase/i)
   })
 
   test('the IMPLEMENTED claims never mention a prover, and each names real code', () => {
@@ -273,7 +313,19 @@ describe('the docblock may not claim a safeguard that no code implements (#184 �
     // into a loop over nothing — a guard that cannot fail.
     const cited = [...claims.matchAll(/`([^`]+)`/g)].flatMap((m) => (m[1] ? [m[1]] : []))
     expect(cited.length).toBeGreaterThan(0)
-    for (const symbol of cited) expect(SRC).toContain(symbol)
+    const code = codeOutsideDocblock()
+    for (const symbol of cited) {
+      if (/^[A-Za-z_$][\w$]*$/.test(symbol)) {
+        // An identifier must resolve to a DECLARATION. Mere presence is not enough:
+        // an ordinary English word in backticks ('every') occurs in the source by
+        // coincidence and would pass while naming no code at all.
+        expect(code).toMatch(new RegExp(String.raw`\b(function|const|let|var|class)\s+${symbol}\b`))
+      } else {
+        // An expression citation (`ci.status === 'red'`) has no declaration to find,
+        // so it must appear verbatim — outside the docblock, or it cites itself.
+        expect(code).toContain(symbol)
+      }
+    }
   })
 
   test('the gap is stated as a gap — a blocker does NOT veto an APPROVE', () => {

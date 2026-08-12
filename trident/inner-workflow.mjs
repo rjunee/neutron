@@ -682,7 +682,10 @@ function normalizeVerdict(v) {
 //     gate runs.
 //   • a deferred reviewer still vetoes an APPROVE — `enforceCrossModelGate` below.
 //   • this gate REFUSES TO DOWNGRADE a rejection carrying a blocker or major —
-//     `NON_BLOCKING_SEVERITIES` below, via the `every` test.
+//     `NON_BLOCKING_SEVERITIES` below, which every finding must be in before the
+//     downgrade happens. (Backticks here mean "this names real code": the test
+//     resolves each one to a DECLARATION elsewhere in this file, so an English
+//     word may not wear them.)
 //
 // NOT IMPLEMENTED — a known, deliberate gap, stated so it is not mistaken for the
 // bullet above it:
