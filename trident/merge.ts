@@ -226,7 +226,7 @@ export async function detectBaseBranch(
 // base), not the resolver (never invoked) — ever looked at the combination.
 //
 // WHAT THIS DELIBERATELY DOES NOT CATCH, stated so nobody reads more into a
-// green merge than is there. Two holes, both chosen:
+// green merge than is there. Four holes, all chosen:
 //
 //   1. CROSS-FILE SEMANTIC COUPLING. If the base changes the behaviour of a
 //      helper in `a.ts` and the branch adds a caller in `b.ts`, the file sets do
@@ -257,8 +257,40 @@ export async function detectBaseBranch(
 //      `git diff <review_base> <current_base> -- F` hunk ranges with the
 //      resolver's — a strictly bigger change than this circuit breaker.
 //
+//   3. A BASE THAT WAS REWOUND BELOW THE FORK POINT (pr mode). The fork point is
+//      derived, so it can only ever name a commit the CURRENT base still
+//      contains. Graph `A─B─F`, branch `F` reviewed as `B..F`, then `base` is
+//      force-reset from `B` back to `A`: `merge-base(A, F)` is `A`, which equals
+//      the base tip, so this reports `moved: false` and lands — even though the
+//      reviewed base was `B`, and a squash of `A..F` reintroduces `B`'s changes
+//      that someone deliberately rewound. The `+` refspec on the fetch below
+//      accepts exactly such a force-update, so this is a reachable input, not a
+//      theoretical one. It is NOT closable from a derived fork point: nothing in
+//      the repo at merge time distinguishes "the branch contains the base tip
+//      because it was rebased onto it" from "…because the base was rewound under
+//      it". Closing it needs the recorded `review_base_sha` this section rejects
+//      above, and would buy this one case at the cost of the three failure modes
+//      listed there — a trade worth making only if a rewound base ever actually
+//      bites. A rewind is a deliberate human act on `main`; a stale review is the
+//      routine one, and the routine one is what this gate is for.
+//
+//   4. A BASE THAT MOVES BETWEEN THE ASSESSMENT AND `gh pr merge` (pr mode).
+//      The assessment reads `origin/<base>`; the land is a SERVER-side squash
+//      that GitHub performs against whatever `<base>` is when it runs. Nothing in
+//      the GitHub merge API takes a base precondition — `--match-head-commit`
+//      pins the PR HEAD only — so a sibling lane landing in that window merges
+//      onto a tip this gate never scored. The window is the single process spawn
+//      between the two calls, down from "the whole review" before this gate
+//      existed, and the assessment is deliberately the LAST thing before the
+//      merge so it stays that small. Making it ZERO is a GitHub setting, not
+//      code: `strict_required_status_checks_policy` (require branches to be up to
+//      date) makes the server itself refuse a branch that does not contain the
+//      current base. That setting was turned off on this repo 2026-08-11; this
+//      gate is what covers the gap while it is off, and it does not replace it.
+//
 // This gate is the circuit breaker for the same-file silent-merge case, at file
-// granularity; it is not a claim of semantic safety.
+// granularity, against a base that moved FORWARD; it is not a claim of semantic
+// safety, and it is not atomic with the merge it guards.
 
 /** A base-drift verdict over one (base, branch) pair. Pure data — the decision
  *  to hold is the caller's, because local mode must also subtract the files the
@@ -378,6 +410,10 @@ export async function assessBaseDrift(
   if (review_base_sha === current_base_sha) {
     // The branch already contains the base tip — the reviewed diff's base IS the
     // base being landed on. Nothing moved; no file lists needed.
+    //
+    // This is also hole 3 (see the section header): a base REWOUND below the fork
+    // point lands here reporting `moved: false`, because a derived fork point can
+    // only ever name a commit the current base still contains.
     return {
       review_base_sha,
       current_base_sha,
@@ -1112,6 +1148,10 @@ export function buildMergeCleanupDeps(
       }
       // `--match-head-commit` makes GitHub reject the merge if the PR head moved
       // since the review — a LOUD failure instead of shipping unreviewed code.
+      // It pins the HEAD only: there is no base precondition in the merge API, so
+      // the gate above is not atomic with this call (hole 4 in the section
+      // header). Nothing may be inserted between them — every line added here
+      // widens the window in which a sibling lane can move `base`.
       must(
         'gh pr merge',
         await run_host(
