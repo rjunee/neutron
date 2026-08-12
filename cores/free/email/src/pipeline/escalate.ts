@@ -85,7 +85,12 @@ export interface EscalateResult {
 }
 
 export async function escalateEmail(
-  email: Pick<EmailRow, 'id' | 'sender' | 'subject'> & { reason: string; account_id?: string | null },
+  email: Pick<EmailRow, 'id' | 'sender' | 'subject'> & {
+    reason: string
+    account_id?: string | null
+    /** Non-null ⇒ the push already went out; the resume pass must not repeat it. */
+    pushed_at?: number | null
+  },
   deps: EscalateDeps,
 ): Promise<EscalateResult> {
   const text = composeEscalationText({
@@ -156,12 +161,21 @@ export async function escalateEmail(
     }
   }
 
-  // Best-effort, ALONGSIDE. Fired regardless of the chat outcome (the owner's
+  // Best-effort, ALONGSIDE. Fired regardless of the chat OUTCOME (the owner's
   // phone is often the faster surface), and its result is never delivery.
-  if (deps.push !== null) {
+  //
+  // ONCE PER MESSAGE, THOUGH. A failed chat delivery is retried by the resume
+  // pass, and an unconditional push here went out again on every attempt: five
+  // buzzes for one email, while the chat post the owner actually relies on
+  // never landed. The chat idempotency key cannot help — push has no such key,
+  // so the guard has to be ours. `pushed_at` is that guard, a durable fact on
+  // the row like `escalated_at` and `mutated_at`. Best-effort means it may be
+  // dropped; it does not mean it may be repeated.
+  if (deps.push !== null && (email.pushed_at ?? null) === null) {
     const push = deps.push
     try {
       await push.pushAll(deps.project_slug, { title: ESCALATION_PUSH_TITLE, body: text })
+      deps.store.markPushed(email.id, deps.now(), account)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       deps.log?.('email escalation push failed (chat is unaffected)', {

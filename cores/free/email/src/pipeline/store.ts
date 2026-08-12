@@ -66,6 +66,8 @@ export interface EmailRow {
   /** NULL ⇒ the Gmail label/archive write is still owed. See the migration. */
   mutated_at: number | null
   mutation_attempts: number
+  /** NULL ⇒ the best-effort mobile push has not gone out for this message. */
+  pushed_at: number | null
 }
 
 /** The caller-supplied half of an `emails` row; the rest defaults. */
@@ -206,6 +208,14 @@ export class EmailPipelineStore {
           ORDER BY received_at ASC`,
       )
       .all(max_attempts)
+  }
+
+  /** The best-effort push has gone out for this message; never send it again. */
+  markPushed(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(
+      `UPDATE emails SET pushed_at = ? WHERE id = ? AND account_id = ?`,
+      [at, id, account_id ?? ''],
+    )
   }
 
   /** Account-qualified, like `hasEmail` — the id alone is not an identity. */

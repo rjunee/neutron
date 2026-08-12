@@ -406,6 +406,8 @@ export async function runEmailPipelineTick(
             // — the part of the verdict that survives a restart.
             reason: pending.category ?? 'important',
             account_id: pending.account_id,
+            // Carry the push mark so a resumed escalation does not buzz again.
+            pushed_at: pending.pushed_at,
           },
           escalateDeps,
         )

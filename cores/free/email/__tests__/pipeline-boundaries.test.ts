@@ -395,3 +395,70 @@ describe('the page budget pauses the walk, it does not end it', () => {
     })
   })
 })
+
+describe('a retried escalation does not buzz the phone again', () => {
+  test('chat keeps failing; the push goes out ONCE, not once per attempt', async () => {
+    await withStore(async (store) => {
+      store.insertEmail({
+        id: 'msg-push',
+        thread_id: 't-push',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+
+      const pushes: string[] = []
+      const deps = {
+        // Chat never persists — so the row stays eligible and is retried.
+        deliver: async (): Promise<unknown> => ({ persisted: false, delivered_live: false }),
+        topic_id: 'app:owner',
+        push: {
+          async pushAll(_slug: string, m: { body: string }): Promise<unknown> {
+            pushes.push(m.body)
+            return { sent: 1 }
+          },
+        },
+        project_slug: 'instance',
+        store,
+        now: () => NOW,
+      }
+
+      const first = await escalateEmail(
+        {
+          id: 'msg-push',
+          sender: 'Vendor Billing <billing@vendor.example.com>',
+          subject: 'Action required: payment failed',
+          reason: 'billing action',
+        },
+        deps,
+      )
+      expect(first.delivered).toBe(false)
+      expect(pushes).toHaveLength(1)
+      expect(store.getEmail('msg-push')?.pushed_at).toBe(NOW)
+
+      // The resume pass picks the row up again, carrying its push mark.
+      const pending = store.listPendingEscalations(5)[0]
+      expect(pending?.id).toBe('msg-push')
+      await escalateEmail(
+        {
+          id: 'msg-push',
+          sender: 'Vendor Billing <billing@vendor.example.com>',
+          subject: 'Action required: payment failed',
+          reason: 'billing action',
+          pushed_at: pending?.pushed_at ?? null,
+        },
+        deps,
+      )
+
+      // THE REGRESSION: the push used to fire on every attempt — five buzzes
+      // for one email, while the chat post the owner relies on never landed.
+      expect(pushes).toHaveLength(1)
+    })
+  })
+})

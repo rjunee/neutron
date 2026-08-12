@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS emails (
   -- on insert: the backlog is deliberately never mutated at all.
   mutated_at           INTEGER,
   mutation_attempts    INTEGER NOT NULL DEFAULT 0,
+  -- PUSH state, separate again. Mobile push is best-effort and fires ALONGSIDE
+  -- the chat post, so it is not delivery — but it is also not free to repeat.
+  -- A chat delivery that fails is retried by the resume pass, and without its
+  -- own mark the push went out again on every attempt: the owner's phone buzzed
+  -- five times for one email while the chat post never landed. The chat
+  -- idempotency key cannot dedupe this; push has no such key.
+  pushed_at            INTEGER,
   -- Identity is (account, message), never the message id alone.
   PRIMARY KEY (account_id, id)
 );
