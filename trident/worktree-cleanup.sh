@@ -58,10 +58,47 @@
 #   REMOVED <path>
 #   PRESERVED worktree <path> reason=<dirty|unverifiable>
 #   PRESERVED branch <name> reason=<worktree-preserved|not-on-origin|unpushed|ls-remote-failed>
+#   SKIPPED <path> reason=not-a-worktree-root
 #   KEPT branch <name> reason=checked-out
 #   DELETED branch <name>
 #   RESULT preserved=<n> removed=<n>
+#
+# `preserved` counts ITEMS KEPT, not worktrees — a worktree and a branch are two
+# separate things that can each hold the only copy of some work. So ONE dirty
+# worktree in `delete-branch` mode reports `preserved=2`: the tree, plus the
+# branch whose commits sit underneath it. The number is a magnitude for the log;
+# the exit code (3) and the per-item records above are the contract.
+#
+# THE OUTPUT IS BOUNDED BY CONSTRUCTION. It is read back through the run log and,
+# in the inner workflow, transcribed by a cheap agent — so a 20k-line dirty tree
+# (one un-ignored `dist/`) must not be able to push the trailing RESULT line and
+# the caller's exit marker out of the reader's window and invert the "work was
+# preserved" alarm into "nothing was inspected". Every unbounded thing git can
+# hand us (the dirty file list, git's stderr) is capped below, with the exact
+# command to see the rest printed in its place.
 set -uo pipefail
+
+# Never BLOCK. This script runs from the inner workflow's `finally{}` — which
+# fires on throw and on abort, with nobody at a keyboard — and `ls-remote` below
+# talks to origin. Without this, an expired credential helper or a bare-HTTPS
+# remote sits on a username prompt forever and takes the whole cleanup with it.
+# Same setting the rest of the repo uses wherever it shells git at a remote.
+export GIT_TERMINAL_PROMPT=0
+
+# How many dirty paths are printed per worktree before the list is summarised.
+max_dirty_lines=50
+# How many bytes of git's stderr are quoted in a diagnostic.
+max_stderr_bytes=2000
+# `git` for the one command that touches the network, wall-clock capped where
+# coreutils `timeout` exists (see the ls-remote call for why). The deadline is a
+# BOUND, not a tuning knob — it is overridable only so the hang guard itself is
+# testable in under a second instead of twenty. Behaviour is identical either
+# way: blowing the deadline is just another unreachable origin.
+ls_remote_timeout="${TRIDENT_CLEANUP_LS_REMOTE_TIMEOUT:-20}"
+ls_remote=(git)
+if command -v timeout >/dev/null 2>&1; then
+  ls_remote=(timeout "$ls_remote_timeout" git)
+fi
 
 usage="usage: worktree-cleanup.sh <repo> <branch> <delete-branch|keep-branch>"
 # Argument validation exits 2, the DOCUMENTED usage code. `${1:?}` would exit 1
@@ -132,6 +169,32 @@ while IFS= read -r wt; do
     continue
   fi
 
+  # THE PROBE MUST BE POINTED AT A WORKTREE ROOT — the same guard merge.ts's
+  # `worktreeDirt` applies, and the reason this loop cannot just call `status`.
+  # `git -C <dir> status` WALKS UP to the enclosing repo, so a registered path
+  # that is no longer a worktree root (a crashed `worktree add`, a `.git` file
+  # deleted while the directory survived INSIDE the checkout, a plain directory
+  # recreated at the deterministic path) reports the SHARED CHECKOUT's dirt as
+  # this tree's. That is a false preservation in every direction that matters:
+  # exit 3 on a run that preserved nothing, recovery instructions naming files
+  # that are not in the named tree, and pr-mode branch teardown pinned at 3 for
+  # good. `--show-toplevel` must name `$wt` itself; git prints the
+  # SYMLINK-RESOLVED root, so the resolved path counts as a match too (`/tmp` is
+  # a symlink on macOS).
+  #
+  # A rev-parse that says NOTHING (empty/failed — the directory is not in any
+  # repo at all) is deliberately NOT skipped: it falls through to the status
+  # probe, fails there, and lands on `unverifiable` → PRESERVE. "git cannot
+  # classify this directory" and "git says this directory belongs to some other
+  # repo" are different answers, and only the second one is evidence of absence.
+  wt_top="$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)"
+  wt_real="$(cd "$wt" 2>/dev/null && pwd -P)"
+  if [ -n "$wt_top" ] && [ "$wt_top" != "$wt" ] && [ "$wt_top" != "$wt_real" ]; then
+    echo "SKIPPED $wt reason=not-a-worktree-root"
+    echo "worktree-cleanup.sh: '$wt' is registered as a worktree but its git root is '$wt_top' — NOT probing it; its 'git status' would be that repo's dirt, not this tree's" >&2
+    continue
+  fi
+
   # THE DECISION. Untracked files count as dirt: the #541 incident's lost work
   # included files git had never seen. `--untracked-files=all` then EXPANDS an
   # untracked DIRECTORY into its individual files — plain `--porcelain` collapses
@@ -142,7 +205,7 @@ while IFS= read -r wt; do
   # them as work would preserve every worktree forever.
   if ! dirty="$(git -C "$wt" status --porcelain --untracked-files=all 2>"$git_err")"; then
     echo "PRESERVED worktree $wt reason=unverifiable"
-    echo "worktree-cleanup.sh: cannot read git status in '$wt' — PRESERVING it: $(cat "$git_err")" >&2
+    echo "worktree-cleanup.sh: cannot read git status in '$wt' — PRESERVING it: $(head -c "$max_stderr_bytes" "$git_err")" >&2
     preserved=$((preserved + 1))
     continue
   fi
@@ -150,8 +213,15 @@ while IFS= read -r wt; do
   if [ -n "$dirty" ]; then
     echo "PRESERVED worktree $wt reason=dirty"
     # The paths (git's own porcelain lines, indented), so the operator can
-    # recover the work without guessing what was in there.
-    printf '%s\n' "$dirty" | sed 's|^|  |'
+    # recover the work without guessing what was in there — CAPPED, because this
+    # list is the one part of the output whose length is attacker-shaped (an
+    # un-ignored build directory is thousands of untracked files) and losing the
+    # RESULT line below it would invert the alarm this whole script exists for.
+    dirty_lines="$(printf '%s\n' "$dirty" | wc -l | tr -d ' ')"
+    printf '%s\n' "$dirty" | head -n "$max_dirty_lines" | sed 's|^|  |'
+    if [ "$dirty_lines" -gt "$max_dirty_lines" ]; then
+      echo "  … and $((dirty_lines - max_dirty_lines)) more path(s) — see them all with: git -C '$wt' status --porcelain --untracked-files=all"
+    fi
     preserved=$((preserved + 1))
     continue
   fi
@@ -165,7 +235,7 @@ while IFS= read -r wt; do
     # our status and this call). Leave it: an orphan worktree is cosmetic, and
     # this script has exactly one job it must never get wrong.
     echo "PRESERVED worktree $wt reason=unverifiable"
-    echo "worktree-cleanup.sh: 'git worktree remove' declined for '$wt' — PRESERVING it: $rm_err" >&2
+    echo "worktree-cleanup.sh: 'git worktree remove' declined for '$wt' — PRESERVING it: $(printf '%s' "$rm_err" | head -c "$max_stderr_bytes")" >&2
     preserved=$((preserved + 1))
   fi
 done <<EOF
@@ -180,13 +250,21 @@ if [ "$mode" = "delete-branch" ]; then
       # the delete anyway), and its work is un-committed on top of these commits.
       echo "PRESERVED branch $branch reason=worktree-preserved"
       preserved=$((preserved + 1))
+    # THE ONLY NETWORK CALL IN THE SCRIPT, and it runs inside a `finally{}`. It
+    # is hard-capped in wall-clock as well as un-promptable (GIT_TERMINAL_PROMPT
+    # at the top): a black-holed origin answers neither, and a cleanup that hangs
+    # forever is a hung run. `timeout` is coreutils and not universal (a bare
+    # macOS has no such binary), so it is used only when present — and a timeout
+    # kill exits non-zero, which lands on `ls-remote-failed` → KEEP the branch,
+    # the safe direction, exactly like an unreachable remote.
+    #
     # stderr kept OUT of `remote_out` for the same reason as the status probe:
     # anything git writes there (a trace, a "Warning: Permanently added … to the
     # list of known hosts") would otherwise become line 1 and be read as the
     # remote sha — a pushed branch would look "unpushed" forever.
-    elif ! remote_out="$(git -C "$repo" ls-remote origin "refs/heads/$branch" 2>"$git_err")"; then
+    elif ! remote_out="$("${ls_remote[@]}" -C "$repo" ls-remote origin "refs/heads/$branch" 2>"$git_err")"; then
       echo "PRESERVED branch $branch reason=ls-remote-failed"
-      echo "worktree-cleanup.sh: cannot reach origin to prove '$branch' is pushed — KEEPING it: $(cat "$git_err")" >&2
+      echo "worktree-cleanup.sh: cannot reach origin to prove '$branch' is pushed — KEEPING it: $(head -c "$max_stderr_bytes" "$git_err")" >&2
       preserved=$((preserved + 1))
     else
       remote_sha="$(printf '%s\n' "$remote_out" | awk 'NR==1{print $1}')"

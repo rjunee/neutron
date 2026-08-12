@@ -136,7 +136,10 @@ describe('worktree-cleanup.sh — a DIRTY worktree is PRESERVED (the #541 incide
     expect(res.out).toContain(`PRESERVED worktree ${wt} reason=dirty`)
     // The PATHS are printed — the operator must not have to guess what survived.
     expect(res.out).toContain('brand-new.ts')
-    expect(res.out).toContain('RESULT preserved=')
+    // preserved counts ITEMS KEPT, not worktrees: the tree AND the branch whose
+    // commits sit under it. Asserted exactly — a bare `RESULT preserved=` prefix
+    // passes for every count including 0, which is the one that would be a bug.
+    expect(res.out).toContain('RESULT preserved=2 removed=0')
     // Nothing was destroyed.
     expect(existsSync(join(wt, 'brand-new.ts'))).toBe(true)
     expect(readFileSync(join(wt, 'brand-new.ts'), 'utf8')).toContain('197')
@@ -235,7 +238,7 @@ describe('worktree-cleanup.sh — a CLEAN worktree is still removed', () => {
     expect(existsSync(wt)).toBe(false)
   })
 
-  test('the removal NEVER passes --force (git refuses a dirty tree as a second gate)', async () => {
+  test('the script SOURCE never spells --force (a grep, not a behaviour test)', async () => {
     // The script's own CODE is the contract here: a future edit that reintroduces
     // `--force` on a remove would re-open #541 even if every behavioral test above
     // still passed (a `--force` remove of a CLEAN tree succeeds identically).
@@ -371,6 +374,130 @@ describe('worktree-cleanup.sh — the SHARED CHECKOUT is never a candidate', () 
     expect(res.out).not.toContain(`PRESERVED worktree ${repo}`)
     // The unrelated linked worktree on ANOTHER branch is likewise untouched.
     expect(existsSync(wt)).toBe(true)
+  })
+})
+
+describe('worktree-cleanup.sh — the probe must point at a WORKTREE ROOT', () => {
+  test("a registered path that is no longer a worktree root is SKIPPED, not credited with the SHARED CHECKOUT's dirt", () => {
+    // `git -C <dir> status` WALKS UP. A registered worktree directory that has
+    // stopped being a worktree root — here its `.git` file is gone but the
+    // directory survives INSIDE the checkout — therefore answers with the
+    // enclosing repo's status. Without the `--show-toplevel` guard the operator
+    // gets `PRESERVED worktree <wt> reason=dirty` listing files that are not in
+    // <wt> at all, exit 3 on a run that preserved nothing, and pr-mode branch
+    // teardown pinned at 3 for as long as the stale directory sits there.
+    const repo = makeRepo()
+    const wt = addBuildWorktree(repo)
+    git(wt, 'push', '-q', 'origin', BRANCH)
+    rmSync(join(wt, '.git'), { force: true })
+    // The dirt belongs to the SHARED CHECKOUT, and to nothing else.
+    writeFileSync(join(repo, 'operator-scratch.ts'), 'the human is mid-edit here\n')
+
+    const res = run(repo, BRANCH, 'delete-branch')
+
+    expect(res.out).toContain(`SKIPPED ${wt} reason=not-a-worktree-root`)
+    // The false preservation, in all three of its shapes.
+    expect(res.out).not.toContain('reason=dirty')
+    expect(res.out).not.toContain('operator-scratch.ts')
+    expect(res.code).not.toBe(3)
+    expect(res.code).toBe(0)
+    // Nothing was destroyed on either side of the mistake.
+    expect(existsSync(join(wt, 'built.txt'))).toBe(true)
+    expect(readFileSync(join(repo, 'operator-scratch.ts'), 'utf8')).toContain('mid-edit')
+  })
+
+  test('a directory git cannot classify AT ALL is still preserved (absence of evidence is not evidence)', () => {
+    // The other half of the guard, and the reason it checks for a DIFFERENT root
+    // rather than "not exactly this one": a broken worktree outside any repo
+    // makes `rev-parse` say nothing, which is not the same answer as "this
+    // belongs to some other repo". It must still land on PRESERVE.
+    const repo = makeRepo()
+    const wt = addBuildWorktree(repo, BRANCH, true)
+    rmSync(join(wt, '.git'), { force: true })
+
+    const res = run(repo, BRANCH, 'delete-branch')
+
+    expect(res.code).toBe(3)
+    expect(res.out).toContain(`PRESERVED worktree ${wt} reason=unverifiable`)
+    expect(res.out).not.toContain('SKIPPED')
+    expect(existsSync(join(wt, 'built.txt'))).toBe(true)
+  })
+})
+
+describe('worktree-cleanup.sh — the output is BOUNDED, so the RESULT line survives', () => {
+  test('a huge dirty tree is summarised: the record, the RESULT line and the exit code all survive', () => {
+    // This output is piped verbatim through a cheap transcribing agent in the
+    // inner workflow. One un-ignored `dist/` is thousands of untracked paths,
+    // and an unbounded list pushes the trailing RESULT line (and the caller's
+    // `___EXIT=` marker) out of the reader's window — at which point the run
+    // logs "NOTHING was inspected or removed", the exact inverse of the truth.
+    const repo = makeRepo()
+    const wt = addBuildWorktree(repo)
+    mkdirSync(join(wt, 'dist'))
+    for (let i = 0; i < 600; i++) writeFileSync(join(wt, 'dist', `chunk-${i}.js`), 'x\n')
+
+    const res = run(repo, BRANCH, 'keep-branch')
+
+    expect(res.code).toBe(3)
+    expect(res.out).toContain(`PRESERVED worktree ${wt} reason=dirty`)
+    // Named work, then a count and the command for the rest — never 600 lines.
+    expect(res.out).toContain('dist/chunk-0.js')
+    expect(res.out).toContain('and 550 more path(s)')
+    expect(res.out).toContain(`git -C '${wt}' status --porcelain --untracked-files=all`)
+    expect(res.out.split('\n').length).toBeLessThan(80)
+    // The load-bearing tail is still there.
+    expect(res.out.trimEnd().endsWith('RESULT preserved=1 removed=0')).toBe(true)
+    expect(existsSync(join(wt, 'dist', 'chunk-599.js'))).toBe(true)
+  })
+})
+
+describe('worktree-cleanup.sh — the one network call can never hang the finally{}', () => {
+  /** An `origin` whose transport is an arbitrary command (git's `ext::` helper),
+   *  so `ls-remote` can be made to hang, or to report the environment it ran in. */
+  function extRemote(repo: string, script: string): string {
+    const helper = join(repo, '..', `helper-${Math.random().toString(36).slice(2)}.sh`)
+    writeFileSync(helper, `#!/bin/sh\n${script}\n`)
+    chmodSync(helper, 0o755)
+    git(repo, 'remote', 'add', 'origin', `ext::${helper}`)
+    git(repo, 'config', 'protocol.ext.allow', 'always')
+    return helper
+  }
+
+  test('an origin that never answers is CUT OFF and keeps the branch, instead of hanging forever', () => {
+    // The cleanup runs from a `finally{}` that fires on throw and on abort, with
+    // nobody at a keyboard. A black-holed origin used to take the whole block
+    // with it. The deadline is dropped to 1s here purely so the test is fast —
+    // the helper would otherwise sleep for 30.
+    const repo = makeRepo({ withRemote: false })
+    // The transport records that it RAN TO COMPLETION. Killed mid-sleep, it never
+    // gets to — so "was it cut off?" is a file that does or does not exist, not a
+    // stopwatch. (Ungated, this test would sit here for the full 30s and then
+    // find the marker; the deadline is dropped to 1s so the green path is fast.)
+    const finished = join(repo, '..', 'transport-ran-to-completion.txt')
+    extRemote(repo, `sleep 30; printf ran > ${finished}; exit 1`)
+    addBuildWorktree(repo)
+
+    const res = run(repo, BRANCH, 'delete-branch', { TRIDENT_CLEANUP_LS_REMOTE_TIMEOUT: '1' })
+
+    expect(existsSync(finished)).toBe(false)
+    // Cut off ≠ proved pushed: the branch is KEPT, the safe direction.
+    expect(res.code).toBe(3)
+    expect(res.out).toContain(`PRESERVED branch ${BRANCH} reason=ls-remote-failed`)
+    expect(branchExists(repo, BRANCH)).toBe(true)
+  }, 60_000)
+
+  test('git is run with terminal prompting DISABLED, so a credential prompt cannot block it', () => {
+    // Observed, not grepped: the transport helper reports the environment git
+    // actually handed it. Unset (the default) is what stalls on a username
+    // prompt when origin is a bare-HTTPS URL with an expired credential helper.
+    const repo = makeRepo({ withRemote: false })
+    const seen = join(repo, '..', 'terminal-prompt.txt')
+    extRemote(repo, `printf 'GIT_TERMINAL_PROMPT=[%s]' "\${GIT_TERMINAL_PROMPT-unset}" > ${seen}; exit 1`)
+    addBuildWorktree(repo)
+
+    run(repo, BRANCH, 'delete-branch')
+
+    expect(readFileSync(seen, 'utf8')).toBe('GIT_TERMINAL_PROMPT=[0]')
   })
 })
 

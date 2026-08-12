@@ -280,22 +280,28 @@ function realpathOrSelf(p: string): string {
  * UNVERIFIABLE COUNTS AS DIRTY. If the probe cannot run in a directory that DOES
  * exist (broken worktree admin, a throwing host) we cannot prove the tree is
  * clean, and the failure mode of guessing wrong here is unrecoverable data loss.
- * A path that does not exist at all is not "unverifiable" — there is no working
- * tree there to preserve, only a stale admin entry for `prune`.
+ * That includes `rev-parse` itself failing: a directory git cannot classify at
+ * all is NOT the same as one it classifies as "somebody else's repo". A path that
+ * does not exist at all is not "unverifiable" either — there is no working tree
+ * there to preserve, only a stale admin entry for `prune`, which is why the
+ * `existsSync` gate is load-bearing rather than a shortcut for the probe.
  *
  * @returns the dirty porcelain output, or `null` when the tree is provably clean
- *          (or absent, or not a worktree root at all).
+ *          (or absent, or a directory rooted in some OTHER repo).
  */
 async function worktreeDirt(run_host: RunHostCommand, wt: string): Promise<string | null> {
   if (!existsSync(wt)) return null
   try {
     const top = await run_host(['git', '-C', wt, 'rev-parse', '--show-toplevel'], wt)
-    // Not a git worktree root: either not a repo at all, or a plain directory
-    // whose status would be the PARENT repo's. Nothing here is preservable work.
+    const top_path = top.ok ? top.stdout.trim() : ''
+    // The directory exists but git cannot say what it is → unverifiable → dirty.
+    if (top_path === '')
+      return top.stderr || top.stdout || `git rev-parse --show-toplevel exited ${top.exit_code}`
+    // Rooted in a DIFFERENT repo: a plain directory whose status would be the
+    // PARENT repo's, not this tree's. Nothing here is preservable work of ours.
     // git prints the SYMLINK-RESOLVED root, so `/tmp/x` on a platform where /tmp
     // is a symlink must still match — compare against the resolved path too.
-    const top_path = top.ok ? top.stdout.trim() : ''
-    if (top_path === '' || (top_path !== wt && top_path !== realpathOrSelf(wt))) return null
+    if (top_path !== wt && top_path !== realpathOrSelf(wt)) return null
     const res = await run_host(['git', '-C', wt, 'status', '--porcelain', '--untracked-files=all'], wt)
     if (!res.ok) return res.stderr || res.stdout || `git status exited ${res.exit_code}`
     return res.stdout.trim() === '' ? null : res.stdout.trim()
@@ -357,8 +363,17 @@ async function removeWorktreePath(
  *
  * A stale worktree that is DIRTY is NOT force-removed (ISSUES #541): it may hold
  * a half-finished conflict resolution that exists nowhere else. The merge FAILS
- * LOUDLY instead, naming the path — the operator recovers or deletes it, and the
- * next run gets a fresh (run-keyed) path anyway.
+ * LOUDLY instead, naming the path.
+ *
+ * AND IT KEEPS FAILING UNTIL A HUMAN LOOKS. `runWorktreePath` is keyed on
+ * `run.id` + `run.slug`, both stable across retries, and #194 made slugs reusable
+ * — so a retry re-derives THIS path and re-hits THIS dirty tree. That is the
+ * intended trade and not a bug to route around: the conflict resolver is told to
+ * write logs and run tests in here, so the tree it leaves behind is exactly the
+ * kind of "exists nowhere else" work #541 is about, and a merge that is wedged is
+ * recoverable while one that force-removed the resolution is not. The error names
+ * the path and the two ways out (recover it, or `git worktree remove` it) so the
+ * wedge is a 30-second fix rather than a mystery.
  */
 async function provisionRunWorktree(
   run_host: RunHostCommand,
@@ -369,7 +384,7 @@ async function provisionRunWorktree(
   const preserved = await removeWorktreePath(run_host, repo, wt)
   if (preserved !== null) {
     throw new TridentMergeError(
-      `refusing to reuse the merge worktree ${wt}: it has uncommitted changes that exist nowhere else — recover or delete it by hand, then re-run the merge`,
+      `refusing to reuse the merge worktree ${wt}: it has uncommitted changes that exist nowhere else. Every retry re-derives this same path, so the merge will keep failing until a human clears it: rescue whatever is in that directory, then \`git -C ${repo} worktree remove --force ${wt}\` and re-run the merge`,
       'git worktree add',
       { ok: false, stdout: preserved, stderr: '', exit_code: -1 },
     )
@@ -424,7 +439,7 @@ async function freeBranchFromWorktrees(
     throw new TridentMergeError(
       `trident PRESERVED uncommitted work instead of merging: ${preserved
         .map((p) => p.path)
-        .join(', ')} still ${preserved.length === 1 ? 'has' : 'have'} changes that exist nowhere else (branch ${branch}). Nothing was force-removed. Recover or delete ${preserved.length === 1 ? 'it' : 'them'} by hand, then re-run the merge.`,
+        .join(', ')} still ${preserved.length === 1 ? 'has' : 'have'} changes that exist nowhere else (branch ${branch}). Nothing was force-removed. Every retry re-checks the same paths, so this blocks until a human clears ${preserved.length === 1 ? 'it' : 'them'}: rescue the work, then \`git -C ${repo} worktree remove --force <path>\` and re-run the merge.`,
       'worktree preserved (dirty)',
       { ok: false, stdout: preserved.map((p) => `${p.path}\n${p.dirt}`).join('\n'), stderr: '', exit_code: -1 },
     )

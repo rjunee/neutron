@@ -5224,10 +5224,20 @@ deleted, no dual path):
   CHECKOUT is skipped entirely (git refuses to remove a main working tree, and
   `merge.ts` legitimately parks it on a feature branch — a branch it still holds
   is reported `KEPT … reason=checked-out` at exit 0), the dirt probe requires
-  `rev-parse --show-toplevel` to name the path itself (else a leftover plain
-  directory reports the enclosing repo's dirt as its own), and **only exit 3**
-  means preserved work — 2 is a usage error, 127 a bad script path, and the
-  caller reports those as a cleanup FAILURE that inspected nothing.
+  `rev-parse --show-toplevel` to name the path itself **in both copies** (else a
+  registered path that has stopped being a worktree root reports the enclosing
+  repo's dirt as its own; the shell says `SKIPPED … reason=not-a-worktree-root`),
+  and **only exit 3** means preserved work — 2 is a usage error, 127 a bad script
+  path, and the caller reports those as a cleanup FAILURE that inspected nothing.
+  The gate also cannot break itself: the script's output is capped (a 20k-line
+  dirty tree would push the `RESULT` line out of the transcribing agent's window
+  and invert the alarm), the exit code is read from two sources so a string `"3"`
+  or a dropped field still counts, and the lone network call (`ls-remote`) runs
+  with `GIT_TERMINAL_PROMPT=0` plus a `timeout` deadline so a black-holed origin
+  cannot hang a `finally{}` nobody is watching. A preserved DIRTY merge worktree
+  does wedge every retry — the path is run-keyed and stable — which is the
+  deliberate trade: a wedged merge is recoverable, a force-removed conflict
+  resolution is not, and the error names the path and the way out.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 

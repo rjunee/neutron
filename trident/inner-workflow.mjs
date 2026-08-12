@@ -1029,6 +1029,56 @@ const CLEANUP_SCHEMA = {
   },
 }
 
+/**
+ * What `worktree-cleanup.sh` actually did, read out of an LLM's transcription of
+ * it (ISSUES #541).
+ *
+ * The script's verdict is deterministic; getting it back into the run log is not,
+ * because the agent that ran it types the answer out. So both halves are read
+ * GENEROUSLY, and every ambiguity resolves toward the alarm:
+ *
+ *   * `exit_code` may arrive as the STRING "3". `Number.isFinite('3')` is false,
+ *     and treating that as "no exit code" flips a real preservation into "NOTHING
+ *     was inspected" — inverting the one alarm this path exists to raise.
+ *   * If the field is missing entirely, the `___EXIT=` marker the caller appends
+ *     to the command is a second, independent source inside `raw`. (The LAST
+ *     marker: an agent that echoed the command it was given would put the
+ *     un-expanded `___EXIT=$?` — no digits, so unmatchable — ahead of the real
+ *     one. The script also caps its own output so the marker cannot be pushed out
+ *     of the agent's window in the first place; this is the backstop.)
+ *   * With NO usable exit code at all, the script's own `PRESERVED` records in
+ *     the transcript still decide. Announcing preserved work that was in fact
+ *     removed costs the operator one wasted look; the reverse costs them the work.
+ *
+ * Only a real 3 (or a transcript that says PRESERVED) is a preservation. Exit 2 is
+ * a usage error and 127 a wrong script path — the script inspected NOTHING on
+ * those, and calling them "PRESERVED WORK" drowns the real alarm in noise.
+ *
+ * @param reported the agent's `exit_code` field, in whatever type it arrived as
+ * @param raw the agent's transcription of the script's stdout+stderr
+ * @returns `exit` (null when neither source produced one) and the `outcome` the
+ *          caller logs: 'ok' | 'preserved' | 'preserved-unmarked' | 'failed'
+ */
+function classifyCleanupOutcome(reported, raw) {
+  const coerced =
+    typeof reported === 'number'
+      ? reported
+      : typeof reported === 'string' && reported.trim() !== ''
+        ? Number(reported)
+        : Number.NaN
+  const text = typeof raw === 'string' ? raw : ''
+  const markers = text.match(/___EXIT=(\d+)/g)
+  const exit = Number.isFinite(coerced)
+    ? coerced
+    : markers
+      ? Number(markers[markers.length - 1].slice('___EXIT='.length))
+      : null
+  if (exit === 0) return { exit, outcome: 'ok' }
+  if (exit === 3) return { exit, outcome: 'preserved' }
+  if (exit === null && /^PRESERVED /m.test(text)) return { exit, outcome: 'preserved-unmarked' }
+  return { exit, outcome: 'failed' }
+}
+
 /** States GitHub reports for a check that has FINISHED and FAILED. */
 const CI_FAILED_STATES = new Set([
   'FAILURE',
@@ -2035,18 +2085,21 @@ ${cleanupCmd}`,
   )
   // Surface the outcome in the run log — a preservation is the operator's ONLY
   // notice that a worktree still holds uncommitted work, so it is logged in full.
-  const cleanupExit = cleanup && Number.isFinite(cleanup.exit_code) ? cleanup.exit_code : null
   const cleanupRaw = cleanup && typeof cleanup.raw === 'string' ? cleanup.raw.trim() : ''
-  // ONLY exit 3 means "work was preserved" — that is the script's contract. Exit
-  // 2 is a usage error, 127 a wrong script path, and null means the agent never
-  // reported one: in every one of those the script inspected NOTHING, so calling
-  // them "PRESERVED WORK" turns the operator's single alarm for unrecoverable
-  // work into noise the cleanup emits about its own breakage. They are cleanup
-  // FAILURES — loud, but a different kind of loud.
-  if (cleanupExit === 0) {
+  // See `classifyCleanupOutcome` for why the agent's answer is read from two
+  // sources and why every ambiguity resolves toward the alarm.
+  const { exit: cleanupExit, outcome: cleanupOutcome } = classifyCleanupOutcome(
+    cleanup == null ? null : cleanup.exit_code,
+    cleanupRaw,
+  )
+  if (cleanupOutcome === 'ok') {
     log(`trident-v2 cleanup:worktree ok — ${cleanupRaw.split('\n').pop() || 'no output'}`)
-  } else if (cleanupExit === 3) {
+  } else if (cleanupOutcome === 'preserved') {
     log(`trident-v2 cleanup:worktree PRESERVED WORK (exit=3) — nothing was force-removed:\n${cleanupRaw}`)
+  } else if (cleanupOutcome === 'preserved-unmarked') {
+    log(
+      `trident-v2 cleanup:worktree PRESERVED WORK (exit code unreported — read from the output) — nothing was force-removed:\n${cleanupRaw}`,
+    )
   } else {
     log(`trident-v2 cleanup:worktree FAILED (exit=${cleanupExit === null ? 'unknown' : cleanupExit}) — the cleanup script did not run to completion, so NOTHING was inspected or removed (this is not a preservation):\n${cleanupRaw}`)
   }

@@ -652,6 +652,41 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     expect(calls.map((c) => c.join(' ')).some((c) => c.includes('worktree remove'))).toBe(false)
   })
 
+  test('a directory git cannot CLASSIFY at all counts as dirty (rev-parse silence ≠ "not ours")', async () => {
+    // The other half of the worktree-root guard. "git says this directory belongs
+    // to some other repo" is evidence; "git could not tell me anything" is not,
+    // and the difference decides whether an existing directory is removable. Only
+    // the `existsSync` gate above it may answer null — a path that is GONE has no
+    // working tree to preserve, only a stale admin entry for `prune`.
+    const wt = realDir()
+    const { host, calls } = recordingHost((cmd) =>
+      cmd.includes('--show-toplevel') && cmd.includes(wt) ? fail('not a git repository') : ok(),
+    )
+    const deps = buildMergeCleanupDeps(host)
+    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    const joined = calls.map((c) => c.join(' '))
+    expect(joined.some((c) => c.includes('worktree remove'))).toBe(false)
+    // …and it never fell through to a status probe it had no right to trust.
+    expect(joined.some((c) => c.includes(`git -C ${wt} status`))).toBe(false)
+  })
+
+  test('a worktree path that does NOT EXIST is not "unverifiable" — it is simply gone', async () => {
+    // Pinned because it is the only thing making the `existsSync` gate load-bearing
+    // now that rev-parse silence preserves: without it, a pruned/never-created path
+    // would report as precious work and wedge the merge on nothing at all.
+    const gone = join(tmpdir(), `trident-merge-absent-${Math.random().toString(36).slice(2)}`)
+    const { host, calls } = recordingHost((cmd) =>
+      cmd.includes('--show-toplevel') || cmd.includes('status') ? fail('not a git repository') : ok(),
+    )
+    const deps = buildMergeCleanupDeps(host)
+    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: gone }), deps)
+    const joined = calls.map((c) => c.join(' '))
+    // Treated as removable: the removal was ATTEMPTED (and its failure swallowed),
+    // which is the "nothing to preserve" path, not the preserve path.
+    expect(joined).toContain(`git -C /repo worktree remove ${gone}`)
+    expect(joined.some((c) => c.includes('--show-toplevel'))).toBe(false)
+  })
+
   test('a PLAIN DIRECTORY at the worktree path is NOT precious — it inherits nothing', async () => {
     // `git -C <dir> status` WALKS UP to the enclosing repo, so a leftover plain
     // directory inside the checkout (a crashed `worktree add`) reports the SHARED

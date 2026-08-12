@@ -49,14 +49,41 @@ Four ways a preserve-by-default gate can turn into a nuisance, all closed:
   the exit at 3 for good. It is skipped, and a branch git won't delete because
   it is checked out there is reported as `KEPT … reason=checked-out` at exit 0 —
   origin already has the sha, so nothing is at risk.
-- **The probe must point at a worktree ROOT.** `git -C <dir> status` walks up to
-  the enclosing repo, so an empty leftover directory at the run's worktree path
-  reported the shared checkout's dirt as its own and failed every merge.
-  `rev-parse --show-toplevel` must name the path itself.
+- **The probe must point at a worktree ROOT — in BOTH copies.** `git -C <dir>
+  status` walks up to the enclosing repo, so a registered path that has stopped
+  being a worktree root (an empty leftover directory, a `.git` file deleted while
+  the directory survived) reports the shared checkout's dirt as its own:
+  recovery instructions naming files that are not in the named tree, exit 3 on a
+  run that preserved nothing, and pr-mode branch teardown pinned at 3 for as long
+  as the stale directory sits there. `rev-parse --show-toplevel` must name the
+  path itself, in the shell script (`SKIPPED … reason=not-a-worktree-root`) as
+  well as in `merge.ts`. A rev-parse that says *nothing* is a different answer
+  from one naming another repo, and still preserves — absence of evidence is not
+  evidence of absence when the failure mode is unrecoverable.
 - **Only exit 3 means preserved work.** Usage errors exit 2 (documented, and now
   actually 2 rather than bash's `${1:?}` 1) and a wrong script path exits 127 —
   the caller reports those as a cleanup FAILURE, because a script that never ran
-  inspected nothing.
+  inspected nothing. But the *reading* of that code is generous, because it comes
+  back through a transcribing agent: a string `"3"` counts, a missing field falls
+  back to the `___EXIT=` marker in the output, and an output full of `PRESERVED`
+  records with no code at all still raises the alarm rather than the "NOTHING was
+  inspected" line. A wasted look costs a minute; the inverse costs the work.
+
+Two ways the gate could have failed *itself*, also closed. The output is bounded
+by construction — a 20k-line dirty tree (one un-ignored `dist/`) would otherwise
+push the `RESULT` line and the exit marker out of the transcriber's window, so
+the dirty list is capped at 50 paths with a count and the exact command for the
+rest. And the one network call cannot hang: the cleanup runs from a `finally{}`
+that fires on throw and abort with nobody at a keyboard, so `ls-remote` runs with
+`GIT_TERMINAL_PROMPT=0` and, where coreutils `timeout` exists, a 20s deadline —
+blowing it is just another unreachable origin, which keeps the branch.
+
+One thing this fix deliberately does NOT do: unwedge itself. `runWorktreePath` is
+keyed on `run.id` + `run.slug`, both stable across retries, so a preserved dirty
+merge worktree makes every retry fail at the same path until a human clears it.
+That is the trade, stated where it is made rather than papered over: a wedged
+merge is recoverable, a force-removed conflict resolution is not. The error names
+the path and the two ways out.
 
 Tested against real git repos rather than a mocked host — the bug is only
 observable on a real working tree — covering untracked-only, modified, staged,
@@ -64,12 +91,20 @@ unreadable, ignored-files-only, clean, already-gone, and other-branch trees, an
 untracked file inside an untracked DIRECTORY (what `--untracked-files=all`
 actually buys: the individual paths, not one collapsed `?? feature/`), a clean
 tree whose git warns on stderr, a shared checkout parked on the branch, and the
-four branch-teardown outcomes. Mutation-verified, 15 mutations applied and
-killed: dropping `--untracked-files=all` (both copies), folding stderr back into
-either probe, un-skipping the main working tree, exiting 1 on a usage error,
-restoring `--force` (both copies), downgrading exit 3 to 0, dropping the
-worktree-root guard, treating an unverifiable status as clean, dropping the
-operator-facing throw, and calling every non-zero cleanup exit a preservation.
+four branch-teardown outcomes, a registered path that is no longer a worktree
+root sitting next to a dirty shared checkout, a 600-file dirty tree, and an
+`origin` whose transport never answers. The exit-code reader is EXECUTED, lifted
+out of the shipped `inner-workflow.mjs` rather than grepped for.
+Mutation-verified, 20 mutations applied and killed: dropping
+`--untracked-files=all` (both copies), folding stderr back into either probe,
+un-skipping the main working tree, exiting 1 on a usage error, restoring
+`--force` (both copies), downgrading exit 3 to 0, dropping the worktree-root
+guard (both copies), treating an unverifiable status as clean, treating
+rev-parse silence as "not ours", dropping the `existsSync` gate, dropping the
+operator-facing throw, calling every non-zero cleanup exit a preservation,
+rejecting a string exit code, dropping the `___EXIT=` fallback, dropping the
+PRESERVED-records fallback, removing the dirty-list cap, and dropping
+`GIT_TERMINAL_PROMPT=0` / the `ls-remote` deadline.
 
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 

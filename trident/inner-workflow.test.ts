@@ -64,6 +64,36 @@ const CLEANUP_SH = readFileSync(
   'utf8',
 )
 
+/** `function <name>(…) { … }` lifted verbatim out of `SRC`, brace-matched so the
+ *  extraction survives edits inside the body instead of a fixed line count. */
+function grabFunction(name: string): string {
+  const at = SRC.indexOf(`function ${name}(`)
+  if (at === -1) throw new Error(`${name} is missing from inner-workflow.mjs`)
+  let depth = 0
+  let started = false
+  for (let i = at; i < SRC.length; i += 1) {
+    const c = SRC[i]
+    if (c === '{') {
+      depth += 1
+      started = true
+    } else if (c === '}') {
+      depth -= 1
+      if (started && depth === 0) return SRC.slice(at, i + 1)
+    }
+  }
+  throw new Error(`could not brace-match ${name}`)
+}
+
+/** The SHIPPED `classifyCleanupOutcome`, executed rather than grepped (#541). */
+function loadCleanupClassifier(): (
+  reported: unknown,
+  raw: unknown,
+) => { exit: number | null; outcome: string } {
+  return new Function(
+    `${grabFunction('classifyCleanupOutcome')}; return classifyCleanupOutcome`,
+  )() as (reported: unknown, raw: unknown) => { exit: number | null; outcome: string }
+}
+
 describe('inner-workflow.mjs — meta + phases', () => {
   test('exports a pure meta literal named trident-v2-inner with the three phases', () => {
     expect(SRC).toContain("name: 'trident-v2-inner'")
@@ -1224,17 +1254,70 @@ describe('inner-workflow.mjs — worktree cleanup on ALL paths, destructive on N
     expect(CLEANUP_SH).toContain('[ "$preserved" -eq 0 ] || exit 3')
   })
 
-  test('ONLY exit 3 is reported as preserved work — any other non-zero is a cleanup FAILURE', () => {
-    // Exit 3 is the script's deliberate "a human has work waiting". Exit 2 (usage),
-    // 127 (wrong path) and a missing exit_code all mean the script never inspected
-    // anything — reporting those as "PRESERVED WORK" points the operator at work
-    // that was never preserved and drowns the one alarm that matters in noise.
-    expect(SRC).toContain('} else if (cleanupExit === 3) {')
-    expect(SRC).toContain('PRESERVED WORK (exit=3)')
-    expect(SRC).toContain('cleanup:worktree FAILED')
-    expect(SRC).toContain('this is not a preservation')
-    // The old shape: one `else` that called EVERY non-zero exit a preservation.
-    expect(SRC).not.toContain('PRESERVED WORK (exit=${')
+  describe('the cleanup verdict survives its trip through the transcribing agent', () => {
+    // EXECUTED, not grepped: `classifyCleanupOutcome` is lifted out of the shipped
+    // source and run. The script's verdict is deterministic; getting it back into
+    // the run log is not, because an LLM types the answer out — and every way that
+    // transcription can go wrong lands on the SAME failure, the run reporting
+    // "NOTHING was inspected or removed" over work that was in fact preserved.
+    const classify = loadCleanupClassifier()
+
+    test('exit 3 is a preservation; 0 is a clean run', () => {
+      expect(classify(3, 'PRESERVED worktree /wt reason=dirty\nRESULT preserved=1 removed=0').outcome)
+        .toBe('preserved')
+      expect(classify(0, 'RESULT preserved=0 removed=1').outcome).toBe('ok')
+    })
+
+    test('a STRING "3" is still a preservation (Number.isFinite("3") is false)', () => {
+      // The schema says integer, but the value comes from a model. Rejecting the
+      // string reclassified a real preservation as a cleanup FAILURE — the exact
+      // inversion of the operator's only data-loss alarm.
+      expect(classify('3', 'PRESERVED worktree /wt reason=dirty').outcome).toBe('preserved')
+      expect(classify('3', '').exit).toBe(3)
+      expect(classify('0', 'RESULT preserved=0 removed=0').outcome).toBe('ok')
+    })
+
+    test('a MISSING exit_code falls back to the ___EXIT= marker in the transcript', () => {
+      const raw = 'PRESERVED worktree /wt reason=dirty\nRESULT preserved=1 removed=0\n___EXIT=3'
+      expect(classify(undefined, raw).outcome).toBe('preserved')
+      expect(classify(null, raw).exit).toBe(3)
+      expect(classify('', raw).exit).toBe(3)
+      // An agent that echoed the command it was told to run puts the UNEXPANDED
+      // `___EXIT=$?` in front of the real marker; only the expanded one counts.
+      expect(classify(null, `bash cleanup.sh 2>&1; echo "___EXIT=$?"\n${raw}`).exit).toBe(3)
+      // The marker is APPENDED, so the LAST one is the real one. Anything earlier
+      // is content — and the dirty list is arbitrary filenames chosen by whoever
+      // was editing, not a namespace this script controls.
+      expect(
+        classify(
+          null,
+          'PRESERVED worktree /wt reason=dirty\n  ?? notes/___EXIT=0.txt\n___EXIT=3',
+        ).exit,
+      ).toBe(3)
+    })
+
+    test('no exit code ANYWHERE, but PRESERVED records in the output → still the alarm', () => {
+      // The 20k-line-dirty-tree case: the marker fell off the end of the agent's
+      // window. A wasted look costs the operator a minute; the inverse costs them
+      // the work, so the transcript's own records decide.
+      const got = classify(undefined, 'PRESERVED worktree /wt reason=dirty\n  ?? brand-new.ts')
+      expect(got.outcome).toBe('preserved-unmarked')
+      expect(got.exit).toBe(null)
+    })
+
+    test('a cleanup that never ran is a FAILURE, never a preservation', () => {
+      // Exit 2 (usage), 127 (wrong script path) and a silent agent all mean the
+      // script inspected NOTHING. Calling those "PRESERVED WORK" points the
+      // operator at work that does not exist and drowns the real alarm in noise.
+      expect(classify(2, 'worktree-cleanup.sh: usage: …').outcome).toBe('failed')
+      expect(classify(127, 'bash: no such file').outcome).toBe('failed')
+      expect(classify(undefined, '').outcome).toBe('failed')
+      expect(classify(undefined, 'REMOVED /wt\nRESULT preserved=0 removed=1').outcome).toBe('failed')
+      expect(classify('not-a-number', 'REMOVED /wt').outcome).toBe('failed')
+      // …and the log line for those says so, rather than crying preservation.
+      expect(SRC).toContain('cleanup:worktree FAILED')
+      expect(SRC).toContain('this is not a preservation')
+    })
   })
 
   test('the top-level return carries the Workflow result API shape', () => {
