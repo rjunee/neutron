@@ -55,8 +55,9 @@
  *     extend it, and an attempt the LEVEL GATE drops does not start one (the
  *     original sets `wedgeAlertState` only inside `if (action.alert.send)`).
  *
- *     Two consequences that are easy to get wrong — not the whole caller-facing
- *     contract, and not an inventory of how this differs from the original:
+ *     Three consequences that are easy to get wrong — not the whole
+ *     caller-facing contract, and not an inventory of how this differs from
+ *     the original:
  *
  *     A CLOCK JUMP MUST NOT BE ABLE TO SILENCE THE KEY FOR THE JUMP PLUS THE
  *     WINDOW. `Date.now()` can jump backward (an NTP correction, a VM resume),
@@ -76,8 +77,16 @@
  *     let a persistently-throwing sink re-attempt on every single call,
  *     precisely the flood the window exists to prevent. A caller that needs a
  *     DELIVERY bound must make its own sink non-throwing; this primitive will
- *     not do it for them. `ms` is likewise not validated here, so a caller
- *     that COMPUTES `ms` must validate it.
+ *     not do it for them.
+ *
+ *     NOTHING A CALLER PASSES CAN SILENCE A KEY PERMANENTLY. `ms` used to be
+ *     unvalidated, and `rateLimited(key, NaN)` therefore suppressed the key
+ *     for as long as the clock moved forward — an invisible failure inside
+ *     the primitive that exists to make a flood visible. A window that is not
+ *     computable as a finite number now counts as DUE, so the failure
+ *     direction is an extra line, never a dead one. That makes
+ *     `rateLimited(key, Infinity)` a flood rather than a latch: `once(key)`
+ *     is how "never again" is expressed.
  *
  * Both latch states are PER-PROCESS module state keyed by
  * `subsystem × key` — "once per process" holds even across two
@@ -150,8 +159,11 @@ export interface Logger extends LogEmitter {
    * wedge-alert `alertDedupeMs` cooldown).
    *
    * "Roughly" is load-bearing: a clock jump can move an individual attempt in
-   * either direction, and a throwing sink consumes a window with no
-   * guarantee that anything was delivered. Both are deliberate — the head
+   * either direction, a throwing sink consumes a window with no
+   * guarantee that anything was delivered, and a window that is not a finite
+   * number counts as due rather than as forever. All three are deliberate —
+   * and all three err toward an extra line, because this primitive must not
+   * be able to go permanently silent on any input. The head
    * docblock gives the reasons, the condition itself is in the implementation
    * below, and `logger/__tests__/logger.test.ts` holds the pinned cases — not
    * including the throwing-sink half, which is the gap the head docblock
@@ -359,6 +371,17 @@ export function createLogger(subsystem: string, options?: LoggerOptions): Logger
           const last = rateLimitState.get(subsystem)?.get(key)
           if (last === undefined) return true
           const elapsed = clock() - last
+          // An UNCOMPUTABLE window counts as due. Every comparison against a
+          // NaN is false, so without this line a single non-finite input — a
+          // computed `ms`, or a clock reading that is not a number — makes
+          // both halves of the condition below false and silences the key.
+          // That is the fail-CLOSED direction, and it is strictly worse than
+          // the flood this primitive exists to stop: a flood is visible in
+          // the journal, a permanently silenced heartbeat reads as "the thing
+          // died" and shows up nowhere at all. Erring toward an extra line
+          // keeps the failure mode observable. `Infinity` is rejected here
+          // too — see the head docblock for why `once` owns "never again".
+          if (!Number.isFinite(elapsed) || !Number.isFinite(ms)) return true
           // `Date.now()` is not monotonic (NTP, a VM resume), so the reading
           // can land BEHIND `last` and a plain `>= ms` would then suppress the
           // line for the jump plus the window. For a rate-limited heartbeat

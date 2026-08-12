@@ -177,11 +177,17 @@ export interface ImportRunningHandlerDeps {
 export function buildImportRunningHandler(
   deps: ImportRunningHandlerDeps,
 ): CronHandler {
+  // ONE logger view per clock, deliberately. `rateLimited` windows are
+  // per-process state keyed `subsystem × key` — the CLOCK is not part of the
+  // key — so two views on `import-running-cron` reading different clocks would
+  // compare one clock's readings against the other's stamps in a single
+  // window. Only the test seam injects a clock, so in production this IS the
+  // module-level `log` and that mix cannot arise at all; a test that injects
+  // one gets its own view, and `resetLoggerStateForTests` is what keeps its
+  // stamps out of the next test's window.
+  const tickLog =
+    deps.now === undefined ? log : createLogger('import-running-cron', { now: deps.now })
   const now = deps.now ?? ((): number => Date.now())
-  // A second view on the same subsystem, built with this handler's clock so the
-  // idle-heartbeat window is deterministic under test. `rateLimited` windows are
-  // per-process state keyed `subsystem × key`, so this view and `log` share them.
-  const tickLog = createLogger('import-running-cron', { now })
 
   return async (ctx) => {
     const fired_at = now()

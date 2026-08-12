@@ -527,6 +527,78 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     expect(tickLines()).toEqual([tickLine(OWNER, 1), tickLine(OWNER, 1)])
   })
 
+  test('the FIRST idle tick after an import finishes logs — busy ticks do not stamp the window', async () => {
+    // The transition the other cases leave open, and the one an operator meets
+    // every time an import completes: busy → idle. The busy branch never touches
+    // the window, so the first idle tick after the work drains must log AT ONCE.
+    // If the busy branch ever started stamping — the obvious "just throttle the
+    // tick" simplification — this line would be suppressed for up to a full
+    // IDLE_TICK_LOG_INTERVAL_MS after every import, and the only observable
+    // difference from a cron that stopped firing would be the wait.
+    //
+    // The drain is driven the real way: the runner reports `completed`, the tick
+    // advances the phase out of `import_running`, and the SCAN then returns zero
+    // rows on its own. Nothing here rewrites state to fake the idle branch.
+    const job_id = 'job-busy-then-idle'
+    await stateStore.upsert({
+      user_id: 'test-user',
+      owner_slug: OWNER,
+      phase: 'import_running',
+      phase_state_patch: {
+        topic_id: TOPIC,
+        user_id: USER,
+        signup_via: 'web',
+        import_job_id: job_id,
+        import_source: 'chatgpt-zip',
+      },
+      advanced_at: T0,
+    })
+    runnerResults.set(job_id, {
+      job_id,
+      owner_slug: OWNER,
+      source: 'chatgpt-zip',
+      status: 'pass1-running',
+      dollars_spent: 0.4,
+      pass1_chunks_done: 2,
+      pass1_chunks_total: 8,
+      chunks_total_known: false,
+      started_at: T0 - 30_000,
+    })
+
+    const tick = makeTicker(OWNER)
+    captureLogLines()
+    await tick(T0)
+
+    runnerResults.set(job_id, {
+      job_id,
+      owner_slug: OWNER,
+      source: 'chatgpt-zip',
+      status: 'completed',
+      dollars_spent: 1.2,
+      pass1_chunks_done: 8,
+      pass1_chunks_total: 8,
+      chunks_total_known: true,
+      started_at: T0 - 30_000,
+      completed_at: T0 + 1_000,
+      result: completedResult(),
+    })
+    // Still busy at scan time — this is the tick that advances the phase.
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect((await stateStore.get(OWNER, 'test-user'))?.phase).toBe(
+      'import_analysis_presented',
+    )
+
+    // Now idle, one cadence later — deep inside the window that suppresses a
+    // CONSECUTIVE idle tick, so this line only appears because the busy ticks
+    // before it left the window untouched.
+    await tick(T0 + 2 * DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([
+      tickLine(OWNER, 1),
+      tickLine(OWNER, 1),
+      tickLine(OWNER, 0),
+    ])
+  })
+
   test('the interval is long enough to matter and short enough to notice', async () => {
     // A guard on the constant itself: at 5s sweeps this is the difference between
     // ~17,280 and ~144 lines/day.

@@ -437,6 +437,57 @@ describe('rateLimited', () => {
     b.rateLimited('k', 1000).info('deduped')
     expect(lines).toHaveLength(1)
   })
+
+  // The fail-CLOSED cases. Every comparison against a NaN is false, so before
+  // the finite-window guard a single non-finite input silenced the key for as
+  // long as the clock moved forward — inside the primitive whose whole job is
+  // to make a flood visible without going dark. These assert the OPPOSITE
+  // outcome (a line on every attempt), because a permanently silent heartbeat
+  // is the failure nobody can see. They are not hypothetical inputs to
+  // validate at the call sites: the point is that no call site CAN produce it.
+  test('a NaN window emits every time rather than silencing the key', () => {
+    let now = 0
+    const { sink, lines } = capture()
+    const log = createLogger('nan-ms', { sink, now: () => now })
+    for (let i = 0; i < 5; i += 1) {
+      now += 1_000
+      log.rateLimited('k', Number.NaN).info('beat')
+    }
+    expect(lines).toHaveLength(5)
+  })
+
+  test('a NaN CLOCK READING emits rather than silencing the key', () => {
+    // The stamp is written from the same clock, so one bad reading poisons
+    // `last` as well as `elapsed` — both sides of the subtraction, forever.
+    let now: number = Number.NaN
+    const { sink, lines } = capture()
+    const log = createLogger('nan-clock', { sink, now: () => now })
+    log.rateLimited('k', 1_000).info('first') // stamps NaN
+    log.rateLimited('k', 1_000).info('second') // NaN - NaN → still due
+    now = 10_000 // clock recovers; `last` is still NaN
+    log.rateLimited('k', 1_000).info('third')
+    expect(lines.map((l) => l.line)).toEqual([
+      '[nan-clock] event=first',
+      '[nan-clock] event=second',
+      '[nan-clock] event=third',
+    ])
+  })
+
+  test('an INFINITE window is a flood, not a latch — `once` owns "never again"', () => {
+    // Deliberate: `rateLimited(key, Infinity)` reads like a latch, and honouring
+    // it would put a permanent per-key silence back within a caller's reach.
+    // `once` is the primitive that expresses it, and it is observable.
+    let now = 0
+    const { sink, lines } = capture()
+    const log = createLogger('inf-ms', { sink, now: () => now })
+    log.rateLimited('k', Number.POSITIVE_INFINITY).info('beat')
+    now = 1
+    log.rateLimited('k', Number.POSITIVE_INFINITY).info('beat')
+    expect(lines).toHaveLength(2)
+    log.once('k').info('latched')
+    log.once('k').info('suppressed')
+    expect(lines).toHaveLength(3)
+  })
 })
 
 // ---------------------------------------------------------------------------
