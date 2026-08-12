@@ -442,6 +442,19 @@ async function provisionRunWorktree(
  * what the operator would otherwise see in chat, and it reads like a trident bug
  * instead of what it is: trident kept your uncommitted work, and it is waiting
  * for you at a path you now know.
+ *
+ * THE SHARED CHECKOUT IS NEVER A CANDIDATE — the same rule the SHELL twin applies,
+ * for the same reason. `git worktree remove` refuses a main working tree outright
+ * ("is a main working tree"), and that path IS its own `--show-toplevel`, so
+ * `removeWorktreePath` would score the refusal as PRESERVED and this function
+ * would throw — blocking the merge over a shared checkout that holds no
+ * uncommitted work at all. Today step (0a) of `mergeLocal` moves the checkout onto
+ * `base` before we are called, so the branch match cannot reach it; that ordering
+ * is the only thing standing between this and a merge that fails forever, which is
+ * too thin a guarantee to leave the twins disagreeing about. git documents the
+ * main worktree as the FIRST `worktree` record (git-worktree(1): "The main
+ * worktree is listed first"), so it is skipped positionally, exactly as the shell
+ * twin skips it with `n > 1`.
  */
 async function freeBranchFromWorktrees(
   run_host: RunHostCommand,
@@ -454,13 +467,16 @@ async function freeBranchFromWorktrees(
   const wantRef = `refs/heads/${branch}`
   const preserved: { path: string; dirt: string }[] = []
   let curPath: string | null = null
+  let seen = 0
   for (const raw of list.stdout.split(/\r?\n/)) {
     const line = raw.trim()
     if (line.startsWith('worktree ')) {
       curPath = line.slice('worktree '.length).trim()
+      seen += 1
     } else if (line.startsWith('branch ')) {
       const ref = line.slice('branch '.length).trim()
-      if (ref === wantRef && curPath !== null && curPath !== keepPath) {
+      // `seen > 1` skips the main working tree — see the doc comment above.
+      if (ref === wantRef && curPath !== null && curPath !== keepPath && seen > 1) {
         const dirt = await removeWorktreePath(run_host, repo, curPath)
         if (dirt !== null) preserved.push({ path: curPath, dirt })
       }

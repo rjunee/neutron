@@ -43,12 +43,19 @@ Four ways a preserve-by-default gate can turn into a nuisance, all closed:
   perfectly clean tree — an unreadable subdirectory, a trace — parsed as a dirty
   path: worktrees leaked forever, pr-mode branch teardown never ran, and the
   alarm fired on runs that had preserved nothing.
-- **The shared checkout is never a candidate.** git refuses `worktree remove` on
-  a main working tree, and `merge.ts` legitimately leaves it on a feature branch
-  after a stale-rebase recovery; scoring that refusal as a preservation pinned
-  the exit at 3 for good. It is skipped, and a branch git won't delete because
-  it is checked out there is reported as `KEPT … reason=checked-out` at exit 0 —
-  origin already has the sha, so nothing is at risk.
+- **The shared checkout is never a candidate — in BOTH copies.** git refuses
+  `worktree remove` on a main working tree, and `merge.ts` legitimately leaves it
+  on a feature branch after a stale-rebase recovery; scoring that refusal as a
+  preservation pinned the exit at 3 for good. It is skipped, and a branch git
+  won't delete because it is checked out there is reported as
+  `KEPT … reason=checked-out` at exit 0 — origin already has the sha, so nothing
+  is at risk. The cross-model reviewer caught that only the shell twin skipped
+  it: `freeBranchFromWorktrees` would have scored the refusal as preserved work
+  and thrown, failing the merge over a checkout holding nothing uncommitted, on
+  every retry. It is unreachable today only because `mergeLocal` step (0a) moves
+  the checkout onto base first — too thin a guarantee to leave the twins
+  disagreeing about, so `merge.ts` now skips the first `worktree` record exactly
+  as the shell twin's `n > 1` does.
 - **The probe must point at a worktree ROOT — in BOTH copies.** `git -C <dir>
   status` walks up to the enclosing repo, so a registered path that has stopped
   being a worktree root (an empty leftover directory, a `.git` file deleted while

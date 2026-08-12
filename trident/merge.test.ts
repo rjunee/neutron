@@ -411,7 +411,7 @@ describe('buildMergeCleanupDeps — local mode rebase-onto-latest + conflict res
     const stray = '/shared/.wt/stray-feat-x'
     const host: RunHostCommand = async (cmd) => {
       if (cmd.includes('worktree') && cmd.includes('list')) {
-        return ok(`worktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
+        return ok(`worktree /shared\nHEAD main0\nbranch refs/heads/main\n\nworktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
       }
       return ok()
     }
@@ -732,7 +732,7 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     const run = makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/shared' })
     const { host, calls } = recordingHost((cmd) => {
       if (cmd.includes('worktree') && cmd.includes('list')) {
-        return ok(`worktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
+        return ok(`worktree /shared\nHEAD main0\nbranch refs/heads/main\n\nworktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
       }
       if (cmd.includes('--show-toplevel') && cmd.includes(stray)) return ok(`${stray}\n`)
       if (cmd.includes('status') && cmd.includes(stray)) return ok('?? forge-was-mid-edit.ts\n')
@@ -762,7 +762,9 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     let removed = false
     const { host, calls } = recordingHost((cmd) => {
       if (cmd.includes('worktree') && cmd.includes('list')) {
-        return removed ? ok('') : ok(`worktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
+        return removed
+          ? ok(`worktree /shared\nHEAD main0\nbranch refs/heads/main\n`)
+          : ok(`worktree /shared\nHEAD main0\nbranch refs/heads/main\n\nworktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
       }
       if (cmd.includes('--show-toplevel') && cmd.includes(stray)) return ok(`${stray}\n`)
       if (cmd.includes('status') && cmd.includes(stray)) return ok('')
@@ -778,5 +780,39 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     const joined = calls.map((c) => c.join(' '))
     expect(joined.some((c) => c === `git -C /shared worktree remove ${stray}`)).toBe(true)
     expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(true)
+  })
+
+  test('the SHARED CHECKOUT parked on the branch is SKIPPED, not scored as preserved work', async () => {
+    // The shell twin skips the main working tree (`n > 1`); merge.ts did not. git
+    // refuses `worktree remove` on a main working tree ("is a main working tree")
+    // and that path IS its own `--show-toplevel`, so the refusal used to read as a
+    // PRESERVED worktree and threw — failing the merge over a shared checkout with
+    // no uncommitted work in it at all. That is the "cry wolf" direction: the gate
+    // fires on a run that preserved nothing, and it does so on EVERY retry.
+    const run = makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/shared' })
+    const { host, calls } = recordingHost((cmd) => {
+      if (cmd.includes('worktree') && cmd.includes('list')) {
+        // Realistic porcelain: the main worktree is FIRST, and it is on feat-x.
+        return ok(`worktree /shared\nHEAD abc\nbranch refs/heads/feat-x\n`)
+      }
+      // Were it ever probed/removed, git would answer exactly this.
+      if (cmd.includes('--show-toplevel') && cmd.includes('/shared')) return ok('/shared\n')
+      if (cmd.includes('worktree') && cmd.includes('remove')) {
+        return fail("fatal: '/shared' is a main working tree")
+      }
+      if (cmd.includes('--abort')) return fail()
+      return ok()
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    // BEHAVIOUR, not bookkeeping: the merge actually completes…
+    await cleanupAfterMerge(run, deps)
+    const joined = calls.map((c) => c.join(' '))
+    expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(true)
+    // …and the shared checkout was never even offered to `worktree remove`.
+    // Not removed — forced or otherwise. (The `worktree remove`/`add --force` calls
+    // that DO appear target the run's own merge worktree, a different path.)
+    expect(joined.some((c) => /worktree remove (--force )?\/shared$/.test(c))).toBe(false)
+    // It was SKIPPED, not probed-and-spared: `worktreeDirt` never even ran on it.
+    expect(joined.some((c) => c === 'git -C /shared rev-parse --show-toplevel')).toBe(false)
   })
 })
