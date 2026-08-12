@@ -20,7 +20,15 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -44,9 +52,14 @@ function git(cwd: string, ...args: string[]): string {
   return p.stdout.toString()
 }
 
-function run(repo: string, branch: string, mode: string): { code: number; out: string } {
+function run(
+  repo: string,
+  branch: string,
+  mode: string,
+  env: Record<string, string> = {},
+): { code: number; out: string } {
   const p = Bun.spawnSync(['bash', SCRIPT, repo, branch, mode], {
-    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', ...env },
   })
   return { code: p.exitCode, out: `${p.stdout.toString()}${p.stderr.toString()}` }
 }
@@ -132,6 +145,27 @@ describe('worktree-cleanup.sh — a DIRTY worktree is PRESERVED (the #541 incide
     expect(branchExists(repo, BRANCH)).toBe(true)
     expect(res.out).toContain(`PRESERVED branch ${BRANCH} reason=worktree-preserved`)
     expect(res.out).not.toContain(`DELETED branch`)
+  })
+
+  test('untracked files inside an untracked DIRECTORY are named INDIVIDUALLY (what -uall buys)', () => {
+    // This is the whole behavioral payload of `--untracked-files=all`, and the
+    // only test that fails if the flag is dropped: plain `--porcelain` collapses
+    // a brand-new directory to a single `?? feature/` line. The tree is "dirty"
+    // either way — but this output IS the operator's recovery instructions, and
+    // "feature/" does not tell them 197 insertions across 7 files are in there.
+    const repo = makeRepo()
+    const wt = addBuildWorktree(repo)
+    mkdirSync(join(wt, 'feature', 'deep'), { recursive: true })
+    writeFileSync(join(wt, 'feature', 'router.ts'), 'export const a = 1\n')
+    writeFileSync(join(wt, 'feature', 'deep', 'handler.ts'), 'export const b = 2\n')
+
+    const res = run(repo, BRANCH, 'delete-branch')
+
+    expect(res.code).toBe(3)
+    expect(res.out).toContain(`PRESERVED worktree ${wt} reason=dirty`)
+    expect(res.out).toContain('feature/router.ts')
+    expect(res.out).toContain('feature/deep/handler.ts')
+    expect(existsSync(join(wt, 'feature', 'deep', 'handler.ts'))).toBe(true)
   })
 
   test('a MODIFIED tracked file is preserved with its edit intact', () => {
@@ -248,6 +282,98 @@ describe('worktree-cleanup.sh — a CLEAN worktree is still removed', () => {
   })
 })
 
+describe('worktree-cleanup.sh — git STDERR is diagnostics, never dirt', () => {
+  // Only `git status`'s STDOUT decides dirtiness. Reading `2>&1` made every
+  // warning git prints on a CLEAN tree parse as a dirty path: the worktree was
+  // never removed, pr-mode branch teardown never ran, and "PRESERVED WORK" fired
+  // on runs that had preserved nothing — a leak plus permanent alarm fatigue.
+
+  test('a clean tree whose git writes to stderr (GIT_TRACE) is still REMOVED, exit 0', () => {
+    const repo = makeRepo()
+    const wt = addBuildWorktree(repo)
+    git(wt, 'push', '-q', 'origin', BRANCH)
+
+    // GIT_TRACE makes every git command emit trace lines on stderr and exit 0 —
+    // a clean, uid-independent stand-in for "git warned about something".
+    const res = run(repo, BRANCH, 'delete-branch', { GIT_TRACE: '1' })
+
+    expect(res.out).toContain(`REMOVED ${wt}`)
+    expect(res.out).not.toContain('reason=dirty')
+    expect(existsSync(wt)).toBe(false)
+    // …and the same stderr does not poison the ls-remote sha comparison either:
+    // a trace line as "line 1" would read as the remote sha and fake `unpushed`.
+    expect(res.out).not.toContain('reason=unpushed')
+    expect(res.out).toContain(`DELETED branch ${BRANCH}`)
+    expect(res.code).toBe(0)
+  })
+
+  test.skipIf(process.getuid?.() === 0)(
+    'a clean tree with an UNREADABLE subdirectory (git warns, exits 0) is still REMOVED',
+    () => {
+      const repo = makeRepo()
+      const wt = addBuildWorktree(repo)
+      // `warning: could not open directory 'locked/': Permission denied` on
+      // stderr, rc=0, empty stdout. Skipped as root, where nothing is unreadable.
+      const locked = join(wt, 'locked')
+      mkdirSync(locked)
+      chmodSync(locked, 0o000)
+      try {
+        const res = run(repo, BRANCH, 'keep-branch')
+        expect(res.code).toBe(0)
+        expect(res.out).toContain(`REMOVED ${wt}`)
+      } finally {
+        if (existsSync(locked)) chmodSync(locked, 0o755)
+      }
+    },
+  )
+})
+
+describe('worktree-cleanup.sh — the SHARED CHECKOUT is never a candidate', () => {
+  test('the main working tree ON the branch is left alone; teardown still resolves, exit 0', () => {
+    // merge.ts legitimately leaves the shared checkout on a feature branch after
+    // a stale-rebase recovery. `git worktree remove` refuses a main working tree
+    // ("fatal: '<repo>' is a main working tree"), which used to be scored as an
+    // unverifiable PRESERVATION — pinning the exit at 3 and blocking pr-mode
+    // branch teardown for good.
+    const repo = makeRepo()
+    git(repo, 'checkout', '-q', '-b', BRANCH)
+    writeFileSync(join(repo, 'in-shared-checkout.txt'), 'work in the shared checkout\n')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-q', '-m', 'on the branch in the shared checkout')
+    git(repo, 'push', '-q', 'origin', BRANCH)
+
+    const res = run(repo, BRANCH, 'delete-branch')
+
+    expect(res.code).toBe(0)
+    expect(res.out).not.toContain('PRESERVED worktree')
+    expect(res.out).toContain('RESULT preserved=0 removed=0')
+    // The shared checkout is intact — files, HEAD and all.
+    expect(existsSync(join(repo, 'in-shared-checkout.txt'))).toBe(true)
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(BRANCH)
+    // git refuses to delete a branch that is checked out there; origin holds the
+    // exact sha, so nothing is at risk and it is reported WITHOUT the exit-3 alarm.
+    expect(res.out).toContain(`KEPT branch ${BRANCH} reason=checked-out`)
+    expect(branchExists(repo, BRANCH)).toBe(true)
+  })
+
+  test('a DIRTY shared checkout on the branch still does not block the run', () => {
+    const repo = makeRepo()
+    git(repo, 'checkout', '-q', '-b', BRANCH)
+    git(repo, 'push', '-q', 'origin', BRANCH)
+    writeFileSync(join(repo, 'operator-scratch.ts'), 'the human is mid-edit here\n')
+    const wt = addBuildWorktree(repo, 'trident/linked')
+
+    const res = run(repo, BRANCH, 'delete-branch')
+
+    expect(res.code).toBe(0)
+    // Untouched: not removed, not reported, not counted.
+    expect(readFileSync(join(repo, 'operator-scratch.ts'), 'utf8')).toContain('mid-edit')
+    expect(res.out).not.toContain(`PRESERVED worktree ${repo}`)
+    // The unrelated linked worktree on ANOTHER branch is likewise untouched.
+    expect(existsSync(wt)).toBe(true)
+  })
+})
+
 describe('worktree-cleanup.sh — branch teardown is gated on the work being elsewhere', () => {
   test('delete-branch + clean tree + origin has the SAME sha → branch deleted, exit 0', () => {
     const repo = makeRepo()
@@ -329,8 +455,16 @@ describe('worktree-cleanup.sh — usage contract', () => {
     expect(run(dir, BRANCH, 'keep-branch').code).toBe(2)
   })
 
-  test('missing arguments are a usage error, never a silent success', () => {
-    const p = Bun.spawnSync(['bash', SCRIPT])
-    expect(p.exitCode).not.toBe(0)
+  test('missing/empty arguments exit 2 EXACTLY — the documented usage code', () => {
+    // Not merely "non-zero": the caller branches on the code. `${1:?}` exited 1,
+    // which is indistinguishable from a crash, and only exit 3 may ever be read
+    // as "work was preserved" (see inner-workflow.mjs).
+    expect(Bun.spawnSync(['bash', SCRIPT]).exitCode).toBe(2)
+    expect(Bun.spawnSync(['bash', SCRIPT, '/tmp']).exitCode).toBe(2)
+    expect(Bun.spawnSync(['bash', SCRIPT, '/tmp', BRANCH]).exitCode).toBe(2)
+    // An EMPTY branch would otherwise match `refs/heads/` prefixes loosely.
+    expect(Bun.spawnSync(['bash', SCRIPT, '/tmp', '', 'keep-branch']).exitCode).toBe(2)
+    // Extra arguments are a typo, not a mode to guess at.
+    expect(Bun.spawnSync(['bash', SCRIPT, '/tmp', BRANCH, 'keep-branch', 'extra']).exitCode).toBe(2)
   })
 })

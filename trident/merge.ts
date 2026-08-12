@@ -47,7 +47,7 @@
  * unpinnable merge is exactly the unreviewable merge this prevents).
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { createLogger } from '@neutronai/logger'
@@ -252,13 +252,30 @@ export async function recoverStaleGitState(run_host: RunHostCommand, repo: strin
   return wasDirty
 }
 
+/** Symlink-resolved path, or the input when it cannot be resolved. */
+function realpathOrSelf(p: string): string {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
 /**
  * Is this worktree holding work that exists NOWHERE ELSE? (ISSUES #541)
  *
- * `--untracked-files=all` is load-bearing: the #541 incident's lost work included
- * files git had never seen, and a status that omits them reports a tree full of
- * brand-new files as CLEAN. Ignored files (node_modules, build output) are NOT
- * counted — they are not work.
+ * Untracked files count as dirt: the #541 incident's lost work included files git
+ * had never seen. `--untracked-files=all` then EXPANDS an untracked DIRECTORY into
+ * its individual files — plain `--porcelain` collapses a whole new `src/feature/`
+ * into one `?? src/feature/` line, and this output is what names the work for the
+ * operator. Ignored files (node_modules, build output) are NOT counted — they are
+ * not work.
+ *
+ * THE PROBE MUST BE POINTED AT A WORKTREE ROOT. `git -C <dir> status` walks UP to
+ * the enclosing repo, so a leftover PLAIN DIRECTORY inside the checkout (a crashed
+ * `worktree add`, a hand-made dir at the deterministic path) reports the SHARED
+ * CHECKOUT's dirt as its own — an empty directory would then look like precious
+ * work and fail every merge. `--show-toplevel` must name `wt` itself.
  *
  * UNVERIFIABLE COUNTS AS DIRTY. If the probe cannot run in a directory that DOES
  * exist (broken worktree admin, a throwing host) we cannot prove the tree is
@@ -267,11 +284,18 @@ export async function recoverStaleGitState(run_host: RunHostCommand, repo: strin
  * tree there to preserve, only a stale admin entry for `prune`.
  *
  * @returns the dirty porcelain output, or `null` when the tree is provably clean
- *          (or absent).
+ *          (or absent, or not a worktree root at all).
  */
 async function worktreeDirt(run_host: RunHostCommand, wt: string): Promise<string | null> {
   if (!existsSync(wt)) return null
   try {
+    const top = await run_host(['git', '-C', wt, 'rev-parse', '--show-toplevel'], wt)
+    // Not a git worktree root: either not a repo at all, or a plain directory
+    // whose status would be the PARENT repo's. Nothing here is preservable work.
+    // git prints the SYMLINK-RESOLVED root, so `/tmp/x` on a platform where /tmp
+    // is a symlink must still match — compare against the resolved path too.
+    const top_path = top.ok ? top.stdout.trim() : ''
+    if (top_path === '' || (top_path !== wt && top_path !== realpathOrSelf(wt))) return null
     const res = await run_host(['git', '-C', wt, 'status', '--porcelain', '--untracked-files=all'], wt)
     if (!res.ok) return res.stderr || res.stdout || `git status exited ${res.exit_code}`
     return res.stdout.trim() === '' ? null : res.stdout.trim()
@@ -307,7 +331,11 @@ async function removeWorktreePath(
       // Nothing is force-removed and nothing is pruned out from under it: the
       // caller decides whether a preserved tree is fatal (provisioning) or merely
       // reported (post-merge cleanup).
-      log.warn('worktree_preserved_dirty', { worktree: wt, dirty: dirt })
+      log.warn('worktree_preserved_dirty', {
+        worktree: wt,
+        dirty: dirt,
+        action: `trident preserved uncommitted work at ${wt} — nothing was force-removed; recover or delete it by hand`,
+      })
       return dirt
     }
     await run_host(['git', '-C', repo, 'worktree', 'remove', wt], repo)
@@ -360,8 +388,13 @@ async function provisionRunWorktree(
  *
  * A lingering build worktree is EXACTLY the tree #541 is about — the inner
  * cleanup left it behind, which usually means the build died mid-edit — so a
- * DIRTY one is preserved (never `--force`d) and the merge proceeds to fail its
- * own `git checkout <branch>` loudly rather than silently eating the work.
+ * DIRTY one is preserved (never `--force`d) and the merge FAILS.
+ *
+ * It fails HERE, naming the path, rather than three lines later at `git checkout
+ * <branch>` with git's own "already checked out at <path>". That raw message is
+ * what the operator would otherwise see in chat, and it reads like a trident bug
+ * instead of what it is: trident kept your uncommitted work, and it is waiting
+ * for you at a path you now know.
  */
 async function freeBranchFromWorktrees(
   run_host: RunHostCommand,
@@ -372,6 +405,7 @@ async function freeBranchFromWorktrees(
   const list = await run_host(['git', '-C', repo, 'worktree', 'list', '--porcelain'], repo)
   if (!list.ok) return
   const wantRef = `refs/heads/${branch}`
+  const preserved: { path: string; dirt: string }[] = []
   let curPath: string | null = null
   for (const raw of list.stdout.split(/\r?\n/)) {
     const line = raw.trim()
@@ -380,11 +414,21 @@ async function freeBranchFromWorktrees(
     } else if (line.startsWith('branch ')) {
       const ref = line.slice('branch '.length).trim()
       if (ref === wantRef && curPath !== null && curPath !== keepPath) {
-        await removeWorktreePath(run_host, repo, curPath)
+        const dirt = await removeWorktreePath(run_host, repo, curPath)
+        if (dirt !== null) preserved.push({ path: curPath, dirt })
       }
     }
   }
   await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+  if (preserved.length > 0) {
+    throw new TridentMergeError(
+      `trident PRESERVED uncommitted work instead of merging: ${preserved
+        .map((p) => p.path)
+        .join(', ')} still ${preserved.length === 1 ? 'has' : 'have'} changes that exist nowhere else (branch ${branch}). Nothing was force-removed. Recover or delete ${preserved.length === 1 ? 'it' : 'them'} by hand, then re-run the merge.`,
+      'worktree preserved (dirty)',
+      { ok: false, stdout: preserved.map((p) => `${p.path}\n${p.dirt}`).join('\n'), stderr: '', exit_code: -1 },
+    )
+  }
 }
 
 /**

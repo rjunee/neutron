@@ -597,10 +597,19 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
     dirs.push(d)
     return d
   }
-  /** A host whose `status --porcelain` reports `dirt` for `wt` (empty = clean). */
-  const hostWithDirt = (wt: string, dirt: string) =>
+  /** A host whose `status --porcelain` reports `dirt` for `wt` (empty = clean),
+   *  and whose `rev-parse --show-toplevel` confirms `wt` IS a worktree root —
+   *  the guard that stops a plain directory inheriting the enclosing repo's dirt.
+   *  Pass a different `toplevel` to play the plain-directory case. */
+  const hostWithDirt = (wt: string, dirt: string, toplevel: string = wt) =>
     recordingHost((cmd) =>
-      cmd.includes('status') && cmd.includes(wt) ? ok(dirt) : cmd.includes('--abort') ? fail() : ok(),
+      cmd.includes('--show-toplevel') && cmd.includes(wt)
+        ? ok(`${toplevel}\n`)
+        : cmd.includes('status') && cmd.includes(wt)
+          ? ok(dirt)
+          : cmd.includes('--abort')
+            ? fail()
+            : ok(),
     )
 
   test('post-merge cleanup PRESERVES a dirty run.worktree (untracked files count)', async () => {
@@ -632,11 +641,34 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
   test('a worktree whose status probe FAILS counts as dirty (unverifiable → preserve)', async () => {
     const wt = realDir()
     const { host, calls } = recordingHost((cmd) =>
-      cmd.includes('status') && cmd.includes(wt) ? fail('not a git repository') : ok(),
+      cmd.includes('--show-toplevel') && cmd.includes(wt)
+        ? ok(`${wt}\n`)
+        : cmd.includes('status') && cmd.includes(wt)
+          ? fail('not a git repository')
+          : ok(),
     )
     const deps = buildMergeCleanupDeps(host)
     await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
     expect(calls.map((c) => c.join(' ')).some((c) => c.includes('worktree remove'))).toBe(false)
+  })
+
+  test('a PLAIN DIRECTORY at the worktree path is NOT precious — it inherits nothing', async () => {
+    // `git -C <dir> status` WALKS UP to the enclosing repo, so a leftover plain
+    // directory inside the checkout (a crashed `worktree add`) reports the SHARED
+    // checkout's dirt as its own. Without the `--show-toplevel === wt` guard an
+    // EMPTY directory looks like precious work and fails every merge from then on.
+    const wt = realDir()
+    const run = makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/repo', worktree: wt })
+    // toplevel is the PARENT repo, not `wt` → not a worktree root.
+    const { host, calls } = hostWithDirt(wt, '?? someone-elses-work.ts\n', '/repo')
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(run, deps)
+    const joined = calls.map((c) => c.join(' '))
+    // Provisioning proceeded: no bogus "refusing to reuse" throw, and the merge landed.
+    expect(joined.some((c) => c.includes(`worktree add --detach --force ${wt}`))).toBe(true)
+    expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(true)
+    // The parent repo's status was never even consulted for the verdict.
+    expect(joined.some((c) => c.includes(`git -C ${wt} status`))).toBe(false)
   })
 
   test('a DIRTY stale merge worktree FAILS the merge loudly instead of being force-removed', async () => {
@@ -667,15 +699,49 @@ describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)
       if (cmd.includes('worktree') && cmd.includes('list')) {
         return ok(`worktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
       }
+      if (cmd.includes('--show-toplevel') && cmd.includes(stray)) return ok(`${stray}\n`)
       if (cmd.includes('status') && cmd.includes(stray)) return ok('?? forge-was-mid-edit.ts\n')
+      if (cmd.includes('--abort')) return fail()
+      return ok()
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    // The failure NAMES the preservation, in the operator's words. Previously this
+    // came out three calls later as git's own "already checked out at <path>" —
+    // which reads like a trident bug, not "your work is safe, and it is HERE".
+    await expect(cleanupAfterMerge(run, deps)).rejects.toThrow(
+      /trident PRESERVED uncommitted work/,
+    )
+    await expect(cleanupAfterMerge(run, deps)).rejects.toThrow(new RegExp(stray))
+    const joined = calls.map((c) => c.join(' '))
+    // The stray build worktree — the one the inner cleanup preserved — survives.
+    expect(joined.some((c) => c.includes(`worktree remove ${stray}`))).toBe(false)
+    expect(joined.some((c) => c.includes('--force') && c.includes(stray))).toBe(false)
+    // …and the merge stopped there rather than blundering into `git checkout`.
+    expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(false)
+    expect(joined.some((c) => c.includes('branch -D'))).toBe(false)
+  })
+
+  test('a CLEAN lingering build worktree is freed and the merge proceeds (no false alarm)', async () => {
+    const stray = realDir()
+    const run = makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/shared' })
+    let removed = false
+    const { host, calls } = recordingHost((cmd) => {
+      if (cmd.includes('worktree') && cmd.includes('list')) {
+        return removed ? ok('') : ok(`worktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
+      }
+      if (cmd.includes('--show-toplevel') && cmd.includes(stray)) return ok(`${stray}\n`)
+      if (cmd.includes('status') && cmd.includes(stray)) return ok('')
+      if (cmd.includes('worktree') && cmd.includes('remove') && cmd.includes(stray)) {
+        removed = true
+        return ok()
+      }
       if (cmd.includes('--abort')) return fail()
       return ok()
     })
     const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
     await cleanupAfterMerge(run, deps)
     const joined = calls.map((c) => c.join(' '))
-    // The stray build worktree — the one the inner cleanup preserved — survives.
-    expect(joined.some((c) => c.includes(`worktree remove ${stray}`))).toBe(false)
-    expect(joined.some((c) => c.includes('--force') && c.includes(stray))).toBe(false)
+    expect(joined.some((c) => c === `git -C /shared worktree remove ${stray}`)).toBe(true)
+    expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(true)
   })
 })

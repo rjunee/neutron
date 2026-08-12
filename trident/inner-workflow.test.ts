@@ -1214,11 +1214,27 @@ describe('inner-workflow.mjs — worktree cleanup on ALL paths, destructive on N
     expect(CLEANUP_SH).toContain('PRESERVED branch $branch reason=unpushed')
   })
 
-  test('the script preserves a DIRTY tree — including UNTRACKED files — and exits non-zero', () => {
-    // Behavior is proven in worktree-cleanup-sh.test.ts against real git; these two
-    // lines are the ones a future edit is most likely to "simplify" away.
+  test("the script SOURCE still carries the two lines an edit is likeliest to 'simplify' away", () => {
+    // NAME SAYS WHAT THIS IS: two greps over the shell source, executing nothing.
+    // The behavior — untracked work preserved, individual paths named, exit 3 —
+    // is proven against real git in worktree-cleanup-sh.test.ts ("untracked files
+    // inside an untracked DIRECTORY are named INDIVIDUALLY", "UNTRACKED-ONLY work
+    // is preserved"). These greps only guard the exact spelling those tests rely on.
     expect(CLEANUP_SH).toContain('git -C "$wt" status --porcelain --untracked-files=all')
     expect(CLEANUP_SH).toContain('[ "$preserved" -eq 0 ] || exit 3')
+  })
+
+  test('ONLY exit 3 is reported as preserved work — any other non-zero is a cleanup FAILURE', () => {
+    // Exit 3 is the script's deliberate "a human has work waiting". Exit 2 (usage),
+    // 127 (wrong path) and a missing exit_code all mean the script never inspected
+    // anything — reporting those as "PRESERVED WORK" points the operator at work
+    // that was never preserved and drowns the one alarm that matters in noise.
+    expect(SRC).toContain('} else if (cleanupExit === 3) {')
+    expect(SRC).toContain('PRESERVED WORK (exit=3)')
+    expect(SRC).toContain('cleanup:worktree FAILED')
+    expect(SRC).toContain('this is not a preservation')
+    // The old shape: one `else` that called EVERY non-zero exit a preservation.
+    expect(SRC).not.toContain('PRESERVED WORK (exit=${')
   })
 
   test('the top-level return carries the Workflow result API shape', () => {

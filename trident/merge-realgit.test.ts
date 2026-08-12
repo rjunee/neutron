@@ -19,7 +19,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -326,9 +326,18 @@ describe('REAL git — a dirty lingering build worktree is PRESERVED (#541)', ()
     // The merge cannot check the branch out (it is held by the preserved
     // worktree), so it fails — LOUDLY, which is the correct trade: an operator
     // recovers the work, and nothing was destroyed to make the merge convenient.
-    await expect(cleanupAfterMerge(localRun(repo, 'dddddddd', branch), deps)).rejects.toBeInstanceOf(
-      TridentMergeError,
+    const err = await cleanupAfterMerge(localRun(repo, 'dddddddd', branch), deps).then(
+      () => null,
+      (e: unknown) => e,
     )
+    expect(err).toBeInstanceOf(TridentMergeError)
+    // …and the failure the OPERATOR reads says trident kept their work and WHERE
+    // it is — not git's raw "already checked out at <path>", which reads like a
+    // trident bug and names no remedy.
+    const msg = err instanceof Error ? err.message : String(err)
+    expect(msg).toContain('trident PRESERVED uncommitted work')
+    expect(msg).toContain(wt)
+    expect(msg).toContain('re-run the merge')
 
     // THE POINT: the uncommitted work is still there, byte for byte.
     expect(existsSync(join(wt, 'never-committed.ts'))).toBe(true)
@@ -359,5 +368,30 @@ describe('REAL git — a dirty lingering build worktree is PRESERVED (#541)', ()
     expect(existsSync(join(repo, 'clean.txt'))).toBe(true)
     expect(existsSync(wt)).toBe(false)
     expect(await worktreeCount(repo)).toBe(1)
+  }, 30_000)
+
+  test('a leftover PLAIN DIRECTORY at the merge-worktree path never fakes preserved work', async () => {
+    // `git -C <dir> status` walks UP to the enclosing repo, so an empty leftover
+    // directory INSIDE the checkout reports the SHARED checkout's untracked files
+    // as its own. Guarded only by existsSync, that empty dir looked like precious
+    // work and made every merge for this run throw "refusing to reuse".
+    const repo = await makeBaseRepo()
+    const branch = 'trident/plain-dir'
+    await fakeBuild(repo, branch, 'feature.txt', 'shipped\n')
+    const run = localRun(repo, 'ffffffff', branch)
+    const wt = run.worktree as string
+    mkdirSync(wt, { recursive: true })
+    // Untracked dirt in the SHARED checkout — what the plain dir would inherit.
+    writeFileSync(join(repo, 'operator-scratch.txt'), 'the human is mid-edit\n')
+    // Prove the premise (this is why the guard exists, not just that it is there).
+    expect((await gitOut(wt, 'status', '--porcelain', '--untracked-files=all')).trim()).not.toBe('')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    await cleanupAfterMerge(run, deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
+    // The operator's real scratch file in the shared checkout was never touched.
+    expect(existsSync(join(repo, 'operator-scratch.txt'))).toBe(true)
   }, 30_000)
 })

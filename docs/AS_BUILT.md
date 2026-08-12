@@ -30,17 +30,46 @@ origin all keep it and say why. Local mode never touches the branch — it is th
 only copy of the build and the outer loop merges it. `merge.ts` inherits the
 gate at all three of its removal sites, including the lingering build worktree
 `freeBranchFromWorktrees` used to force away; a dirty one there now fails the
-merge loudly instead, which is the right trade when the alternative is deleting
-work to make a merge convenient.
+merge loudly instead, naming the path in the operator's words ("trident
+PRESERVED uncommitted work … recover or delete it, then re-run the merge")
+rather than letting git's raw "already checked out at `<path>`" reach chat.
+That is the right trade when the alternative is deleting work to make a merge
+convenient.
+
+Four ways a preserve-by-default gate can turn into a nuisance, all closed:
+
+- **Only stdout decides.** `git status` and `ls-remote` are read with stderr
+  captured separately. Folded together (`2>&1`), any warning git prints on a
+  perfectly clean tree — an unreadable subdirectory, a trace — parsed as a dirty
+  path: worktrees leaked forever, pr-mode branch teardown never ran, and the
+  alarm fired on runs that had preserved nothing.
+- **The shared checkout is never a candidate.** git refuses `worktree remove` on
+  a main working tree, and `merge.ts` legitimately leaves it on a feature branch
+  after a stale-rebase recovery; scoring that refusal as a preservation pinned
+  the exit at 3 for good. It is skipped, and a branch git won't delete because
+  it is checked out there is reported as `KEPT … reason=checked-out` at exit 0 —
+  origin already has the sha, so nothing is at risk.
+- **The probe must point at a worktree ROOT.** `git -C <dir> status` walks up to
+  the enclosing repo, so an empty leftover directory at the run's worktree path
+  reported the shared checkout's dirt as its own and failed every merge.
+  `rev-parse --show-toplevel` must name the path itself.
+- **Only exit 3 means preserved work.** Usage errors exit 2 (documented, and now
+  actually 2 rather than bash's `${1:?}` 1) and a wrong script path exits 127 —
+  the caller reports those as a cleanup FAILURE, because a script that never ran
+  inspected nothing.
 
 Tested against real git repos rather than a mocked host — the bug is only
 observable on a real working tree — covering untracked-only, modified, staged,
-unreadable, ignored-files-only, clean, already-gone, and other-branch trees, plus
-the four branch-teardown outcomes. Mutation-verified, 11 of 11 killed: dropping
-`--untracked-files=all` (both copies), removing the dirty check, restoring
-`--force` (both copies), downgrading exit 3 to 0, deleting the branch without the
-`ls-remote` proof, deleting it in local mode, bypassing the script from the
-workflow, and dropping the script path from the launcher args.
+unreadable, ignored-files-only, clean, already-gone, and other-branch trees, an
+untracked file inside an untracked DIRECTORY (what `--untracked-files=all`
+actually buys: the individual paths, not one collapsed `?? feature/`), a clean
+tree whose git warns on stderr, a shared checkout parked on the branch, and the
+four branch-teardown outcomes. Mutation-verified, 15 mutations applied and
+killed: dropping `--untracked-files=all` (both copies), folding stderr back into
+either probe, un-skipping the main working tree, exiting 1 on a usage error,
+restoring `--force` (both copies), downgrading exit 3 to 0, dropping the
+worktree-root guard, treating an unverifiable status as clean, dropping the
+operator-facing throw, and calling every non-zero cleanup exit a preservation.
 
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 

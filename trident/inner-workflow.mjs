@@ -2037,9 +2037,17 @@ ${cleanupCmd}`,
   // notice that a worktree still holds uncommitted work, so it is logged in full.
   const cleanupExit = cleanup && Number.isFinite(cleanup.exit_code) ? cleanup.exit_code : null
   const cleanupRaw = cleanup && typeof cleanup.raw === 'string' ? cleanup.raw.trim() : ''
+  // ONLY exit 3 means "work was preserved" — that is the script's contract. Exit
+  // 2 is a usage error, 127 a wrong script path, and null means the agent never
+  // reported one: in every one of those the script inspected NOTHING, so calling
+  // them "PRESERVED WORK" turns the operator's single alarm for unrecoverable
+  // work into noise the cleanup emits about its own breakage. They are cleanup
+  // FAILURES — loud, but a different kind of loud.
   if (cleanupExit === 0) {
     log(`trident-v2 cleanup:worktree ok — ${cleanupRaw.split('\n').pop() || 'no output'}`)
+  } else if (cleanupExit === 3) {
+    log(`trident-v2 cleanup:worktree PRESERVED WORK (exit=3) — nothing was force-removed:\n${cleanupRaw}`)
   } else {
-    log(`trident-v2 cleanup:worktree PRESERVED WORK (exit=${cleanupExit === null ? 'unknown' : cleanupExit}) — nothing was force-removed:\n${cleanupRaw}`)
+    log(`trident-v2 cleanup:worktree FAILED (exit=${cleanupExit === null ? 'unknown' : cleanupExit}) — the cleanup script did not run to completion, so NOTHING was inspected or removed (this is not a preservation):\n${cleanupRaw}`)
   }
 }

@@ -5216,7 +5216,18 @@ deleted, no dual path):
   clean one is removed with a plain `git worktree remove` (no `--force`, so git's
   own dirty check is a second gate); the pr-mode `git branch -D` runs only once
   `git ls-remote` proves origin holds the same sha (local mode never deletes it).
-  `merge.ts` applies the same gate to every worktree removal it does.
+  `merge.ts` applies the same gate to every worktree removal it does, and fails
+  the merge with "trident PRESERVED uncommitted work at `<path>`" rather than
+  letting git's raw "already checked out at `<path>`" be the operator's notice.
+  Preserve-by-default only works if it never cries wolf, so: git's stderr is kept
+  out of both probes (a warning on a clean tree is not a dirty path), the SHARED
+  CHECKOUT is skipped entirely (git refuses to remove a main working tree, and
+  `merge.ts` legitimately parks it on a feature branch — a branch it still holds
+  is reported `KEPT … reason=checked-out` at exit 0), the dirt probe requires
+  `rev-parse --show-toplevel` to name the path itself (else a leftover plain
+  directory reports the enclosing repo's dirt as its own), and **only exit 3**
+  means preserved work — 2 is a usage error, 127 a bad script path, and the
+  caller reports those as a cleanup FAILURE that inspected nothing.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 

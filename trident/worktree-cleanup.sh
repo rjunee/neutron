@@ -34,29 +34,47 @@
 # In local-mode (`keep-branch`) the branch is the only copy of the build by
 # design — the OUTER loop merges it — so it is never touched here.
 #
+# THE SHARED CHECKOUT (git's "main working tree") IS NEVER TOUCHED. It is not a
+# disposable build tree — it is the repo the operator works in, and merge.ts
+# legitimately leaves it ON a feature branch after a stale-rebase recovery.
+# `git worktree remove` refuses it outright ("is a main working tree"), which
+# used to be scored as an unverifiable preservation and jammed pr-mode branch
+# teardown at exit 3 forever. It is now skipped before the decision.
+#
 # Usage:
 #   worktree-cleanup.sh <repo> <branch> <delete-branch|keep-branch>
 #
-# Exit codes:
+# Exit codes — the caller BRANCHES ON THESE, so they are a contract:
 #   0  nothing needed preserving (clean worktrees removed, branch handled)
-#   2  usage error
+#   2  usage error (wrong argument count, empty argument, bad mode, non-repo)
 #   3  something was PRESERVED — a dirty/unverifiable worktree, or a branch
 #      whose commits are not on origin. NOT a failure of this script: it is the
 #      signal that a human has work waiting. The caller must report it, never
 #      "retry" it and never work around it.
+#   anything else is a FAILURE of this script (it crashed, or never ran) and
+#   means NOTHING was inspected — it must NOT be reported as preserved work.
 #
 # Output is machine-greppable, one record per line:
 #   REMOVED <path>
 #   PRESERVED worktree <path> reason=<dirty|unverifiable>
-#   PRESERVED branch <name> reason=<not-on-origin|unpushed|ls-remote-failed>
+#   PRESERVED branch <name> reason=<worktree-preserved|not-on-origin|unpushed|ls-remote-failed>
+#   KEPT branch <name> reason=checked-out
 #   DELETED branch <name>
 #   RESULT preserved=<n> removed=<n>
 set -uo pipefail
 
 usage="usage: worktree-cleanup.sh <repo> <branch> <delete-branch|keep-branch>"
-repo="${1:?$usage}"
-branch="${2:?$usage}"
-mode="${3:?$usage}"
+# Argument validation exits 2, the DOCUMENTED usage code. `${1:?}` would exit 1
+# — indistinguishable from a crash — and the caller reads exit 3 vs "anything
+# else" as "work is waiting" vs "cleanup broke", so every code has to mean what
+# the header says it means.
+if [ "$#" -ne 3 ] || [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
+  echo "worktree-cleanup.sh: $usage" >&2
+  exit 2
+fi
+repo="$1"
+branch="$2"
+mode="$3"
 
 case "$mode" in
   delete-branch | keep-branch) ;;
@@ -74,16 +92,36 @@ fi
 preserved=0
 removed=0
 
-# Every worktree that has THIS branch checked out. `worktree list --porcelain`
-# emits a `worktree <path>` line followed by that entry's attributes, so the
-# branch match is attributed to the most recent path line (same parse as
-# merge.ts `freeBranchFromWorktrees`).
+# Every LINKED worktree that has THIS branch checked out. `worktree list
+# --porcelain` emits a `worktree <path>` line followed by that entry's
+# attributes, so the branch match is attributed to the most recent path line
+# (same parse as merge.ts `freeBranchFromWorktrees`).
+#
+# `n > 1` skips the FIRST entry, which git documents as the main working tree —
+# the shared checkout (git-worktree(1): "The main worktree is listed first").
+# It is not ours to remove: `git worktree remove` refuses it, and scoring that
+# refusal as a preservation pins the exit at 3 and blocks branch teardown for
+# good whenever the shared checkout is parked on the build branch.
 worktrees="$(
   git -C "$repo" worktree list --porcelain 2>/dev/null | awk -v want="refs/heads/$branch" '
-    /^worktree /{ w = substr($0, 10); next }
-    /^branch /{ if (substr($0, 8) == want) print w }
+    /^worktree /{ w = substr($0, 10); n++; next }
+    /^branch /{ if (substr($0, 8) == want && n > 1) print w }
   '
 )"
+
+# `git status`'s STDERR is captured HERE, apart from its stdout. Folding the two
+# together (`2>&1`) made anything git writes to stderr on a perfectly CLEAN tree
+# — `warning: could not open directory 'x/': Permission denied`, a GIT_TRACE line
+# from the operator's environment — parse as a dirty path: the worktree was never
+# removed, pr-mode branch teardown never ran, and the "PRESERVED WORK" alarm
+# fired on runs that had preserved nothing. Only stdout decides dirtiness;
+# stderr is diagnostics for the operator.
+#
+# A failed `mktemp` must not leave an EMPTY redirect target (`2>""` fails the
+# whole command): fall back to a pid-keyed path. If that is unwritable too the
+# probe fails, which lands on PRESERVE — the safe direction, by construction.
+git_err="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/worktree-cleanup-err.$$")"
+trap 'rm -f "$git_err"' EXIT
 
 while IFS= read -r wt; do
   [ -n "$wt" ] || continue
@@ -94,14 +132,17 @@ while IFS= read -r wt; do
     continue
   fi
 
-  # THE DECISION. `--untracked-files=all` is the load-bearing flag: the #541
-  # incident's lost work included files git had never seen, and a status that
-  # omits them reports a tree full of brand-new files as CLEAN. Ignored files
-  # (node_modules, build output, .env) are deliberately NOT included — they are
-  # not work, and treating them as work would preserve every worktree forever.
-  if ! dirty="$(git -C "$wt" status --porcelain --untracked-files=all 2>&1)"; then
+  # THE DECISION. Untracked files count as dirt: the #541 incident's lost work
+  # included files git had never seen. `--untracked-files=all` then EXPANDS an
+  # untracked DIRECTORY into its individual files — plain `--porcelain` collapses
+  # a whole new `src/feature/` to one `?? src/feature/` line, which still marks
+  # the tree dirty but tells the operator nothing about WHAT is in there, and
+  # this output is the recovery instructions. Ignored files (node_modules, build
+  # output, .env) are deliberately NOT included — they are not work, and treating
+  # them as work would preserve every worktree forever.
+  if ! dirty="$(git -C "$wt" status --porcelain --untracked-files=all 2>"$git_err")"; then
     echo "PRESERVED worktree $wt reason=unverifiable"
-    echo "worktree-cleanup.sh: cannot read git status in '$wt' — PRESERVING it: $dirty" >&2
+    echo "worktree-cleanup.sh: cannot read git status in '$wt' — PRESERVING it: $(cat "$git_err")" >&2
     preserved=$((preserved + 1))
     continue
   fi
@@ -139,9 +180,13 @@ if [ "$mode" = "delete-branch" ]; then
       # the delete anyway), and its work is un-committed on top of these commits.
       echo "PRESERVED branch $branch reason=worktree-preserved"
       preserved=$((preserved + 1))
-    elif ! remote_out="$(git -C "$repo" ls-remote origin "refs/heads/$branch" 2>&1)"; then
+    # stderr kept OUT of `remote_out` for the same reason as the status probe:
+    # anything git writes there (a trace, a "Warning: Permanently added … to the
+    # list of known hosts") would otherwise become line 1 and be read as the
+    # remote sha — a pushed branch would look "unpushed" forever.
+    elif ! remote_out="$(git -C "$repo" ls-remote origin "refs/heads/$branch" 2>"$git_err")"; then
       echo "PRESERVED branch $branch reason=ls-remote-failed"
-      echo "worktree-cleanup.sh: cannot reach origin to prove '$branch' is pushed — KEEPING it: $remote_out" >&2
+      echo "worktree-cleanup.sh: cannot reach origin to prove '$branch' is pushed — KEEPING it: $(cat "$git_err")" >&2
       preserved=$((preserved + 1))
     else
       remote_sha="$(printf '%s\n' "$remote_out" | awk 'NR==1{print $1}')"
@@ -155,13 +200,16 @@ if [ "$mode" = "delete-branch" ]; then
         preserved=$((preserved + 1))
       else
         # origin holds this exact sha: the local branch is a disposable copy.
-        # A REFUSED delete needs no handling: git only refuses while some worktree
-        # still has the branch checked out, and any such worktree was already
-        # walked above — it was either removed (so the delete succeeds) or
-        # preserved (so `$preserved` is non-zero and we never reach this branch).
-        # Either way the branch survives, which is the safe direction.
         if git -C "$repo" branch -D "$branch" >/dev/null 2>&1; then
           echo "DELETED branch $branch"
+        else
+          # git refuses while SOME worktree still has the branch checked out. The
+          # linked ones were all walked above (removed, or preserved — and then
+          # `$preserved` is non-zero and we never got here), so what is left is
+          # the SHARED CHECKOUT, deliberately skipped. Nothing is at risk: origin
+          # was just proved to hold this exact sha. Report it and stay exit 0 —
+          # scoring it as a preservation would cry wolf on every run.
+          echo "KEPT branch $branch reason=checked-out"
         fi
       fi
     fi
