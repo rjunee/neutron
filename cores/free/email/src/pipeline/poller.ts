@@ -701,21 +701,19 @@ export async function runEmailPipelineTick(
         }
       }
 
-      // Stop when this tick has done real WORK — not merely when it TRIED. The
-      // stop used to key on `scanned`, which counts attempts including ones
-      // that threw and left no row behind. A single permanently unreadable
-      // message (Gmail 500s on `getMessage`, say) therefore ended the walk on
-      // page one of every tick, forever, and everything behind it — including
-      // genuinely important mail — was never reached. A message we cannot read
-      // must not become a wall across the whole mailbox.
+      // DO NOT STOP JUST BECAUSE THIS PAGE HAD WORK. Two earlier versions
+      // stopped early and both starved deeper mail:
       //
-      // Progress means a message was actually handled. Otherwise the walk
-      // continues to the next page, and the bad message is retried next tick
-      // alongside everything else.
-      if (handledOnThisPage > 0) {
-        exhausted = true
-        break
-      }
+      //   - stopping on `scanned > 0` counted ATTEMPTS, so one permanently
+      //     unreadable message became a wall across the whole mailbox;
+      //   - stopping on real progress starved page 2 whenever page 1 kept
+      //     receiving mail. A busy inbox would never reach the important
+      //     message sitting behind the busy part.
+      //
+      // The page BUDGET is what bounds a tick, not an early exit. So the walk
+      // continues to the end of the budget or the end of the cursors, and if it
+      // runs out of budget it remembers where it was.
+      void handledOnThisPage
       cursor = listed.next_page_token
       cursors = nextCursorMap(
         accountsOnThisPage(listed, false),
@@ -730,17 +728,19 @@ export async function runEmailPipelineTick(
     }
 
     if (!exhausted) {
-      // Out of budget with nothing found: REMEMBER the place. Discarding the
-      // cursor here is what made the budget a wall instead of a pause.
+      // Out of budget: REMEMBER the place. Discarding the cursor here is what
+      // made the budget a wall instead of a pause — the next tick would restart
+      // at the top and give up in exactly the same spot, forever.
       store.setCheckpoint(CHECKPOINT_POLL_CURSOR, cursor ?? '')
       store.setCheckpoint(CHECKPOINT_POLL_CURSORS, JSON.stringify(cursors))
       log?.('email pipeline poll hit its page budget; will resume from here', {
         pages,
         page_budget,
+        scanned: result.scanned,
       })
     } else {
-      // Found mail, or reached the end. Either way the next tick starts at the
-      // top, which is where new mail arrives.
+      // Reached the end of the mailbox. Next tick starts at the top, which is
+      // where new mail arrives.
       store.setCheckpoint(CHECKPOINT_POLL_CURSOR, '')
       store.setCheckpoint(CHECKPOINT_POLL_CURSORS, '')
     }

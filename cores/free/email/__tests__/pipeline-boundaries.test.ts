@@ -587,3 +587,63 @@ describe('one unreadable message is not a wall across the mailbox', () => {
     })
   })
 })
+
+describe('a busy first page does not hide a later one', () => {
+  test('page 1 keeps receiving mail; the important message on page 2 is still reached', async () => {
+    await withStore(async (store) => {
+      // The starvation this replaced was subtle: stopping as soon as a page had
+      // real work is reasonable-sounding, and wrong. If page 1 keeps receiving
+      // mail — a busy inbox — every tick handles page 1 and stops, and the
+      // important message behind it is never reached on any tick.
+      const delivered: string[] = []
+      let arrival = 0
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          if (input.page_token === 'p2') {
+            return { results: [meta('important-deep')], next_page_tokens: {} }
+          }
+          // A different new message on page 1 every single tick.
+          arrival++
+          return {
+            results: [meta(`chatter-${arrival}`, 'This week at the shop')],
+            next_page_token: 'p2',
+          }
+        },
+        async getMessage(input: { message_id: string }): Promise<unknown> {
+          return input.message_id === 'important-deep'
+            ? { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+            : { body_text: 'Lots of news. Unsubscribe any time.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const r = await runEmailPipelineTick({
+        gmail,
+        store,
+        classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+        escalate: {
+          deliver: async (_t, e): Promise<unknown> => {
+            delivered.push(e.body)
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
+          },
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+        },
+        now: () => NOW,
+      })
+
+      // Both handled on the SAME tick: the newsletter archived, the important
+      // one escalated.
+      expect(r.scanned).toBe(2)
+      expect(r.escalated).toBe(1)
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]).toContain('billing@vendor.example.com')
+    })
+  })
+})
