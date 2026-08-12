@@ -3208,7 +3208,14 @@ try {
     // was generated FROM this OID), never whatever a live probe happened to see.
     reviewedHead = recordedResumeHead
     // Inherit the round budget already spent, so a lane resumed at fix round 7
-    // gets the rounds it has left rather than a fresh allowance.
+    // gets the rounds it has left rather than a fresh allowance — a bounded loop
+    // must not become unbounded by crashing. Only `fix-round-N` carries a round in
+    // its name; `forge-done` (round 1 by definition) and `argus-request-changes`
+    // (whose round the checkpoint does not encode) start from 1, so a resume from
+    // the latter can spend a full budget again. That is a KNOWN looseness, not an
+    // oversight: it is bounded by `maxRounds` per run either way, and closing it
+    // means recording the round on the checkpoint too — worth doing when a run is
+    // observed resuming from a late `argus-request-changes`, not before.
     round = Math.max(round, parseResumeRound(resumeCheckpoint))
     log(`trident-v2 resume: skipping forge:build — reviewing recorded head ${recordedResumeHead} from round ${round} (diff ${diffFile})`)
   } else {
