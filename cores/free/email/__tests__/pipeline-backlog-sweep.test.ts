@@ -344,3 +344,44 @@ describe('mailboxes of UNEQUAL depth converge', () => {
     })
   })
 })
+
+describe('a FAILED account is retried, never quietly completed', () => {
+  test('failure then recovery: B is actually read before it is marked done', async () => {
+    await withStore(async (store) => {
+      const gmail = scriptedClient([
+        {
+          // Tick 1: A answers, B is down.
+          results: [msg('a-1', 'acct-a')],
+          next_page_tokens: {},
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: false, error: 'token expired' },
+          ],
+        },
+        {
+          // Tick 2: B has recovered and returns its history.
+          results: [msg('b-old', 'acct-b')],
+          next_page_tokens: {},
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: true },
+          ],
+        },
+      ])
+
+      await tick(gmail, store)
+      expect(store.getCheckpoint('backlog_marked:acct-b')).not.toBe('1')
+
+      await tick(gmail, store)
+      // THE ASSERTION THAT MATTERS is what the SECOND tick ASKED FOR. B failed,
+      // so it must not have been carried forward as exhausted: the real fan-out
+      // SKIPS a sentinel-marked account and reports that skip as ok, so the
+      // sweep would mark a backlog complete that it never read — and B's whole
+      // history would then arrive as new mail.
+      expect(gmail.calls[1]?.page_tokens?.['acct-b']).not.toBe('__neutron_exhausted__')
+      // Now it has genuinely been read.
+      expect(store.getEmail('b-old', 'acct-b')?.handling).toBe('preexisting')
+      expect(store.getCheckpoint('backlog_marked:acct-b')).toBe('1')
+    })
+  })
+})

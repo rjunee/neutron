@@ -161,14 +161,34 @@ function nextCursorMap(
   scope: readonly string[],
   returned: Readonly<Record<string, string>>,
   previous: Readonly<Record<string, string>>,
+  failed: ReadonlySet<string> = new Set(),
 ): Record<string, string> {
   const out: Record<string, string> = {}
   for (const id of scope) {
+    // A FAILED account returned no cursor because it returned NOTHING — that is
+    // not the same as having no more pages. Marking it exhausted would make the
+    // next tick SKIP it (the fan-out honours the sentinel and reports the skip
+    // as ok), and the sweep would then declare that mailbox's backlog complete
+    // without ever having read a single message from it. Its entire history
+    // would land in the classifier as new mail. A failed account keeps whatever
+    // cursor it had, or none — either way it stays readable and unfinished.
+    if (failed.has(id)) {
+      const prior = previous[id]
+      if (prior !== undefined && prior !== PAGE_TOKEN_EXHAUSTED) out[id] = prior
+      continue
+    }
     const next = returned[id]
-    if (next !== undefined && next.length > 0) out[id] = next
-    else if (previous[id] === PAGE_TOKEN_EXHAUSTED) out[id] = PAGE_TOKEN_EXHAUSTED
-    else out[id] = PAGE_TOKEN_EXHAUSTED
+    out[id] = next !== undefined && next.length > 0 ? next : PAGE_TOKEN_EXHAUSTED
   }
+  return out
+}
+
+/** Accounts that did NOT answer this read. */
+function failedAccounts(page: {
+  accounts?: ReadonlyArray<{ account_id: string; ok: boolean }>
+}): ReadonlySet<string> {
+  const out = new Set<string>()
+  for (const a of page.accounts ?? []) if (!a.ok) out.add(a.account_id)
   return out
 }
 
@@ -330,6 +350,7 @@ export async function runEmailPipelineTick(
         accountsOnThisPage(page, false),
         page.next_page_tokens ?? {},
         perAccount,
+        failedAccounts(page),
       )
       const outcomes = page.accounts
       const allAccountsAnswered = outcomes === undefined || outcomes.every((a) => a.ok)
@@ -618,6 +639,7 @@ export async function runEmailPipelineTick(
         accountsOnThisPage(listed, false),
         listed.next_page_tokens ?? {},
         cursors,
+        failedAccounts(listed),
       )
       if (cursor === undefined && !anyCursorsRemain(cursors)) {
         exhausted = true
