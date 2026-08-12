@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
 import {
+  canonicalPayload,
   changedFilesOnBranch,
   createMutationProver,
   isProseOnlyChange,
@@ -12,8 +13,10 @@ import {
   parseMutationClaim,
   proofWorktreePath,
   runMutationProofGate,
+  spawnGuardCommand,
   type MutationClaim,
   type MutationEvidence,
+  type MutationGateInput,
   type ProverFs,
 } from './mutation-prover.ts'
 
@@ -41,6 +44,9 @@ const CLAIM: MutationClaim = {
 }
 
 const RUN = { id: 'run-1', slug: 'add-limit', repo_path: '/repo', branch: 'feat-x' }
+
+/** The prover's reap grace, capped by whatever budget was left (see `observe`). */
+const KILL_GRACE_CEILING = 5_000
 
 function res(exit: number, stdout = ''): HostCommandResult {
   return { ok: exit === 0, stdout, stderr: '', exit_code: exit }
@@ -187,7 +193,7 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
         return new Promise<HostCommandResult>(() => {})
       },
       fs,
-      command_timeout_ms: 5,
+      proof_budget_ms: 5,
       // Fire the timeout immediately rather than waiting on the wall clock.
       set_timer: (fn) => {
         queueMicrotask(fn)
@@ -199,6 +205,73 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
     expect(evidence.proved).toBe(false)
     expect(evidence.reason).toContain('timed out')
     expect(evidence.observed?.guard_mutated.timed_out).toBe(true)
+  })
+
+  test('a command that outruns the budget is KILLED, and the budget covers the WHOLE proof', async () => {
+    // Two bugs in one test. (1) A timed-out command used to be merely abandoned
+    // by `Promise.race` — still running, still writing, while the worktree was
+    // force-removed underneath it. (2) The ceiling was per-command, so a 15-minute
+    // limit was really a 45-minute stall of the single-flight tick loop.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const aborted: string[][] = []
+    const started: string[][] = []
+    let clock = 0
+    let seq = 0
+    const cancelled = new Set<number>()
+    const prover = createMutationProver({
+      run_host: async (cmd) => (cmd.includes('rev-parse') ? res(0, HEAD) : res(0)),
+      run_guard: (argv, _cwd, signal) => {
+        started.push(argv)
+        return new Promise<HostCommandResult>((resolve) => {
+          signal.addEventListener('abort', () => {
+            aborted.push(argv)
+            resolve({ ok: false, stdout: '', stderr: 'killed', exit_code: -1 })
+          })
+        })
+      },
+      fs,
+      proof_budget_ms: 1_000,
+      now: () => clock,
+      // A fake clock: firing a timer advances the clock by exactly its delay, so
+      // `clock` at the end is the wall time this proof would have burned.
+      set_timer: (fn, ms) => {
+        const id = ++seq
+        queueMicrotask(() => {
+          if (cancelled.has(id)) return
+          clock += ms
+          fn()
+        })
+        return id
+      },
+      clear_timer: (h) => void cancelled.add(h as number),
+    })
+
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('timed out')
+    // IT WAS KILLED, not abandoned.
+    expect(aborted).toEqual([CLAIM.guard])
+    // And the budget was spent ONCE. Only the guard was ever spawned: with a
+    // fresh per-command ceiling the control and the restored guard would each
+    // have started and burned another full ceiling (3× the stated limit).
+    expect(started).toEqual([CLAIM.guard])
+    expect(evidence.observed?.guard_restored.timed_out).toBe(true)
+    // Wall clock: the budget, plus at most one bounded reap of the killed process.
+    expect(clock).toBeLessThanOrEqual(1_000 + KILL_GRACE_CEILING)
+    expect(evidence.observed?.control_mutated.timed_out).toBe(true)
+  })
+
+  test('spawnGuardCommand really kills the process it gave up on', async () => {
+    // The kill seam against a REAL process, asserted on the DISCRIMINANT rather
+    // than on elapsed time: 137 is 128+SIGKILL, which only a killed process
+    // reports. A `sleep 30` that was merely abandoned exits 0 — and would blow
+    // this test's own timeout long before it got the chance.
+    const controller = new AbortController()
+    const running = spawnGuardCommand(['sleep', '30'], process.cwd(), controller.signal)
+    controller.abort()
+    const out = await running
+    expect(out.ok).toBe(false)
+    expect(out.exit_code).toBe(137)
   })
 
   test('the file is restored even when the guard did NOT go red', async () => {
@@ -248,8 +321,93 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     const escape = await prover.prove({ run: RUN, claim: { ...CLAIM, file: '../../etc/passwd' } })
     expect(escape.reason).toContain('repo-relative')
     const rm = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['rm', '-rf', '/'] } })
-    expect(rm.reason).toContain('not on the prover allowlist')
+    expect(rm.reason).toContain('not a test runner')
     expect(host.calls).toHaveLength(0)
+  })
+
+  test('the guard and the control must be TESTS — a shell one-liner is not one', async () => {
+    // The bypass this closes: `bash -c 'grep …'` is red under any mutation of the
+    // line and `echo` is green by construction, so the pair walks the red→green
+    // cycle without a single test process ever starting.
+    const { prover, host } = proverOver()
+    const shell = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bash', '-c', 'grep -q LIMIT src/limit.ts'] } })
+    expect(shell.proved).toBe(false)
+    expect(shell.reason).toContain('not a test runner')
+    const echo = await prover.prove({ run: RUN, claim: { ...CLAIM, control: ['sh', '-c', 'echo ok'] } })
+    expect(echo.reason).toContain('not a test runner')
+
+    // A program that IS on the list, in a shape that is not its test form.
+    const notTest = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'run', 'build'] } })
+    expect(notTest.reason).toContain('must be a test invocation')
+    const nodeScript = await prover.prove({ run: RUN, claim: { ...CLAIM, control: ['node', 'scripts/echo.mjs'] } })
+    expect(nodeScript.reason).toContain('must be a test invocation')
+
+    // …and the real test shapes are accepted: each one gets past validation and
+    // is actually RUN (it comes back carrying observations).
+    for (const guard of [
+      ['bun', 'test', 'x.test.ts'],
+      ['node', '--test', 'x.js'],
+      ['go', 'test', './...'],
+      ['python3', '-m', 'pytest'],
+      ['npm', 'run', 'test:unit'],
+      ['cargo', 'test'],
+      ['make', 'test-unit'],
+    ]) {
+      const accepted = await prover.prove({ run: RUN, claim: { ...CLAIM, guard } })
+      expect(accepted.observed).not.toBeNull()
+    }
+    expect(host.calls.length).toBeGreaterThan(0)
+  })
+
+  test('one command cannot be both the RED and the GREEN', async () => {
+    const { prover } = proverOver()
+    const same = await prover.prove({ run: RUN, claim: { ...CLAIM, control: [...CLAIM.guard] } })
+    expect(same.proved).toBe(false)
+    expect(same.reason).toContain('same command as claim.guard')
+  })
+
+  test('a mutation of a TEST file, or of documentation, is not a mutation of behaviour', async () => {
+    const { prover, host } = proverOver()
+    for (const file of ['src/limit.test.ts', 'src/__tests__/limit.ts', 'app/foo_test.go']) {
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, file } })
+      expect(out.reason).toContain('is a test file')
+    }
+    const doc = await prover.prove({ run: RUN, claim: { ...CLAIM, file: 'docs/limits.md' } })
+    expect(doc.reason).toContain('is documentation')
+    expect(host.calls).toHaveLength(0)
+  })
+
+  test('a `replace` containing a $-pattern writes the bytes it says it writes', async () => {
+    // `String.replace(find, "$`")` expands to the text BEFORE the match. The
+    // claim is signed, so the bytes on disk have to be the bytes claimed.
+    const path = join(proofWorktreePath('/repo', RUN), CLAIM.file)
+    const fs = memFs({ [path]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    await prover.prove({ run: RUN, claim: { ...CLAIM, replace: '$`$&' } })
+    expect(fs.writes[0]).toBe('export const LIMIT = 10\nexport function under(n: number) { return $`$& }\n')
+    // The expansion this rules out: `$\`` is the text BEFORE the match, so the
+    // naive `replace` wrote the whole file prefix into the middle of the line.
+    expect(fs.writes[0]).not.toContain('export const LIMIT = 10\nexport function under(n: number) { return export')
+  })
+
+  test('a restore that did not actually restore is not a proof', async () => {
+    // Kills the mutation `restoredSha = sha256(before)` — computing the "restored"
+    // digest from the bytes we MEANT to write rather than from the file we re-read.
+    const path = join(proofWorktreePath('/repo', RUN), CLAIM.file)
+    const fs = memFs({ [path]: SRC_BEFORE })
+    const corrupting: ProverFs = {
+      read: fs.read,
+      write: async (p, c) => {
+        // The restore write lands one byte short — a silent disk-level failure.
+        await fs.write(p, c === SRC_BEFORE ? `${c}// leftover\n` : c)
+      },
+    }
+    const host = scriptedHost()
+    const prover = createMutationProver({ run_host: host.run, fs: corrupting })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('not restored to its original bytes')
+    expect(evidence.observed?.file_sha256_restored).not.toBe(evidence.observed?.file_sha256_before)
   })
 
   test('a run with no branch, and an unresolvable head, are refusals not passes', async () => {
@@ -369,6 +527,135 @@ describe('NO AGENT MAY COMPOSE THE EVIDENCE BLOCK', () => {
     expect(prover.verify(handWritten({ prover_version: 99 })).ok).toBe(false)
     expect(prover.verify(handWritten({ observed: null })).ok).toBe(false)
   })
+
+  test('a block with fields simply MISSING is REJECTED, never a crash', async () => {
+    const { prover } = proverOver()
+    // A hand-written block that left `claimed` out used to reach
+    // `canonicalPayload`, which dereferenced `e.claimed.file` and THREW. A
+    // TypeError out of the gate is not the rejection this module promises.
+    const noClaim = { ...(handWritten() as Record<string, unknown>) }
+    delete noClaim.claimed
+    let verdict = prover.verify(noClaim)
+    expect(verdict.ok).toBe(false)
+    expect(verdict.reason).toContain('no `claimed` nomination')
+
+    for (const [field, reason] of [
+      ['run_id', 'run_id is missing'],
+      ['reason', 'reason is missing'],
+    ] as const) {
+      const stripped = { ...(handWritten() as Record<string, unknown>) }
+      delete stripped[field]
+      verdict = prover.verify(stripped)
+      expect(verdict.ok).toBe(false)
+      expect(verdict.reason).toContain(reason)
+    }
+
+    // …and a `claimed` that is present but not a nomination.
+    expect(prover.verify(handWritten({ claimed: { file: 'a.ts' } })).reason).toContain('claimed.find is missing')
+    expect(prover.verify(handWritten({ claimed: { ...CLAIM, guard: 'bun test' } })).reason).toContain(
+      'claimed.guard is not a command',
+    )
+  })
+
+  test('a PLACEHOLDER head_sha or timed_out is rejected by name', async () => {
+    const { prover } = proverOver()
+    const observed = (handWritten() as { observed: Record<string, unknown> }).observed
+    expect(prover.verify(handWritten({ observed: { ...observed, head_sha: '<commit>' } })).reason).toContain(
+      'head_sha is not a commit sha',
+    )
+    expect(prover.verify(handWritten({ observed: { ...observed, head_sha: 'HEAD' } })).reason).toContain(
+      'head_sha is not a commit sha',
+    )
+    expect(
+      prover.verify(
+        handWritten({
+          observed: {
+            ...observed,
+            guard_restored: { argv: CLAIM.guard, exit_code: 0, output_sha256: 'c'.repeat(64), timed_out: 'no' },
+          },
+        }),
+      ).reason,
+    ).toContain('timed_out is not a boolean')
+  })
+
+  test('the proof is BOUND to its run and its commit, and verify enforces both', async () => {
+    const { prover } = proverOver()
+    const real = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(prover.verify(real, { run_id: RUN.id, head_sha: HEAD }).ok).toBe(true)
+    expect(prover.verify(real, { run_id: 'run-2' }).reason).toContain('not for this run')
+    expect(prover.verify(real, { head_sha: 'b'.repeat(40) }).reason).toContain('is not the commit that was proved')
+  })
+
+  test('EVERY signed field is in the canonical payload — a dropped one stops being protected', async () => {
+    // Structural, and derived from a real block rather than from a list written
+    // here: delete any field from `canonicalPayload` and this goes red, because
+    // that field's (distinct) value disappears from the signed bytes. Several of
+    // those deletions previously survived the whole suite.
+    // The block is TYPED as the real interface, so a new observation field
+    // cannot be added without landing here (tsc requires it) — and once it is
+    // here, the walk demands the payload cover it too.
+    const block: Omit<MutationEvidence, 'proof_token'> = {
+      schema: MUTATION_PROOF_SCHEMA,
+      prover_version: MUTATION_PROVER_VERSION,
+      run_id: 'RUN_ID_MARKER',
+      claimed: {
+        file: 'CLAIMED_FILE',
+        find: 'CLAIMED_FIND',
+        replace: 'CLAIMED_REPLACE',
+        guard: ['CLAIMED_GUARD_ARGV'],
+        control: ['CLAIMED_CONTROL_ARGV'],
+      },
+      observed: {
+        head_sha: 'HEAD_SHA_MARKER',
+        file: 'OBSERVED_FILE',
+        file_sha256_before: 'DIGEST_BEFORE',
+        file_sha256_mutated: 'DIGEST_MUTATED',
+        file_sha256_restored: 'DIGEST_RESTORED',
+        guard_mutated: {
+          argv: ['GUARD_MUTATED_ARGV'],
+          exit_code: 41,
+          output_sha256: 'OUT_GUARD_MUTATED',
+          timed_out: false,
+        },
+        control_mutated: {
+          argv: ['CONTROL_MUTATED_ARGV'],
+          exit_code: 42,
+          output_sha256: 'OUT_CONTROL_MUTATED',
+          timed_out: false,
+        },
+        guard_restored: {
+          argv: ['GUARD_RESTORED_ARGV'],
+          exit_code: 43,
+          output_sha256: 'OUT_GUARD_RESTORED',
+          timed_out: true,
+        },
+      },
+      proved: true,
+      reason: 'REASON_MARKER',
+    }
+    // COUNTED, not merely present: the booleans repeat (`proved`, three
+    // `timed_out`s), so a field dropped from the payload has to show up as one
+    // fewer `false`, not as a value that some sibling still happens to carry.
+    const census = (v: unknown, into: Map<string, number> = new Map()): Map<string, number> => {
+      if (v === null || v === undefined) return into
+      if (Array.isArray(v)) {
+        for (const item of v) census(item, into)
+        return into
+      }
+      if (typeof v === 'object') {
+        for (const item of Object.values(v as Record<string, unknown>)) census(item, into)
+        return into
+      }
+      const k = `${typeof v}:${String(v)}`
+      into.set(k, (into.get(k) ?? 0) + 1)
+      return into
+    }
+    const want = census(block)
+    const got = census(JSON.parse(canonicalPayload(block)))
+    for (const [value, count] of want) {
+      expect({ value, count: got.get(value) ?? 0 }).toEqual({ value, count })
+    }
+  })
 })
 
 describe('parseMutationClaim — a nomination, shape-checked, never a finding', () => {
@@ -401,6 +688,35 @@ describe('the prose-only exemption FAILS CLOSED', () => {
     expect(isProseOnlyChange(['.github/workflows/ci.yml'])).toBe(false)
   })
 
+  test('executable prose NESTED under any directory is caught, not just at the repo root', () => {
+    // The denylist was anchored to the repo root, so the same operating contract
+    // one level down merged as "documentation".
+    expect(isProseOnlyChange(['onboarding/interview/skills/_envelope.md'])).toBe(false)
+    expect(isProseOnlyChange(['open/.claude/notes.md'])).toBe(false)
+    expect(isProseOnlyChange(['tools/prompts/reviewer.md'])).toBe(false)
+  })
+
+  test('the markdown that DRIVES the harness is not documentation either', () => {
+    // `SPEC.md` flips the repo into Ralph mode and `IMPLEMENTATION_PLAN.md` is the
+    // task list the next run builds from: both change what the harness DOES.
+    expect(isProseOnlyChange(['SPEC.md'])).toBe(false)
+    expect(isProseOnlyChange(['IMPLEMENTATION_PLAN.md'])).toBe(false)
+    expect(isProseOnlyChange(['CLAUDE.md'])).toBe(false)
+    expect(isProseOnlyChange(['AGENTS.md'])).toBe(false)
+    expect(isProseOnlyChange(['open/SPEC.md'])).toBe(false)
+    // …and CODEOWNERS routes review, so it is configuration, not a licence.
+    expect(isProseOnlyChange(['CODEOWNERS'])).toBe(false)
+  })
+
+  test('.txt is NOT prose — plain text is where this repo keeps load-bearing config', () => {
+    // Both of these merged unproved while `.txt` counted as documentation: the
+    // first decides which secret-leak findings are suppressed, the second is the
+    // schema snapshot the migration gate compares against.
+    expect(isProseOnlyChange(['scripts/ci/leak-gate-allowlist.txt'])).toBe(false)
+    expect(isProseOnlyChange(['migrations/expected-schema.txt'])).toBe(false)
+    expect(isProseOnlyChange(['README.md', 'notes.txt'])).toBe(false)
+  })
+
   test('"I could not tell" is never an exemption', () => {
     expect(isProseOnlyChange(null)).toBe(false)
     expect(isProseOnlyChange(undefined)).toBe(false)
@@ -420,11 +736,19 @@ describe('the prose-only exemption FAILS CLOSED', () => {
 })
 
 describe('runMutationProofGate — the phase between APPROVE and merge', () => {
-  function gateHost(files: string, script: HostScript = {}) {
+  /**
+   * The gate's PRODUCTION guard runner is the real killable spawner, so every
+   * test that actually runs a proof injects `run_guard` — the scripted host —
+   * rather than letting `bun test src/limit.test.ts` loose on this box.
+   */
+  function gateDeps(files: string, script: HostScript = {}): Pick<MutationGateInput, 'run_host' | 'run_guard'> {
     const scripted = scriptedHost(script)
-    return async (cmd: string[], cwd?: string): Promise<HostCommandResult> => {
-      if (cmd.includes('diff') && cmd.includes('--name-only')) return res(0, files)
-      return scripted.run(cmd, cwd)
+    return {
+      run_host: async (cmd: string[], cwd?: string): Promise<HostCommandResult> => {
+        if (cmd.includes('diff') && cmd.includes('--name-only')) return res(0, files)
+        return scripted.run(cmd, cwd)
+      },
+      run_guard: async (argv: string[], cwd: string): Promise<HostCommandResult> => scripted.run(argv, cwd),
     }
   }
 
@@ -434,11 +758,76 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: CLAIM,
       base_branch: 'main',
-      run_host: gateHost('src/limit.ts\n'),
+      ...gateDeps('src/limit.ts\n'),
       fs,
     })
     expect(out.ok).toBe(true)
     expect(out.exempt).toBe(false)
+    expect(out.evidence?.proved).toBe(true)
+    // The line that survives this process names WHICH commands were run.
+    expect(out.reason).toContain('bun test src/limit.test.ts')
+    expect(out.reason).toContain('bun test src/other.test.ts')
+  })
+
+  test('the nominated file must be one THIS PR changes — otherwise it certifies nothing', async () => {
+    // The bypass: nominate a mutation in stable, well-guarded code the diff never
+    // touches. It proves red-then-green perfectly, and says nothing about the
+    // merge — so one boilerplate nomination would satisfy the phase forever.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const deps = gateDeps('trident/merge.ts\n')
+    const out = await runMutationProofGate({ run: RUN, claim: CLAIM, base_branch: 'main', ...deps, fs })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain('is not in this branch')
+    expect(out.evidence).toBeNull()
+  })
+
+  test('a guard that is not a test — the grep/echo pair — never opens the gate', async () => {
+    // END TO END on the real bypass: `bash -c 'grep …'` reddens under any
+    // mutation of the line and `sh -c 'echo ok'` is green by construction, so
+    // the pair satisfies red-then-green while proving nothing. It has to be
+    // refused at the CLAIM, before either one is executed.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const ran: string[][] = []
+    const deps = gateDeps('src/limit.ts\n')
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: { ...CLAIM, guard: ['bash', '-c', 'grep -q "n < LIMIT" src/limit.ts'], control: ['sh', '-c', 'echo ok'] },
+      base_branch: 'main',
+      run_host: deps.run_host,
+      run_guard: async (argv, cwd) => {
+        ran.push(argv)
+        return res(0)
+      },
+      fs,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain('not a test runner')
+    expect(ran).toHaveLength(0)
+  })
+
+  test('a branch that moved while the proof ran does not merge the commit it proved', async () => {
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const scripted = scriptedHost()
+    let headReads = 0
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('diff') && cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('rev-parse')) {
+          headReads += 1
+          // The proof reads the head first; a push lands before the gate re-reads it.
+          return res(0, headReads === 1 ? HEAD : 'b'.repeat(40))
+        }
+        return scripted.run(cmd, cwd)
+      },
+      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
+      fs,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain('is not the commit that was proved')
+    // The proof itself was real — it is the BINDING that failed.
     expect(out.evidence?.proved).toBe(true)
   })
 
@@ -447,7 +836,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: null,
       base_branch: 'main',
-      run_host: gateHost('src/limit.ts\n'),
+      ...gateDeps('src/limit.ts\n'),
     })
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('nominated no mutation')
@@ -487,26 +876,40 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: CLAIM,
       base_branch: 'main',
-      run_host: gateHost('src/limit.ts\n', { guardMutated: 0 }),
+      ...gateDeps('src/limit.ts\n', { guardMutated: 0 }),
       fs,
     })
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('PASSED under the mutation')
   })
 
-  test('the gate takes no evidence as INPUT — only a claim it executes', () => {
-    // A structural property, asserted so a future refactor cannot quietly add an
-    // `evidence` parameter: the only way to get a verdict out of this module is
-    // to hand it a mutation to RUN.
-    const params = Object.keys({
-      run: 0,
-      claim: 0,
-      base_branch: 0,
-      run_host: 0,
-      prover: 0,
-      fs: 0,
-      command_timeout_ms: 0,
-    })
-    expect(params).not.toContain('evidence')
+  test('the gate takes no evidence as INPUT — only a claim it executes', async () => {
+    // TYPE-LEVEL: `MutationGateInput` itself is the subject. If a future refactor
+    // adds an `evidence` key to it, `Smuggled` resolves to `never`, the literal
+    // below stops being assignable and the TYPECHECK MATRIX goes red. (The
+    // previous version of this test enumerated a hand-written object literal, so
+    // it would have stayed green through exactly the change it existed to catch.)
+    type Smuggled = 'evidence' extends keyof MutationGateInput ? never : MutationGateInput
+    const _noEvidenceOnTheType: Smuggled = {
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async () => res(1),
+    }
+    expect(_noEvidenceOnTheType.claim).toBeNull()
+
+    // BEHAVIOURAL: a caller that smuggles a perfect-looking block in anyway gets
+    // it IGNORED — the gate still runs the mutation, and with no claim to run it
+    // blocks. Nothing a caller can pass is read as a proof.
+    const smuggler = {
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async () => res(0, 'src/limit.ts\n'),
+      evidence: { schema: MUTATION_PROOF_SCHEMA, proved: true, proof_token: 'a'.repeat(64) },
+    } as unknown as MutationGateInput
+    const out = await runMutationProofGate(smuggler)
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain('nominated no mutation')
   })
 })

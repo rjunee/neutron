@@ -42,6 +42,22 @@
  *     with a reason that names what was wrong rather than an opaque
  *     signature mismatch.
  *
+ * ── WHAT MAKES IT ABOUT *THIS* PR ─────────────────────────────────────
+ * A red-then-green cycle is only evidence if it is evidence about the merge:
+ *
+ *   • The nominated file must appear in the branch's own diff. A mutation of
+ *     stable, well-guarded code the PR never touches proves the cycle perfectly
+ *     and certifies NOTHING — and being diff-independent, one boilerplate
+ *     nomination would satisfy this phase forever.
+ *   • The guard and the control must be TEST INVOCATIONS, not merely programs
+ *     on an allowlist. `bash -c 'grep …'` goes red under any edit of the line
+ *     and `sh -c 'echo ok'` is green by construction: that pair walks the whole
+ *     cycle without a test process ever starting. A general shell is off the
+ *     list entirely (see `TEST_COMMAND_SHAPES`).
+ *   • The block is BOUND to a run and a commit, and `verify` checks both — the
+ *     branch head is re-read after the proof, so a branch that moved mid-proof
+ *     blocks rather than merging a commit nothing ever proved.
+ *
  * ── WHAT IT IS NOT ────────────────────────────────────────────────────
  * The CLAIM is untrusted input. A build agent nominates WHICH mutation to
  * run — that is a proposal, echoed verbatim into `claimed` and never
@@ -65,27 +81,61 @@ export const MUTATION_PROOF_SCHEMA = 'trident.mutation-proof/1'
 /** Prover implementation version, recorded in (and signed into) the evidence. */
 export const MUTATION_PROVER_VERSION = 1
 
-/** Default wall-clock ceiling for ONE guard/control command. */
-export const DEFAULT_PROOF_COMMAND_TIMEOUT_MS = 15 * 60_000
+/**
+ * Wall-clock ceiling for the WHOLE proof — guard, control and the restored
+ * guard together, not each. The tick loop is single-flight (`tick.ts`), so a
+ * per-command ceiling of N is really a 3N stall for every other run on the box.
+ */
+export const DEFAULT_PROOF_BUDGET_MS = 15 * 60_000
+
+/** Bounded grace to reap a killed command before its worktree is deleted. */
+const KILL_GRACE_MS = 5_000
 
 /**
- * The programs a claim may nominate as its guard/control. An allowlist, not a
- * denylist: the claim is agent-authored input that this module EXECUTES, so
- * an unrecognised program is refused rather than run.
+ * The guard/control commands a claim may nominate: an allowlist of TEST-RUNNER
+ * INVOCATIONS, not of programs.
+ *
+ * WHY THE SHAPE AND NOT JUST THE PROGRAM. This is agent-authored input that the
+ * module EXECUTES, and the whole gate rests on the guard being a TEST — a thing
+ * that can only go red because the behaviour broke. A program allowlist does not
+ * give that: `bash -c 'grep -q LIMIT src/limit.ts'` is a "guard" that goes red
+ * under any mutation of that line, and `sh -c 'echo ok'` is a "control" that is
+ * green by construction. That pair satisfies red-then-green while proving
+ * NOTHING, and it is exactly what a boilerplate nomination would converge on. So
+ * a general shell is off the list entirely and every remaining program must be
+ * invoked in its test form (`bun test …`, `go test …`, `python3 -m pytest …`).
+ *
+ * Fails closed: an unrecognised program, or a recognised one in a shape that is
+ * not its test subcommand, is REFUSED rather than run.
  */
-const ALLOWED_PROGRAMS: ReadonlySet<string> = new Set([
-  'bun',
-  'node',
-  'npm',
-  'pnpm',
-  'yarn',
-  'bash',
-  'sh',
-  'make',
-  'python3',
-  'go',
-  'cargo',
-])
+const TEST_COMMAND_SHAPES: ReadonlyArray<{
+  program: string
+  /** Human-readable form, quoted back in the refusal. */
+  shape: string
+  ok: (argv: readonly string[]) => boolean
+}> = [
+  { program: 'bun', shape: 'bun test …', ok: (a) => a[1] === 'test' },
+  { program: 'node', shape: 'node --test …', ok: (a) => a.includes('--test') },
+  { program: 'npm', shape: 'npm test … / npm run test… ', ok: isPackageScriptTest },
+  { program: 'pnpm', shape: 'pnpm test … / pnpm run test…', ok: isPackageScriptTest },
+  { program: 'yarn', shape: 'yarn test … / yarn run test…', ok: isPackageScriptTest },
+  { program: 'make', shape: 'make test…', ok: (a) => typeof a[1] === 'string' && a[1].startsWith('test') },
+  {
+    program: 'python3',
+    shape: 'python3 -m pytest|unittest …',
+    ok: (a) => a[1] === '-m' && (a[2] === 'pytest' || a[2] === 'unittest'),
+  },
+  { program: 'go', shape: 'go test …', ok: (a) => a[1] === 'test' },
+  { program: 'cargo', shape: 'cargo test …', ok: (a) => a[1] === 'test' },
+]
+
+function isPackageScriptTest(argv: readonly string[]): boolean {
+  if (argv[1] === 'test') return true
+  return argv[1] === 'run' && typeof argv[2] === 'string' && argv[2].startsWith('test')
+}
+
+/** A source file whose name says it is a test — never a valid mutation target. */
+const TEST_FILE = /(^|\/)(__tests__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rs)$/
 
 /**
  * The UNTRUSTED nomination: which production behaviour to break, and which
@@ -161,14 +211,33 @@ export interface ProverFs {
   write(path: string, contents: string): Promise<void>
 }
 
+/**
+ * How a guard/control command is run. Separate from `RunHostCommand` for two
+ * reasons, both of which the git/gh runner cannot serve:
+ *
+ *  • KILLABILITY. `RunHostCommand` has no abort seam, so a command that outran
+ *    the ceiling used to be merely stopped being waited on — it kept running,
+ *    kept writing, and the worktree was force-removed out from under it. The
+ *    signal here is how the proof actually ends a process it gave up on.
+ *  • BLAST RADIUS. This argv is agent-nominated. The production `run_host` is
+ *    credentialed (`makeCredentialedHostRunner`) so that `git push` works;
+ *    handing that environment to a nominated command is not something this
+ *    module should do. `spawnGuardCommand` inherits the plain environment.
+ */
+export type RunGuardCommand = (argv: string[], cwd: string, signal: AbortSignal) => Promise<HostCommandResult>
+
 export interface MutationProverDeps {
   run_host: RunHostCommand
+  /** Runner for the nominated guard/control argv. Defaults to `run_host`. */
+  run_guard?: RunGuardCommand
   fs?: ProverFs
-  /** Per-command wall-clock ceiling. Default 15 min. */
-  command_timeout_ms?: number
+  /** Wall-clock ceiling for the WHOLE proof (all three runs). Default 15 min. */
+  proof_budget_ms?: number
   /** Timer seam (tests). Defaults to `setTimeout`. */
   set_timer?: (fn: () => void, ms: number) => unknown
   clear_timer?: (handle: unknown) => void
+  /** Clock seam (tests). Defaults to `Date.now`. */
+  now?: () => number
 }
 
 export interface ProveInput {
@@ -184,7 +253,19 @@ export interface ProveInput {
  */
 export interface MutationProver {
   prove(input: ProveInput): Promise<MutationEvidence>
-  verify(evidence: unknown): VerifyResult
+  verify(evidence: unknown, expect?: VerifyExpectation): VerifyResult
+}
+
+/**
+ * What the caller believes this block must be BOUND to. The schema documents
+ * that a proof belongs to one run and one commit; this is where that stops being
+ * documentation. The gate passes the run it is gating and the branch head as it
+ * stands AFTER the proof, so a block from another run — or one proved against a
+ * commit the branch has since moved off — is refused rather than merged.
+ */
+export interface VerifyExpectation {
+  run_id?: string
+  head_sha?: string
 }
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -199,8 +280,12 @@ function sha256(s: string): string {
  * FIXED order (never `JSON.stringify` of the whole object — key order there is
  * an insertion-order accident, and a token that depends on it would break on a
  * round-trip through the DB).
+ *
+ * EXPORTED for the test that walks a fully-populated block and asserts every
+ * leaf value appears here. A field quietly dropped from this list is a field the
+ * token stops protecting, and nothing else in the suite would notice.
  */
-function canonicalPayload(e: Omit<MutationEvidence, 'proof_token'>): string {
+export function canonicalPayload(e: Omit<MutationEvidence, 'proof_token'>): string {
   const o = e.observed
   return JSON.stringify([
     e.schema,
@@ -247,6 +332,16 @@ function validateClaim(claim: MutationClaim | null | undefined): string | null {
   if (claim.file.startsWith('/') || claim.file.split('/').includes('..')) {
     return `claim.file must be a repo-relative path inside the worktree (got ${claim.file})`
   }
+  // Breaking a test and watching that test fail is a tautology, not a proof:
+  // the schema says a PRODUCTION file and this is where that is enforced.
+  if (TEST_FILE.test(claim.file)) {
+    return `claim.file ${claim.file} is a test file — the mutation must break PRODUCTION behaviour`
+  }
+  // Nor does mutating documentation prove anything: nothing executes it, so a
+  // guard that reddens on it is reading bytes rather than exercising behaviour.
+  if (isProseOnlyChange([claim.file])) {
+    return `claim.file ${claim.file} is documentation — mutating prose proves nothing about behaviour`
+  }
   if (typeof claim.find !== 'string' || claim.find.length === 0) return 'claim.find is missing'
   if (typeof claim.replace !== 'string') return 'claim.replace is missing'
   if (claim.find === claim.replace) return 'claim.replace equals claim.find — that mutation changes nothing'
@@ -254,6 +349,9 @@ function validateClaim(claim: MutationClaim | null | undefined): string | null {
   if (guard !== null) return guard
   const control = validateArgv(claim.control, 'control')
   if (control !== null) return control
+  if (JSON.stringify(claim.guard) === JSON.stringify(claim.control)) {
+    return 'claim.control is the same command as claim.guard — one command cannot be both the RED and the GREEN'
+  }
   return null
 }
 
@@ -263,8 +361,12 @@ function validateArgv(argv: unknown, which: string): string | null {
     return `claim.${which} must be an array of non-empty strings`
   }
   const program = argv[0] as string
-  if (!ALLOWED_PROGRAMS.has(program)) {
-    return `claim.${which} program ${program} is not on the prover allowlist`
+  const shape = TEST_COMMAND_SHAPES.find((s) => s.program === program)
+  if (shape === undefined) {
+    return `claim.${which} program ${program} is not a test runner on the prover allowlist`
+  }
+  if (!shape.ok(argv as string[])) {
+    return `claim.${which} must be a test invocation (${shape.shape}), not ${argv.join(' ')}`
   }
   return null
 }
@@ -327,9 +429,11 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
   // prompt, no env. That is the entire reason an agent cannot mint evidence —
   // it is not a secret it is trusted to keep, it is a secret it never sees.
   const key = randomBytes(32)
-  const timeoutMs = deps.command_timeout_ms ?? DEFAULT_PROOF_COMMAND_TIMEOUT_MS
+  const budgetMs = deps.proof_budget_ms ?? DEFAULT_PROOF_BUDGET_MS
   const setTimer = deps.set_timer ?? ((fn, ms) => setTimeout(fn, ms))
   const clearTimer = deps.clear_timer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>))
+  const now = deps.now ?? (() => Date.now())
+  const runGuard: RunGuardCommand = deps.run_guard ?? ((argv, cwd) => deps.run_host(argv, cwd))
   const fs: ProverFs = deps.fs ?? {
     read: (p) => readFile(p, 'utf8'),
     write: (p, c) => writeFile(p, c, 'utf8'),
@@ -351,26 +455,64 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     })
   }
 
-  /**
-   * Run one guard/control command, bounded. A command that outlives the
-   * ceiling is recorded as `timed_out` with a sentinel exit code: an
-   * observation we could not complete is NOT an observation of success, and
-   * `evaluate` treats it as such.
-   */
-  async function observe(argv: string[], cwd: string): Promise<CommandObservation> {
+  /** Resolve after `ms`, via the injectable timer. */
+  function after(ms: number): { promise: Promise<'timeout'>; cancel: () => void } {
     let handle: unknown = null
-    const timeout = new Promise<'timeout'>((resolve) => {
-      handle = setTimer(() => resolve('timeout'), timeoutMs)
+    const promise = new Promise<'timeout'>((resolve) => {
+      handle = setTimer(() => resolve('timeout'), ms)
     })
+    return { promise, cancel: () => clearTimer(handle) }
+  }
+
+  /**
+   * Run one guard/control command against the SHARED proof budget.
+   *
+   * Two properties, both of which the first cut of this got wrong:
+   *
+   *  • A command that outlives the budget is KILLED (`AbortSignal`), and we then
+   *    wait a bounded grace for it to actually die. It used to be merely
+   *    abandoned by `Promise.race` — still running, still writing, while the
+   *    `finally` in `prove` force-removed the worktree underneath it.
+   *  • The ceiling is the budget REMAINING, not a fresh one per command, so the
+   *    whole phase is bounded by `proof_budget_ms` rather than 3× it. `tick.ts`
+   *    is single-flight: that difference is how long every other run waits.
+   *
+   * A command we could not complete is recorded `timed_out`, which is NOT an
+   * observation of success — `evaluate` refuses on it.
+   */
+  async function observe(argv: string[], cwd: string, deadline: number): Promise<CommandObservation> {
+    const remaining = deadline - now()
+    if (remaining <= 0) {
+      // The budget is already gone; spawning here could only be killed at once.
+      return { argv, exit_code: -1, output_sha256: sha256(`budget-exhausted:${argv.join(' ')}`), timed_out: true }
+    }
+    const controller = new AbortController()
+    const running = runGuard(argv, cwd, controller.signal).catch(
+      (err): HostCommandResult => ({
+        ok: false,
+        stdout: '',
+        stderr: err instanceof Error ? err.message : String(err),
+        exit_code: -1,
+      }),
+    )
+    const ceiling = after(remaining)
     let res: HostCommandResult | 'timeout'
     try {
-      res = await Promise.race([deps.run_host(argv, cwd), timeout])
-    } catch (err) {
-      res = { ok: false, stdout: '', stderr: err instanceof Error ? err.message : String(err), exit_code: -1 }
+      res = await Promise.race([running, ceiling.promise])
     } finally {
-      clearTimer(handle)
+      ceiling.cancel()
     }
     if (res === 'timeout') {
+      controller.abort()
+      // Bounded reap: give the killed process a moment to exit before the
+      // caller deletes the tree it is running in. A runner that ignores the
+      // signal costs us the grace, never the wall clock.
+      const grace = after(Math.min(KILL_GRACE_MS, Math.max(1, remaining)))
+      try {
+        await Promise.race([running, grace.promise])
+      } finally {
+        grace.cancel()
+      }
       return { argv, exit_code: -1, output_sha256: sha256(`timeout:${argv.join(' ')}`), timed_out: true }
     }
     return {
@@ -406,7 +548,8 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     if (!add.ok) return refuse(run.id, claim, 'could not provision the proof worktree')
 
     try {
-      return await proveInWorktree(run.id, claim, wt, headSha)
+      // ONE deadline for the whole proof, started once the worktree exists.
+      return await proveInWorktree(run.id, claim, wt, headSha, now() + budgetMs)
     } finally {
       await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
       await deps.run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
@@ -418,6 +561,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     claim: MutationClaim,
     wt: string,
     headSha: string,
+    deadline: number,
   ): Promise<MutationEvidence> {
     const target = join(wt, claim.file)
     let before: string
@@ -439,7 +583,11 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       return refuse(run_id, claim, `claim.find occurs ${occurrences}x in ${claim.file} — the mutation is ambiguous`)
     }
 
-    const mutated = before.replace(claim.find, claim.replace)
+    // REPLACER FUNCTION, never the raw string: `String.prototype.replace` expands
+    // `$&`, `$\``, `$'`, `$$` and `$n` in a string replacement, so a claim whose
+    // `replace` contains one would write bytes that differ from the `replace` the
+    // block goes on to sign. The signed nomination must be what actually hit disk.
+    const mutated = before.replace(claim.find, () => claim.replace)
     const beforeSha = sha256(before)
     const mutatedSha = sha256(mutated)
     if (mutatedSha === beforeSha) {
@@ -455,8 +603,8 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     let guardMutated: CommandObservation
     let controlMutated: CommandObservation
     try {
-      guardMutated = await observe(claim.guard, wt)
-      controlMutated = await observe(claim.control, wt)
+      guardMutated = await observe(claim.guard, wt, deadline)
+      controlMutated = await observe(claim.control, wt, deadline)
     } finally {
       // ALWAYS restore, even if a command threw. The worktree is thrown away
       // either way, but the restored-digest check below is a real observation
@@ -471,7 +619,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       return refuse(run_id, claim, `could not re-read ${claim.file} after restoring it`)
     }
     const restoredSha = sha256(restored)
-    const guardRestored = await observe(claim.guard, wt)
+    const guardRestored = await observe(claim.guard, wt, deadline)
 
     const observed: MutationObservations = {
       head_sha: headSha,
@@ -495,10 +643,26 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     })
   }
 
-  function verify(evidence: unknown): VerifyResult {
+  function verify(evidence: unknown, expect?: VerifyExpectation): VerifyResult {
     const shape = checkShape(evidence)
     if (!shape.ok) return shape
     const e = evidence as MutationEvidence
+    // THE BINDING, enforced rather than merely documented. Both of these are
+    // signed into the payload, so a mismatch is not forgeable — but without
+    // these two lines nothing would ever COMPARE them, and a block proved
+    // against another run (or against a commit this branch has since moved off)
+    // would sail through on a perfectly valid signature.
+    if (expect?.run_id !== undefined && e.run_id !== expect.run_id) {
+      return { ok: false, reason: `evidence was proved for run ${e.run_id}, not for this run` }
+    }
+    if (expect?.head_sha !== undefined && e.observed?.head_sha !== expect.head_sha) {
+      return {
+        ok: false,
+        reason:
+          `evidence proves ${String(e.observed?.head_sha).slice(0, 8)} but the branch head is now ` +
+          `${expect.head_sha.slice(0, 8)} — the commit that would merge is not the commit that was proved`,
+      }
+    }
     const expected = createHmac('sha256', key).update(canonicalPayload(stripToken(e))).digest('hex')
     const got = Buffer.from(e.proof_token, 'hex')
     const want = Buffer.from(expected, 'hex')
@@ -535,7 +699,15 @@ export function evaluate(o: MutationObservations): { proved: boolean; reason: st
   if (o.guard_mutated.exit_code === 0) {
     return {
       proved: false,
-      reason: 'the guard PASSED under the mutation — it does not actually guard this behaviour',
+      // Two ways to arrive here and the operator has to be able to tell them
+      // apart: the guard really does not cover this line, OR the guard reached
+      // the code through a workspace alias (`@neutronai/x/…`) that resolves to
+      // the base checkout rather than to the proof worktree, so it never saw the
+      // mutation at all. Both block the merge — a proof we could not make is not
+      // a proof — but only one of them is a bad guard.
+      reason:
+        `the guard [${argvOf(o.guard_mutated)}] PASSED under the mutation of ${o.file} — either it does not ` +
+        'guard this behaviour, or it does not load that file from the proof worktree (a workspace alias)',
     }
   }
   if (o.control_mutated.timed_out || o.control_mutated.exit_code !== 0) {
@@ -558,8 +730,18 @@ export function evaluate(o: MutationObservations): { proved: boolean; reason: st
   }
   return {
     proved: true,
-    reason: `mutation applied to ${o.file}: guard RED (exit ${o.guard_mutated.exit_code}), control GREEN, restored, guard GREEN`,
+    // THE AUDIT LINE. The orchestrator writes this onto the run row, and it is
+    // signed into the payload, so it names WHICH commands were run: without the
+    // argv here a nomination whose "guard" never tests anything reads exactly
+    // like a real one on the row that outlives the process.
+    reason:
+      `mutation applied to ${o.file} @ ${o.head_sha.slice(0, 8)}: guard [${argvOf(o.guard_mutated)}] RED ` +
+      `(exit ${o.guard_mutated.exit_code}), control [${argvOf(o.control_mutated)}] GREEN, restored, guard GREEN`,
   }
+}
+
+function argvOf(c: CommandObservation): string {
+  return Array.isArray(c.argv) ? c.argv.join(' ') : ''
 }
 
 /**
@@ -579,7 +761,29 @@ function checkShape(value: unknown): VerifyResult {
   if (typeof e.proof_token !== 'string' || !HEX64.test(e.proof_token)) {
     return { ok: false, reason: 'evidence proof_token is missing or not a sha256 hex digest' }
   }
+  if (typeof e.run_id !== 'string' || e.run_id.length === 0) {
+    return { ok: false, reason: 'evidence run_id is missing — a proof belongs to exactly one run' }
+  }
+  if (typeof e.reason !== 'string') return { ok: false, reason: 'evidence reason is missing' }
   if (e.proved !== true) return { ok: false, reason: 'evidence does not claim `proved`' }
+  // `claimed` is signed into the payload, so a block that omits it cannot be
+  // canonicalised. Checked HERE, structurally: without this, `canonicalPayload`
+  // dereferences `e.claimed.file` and `verify` THROWS on a hand-written block
+  // that left the field out — and a crash is not the rejection this promises.
+  const claimed = e.claimed
+  if (claimed === null || typeof claimed !== 'object') {
+    return { ok: false, reason: 'evidence carries no `claimed` nomination' }
+  }
+  const c = claimed as Record<string, unknown>
+  for (const field of ['file', 'find', 'replace'] as const) {
+    if (typeof c[field] !== 'string') return { ok: false, reason: `claimed.${field} is missing or not a string` }
+  }
+  for (const field of ['guard', 'control'] as const) {
+    const v = c[field]
+    if (!Array.isArray(v) || v.length === 0 || !v.every((a) => typeof a === 'string')) {
+      return { ok: false, reason: `claimed.${field} is not a command` }
+    }
+  }
   const o = e.observed
   if (o === null || typeof o !== 'object') {
     return { ok: false, reason: 'evidence is marked proved but carries no observations' }
@@ -630,10 +834,32 @@ function checkObservation(value: unknown, field: string): string | null {
  * agent's operating contract, and editing it changes what the harness does at
  * runtime as surely as editing a .ts file does. Those are excluded below, so
  * they take the proof path like any other behaviour change.
+ *
+ * MATCHED ON EVERY PATH SEGMENT, not on a repo-root prefix. `skills/x/S.md` and
+ * `onboarding/interview/skills/_envelope.md` are the same kind of file, and a
+ * root-anchored prefix let the second one through as documentation.
  */
-const PROSE_DIR_DENYLIST = ['skills/', 'prompts/', '.claude/', 'agent-dispatch/', '.github/']
-const PROSE_SUFFIXES = ['.md', '.mdx', '.txt']
-const PROSE_EXACT = ['LICENSE', 'NOTICE', 'CODEOWNERS']
+const PROSE_DIR_DENYLIST = ['skills', 'prompts', '.claude', 'agent-dispatch', '.github']
+
+/**
+ * `.txt` IS NOT PROSE in this repo, and that is not a nitpick: `scripts/ci/
+ * leak-gate-allowlist.txt` decides which secret-leak findings are suppressed and
+ * `migrations/expected-schema.txt` is the schema snapshot the migration gate
+ * compares against. Both are load-bearing configuration that happens to be
+ * plain text, and both merged unproved while `.txt` sat on this list.
+ */
+const PROSE_SUFFIXES = ['.md', '.mdx']
+
+/** Inert by content, wherever they sit. NOT `CODEOWNERS` — that routes review. */
+const PROSE_EXACT = ['LICENSE', 'NOTICE']
+
+/**
+ * Markdown that DRIVES the harness, matched by basename anywhere in the tree.
+ * `SPEC.md` flips the repo into Ralph mode (`git-mode.ts:defaultRalphModeProbe`)
+ * and `IMPLEMENTATION_PLAN.md` is the task list Ralph builds from — editing
+ * either changes what the next run DOES, so neither is documentation.
+ */
+const EXECUTABLE_PROSE_FILES = ['SPEC.md', 'IMPLEMENTATION_PLAN.md', 'CLAUDE.md', 'AGENTS.md', 'SKILL.md']
 
 /**
  * Is this diff PURE PROSE, and therefore exempt from the proof?
@@ -650,11 +876,12 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
     if (typeof raw !== 'string') return false
     const path = raw.trim()
     if (path.length === 0) return false
-    if (PROSE_DIR_DENYLIST.some((dir) => path === dir.slice(0, -1) || path.startsWith(dir))) return false
-    if (PROSE_EXACT.includes(path)) return true
-    const base = path.slice(path.lastIndexOf('/') + 1)
+    const segments = path.split('/')
+    if (segments.some((segment) => PROSE_DIR_DENYLIST.includes(segment))) return false
+    const base = segments[segments.length - 1] ?? ''
+    if (EXECUTABLE_PROSE_FILES.includes(base)) return false
     if (PROSE_EXACT.includes(base)) return true
-    return PROSE_SUFFIXES.some((suffix) => path.endsWith(suffix))
+    return PROSE_SUFFIXES.some((suffix) => base.endsWith(suffix))
   })
 }
 
@@ -679,16 +906,65 @@ export async function changedFilesOnBranch(
   return files.length === 0 ? null : files
 }
 
+/**
+ * The production guard/control runner: spawns the nominated argv and — the part
+ * `RunHostCommand` cannot do — KILLS it when the proof gives up on it.
+ *
+ * `SIGKILL` reaches the direct child. A guard that forks its own daemon can
+ * still leave a grandchild behind; the bounded reap in `observe` means we do not
+ * WAIT on that, and the proof worktree removal is `--force`. That residual is
+ * accepted here because the alternative (a process group per guard) is not
+ * exposed by `Bun.spawn`.
+ */
+export async function spawnGuardCommand(
+  argv: string[],
+  cwd: string,
+  signal: AbortSignal,
+): Promise<HostCommandResult> {
+  try {
+    const proc = Bun.spawn(argv, { cwd, stdout: 'pipe', stderr: 'pipe' })
+    const kill = (): void => {
+      try {
+        proc.kill('SIGKILL')
+      } catch {
+        // Already gone — nothing to kill.
+      }
+    }
+    if (signal.aborted) kill()
+    else signal.addEventListener('abort', kill, { once: true })
+    try {
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      const exit_code = await proc.exited
+      return { ok: exit_code === 0, stdout: stdout.trim(), stderr: stderr.trim(), exit_code }
+    } finally {
+      signal.removeEventListener('abort', kill)
+    }
+  } catch (err) {
+    return { ok: false, stdout: '', stderr: String(err), exit_code: -1 }
+  }
+}
+
 // ── The gate the merge path calls ────────────────────────────────────────────
 
 export interface MutationGateOutcome {
   /** May this APPROVE proceed to merge? */
   ok: boolean
-  /** One line for the run note / `failure_reason`. */
+  /**
+   * One line for the run note / `failure_reason` — and THE AUDIT TRAIL, because
+   * it is the only part of this outcome that outlives the process. The block
+   * below cannot be one: its signing key is minted per gate call and dies with
+   * it, so a stored block could never be re-verified by anything. `reason`
+   * therefore carries the load-bearing facts itself — which file, at which
+   * commit, and the guard/control argv that actually ran, which is exactly what
+   * a later reader needs in order to spot a "guard" that tested nothing.
+   */
   reason: string
   /** True when the prose-only predicate exempted the diff (no proof run). */
   exempt: boolean
-  /** The machine-emitted block, for the audit trail. Null when exempt. */
+  /** The machine-emitted block, for the caller to inspect. Null when exempt. */
   evidence: MutationEvidence | null
 }
 
@@ -698,10 +974,12 @@ export interface MutationGateInput {
   claim: MutationClaim | null
   base_branch: string
   run_host: RunHostCommand
+  /** Runner for the nominated argv. Defaults to the real, killable spawner. */
+  run_guard?: RunGuardCommand
   /** Prover override (tests). Production mints a fresh one per gate call. */
   prover?: MutationProver
   fs?: ProverFs
-  command_timeout_ms?: number
+  proof_budget_ms?: number
 }
 
 /**
@@ -727,15 +1005,58 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     }
   }
 
+  // BIND THE PROOF TO THIS PR. Without this the gate certifies nothing about the
+  // merge: a nomination pointing at a stable, well-tested file the PR never
+  // touches proves red-then-green perfectly and says NOTHING about the diff — and
+  // being diff-independent, one boilerplate nomination would satisfy the phase
+  // forever. The proof must break a line THIS branch changed.
+  if (files === null) {
+    return {
+      ok: false,
+      reason: 'mutation proof required but the branch diff could not be read — a proof cannot be bound to it',
+      exempt: false,
+      evidence: null,
+    }
+  }
+  if (!files.includes(input.claim.file)) {
+    return {
+      ok: false,
+      reason:
+        `mutation proof rejected: the nominated file ${input.claim.file} is not in this branch's diff — ` +
+        'a mutation of a file the PR does not change certifies nothing about this merge',
+      exempt: false,
+      evidence: null,
+    }
+  }
+
   const prover =
     input.prover ??
     createMutationProver({
       run_host: input.run_host,
+      run_guard: input.run_guard ?? spawnGuardCommand,
       ...(input.fs !== undefined ? { fs: input.fs } : {}),
-      ...(input.command_timeout_ms !== undefined ? { command_timeout_ms: input.command_timeout_ms } : {}),
+      ...(input.proof_budget_ms !== undefined ? { proof_budget_ms: input.proof_budget_ms } : {}),
     })
   const evidence = await prover.prove({ run: input.run, claim: input.claim })
-  const verified = prover.verify(evidence)
+
+  // THE HEAD THE MERGE WILL TAKE, re-read AFTER the proof. A proof is bound to
+  // one commit; if the branch moved while it ran, the commit that would merge is
+  // not the commit that was proved, and this refuses rather than merges it.
+  const head = await input.run_host(
+    ['git', '-C', input.run.repo_path, 'rev-parse', input.run.branch ?? 'HEAD'],
+    input.run.repo_path,
+  )
+  const headSha = head.stdout.trim().toLowerCase()
+  if (!head.ok || !HEX40.test(headSha)) {
+    return {
+      ok: false,
+      reason: 'mutation proof rejected: could not re-read the branch head to bind the proof to it',
+      exempt: false,
+      evidence,
+    }
+  }
+
+  const verified = prover.verify(evidence, { run_id: input.run.id, head_sha: headSha })
   if (!verified.ok) {
     // A block WE just produced that came back `proved:false` already carries the
     // specific observation that killed it ("the guard PASSED under the

@@ -52,6 +52,8 @@ interface Harness {
   /** RALPH RE-FIRE (#362) — every atomic reset patch `persist_refire_reset` was
    *  called with (assert the crash-safe bundle: inner_result + slot + ralph_round). */
   refirePatches: import('./store.ts').TridentRunUpdate[]
+  /** What the post-APPROVE mutation-prover phase was asked to prove, per call. */
+  proofCalls: Array<{ branch: string | null; run_id: string }>
 }
 
 function buildHarness(opts: {
@@ -74,6 +76,7 @@ function buildHarness(opts: {
   mutation_proof_ok?: boolean
 }): Harness {
   const hostCalls: string[][] = []
+  const proofCalls: Array<{ branch: string | null; run_id: string }> = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
   const now = opts.now ?? (() => new Date(0).toISOString())
   // Bind the store to the SAME clock as the orchestrator so `last_advanced_at`
@@ -99,7 +102,7 @@ function buildHarness(opts: {
       refirePatches.push(patch)
       return store.update(id, patch).then(() => {})
     },
-    prove_mutation: buildSimMutationProofGate({ ok: opts.mutation_proof_ok ?? true }),
+    prove_mutation: buildSimMutationProofGate({ ok: opts.mutation_proof_ok ?? true }, proofCalls),
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
@@ -116,7 +119,7 @@ function buildHarness(opts: {
     step: orch.step,
     ...(opts.on_terminal !== undefined ? { on_terminal: opts.on_terminal } : {}),
   })
-  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
+  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches, proofCalls }
 }
 
 /** Tick, then simulate the in-flight workflow finishing (write its result), so a
@@ -945,6 +948,22 @@ describe('the post-APPROVE MUTATION PROVER stands between APPROVE and merge', ()
     expect(h.hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
   })
 
+  test('the prover is pointed at the branch the merge will take, not the one on the row', async () => {
+    // The run row's branch is STALE (here: never written at all) and the build
+    // named it in its result. The merge below uses `result.branch ?? run.branch`,
+    // so a prover handed the un-updated `run` would resolve a head off the OLD
+    // ref — proving one commit and merging another.
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'trident/the-real-branch' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(final.branch).toBe('trident/the-real-branch')
+    expect(h.proofCalls).toEqual([{ branch: 'trident/the-real-branch', run_id: run.id }])
+  })
+
   test('with NO seam wired at all, a run whose build nominated no mutation still does not merge', async () => {
     // The DEFAULT path — `prove_mutation` unset, so the orchestrator uses the
     // real `runMutationProofGate`. This is the fail-closed wiring assertion: if
@@ -968,7 +987,10 @@ describe('the post-APPROVE MUTATION PROVER stands between APPROVE and merge', ()
     const loop = new TridentTickLoop({ store, step: orch.step })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
-    const final = await runToTerminal({ loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches: [] }, run.id)
+    const final = await runToTerminal(
+      { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches: [], proofCalls: [] },
+      run.id,
+    )
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('nominated no mutation')
     expect(hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)

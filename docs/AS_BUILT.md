@@ -28,20 +28,48 @@ or replayed from another process. Placeholder-shaped observations (`"<sha256>"`,
 "RED" run that exited 0, a red and a green run with byte-identical output) are
 rejected first, by name, so a fake is told what was wrong with it.
 
+Two things make the proof about THIS PR rather than about mutation in the
+abstract. The nominated file must appear in `base...branch` — a mutation of a
+stable, well-guarded file the diff never touches proves red-then-green perfectly
+and certifies nothing, and being diff-independent it would let one boilerplate
+nomination satisfy the phase forever. And the guard and control must be TEST
+INVOCATIONS (`bun test …`, `go test …`, `python3 -m pytest …`), not merely
+allowlisted programs: `bash -c 'grep …'` reddens under any edit of the line and
+`sh -c 'echo ok'` is green by construction, so a general shell is off the list
+entirely. The nominated file may not be a test file or documentation either.
+
 Docs-only PRs are exempt through a predicate that fails closed at every step: an
 unreadable diff, an empty list, one unrecognised path — each requires the proof.
 A `.md` under `skills/`, `prompts/`, `.claude/` or `.github/` is executable prose,
-not documentation, and takes the proof path.
+not documentation, and takes the proof path — matched on EVERY path segment, so
+`onboarding/interview/skills/_envelope.md` is caught as surely as the root-level
+one. `SPEC.md` and `IMPLEMENTATION_PLAN.md` drive the harness (Ralph mode and its
+task list) and are not documentation; neither is `CODEOWNERS`. `.txt` is not
+prose in this repo — `scripts/ci/leak-gate-allowlist.txt` decides which leak
+findings are suppressed and `migrations/expected-schema.txt` is the schema the
+migration gate compares against.
+
+The proof is BOUND, and `verify` enforces the binding rather than documenting it:
+to the run id, and to the branch head as re-read AFTER the proof, so a branch
+that moved mid-proof blocks instead of merging a commit that was never proved.
+The whole phase runs against ONE wall-clock budget (15 min for all three runs,
+not each), and a command that outruns it is KILLED and reaped — `tick.ts` is
+single-flight, so an abandoned guard was every other run's stall as well as an
+orphan process writing into a worktree about to be force-removed.
 
 NO FEATURE FLAGS: there is no config, env var or operator switch that turns the
 proof off, only a `prove_mutation` test seam of the same kind as `merge_deps`,
 which production does not wire.
 
-Mutation-verified, eight ways: deleting the guard-must-go-RED check, the signature
-check, the placeholder-digest check, the ambiguity refusal, the restore step, the
-fail-closed prose predicate, the untrusted-claim shape check, and the gate call in
-the merge path each redden the suite, and each mutation was confirmed applied
-(exactly one occurrence, changed bytes) before its test was run.
+Mutation-verified: deleting the guard-must-go-RED check, the signature check, the
+placeholder-digest check, the ambiguity refusal, the restore step, the fail-closed
+prose predicate, the untrusted-claim shape check, the diff-binding check, the
+test-shape check and the gate call in the merge path each redden the suite, and
+each mutation was confirmed applied (exactly one occurrence, changed bytes) before
+its test was run. The signed payload is covered structurally rather than by a
+list: a test censuses every leaf of a fully-populated block and demands the
+canonical bytes carry each one, so a field quietly dropped from the signature
+reddens even though every other assertion still passes.
 
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 

@@ -630,8 +630,14 @@ export function buildTridentOrchestrator(
       // what this phase exists to stop being sufficient. Fails CLOSED: an
       // unprovable APPROVE does not merge (prose-only diffs are exempted by
       // `isProseOnlyChange`, which itself fails closed).
+      //
+      // `{ ...run, branch }` — the FRESHLY RESOLVED branch, never the one on the
+      // row. `branch` above is `result.branch ?? run.branch`, and on a run whose
+      // row was written before the build named its branch (`run.branch === null`,
+      // or a stale value) the prover would resolve a head off the OLD ref while
+      // the merge below took the new one: proving one commit and merging another.
       const proof = await proveMutation({
-        run,
+        run: { ...run, branch },
         claim: result.mutation_claim,
         base_branch: await resolveBase(run),
         run_host: opts.run_host,

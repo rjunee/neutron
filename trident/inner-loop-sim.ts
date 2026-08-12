@@ -92,14 +92,21 @@ export async function writeSimulatedResult(
  */
 export function buildSimMutationProofGate(
   outcome: { ok?: boolean; reason?: string } = {},
+  /** Every gate call, in order — so a test can assert WHAT was handed to the
+   *  prover (the run it was asked to prove, and on which branch). */
+  seen: Array<{ branch: string | null; run_id: string }> = [],
 ): (input: unknown) => Promise<{ ok: boolean; reason: string; exempt: boolean; evidence: null }> {
   const ok = outcome.ok ?? true
-  return async () => ({
-    ok,
-    reason: outcome.reason ?? (ok ? 'simulated mutation proof' : 'simulated mutation proof failure'),
-    exempt: false,
-    evidence: null,
-  })
+  return async (input) => {
+    const run = (input as { run?: { branch?: string | null; id?: string } }).run
+    seen.push({ branch: run?.branch ?? null, run_id: run?.id ?? '' })
+    return {
+      ok,
+      reason: outcome.reason ?? (ok ? 'simulated mutation proof' : 'simulated mutation proof failure'),
+      exempt: false,
+      evidence: null,
+    }
+  }
 }
 
 /** A test's per-run plan for what the simulated fire + workflow do. */
