@@ -15,6 +15,12 @@
 #
 # Note: `tsconfig.base.json` is `extends`-only (no `include`) and is NOT named
 # `tsconfig.json`, so `find -name tsconfig.json` correctly skips it.
+#
+# `.claude/worktrees/` is skipped: it is gitignored scratch space holding OTHER
+# agent lanes' checkouts of this same repo. CI never has it, so the matrix there
+# is unchanged — but locally it made the gate report another lane's in-progress
+# failures as this checkout's, which is a gate that cries wolf and gets ignored.
+# The skip is by PATH, not by name, so a real package can never hide behind it.
 
 set -uo pipefail
 
@@ -22,6 +28,7 @@ cd "$(dirname "$0")/../.." || exit 2
 
 discover() {
   find . -name tsconfig.json -not -path '*/node_modules/*' \
+    -not -path './.claude/worktrees/*' \
     | sed 's|^\./||' \
     | LC_ALL=C sort
 }

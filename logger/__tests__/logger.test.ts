@@ -350,6 +350,38 @@ describe('once', () => {
     log.once('never').info('e')
     expect(lines).toHaveLength(1)
   })
+
+  test('a THROWING sink CONSUMES the latch — the bound is on attempts, not deliveries', () => {
+    // The head docblock says `once` latches on the same attempts-not-deliveries bound as
+    // `rateLimited`. Only the `rateLimited` half had a case behind it: moving `onEmit?.()`
+    // to AFTER the `sink(...)` call in `emit` reddened the throwing-sink window case and
+    // NOTHING here, so the `once` half of the claim was prose. This closes that.
+    //
+    // The behaviour, not the bookkeeping: attempt 1 reaches the sink and throws; attempt 2
+    // is REFUSED before the sink is reached, so it does not throw and the sink is not
+    // called again. That refusal is only possible if the latch was set by an attempt that
+    // delivered nothing.
+    let sinkCalls = 0
+    const log = createLogger('throwing-sink-once', {
+      sink: () => {
+        sinkCalls += 1
+        throw new Error('sink is down')
+      },
+    })
+
+    expect(() => log.once('k').info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(1)
+
+    // With the stamp moved after the sink the latch never closes, so this line throws
+    // again and `sinkCalls` reaches 2 — a broken sink re-attempting on every single call.
+    expect(() => log.once('k').info('beat')).not.toThrow()
+    expect(sinkCalls).toBe(1)
+
+    // `clearOnce` still re-arms: consuming the latch is not welding it shut.
+    log.clearOnce('k')
+    expect(() => log.once('k').info('beat')).toThrow('sink is down')
+    expect(sinkCalls).toBe(2)
+  })
 })
 
 // ---------------------------------------------------------------------------

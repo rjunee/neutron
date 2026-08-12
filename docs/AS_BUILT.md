@@ -9400,7 +9400,7 @@ and 3 of the 6 went red — while a single pass stayed green, which is how it su
 review rounds. Worse, the comment explaining why no reset was needed cited a constraint that
 does not exist ("without a test-only reset hook in production code"): `resetLoggerStateForTests()`
 is exported from `logger/index.ts` and is already what `logger/__tests__` uses. One
-`beforeEach` fixed it — `--rerun-each 2` is now 20/20 — and the root `package.json` gained
+`beforeEach` fixed it — `--rerun-each 2` went green, **20/20 as measured in THAT round** — and the root `package.json` gained
 the `@neutronai/logger` workspace dep the root-level suite needed to import it. **A
 per-case-unique key HIDES shared state instead of removing it, and only running the file
 twice in one process can tell the two apart.**
@@ -10243,3 +10243,127 @@ scheduler's `project_slug`, so there is no absent-field path that could silently
 throttle. ⚠️ Cross-model lanes: this entry records no cross-model APPROVE. The **codex** and **kimi**
 lanes were DEFERRED in round 12 — configured, called, and the calls failed — and a configured
 reviewer that died leaves the panel INCOMPLETE.
+
+**Round 14 — the leak gate could not see who wrote the commit, and 12 of this branch's own
+commits proved it (PR #174).**
+
+📌 **The gate scanned the MESSAGE and called that "the commit".** `scripts/ci/leak-gate.sh`
+built its message view from `git log --no-merges --format='%s%n%b'` — subject and body, and
+nothing else. `%an`/`%ae` were never in the view, so a branch could carry the owner's personal
+name and address on every commit and the gate would print SILENT ✅ and exit 0. Twelve commits
+on THIS branch did exactly that, and three review rounds went by with the gate green; two
+reviewers found it by reading `git log --format='%an <%ae>'` by hand, which is the tell that no
+automated control was looking.
+
+**It is not a cosmetic field, and the route is already demonstrated on main.** GitHub's
+`--squash` merge reads the AUTHOR of each squashed commit and writes it into a
+`Co-authored-by:` trailer on the merge commit. That trailer lands in main's message body — a
+surface this gate *does* scan, but only on the run AFTER the merge that published it, by which
+point GHArchive/BigQuery have mirrored it and there is no remedy. One such trailer is already
+in this repo's main history, injected by exactly that path. **A gate whose scan window ends one
+commit before the surface it protects is not a gate for that surface.**
+
+Both halves are fixed, because either alone leaves the failure intact:
+  * the HISTORY — every author AND committer on this branch was rewritten to
+    `neutron-agent <agent@example.com>`, so the squash has nothing to inject; and
+  * the GATE — a `COMMIT-AUTHOR` view carrying `%an <%ae>` and `%cn <%ce>`, scanned by the
+    owner-PII denylist rules. Scrubbing the branch without closing the hole would have left the
+    next branch to be caught by hand again, and *the next reviewer who reads `%an` by hand is a
+    control that does not exist.*
+
+📌 **The first run of the new rule set caught something — the agent's own identity — and that
+is what settled the design.** The author lines were first appended to the existing `MSG_VIEW`,
+which put them through every message rule including `private-path-msg`, the STRUCTURAL rule
+whose remedy text is "rename the PATH". The committing identity used across this repo contains
+that rule's token, so the run came back with 40 findings: every commit, on every branch, for as
+long as the agent commits as itself. **A rule that fires on 100% of its inputs is not a control
+— it is the thing people learn to scroll past, and it would have drowned the denylist findings
+printed beside it.** So the author lines got their own view and the owner-PII rules only, with
+the exclusion written down where the rules are and pinned by a case (built with the same
+`'va' + 'jra'`-style split the gate uses on its own copy, so the literal never enters the tree).
+Whether the committing identity is itself a leak is a decision about what the agent commits AS;
+it is not this rule's job, and bolting it on here would have made the gate unusable in the same
+change that gave it sight. *The first run of a new rule is a measurement, not a formality — this
+one changed the design, and shipping the untested-in-anger version would have shipped a gate
+that gets ignored.*
+
+📌 **Then the first CI run answered the question the local run could only defer: the identity
+this repo commits as is ITSELF on the owner-PII denylist.** The denylist is a repository secret,
+so no local run can evaluate it — locally the author stream came back clean and the only
+objection to the old identity was the structural path rule, which is why the paragraph above
+declines to rule on it. In CI, with the real list loaded, the author stream returned **40
+findings, one per author/committer line, all `pii-denylist-msg`** — while the TREE scan of the
+same commit was silent, because the string is not in the tree. It was only ever in `%an`/`%ae`.
+So the answer is not a judgement call after all: **by the owner's own declaration of what may
+never be public, every commit this repo has produced was publishing a denylisted string into a
+surface that cannot be redacted, and the control that would have said so did not look there.**
+The branch is now authored and committed as `neutron-agent <agent@example.com>`, which is the
+convention the tree already uses for example addresses.
+
+*The blocker was raised as "the owner's real name is in 12 authors". It was the smaller half.*
+The gate that was blind to those 12 was equally blind to the 40 — and the 40 are not one
+branch's accident but what the identity in `git config` produces on every commit of every
+branch. Expect other in-flight branches to go red on this rule: that is the finding, not a
+regression, and the remedy is the same `rebase --exec` amend used here. **A control's first
+real run is where you learn whether the thing you were policing was the common case.**
+
+The case that pins it plants a denylisted name in the AUTHOR of a commit whose subject and body
+are clean — so a gate reading only `%s%n%b` reports SILENT on that fixture, and only the author
+stream fails it. It asserts the REFUSAL (`[pii-denylist-msg]`, the `COMMIT-AUTHOR` label, exit
+1), not that a line was printed. A companion case pins the other direction (clean author ⇒ exit
+0), because a rule that is always red is not a rule.
+
+📌 **`once` claimed the same attempts-not-deliveries bound as `rateLimited` and only
+`rateLimited` had a case.** Round 13 closed the window half; the latch half stayed prose, and
+the stamp-after-sink mutant proved it — one red, from the `rateLimited` case alone. The `once`
+half now has the same shape of case: a throwing sink, attempt 1 throws and reaches the sink,
+attempt 2 is refused BEFORE the sink (so it does not throw and the sink is not called twice),
+and `clearOnce` still re-arms. Same mutant is now **2 red**. *A docblock clause that names two
+primitives needs a case per primitive; one case makes the sentence look pinned and pins half of
+it.*
+
+📌 **The typecheck matrix typechecked other agents' worktrees.** `scripts/ci/typecheck-all.sh`
+discovers tsconfigs with a plain `find`, and `.claude/worktrees/` — gitignored scratch space
+holding other lanes' checkouts of this same repo — was inside it. A local matrix run therefore
+reported another lane's in-progress failures as this checkout's: 81 FAIL lines that belonged to
+someone else. CI never has those directories, so the CI matrix was never wrong; the LOCAL gate
+was, in the direction that gets a gate ignored. Skipped by PATH from the repo root in both the
+script and the independent walk in `ci-workflow.test.ts` (which had to move in lockstep or the
+completeness cross-check would fail on any machine with worktrees) — never by directory NAME,
+so a real package called `worktrees` still cannot hide behind it.
+
+**Two stale measurements from earlier rounds, corrected in the round that re-ran them:** the
+round-9 block said `--rerun-each 2` "is now 20/20" in the present tense while the suite measures
+24; it now reads as the measurement of that round, which is what it was. And the round-11
+table's "drop the throttle ⇒ 2 red" was derived against a 6-case suite that is now 8. Re-run
+this round with the mutation asserted applied: it is **4 red**, not 2 — the two cases added
+since redden it too. The table itself is left standing under its staleness banner, because
+editing a past round's number to match today's tree destroys the record of what was actually
+run then; the current figure lives here, in the round that measured it.
+
+**Mutants, each asserted APPLIED by grep BEFORE its run was believed, each reverted by `cp` from
+a pre-edit backup with the grep re-run at 0 and `git diff` clean:**
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| `onEmit?.()` moved to AFTER `sink(...)` in `emit` (stamp-after-sink) | post-edit form `grep -c` = 1, pre-edit form = 0, reversed on revert | **2 red — the `rateLimited` throwing-sink case AND the new `once` one**, where the `once` half survived last round |
+| the `COMMIT-AUTHOR` stream deleted from `build_message_view` | `grep -c 'COMMIT-AUTHOR:%d'` = 0, back to 1 on revert | **2 red — both denylisted-author cases**; the clean-author case and the private-path-exclusion case correctly stayed green |
+| `private-path-msg` ALSO applied to the author view (the version the first run rejected) | `grep -c 'MUTANT strict-author'` = 1, back to 0 on revert | **1 red — the exclusion case**, so the exclusion is pinned rather than merely written down |
+| `const tickEmitter = idle` → `= false` (log unconditionally, i.e. drop the throttle) | `grep -c 'const tickEmitter = false'` = 1, pre-edit form = 0 | **4 red** — the re-derivation of the round-11 row that said 2 |
+
+**Verification (round 14):** `logger/__tests__/logger.test.ts` **54**,
+`import-running-cron-tick.test.ts` **12**, `import-running-cron-scheduler-boot.test.ts` **2**,
+`scripts/ci/ci-workflow.test.ts` **24** — **184 pass, 0 fail, 378 expect() calls** across the 4
+files under `bun test --rerun-each 2`. the three `leak-gate-*` suites **69 pass, 0 fail, 201
+expect() calls**. Run against this branch's OWN range, the gate reports 40 author identity
+lines in the scan window and 0 findings from the rules a local run can evaluate — the denylist
+rules need the CI secret, and it was CI that returned the 40 above. `scripts/ci/typecheck-all.sh` exit 0 across all **51** tsconfigs,
+not `tsc -p .` alone. The field the new gate rule keys on was printed on a real artifact before
+being trusted, not assumed from its name: `git log --format='%an <%ae>'` over this branch's own
+range emitted one `Name <email>` line per commit, which is what the fixture asserts against —
+and the ABSENT case was checked rather than assumed: when `git log` can resolve no range,
+`build_message_view` returns non-zero and the whole message section — author stream included —
+is `exit 2` in CI and `INCOMPLETE`/exit 3 locally, so an unscannable range cannot present as a
+clean one. ⚠️ Cross-model lanes: this
+entry records no cross-model APPROVE. The **kimi** lane was DEFERRED in round 13 — configured,
+called, and the call failed — and a configured reviewer that died leaves the panel INCOMPLETE.

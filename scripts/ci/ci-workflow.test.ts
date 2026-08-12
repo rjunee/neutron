@@ -69,14 +69,25 @@ describe('G5 CI typechecks every tsconfig on disk', () => {
 
   // Independent enumeration: walk the repo ourselves, skipping node_modules,
   // and collect every file literally named `tsconfig.json`.
+  //
+  // `.claude/worktrees` is skipped for the same reason the script skips it —
+  // it is gitignored scratch space holding OTHER agent lanes' checkouts of this
+  // repo, and typechecking their in-progress trees reports their failures as
+  // this checkout's. It is matched by its path from the repo root, not by
+  // directory NAME, so a package that happens to be called `worktrees`
+  // anywhere else still has to be in the matrix.
+  const SCRATCH_WORKTREES = join('.claude', 'worktrees')
+
   function findTsconfigsOnDisk(): string[] {
     const out: string[] = []
     const walk = (abs: string) => {
       for (const ent of readdirSync(abs, { withFileTypes: true })) {
         if (ent.name === 'node_modules' || ent.name === '.git') continue
         const child = join(abs, ent.name)
-        if (ent.isDirectory()) walk(child)
-        else if (ent.name === 'tsconfig.json')
+        if (ent.isDirectory()) {
+          if (relative(REPO_ROOT, child) === SCRATCH_WORKTREES) continue
+          walk(child)
+        } else if (ent.name === 'tsconfig.json')
           out.push(relative(REPO_ROOT, child))
       }
     }

@@ -13,8 +13,10 @@
 #
 # WHAT IT SCANS
 #   * the TREE at --tree <dir> (every file, not just tracked ones), and
-#   * the COMMIT MESSAGES on this branch + the PR title/body, which the tree scan
-#     cannot see. Those are mirrored permanently to GHArchive/BigQuery, where no
+#   * the COMMIT MESSAGES on this branch, the AUTHOR + COMMITTER identity of
+#     those same commits (owner-PII rules only — see the author block for which
+#     rules and why), and the PR title/body. None of these are visible to the
+#     tree scan. They are mirrored permanently to GHArchive/BigQuery, where no
 #     deletion is possible — prevention is the only control that exists for them,
 #     so they are in scope. Pre-existing history is deliberately NOT scanned: it
 #     is immutable and already mirrored, so flagging it would only produce a
@@ -146,7 +148,8 @@ SCAN_ROOT="$(cd "$SCAN_ROOT" && pwd)" || { echo "leak-gate: cannot cd to scan ro
 [ -f "$PROSE_AWK" ] || { echo "leak-gate: missing $PROSE_AWK (prose extractor)" >&2; exit 2; }
 
 FILELIST="$(mktemp)"; PROSE_VIEW="$(mktemp)"; MSG_VIEW="$(mktemp)"
-trap 'rm -f "$FILELIST" "$PROSE_VIEW" "$MSG_VIEW"' EXIT
+AUTHOR_VIEW="$(mktemp)"
+trap 'rm -f "$FILELIST" "$PROSE_VIEW" "$MSG_VIEW" "$AUTHOR_VIEW"' EXIT
 
 # ── Secret-access context ─────────────────────────────────────────────────────
 # Derived from variables the GitHub runner sets, which a contributor cannot forge
@@ -662,6 +665,20 @@ build_message_view() {
   git -C "$SCAN_ROOT" rev-parse --verify -q "${head}^{commit}" >/dev/null 2>&1 || head=HEAD
   git -C "$SCAN_ROOT" log --no-merges --format='%s%n%b' "${base}..${head}" 2>/dev/null \
     | awk '{ printf "COMMIT-MESSAGE:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
+  # AUTHOR + COMMITTER identity, built as its OWN view (2026-08-12) because it
+  # gets its own rule set — see the author block below for which rules and why.
+  # `%s%n%b` is the message and NOTHING else, so until now this gate could not see
+  # the name and email stamped on every commit, and those are published exactly as
+  # permanently as the subject line is. Worse, GitHub's squash merge READS the
+  # author of each squashed commit and writes it into a `Co-authored-by:` trailer
+  # on the merge commit, so a branch author lands in main's message body — a
+  # surface this gate does scan, but only AFTER the merge that published it. That
+  # already happened on this repo. Scanning identity here is what lets the
+  # pre-merge check see what the post-merge message will say.
+  : > "$AUTHOR_VIEW"
+  git -C "$SCAN_ROOT" log --no-merges --format='%an <%ae>%n%cn <%ce>' \
+    "${base}..${head}" 2>/dev/null \
+    | awk '{ printf "COMMIT-AUTHOR:%d:%s\n", NR, $0 }' >> "$AUTHOR_VIEW"
   # PR title/body arrive via env and are NEVER interpolated into a shell command
   # (a PR body is attacker-controlled text; `${{ github.event… }}` inside `run:`
   # is a script-injection sink, inside `env:` it is not).
@@ -671,23 +688,54 @@ build_message_view() {
   } | awk '{ printf "PR-TITLE-BODY:%d:%s\n", NR, $0 }' >> "$MSG_VIEW"
   return 0
 }
-run_grep_messages() {
-  local mode="$1" pattern="$2"
+run_grep_view() {
+  local view="$1" mode="$2" pattern="$3"
   [ "$mode" = "ci" ] && pattern="$(printf '%s' "$pattern" | tr 'A-Z' 'a-z')"
   awk -v pat="$pattern" -v ci="$([ "$mode" = "ci" ] && echo 1 || echo 0)" '
     { text=$0; sub(/^[^:]*:[0-9]+:/,"",text)
       probe = text
       if (ci) probe = tolower(text)
-      if (probe ~ pat) print $0 }' "$MSG_VIEW" 2>/dev/null || true
+      if (probe ~ pat) print $0 }' "$view" 2>/dev/null || true
 }
-grep_rule_messages() { local rule="$1"; shift; report_hits "$rule" < <(run_grep_messages "$@"); }
+grep_rule_messages() {
+  local rule="$1"; shift; report_hits "$rule" < <(run_grep_view "$MSG_VIEW" "$@")
+}
+grep_rule_authors() {
+  local rule="$1"; shift; report_hits "$rule" < <(run_grep_view "$AUTHOR_VIEW" "$@")
+}
 
 if build_message_view; then
   echo "  message lines in scan window: $(wc -l < "$MSG_VIEW" | tr -d ' ')"
+  echo "  author identity lines in scan window: $(wc -l < "$AUTHOR_VIEW" | tr -d ' ')"
   grep_rule_messages private-path-msg ci "$PRIVATE_PATH_RE"
   grep_rule_messages neutron-computer-msg ci 'neutron\.computer'
   [ -n "$PII_SUB_ALT" ]  && grep_rule_messages pii-denylist-msg      ci "(${PII_SUB_ALT})"
   [ -n "$PII_WORD_ALT" ] && grep_rule_messages pii-denylist-word-msg cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
+
+  # ── Commit AUTHOR/COMMITTER identity ────────────────────────────────────────
+  # The OWNER-PII rules only, and that is a deliberate, load-bearing choice
+  # rather than an oversight — the first run of this rule set is what surfaced
+  # the reason:
+  #
+  #   * the DENYLIST rules are the point. The failure that prompted this was an
+  #     owner's real name and personal address on 12 commit authors of a branch
+  #     bound for a squash merge, invisible to a gate reading only the message.
+  #     These rules catch exactly that, on the one surface with no remedy after
+  #     the fact.
+  #   * `private-path-msg` is deliberately NOT applied here. It is the STRUCTURAL
+  #     path rule ("rename the PATH"), and the agent identity that authors nearly
+  #     every commit in this repo legitimately contains its token. Running it over
+  #     identity would flag every commit of every branch, and a rule that fires on
+  #     100% of its inputs is not a control — it is the thing people learn to
+  #     scroll past, and it would drown the denylist findings printed beside it.
+  #     Its remedy text ("rename the PATH — scrubbing file contents is not
+  #     enough") is also simply not actionable for an email address. If the
+  #     committing identity is itself judged a leak, that is a decision about what
+  #     the agent commits AS; it is not this rule's job, and bolting it on here
+  #     would have made the gate unusable in the same change that gave it sight.
+  grep_rule_authors neutron-computer-author ci 'neutron\.computer'
+  [ -n "$PII_SUB_ALT" ]  && grep_rule_authors pii-denylist-msg      ci "(${PII_SUB_ALT})"
+  [ -n "$PII_WORD_ALT" ] && grep_rule_authors pii-denylist-word-msg cs "(^|[^A-Za-z0-9_])(${PII_WORD_ALT})([^A-Za-z0-9_]|\$)"
 elif [ "$IN_CI" = "1" ]; then
   cat >&2 <<'EOF'
 leak-gate: FATAL — could not determine a commit range to scan. Commit messages and
