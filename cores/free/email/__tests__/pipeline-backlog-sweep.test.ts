@@ -96,6 +96,11 @@ function tick(gmail: GmailClient, store: EmailPipelineStore): ReturnType<typeof 
       project_slug: 'instance',
     },
     now: () => NOW,
+    // These arms are about the CURSOR logic, so they hold the sweep to one page
+    // per tick and step it deliberately. In production the sweep pages within a
+    // tick (see the in-tick-completion arm below) — a one-page-per-tick crawl
+    // kept new mail out of the owner's chat for hours after switch-on.
+    max_backlog_pages: 1,
   })
 }
 
@@ -382,6 +387,69 @@ describe('a FAILED account is retried, never quietly completed', () => {
       // Now it has genuinely been read.
       expect(store.getEmail('b-old', 'acct-b')?.handling).toBe('preexisting')
       expect(store.getCheckpoint('backlog_marked:acct-b')).toBe('1')
+    })
+  })
+})
+
+describe('the sweep does not hold live mail hostage', () => {
+  test('a multi-page backlog is swept AND new mail is escalated in ONE tick', async () => {
+    await withStore(async (store) => {
+      // Three pages of history, and one genuinely new important message that
+      // arrives on the last page. One page per tick meant a 10,000-message
+      // inbox took ~100 ticks — over eight hours at the five-minute schedule —
+      // before ANY new mail could reach chat, against an acceptance criterion
+      // that promises one poll interval.
+      const pages: GmailListResult[] = [
+        { results: [msg('old-1')], next_page_token: 'p2' },
+        { results: [msg('old-2')], next_page_token: 'p3' },
+        { results: [msg('old-3')], next_page_tokens: {} },
+      ]
+      let i = 0
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          // Steady state re-lists from the top and finds the new arrival.
+          if (store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) === '1') {
+            return { results: [msg('brand-new')], next_page_tokens: {} }
+          }
+          return pages[Math.min(i++, pages.length - 1)] as GmailListResult
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const r = await runEmailPipelineTick({
+        gmail,
+        store,
+        classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+        escalate: {
+          deliver: async (_t, e): Promise<unknown> => {
+            delivered.push(e.body)
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
+          },
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+        },
+        now: () => NOW,
+      })
+
+      // All three history pages marked...
+      expect(r.precutoff).toBe(3)
+      expect(store.getCheckpoint(CHECKPOINT_BACKLOG_DONE)).toBe('1')
+      // ...and the tick did NOT stop there: it carried on into steady state and
+      // escalated the new message on the SAME tick.
+      expect(r.escalated).toBe(1)
+      expect(delivered).toHaveLength(1)
+      // The history itself was never escalated.
+      expect(delivered[0]).not.toContain('old-')
     })
   })
 })

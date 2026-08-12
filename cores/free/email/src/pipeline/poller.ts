@@ -80,6 +80,13 @@ export const DEFAULT_MAX_ESCALATION_ATTEMPTS = 5
  * before a tick reports it ran out of budget.
  */
 export const DEFAULT_MAX_POLL_PAGES = 20
+/**
+ * How many backlog pages ONE tick may sweep. At the 100-per-page default that
+ * is 5,000 messages a tick, so a large inbox is marked in a couple of ticks
+ * instead of one page every five minutes — the crawl that kept new mail out of
+ * the owner's chat for hours after switch-on. Bounds the tick, not the sweep.
+ */
+export const DEFAULT_MAX_BACKLOG_PAGES = 50
 
 export type PipelineLog = (message: string, meta?: Record<string, unknown>) => void
 
@@ -99,6 +106,8 @@ export interface EmailPipelineTickDeps {
   backlog_page_size?: number
   /** List pages one steady-state tick may walk before giving up for now. */
   max_poll_pages?: number
+  /** Backlog pages one tick may sweep before pausing until the next tick. */
+  max_backlog_pages?: number
 }
 
 export interface EmailPipelineTickResult {
@@ -271,8 +280,23 @@ export async function runEmailPipelineTick(
       }
     }
 
-    if (backlogPending) {
+    // THE SWEEP PAGES WITHIN THE TICK, and hands over the moment it finishes.
+    //
+    // One page per tick made the sweep a five-minute-per-page crawl: a 10,000
+    // message inbox is 100 pages, so no NEW important mail could reach the
+    // owner's chat for something like eight hours after switching the pipeline
+    // on — while the acceptance criterion promises one poll interval. The
+    // sweep is a migration, not the product; it must not hold the product
+    // hostage for a working day.
+    //
+    // So it loops here up to a page budget, and when it completes it does NOT
+    // return — it falls through to steady state on this same tick, so the first
+    // real message is handled immediately rather than five minutes later.
+    let sweepPages = 0
+    const sweep_budget = deps.max_backlog_pages ?? DEFAULT_MAX_BACKLOG_PAGES
+    while (backlogPending && sweepPages < sweep_budget) {
       result.backlog_sweeping = true
+      sweepPages++
       const cursor = store.getCheckpoint(CHECKPOINT_BACKLOG_CURSOR)
       const perAccount = parseCursorMap(store.getCheckpoint(CHECKPOINT_BACKLOG_CURSORS))
       const page = await gmail.listMessages({
@@ -387,7 +411,23 @@ export async function runEmailPipelineTick(
           marked: result.precutoff,
           accounts: [...sweepTargets],
         })
+        // DONE — fall out of the loop and carry straight on into steady state
+        // on this same tick. The owner's next important email should not wait
+        // for the next cron fire just because the migration happened to finish
+        // during this one.
+        backlogPending = false
+        break
       }
+    }
+
+    if (backlogPending) {
+      // Still sweeping and out of budget for this tick. Live mail is not
+      // processed yet — that is the price of not escalating history — but the
+      // budget bounds how long one tick runs, not how long the sweep takes.
+      log?.('email pipeline backlog sweep paused at its page budget', {
+        pages: sweepPages,
+        marked: result.precutoff,
+      })
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
       return result
     }

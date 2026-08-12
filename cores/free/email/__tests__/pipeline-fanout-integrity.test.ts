@@ -193,6 +193,9 @@ function tick(
       project_slug: 'instance',
     },
     now: () => NOW,
+    // One page per tick: this suite steps the sweep deliberately to assert each
+    // mailbox resumes from ITS OWN cursor. Production pages within the tick.
+    max_backlog_pages: 1,
     ...over,
   })
 }
