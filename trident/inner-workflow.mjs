@@ -660,19 +660,39 @@ function normalizeVerdict(v) {
 //     get the last word and can re-block anything it let through. A gate that
 //     forces REQUEST_CHANGES must never be undoable by this one.
 //
-// This gate does NOT discard the findings — it returns them on the verdict, and
-// the two gates after it spread `findings` forward, so a downgraded round's nits
-// reach the round-N+1 fix prompt if a later gate re-blocks. They go no further
-// than that: NOTHING in this repo posts findings to the PR, and the APPROVE-path
-// `terminalResult` carries no `findings` key — so on a clean downgrade they are
-// seen by no one. That is a real gap, not a safeguard; do not cite it as one.
+// This gate does NOT discard the findings — it returns them on the verdict. What
+// happens to them after that is a GAP, described here so nobody cites it as a
+// safeguard: NOTHING in this repo posts findings to the PR, and the APPROVE-path
+// `terminalResult` carries no `findings` key, so on a clean downgrade they are
+// seen by no one. They survive only into a round-N+1 fix prompt, and only if a
+// LATER gate re-blocks — and that path has its own cost, also unfixed: a
+// surviving nit is not a deferral finding, so `classifyBlock` reads the round as
+// 'code' rather than 'infra-only' and the loop re-Forges to "fix" what may be
+// nothing but a peer timeout.
 //
-// The quality floor is unchanged, and each of these is IMPLEMENTED HERE — a
-// claim in this block must name the code that enforces it:
-//   • any blocker or major still vetoes — `NON_BLOCKING_SEVERITIES` below.
+// WHAT THIS BLOCK MAY CLAIM. Every claim below must name the code that enforces
+// it; a claim no code enforces is a lie that outlives the reviewer who believed
+// it. (PR #184 asserted here that a "mutation-prover phase" stood between APPROVE
+// and merge. No such phase ever existed, and the false claim was used to justify
+// removing nit-blocking. It is deleted; do not reintroduce it in any form.)
+//
+// IMPLEMENTED — the quality floor these actually hold:
 //   • red CI still vetoes — the `ci.status === 'red'` branch in
-//     `reviewAndSynthesize` forces REQUEST_CHANGES after this gate runs.
-//   • a deferred reviewer still vetoes — `enforceCrossModelGate` below.
+//     `reviewAndSynthesize` REPLACES the verdict with REQUEST_CHANGES after this
+//     gate runs.
+//   • a deferred reviewer still vetoes an APPROVE — `enforceCrossModelGate` below.
+//   • this gate REFUSES TO DOWNGRADE a rejection carrying a blocker or major —
+//     `NON_BLOCKING_SEVERITIES` below, via the `every` test.
+//
+// NOT IMPLEMENTED — a known, deliberate gap, stated so it is not mistaken for the
+// bullet above it:
+//   • a blocker or major does NOT veto an APPROVE. `enforceSeverityGate` returns
+//     early on any verdict that is not REQUEST_CHANGES, and no gate after it
+//     inspects severities, so a synthesis of APPROVE carrying a blocker finding
+//     reaches merge unchanged when CI is green and no peer deferred. Only the
+//     synthesis prompt asks for that — i.e. one LLM's obedience, which is the
+//     exact failure mode PR #171 recorded. `NON_BLOCKING_SEVERITIES` narrows one
+//     direction only; it vetoes nothing.
 const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
 
 function enforceSeverityGate(synthesis) {

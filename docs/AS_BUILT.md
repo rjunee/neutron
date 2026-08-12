@@ -57,7 +57,15 @@ is ambiguous. It enumerates the NON-blocking severities rather than the blocking
 ones, which makes an unknown, absent or misspelled severity block rather than
 pass; a rejection carrying no findings at all is left untouched; and it runs
 first in the chain so the CI gate and the cross-model gate both retain the last
-word. `blocker` and `major` still veto, as do red CI and a deferred reviewer.
+word. Red CI and a deferred reviewer still veto an `APPROVE`, and a rejection
+carrying a `blocker` or `major` is never downgraded.
+
+What `blocker` and `major` do NOT do is veto an `APPROVE`. `enforceSeverityGate`
+returns early on any verdict that is not `REQUEST_CHANGES` and no later gate
+reads severities, so an `APPROVE` carrying a blocker finding merges on green CI
+with no deferred peer — asked for only by the synthesis prompt, which is the
+same unenforced-rule shape this section exists to remove. Known gap, recorded
+rather than papered over.
 
 Tested against the real function extracted from the `.mjs` and evaluated rather
 than a hand-copied duplicate. 13 tests, 38 assertions, mutation-verified:
