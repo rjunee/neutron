@@ -146,6 +146,8 @@ function doneRun(overrides: Partial<TridentRun> = {}): TridentRun {
     failure_reason: null,
     workflow_run_id: null,
     inner_checkpoint: null,
+    inner_checkpoint_head: null,
+    inner_checkpoint_findings: null,
     inner_verdict: null,
     inner_result: null,
     started_at: '2026-06-26T00:00:00.000Z',

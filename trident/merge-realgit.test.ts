@@ -104,6 +104,8 @@ function localRun(repo: string, id: string, branch: string): TridentRun {
     failure_reason: null,
     workflow_run_id: null,
     inner_checkpoint: 'argus-approved',
+    inner_checkpoint_head: null,
+    inner_checkpoint_findings: null,
     inner_verdict: 'APPROVE',
     inner_result: null,
     started_at: '2026-01-01T00:00:00.000Z',

@@ -257,10 +257,43 @@ describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
   })
 })
 
-describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
-  test("resumeCheckpoint === 'argus-approved' skips build+review", () => {
-    expect(SRC).toContain("resumeCheckpoint === 'argus-approved'")
+describe('inner-workflow.mjs — idempotent crash-resume (C2) + mid-loop resume', () => {
+  test("an 'argus-approved' resume whose recorded head still matches skips build+review", () => {
+    // The decision is `classifyResume`'s and the behaviour is proved end-to-end in
+    // inner-workflow-resume.test.ts; this pins that the shortcut is reached through
+    // the OID comparison rather than off the checkpoint name.
+    expect(SRC).toContain("if (resumeMode === 'approved') {")
+    expect(SRC).toContain("name === 'argus-approved'")
     expect(SRC).toContain('skipping build+review')
+  })
+
+  test('the checkpoint NAME alone never unlocks a fast path — every mode goes through classifyResume', () => {
+    expect(SRC).toContain('function classifyResume(input)')
+    // The four refusals, each returning a rebuild with a named reason.
+    for (const reason of ['no-checkpoint', 'no-recorded-head', 'head-unreadable', 'head-moved', 'unknown-checkpoint']) {
+      expect(SRC).toContain(`reason: '${reason}'`)
+    }
+    // Nothing else in the script may branch on the resume checkpoint's VALUE.
+    const nameComparisons = SRC.split('\n')
+      .map((l) => l.trim())
+      .filter((l) => !l.startsWith('//') && !l.startsWith('*'))
+      .filter((l) => /resumeCheckpoint\s*===\s*'/.test(l))
+    expect(nameComparisons).toEqual([])
+  })
+
+  test('every checkpoint records the head OID it applies to (the enabling fact)', () => {
+    // Without an OID on the row a resume cannot tell whether the code in front of
+    // it is the code the checkpoint was about — which is why resume had to rebuild.
+    expect(SRC).toContain('inner_checkpoint_head ${shSingleQuote(normalizeOid(o.head))}')
+    for (const call of [
+      "checkpoint('forge-done', { pr, head: branchHead })",
+      "checkpoint('ralph-task-built', { pr, head: branchHead })",
+    ]) {
+      expect(SRC).toContain(call)
+    }
+    // The two argus checkpoints + the fix-round one pass a head too.
+    expect(SRC).toContain('head: reviewedHead,')
+    expect(SRC).toContain("head: typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : '',")
   })
 
   test('an existing PR is REUSED, never duplicated', () => {
@@ -309,6 +342,10 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
       // the reviewers read?" — pinning to either certifies an unreviewed push.
       expect(line).not.toContain('readBranchHead')
       expect(line).not.toContain('headAfter')
+      // Same rule for the resume path's probe: `currentHeadAtResume` is the LIVE
+      // head, and it may only ever be an input to the comparison — the value the
+      // resume goes on to call reviewed is the RECORDED one.
+      expect(line).not.toContain('currentHeadAtResume')
     }
   })
 
@@ -335,22 +372,24 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
     expect(SRC.slice(start, end)).toContain('reviewedHead,')
   })
 
-  // THE CRASH-RESUME SHORTCUT RECORDS NO HEAD, ON PURPOSE.
+  // A RESUME MAY PIN THE MERGE ONLY TO A COMMIT SOME REVIEWER DEMONSTRABLY READ.
   //
-  // It runs only when the prior process reached 'argus-approved' and its terminal
-  // result was never harvested — and the terminal result is the ONLY place a
-  // reviewed OID is written, so by construction none exists to resume from.
-  // Probing the head at resume and labelling it `reviewedHead` would certify an
-  // unreviewed commit: reviewers approve A, B is pushed into the crash window,
-  // resume reads B, and the merge pins to B and SUCCEEDS. The pin then vouches for
-  // a commit nobody read, which is worse than no pin at all.
-  describe('the crash-resume shortcut records NO reviewed head (fail-closed)', () => {
+  // The shortcut used to record NO head at all, so the merge failed closed — the
+  // right answer at the time, because the row carried no OID and the resume could
+  // not tell the approved commit from whatever was on the branch. Now the
+  // approving checkpoint RECORDS the OID it approved, so the shortcut may pin to
+  // THAT — and only that. Probing the head at resume and labelling the answer
+  // `reviewedHead` would still certify an unreviewed commit: reviewers approve A,
+  // B is pushed into the crash window, resume reads B, the merge pins to B and
+  // SUCCEEDS. The pin then vouches for a commit nobody read, which is worse than
+  // no pin at all.
+  describe("the 'approved' resume pins ONLY to the RECORDED oid (#545)", () => {
     // The resume block's CODE, sliced out so these assertions cannot be satisfied
     // by an unrelated part of the file. Comment lines are stripped: the docblock
-    // there names `reviewedHead` to explain why it is deliberately absent, and a
-    // naive check would fail on the documentation of the very fix it verifies.
+    // there discusses the probe at length to explain why it is not used, and a
+    // naive check would fail on the documentation of the very rule it verifies.
     const resumeBlock = (): string => {
-      const at = SRC.indexOf("if (resumeCheckpoint === 'argus-approved') {")
+      const at = SRC.indexOf("if (resumeMode === 'approved') {")
       expect(at).toBeGreaterThan(-1)
       const end = SRC.indexOf('return resumeResult', at)
       expect(end).toBeGreaterThan(at)
@@ -360,14 +399,28 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
         .join('\n')
     }
 
-    test('it does NOT probe the branch head and pass it off as reviewed', () => {
+    test('it carries the RECORDED oid, and never the probed one', () => {
       const block = resumeBlock()
+      expect(block).toContain('reviewedHead: recordedResumeHead,')
+      // The live head is an input to the comparison ONLY; it never becomes the
+      // value, and the block does not re-probe.
+      expect(block).not.toContain('reviewedHead: currentHeadAtResume')
       expect(block).not.toContain('readBranchHead')
-      expect(block).not.toContain('reviewedHead')
     })
 
-    test('the resume result omits the field entirely, so `reviewedHeadOid` yields null', () => {
-      // Mirrors the object the resume path builds. merge.ts must refuse this.
+    test('the recorded oid must be a FULL oid or it is not a recorded oid at all', () => {
+      // `normalizeOid` applies merge.ts's own `^[0-9a-f]{40}$`, so an abbreviated
+      // or garbage value reads as "none recorded" → rebuild, never a pin the
+      // merge would refuse anyway.
+      expect(SRC).toContain('const FULL_OID = /^[0-9a-f]{40}$/')
+      expect(SRC).toContain('function normalizeOid(value)')
+      expect(SRC).toContain('const recorded = normalizeOid(input.recordedHead)')
+      expect(SRC).toContain("if (recorded.length === 0) return { mode: 'rebuild', reason: 'no-recorded-head' }")
+    })
+
+    test('a resume result WITH a recorded oid pins the merge to exactly it', () => {
+      // The REAL decoder, on the REAL shape the resume path builds.
+      const A = 'a'.repeat(40)
       const resumeResult = {
         ok: true,
         prNumber: 42,
@@ -375,26 +428,27 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
         verdict: 'APPROVE',
         round: 0,
         checkpoint: 'argus-approved',
+        reviewedHead: A,
+        remainingTasks: 0,
+        blockKind: 'none',
       }
-      expect('reviewedHead' in resumeResult).toBe(false)
-      // The REAL decoder, on the REAL shape — not a restatement of the rule.
-      expect(reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)).toBeNull()
+      expect(reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)).toBe(A)
     })
 
-    test('A approved → crash → B pushed → resume must not merge B', () => {
-      // The boundary the shortcut used to get wrong, end to end through the real
-      // decoder: whatever B is, a resume result cannot name it as reviewed.
+    test('A approved → crash → B pushed → the resume never emits an APPROVE naming B', () => {
+      // The boundary end to end. A head that MOVED never reaches this block at all
+      // (`classifyResume` returns rebuild), so the only APPROVE a resume can emit
+      // names the recorded commit — and `--match-head-commit` then re-checks the
+      // same equality at merge time, so a push landing afterwards fails LOUDLY.
+      const A = 'a'.repeat(40)
       const B = 'b'.repeat(40)
-      const resumeResult = {
-        ok: true,
-        prNumber: 42,
-        branch: 'feat-x',
-        verdict: 'APPROVE',
-        round: 0,
-        checkpoint: 'argus-approved',
-      }
-      const pinned = reviewedHeadOid({ inner_result: JSON.stringify(resumeResult) } as TridentRun)
-      expect(pinned).toBeNull()
+      // The head-moved refusal is EXECUTED against the real function in
+      // inner-workflow-resume.test.ts; here it is the source rule + the decoder.
+      expect(SRC).toContain("if (current !== recorded) return { mode: 'rebuild', reason: 'head-moved' }")
+      const pinned = reviewedHeadOid({
+        inner_result: JSON.stringify({ verdict: 'APPROVE', checkpoint: 'argus-approved', reviewedHead: A }),
+      } as TridentRun)
+      expect(pinned).toBe(A)
       expect(pinned).not.toBe(B)
     })
   })

@@ -260,6 +260,12 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'head-probe-round-', dynamic: true },
       { label: 'ci-probe-round-', dynamic: true },
       { label: 'merge-probe-round-', dynamic: true },
+      // The mid-loop resume's diff regeneration: one `git diff <base>..<oid>`
+      // redirected to a file, reporting only the byte count. Same shape as the
+      // head probe — a fixed command and a number — so it belongs on the same
+      // cheap tier rather than in the silent, expensive fallback that probe
+      // spent its whole life in.
+      { label: 'resume-diff' },
     ],
     default: { tier: 'fast', effort: 'low' },
   },

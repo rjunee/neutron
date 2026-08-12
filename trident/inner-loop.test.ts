@@ -20,6 +20,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildWorkflowFirer,
   buildSubstrateWorkflowFire,
+  parseCheckpointFindings,
   parseInnerResult,
   WORKFLOW_FIRE_TOOL_NAMES,
   type FireInnerWorkflow,
@@ -57,6 +58,8 @@ function makeRun(over: Partial<TridentRun> = {}): TridentRun {
     failure_reason: null,
     workflow_run_id: null,
     inner_checkpoint: null,
+    inner_checkpoint_head: null,
+    inner_checkpoint_findings: null,
     inner_verdict: null,
     inner_result: null,
     started_at: '1970-01-01T00:00:00.000Z',
@@ -88,6 +91,25 @@ function fakeFire(
   }
   return { fire, calls }
 }
+
+describe('parseCheckpointFindings — a resumed fix round fixes RECORDED findings, or none', () => {
+  test('decodes a recorded array verbatim', () => {
+    const findings = [{ severity: 'blocker', title: 'boom', evidence: 'a.ts:1' }]
+    expect(parseCheckpointFindings(JSON.stringify(findings))).toEqual(findings)
+  })
+
+  test.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['empty', ''],
+    ['whitespace', '   '],
+    ['unparseable', '{not json'],
+    ['an object, not an array', '{"severity":"blocker"}'],
+    ['a bare string', '"boom"'],
+  ])('%s → [] (the workflow then RE-REVIEWS instead of fixing blind)', (_label, raw) => {
+    expect(parseCheckpointFindings(raw as string | null | undefined)).toEqual([])
+  })
+})
 
 describe('parseInnerResult — decode the typed terminal column', () => {
   test('parses a full result object', () => {
@@ -204,6 +226,35 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(prompt).toContain('"prNumber":55')
     expect(prompt).toContain('"resumeCheckpoint":"argus-request-changes"')
     expect(prompt).toContain('"runId":"run-9"')
+  })
+
+  test('args thread the checkpoint OID + findings, so a resume can tell WHICH code was reviewed', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    const head = 'a'.repeat(40)
+    await firer(
+      input({
+        run: makeRun({ id: 'run-9', pr: 55 }),
+        resume_checkpoint: 'argus-request-changes',
+        resume_checkpoint_head: head,
+        resume_findings: JSON.stringify([{ severity: 'blocker', title: 'boom', evidence: 'a.ts:1' }]),
+      }),
+    )
+    const prompt = calls[0]!.prompt
+    // Threading the NAME alone is what forced every relaunch to rebuild: a verdict
+    // is about a commit, and without the OID the workflow cannot tell whether the
+    // branch still holds the code that verdict was about.
+    expect(prompt).toContain(`"resumeCheckpointHead":"${head}"`)
+    expect(prompt).toContain('"resumeFindings":[{"severity":"blocker"')
+  })
+
+  test('an absent OID / garbled findings thread as null + [] (old rows never unlock the fast path)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input({ resume_checkpoint: 'forge-done', resume_findings: 'not json' }))
+    const prompt = calls[0]!.prompt
+    expect(prompt).toContain('"resumeCheckpointHead":null')
+    expect(prompt).toContain('"resumeFindings":[]')
   })
 
   test('args thread the checked-in checkpointScript abs path (P10 — the workflow cannot resolve it itself)', async () => {
