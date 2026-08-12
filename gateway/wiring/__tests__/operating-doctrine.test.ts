@@ -45,9 +45,21 @@ describe('operating-doctrine — principle set', () => {
       // It names the trident dispatch tool + tells the agent to self-route.
       expect(frag).toContain('work_board_dispatch_build')
       expect(frag.toLowerCase()).toContain('build routing')
-      // SIMPLE → inline; COMPLEX → trident + tell the owner why.
+      // SIMPLE → inline; COMPLEX → trident + tell the owner why. The permission
+      // itself is deliberately kept: banning inline outright would push a one-line
+      // fix through a full review loop.
       expect(frag).toContain('INLINE')
       expect(frag.toLowerCase()).toContain('complex')
+      // THE ESCALATION TRIPWIRE is the part that was missing, and it is what this
+      // assertion exists for. An agent judged the Email Core simple, built it
+      // inline, and held one chat turn for 22 hours across 17 self-review rounds.
+      // The initial call was defensible; nothing re-examined it once the work had
+      // disproved it. So assert the MID-BUILD REVISION, not merely that the routing
+      // rule mentions complexity — the old permissive text did that too and would
+      // have satisfied a weaker assertion while permitting the 22-hour turn.
+      expect(frag).toContain('MUST REVISE IT WHEN THE WORK PROVES YOU WRONG')
+      expect(frag.toLowerCase()).toContain('more than twice')
+      expect(frag.toLowerCase()).toContain('is not a reason to push on')
       expect(frag.toLowerCase()).toContain('tell the owner')
       // #334 — EVERY build (inline or trident, any project) must leave a card.
       expect(frag).toContain('MUST leave a trackable card')
