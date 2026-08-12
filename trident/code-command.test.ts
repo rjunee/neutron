@@ -48,6 +48,17 @@ afterEach(() => {
 })
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+/** #542 — the base-drift gate has to be able to READ the repo. A host that
+ *  answers `rev-parse` with an empty string is not a neutral stub: it is a repo
+ *  the gate cannot assess, and pr mode HOLDS on that (`gh pr merge` runs on
+ *  GitHub, so there is no loud local failure behind it). This is a healthy repo
+ *  whose base has NOT moved. */
+const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+const driftFreeHost = (cmd: string[]): HostCommandResult =>
+  (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+    ? ok(NO_DRIFT_SHA)
+    : ok()
+
 
 /** A board binder with one READY item ('item-1', a detailed title → passes the
  *  ask-gate), a doc-backed item ('item-doc'), and a terse UNDERSPECIFIED item
@@ -431,7 +442,7 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {
         hostCalls.push(cmd)
-        return ok()
+        return driftFreeHost(cmd)
       },
       base_branch: 'main',
       now: () => new Date(0).toISOString(),

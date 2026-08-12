@@ -68,7 +68,18 @@ function orchestrator(fire: ReturnType<typeof crashingFirer>) {
   return buildTridentOrchestrator({
     fire_workflow: fire as never,
     db_path: join(tmp, 'project.db'),
-    run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+    // #542 — see board-reconcile.test.ts: an empty `rev-parse` answer reads as a
+    // repo the drift gate cannot assess, which pr mode holds on. This is a
+    // healthy repo whose base has not moved.
+    run_host: async (cmd) => ({
+      ok: true,
+      stdout:
+        (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+          ? '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+          : '',
+      stderr: '',
+      exit_code: 0,
+    }),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
   })

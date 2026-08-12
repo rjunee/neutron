@@ -35,6 +35,17 @@ import { computeTransition } from './state-machine.ts'
 import type { MergeMode, TridentRun } from './store.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+/** #542 — the base-drift gate has to be able to READ the repo. A host that
+ *  answers `rev-parse` with an empty string is not a neutral stub: it is a repo
+ *  the gate cannot assess, and pr mode HOLDS on that (`gh pr merge` runs on
+ *  GitHub, so there is no loud local failure behind it). This is a healthy repo
+ *  whose base has NOT moved. */
+const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+const driftFreeHost = (cmd: string[]): HostCommandResult =>
+  (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+    ? ok(NO_DRIFT_SHA)
+    : ok()
+
 const fail = (): HostCommandResult => ({ ok: false, stdout: '', stderr: 'boom', exit_code: 1 })
 
 /** The single live source of the Forge/Argus contract. */
@@ -143,7 +154,7 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async () => ok(),
+      run_host: async (cmd) => driftFreeHost(cmd),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
@@ -166,7 +177,7 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async () => ok(),
+      run_host: async (cmd) => driftFreeHost(cmd),
       base_branch: 'main',
       on_orphaned_session: 'wait',
       now: () => new Date(0).toISOString(),
@@ -246,7 +257,7 @@ describe('FIX 5 — no phantom-ID race (ambiguous session never auto-terminates)
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async () => ok(),
+      run_host: async (cmd) => driftFreeHost(cmd),
       base_branch: 'main',
       on_orphaned_session: 'wait',
       now: () => new Date(0).toISOString(),

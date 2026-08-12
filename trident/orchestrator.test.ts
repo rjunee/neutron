@@ -43,6 +43,20 @@ afterEach(() => {
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 
+/**
+ * The DEFAULT host answers the #542 drift probes as a healthy repo whose base
+ * has NOT moved: every ref resolves and the fork point IS the base tip. A host
+ * that answers `rev-parse` with an empty string is not a neutral stub — it is a
+ * repo the gate cannot assess, which pr mode now HOLDS on (it has no loud local
+ * failure to fall back on, since `gh pr merge` runs on GitHub). Tests about
+ * anything other than drift want a repo the gate can actually read.
+ */
+const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+const driftFreeHost = (cmd: string[]): HostCommandResult =>
+  (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+    ? ok(NO_DRIFT_SHA)
+    : ok()
+
 interface Harness {
   loop: TridentTickLoop
   /** Flush queued workflow completions (write their `inner_result` to the DB). */
@@ -79,7 +93,7 @@ function buildHarness(opts: {
   const sim = buildSimFirer(store, opts.plan)
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
-    return opts.hostResponder ? opts.hostResponder(cmd) : ok()
+    return opts.hostResponder ? opts.hostResponder(cmd) : driftFreeHost(cmd)
   }
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: sim.fire_workflow,

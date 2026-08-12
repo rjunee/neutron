@@ -91,7 +91,18 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+      // #542 — a host that answers `rev-parse` with '' is a repo the drift gate
+      // cannot assess, and pr mode holds on that. Answer as a healthy repo whose
+      // base has not moved, so this test exercises the board reconcile it is about.
+      run_host: async (cmd) => ({
+        ok: true,
+        stdout:
+          (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+            ? '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+            : '',
+        stderr: '',
+        exit_code: 0,
+      }),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })

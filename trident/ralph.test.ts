@@ -26,6 +26,17 @@ import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+/** #542 — the base-drift gate has to be able to READ the repo. A host that
+ *  answers `rev-parse` with an empty string is not a neutral stub: it is a repo
+ *  the gate cannot assess, and pr mode HOLDS on that (`gh pr merge` runs on
+ *  GitHub, so there is no loud local failure behind it). This is a healthy repo
+ *  whose base has NOT moved. */
+const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+const driftFreeHost = (cmd: string[]): HostCommandResult =>
+  (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+    ? ok(NO_DRIFT_SHA)
+    : ok()
+
 
 describe('detectRalphMode', () => {
   const hostReturning = (root: string) => async (cmd: string[]): Promise<HostCommandResult> => {
@@ -80,7 +91,7 @@ describe('Ralph mode threads through to the inner loop', () => {
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async () => ok(),
+      run_host: async (cmd) => driftFreeHost(cmd),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
