@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS sender_cache (
   -- classified from this table forever after, with no model call.
   sender      TEXT PRIMARY KEY,
   category    TEXT NOT NULL,
+  -- The IMPORTANCE decision, stored alongside the category because it is a
+  -- SEPARATE fact. Reconstructing it as (category === 'important') silently
+  -- dropped every verdict where the two disagree — a receipt that needs the
+  -- owner's eye escalated once and was archived from then on.
+  important   INTEGER NOT NULL DEFAULT 0 CHECK (important IN (0, 1)),
   updated_at  INTEGER NOT NULL
 );
 

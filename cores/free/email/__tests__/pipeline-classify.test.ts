@@ -194,6 +194,7 @@ describe('classifyEmail — cache and LLM', () => {
     const cached: SenderCacheRow = {
       sender: 'notify@service.example.com',
       category: 'notification',
+      important: 0,
       updated_at: 0,
     }
     const c = await classifyEmail(
@@ -295,5 +296,85 @@ describe('sender_rules.handling is honoured, not just stored', () => {
       },
     )
     expect(verdict.important).toBe(false)
+  })
+})
+
+describe('the model verdict is validated, and the cache keeps BOTH facts', () => {
+  test('category and importance can disagree, and the cache remembers that', async () => {
+    // `{category:'receipt', important:true}` is a legitimate verdict — a receipt
+    // the owner needs to look at. Caching only the category and re-deriving
+    // importance as (category === 'important') meant it escalated ONCE and was
+    // archived on every later message from that sender.
+    const stored: Array<{ sender: string; category: string; important: boolean }> = []
+    const first = await classifyEmail(
+      message({ sender: 'Billing <pay@vendor.example.com>', subject: 'Your receipt' }),
+      {
+        rules: [],
+        cache_lookup: () => null,
+        cache_store: (sender, category, important) => {
+          stored.push({ sender, category, important })
+        },
+        llm: async () => '{"category":"receipt","important":true,"reason":"payment needs review"}',
+      },
+    )
+    expect(first.important).toBe(true)
+    expect(stored[0]).toEqual({
+      sender: 'pay@vendor.example.com',
+      category: 'receipt',
+      important: true,
+    })
+
+    // The NEXT message from that sender reads the cache — and must still be important.
+    const second = await classifyEmail(
+      message({ sender: 'Billing <pay@vendor.example.com>', subject: 'Your receipt' }),
+      {
+        rules: [],
+        cache_lookup: () => ({
+          sender: 'pay@vendor.example.com',
+          category: 'receipt',
+          important: 1,
+          updated_at: 0,
+        }),
+        cache_store: () => undefined,
+        llm: null,
+      },
+    )
+    expect(second.source).toBe('cache')
+    expect(second.important).toBe(true)
+  })
+
+  test('a category outside the offered set is REFUSED, not cached', async () => {
+    // Model output is untrusted input. Accepting any string wrote it into
+    // sender_cache permanently — one malformed or injected answer and that
+    // sender carries an arbitrary category forever.
+    const stored: string[] = []
+    const c = await classifyEmail(
+      message({ sender: 'someone@other.example.com', subject: 'hello' }),
+      {
+        rules: [],
+        cache_lookup: () => null,
+        cache_store: (_s, category) => {
+          stored.push(category)
+        },
+        llm: async () => '{"category":"attacker-controlled","important":true,"reason":"x"}',
+      },
+    )
+    expect(c.source).toBe('default')
+    expect(c.important).toBe(false)
+    expect(stored).toEqual([])
+  })
+
+  test('a non-boolean `important` is REFUSED', async () => {
+    const c = await classifyEmail(
+      message({ sender: 'someone@other.example.com', subject: 'hello' }),
+      {
+        rules: [],
+        cache_lookup: () => null,
+        cache_store: () => undefined,
+        llm: async () => '{"category":"important","important":"yes","reason":"x"}',
+      },
+    )
+    expect(c.source).toBe('default')
+    expect(c.important).toBe(false)
   })
 })

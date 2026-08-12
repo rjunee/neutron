@@ -87,6 +87,9 @@ export interface InsertEmailInput {
 export interface SenderCacheRow {
   sender: string
   category: string
+  /** 1 when the learned verdict was IMPORTANT. Stored, never re-derived from
+   *  the category — the two are separate facts and do disagree. */
+  important: number
   updated_at: number
 }
 
@@ -296,11 +299,13 @@ export class EmailPipelineStore {
       .get(sender)
   }
 
-  upsertSenderCache(sender: string, category: string, at?: number): void {
+  upsertSenderCache(sender: string, category: string, important = false, at?: number): void {
     this.db.run(
-      `INSERT INTO sender_cache (sender, category, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT(sender) DO UPDATE SET category = excluded.category, updated_at = excluded.updated_at`,
-      [sender, category, at ?? this.now()],
+      `INSERT INTO sender_cache (sender, category, important, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(sender) DO UPDATE SET category = excluded.category,
+                                           important = excluded.important,
+                                           updated_at = excluded.updated_at`,
+      [sender, category, important ? 1 : 0, at ?? this.now()],
     )
   }
 

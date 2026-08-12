@@ -30,7 +30,7 @@
  *   (f) default        — `other`, not important.
  */
 
-import { buildClassifyPrompt } from './prompts.ts'
+import { buildClassifyPrompt, DEFAULT_CATEGORIES } from './prompts.ts'
 import type { SenderCacheRow, SenderRule } from './store.ts'
 
 export type ClassificationSource = 'rule' | 'pattern' | 'cache' | 'llm' | 'default'
@@ -56,7 +56,9 @@ export interface ClassifyInput {
 export interface ClassifyDeps {
   rules: readonly SenderRule[]
   cache_lookup: (sender: string) => SenderCacheRow | null
-  cache_store: (sender: string, category: string) => void
+  /** Persists the learned verdict. BOTH facts — the category and the importance
+   *  decision — because the second cannot be re-derived from the first. */
+  cache_store: (sender: string, category: string, important: boolean) => void
   /** The substrate one-shot caller, or null on an LLM-less box. */
   llm: ((prompt: string) => Promise<string>) | null
 }
@@ -227,9 +229,13 @@ export async function classifyEmail(
   // (d) learned sender cache — short-circuits the model entirely.
   const cached = deps.cache_lookup(bareAddress(input.sender))
   if (cached !== null) {
+    // The IMPORTANCE decision is read back, never re-derived. Reconstructing it
+    // as `category === 'important'` discarded every verdict where the two
+    // legitimately disagree — `{category:'receipt', important:true}` escalated
+    // once and was archived on every message from that sender afterwards.
     return applyDowngrade({
       category: cached.category,
-      important: cached.category === 'important',
+      important: cached.important === 1,
       reason: 'known sender',
       source: 'cache',
       protected: false,
@@ -248,9 +254,19 @@ export async function classifyEmail(
         }),
       )
       const verdict = parseVerdict(answer)
-      if (verdict !== null && typeof verdict.category === 'string' && verdict.category.length > 0) {
-        const category = verdict.category
-        deps.cache_store(bareAddress(input.sender), category)
+      // MODEL OUTPUT IS UNTRUSTED INPUT. Accepting any non-empty string wrote
+      // whatever the model emitted straight into `sender_cache`, permanently:
+      // one malformed (or prompt-injected) answer and that sender carries an
+      // arbitrary category forever, with no path back through the cache. The
+      // category must be one the prompt actually offered — an owner's own
+      // categories arrive as `sender_rules`, which are handled above and never
+      // reach here. An unrecognised category falls through to the deterministic
+      // default rather than being invented into the store.
+      const proposed = typeof verdict?.category === 'string' ? verdict.category.trim() : ''
+      const known = (DEFAULT_CATEGORIES as readonly string[]).includes(proposed)
+      if (verdict !== null && known && typeof verdict.important === 'boolean') {
+        const category = proposed
+        deps.cache_store(bareAddress(input.sender), category, verdict.important === true)
         return applyDowngrade({
           category,
           important: verdict.important === true,
