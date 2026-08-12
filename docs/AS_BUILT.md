@@ -9987,3 +9987,33 @@ positive control.
 `tests/integration/import-running-cron-tick.test.ts` and
 `tests/integration/import-running-cron-scheduler-boot.test.ts` pass; `scripts/ci/typecheck-all.sh`
 and `scripts/ci/lint.sh` exit 0. Test count unchanged.
+
+**Round 9 — the mutants were re-proved from scratch, and the PROOF STEP is the point (PR #174).**
+No source line changed this round; the branch was rebased onto `main` and re-verified. Two of the
+mutants this PR claims were re-applied independently, and in each case the mutation was asserted
+PRESENT in the tree before the test run was believed:
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| drop the handler's throttle (`tickEmitter = tickLog` unconditionally) | `grep -n 'rateLimited('` over `onboarding/interview/import-running-cron.ts` returned NOTHING after the edit, where it returns the call before it | 2 cases in `import-running-cron-tick.test.ts` |
+| drop the non-monotonic guard (`elapsed < 0 \|\| elapsed >= ms` → `elapsed >= ms`) | `grep -n 'return elapsed'` showed the mutated line | 1 case in `logger/__tests__/logger.test.ts` |
+
+Distinct red sets, and the tree was confirmed clean (`git diff --quiet`) after each revert. 📌 **A
+mutation test that is not asserted to have APPLIED proves nothing, because the failure mode — the
+edit silently not landing — produces a GREEN run that is indistinguishable from a passing one.**
+Two mutation runs earlier in this repo's history did exactly that. The grep is not ceremony; it is
+the only thing separating "the guard fired" from "the guard was never touched".
+
+Also re-checked, by execution rather than by reading the comment beside it: the tick handler's
+production clock is the real `Date.now` (`gateway/composition/build-core-modules.ts` passes no
+`now` to `buildImportRunningHandler`), which matters because a clock that does not advance would
+suppress the idle heartbeat permanently — the fail-CLOSED direction, and the one that is invisible
+when it happens. The field the throttle keys on was printed on a real artifact rather than assumed:
+the scheduler-boot test drives the REAL `CronScheduler`, and the line it emitted reads
+`project=owner-s15`, so `ctx.owner_slug` does carry a slug. The two greps the head docblock cites
+as its disclosed gap were re-run with their controls and both hold.
+
+**Verification (round 9):** the three suites above pass under `bun test --rerun-each 2` (120/120) —
+the flag that caught the process-global window state two rounds ago, so it is the one that has to
+stay green. `scripts/ci/typecheck-all.sh` exit 0 across the 51-tsconfig matrix, not `tsc -p .`
+alone. Test count unchanged at 10 and 48.
