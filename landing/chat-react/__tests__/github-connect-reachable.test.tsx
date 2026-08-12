@@ -287,6 +287,31 @@ describe('GitHub — the owner can start the flow from the web', () => {
     expect(sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length).toBe(settled)
   })
 
+  it('a DROPPED poll keeps the code on screen instead of blanking the flow', async () => {
+    // The owner is at GitHub typing the code when one poll hits a flaky network.
+    // Treating that as "not connected" would take the code away AND tear down the
+    // poll that was about to see the approval — the flow would look like it had
+    // failed at the exact moment it was working. The mobile screen shipped with
+    // that bug and was fixed; nothing here held the web side to the same rule, so
+    // re-introducing it left this whole file green.
+    const root = await mountTab()
+    await click(root, 'button.cint-github-connect')
+    networkDown = true
+    await pollTicks(3)
+    expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'awaiting_owner',
+    )
+    // …and the poll is still armed, so the very next tick on a network that came
+    // back still finishes the flow.
+    networkDown = false
+    state = { status: 'connected' }
+    await pollTicks(3)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'connected',
+    )
+  })
+
   it('an ALREADY-CONNECTED account renders as connected, with no code and no Connect', async () => {
     state = { status: 'connected' }
     const root = await mountTab()

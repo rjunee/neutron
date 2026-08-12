@@ -60,7 +60,7 @@ component was fine and nothing reached it.
   layouts after walking the owner's real path (header menu → Admin). It needed a
   third probe phase, `inAdmin`, because the things you adjust live behind that
   menu rather than in the tab band.
-- `landing/chat-react/__tests__/github-connect-reachable.test.tsx` (12) and
+- `landing/chat-react/__tests__/github-connect-reachable.test.tsx` (13) and
   `app/__tests__/github-connect-reachable.test.tsx` (14) PRESS the control and
   assert the wire: the POST leaves, the code renders, Copy reaches the clipboard,
   `Linking` gets the URL, the poll flips to connected and then STOPS, a DROPPED
@@ -77,8 +77,14 @@ component was fine and nothing reached it.
 - Mutation-proved, each mutation confirmed APPLIED by grep before the result was
   believed (two mutation tests in this repo have silently not applied and gone
   green): renaming the web control's class reds both layouts of the reachability
-  gate; making Connect call status instead of start reds 6 of 12 web and 7 of 12
-  mobile assertions; disabling the poll effect reds exactly the poll test.
+  gate; skipping the probe's walk to Admin reds both layouts too, so those two
+  steps are load-bearing and not decoration; making Connect call status instead
+  of start reds 7 of the 13 web tests and 8 of the 14 mobile ones; disabling the poll
+  effect reds exactly the two tests that need a poll; blanking the state on a failed poll reds the
+  dropped-poll test on EACH surface and nothing else. The web dropped-poll test
+  was added in review, after that mutation was found to leave the whole web file
+  green — the behaviour was already correct there and only the mobile side was
+  holding it to the rule.
 - `bash scripts/ci/typecheck-all.sh > /tmp/neutron-typecheck.log 2>&1` — 51
   tsconfigs, all pass. `scripts/ci/lint.sh` and `scripts/ci/leak-gate.sh` clean.
 
