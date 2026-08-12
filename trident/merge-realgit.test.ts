@@ -25,7 +25,12 @@ import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
 import { cleanupAfterMerge } from './git-mode.ts'
-import { buildMergeCleanupDeps, runWorktreePath, TridentMergeConflictEscalation } from './merge.ts'
+import {
+  buildMergeCleanupDeps,
+  runWorktreePath,
+  TridentBaseDriftHold,
+  TridentMergeConflictEscalation,
+} from './merge.ts'
 import type { TridentRun } from './store.ts'
 
 const GIT_ID = ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false']
@@ -299,5 +304,109 @@ describe('REAL git — failure isolation: an unrecoverable conflict never poison
     await cleanupAfterMerge(localRun(repo, 'zzzzzzzz', 'trident/z'), deps)
     await git(repo, 'checkout', '-q', 'main')
     expect(existsSync(join(repo, 'z.txt'))).toBe(true)
+  }, 30_000)
+})
+
+describe('REAL git — base-drift hold: a verdict never lands on a base it did not see (#542)', () => {
+  /** A file with enough distance between its two edited regions that git merges
+   *  both sides with NO textual conflict — the SEMANTIC-conflict shape. */
+  const lines = (mark1: string, mark20: string): string =>
+    Array.from({ length: 20 }, (_, i) => (i === 0 ? mark1 : i === 19 ? mark20 : `L${i + 1}`)).join('\n') + '\n'
+
+  async function baseRepoWithModule(): Promise<string> {
+    const repo = await makeBaseRepo()
+    writeFileSync(join(repo, 'mod.txt'), lines('L1', 'L20'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'add mod')
+    return repo
+  }
+
+  /** Advance main by ONE commit editing `file`. */
+  async function advanceMain(repo: string, file: string, content: string): Promise<void> {
+    await git(repo, 'checkout', '-q', 'main')
+    writeFileSync(join(repo, file), content)
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', `main moves ${file}`)
+  }
+
+  test('HOLDS the merge when the moved base edited the SAME file with no conflict', async () => {
+    const repo = await baseRepoWithModule()
+    // The reviewed build edits the BOTTOM of mod.txt...
+    await fakeBuild(repo, 'trident/feat', 'mod.txt', lines('L1', 'L20-from-branch'))
+    // ...and AFTER the review, main edits the TOP of the same file. Far enough
+    // apart that the rebase applies cleanly: nothing textual to catch it.
+    await advanceMain(repo, 'mod.txt', lines('L1-from-main', 'L20'))
+    const mainBeforeMerge = await gitOut(repo, 'rev-parse', 'main')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    let held: unknown = null
+    try {
+      await cleanupAfterMerge(localRun(repo, 'dddddddd', 'trident/feat'), deps)
+    } catch (e) {
+      held = e
+    }
+    expect(held).toBeInstanceOf(TridentBaseDriftHold)
+    const hold = held as TridentBaseDriftHold
+    expect(hold.detail.silent_overlap).toEqual(['mod.txt'])
+    expect(hold.detail.review_base_sha).not.toBe(hold.detail.current_base_sha)
+    // LOUD but plain — the owner-facing text names the file, not git stderr.
+    expect(hold.message).toContain('mod.txt')
+    expect(hold.message.toLowerCase()).not.toContain('fatal:')
+
+    // NOTHING LANDED: main is exactly where it was, and the branch still exists
+    // so the build can be re-reviewed against the new base.
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'rev-parse', 'main')).toBe(mainBeforeMerge)
+    expect((await gitOut(repo, 'branch', '--list', 'trident/feat')).trim()).not.toBe('')
+    // The shared checkout is clean and the throwaway worktree is gone.
+    expect(await status(repo)).toBe('')
+    expect(await worktreeCount(repo)).toBe(1)
+    expect(noStrayWorktreeDirs(repo)).toBe(true)
+  }, 30_000)
+
+  test('LANDS when the moved base touched a DIFFERENT file than the reviewed diff', async () => {
+    const repo = await baseRepoWithModule()
+    await fakeBuild(repo, 'trident/feat', 'mod.txt', lines('L1', 'L20-from-branch'))
+    // Same amount of drift — a whole commit — but nowhere near the reviewed diff.
+    await advanceMain(repo, 'UNRELATED.md', 'unrelated\n')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    await cleanupAfterMerge(localRun(repo, 'eeeeeeee', 'trident/feat'), deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'show', 'main:mod.txt')).toContain('L20-from-branch')
+    expect(existsSync(join(repo, 'UNRELATED.md'))).toBe(true)
+    expect(await status(repo)).toBe('')
+    expect(await worktreeCount(repo)).toBe(1)
+  }, 30_000)
+
+  test('LANDS when the base did not move at all', async () => {
+    const repo = await baseRepoWithModule()
+    await fakeBuild(repo, 'trident/feat', 'mod.txt', lines('L1', 'L20-from-branch'))
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    await cleanupAfterMerge(localRun(repo, 'ffffff11', 'trident/feat'), deps)
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'show', 'main:mod.txt')).toContain('L20-from-branch')
+  }, 30_000)
+
+  test('LANDS when the same-file drift DID conflict — the resolver, not the hold, owns that case', async () => {
+    const repo = await baseRepoWithModule()
+    // Both sides edit the SAME line → a real textual conflict on rebase, which the
+    // bounded resolver fixes. The #542 hold must NOT pre-empt that path.
+    await fakeBuild(repo, 'trident/feat', 'mod.txt', lines('L1-from-branch', 'L20'))
+    await advanceMain(repo, 'mod.txt', lines('L1-from-main', 'L20'))
+
+    const resolve = async (input: { repo_path: string; conflicted_files: string[] }) => {
+      for (const f of input.conflicted_files) {
+        writeFileSync(join(input.repo_path, f), lines('L1-resolved', 'L20'))
+        await git(input.repo_path, 'add', f)
+      }
+      return { resolved: true as const }
+    }
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main', resolve_conflict: resolve })
+    await cleanupAfterMerge(localRun(repo, 'ffffff22', 'trident/feat'), deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    expect(await gitOut(repo, 'show', 'main:mod.txt')).toContain('L1-resolved')
   }, 30_000)
 })

@@ -221,6 +221,62 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
   })
 })
 
+describe('orchestrator — base-drift hold (#542): a HELD merge fails LOUDLY, not silently', () => {
+  /** A host whose base has moved since the fork point, editing `baseTouched`;
+   *  the branch's reviewed diff touches `reviewedFiles`. The rebase is clean, so
+   *  nothing textual catches the overlap — only the #542 hold can. */
+  const driftedHost = (
+    baseTouched: string[],
+    reviewedFiles: string[],
+  ): ((cmd: string[]) => HostCommandResult) => {
+    const REVIEW_BASE = '1111111111111111111111111111111111111111'
+    const CURRENT_BASE = '2222222222222222222222222222222222222222'
+    const BRANCH_HEAD = '3333333333333333333333333333333333333333'
+    return (cmd) => {
+      if (cmd.includes('rev-parse') && cmd.includes('--verify')) {
+        const ref = (cmd[cmd.length - 1] ?? '').replace('^{commit}', '')
+        if (ref.startsWith('feat-')) return ok(BRANCH_HEAD)
+        return ok(CURRENT_BASE)
+      }
+      if (cmd.includes('merge-base')) return ok(REVIEW_BASE)
+      if (cmd.includes('diff') && cmd.includes('--name-only') && !cmd.includes('--diff-filter=U')) {
+        return ok((cmd[cmd.length - 1] === BRANCH_HEAD ? reviewedFiles : baseTouched).join('\n'))
+      }
+      return ok()
+    }
+  }
+
+  test('an APPROVE whose base drifted INTO the reviewed diff is HELD → failed, nothing merged', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: driftedHost(['shared.ts'], ['shared.ts']),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    // The reason IS the hold text (the terminal delivery posts it verbatim) — not
+    // a raw "merge failed", and it names both shas + the overlapping file.
+    expect(final.failure_reason).toContain('holding the merge')
+    expect(final.failure_reason).toContain('shared.ts')
+    expect(final.failure_reason).not.toContain('merge failed')
+    // The APPROVE is preserved: the work is intact, it just may not land here.
+    expect(final.inner_verdict).toBe('APPROVE')
+    // NOTHING landed on the base.
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge --no-ff'))).toBe(false)
+  })
+
+  test('an APPROVE whose base drifted ELSEWHERE still merges (done)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: driftedHost(['docs/CHANGELOG.md'], ['shared.ts']),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.startsWith('git -C /repo merge --no-ff'))).toBe(true)
+  })
+})
+
 describe('orchestrator — server-gated verdict provenance', () => {
   test('a self-asserted APPROVE with no recorded argus-approved checkpoint is REJECTED → failed (no merge)', async () => {
     // The workflow's result claims APPROVE, but the recorded provenance checkpoint

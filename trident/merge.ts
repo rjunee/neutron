@@ -12,6 +12,13 @@
  *   • `'local'` → merge the feature branch into the base locally, then
  *                 delete the local branch.
  *
+ * BASE-DRIFT HOLD (ISSUES #542). BOTH modes are gated on the base not having
+ * moved MATERIALLY between the review and the merge — otherwise an APPROVE lands
+ * against a base the reviewer never saw. See the block above `assessBaseDrift`
+ * for what "materially" means here, why the review-time base sha is DERIVED from
+ * the fork point rather than recorded by the reviewer, and what the gate
+ * deliberately does not catch.
+ *
  * WORKTREE CLEANUP — ENFORCED (Trident v2, D-1/C3). The prior "Ryan-locked: NO
  * `git worktree remove`" rule held while Open ran plain branches. Trident v2's
  * inner workflow builds in `isolation:'worktree'` worktrees, and the harness
@@ -42,6 +49,35 @@ export class TridentMergeError extends Error {
   ) {
     super(message)
     this.name = 'TridentMergeError'
+  }
+}
+
+/**
+ * ISSUES #542 — thrown when the base branch moved MATERIALLY between the review
+ * and the merge, so landing would apply an APPROVE to a base the review never
+ * saw. The OUTER loop (`orchestrator.applyResult`) maps this to a `failed` run
+ * whose `failure_reason` is `message` — the terminal delivery posts exactly that
+ * to chat, so the hold is LOUD rather than a silent land.
+ *
+ * `detail` carries the machine-readable provenance (both shas + the overlapping
+ * paths) for the audit trail; `message` is the plain-English, no-raw-git-stderr
+ * text the owner reads.
+ */
+export class TridentBaseDriftHold extends Error {
+  constructor(
+    message: string,
+    readonly detail: {
+      /** The base sha the reviewed diff was computed against (the fork point). */
+      review_base_sha: string | null
+      /** The base tip the merge would have landed on. */
+      current_base_sha: string | null
+      /** Reviewed-diff paths the moved base ALSO changed, minus the ones git
+       *  raised a conflict on (those went through the resolver). */
+      silent_overlap: string[]
+    },
+  ) {
+    super(message)
+    this.name = 'TridentBaseDriftHold'
   }
 }
 
@@ -109,6 +145,212 @@ export async function detectBaseBranch(
     // fall through to the default
   }
   return 'main'
+}
+
+// ---------------------------------------------------------------------------
+// BASE-DRIFT HOLD (ISSUES #542)
+// ---------------------------------------------------------------------------
+//
+// THE HOLE. Nothing held a merge when the base moved after the review, so an
+// APPROVE could be applied to a base the reviewer never saw. Local mode rebases
+// onto the LATEST base and lands; a TEXTUAL conflict hits the bounded Forge
+// resolver, but a SEMANTIC one — base and branch edit the same file in places
+// git reconciles silently — lands with nothing having looked at the combination.
+// PR mode had exactly one other mechanism forcing a branch to contain current
+// main, GitHub's `strict_required_status_checks_policy`, and that was turned OFF
+// on this repo 2026-08-11. With both absent there is no protection at all.
+//
+// WHY THE REVIEW-TIME BASE SHA IS DERIVED HERE, NOT RECORDED BY THE REVIEWER.
+// The obvious implementation is a `review_base_sha` column written by the inner
+// workflow's argus checkpoint step. It is the weaker design, for three reasons:
+//   1. IT WOULD RECORD THE WRONG SHA. That writer's only cheap option is
+//      `git rev-parse <base>` in the repo of record AT REVIEW TIME — but a
+//      sibling build can land in that shared checkout DURING the review, so the
+//      recorded value can name a base the review never saw. The fork point
+//      cannot: the build worktree is cut from base at build start and the
+//      reviewed diff is `git diff <base>..HEAD` computed inside it, so
+//      `merge-base(branch, base)` IS the tree the review was computed against.
+//   2. IT FAILS OPEN BY OMISSION. That writer is an LLM-driven Bash step; a
+//      missed/garbled write leaves the column null and silently disables the
+//      gate — the exact failure class this issue is about. A value derived from
+//      refs that must exist for the merge to happen at all cannot go missing.
+//   3. IT WOULD NOT COVER RUNS ALREADY IN FLIGHT (nor any row written before the
+//      column existed), which is where the next silent land actually comes from.
+// So: no new column, no new writer, no new failure mode — the same fact, read
+// from git at merge time. (The name is kept: `review_base_sha` is what it is.)
+//
+// WHAT "MATERIALLY" MEANS HERE — THE CHOICE, AND WHY.
+// Material drift = the base moved AND its new commits changed at least one file
+// the reviewed diff also changes AND git raised no conflict on that file.
+// Rejected alternatives, and what each costs:
+//   * ANY base movement → hold. Correct-by-construction and useless: on a repo
+//     where main moves several times a day and a build takes an hour, this holds
+//     essentially every merge, and a gate that always fires gets turned off.
+//   * File overlap alone → hold. This is the one the issue's own wording points
+//     at, and it is ALMOST right — but it swallows the textual-conflict path
+//     whole. A file git DID conflict on was already handed to the bounded Forge
+//     resolver with both sides in context, or escalated to chat as a specific
+//     question. That mechanism exists, is deliberate, and is the thing the issue
+//     says already works ("textual ones hit the resolver"). Holding there adds
+//     no safety and deletes a working feature.
+// Subtracting the conflicted files leaves EXACTLY the uncovered gap the issue
+// names: base and branch both touched the file, git merged them with no
+// complaint, and therefore nothing — not the reviewer (who never saw the new
+// base), not the resolver (never invoked) — ever looked at the combination.
+//
+// WHAT THIS DELIBERATELY DOES NOT CATCH, stated so nobody reads more into a
+// green merge than is there: cross-file semantic coupling. If the base changes
+// the behaviour of a helper in `a.ts` and the branch adds a caller in `b.ts`,
+// the file sets do not intersect and this lands. Catching that requires
+// re-running the review, not a git query. This gate is the circuit breaker for
+// the same-file silent-merge case; it is not a claim of semantic safety.
+
+/** A base-drift verdict over one (base, branch) pair. Pure data — the decision
+ *  to hold is the caller's, because local mode must also subtract the files the
+ *  rebase raised a conflict on. */
+export interface BaseDriftAssessment {
+  /** The base sha the reviewed diff was computed against (fork point), or null
+   *  when it could not be resolved. */
+  review_base_sha: string | null
+  /** The base tip this merge would land on, or null when unresolvable. */
+  current_base_sha: string | null
+  /** True when the base tip is not the reviewed base — i.e. the base carries
+   *  commits the reviewed diff never saw. */
+  moved: boolean
+  /** Reviewed-diff paths the moved base ALSO changed. Empty unless `moved`. */
+  overlap: string[]
+  /**
+   * False when git could not answer the question. Paired with `moved` this is
+   * deliberately ASYMMETRIC:
+   *   • `!moved && !assessable` — we never established that the base moved (a
+   *     ref would not resolve). Fail OPEN: an unresolvable ref is not evidence
+   *     of drift, and the merge/rebase that follows fails loudly by itself on a
+   *     genuinely broken repo, so degrading here cannot land something a working
+   *     git would have held.
+   *   • `moved && !assessable` — we KNOW the base moved and could not determine
+   *     what it changed. Fail CLOSED (the caller holds): once drift is
+   *     established, an unassessable materiality must not be assumed benign.
+   */
+  assessable: boolean
+}
+
+/** A git object name, as `rev-parse`/`merge-base` print it (abbreviated or full).
+ *  Anything else — most importantly the EMPTY stdout of a probe that resolved
+ *  nothing — is treated as "did not resolve". */
+const SHA_RE = /^[0-9a-f]{7,64}$/i
+
+/** Resolve a ref to a commit sha, or null when it does not resolve to one. */
+async function revParseCommit(
+  run_host: RunHostCommand,
+  repo: string,
+  ref: string,
+): Promise<string | null> {
+  const res = await run_host(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`], repo)
+  const sha = res.stdout.trim()
+  return res.ok && SHA_RE.test(sha) ? sha : null
+}
+
+/** `git diff --name-only <a> <b>` → the changed paths, or null when git failed. */
+async function changedPaths(
+  run_host: RunHostCommand,
+  repo: string,
+  a: string,
+  b: string,
+): Promise<string[] | null> {
+  const res = await run_host(['git', '-C', repo, 'diff', '--name-only', a, b], repo)
+  if (!res.ok) return null
+  return res.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+/**
+ * Assess base drift for `branch_ref` against `base_ref` in `repo`. MUST be
+ * called BEFORE any rebase: a rebase replays the branch onto the base tip, which
+ * makes the fork point equal the tip and ERASES the very drift being measured.
+ */
+export async function assessBaseDrift(
+  run_host: RunHostCommand,
+  repo: string,
+  base_ref: string,
+  branch_ref: string,
+): Promise<BaseDriftAssessment> {
+  const current_base_sha = await revParseCommit(run_host, repo, base_ref)
+  const branch_head = await revParseCommit(run_host, repo, branch_ref)
+  const mb = await run_host(['git', '-C', repo, 'merge-base', base_ref, branch_ref], repo)
+  const mbSha = mb.stdout.trim()
+  const review_base_sha = mb.ok && SHA_RE.test(mbSha) ? mbSha : null
+  if (current_base_sha === null || branch_head === null || review_base_sha === null) {
+    return { review_base_sha, current_base_sha, moved: false, overlap: [], assessable: false }
+  }
+  if (review_base_sha === current_base_sha) {
+    // The branch already contains the base tip — the reviewed diff's base IS the
+    // base being landed on. Nothing moved; no file lists needed.
+    return { review_base_sha, current_base_sha, moved: false, overlap: [], assessable: true }
+  }
+  // Note an emergent nicety: if the base moved but its NET tree diff is empty
+  // (a revert, a merge that restored the tree), `baseTouched` is `[]` and this
+  // correctly reports no material drift — the reviewed diff's premise is the
+  // TREE it was computed against, not the sha that names it.
+  const baseTouched = await changedPaths(run_host, repo, review_base_sha, current_base_sha)
+  const reviewed = await changedPaths(run_host, repo, review_base_sha, branch_head)
+  if (baseTouched === null || reviewed === null) {
+    // Drift ESTABLISHED, materiality unknown → fail closed (see `assessable`).
+    return { review_base_sha, current_base_sha, moved: true, overlap: [], assessable: false }
+  }
+  const reviewedSet = new Set(reviewed)
+  const overlap = [...new Set(baseTouched.filter((f) => reviewedSet.has(f)))].sort()
+  return { review_base_sha, current_base_sha, moved: true, overlap, assessable: true }
+}
+
+/** True when this assessment must HOLD the merge. `conflicted` are the paths the
+ *  rebase raised a textual conflict on (already routed through the resolver /
+ *  chat escalation) — empty for modes that never rebase locally. */
+export function shouldHoldForBaseDrift(
+  assessment: BaseDriftAssessment,
+  conflicted: ReadonlySet<string> = new Set(),
+): boolean {
+  if (!assessment.moved) return false
+  if (!assessment.assessable) return true
+  return assessment.overlap.some((f) => !conflicted.has(f))
+}
+
+/** Short, stable sha rendering for the owner-facing hold message. */
+function shortSha(sha: string | null): string {
+  return sha === null ? 'unknown' : sha.slice(0, 7)
+}
+
+/** Cap the path list so one huge overlap can't produce an unreadable chat post. */
+function renderPaths(paths: string[]): string {
+  const head = paths.slice(0, 5)
+  const rest = paths.length - head.length
+  return rest > 0 ? `${head.join(', ')} and ${rest} more` : head.join(', ')
+}
+
+/**
+ * The owner-facing hold text. PLAIN prose — no raw git stderr, no paths outside
+ * the repo, no identities — mirroring the conflict escalation's contract (#342
+ * step 3), because this string is posted verbatim to chat.
+ */
+export function baseDriftHoldMessage(
+  branch: string,
+  base: string,
+  assessment: BaseDriftAssessment,
+  silent_overlap: string[],
+): string {
+  const head =
+    `I'm holding the merge of \`${branch}\` into \`${base}\`: it was reviewed against ` +
+    `\`${base}\` at \`${shortSha(assessment.review_base_sha)}\`, but \`${base}\` has since ` +
+    `moved to \`${shortSha(assessment.current_base_sha)}\``
+  const why = assessment.assessable
+    ? ` and those new commits changed ${silent_overlap.length} file(s) the reviewed diff also ` +
+      `changes (${renderPaths(silent_overlap)}) with no conflict for anything to catch`
+    : ` and I could not determine which files it changed`
+  return (
+    `${head}${why}. Nothing has reviewed that combination, so I am not landing it — ` +
+    `re-run the build to get the diff reviewed against the current \`${base}\`.`
+  )
 }
 
 /**
@@ -280,6 +522,33 @@ export function buildMergeCleanupDeps(
           exit_code: -1,
         })
       }
+      // BASE-DRIFT HOLD (#542). PR mode used to be covered by GitHub's
+      // `strict_required_status_checks_policy` (a PR could not merge unless its
+      // branch contained current base); that was turned OFF on this repo
+      // 2026-08-11, so this is now the ONLY thing standing between a stale
+      // review and `main`. Assessed against `origin/<base>` — the tip GitHub
+      // will actually merge into — after a best-effort fetch, since a stale
+      // remote-tracking ref would UNDER-report drift.
+      if (branch !== null) {
+        const base = opts.base_branch ?? (await detectBaseBranch(run_host, repo))
+        await run_host(['git', '-C', repo, 'fetch', 'origin', base], repo)
+        const baseRef = (await revParseCommit(run_host, repo, `origin/${base}`)) !== null ? `origin/${base}` : base
+        const assessment = await assessBaseDrift(run_host, repo, baseRef, branch)
+        // No `conflicted` set to subtract: nothing rebases locally here, and a PR
+        // with TEXTUAL conflicts is refused by GitHub itself (`gh pr merge` exits
+        // non-zero → TridentMergeError). So every drift that reaches a mergeable
+        // PR is precisely the silent-reconciliation case.
+        if (shouldHoldForBaseDrift(assessment)) {
+          throw new TridentBaseDriftHold(
+            baseDriftHoldMessage(branch, base, assessment, assessment.overlap),
+            {
+              review_base_sha: assessment.review_base_sha,
+              current_base_sha: assessment.current_base_sha,
+              silent_overlap: assessment.overlap,
+            },
+          )
+        }
+      }
       must('gh pr merge', await run_host(['gh', 'pr', 'merge', String(run.pr), '--squash'], repo))
       if (branch !== null) {
         // Best-effort branch teardown — the merge already landed, so a
@@ -309,6 +578,14 @@ export function buildMergeCleanupDeps(
       // merge fully in parallel.
       await withLocalMergeLock(repo, async () => {
         const base = opts.base_branch ?? (await detectBaseBranch(run_host, repo))
+        // (0-) BASE-DRIFT SNAPSHOT (#542) — taken FIRST, before anything mutates a
+        //     ref, and INSIDE the lock so a sibling build that just landed is
+        //     already part of `current_base_sha`. It MUST precede the rebase in
+        //     (2): the rebase replays the branch onto the base tip, which makes
+        //     the fork point equal the tip and erases the drift being measured.
+        //     The hold itself is deferred to (2a) because the decision subtracts
+        //     the files the rebase raised a conflict on.
+        const drift = await assessBaseDrift(run_host, repo, base, branch)
         // (0) DEFENSIVE stale-state recovery (FIX 2): heal any merge/rebase a PRIOR
         //     build left in the shared checkout BEFORE we touch it — else one old
         //     poisoned index makes every later merge fail "resolve your current
@@ -335,7 +612,22 @@ export function buildMergeCleanupDeps(
           //     replays on top of any sibling build that merged before it. On a real
           //     content conflict, dispatch the bounded Forge resolver; on a genuinely
           //     ambiguous one, escalate to chat (TridentMergeConflictEscalation).
-          await rebaseBranchOntoBase(run_host, wt, base, branch, run, opts.resolve_conflict)
+          const conflicted = await rebaseBranchOntoBase(run_host, wt, base, branch, run, opts.resolve_conflict)
+          // (2a) BASE-DRIFT HOLD (#542) — the rebase just replayed the reviewed
+          //     diff on top of a base the review never saw. Every file git
+          //     conflicted on went through the bounded resolver (or escalated),
+          //     so subtract those: what remains is base-vs-branch edits to the
+          //     SAME file that git merged silently, which nothing reviewed. Throw
+          //     BEFORE the land in (3) — the `finally` tears the throwaway
+          //     worktree down and the shared checkout is never touched.
+          if (shouldHoldForBaseDrift(drift, conflicted)) {
+            const silent = drift.overlap.filter((f) => !conflicted.has(f))
+            throw new TridentBaseDriftHold(baseDriftHoldMessage(branch, base, drift, silent), {
+              review_base_sha: drift.review_base_sha,
+              current_base_sha: drift.current_base_sha,
+              silent_overlap: silent,
+            })
+          }
           // (3) LAND onto base in the shared checkout — the branch now CONTAINS base
           //     (rebased on top), so this no-ff merge is fast-forwardable and CANNOT
           //     conflict. Heal-then-land defensively (the repo is still clean here).
@@ -390,7 +682,10 @@ async function abortRebase(run_host: RunHostCommand, repo: string, base: string)
  * conflict with the bounded Forge `resolver`. Assumes the caller holds the
  * per-repo merge lock (so the tree is exclusively ours). On success the branch
  * has been replayed on top of `base` and the working tree is left on `branch`;
- * the caller then checks out `base` + merges (a clean no-ff). Throws:
+ * the caller then checks out `base` + merges (a clean no-ff). RETURNS every path
+ * git raised a conflict on across all rounds — the base-drift hold (#542)
+ * subtracts that set, because a file the resolver was handed with both sides in
+ * context is not a file git reconciled silently. Throws:
  *   - `TridentMergeConflictEscalation` when the resolver escalates (ambiguous)
  *     OR no resolver is configured on a conflict — the OUTER loop turns this into
  *     a chat-delivered specific question.
@@ -403,7 +698,11 @@ async function rebaseBranchOntoBase(
   branch: string,
   run: TridentRun,
   resolver: MergeConflictResolver | undefined,
-): Promise<void> {
+): Promise<Set<string>> {
+  // Every path git raised a conflict on, ACCUMULATED across rounds (a later
+  // round's `--diff-filter=U` no longer lists an earlier round's file, and the
+  // #542 hold must subtract all of them, not just the last round's).
+  const conflictedAll = new Set<string>()
   must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
   let res = await run_host(['git', '-C', repo, 'rebase', base], repo)
   let rounds = 0
@@ -416,6 +715,7 @@ async function rebaseBranchOntoBase(
     }
     rounds++
     const conflicted = await listConflictedFiles(run_host, repo)
+    for (const f of conflicted) conflictedAll.add(f)
     if (resolver === undefined) {
       await abortRebase(run_host, repo, base)
       throw new TridentMergeConflictEscalation(
@@ -451,6 +751,7 @@ async function rebaseBranchOntoBase(
       res,
     )
   }
+  return conflictedAll
 }
 
 /**

@@ -2,8 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import { cleanupAfterMerge } from './git-mode.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import {
+  assessBaseDrift,
+  baseDriftHoldMessage,
   buildMergeCleanupDeps,
   detectBaseBranch,
+  shouldHoldForBaseDrift,
+  TridentBaseDriftHold,
   TridentMergeError,
   type RunHostCommand,
 } from './merge.ts'
@@ -495,5 +499,304 @@ describe('buildMergeCleanupDeps — local mode rebase-onto-latest + conflict res
     for (const id of ['aaaaaaaa', 'bbbbbbbb', 'cccccccc']) {
       expect(adds.some((c) => c.includes(`/proj/.trident-worktrees/s-${id} main`))).toBe(true)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// BASE-DRIFT HOLD (ISSUES #542)
+// ---------------------------------------------------------------------------
+
+/**
+ * A host that answers the drift probes with a scripted repo shape and behaves
+ * like a clean repo for everything else (the `--abort` probes fail, as on a
+ * repo with nothing in progress).
+ */
+function driftHost(shape: {
+  base: string
+  branch: string
+  /** The fork point — what the reviewed diff was computed against. */
+  review_base: string
+  /** Where the base tip is NOW. Equal to `review_base` ⇒ no drift. */
+  current_base: string
+  branch_head?: string
+  /** Files the base changed since `review_base`. */
+  base_touched?: string[]
+  /** Files the reviewed diff changes. */
+  reviewed_files?: string[]
+  /** Files the rebase raises a textual conflict on (local mode). */
+  rebase_conflicts?: string[]
+  /** Refs that fail to resolve (to exercise the fail-open / fail-closed split). */
+  unresolvable?: string[]
+  /** Make `git diff --name-only <a> <b>` fail (materiality unassessable). */
+  break_diff?: boolean
+}): { host: RunHostCommand; calls: string[] } {
+  const calls: string[] = []
+  const branchHead = shape.branch_head ?? 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  const conflicts = shape.rebase_conflicts ?? []
+  let rebased = false
+  const host: RunHostCommand = async (cmd) => {
+    calls.push(cmd.join(' '))
+    if (cmd.includes('rev-parse') && cmd.includes('--verify')) {
+      const ref = (cmd[cmd.length - 1] ?? '').replace('^{commit}', '')
+      if ((shape.unresolvable ?? []).includes(ref)) return fail('unknown revision')
+      if (ref === shape.base || ref === `origin/${shape.base}`) return ok(shape.current_base)
+      if (ref === shape.branch) return ok(branchHead)
+      return fail('unknown revision')
+    }
+    if (cmd.includes('merge-base')) {
+      if ((shape.unresolvable ?? []).length > 0) return fail('no merge base')
+      return ok(shape.review_base)
+    }
+    if (cmd.includes('diff') && cmd.includes('--name-only') && !cmd.includes('--diff-filter=U')) {
+      if (shape.break_diff === true) return fail('bad revision')
+      const b = cmd[cmd.length - 1]
+      if (b === shape.current_base) return ok((shape.base_touched ?? []).join('\n'))
+      if (b === branchHead) return ok((shape.reviewed_files ?? []).join('\n'))
+      return ok('')
+    }
+    if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicts.join('\n'))
+    // The rebase conflicts ONCE when the scenario says so, then continues clean.
+    if (cmd.includes('rebase') && !cmd.includes('--continue') && !cmd.includes('--abort')) {
+      if (conflicts.length > 0 && !rebased) {
+        rebased = true
+        return fail('CONFLICT (content): Merge conflict')
+      }
+    }
+    if (cmd.includes('--abort')) return fail('nothing in progress')
+    return ok()
+  }
+  return { host, calls }
+}
+
+const SHA_A = '1111111111111111111111111111111111111111'
+const SHA_B = '2222222222222222222222222222222222222222'
+
+describe('assessBaseDrift (#542)', () => {
+  test('no movement: the fork point IS the base tip', async () => {
+    const { host } = driftHost({ base: 'main', branch: 'feat-x', review_base: SHA_A, current_base: SHA_A })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(a.moved).toBe(false)
+    expect(a.assessable).toBe(true)
+    expect(a.review_base_sha).toBe(SHA_A)
+    expect(shouldHoldForBaseDrift(a)).toBe(false)
+  })
+
+  test('drift that does NOT touch the reviewed diff is IMMATERIAL', async () => {
+    const { host } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['docs/README.md', 'other/a.ts'],
+      reviewed_files: ['trident/merge.ts'],
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(a.moved).toBe(true)
+    expect(a.overlap).toEqual([])
+    expect(shouldHoldForBaseDrift(a)).toBe(false)
+  })
+
+  test('drift that touches a reviewed file IS material', async () => {
+    const { host } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['trident/merge.ts', 'docs/README.md'],
+      reviewed_files: ['trident/merge.ts', 'trident/store.ts'],
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(a.overlap).toEqual(['trident/merge.ts'])
+    expect(shouldHoldForBaseDrift(a)).toBe(true)
+  })
+
+  test('a file the rebase CONFLICTED on is subtracted — the resolver already saw both sides', async () => {
+    const { host } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['trident/merge.ts'],
+      reviewed_files: ['trident/merge.ts'],
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(shouldHoldForBaseDrift(a, new Set(['trident/merge.ts']))).toBe(false)
+    // ...but an UNCONFLICTED overlapping file in the same rebase still holds.
+    expect(shouldHoldForBaseDrift({ ...a, overlap: ['a.ts', 'b.ts'] }, new Set(['a.ts']))).toBe(true)
+  })
+
+  test('unresolvable refs fail OPEN (no drift established)', async () => {
+    const { host } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      unresolvable: ['feat-x'],
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(a.moved).toBe(false)
+    expect(a.assessable).toBe(false)
+    expect(shouldHoldForBaseDrift(a)).toBe(false)
+  })
+
+  test('drift established but materiality UNASSESSABLE fails CLOSED', async () => {
+    const { host } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      break_diff: true,
+    })
+    const a = await assessBaseDrift(host, '/repo', 'main', 'feat-x')
+    expect(a.moved).toBe(true)
+    expect(a.assessable).toBe(false)
+    expect(shouldHoldForBaseDrift(a)).toBe(true)
+  })
+})
+
+describe('baseDriftHoldMessage (#542)', () => {
+  const assessed = {
+    review_base_sha: SHA_A,
+    current_base_sha: SHA_B,
+    moved: true,
+    overlap: ['a.ts'],
+    assessable: true,
+  }
+
+  test('names both shas, the branch, the base and the overlapping files — no raw git stderr', () => {
+    const msg = baseDriftHoldMessage('feat-x', 'main', assessed, ['a.ts'])
+    expect(msg).toContain('feat-x')
+    expect(msg).toContain('main')
+    expect(msg).toContain(SHA_A.slice(0, 7))
+    expect(msg).toContain(SHA_B.slice(0, 7))
+    expect(msg).toContain('a.ts')
+    expect(msg.toLowerCase()).not.toContain('error:')
+    expect(msg.toLowerCase()).not.toContain('fatal:')
+  })
+
+  test('caps a huge overlap instead of pasting every path', () => {
+    const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((f) => `${f}.ts`)
+    const msg = baseDriftHoldMessage('feat-x', 'main', { ...assessed, overlap: many }, many)
+    expect(msg).toContain('and 2 more')
+    expect(msg).not.toContain('g.ts')
+  })
+
+  test('says so plainly when materiality could not be assessed', () => {
+    const msg = baseDriftHoldMessage('feat-x', 'main', { ...assessed, assessable: false }, [])
+    expect(msg).toContain('could not determine which files it changed')
+  })
+})
+
+describe('buildMergeCleanupDeps — base-drift hold, local mode (#542)', () => {
+  const run = makeRun({ id: 'dddddddd', merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/drift' })
+
+  test('HOLDS (never lands) when the moved base silently touched a reviewed file', async () => {
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['shared.ts'],
+      reviewed_files: ['shared.ts'],
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    const err = await cleanupAfterMerge(run, deps).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(TridentBaseDriftHold)
+    expect((err as TridentBaseDriftHold).detail.silent_overlap).toEqual(['shared.ts'])
+    // NOTHING landed on the shared checkout, and the branch survives for a re-run.
+    expect(calls.some((c) => c.includes('merge --no-ff'))).toBe(false)
+    expect(calls.some((c) => c.includes('branch -D'))).toBe(false)
+    // The throwaway worktree is still torn down (the `finally`).
+    expect(calls.some((c) => c.includes('worktree remove --force'))).toBe(true)
+  })
+
+  test('LANDS when the base moved without touching any reviewed file', async () => {
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['docs/CHANGELOG.md'],
+      reviewed_files: ['shared.ts'],
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(run, deps)
+    expect(calls.some((c) => c.startsWith('git -C /drift merge --no-ff feat-x'))).toBe(true)
+  })
+
+  test('LANDS when the overlapping file textually CONFLICTED (the resolver handled it)', async () => {
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['shared.ts'],
+      reviewed_files: ['shared.ts'],
+      rebase_conflicts: ['shared.ts'],
+    })
+    let resolverCalls = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        resolverCalls++
+        return { resolved: true }
+      },
+    })
+    await cleanupAfterMerge(run, deps)
+    expect(resolverCalls).toBe(1)
+    expect(calls.some((c) => c.startsWith('git -C /drift merge --no-ff feat-x'))).toBe(true)
+  })
+
+  test('the drift snapshot is taken BEFORE the rebase (which would erase the drift)', async () => {
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['docs/x.md'],
+      reviewed_files: ['shared.ts'],
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(run, deps)
+    const mergeBaseIdx = calls.findIndex((c) => c.includes('merge-base'))
+    const rebaseIdx = calls.findIndex((c) => c.includes('rebase main'))
+    expect(mergeBaseIdx).toBeGreaterThanOrEqual(0)
+    expect(rebaseIdx).toBeGreaterThan(mergeBaseIdx)
+  })
+})
+
+describe('buildMergeCleanupDeps — base-drift hold, pr mode (#542)', () => {
+  const prRun = makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', repo_path: '/drift-pr' })
+
+  test('HOLDS before `gh pr merge` when origin/base drifted into a reviewed file', async () => {
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['shared.ts'],
+      reviewed_files: ['shared.ts'],
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await expect(cleanupAfterMerge(prRun, deps)).rejects.toBeInstanceOf(TridentBaseDriftHold)
+    // The PR was NEVER merged and the branch was NEVER deleted.
+    expect(calls.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+    expect(calls.some((c) => c.includes('push origin --delete'))).toBe(false)
+    // The remote-tracking ref was refreshed first — a stale one under-reports drift.
+    expect(calls).toContain('git -C /drift-pr fetch origin main')
+  })
+
+  test('MERGES when origin/base drifted only outside the reviewed diff', async () => {
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x',
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['docs/x.md'],
+      reviewed_files: ['shared.ts'],
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(prRun, deps)
+    expect(calls).toContain('gh pr merge 42 --squash')
   })
 })
