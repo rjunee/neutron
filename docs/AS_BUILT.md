@@ -10131,3 +10131,49 @@ the 3 files. `scripts/ci/typecheck-all.sh` exit 0 across all 51 tsconfigs, not `
 `scripts/ci/lint.sh` exit 0. ⚠️ The **kimi** lane was DEFERRED again in round 10 — configured,
 called, and the call failed. A configured reviewer that died leaves the panel INCOMPLETE, and this
 entry likewise records no APPROVE.
+
+**Round 12 — the guard on the constant could not fail on the mutant that disables the throttle (PR
+#174).**
+
+The case named `the interval is long enough to matter and short enough to notice` asserted two
+things about `IDLE_TICK_LOG_INTERVAL_MS` and built nothing: an upper bound
+(`< 15 min`) and a lines/day ceiling (`86_400_000 / interval < 500`). Its comment justified having
+no lower bound with a universal — *"the lines/day ceiling IS the floor, so a separate small-ms
+assertion would be unreachable"* — and that is false for anything ≤ 0. At `IDLE_TICK_LOG_INTERVAL_MS
+= -1` the division is NEGATIVE, so both assertions stay green, while `elapsed >= -1` holds for every
+reading and the throttle is off entirely: the flood is fully restored and the case that exists to
+guard the number does not notice. Two reviewers reached that mutant independently.
+
+📌 **A guard written as an assertion ABOUT a constant is not coverage of the behaviour the constant
+buys, and the two look identical in green.** The lower bound is now the sweep cadence — a window no
+longer than one sweep suppresses nothing, which is a floor derived from the system rather than a
+restatement of the threshold — and the case closes by DRIVING the real handler at both edges of the
+budget: one sweep after the first line the tick is refused (a throttle is in force), and at the
+quarter-hour a line appears (silence never outlasts the operator's budget, whatever the constant is
+set to).
+
+**Two naming/counting corrections in the same class.** `the FIRST idle tick logs — a fresh process
+must prove it came up` restarted nothing; its empty window came from the `beforeEach` reset. The
+name now says what the body does, and the restart claim in the handler's comment — in-memory on
+purpose, because "did it come back up?" is what a heartbeat answers — got its own case instead of
+borrowing that one's title. That case is explicit about what it is: it clears the module-level
+window and rebuilds the handler, which is what a restart looks like at this seam, and it does NOT
+spawn a process. And the describe preamble stated that "three of these cases go red" without the
+reset — a measurement of suite size that rots the next time a case is added, so it no longer states
+a number.
+
+**Mutants, each asserted APPLIED by grep before its run was believed, each reverted by `cp` from a
+pre-edit backup with the grep re-run at 0 and `git diff --quiet` clean:**
+
+| mutant | proof it applied | red set |
+|---|---|---|
+| `IDLE_TICK_LOG_INTERVAL_MS = -1` (throttle disabled) | `grep -c 'IDLE_TICK_LOG_INTERVAL_MS = -1'` = 1 | **4 red, now including the constant guard** — it was GREEN on this mutant before this round |
+| `IDLE_TICK_LOG_INTERVAL_MS = 20 * 60_000` (past the budget) | `grep -c` = 1 | exactly **1 red**, the constant guard alone |
+| drop the handler's throttle (`tickEmitter = tickLog`) | `grep -c 'rateLimited('` = 0, where it is 1 before the edit | 4 red |
+| `resetLoggerStateForTests` stops clearing `rateLimitState` (the window survives the process boundary) | `grep -c 'rateLimitState.clear()'` = 0 | 2 red, **including the new restart case** — so that case is not vacuous |
+
+**Verification (round 12), re-measured this round:** the three files run **66 cases** (65 + the
+restart case) — 132 pass, 0 fail, 244 expect() calls under `bun test --rerun-each 2`, the flag that
+caught the process-global window state. `scripts/ci/typecheck-all.sh` exit 0 across all 51
+tsconfigs, not `tsc -p .` alone; `scripts/ci/lint.sh` exit 0. ⚠️ The **kimi** lane was DEFERRED in
+round 11 as well — configured, called, and the call failed. This entry records no APPROVE either.
