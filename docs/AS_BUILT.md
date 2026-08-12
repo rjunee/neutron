@@ -10017,3 +10017,56 @@ as its disclosed gap were re-run with their controls and both hold.
 the flag that caught the process-global window state two rounds ago, so it is the one that has to
 stay green. `scripts/ci/typecheck-all.sh` exit 0 across the 51-tsconfig matrix, not `tsc -p .`
 alone. Test count unchanged at 10 and 48.
+
+**Round 10 — the caller obligation becomes a guard, because a throttle that can go permanently
+silent is the failure it exists to prevent (PR #174).**
+
+Round 8 kept "a caller that COMPUTES `ms` must validate it" as the contract's answer to the NaN
+window. Two reviewers in round 9 reached the same place independently: that is a mitigation, not a
+fix. `rateLimited`'s condition is `elapsed < 0 || elapsed >= ms`, and every comparison against a
+NaN is false — so one non-finite input (a computed `ms`, or a clock reading that is not a number)
+makes both halves false and suppresses the key while the clock moves forward. Both reviewers also
+verified it is unreachable today: every caller passes a module-level numeric literal
+(30_000 / 60_000 / 600_000, printed here rather than read off the constants' names) and the
+production clock resolves to `Date.now`.
+
+📌 **A gate that fails CLOSED is worse than one that fires wrongly, because the silent failure is
+invisible.** A flood is in the journal and someone complains; a heartbeat that stops presents as
+"the thing died" and produces no artifact at all. So an uncomputable window now counts as DUE —
+the failure direction is an extra line, never a dead one. `Infinity` is rejected with NaN, since
+honouring it puts a permanent per-key silence back within a caller's reach and `once(key)` already
+expresses "never again" observably. The obligation is deleted from the contract, not restated.
+
+📌 **The delegation was documented at the right altitude and was still the wrong control.** Round 8
+reasoned that the log is the home for a mechanism and the contract the home for the obligation it
+implies. That was sound about WHERE to write things and silent about whether the obligation should
+exist at all. A sentence cannot be enforced; a guard makes the state unrepresentable.
+
+Two smaller items from the same review. **The handler built a second logger view on
+`import-running-cron` with a different clock** — windows are keyed `subsystem × key` and the clock
+is not part of the key, so two views could compare one clock's readings against the other's stamps
+in one window. Production passes no clock, so it now reuses the module logger and the mix cannot
+arise there. That is a trap removed, not a bug fixed, and no case pins it. **And busy→idle was the
+one throttle branch no case drove**: the busy branch must not stamp the window, or the first idle
+tick after every import is suppressed for up to a full interval — indistinguishable from a cron
+that stopped. The new case drains the work the real way (the runner completes, the tick advances
+the phase out of `import_running`, the scan then returns zero rows) instead of faking idle.
+
+**Mutants, each asserted APPLIED by grep before its run was believed:** deleting the finite-window
+guard → 3 red in `logger.test.ts`; dropping the handler's throttle → 2 red; throttling the busy
+branch too → 2 red; and **a busy tick burning the idle window → 1 red, the new transition case
+alone**. That last row is why the case was worth adding — the first three are already caught by
+cases that existed, and coverage that only duplicates a red set is not coverage. Tree confirmed
+clean after every revert.
+
+⚠️ One revert used `git checkout <file>` against an UNCOMMITTED tree and discarded the round's own
+edits along with the mutation; it was caught only because the next grep for the guard came back
+empty. The rest ran against a committed tree. 📌 **A mutation harness that reverts to HEAD is safe
+only once the work is at HEAD.**
+
+**Verification (round 10):** `logger.test.ts` (51), `import-running-cron-tick.test.ts` (11) and
+`import-running-cron-scheduler-boot.test.ts` (2) pass, including under `bun test --rerun-each 2`.
+`scripts/ci/lint.sh` exit 0; `scripts/ci/typecheck-all.sh` exit 0 across all 51 tsconfigs, not
+`tsc -p .` alone. ⚠️ The **kimi** lane was DEFERRED in round 9 — configured, called, and the call
+failed. Earlier rounds of this entry record it as absent by design, which it was not: a configured
+reviewer that died leaves the panel INCOMPLETE. This entry records no APPROVE.
