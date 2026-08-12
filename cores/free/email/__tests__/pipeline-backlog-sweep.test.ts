@@ -224,3 +224,39 @@ describe('a mailbox connected AFTER the sweep gets its own sweep', () => {
     })
   })
 })
+
+describe('a re-opened sweep does not bury live mail in an already-swept mailbox', () => {
+  test("acct-a's NEW message survives acct-b's sweep", async () => {
+    await withStore(async (store) => {
+      const withA = scriptedClient([
+        {
+          results: [msg('a-1', 'acct-a')],
+          next_page_tokens: {},
+          accounts: [{ account_id: 'acct-a', account_email: 'a@example.com', ok: true }],
+        },
+      ])
+      await tick(withA, store)
+
+      // acct-b is connected, AND a genuinely new billing message has just
+      // arrived in acct-a. The re-opened sweep sees both.
+      const withBoth = scriptedClient([
+        {
+          results: [msg('a-new', 'acct-a'), msg('b-old', 'acct-b')],
+          next_page_tokens: {},
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: true },
+          ],
+        },
+      ])
+      await tick(withBoth, store)
+
+      // acct-b's history is marked...
+      expect(store.getEmail('b-old', 'acct-b')?.handling).toBe('preexisting')
+      // ...but acct-a's new message must NOT be. Marking it would bury a
+      // message the owner should have been told about, permanently and
+      // indistinguishably from history.
+      expect(store.getEmail('a-new', 'acct-a')).toBeNull()
+    })
+  })
+})

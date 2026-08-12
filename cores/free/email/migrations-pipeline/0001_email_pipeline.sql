@@ -50,11 +50,15 @@ CREATE TABLE IF NOT EXISTS emails (
   body_text            TEXT,
   received_at          INTEGER NOT NULL,
   processed_at         INTEGER NOT NULL,
-  -- NULL category = NEVER CLASSIFIED. That is the go-live cutoff record:
-  -- mail that predates `checkpoints.go_live_after` is archived without the
+  -- NULL category = NEVER CLASSIFIED. That is the BACKLOG record: mail already
+  -- in the inbox when the pipeline was switched on is marked without the
   -- classifier ever being invoked on it.
   category             TEXT,
-  -- 'escalate' | 'archive'.
+  -- 'escalate' | 'archive' | 'preexisting'. The last is the backlog
+  -- marker: recorded as handled and then left completely alone — never
+  -- classified, never escalated, never briefed, and never label-mutated. The
+  -- owner had already triaged that mail by hand (decision 2026-08-12), which
+  -- SUPERSEDES the original archive-on-cutoff design.
   handling             TEXT NOT NULL,
   -- Reserved for the P2 twice-daily brief (the brief this row was reported in).
   brief_id             INTEGER,
@@ -125,8 +129,13 @@ CREATE TABLE IF NOT EXISTS sender_rules (
 
 CREATE TABLE IF NOT EXISTS checkpoints (
   -- Keys in use:
-  --   go_live_after      — epoch-ms cutoff; mail older than this is archived
-  --                        WITHOUT being classified (first-run backlog).
+  --   go_live_after      — epoch-ms stamp of first run. PROVENANCE ONLY (P2
+  --                        reports from it); it is NOT a per-message gate.
+  --   backlog_marked[:id] — the one-time sweep's completion, per account. The
+  --                        connected set is dynamic, so a mailbox added later
+  --                        gets its own sweep rather than having its history
+  --                        read as new mail.
+  --   backlog_cursor(s)  — resume cursors for an in-flight sweep.
   --   last_poll_at       — epoch-ms of the last successful tick.
   --   consecutive_errors — tick-level failure streak.
   --   scribe_watermark   — reserved for P3 (the email→memory fan-out moves

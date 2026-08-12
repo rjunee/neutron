@@ -224,7 +224,20 @@ export async function runEmailPipelineTick(
           'backlog sweep received a TRUNCATED page (cursors withheld) — refusing to mark the backlog complete over a partial inbox',
         )
       }
+      // ONLY the mailboxes that still owe a sweep are marked. A re-opened
+      // sweep sees EVERY account's mail, and marking all of it `preexisting`
+      // would bury genuinely new mail that arrived in an already-swept mailbox
+      // while a second one was being connected — never classified, never
+      // escalated, and indistinguishable from history ever after. Mail from an
+      // already-marked account is left untouched here: it is not recorded, so
+      // the steady-state pass picks it up normally once the sweep finishes.
+      const sweepTargets = new Set(
+        accountsOnThisPage(page).filter(
+          (id) => store.getCheckpoint(backlogDoneKey(id)) !== '1',
+        ),
+      )
       for (const meta of page.results) {
+        if (!sweepTargets.has(meta.account_id ?? '')) continue
         if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
         const received_at = Date.parse(meta.internal_date)
         store.insertEmail({
@@ -278,7 +291,10 @@ export async function runEmailPipelineTick(
         // escalated into the owner's chat. Completion is therefore recorded
         // per account, and `backlogPending` below re-opens the sweep for any
         // account that has not had one.
-        for (const id of accountsOnThisPage(page)) {
+        // Mark exactly the accounts this sweep was FOR. Marking every account
+        // on the page would claim a completed sweep for a mailbox whose mail
+        // was deliberately skipped above.
+        for (const id of sweepTargets) {
           store.setCheckpoint(backlogDoneKey(id), '1')
         }
         store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
@@ -286,7 +302,7 @@ export async function runEmailPipelineTick(
         store.setCheckpoint(CHECKPOINT_BACKLOG_CURSORS, '')
         log?.('email pipeline backlog sweep complete', {
           marked: result.precutoff,
-          accounts: accountsOnThisPage(page),
+          accounts: [...sweepTargets],
         })
       }
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
