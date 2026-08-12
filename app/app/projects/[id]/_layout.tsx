@@ -63,7 +63,8 @@ import {
   type RailOverlayEntry,
 } from '../../../components/ProjectRail';
 import { ComposerDock, ComposerDockProvider } from '../../../lib/composer-dock';
-import { BREAKPOINTS, MOTION, SPACING, THEME, TYPOGRAPHY } from '../../../lib/composer-constants';
+import { BREAKPOINTS, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../../../lib/composer-constants';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 import { loadAppConfig } from '../../../lib/config';
 import { createProjectErrorCopy } from '../../../lib/create-project-helpers';
 import { chatRouteForProject, GENERAL_CHAT_ROUTE } from '../../../lib/entry-route';
@@ -142,6 +143,8 @@ const GENERAL_SCOPE_PROJECT: ProjectSettings = {
 };
 
 export default function ProjectLayout() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user, status: authStatus } = useAuthSession();
   // The URL is the authority for WHICH project the shell is showing.
@@ -163,7 +166,7 @@ export default function ProjectLayout() {
   if (authStatus !== 'ready' || user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -190,6 +193,8 @@ export default function ProjectLayout() {
 }
 
 function ProjectShell({ project_id }: { project_id: string }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   // CONCRETE path segments (`usePathname()` carries the real `<id>`/`<slug>`).
   // `useSegments()` would return the file-route TOKENS (`[id]`, `[slug]`) for
@@ -643,7 +648,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
   const contentOverlay =
     content.kind === 'ready' ? null : content.kind === 'loading' ? (
       <View style={[styles.contentFill, styles.centered]} testID="project-content-loading">
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     ) : content.kind === 'unavailable' ? (
       // The server was asked and could not answer. NOT "project not found" — the
@@ -837,6 +842,7 @@ function SlotFader({
   scopeId: string;
   children: React.ReactNode;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const opacity = useRef(new Animated.Value(1)).current;
   const lastKey = useRef<string>(keyId);
   const lastScope = useRef<string>(scopeId);
@@ -907,6 +913,7 @@ function ProjectLoadFailedPane({
   message: string;
   onRetry: () => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={[styles.contentFill, styles.centered]} testID="project-load-failed">
       <Text style={styles.errorTitle}>Couldn’t load this project</Text>
@@ -933,6 +940,7 @@ function ProjectNotFoundFallback({
   onBack: () => void;
   message?: string;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const safeId = typeof id === 'string' ? id : String(id ?? '');
   return (
     // `contentFill`, not `container`: this pane now renders INSIDE the persistent
@@ -960,61 +968,62 @@ function ProjectNotFoundFallback({
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: THEME.background,
-    paddingTop: SPACING.xxl + SPACING.lg,
-  },
-  centered: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: SPACING.xxl,
-  },
-  // A pane that fills whatever region it is placed in — the content pane inside
-  // the chrome, or the whole screen when there is no scope to build chrome for.
-  contentFill: { flex: 1, backgroundColor: THEME.background },
-  wideBody: {
-    flex: 1,
-    flexDirection: 'row',
-  },
-  wideContent: { flex: 1 },
-  // Mobile: rail (fixed) + main column (tabs + content).
-  railBody: {
-    flex: 1,
-    flexDirection: 'row',
-  },
-  railMain: { flex: 1 },
-  narrowContent: { flex: 1 },
-  fader: { flex: 1 },
-  errorTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  errorBody: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    textAlign: 'center',
-    marginTop: SPACING.sm,
-  },
-  backBtn: {
-    marginTop: SPACING.lg,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md - SPACING.xs / 2,
-    borderRadius: SPACING.md - SPACING.xs / 2,
-    backgroundColor: THEME.text_primary,
-  },
-  backBtnText: {
-    color: THEME.background,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '600',
-  },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.background,
+      paddingTop: SPACING.xxl + SPACING.lg,
+    },
+    centered: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: SPACING.xxl,
+    },
+    // A pane that fills whatever region it is placed in — the content pane inside
+    // the chrome, or the whole screen when there is no scope to build chrome for.
+    contentFill: { flex: 1, backgroundColor: theme.background },
+    wideBody: {
+      flex: 1,
+      flexDirection: 'row',
+    },
+    wideContent: { flex: 1 },
+    // Mobile: rail (fixed) + main column (tabs + content).
+    railBody: {
+      flex: 1,
+      flexDirection: 'row',
+    },
+    railMain: { flex: 1 },
+    narrowContent: { flex: 1 },
+    fader: { flex: 1 },
+    errorTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    errorBody: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      textAlign: 'center',
+      marginTop: SPACING.sm,
+    },
+    backBtn: {
+      marginTop: SPACING.lg,
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md - SPACING.xs / 2,
+      borderRadius: SPACING.md - SPACING.xs / 2,
+      backgroundColor: theme.text_primary,
+    },
+    backBtnText: {
+      color: theme.background,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '600',
+    },
+    pressed: { opacity: 0.7 },
+  });
 
 // Re-export the locked tab set so external callers (tests, future
 // surfaces that want to iterate over the canonical lens list) don't

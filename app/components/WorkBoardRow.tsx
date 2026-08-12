@@ -41,7 +41,8 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme, type NeutronPhaseColors } from '../lib/theme';
+import { usePhase, useTheme, useThemedStyles } from '../lib/theme-context';
 import {
   canPlay,
   dotState,
@@ -84,9 +85,14 @@ export interface WorkBoardRowProps {
   onOpenDoc?: () => void;
 }
 
-/** Solid dot color for a phase bucket; the faint muted outline for 'upcoming'. */
-function dotColor(colorKey: DotColorKey): string {
-  return colorKey === 'upcoming' ? THEME.text_muted : PHASE[colorKey].fg;
+/** Solid dot color for a phase bucket; the faint muted outline for 'upcoming'.
+ *  Takes the active palette — the phase ramp has light and dark variants. */
+function dotColor(
+  colorKey: DotColorKey,
+  theme: NeutronTheme,
+  phase: NeutronPhaseColors,
+): string {
+  return colorKey === 'upcoming' ? theme.text_muted : phase[colorKey].fg;
 }
 
 /** Reduce-motion preference, live-updated. Same pattern as `ProjectSettingsDrawer`. */
@@ -124,6 +130,9 @@ function WorkBoardRowImpl({
   onPlay,
   onOpenDoc,
 }: WorkBoardRowProps) {
+  const theme = useTheme();
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(item.title);
   const [dragging, setDragging] = useState(false);
@@ -240,8 +249,8 @@ function WorkBoardRowImpl({
             style={[
               styles.dot,
               {
-                borderColor: dotColor(dot.colorKey),
-                backgroundColor: dot.colorKey === 'upcoming' ? 'transparent' : dotColor(dot.colorKey),
+                borderColor: dotColor(dot.colorKey, theme, phase),
+                backgroundColor: dot.colorKey === 'upcoming' ? 'transparent' : dotColor(dot.colorKey, theme, phase),
                 opacity: dot.pulse ? pulseAnim : 1,
               },
             ]}
@@ -322,8 +331,8 @@ function WorkBoardRowImpl({
       {hasStatus ? (
         <View style={styles.meta}>
           {tag !== null ? (
-            <View style={[styles.tag, { backgroundColor: PHASE[tag.colorKey].bg }]}>
-              <Text style={[styles.tagText, { color: PHASE[tag.colorKey].fg }]}>{tag.label}</Text>
+            <View style={[styles.tag, { backgroundColor: phase[tag.colorKey].bg }]}>
+              <Text style={[styles.tagText, { color: phase[tag.colorKey].fg }]}>{tag.label}</Text>
             </View>
           ) : null}
           {round !== null ? <Text style={styles.round}>{round}</Text> : null}
@@ -348,6 +357,9 @@ function WorkBoardCompletedRowImpl({
   busy: boolean;
   onDelete: () => void;
 }) {
+  const theme = useTheme();
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   const requestDelete = (): void => {
     Alert.alert('Remove this item?', undefined, [
       { text: 'Keep', style: 'cancel' },
@@ -384,6 +396,9 @@ function IconButton({
   disabled: boolean;
   onPress: () => void;
 }) {
+  const theme = useTheme();
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   return (
     <Pressable
       accessibilityRole="button"
@@ -400,110 +415,111 @@ function IconButton({
 export const WorkBoardRow = memo(WorkBoardRowImpl);
 export const WorkBoardCompletedRow = memo(WorkBoardCompletedRowImpl);
 
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'column',
-    gap: 1,
-    paddingHorizontal: SPACING.sm,
-    borderRadius: SPACING.sm,
-  },
-  // Line 1 — dot + title + actions (the former single-line row layout).
-  line1: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    minHeight: ROW_MIN_HEIGHT,
-  },
-  // Line 2 — muted phase tag + round (or the completed datestamp), indented under
-  // the title. Renders only when the item has status to show (item 4).
-  meta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs,
-    marginLeft: META_INDENT,
-    paddingBottom: SPACING.xs / 2,
-  },
-  rowDragging: { opacity: DRAG_ACTIVE_OPACITY, backgroundColor: THEME.surface_raised },
-  rowDone: { opacity: 0.55 },
-  dotHit: {
-    width: ICON_HIT - SPACING.md,
-    height: ROW_MIN_HEIGHT,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: -SPACING.xs,
-  },
-  dot: {
-    width: DOT_SIZE,
-    height: DOT_SIZE,
-    borderRadius: DOT_SIZE / 2,
-    borderWidth: DOT_BORDER,
-  },
-  dotDone: { borderColor: PHASE.merge.fg, backgroundColor: PHASE.merge.fg },
-  titleCol: { flex: 1, justifyContent: 'center' },
-  titleFill: { flex: 1 },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  docLink: {
-    color: THEME.link,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  titleDone: { color: THEME.text_muted, textDecorationLine: 'line-through' },
-  editInput: {
-    flex: 1,
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    borderWidth: 1,
-    borderColor: THEME.link,
-    borderRadius: SPACING.xs,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-  },
-  tag: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: DENSITY.chip_radius,
-  },
-  tagText: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  round: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  // failure-reason one-liner (#340) — muted red, single-line, shrinks/truncates.
-  failReason: {
-    flexShrink: 1,
-    color: PHASE.failed.fg,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  date: {
-    color: THEME.text_muted,
-    fontFamily: TYPOGRAPHY.mono.fontFamily,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  actions: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs },
-  iconBtn: {
-    width: ICON_HIT,
-    height: ICON_HIT,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: SPACING.xs,
-  },
-  iconGlyph: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  iconDisabled: { opacity: 0.3 },
-  pressed: { opacity: 0.6 },
-});
+const makeStyles = (theme: NeutronTheme, phase: NeutronPhaseColors) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'column',
+      gap: 1,
+      paddingHorizontal: SPACING.sm,
+      borderRadius: SPACING.sm,
+    },
+    // Line 1 — dot + title + actions (the former single-line row layout).
+    line1: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      minHeight: ROW_MIN_HEIGHT,
+    },
+    // Line 2 — muted phase tag + round (or the completed datestamp), indented under
+    // the title. Renders only when the item has status to show (item 4).
+    meta: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.xs,
+      marginLeft: META_INDENT,
+      paddingBottom: SPACING.xs / 2,
+    },
+    rowDragging: { opacity: DRAG_ACTIVE_OPACITY, backgroundColor: theme.surface_raised },
+    rowDone: { opacity: 0.55 },
+    dotHit: {
+      width: ICON_HIT - SPACING.md,
+      height: ROW_MIN_HEIGHT,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginLeft: -SPACING.xs,
+    },
+    dot: {
+      width: DOT_SIZE,
+      height: DOT_SIZE,
+      borderRadius: DOT_SIZE / 2,
+      borderWidth: DOT_BORDER,
+    },
+    dotDone: { borderColor: phase.merge.fg, backgroundColor: phase.merge.fg },
+    titleCol: { flex: 1, justifyContent: 'center' },
+    titleFill: { flex: 1 },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    docLink: {
+      color: theme.link,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    titleDone: { color: theme.text_muted, textDecorationLine: 'line-through' },
+    editInput: {
+      flex: 1,
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      borderWidth: 1,
+      borderColor: theme.link,
+      borderRadius: SPACING.xs,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+    },
+    tag: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      borderRadius: DENSITY.chip_radius,
+    },
+    tagText: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    round: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    // failure-reason one-liner (#340) — muted red, single-line, shrinks/truncates.
+    failReason: {
+      flexShrink: 1,
+      color: phase.failed.fg,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    date: {
+      color: theme.text_muted,
+      fontFamily: TYPOGRAPHY.mono.fontFamily,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    actions: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs },
+    iconBtn: {
+      width: ICON_HIT,
+      height: ICON_HIT,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: SPACING.xs,
+    },
+    iconGlyph: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    iconDisabled: { opacity: 0.3 },
+    pressed: { opacity: 0.6 },
+  });

@@ -54,6 +54,8 @@ import { DiagnosticsPane } from '../features/admin/DiagnosticsPane';
 import { CoresPane } from '../features/admin/CoresPane';
 import { BackupPane } from '../features/admin/BackupPane';
 import { MaxAccountPane } from '../features/admin/MaxAccountPane';
+import type { NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 type AdminPaneKey =
   | 'personality'
@@ -80,6 +82,8 @@ const PANES: ReadonlyArray<PaneSpec> = [
 ];
 
 export default function AdminScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
@@ -105,7 +109,7 @@ export default function AdminScreen() {
   if (user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -164,14 +168,14 @@ export default function AdminScreen() {
       <View style={styles.paneContent}>
         {client === null ? (
           <View style={styles.centered}>
-            <ActivityIndicator color="#cfcfcf" />
+            <ActivityIndicator color={theme.text_secondary} />
           </View>
         ) : active === 'personality' ? (
           personaClient !== null ? (
             <PersonalityPane client={personaClient} />
           ) : (
             <View style={styles.centered}>
-              <ActivityIndicator color="#cfcfcf" />
+              <ActivityIndicator color={theme.text_secondary} />
             </View>
           )
         ) : active === 'gateway' ? (
@@ -188,7 +192,7 @@ export default function AdminScreen() {
           <CoresPane client={coresClient} router={router} />
         ) : (
           <View style={styles.centered}>
-            <ActivityIndicator color="#cfcfcf" />
+            <ActivityIndicator color={theme.text_secondary} />
           </View>
         )}
       </View>
@@ -196,8 +200,9 @@ export default function AdminScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a', paddingTop: 48 },
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+  container: { flex: 1, backgroundColor: theme.background, paddingTop: 48 },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   header: {
     flexDirection: 'row',
@@ -206,7 +211,7 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
+    borderBottomColor: theme.hairline,
   },
   headerIconBtn: {
     width: 40,
@@ -214,22 +219,22 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
   },
-  headerIcon: { color: '#e0e0e0', fontSize: 18, fontWeight: '600' },
+  headerIcon: { color: theme.accent, fontSize: 18, fontWeight: '600' },
   headerCenter: { flex: 1, paddingHorizontal: 4 },
   headerOverline: {
-    color: '#7a7a7a',
+    color: theme.text_muted,
     fontSize: 10,
     fontWeight: '600',
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
-  headerTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginTop: 1 },
+  headerTitle: { color: theme.text_primary, fontSize: 18, fontWeight: '700', marginTop: 1 },
   pressed: { opacity: 0.7 },
-  tabBar: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: '#1a1a1a' },
+  tabBar: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: theme.hairline },
   tabBarContent: { paddingHorizontal: 8, paddingVertical: 8, gap: 4 },
   tabItem: {
     paddingHorizontal: 14,
@@ -237,8 +242,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: 'transparent',
   },
-  tabItemActive: { backgroundColor: '#1a1a1a' },
-  tabLabel: { color: '#888', fontSize: 13, fontWeight: '500' },
-  tabLabelActive: { color: '#fafafa', fontWeight: '600' },
+  tabItemActive: { backgroundColor: theme.surface },
+  tabLabel: { color: theme.text_muted, fontSize: 13, fontWeight: '500' },
+  tabLabelActive: { color: theme.text_primary, fontWeight: '600' },
   paneContent: { flex: 1 },
 });

@@ -13,6 +13,8 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import type { DocTreeNode } from '../lib/docs-client';
 import { formatDocTime } from '../lib/docs-drill';
+import type { NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 export interface DocsDrillListProps {
   /** The nodes at THIS drill level (root tree, or a folder's children). */
@@ -62,6 +64,7 @@ function DrillRow({
   onPress(): void;
   onLongPress?(): void;
 }): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   return (
     <Pressable
       accessibilityRole="button"
@@ -90,6 +93,7 @@ export function DocsDrillList({
   onOpenFile,
   onLongPress,
 }: DocsDrillListProps): React.JSX.Element {
+  const styles = useThemedStyles(makeStyles);
   const clock = now ?? new Date();
   const folders = nodes.filter((n) => n.kind === 'folder');
   // Markdown files AND binaries (images/PDFs/…) are tappable leaves — dropping
@@ -163,10 +167,11 @@ export function DocsDrillList({
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   scroll: { paddingVertical: 8, paddingHorizontal: 6 },
   seclbl: {
-    color: '#8a8a8a',
+    color: theme.text_muted,
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.6,
@@ -183,10 +188,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderRadius: 8,
   },
-  pressed: { backgroundColor: '#1a1a1a' },
+  pressed: { backgroundColor: theme.surface },
   icon: { fontSize: 15 },
-  label: { color: '#cfcfcf', fontSize: 14, fontWeight: '500', flex: 1 },
-  time: { color: '#6a6a6a', fontSize: 12, fontVariant: ['tabular-nums'] },
-  chev: { color: '#6a6a6a', fontSize: 18, marginLeft: 2 },
-  empty: { color: '#5a5a5a', fontSize: 13, padding: 16 },
+  label: { color: theme.text_secondary, fontSize: 14, fontWeight: '500', flex: 1 },
+  time: { color: theme.text_muted, fontSize: 12, fontVariant: ['tabular-nums'] },
+  chev: { color: theme.text_muted, fontSize: 18, marginLeft: 2 },
+  empty: { color: theme.text_muted, fontSize: 13, padding: 16 },
 });

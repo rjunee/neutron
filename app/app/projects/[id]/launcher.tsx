@@ -58,9 +58,12 @@ import {
   useLauncherState,
 } from '../../../lib/launcher-state';
 import { useAuthSession } from '../../../lib/session';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../../../lib/theme';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 
 export default function LauncherTab() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { id } = useLocalSearchParams<{ id: string }>();
   const project_id = typeof id === 'string' ? id : '';
   const { user } = useAuthSession();
@@ -68,7 +71,7 @@ export default function LauncherTab() {
   if (user === null || project_id.length === 0) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -85,6 +88,8 @@ interface LauncherTabBodyProps {
 }
 
 function LauncherTabBody({ projectId }: LauncherTabBodyProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const {
     entries,
@@ -218,7 +223,7 @@ function LauncherTabBody({ projectId }: LauncherTabBodyProps) {
 
       {loading ? (
         <View style={styles.loadingRow}>
-          <ActivityIndicator color={THEME.text_secondary} />
+          <ActivityIndicator color={theme.text_secondary} />
           <Text style={styles.loadingText}>Loading installed Cores…</Text>
         </View>
       ) : null}
@@ -292,60 +297,61 @@ function LauncherTabBody({ projectId }: LauncherTabBodyProps) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: THEME.background, padding: SPACING.lg },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-  intro: { gap: SPACING.xs, marginBottom: SPACING.md },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h1.fontSize,
-    lineHeight: TYPOGRAPHY.h1.lineHeight,
-    fontWeight: '700',
-  },
-  subtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  loadingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingVertical: SPACING.sm,
-  },
-  loadingText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  errorBanner: {
-    marginBottom: SPACING.md,
-    padding: SPACING.sm,
-    borderRadius: DENSITY.banner_radius,
-    backgroundColor: `${THEME.danger}1a` /* THEME.danger @ ~10% alpha */,
-    borderWidth: 1,
-    borderColor: THEME.danger,
-  },
-  errorText: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  errorDismiss: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    marginTop: SPACING.xs / 2,
-    fontStyle: 'italic',
-  },
-  gridScroll: { flex: 1 },
-  gridContent: { paddingBottom: SPACING.xl },
-  emptyText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontStyle: 'italic',
-    marginTop: SPACING.xl,
-    textAlign: 'center',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background, padding: SPACING.lg },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+    intro: { gap: SPACING.xs, marginBottom: SPACING.md },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h1.fontSize,
+      lineHeight: TYPOGRAPHY.h1.lineHeight,
+      fontWeight: '700',
+    },
+    subtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    loadingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      paddingVertical: SPACING.sm,
+    },
+    loadingText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    errorBanner: {
+      marginBottom: SPACING.md,
+      padding: SPACING.sm,
+      borderRadius: DENSITY.banner_radius,
+      backgroundColor: `${theme.danger}1a` /* theme.danger @ ~10% alpha */,
+      borderWidth: 1,
+      borderColor: theme.danger,
+    },
+    errorText: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    errorDismiss: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      marginTop: SPACING.xs / 2,
+      fontStyle: 'italic',
+    },
+    gridScroll: { flex: 1 },
+    gridContent: { paddingBottom: SPACING.xl },
+    emptyText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontStyle: 'italic',
+      marginTop: SPACING.xl,
+      textAlign: 'center',
+    },
+  });

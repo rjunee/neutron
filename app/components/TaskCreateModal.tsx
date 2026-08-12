@@ -23,7 +23,8 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import type { CreateTaskInput } from '../lib/tasks-client';
 import { normalizeDueDate } from '../lib/task-formatters';
 
@@ -39,6 +40,8 @@ export interface TaskCreateModalProps {
 }
 
 export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCreateModalProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [dueDate, setDueDate] = useState('');
@@ -84,7 +87,7 @@ export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCr
           <TextInput
             accessibilityLabel="Task title"
             placeholder="What needs doing?"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             value={title}
             onChangeText={setTitle}
             style={styles.input}
@@ -95,7 +98,7 @@ export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCr
           <TextInput
             accessibilityLabel="Description"
             placeholder="Description (optional)"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             value={description}
             onChangeText={setDescription}
             style={[styles.input, styles.inputMultiline]}
@@ -106,7 +109,7 @@ export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCr
           <TextInput
             accessibilityLabel="Due date"
             placeholder="Due date (YYYY-MM-DD, optional)"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             value={dueDate}
             onChangeText={setDueDate}
             style={styles.input}
@@ -118,7 +121,7 @@ export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCr
           <TextInput
             accessibilityLabel="Priority"
             placeholder="Priority 0-3 (optional)"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             value={priority}
             onChangeText={setPriority}
             style={styles.input}
@@ -150,7 +153,7 @@ export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCr
               testID="tasks-create-submit"
             >
               {submitting ? (
-                <ActivityIndicator color={THEME.background} />
+                <ActivityIndicator color={theme.background} />
               ) : (
                 <Text style={[styles.btnText, styles.btnTextPrimary]}>Create</Text>
               )}
@@ -162,70 +165,71 @@ export function TaskCreateModal({ open, submitting, onCancel, onSubmit }: TaskCr
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.xl,
-  },
-  panel: {
-    width: '100%',
-    maxWidth: 380,
-    backgroundColor: THEME.surface,
-    borderRadius: DENSITY.bubble_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.lg,
-    gap: SPACING.sm,
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h2.fontSize,
-    lineHeight: TYPOGRAPHY.h2.lineHeight,
-    fontWeight: TYPOGRAPHY.h2.fontWeight,
-  },
-  subtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  input: {
-    color: THEME.text_primary,
-    backgroundColor: THEME.background,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  inputMultiline: { minHeight: 72, textAlignVertical: 'top' },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  btn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: DENSITY.bubble_radius - 4,
-    minWidth: 88,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnPressed: { opacity: 0.78 },
-  btnDisabled: { opacity: 0.5 },
-  btnNeutral: { backgroundColor: THEME.surface_raised },
-  btnPrimary: { backgroundColor: THEME.text_primary },
-  btnText: {
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  btnTextNeutral: { color: THEME.text_secondary },
-  btnTextPrimary: { color: THEME.background },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: theme.scrim,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.xl,
+    },
+    panel: {
+      width: '100%',
+      maxWidth: 380,
+      backgroundColor: theme.surface,
+      borderRadius: DENSITY.bubble_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.lg,
+      gap: SPACING.sm,
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h2.fontSize,
+      lineHeight: TYPOGRAPHY.h2.lineHeight,
+      fontWeight: TYPOGRAPHY.h2.fontWeight,
+    },
+    subtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    input: {
+      color: theme.text_primary,
+      backgroundColor: theme.background,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.composer_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm + 2,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    inputMultiline: { minHeight: 72, textAlignVertical: 'top' },
+    actions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    btn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm + 2,
+      borderRadius: DENSITY.bubble_radius - 4,
+      minWidth: 88,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    btnPressed: { opacity: 0.78 },
+    btnDisabled: { opacity: 0.5 },
+    btnNeutral: { backgroundColor: theme.surface_raised },
+    btnPrimary: { backgroundColor: theme.text_primary },
+    btnText: {
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    btnTextNeutral: { color: theme.text_secondary },
+    btnTextPrimary: { color: theme.background },
+  });

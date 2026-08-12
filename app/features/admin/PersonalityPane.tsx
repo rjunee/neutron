@@ -54,6 +54,8 @@ import {
 } from '../../lib/personality-pane-helpers';
 import { RenderMarkdown } from '../../lib/markdown-render';
 import { formatPersonaError } from './format';
+import type { NeutronTheme } from '../../lib/theme';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 
 type PreviewMode = 'edit' | 'preview';
 
@@ -99,6 +101,8 @@ const FILE_HINTS: Record<PersonaFilename, string> = {
 };
 
 export function PersonalityPane({ client }: { client: AdminPersonalityClient }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { width } = useWindowDimensions();
   const wideViewport = width >= 720;
   const [active, setActive] = useState<PersonaFilename>('SOUL.md');
@@ -312,7 +316,7 @@ export function PersonalityPane({ client }: { client: AdminPersonalityClient }) 
   if (loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -440,7 +444,7 @@ export function PersonalityPane({ client }: { client: AdminPersonalityClient }) 
               onChangeText={(t) => updatePane(active, { draft: t })}
               style={[styles.textarea, styles.editorFill]}
               placeholder={`# ${FILE_LABELS[active]}\n`}
-              placeholderTextColor="#5a5a5a"
+              placeholderTextColor={theme.text_muted}
             />
           </View>
           <ScrollView
@@ -460,7 +464,7 @@ export function PersonalityPane({ client }: { client: AdminPersonalityClient }) 
           onChangeText={(t) => updatePane(active, { draft: t })}
           style={styles.textarea}
           placeholder={`# ${FILE_LABELS[active]}\n`}
-          placeholderTextColor="#5a5a5a"
+          placeholderTextColor={theme.text_muted}
         />
       ) : (
         <ScrollView
@@ -627,15 +631,16 @@ export function PersonalityPane({ client }: { client: AdminPersonalityClient }) 
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   paneScroll: { padding: 16, gap: 12 },
   intro: { gap: 6, marginBottom: 8 },
-  paneTitle: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  paneSubtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
-  code: { color: '#cfcfcf', fontFamily: 'Menlo', fontSize: 12 },
+  paneTitle: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  paneSubtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+  code: { color: theme.text_secondary, fontFamily: 'Menlo', fontSize: 12 },
   label: {
-    color: '#6a6a6a',
+    color: theme.text_muted,
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0.5,
@@ -644,13 +649,13 @@ const styles = StyleSheet.create({
   },
   textarea: {
     minHeight: 220,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    color: '#fafafa',
+    color: theme.text_primary,
     fontSize: 13,
     lineHeight: 18,
     textAlignVertical: 'top',
@@ -660,15 +665,15 @@ const styles = StyleSheet.create({
   editorFill: { flex: 1, minHeight: 320 },
   previewMobile: {
     minHeight: 220,
-    backgroundColor: '#0d0d0d',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
   },
   previewScroll: { padding: 12 },
   divider: {
     height: 1,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     marginVertical: 16,
   },
   conflictRow: { gap: 8 },
@@ -678,73 +683,73 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
   },
-  choiceChipActive: { backgroundColor: '#1f2937', borderColor: '#374151' },
-  choiceLabel: { color: '#9a9a9a', fontSize: 12, fontWeight: '500' },
-  choiceLabelActive: { color: '#fafafa', fontWeight: '600' },
+  choiceChipActive: { backgroundColor: theme.surface_raised, borderColor: theme.hairline },
+  choiceLabel: { color: theme.text_muted, fontSize: 12, fontWeight: '500' },
+  choiceLabelActive: { color: theme.text_primary, fontWeight: '600' },
   primaryBtn: {
     marginTop: 12,
     paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: theme.accent,
     alignSelf: 'flex-start',
   },
   primaryBtnDisabled: { opacity: 0.5 },
-  primaryBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '600' },
+  primaryBtnText: { color: theme.background, fontSize: 14, fontWeight: '600' },
   secondaryBtn: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 10,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  secondaryBtnText: { color: '#e0e0e0', fontSize: 13, fontWeight: '500' },
+  secondaryBtnText: { color: theme.accent, fontSize: 13, fontWeight: '500' },
   dangerBtn: {
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#7f1d1d',
+    backgroundColor: theme.danger_fill,
     alignSelf: 'flex-start',
   },
-  dangerBtnText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  dangerBtnText: { color: theme.danger_ink, fontSize: 14, fontWeight: '600' },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
   bannerOk: {
-    backgroundColor: '#0f2418',
-    color: '#bbf7d0',
+    backgroundColor: theme.success_surface,
+    color: theme.success,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#14532d',
+    borderColor: theme.success_border,
     fontSize: 12,
   },
   bannerInfo: {
-    backgroundColor: '#0f1c2e',
-    color: '#bfdbfe',
+    backgroundColor: theme.info_surface,
+    color: theme.info,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#1e40af',
+    borderColor: theme.info_border,
     fontSize: 12,
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: theme.scrim,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
@@ -752,15 +757,15 @@ const styles = StyleSheet.create({
   modalPanel: {
     width: '100%',
     maxWidth: 360,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 18,
     gap: 12,
   },
-  modalTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700' },
-  modalBody: { color: '#bdbdbd', fontSize: 13, lineHeight: 18 },
+  modalTitle: { color: theme.text_primary, fontSize: 16, fontWeight: '700' },
+  modalBody: { color: theme.text_secondary, fontSize: 13, lineHeight: 18 },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
   pressed: { opacity: 0.7 },
 });

@@ -17,13 +17,15 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 export interface ReminderHeaderProps {
   onCreatePress: () => void;
 }
 
 export function ReminderHeader({ onCreatePress }: ReminderHeaderProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.header} testID="reminders-header">
       <View style={styles.intro}>
@@ -49,38 +51,39 @@ export function ReminderHeader({ onCreatePress }: ReminderHeaderProps) {
 
 const BUTTON_RADIUS = DENSITY.bubble_radius - 4;
 
-const styles = StyleSheet.create({
-  header: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: SPACING.md,
-    marginBottom: SPACING.sm,
-  },
-  intro: { flex: 1, gap: SPACING.xs },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h1.fontSize,
-    lineHeight: TYPOGRAPHY.h1.lineHeight,
-    fontWeight: TYPOGRAPHY.h1.fontWeight,
-  },
-  subtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  newBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    borderRadius: BUTTON_RADIUS,
-    backgroundColor: THEME.text_primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  newBtnPressed: { opacity: 0.78 },
-  newBtnText: {
-    color: THEME.background,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '700',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    header: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: SPACING.md,
+      marginBottom: SPACING.sm,
+    },
+    intro: { flex: 1, gap: SPACING.xs },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h1.fontSize,
+      lineHeight: TYPOGRAPHY.h1.lineHeight,
+      fontWeight: TYPOGRAPHY.h1.fontWeight,
+    },
+    subtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    newBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm,
+      borderRadius: BUTTON_RADIUS,
+      backgroundColor: theme.text_primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    newBtnPressed: { opacity: 0.78 },
+    newBtnText: {
+      color: theme.background,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '700',
+    },
+  });

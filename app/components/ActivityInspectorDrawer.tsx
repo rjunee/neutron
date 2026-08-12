@@ -47,8 +47,14 @@ import {
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
-import { PHASE } from '../lib/theme';
+import {
+  MOTION,
+  SPACING,
+  TYPOGRAPHY,
+  type NeutronPhaseColors,
+  type NeutronTheme,
+} from '../lib/composer-constants';
+import { usePhase, useTheme, useThemedStyles } from '../lib/theme-context';
 import {
   activityScopeKey,
   describeState,
@@ -102,16 +108,20 @@ export interface ActivityDrawerSource {
  * never contradict each other: build-blue = working (the same `PHASE.build.fg` the
  * pulsing dot uses), amber = stalled, red = not responding, muted = idle.
  */
-function stateColor(state: ActivityState): string {
+function stateColor(
+  state: ActivityState,
+  theme: NeutronTheme,
+  phase: NeutronPhaseColors,
+): string {
   switch (state) {
     case 'working':
-      return PHASE.build.fg;
+      return phase.build.fg;
     case 'wedged':
-      return THEME.attention;
+      return theme.attention;
     case 'dead':
-      return THEME.danger;
+      return theme.danger;
     case 'idle':
-      return THEME.text_muted;
+      return theme.text_muted;
   }
 }
 
@@ -150,6 +160,7 @@ function ActivityRowView({
   expanded: boolean;
   onToggle: (seq: number) => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const isAssistant = row.kind === 'token';
   const isError = row.kind === 'error';
   // The assistant's words are the full `body` when there is one; `detail` is only
@@ -243,6 +254,9 @@ export function ActivityInspectorDrawer({
   /** Test seam — overrides the async reduce-motion probe. */
   reduceMotionOverride?: boolean;
 }) {
+  const theme = useTheme();
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   const { width } = useWindowDimensions();
   const safeArea = useSafeAreaInsets();
   const panelWidth = useMemo(() => Math.min(width, 520), [width]);
@@ -415,8 +429,8 @@ export function ActivityInspectorDrawer({
               {label}
             </Text>
             <View style={styles.stateRow}>
-              <View style={[styles.stateDot, { backgroundColor: stateColor(state) }]} />
-              <Text style={[styles.state, { color: stateColor(state) }]} testID="activity-state">
+              <View style={[styles.stateDot, { backgroundColor: stateColor(state, theme, phase) }]} />
+              <Text style={[styles.state, { color: stateColor(state, theme, phase) }]} testID="activity-state">
                 {describeState(state)}
               </Text>
             </View>
@@ -481,197 +495,198 @@ export function ActivityInspectorDrawer({
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
-const styles = StyleSheet.create({
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    flexDirection: 'row',
-  },
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-  },
-  backdropPressable: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  panel: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: THEME.surface,
-    borderLeftWidth: 1,
-    borderLeftColor: THEME.hairline,
-    shadowColor: '#000000',
-    shadowOpacity: 0.35,
-    shadowOffset: { width: -4, height: 0 },
-    shadowRadius: 16,
-    elevation: 12,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.lg,
-    // `paddingTop` is supplied per-render from the safe-area inset. A constant
-    // here (it was `SPACING.xxl` = 32) is shorter than the notch on every modern
-    // iPhone, which is what put the close button out of reach.
-    paddingBottom: SPACING.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: THEME.hairline,
-  },
-  headerText: { flex: 1, minWidth: 0, gap: SPACING.xs },
-  scope: {
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: '600',
-    color: THEME.text_primary,
-  },
-  stateRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs + 2 },
-  stateDot: { width: 8, height: 8, borderRadius: 4 },
-  state: {
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  // A full HIG-minimum target, not a 16pt glyph with 4pt of padding.
-  closeBtn: {
-    width: MIN_TAP_TARGET_PT,
-    height: MIN_TAP_TARGET_PT,
-    borderRadius: MIN_TAP_TARGET_PT / 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface_raised,
-  },
-  closeBtnPressed: { opacity: 0.6 },
-  closeGlyph: { fontSize: 18, lineHeight: 22, color: THEME.text_secondary },
-  clocks: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.lg,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: THEME.hairline,
-  },
-  clock: { gap: SPACING.xs },
-  clockDivider: { width: StyleSheet.hairlineWidth, alignSelf: 'stretch', backgroundColor: THEME.hairline },
-  clockKey: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    letterSpacing: 0.6,
-    color: THEME.text_muted,
-  },
-  clockVal: {
-    fontSize: TYPOGRAPHY.h4.fontSize,
-    lineHeight: TYPOGRAPHY.h4.lineHeight,
-    fontWeight: '600',
-    color: THEME.text_primary,
-    fontVariant: ['tabular-nums'],
-  },
-  list: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    gap: SPACING.xs + 2,
-  },
-  row: { flexDirection: 'row', alignItems: 'flex-start', gap: SPACING.sm },
-  // An assistant message is a MESSAGE, not a tick: it gets breathing room and a
-  // left rule so the eye can find the model's own words in the stream at a glance.
-  rowAssistant: {
-    borderLeftWidth: 2,
-    borderLeftColor: THEME.hairline,
-    paddingLeft: SPACING.sm,
-    marginLeft: -SPACING.sm,
-    paddingVertical: SPACING.xs,
-  },
-  // A synthetic keepalive is NOT work — near-invisible so it never reads as
-  // progress (that misreading is exactly ISSUES #386).
-  rowSynthetic: { opacity: 0.38 },
-  // Time + glyph are a FIXED-WIDTH gutter. Pulling them out of the main flex row
-  // is what lets the content column own all remaining width and wrap inside it.
-  rowGutter: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexShrink: 0 },
-  // THE OVERFLOW FIX, and mind WHICH property does the work here — this is Yoga,
-  // not CSS. Yoga defaults `flexShrink` to 0 (CSS defaults it to 1), so a Text
-  // given no shrink simply refuses to narrow and pushes the row wider than the
-  // drawer; that is how a 52-character MCP transport id ran off the right edge.
-  // `flex: 1` is the fix because it sets flexShrink to 1 as well as claiming the
-  // remaining width. `minWidth: 0` is belt-and-braces for parity with the web
-  // twin (where the operative rule is CSS's `min-width: auto` content floor,
-  // which Yoga does not implement at all).
-  rowContent: { flex: 1, minWidth: 0, gap: 2 },
-  rowHead: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexWrap: 'wrap' },
-  // 11pt monospace was unreadable on a phone. 13 is the smallest size in the
-  // type scale (`TYPOGRAPHY.body_small`) and still fits a timestamp + a label.
-  rowTime: {
-    fontFamily: MONO,
-    fontSize: 13,
-    lineHeight: 19,
-    color: THEME.text_muted,
-    fontVariant: ['tabular-nums'],
-  },
-  rowGlyph: { fontFamily: MONO, fontSize: 13, lineHeight: 19, color: THEME.text_muted, width: 16 },
-  rowLabel: {
-    fontFamily: MONO,
-    fontSize: 13,
-    lineHeight: 19,
-    fontWeight: '600',
-    color: THEME.text_primary,
-    flexShrink: 1,
-  },
-  // The MCP server the tool came from — present but demoted, so the identity is
-  // never lost while the TOOL stays the thing you read first.
-  rowSource: {
-    fontFamily: MONO,
-    fontSize: 13,
-    lineHeight: 19,
-    color: THEME.text_muted,
-    flexShrink: 1,
-  },
-  rowDetail: {
-    fontFamily: MONO,
-    fontSize: 13,
-    lineHeight: 19,
-    color: THEME.text_muted,
-  },
-  // The expanded payload: full arguments, or what the tool returned. Monospace and
-  // newline-preserving, because the shape of a diff or a listing is its meaning.
-  rowBodyText: {
-    fontFamily: MONO,
-    fontSize: 13,
-    lineHeight: 19,
-    color: THEME.text_secondary,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: 6,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    marginTop: 2,
-  },
-  rowMore: {
-    fontSize: 13,
-    lineHeight: 18,
-    color: THEME.text_muted,
-    marginTop: 1,
-  },
-  // Assistant prose is deliberately NOT monospace — it is language, and the
-  // proportional face is what makes it read as a message beside the mono tool ticks.
-  assistantWho: {
-    fontSize: 13,
-    lineHeight: 18,
-    letterSpacing: 0.6,
-    color: THEME.text_muted,
-  },
-  assistantText: {
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    color: THEME.text_primary,
-  },
-  rowError: { color: THEME.danger },
-  empty: {
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    color: THEME.text_muted,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      flexDirection: 'row',
+    },
+    backdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: theme.scrim,
+    },
+    backdropPressable: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    panel: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: theme.surface,
+      borderLeftWidth: 1,
+      borderLeftColor: theme.hairline,
+      shadowColor: theme.shadow,
+      shadowOpacity: 0.35,
+      shadowOffset: { width: -4, height: 0 },
+      shadowRadius: 16,
+      elevation: 12,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: SPACING.sm,
+      paddingHorizontal: SPACING.lg,
+      // `paddingTop` is supplied per-render from the safe-area inset. A constant
+      // here (it was `SPACING.xxl` = 32) is shorter than the notch on every modern
+      // iPhone, which is what put the close button out of reach.
+      paddingBottom: SPACING.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.hairline,
+    },
+    headerText: { flex: 1, minWidth: 0, gap: SPACING.xs },
+    scope: {
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: '600',
+      color: theme.text_primary,
+    },
+    stateRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs + 2 },
+    stateDot: { width: 8, height: 8, borderRadius: 4 },
+    state: {
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    // A full HIG-minimum target, not a 16pt glyph with 4pt of padding.
+    closeBtn: {
+      width: MIN_TAP_TARGET_PT,
+      height: MIN_TAP_TARGET_PT,
+      borderRadius: MIN_TAP_TARGET_PT / 2,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface_raised,
+    },
+    closeBtnPressed: { opacity: 0.6 },
+    closeGlyph: { fontSize: 18, lineHeight: 22, color: theme.text_secondary },
+    clocks: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.lg,
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.hairline,
+    },
+    clock: { gap: SPACING.xs },
+    clockDivider: { width: StyleSheet.hairlineWidth, alignSelf: 'stretch', backgroundColor: theme.hairline },
+    clockKey: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      letterSpacing: 0.6,
+      color: theme.text_muted,
+    },
+    clockVal: {
+      fontSize: TYPOGRAPHY.h4.fontSize,
+      lineHeight: TYPOGRAPHY.h4.lineHeight,
+      fontWeight: '600',
+      color: theme.text_primary,
+      fontVariant: ['tabular-nums'],
+    },
+    list: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md,
+      gap: SPACING.xs + 2,
+    },
+    row: { flexDirection: 'row', alignItems: 'flex-start', gap: SPACING.sm },
+    // An assistant message is a MESSAGE, not a tick: it gets breathing room and a
+    // left rule so the eye can find the model's own words in the stream at a glance.
+    rowAssistant: {
+      borderLeftWidth: 2,
+      borderLeftColor: theme.hairline,
+      paddingLeft: SPACING.sm,
+      marginLeft: -SPACING.sm,
+      paddingVertical: SPACING.xs,
+    },
+    // A synthetic keepalive is NOT work — near-invisible so it never reads as
+    // progress (that misreading is exactly ISSUES #386).
+    rowSynthetic: { opacity: 0.38 },
+    // Time + glyph are a FIXED-WIDTH gutter. Pulling them out of the main flex row
+    // is what lets the content column own all remaining width and wrap inside it.
+    rowGutter: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexShrink: 0 },
+    // THE OVERFLOW FIX, and mind WHICH property does the work here — this is Yoga,
+    // not CSS. Yoga defaults `flexShrink` to 0 (CSS defaults it to 1), so a Text
+    // given no shrink simply refuses to narrow and pushes the row wider than the
+    // drawer; that is how a 52-character MCP transport id ran off the right edge.
+    // `flex: 1` is the fix because it sets flexShrink to 1 as well as claiming the
+    // remaining width. `minWidth: 0` is belt-and-braces for parity with the web
+    // twin (where the operative rule is CSS's `min-width: auto` content floor,
+    // which Yoga does not implement at all).
+    rowContent: { flex: 1, minWidth: 0, gap: 2 },
+    rowHead: { flexDirection: 'row', alignItems: 'baseline', gap: SPACING.xs, flexWrap: 'wrap' },
+    // 11pt monospace was unreadable on a phone. 13 is the smallest size in the
+    // type scale (`TYPOGRAPHY.body_small`) and still fits a timestamp + a label.
+    rowTime: {
+      fontFamily: MONO,
+      fontSize: 13,
+      lineHeight: 19,
+      color: theme.text_muted,
+      fontVariant: ['tabular-nums'],
+    },
+    rowGlyph: { fontFamily: MONO, fontSize: 13, lineHeight: 19, color: theme.text_muted, width: 16 },
+    rowLabel: {
+      fontFamily: MONO,
+      fontSize: 13,
+      lineHeight: 19,
+      fontWeight: '600',
+      color: theme.text_primary,
+      flexShrink: 1,
+    },
+    // The MCP server the tool came from — present but demoted, so the identity is
+    // never lost while the TOOL stays the thing you read first.
+    rowSource: {
+      fontFamily: MONO,
+      fontSize: 13,
+      lineHeight: 19,
+      color: theme.text_muted,
+      flexShrink: 1,
+    },
+    rowDetail: {
+      fontFamily: MONO,
+      fontSize: 13,
+      lineHeight: 19,
+      color: theme.text_muted,
+    },
+    // The expanded payload: full arguments, or what the tool returned. Monospace and
+    // newline-preserving, because the shape of a diff or a listing is its meaning.
+    rowBodyText: {
+      fontFamily: MONO,
+      fontSize: 13,
+      lineHeight: 19,
+      color: theme.text_secondary,
+      backgroundColor: theme.surface_raised,
+      borderRadius: 6,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      marginTop: 2,
+    },
+    rowMore: {
+      fontSize: 13,
+      lineHeight: 18,
+      color: theme.text_muted,
+      marginTop: 1,
+    },
+    // Assistant prose is deliberately NOT monospace — it is language, and the
+    // proportional face is what makes it read as a message beside the mono tool ticks.
+    assistantWho: {
+      fontSize: 13,
+      lineHeight: 18,
+      letterSpacing: 0.6,
+      color: theme.text_muted,
+    },
+    assistantText: {
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      color: theme.text_primary,
+    },
+    rowError: { color: theme.danger },
+    empty: {
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      color: theme.text_muted,
+    },
+  });

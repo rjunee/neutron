@@ -19,18 +19,23 @@ import { StyleSheet, View, type DimensionValue } from 'react-native';
 
 import { clampFraction, usageBand, type UsageBand } from '@neutronai/contracts/credential-usage.ts';
 
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import type { UsagePayload } from '../lib/usage-client';
 
 /** A measured-but-tiny reading still gets a visible sliver, so "barely used" and
  *  "unknown" never render identically. */
 const MIN_VISIBLE_FILL = 2;
 
-const BAND_COLOR: Record<UsageBand, string> = {
-  nominal: THEME.usage_nominal,
-  warning: THEME.usage_warning,
-  critical: THEME.usage_critical,
-};
+/** The band ramp, per palette. A function rather than a constant because the
+ *  three bar colours differ between light and dark (the dark greens and ambers
+ *  wash out on a white page), so a map built once at import would have painted
+ *  the wrong ramp in one of the two themes. */
+function bandColor(band: UsageBand, theme: NeutronTheme): string {
+  if (band === 'critical') return theme.usage_critical;
+  if (band === 'warning') return theme.usage_warning;
+  return theme.usage_nominal;
+}
 
 function UsageLine({
   fraction,
@@ -39,6 +44,8 @@ function UsageLine({
   fraction: number | null;
   testID: string;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   if (fraction === null) {
     return <View style={styles.line} testID={testID} />;
   }
@@ -48,7 +55,7 @@ function UsageLine({
         testID={`${testID}-fill`}
         style={[
           styles.fill,
-          { backgroundColor: BAND_COLOR[usageBand(fraction)] },
+          { backgroundColor: bandColor(usageBand(fraction), theme) },
           // Percentage width so the fill tracks the band's own width without a
           // measured layout; `styles.fill`'s `minWidth` keeps a tiny reading
           // visible. Fixed precision because `0.07 * 100` is not 7.
@@ -60,6 +67,7 @@ function UsageLine({
 }
 
 export function UsageMeter({ usage }: { usage: UsagePayload }) {
+  const styles = useThemedStyles(makeStyles);
   const available = usage.available;
   return (
     <View style={styles.meter} testID="usage-meter">
@@ -71,15 +79,16 @@ export function UsageMeter({ usage }: { usage: UsagePayload }) {
 
 const METER_LINE_HEIGHT = 1;
 
-const styles = StyleSheet.create({
-  meter: { flexGrow: 0 },
-  line: {
-    height: METER_LINE_HEIGHT,
-    backgroundColor: THEME.hairline,
-    overflow: 'hidden',
-  },
-  fill: {
-    height: METER_LINE_HEIGHT,
-    minWidth: MIN_VISIBLE_FILL,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    meter: { flexGrow: 0 },
+    line: {
+      height: METER_LINE_HEIGHT,
+      backgroundColor: theme.hairline,
+      overflow: 'hidden',
+    },
+    fill: {
+      height: METER_LINE_HEIGHT,
+      minWidth: MIN_VISIBLE_FILL,
+    },
+  });

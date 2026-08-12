@@ -20,7 +20,7 @@ import {
   projectChipLabel,
   INSTANCE_CHIP_LABEL,
 } from '../lib/focus-row-formatters';
-import { THEME } from '../lib/theme';
+import { DARK_THEME, LIGHT_THEME } from '../lib/theme';
 
 function makeItem(extra: Partial<FocusItem> = {}): FocusItem {
   return {
@@ -109,16 +109,30 @@ describe('projectChipLabel + isInstanceLevel', () => {
 });
 
 describe('bucketDotColor', () => {
-  const cases: Array<[FocusBucket, string]> = [
-    ['overdue', THEME.danger],
-    ['today', THEME.warning],
-    ['soon', THEME.text_muted],
-  ];
-  for (const [bucket, color] of cases) {
-    it(`maps ${bucket} → ${color}`, () => {
-      expect(bucketDotColor(bucket)).toBe(color);
-    });
+  // Asserted for BOTH palettes, keyed by token rather than by hex. The point is
+  // that the mapping bucket -> token is stable while the VALUES differ per theme;
+  // a test pinned to one palette's hexes would pass while the light theme painted
+  // dark-red dots on a white page.
+  for (const [name, theme] of [['dark', DARK_THEME], ['light', LIGHT_THEME]] as const) {
+    const cases: Array<[FocusBucket, string]> = [
+      ['overdue', theme.danger],
+      ['today', theme.warning],
+      ['soon', theme.text_muted],
+    ];
+    for (const [bucket, color] of cases) {
+      it(`maps ${bucket} -> ${color} in ${name}`, () => {
+        expect(bucketDotColor(bucket, theme)).toBe(color);
+      });
+    }
   }
+
+  it('gives the two palettes DIFFERENT dots for the same bucket', () => {
+    // The guard against someone collapsing the parameter back to a captured
+    // palette: if it were captured, both calls would answer identically.
+    expect(bucketDotColor('overdue', LIGHT_THEME)).not.toBe(
+      bucketDotColor('overdue', DARK_THEME),
+    );
+  });
 });
 
 describe('priorityChipKind', () => {
@@ -169,7 +183,7 @@ describe('integration smoke', () => {
     expect(priorityChipKind(it1.priority)).toBe('p1');
     expect(dueChipKind(it1.bucket)).toBe('today');
     expect(formatDueRelative(it1.due_at, now)).toBe('due in 1h');
-    expect(bucketDotColor(it1.bucket)).toBe(THEME.warning);
+    expect(bucketDotColor(it1.bucket, DARK_THEME)).toBe(DARK_THEME.warning);
   });
 
   it('renders the instance-level register for a project-less reminder', () => {
@@ -177,6 +191,6 @@ describe('integration smoke', () => {
     expect(kindChipLabel(it1)).toBe('Reminder');
     expect(projectChipLabel(it1)).toBe(INSTANCE_CHIP_LABEL);
     expect(isInstanceLevel(it1)).toBe(true);
-    expect(bucketDotColor(it1.bucket)).toBe(THEME.danger);
+    expect(bucketDotColor(it1.bucket, DARK_THEME)).toBe(DARK_THEME.danger);
   });
 });

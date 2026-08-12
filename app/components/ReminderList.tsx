@@ -38,7 +38,8 @@ import {
   type ReminderStateError,
 } from '../lib/reminder-state-reducer';
 import type { ReminderItem } from '../lib/reminders-client';
-import { BREAKPOINTS, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { BREAKPOINTS, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { ALPHA_TINTS } from '../lib/task-row-formatters';
 import { ReminderRow } from './ReminderRow';
 
@@ -77,6 +78,8 @@ export function ReminderList({
   onDismissError,
   highlightReminderId = null,
 }: ReminderListProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { width } = useWindowDimensions();
   const wideWeb = Platform.OS === 'web' && width > BREAKPOINTS.narrow_max;
   const contentStyle = wideWeb
@@ -125,7 +128,7 @@ export function ReminderList({
 
       {loading && reminders.length === 0 ? (
         <View style={styles.loadingRow} testID="reminders-loading-row">
-          <ActivityIndicator color={THEME.text_secondary} />
+          <ActivityIndicator color={theme.text_secondary} />
           <Text style={styles.loadingText}>Loading reminders…</Text>
         </View>
       ) : null}
@@ -181,63 +184,64 @@ function emptyCopyForFilter(filter: ReminderFilterChoice, total: number): string
   return 'No pending reminders. Tap “+ New reminder” to add one.';
 }
 
-const styles = StyleSheet.create({
-  listWrap: { flex: 1 },
-  listScroll: { flex: 1 },
-  listContent: {
-    gap: SPACING.sm,
-    paddingBottom: SPACING.xl,
-  },
-  listContentWide: {
-    maxWidth: CONTENT_MAX_WIDTH,
-    alignSelf: 'center',
-    width: '100%',
-  },
-  loadingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingVertical: SPACING.sm,
-  },
-  loadingText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  errorBanner: {
-    marginBottom: SPACING.md,
-    padding: SPACING.md,
-    borderRadius: SPACING.sm,
-    backgroundColor: THEME.danger + ALPHA_TINTS.panel,
-    borderWidth: 1,
-    borderColor: THEME.danger + '5a',
-  },
-  errorText: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-  },
-  errorDismiss: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    marginTop: SPACING.xs,
-    fontStyle: 'italic',
-    opacity: 0.75,
-  },
-  emptyText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontStyle: 'italic',
-    marginTop: SPACING.xl,
-    textAlign: 'center',
-  },
-  highlightedWrap: {
-    borderRadius: SPACING.sm,
-    borderWidth: 1,
-    borderColor: THEME.text_secondary,
-    backgroundColor: THEME.surface_raised,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    listWrap: { flex: 1 },
+    listScroll: { flex: 1 },
+    listContent: {
+      gap: SPACING.sm,
+      paddingBottom: SPACING.xl,
+    },
+    listContentWide: {
+      maxWidth: CONTENT_MAX_WIDTH,
+      alignSelf: 'center',
+      width: '100%',
+    },
+    loadingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      paddingVertical: SPACING.sm,
+    },
+    loadingText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    errorBanner: {
+      marginBottom: SPACING.md,
+      padding: SPACING.md,
+      borderRadius: SPACING.sm,
+      backgroundColor: theme.danger + ALPHA_TINTS.panel,
+      borderWidth: 1,
+      borderColor: theme.danger + '5a',
+    },
+    errorText: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+    },
+    errorDismiss: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      marginTop: SPACING.xs,
+      fontStyle: 'italic',
+      opacity: 0.75,
+    },
+    emptyText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontStyle: 'italic',
+      marginTop: SPACING.xl,
+      textAlign: 'center',
+    },
+    highlightedWrap: {
+      borderRadius: SPACING.sm,
+      borderWidth: 1,
+      borderColor: theme.text_secondary,
+      backgroundColor: theme.surface_raised,
+    },
+  });

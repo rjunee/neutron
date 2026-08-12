@@ -21,7 +21,8 @@
 import { StyleSheet, Text, View } from 'react-native';
 
 import type { FocusBucket, FocusItem } from '../lib/focus-client';
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 import { FocusRow } from './FocusRow';
 
 export interface FocusBucketSectionProps {
@@ -40,6 +41,7 @@ export function FocusBucketSection({
   nowMs,
   onItemPress,
 }: FocusBucketSectionProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View
       style={styles.section}
@@ -66,20 +68,21 @@ export function FocusBucketSection({
   );
 }
 
-const styles = StyleSheet.create({
-  section: {
-    gap: SPACING.sm,
-  },
-  label: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    paddingHorizontal: SPACING.xs,
-  },
-  rows: {
-    gap: SPACING.sm,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    section: {
+      gap: SPACING.sm,
+    },
+    label: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+      paddingHorizontal: SPACING.xs,
+    },
+    rows: {
+      gap: SPACING.sm,
+    },
+  });

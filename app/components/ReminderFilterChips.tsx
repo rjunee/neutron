@@ -14,7 +14,8 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 import {
   REMINDER_FILTER_CHOICES,
   type ReminderFilterChoice,
@@ -26,6 +27,7 @@ export interface ReminderFilterChipsProps {
 }
 
 export function ReminderFilterChips({ active, onSelect }: ReminderFilterChipsProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.row} testID="reminders-filter-row" accessibilityRole="tablist">
       {REMINDER_FILTER_CHOICES.map((choice) => {
@@ -59,32 +61,33 @@ export function ReminderFilterChips({ active, onSelect }: ReminderFilterChipsPro
   );
 }
 
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    gap: SPACING.sm,
-    marginBottom: SPACING.md,
-  },
-  chip: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: DENSITY.chip_radius,
-    borderWidth: 1,
-  },
-  chipInactive: {
-    backgroundColor: THEME.surface,
-    borderColor: THEME.hairline,
-  },
-  chipActive: {
-    backgroundColor: THEME.text_primary,
-    borderColor: THEME.text_primary,
-  },
-  chipPressed: { opacity: 0.78 },
-  chipText: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  chipTextInactive: { color: THEME.text_secondary },
-  chipTextActive: { color: THEME.background },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'row',
+      gap: SPACING.sm,
+      marginBottom: SPACING.md,
+    },
+    chip: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs + 2,
+      borderRadius: DENSITY.chip_radius,
+      borderWidth: 1,
+    },
+    chipInactive: {
+      backgroundColor: theme.surface,
+      borderColor: theme.hairline,
+    },
+    chipActive: {
+      backgroundColor: theme.text_primary,
+      borderColor: theme.text_primary,
+    },
+    chipPressed: { opacity: 0.78 },
+    chipText: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    chipTextInactive: { color: theme.text_secondary },
+    chipTextActive: { color: theme.background },
+  });

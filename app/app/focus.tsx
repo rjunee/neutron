@@ -43,9 +43,12 @@ import {
   useFocusState,
 } from '../lib/focus-state';
 import { useAuthSession } from '../lib/session';
-import { SPACING, THEME } from '../lib/theme';
+import { SPACING, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 export default function FocusScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { user } = useAuthSession();
   const router = useRouter();
 
@@ -59,7 +62,7 @@ export default function FocusScreen() {
   if (user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -72,6 +75,7 @@ export default function FocusScreen() {
 }
 
 function FocusScreenBody() {
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { clear } = useAuthSession();
   const {
@@ -157,11 +161,12 @@ function FocusScreenBody() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: THEME.background,
-    paddingTop: SPACING.xxl + SPACING.lg,
-  },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.background,
+      paddingTop: SPACING.xxl + SPACING.lg,
+    },
+    centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  });

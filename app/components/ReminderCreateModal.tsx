@@ -33,7 +33,8 @@ import {
   DEFAULT_CREATE_PRESET_ID,
   type ReminderPreset,
 } from '../lib/reminder-presets';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 const MAX_MESSAGE_LEN = 4096;
 
@@ -50,6 +51,8 @@ export function ReminderCreateModal({
   onCancel,
   onSubmit,
 }: ReminderCreateModalProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [message, setMessage] = useState('');
   const [selectedPresetId, setSelectedPresetId] = useState<string>(
     DEFAULT_CREATE_PRESET_ID,
@@ -96,7 +99,7 @@ export function ReminderCreateModal({
           <TextInput
             accessibilityLabel="Reminder message"
             placeholder="What should we remind you about?"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             value={message}
             onChangeText={setMessage}
             style={[styles.input, styles.inputMultiline]}
@@ -165,7 +168,7 @@ export function ReminderCreateModal({
               testID="reminders-create-submit"
             >
               {submitting ? (
-                <ActivityIndicator color={THEME.background} />
+                <ActivityIndicator color={theme.background} />
               ) : (
                 <Text style={[styles.btnText, styles.btnTextPrimary]}>Create</Text>
               )}
@@ -177,106 +180,107 @@ export function ReminderCreateModal({
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.xl,
-  },
-  panel: {
-    width: '100%',
-    maxWidth: 380,
-    backgroundColor: THEME.surface,
-    borderRadius: DENSITY.bubble_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.lg,
-    gap: SPACING.sm,
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h2.fontSize,
-    lineHeight: TYPOGRAPHY.h2.lineHeight,
-    fontWeight: TYPOGRAPHY.h2.fontWeight,
-  },
-  subtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  fieldLabel: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    marginTop: SPACING.xs,
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-  },
-  input: {
-    color: THEME.text_primary,
-    backgroundColor: THEME.background,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  inputMultiline: { minHeight: 80, textAlignVertical: 'top' },
-  presetRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-  },
-  presetChip: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: DENSITY.chip_radius,
-    borderWidth: 1,
-  },
-  presetChipInactive: {
-    backgroundColor: THEME.surface_raised,
-    borderColor: THEME.hairline,
-  },
-  presetChipActive: {
-    backgroundColor: THEME.text_primary,
-    borderColor: THEME.text_primary,
-  },
-  presetChipPressed: { opacity: 0.78 },
-  presetChipText: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  presetChipTextInactive: { color: THEME.text_secondary },
-  presetChipTextActive: { color: THEME.background },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  btn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: DENSITY.bubble_radius - 4,
-    minWidth: 88,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnPressed: { opacity: 0.78 },
-  btnDisabled: { opacity: 0.5 },
-  btnNeutral: { backgroundColor: THEME.surface_raised },
-  btnPrimary: { backgroundColor: THEME.text_primary },
-  btnText: {
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  btnTextNeutral: { color: THEME.text_secondary },
-  btnTextPrimary: { color: THEME.background },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      backgroundColor: theme.scrim,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.xl,
+    },
+    panel: {
+      width: '100%',
+      maxWidth: 380,
+      backgroundColor: theme.surface,
+      borderRadius: DENSITY.bubble_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.lg,
+      gap: SPACING.sm,
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h2.fontSize,
+      lineHeight: TYPOGRAPHY.h2.lineHeight,
+      fontWeight: TYPOGRAPHY.h2.fontWeight,
+    },
+    subtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    fieldLabel: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      marginTop: SPACING.xs,
+      letterSpacing: 0.4,
+      textTransform: 'uppercase',
+    },
+    input: {
+      color: theme.text_primary,
+      backgroundColor: theme.background,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.composer_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm + 2,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    inputMultiline: { minHeight: 80, textAlignVertical: 'top' },
+    presetRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.sm,
+    },
+    presetChip: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs + 2,
+      borderRadius: DENSITY.chip_radius,
+      borderWidth: 1,
+    },
+    presetChipInactive: {
+      backgroundColor: theme.surface_raised,
+      borderColor: theme.hairline,
+    },
+    presetChipActive: {
+      backgroundColor: theme.text_primary,
+      borderColor: theme.text_primary,
+    },
+    presetChipPressed: { opacity: 0.78 },
+    presetChipText: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    presetChipTextInactive: { color: theme.text_secondary },
+    presetChipTextActive: { color: theme.background },
+    actions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    btn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm + 2,
+      borderRadius: DENSITY.bubble_radius - 4,
+      minWidth: 88,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    btnPressed: { opacity: 0.78 },
+    btnDisabled: { opacity: 0.5 },
+    btnNeutral: { backgroundColor: theme.surface_raised },
+    btnPrimary: { backgroundColor: theme.text_primary },
+    btnText: {
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    btnTextNeutral: { color: theme.text_secondary },
+    btnTextPrimary: { color: theme.background },
+  });

@@ -74,9 +74,10 @@ import {
   RenameModal,
   RevertConfirmModal,
   TreeBranch,
-  styles,
+  makeStyles,
 } from '../../../features/docs/docs-ui';
 import { DocHistoryPane, DocViewerPane } from '../../../features/docs/docs-panes';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 import { useDocTree } from '../../../features/docs/use-doc-tree';
 import { useDocFile } from '../../../features/docs/use-doc-file';
 import { useDocHistory } from '../../../features/docs/use-doc-history';
@@ -84,6 +85,8 @@ import { useDocMutations } from '../../../features/docs/use-doc-mutations';
 import { useDeepLinkAnchor } from '../../../features/docs/use-deep-link-anchor';
 
 export default function DocsTab() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const {
     id,
     path: pathParam,
@@ -279,7 +282,7 @@ export default function DocsTab() {
   if (user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -343,7 +346,7 @@ export default function DocsTab() {
       {showDrillList ? (
         loadingTree ? (
           <View style={[styles.body, styles.centeredBody]}>
-            <ActivityIndicator color="#cfcfcf" />
+            <ActivityIndicator color={theme.text_secondary} />
           </View>
         ) : tree.length === 0 ? (
           <View style={styles.body}>
@@ -368,7 +371,7 @@ export default function DocsTab() {
         {wideViewport ? (
         <View style={[styles.treePane, styles.treePaneWide]}>
           {loadingTree ? (
-            <ActivityIndicator color="#cfcfcf" />
+            <ActivityIndicator color={theme.text_secondary} />
           ) : (
             <ScrollView contentContainerStyle={styles.treeScroll}>
               {tree.length === 0 ? (

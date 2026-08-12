@@ -10,8 +10,11 @@ import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-nati
 
 import { AdminClient } from '../../lib/admin-client';
 import { formatError } from './format';
+import type { NeutronTheme } from '../../lib/theme';
+import { useThemedStyles } from '../../lib/theme-context';
 
 export function GatewayPane({ client }: { client: AdminClient }) {
+  const styles = useThemedStyles(makeStyles);
   const [confirming, setConfirming] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -101,44 +104,45 @@ export function GatewayPane({ client }: { client: AdminClient }) {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   paneScroll: { padding: 16, gap: 12 },
   intro: { gap: 6, marginBottom: 8 },
-  paneTitle: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  paneSubtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
+  paneTitle: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  paneSubtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
   bannerOk: {
-    backgroundColor: '#0f2418',
-    color: '#bbf7d0',
+    backgroundColor: theme.success_surface,
+    color: theme.success,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#14532d',
+    borderColor: theme.success_border,
     fontSize: 12,
   },
   dangerBtn: {
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#7f1d1d',
+    backgroundColor: theme.danger_fill,
     alignSelf: 'flex-start',
   },
-  dangerBtnText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  dangerBtnText: { color: theme.danger_ink, fontSize: 14, fontWeight: '600' },
   primaryBtnDisabled: { opacity: 0.5 },
   pressed: { opacity: 0.7 },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: theme.scrim,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
@@ -146,23 +150,23 @@ const styles = StyleSheet.create({
   modalPanel: {
     width: '100%',
     maxWidth: 360,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 18,
     gap: 12,
   },
-  modalTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700' },
-  modalBody: { color: '#bdbdbd', fontSize: 13, lineHeight: 18 },
+  modalTitle: { color: theme.text_primary, fontSize: 16, fontWeight: '700' },
+  modalBody: { color: theme.text_secondary, fontSize: 13, lineHeight: 18 },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
   secondaryBtn: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 10,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  secondaryBtnText: { color: '#e0e0e0', fontSize: 13, fontWeight: '500' },
+  secondaryBtnText: { color: theme.accent, fontSize: 13, fontWeight: '500' },
 });

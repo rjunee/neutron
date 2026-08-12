@@ -32,9 +32,11 @@ import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 
 import { sanitizeCoreTabUrl } from '../../../../lib/project-tabs';
-import { SPACING, THEME, TYPOGRAPHY } from '../../../../lib/composer-constants';
+import { SPACING, TYPOGRAPHY, type NeutronTheme } from '../../../../lib/composer-constants';
+import { useThemedStyles } from '../../../../lib/theme-context';
 
 export default function CoreTabScreen() {
+  const styles = useThemedStyles(makeStyles);
   const { slug, url, label } = useLocalSearchParams<{
     slug: string;
     url?: string;
@@ -97,66 +99,67 @@ export default function CoreTabScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: THEME.background,
-  },
-  centered: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: SPACING.xxl,
-    gap: SPACING.sm,
-  },
-  overline: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  body: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    textAlign: 'center',
-  },
-  openBtn: {
-    marginTop: SPACING.md,
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md - SPACING.xs / 2,
-    borderRadius: SPACING.md - SPACING.xs / 2,
-    backgroundColor: THEME.text_primary,
-  },
-  openBtnText: {
-    color: THEME.background,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '600',
-  },
-  urlHint: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    marginTop: SPACING.xs,
-    maxWidth: '100%',
-  },
-  errorTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  errorBody: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    textAlign: 'center',
-  },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.background,
+    },
+    centered: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: SPACING.xxl,
+      gap: SPACING.sm,
+    },
+    overline: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    body: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      textAlign: 'center',
+    },
+    openBtn: {
+      marginTop: SPACING.md,
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md - SPACING.xs / 2,
+      borderRadius: SPACING.md - SPACING.xs / 2,
+      backgroundColor: theme.text_primary,
+    },
+    openBtnText: {
+      color: theme.background,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '600',
+    },
+    urlHint: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      marginTop: SPACING.xs,
+      maxWidth: '100%',
+    },
+    errorTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    errorBody: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      textAlign: 'center',
+    },
+    pressed: { opacity: 0.7 },
+  });

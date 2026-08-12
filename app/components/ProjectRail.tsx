@@ -26,8 +26,8 @@ import {
   View,
 } from 'react-native';
 
-import { SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
-import { PHASE } from '../lib/theme';
+import { SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/composer-constants';
+import { usePhase, useTheme, useThemedStyles } from '../lib/theme-context';
 import { hapticProjectSwitch } from '../lib/haptics';
 import {
   railDotKind,
@@ -70,6 +70,9 @@ export interface ProjectRailProps {
 
 /** The corner activity dot. Pulses (work) under motion; static otherwise. */
 function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: boolean }) {
+  const theme = useTheme();
+  const phase = usePhase();
+  const styles = useThemedStyles(makeStyles);
   const opacity = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     if (kind !== 'work' || reduceMotion) {
@@ -94,7 +97,7 @@ function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: 
     return () => loop.stop();
   }, [kind, reduceMotion, opacity]);
 
-  // FIX #335 — the pulsing `work` dot uses the building blue (`PHASE.build.fg`),
+  // FIX #335 — the pulsing `work` dot uses the building blue (`phase.build.fg`),
   // matching the Work-list building dot exactly; `attention` stays a static amber.
   //
   // IDLE PAINTS NOTHING. WAVE 3.5 drew a quiet hollow ring at rest so the dot
@@ -121,7 +124,7 @@ function ActivityDot({ kind, reduceMotion }: { kind: RailDotKind; reduceMotion: 
   if (kind === 'idle') {
     return <Animated.View testID="rail-dot-none" style={styles.dotSlot} />;
   }
-  const color = kind === 'attention' ? THEME.attention : PHASE.build.fg;
+  const color = kind === 'attention' ? theme.attention : phase.build.fg;
   return (
     <Animated.View
       testID={`rail-dot-${kind}`}
@@ -146,6 +149,7 @@ function RailItem({
   /** Open the Activity Inspector for this scope (the dot's action, SPEC § WAVE 3.5). */
   onOpenActivity: (id: string) => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const isGeneral = project.id === GENERAL_PROJECT_ID;
   const dot = railDotKind(overlay?.activity, isGeneral);
   const badge = railBadgeLabel(project.unread_count);
@@ -297,6 +301,7 @@ const PLUS_STROKE = 1.5;
 const PLUS_ARM = 12;
 
 function PlusMark({ color }: { color: string }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.plusMark} testID="rail-create-plus">
       <View style={[styles.plusBarH, { backgroundColor: color }]} />
@@ -314,6 +319,8 @@ export function ProjectRail({
   onOpenActivity,
   reduceMotionOverride,
 }: ProjectRailProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   // No-op default so a rail rendered without the inspector wired still shows a dot
   // that does nothing, rather than throwing on tap.
   const openActivity = onOpenActivity ?? ((): void => {});
@@ -362,7 +369,7 @@ export function ProjectRail({
         >
           <View style={styles.glyphWrap}>
             <View style={styles.createTile} testID="rail-create-tile">
-              <PlusMark color={THEME.text_muted} />
+              <PlusMark color={theme.text_muted} />
             </View>
           </View>
           <Text style={styles.createLabel} numberOfLines={1}>
@@ -381,193 +388,194 @@ const DOT = 10;
 /** The create tile, inset inside a project row's 44pt glyph box. */
 const CREATE_TILE = 32;
 
-const styles = StyleSheet.create({
-  rail: {
-    width: RAIL_WIDTH,
-    backgroundColor: THEME.surface,
-    borderRightWidth: 1,
-    borderRightColor: THEME.hairline,
-  },
-  railContent: {
-    alignItems: 'center',
-    paddingVertical: SPACING.sm,
-    gap: SPACING.xs,
-  },
-  item: {
-    width: RAIL_WIDTH - SPACING.sm,
-    alignItems: 'center',
-    paddingVertical: SPACING.xs,
-    borderRadius: SPACING.md,
-    gap: 2,
-  },
-  itemActive: {
-    // Fill ONLY. A border was tried and rejected by the owner — see the note on
-    // THEME.rail_selected. Nothing here changes the row's box, so selecting a row
-    // cannot shift the column.
-    backgroundColor: THEME.rail_selected,
-  },
-  pressed: { opacity: 0.7 },
-  glyphWrap: {
-    width: GLYPH,
-    height: GLYPH,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emoji: {
-    fontSize: 24,
-    lineHeight: 30,
-    textAlign: 'center',
-  },
-  /**
-   * SPEC § WAVE 3.5 — the corner offset moved OFF the dot and ONTO its `dotPress`
-   * wrapper, so the tappable Pressable is what sits in the corner and the dot
-   * paints inside it. Same rendered geometry as before (a DOT-sized circle at
-   * right:2/bottom:2 of `glyphWrap`); the wrapper is what carries `hitSlop`.
-   */
-  dot: {
-    width: DOT,
-    height: DOT,
-    borderRadius: DOT / 2,
-    // Ring that separates the dot from the emoji (rail bg = surface).
-    borderWidth: 2,
-    borderColor: THEME.surface,
-  },
-  /**
-   * The idle corner: a DOT-sized hole in the paint. No fill, no border, no
-   * opacity trick — nothing renders. It exists ONLY to hold the box open, so
-   * `dotPress` keeps its 10px target (plus `hitSlop`) while nothing is drawn and
-   * the row does not twitch when a dot lights up. Anything visible here — a
-   * dimmed ring, a low-opacity dot — is the exact thing that was removed.
-   */
-  dotSlot: {
-    width: DOT,
-    height: DOT,
-  },
-  dotPress: {
-    position: 'absolute',
-    right: 2,
-    bottom: 2,
-  },
-  /**
-   * The same corner slot, INERT — what a non-active row's dot paints into. Same
-   * geometry as `dotPress` so the rail looks identical; `pointerEvents: 'none'`
-   * hands every touch straight through to the row's own Pressable, which is the
-   * whole point (a dot you cannot mis-tap on the way to switching projects).
-   */
-  dotInert: {
-    position: 'absolute',
-    right: 2,
-    bottom: 2,
-    pointerEvents: 'none',
-  },
-  name: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '500',
-    color: THEME.text_muted,
-    textAlign: 'center',
-    maxWidth: RAIL_WIDTH - SPACING.xs,
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    rail: {
+      width: RAIL_WIDTH,
+      backgroundColor: theme.surface,
+      borderRightWidth: 1,
+      borderRightColor: theme.hairline,
+    },
+    railContent: {
+      alignItems: 'center',
+      paddingVertical: SPACING.sm,
+      gap: SPACING.xs,
+    },
+    item: {
+      width: RAIL_WIDTH - SPACING.sm,
+      alignItems: 'center',
+      paddingVertical: SPACING.xs,
+      borderRadius: SPACING.md,
+      gap: 2,
+    },
+    itemActive: {
+      // Fill ONLY. A border was tried and rejected by the owner — see the note on
+      // theme.rail_selected. Nothing here changes the row's box, so selecting a row
+      // cannot shift the column.
+      backgroundColor: theme.rail_selected,
+    },
+    pressed: { opacity: 0.7 },
+    glyphWrap: {
+      width: GLYPH,
+      height: GLYPH,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    emoji: {
+      fontSize: 24,
+      lineHeight: 30,
+      textAlign: 'center',
+    },
     /**
-     * BOTH LINES' HEIGHT IS RESERVED ON EVERY ROW, whether the name uses one line
-     * or two. Without it the rail becomes a ragged column whose row heights depend
-     * on name length — and worse, a row would CHANGE HEIGHT when a project is
-     * renamed, moving every target beneath it. The rail's own glyph box is already
-     * a fixed 44pt grid; this keeps the label on the same footing, at the cost of
-     * one blank line under short names.
+     * SPEC § WAVE 3.5 — the corner offset moved OFF the dot and ONTO its `dotPress`
+     * wrapper, so the tappable Pressable is what sits in the corner and the dot
+     * paints inside it. Same rendered geometry as before (a DOT-sized circle at
+     * right:2/bottom:2 of `glyphWrap`); the wrapper is what carries `hitSlop`.
      */
-    minHeight: TYPOGRAPHY.caption.lineHeight * 2,
-  },
-  nameActive: {
-    color: THEME.text_primary,
-  },
-  nameUnread: {
-    fontWeight: '700',
-    color: THEME.text_secondary,
-  },
-  /**
-   * The unread pill. `minWidth` with symmetric padding so "1" is a circle and "99+"
-   * grows sideways into a lozenge rather than being clipped — the badge must never
-   * truncate the very number it exists to show.
-   */
-  badge: {
-    position: 'absolute',
-    top: -2,
-    right: -4,
-    minWidth: 16,
-    height: 16,
-    borderRadius: 8,
-    paddingHorizontal: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.user_bubble,
-  },
-  badgeText: {
-    color: THEME.user_ink,
-    fontSize: 10,
-    lineHeight: 16,
-    fontWeight: '700',
-  },
-  /**
-   * The rule that ends the project list. Short of the rail's full width so it
-   * reads as a separator inside the column, not as the column's own edge.
-   */
-  createDivider: {
-    width: CREATE_TILE,
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: THEME.text_muted,
-    opacity: 0.35,
-    marginTop: SPACING.sm,
-    marginBottom: SPACING.xs,
-  },
-  /**
-   * The empty slot. Smaller than `glyphWrap` and centred in it, so the create
-   * row keeps EXACTLY the height and rhythm of a project row while the tile
-   * itself stays visibly lighter than a project's 24pt emoji.
-   *
-   * `borderStyle: 'dashed'` is the mark of a slot waiting to be filled. Verified
-   * rendering dashed on Android 14 (Pixel 9, Genymotion) before merge — RN has
-   * historically flattened dashed borders to solid when combined with
-   * `borderRadius` on Android, so this is checked, not assumed. Even flattened
-   * it would still read as an outlined square against a filled circle; the dash
-   * is the bonus, the outline is the load-bearing part.
-   */
-  createTile: {
-    width: CREATE_TILE,
-    height: CREATE_TILE,
-    borderRadius: SPACING.sm,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: THEME.text_muted,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  /** Same caption type as a project name, one step quieter. */
-  createLabel: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '500',
-    color: THEME.text_muted,
-    textAlign: 'center',
-    maxWidth: RAIL_WIDTH - SPACING.xs,
-  },
-  plusMark: {
-    width: PLUS_BOX,
-    height: PLUS_BOX,
-  },
-  plusBarH: {
-    position: 'absolute',
-    left: (PLUS_BOX - PLUS_ARM) / 2,
-    top: (PLUS_BOX - PLUS_STROKE) / 2,
-    width: PLUS_ARM,
-    height: PLUS_STROKE,
-    borderRadius: PLUS_STROKE / 2,
-  },
-  plusBarV: {
-    position: 'absolute',
-    left: (PLUS_BOX - PLUS_STROKE) / 2,
-    top: (PLUS_BOX - PLUS_ARM) / 2,
-    width: PLUS_STROKE,
-    height: PLUS_ARM,
-    borderRadius: PLUS_STROKE / 2,
-  },
-});
+    dot: {
+      width: DOT,
+      height: DOT,
+      borderRadius: DOT / 2,
+      // Ring that separates the dot from the emoji (rail bg = surface).
+      borderWidth: 2,
+      borderColor: theme.surface,
+    },
+    /**
+     * The idle corner: a DOT-sized hole in the paint. No fill, no border, no
+     * opacity trick — nothing renders. It exists ONLY to hold the box open, so
+     * `dotPress` keeps its 10px target (plus `hitSlop`) while nothing is drawn and
+     * the row does not twitch when a dot lights up. Anything visible here — a
+     * dimmed ring, a low-opacity dot — is the exact thing that was removed.
+     */
+    dotSlot: {
+      width: DOT,
+      height: DOT,
+    },
+    dotPress: {
+      position: 'absolute',
+      right: 2,
+      bottom: 2,
+    },
+    /**
+     * The same corner slot, INERT — what a non-active row's dot paints into. Same
+     * geometry as `dotPress` so the rail looks identical; `pointerEvents: 'none'`
+     * hands every touch straight through to the row's own Pressable, which is the
+     * whole point (a dot you cannot mis-tap on the way to switching projects).
+     */
+    dotInert: {
+      position: 'absolute',
+      right: 2,
+      bottom: 2,
+      pointerEvents: 'none',
+    },
+    name: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '500',
+      color: theme.text_muted,
+      textAlign: 'center',
+      maxWidth: RAIL_WIDTH - SPACING.xs,
+      /**
+       * BOTH LINES' HEIGHT IS RESERVED ON EVERY ROW, whether the name uses one line
+       * or two. Without it the rail becomes a ragged column whose row heights depend
+       * on name length — and worse, a row would CHANGE HEIGHT when a project is
+       * renamed, moving every target beneath it. The rail's own glyph box is already
+       * a fixed 44pt grid; this keeps the label on the same footing, at the cost of
+       * one blank line under short names.
+       */
+      minHeight: TYPOGRAPHY.caption.lineHeight * 2,
+    },
+    nameActive: {
+      color: theme.text_primary,
+    },
+    nameUnread: {
+      fontWeight: '700',
+      color: theme.text_secondary,
+    },
+    /**
+     * The unread pill. `minWidth` with symmetric padding so "1" is a circle and "99+"
+     * grows sideways into a lozenge rather than being clipped — the badge must never
+     * truncate the very number it exists to show.
+     */
+    badge: {
+      position: 'absolute',
+      top: -2,
+      right: -4,
+      minWidth: 16,
+      height: 16,
+      borderRadius: 8,
+      paddingHorizontal: 4,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.user_bubble,
+    },
+    badgeText: {
+      color: theme.user_ink,
+      fontSize: 10,
+      lineHeight: 16,
+      fontWeight: '700',
+    },
+    /**
+     * The rule that ends the project list. Short of the rail's full width so it
+     * reads as a separator inside the column, not as the column's own edge.
+     */
+    createDivider: {
+      width: CREATE_TILE,
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: theme.text_muted,
+      opacity: 0.35,
+      marginTop: SPACING.sm,
+      marginBottom: SPACING.xs,
+    },
+    /**
+     * The empty slot. Smaller than `glyphWrap` and centred in it, so the create
+     * row keeps EXACTLY the height and rhythm of a project row while the tile
+     * itself stays visibly lighter than a project's 24pt emoji.
+     *
+     * `borderStyle: 'dashed'` is the mark of a slot waiting to be filled. Verified
+     * rendering dashed on Android 14 (Pixel 9, Genymotion) before merge — RN has
+     * historically flattened dashed borders to solid when combined with
+     * `borderRadius` on Android, so this is checked, not assumed. Even flattened
+     * it would still read as an outlined square against a filled circle; the dash
+     * is the bonus, the outline is the load-bearing part.
+     */
+    createTile: {
+      width: CREATE_TILE,
+      height: CREATE_TILE,
+      borderRadius: SPACING.sm,
+      borderWidth: 1,
+      borderStyle: 'dashed',
+      borderColor: theme.text_muted,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    /** Same caption type as a project name, one step quieter. */
+    createLabel: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '500',
+      color: theme.text_muted,
+      textAlign: 'center',
+      maxWidth: RAIL_WIDTH - SPACING.xs,
+    },
+    plusMark: {
+      width: PLUS_BOX,
+      height: PLUS_BOX,
+    },
+    plusBarH: {
+      position: 'absolute',
+      left: (PLUS_BOX - PLUS_ARM) / 2,
+      top: (PLUS_BOX - PLUS_STROKE) / 2,
+      width: PLUS_ARM,
+      height: PLUS_STROKE,
+      borderRadius: PLUS_STROKE / 2,
+    },
+    plusBarV: {
+      position: 'absolute',
+      left: (PLUS_BOX - PLUS_STROKE) / 2,
+      top: (PLUS_BOX - PLUS_ARM) / 2,
+      width: PLUS_STROKE,
+      height: PLUS_ARM,
+      borderRadius: PLUS_STROKE / 2,
+    },
+  });

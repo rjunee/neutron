@@ -37,7 +37,8 @@
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 import { formatFireAt, type ReminderItem } from '../lib/reminders-client';
 import {
   computeFireAtBucket,
@@ -56,27 +57,23 @@ export interface ReminderRowProps {
   onPress: (entry: ReminderItem) => void;
 }
 
-function fireAtChipStyle(bucket: FireAtBucket) {
-  if (bucket === 'overdue') {
-    return {
-      backgroundColor: THEME.danger + ALPHA_TINTS.panel,
-    };
-  }
-  if (bucket === 'today') {
-    return {
-      backgroundColor: THEME.warning + ALPHA_TINTS.panel,
-    };
-  }
+/** The active sheet is passed in — see the note on TaskRow's identical pickers. */
+type ReminderRowStyles = ReturnType<typeof makeStyles>;
+
+function fireAtChipStyle(bucket: FireAtBucket, styles: ReminderRowStyles) {
+  if (bucket === 'overdue') return styles.chipDangerTint;
+  if (bucket === 'today') return styles.chipWarningTint;
   return styles.chipNeutral;
 }
 
-function fireAtChipTextStyle(bucket: FireAtBucket) {
+function fireAtChipTextStyle(bucket: FireAtBucket, styles: ReminderRowStyles) {
   if (bucket === 'overdue') return styles.chipTextDanger;
   if (bucket === 'today') return styles.chipTextWarning;
   return styles.chipTextMuted;
 }
 
 export function ReminderRow({ entry, mutating = false, onPress }: ReminderRowProps) {
+  const styles = useThemedStyles(makeStyles);
   const now_ms = Date.now();
   const fireBucket = useMemo(
     () => computeFireAtBucket(entry.fire_at, now_ms),
@@ -131,11 +128,11 @@ export function ReminderRow({ entry, mutating = false, onPress }: ReminderRowPro
         </Text>
         <View style={styles.meta} testID={`reminders-row-${entry.id}-meta`}>
           <View
-            style={[styles.chip, fireAtChipStyle(fireBucket)]}
+            style={[styles.chip, fireAtChipStyle(fireBucket, styles)]}
             testID={`reminders-row-${entry.id}-fire-at`}
             accessibilityLabel={`Fires ${fireLabel}`}
           >
-            <Text style={[styles.chipText, fireAtChipTextStyle(fireBucket)]}>
+            <Text style={[styles.chipText, fireAtChipTextStyle(fireBucket, styles)]}>
               {fireLabel}
             </Text>
           </View>
@@ -174,76 +171,79 @@ const ROW_MIN_HEIGHT = SPACING.lg * 4;
 const GLYPH_VISUAL = 24;
 const GLYPH_HIT = 44;
 
-const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: SPACING.md,
-    paddingVertical: SPACING.md,
-    paddingHorizontal: SPACING.lg,
-    minHeight: ROW_MIN_HEIGHT,
-    borderRadius: DENSITY.composer_radius,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  rowPressed: { backgroundColor: THEME.surface_raised },
-  glyphHitTarget: {
-    width: GLYPH_HIT,
-    height: GLYPH_HIT,
-    marginLeft: -SPACING.sm,
-    marginVertical: -SPACING.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  glyph: {
-    width: GLYPH_VISUAL,
-    height: GLYPH_VISUAL,
-    borderRadius: GLYPH_VISUAL / 2,
-    borderWidth: 1.5,
-    borderColor: THEME.text_secondary,
-    backgroundColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  glyphMutating: { opacity: 0.6 },
-  glyphText: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    color: THEME.text_secondary,
-  },
-  body: {
-    flex: 1,
-    gap: SPACING.xs,
-  },
-  title: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '500',
-  },
-  meta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  chip: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: DENSITY.chip_radius,
-    maxWidth: 220,
-  },
-  chipNeutral: {
-    backgroundColor: THEME.surface_raised,
-  },
-  chipText: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  chipTextDanger: { color: THEME.danger },
-  chipTextWarning: { color: THEME.warning },
-  chipTextMuted: { color: THEME.text_muted },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    row: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: SPACING.md,
+      paddingVertical: SPACING.md,
+      paddingHorizontal: SPACING.lg,
+      minHeight: ROW_MIN_HEIGHT,
+      borderRadius: DENSITY.composer_radius,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    rowPressed: { backgroundColor: theme.surface_raised },
+    glyphHitTarget: {
+      width: GLYPH_HIT,
+      height: GLYPH_HIT,
+      marginLeft: -SPACING.sm,
+      marginVertical: -SPACING.sm,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    glyph: {
+      width: GLYPH_VISUAL,
+      height: GLYPH_VISUAL,
+      borderRadius: GLYPH_VISUAL / 2,
+      borderWidth: 1.5,
+      borderColor: theme.text_secondary,
+      backgroundColor: 'transparent',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    glyphMutating: { opacity: 0.6 },
+    glyphText: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      color: theme.text_secondary,
+    },
+    body: {
+      flex: 1,
+      gap: SPACING.xs,
+    },
+    title: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '500',
+    },
+    meta: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    chip: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      borderRadius: DENSITY.chip_radius,
+      maxWidth: 220,
+    },
+    chipNeutral: {
+      backgroundColor: theme.surface_raised,
+    },
+    chipDangerTint: { backgroundColor: theme.danger + ALPHA_TINTS.panel },
+    chipWarningTint: { backgroundColor: theme.warning + ALPHA_TINTS.panel },
+    chipText: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    chipTextDanger: { color: theme.danger },
+    chipTextWarning: { color: theme.warning },
+    chipTextMuted: { color: theme.text_muted },
+  });

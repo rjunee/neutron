@@ -26,7 +26,8 @@ import {
   View,
 } from 'react-native';
 
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 export interface ToastProps {
   /** Bold leading line, e.g. "Joined Acme". */
@@ -49,6 +50,7 @@ export function Toast({
   onDismiss,
   durationMs = DEFAULT_DURATION_MS,
 }: ToastProps) {
+  const styles = useThemedStyles(makeStyles);
   const opacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(-ENTER_OFFSET)).current;
   const [reduceMotion, setReduceMotion] = useState(false);
@@ -137,42 +139,43 @@ export function Toast({
   );
 }
 
-const styles = StyleSheet.create({
-  wrap: {
-    position: 'absolute',
-    top: SPACING.md,
-    left: SPACING.lg,
-    right: SPACING.lg,
-    alignItems: 'center',
-    zIndex: 50,
-  },
-  toast: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    maxWidth: 420,
-    backgroundColor: THEME.surface_raised,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.banner_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-  },
-  check: {
-    color: THEME.link,
-    fontSize: TYPOGRAPHY.h4.fontSize,
-    fontWeight: '700',
-  },
-  copy: { flexShrink: 1 },
-  message: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '600',
-  },
-  detail: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    wrap: {
+      position: 'absolute',
+      top: SPACING.md,
+      left: SPACING.lg,
+      right: SPACING.lg,
+      alignItems: 'center',
+      zIndex: 50,
+    },
+    toast: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      maxWidth: 420,
+      backgroundColor: theme.surface_raised,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.banner_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm + 2,
+    },
+    check: {
+      color: theme.link,
+      fontSize: TYPOGRAPHY.h4.fontSize,
+      fontWeight: '700',
+    },
+    copy: { flexShrink: 1 },
+    message: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '600',
+    },
+    detail: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+  });

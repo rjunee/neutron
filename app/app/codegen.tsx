@@ -36,13 +36,16 @@ import {
   type PhaseOverride,
 } from '../lib/phase-models-client';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 function formatErr(err: unknown): string {
   return err instanceof Error ? err.message : 'something went wrong';
 }
 
 export default function CodeGenSettingsScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
@@ -111,7 +114,7 @@ export default function CodeGenSettingsScreen() {
   if (user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -152,7 +155,7 @@ export default function CodeGenSettingsScreen() {
         ) : null}
 
         {loading ? (
-          <ActivityIndicator color={THEME.text_secondary} testID="codegen-loading" />
+          <ActivityIndicator color={theme.text_secondary} testID="codegen-loading" />
         ) : payload === null ? (
           <Text style={styles.muted}>Couldn&apos;t load the build settings.</Text>
         ) : (
@@ -248,65 +251,66 @@ export default function CodeGenSettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-  pressed: { opacity: 0.6 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  headerBack: { padding: 4 },
-  headerIcon: { color: THEME.text_primary, fontSize: 20 },
-  headerOverline: { color: THEME.text_muted, fontSize: 11, textTransform: 'uppercase' },
-  headerTitle: { color: THEME.text_primary, fontSize: 18, fontWeight: '700' },
-  scroll: { padding: 16, gap: 16, paddingBottom: 48 },
-  muted: { color: THEME.text_muted, fontSize: 13, lineHeight: 18 },
-  footnote: { color: THEME.text_muted, fontSize: 11, lineHeight: 15 },
-  bannerError: {
-    color: THEME.danger,
-    fontSize: 12,
-    lineHeight: 17,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: 8,
-    padding: 10,
-  },
-  bannerOk: { color: THEME.text_secondary, fontSize: 12 },
-  phase: {
-    gap: 8,
-    padding: 12,
-    borderRadius: 10,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  phaseHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  phaseTitle: { color: THEME.text_primary, fontSize: 15, fontWeight: '600' },
-  tag: { color: THEME.warning, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
-  phaseDesc: { color: THEME.text_muted, fontSize: 12, lineHeight: 16 },
-  optionLabel: { color: THEME.text_secondary, fontSize: 11, textTransform: 'uppercase' },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  chip: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  chipOn: { backgroundColor: THEME.text_primary, borderColor: THEME.text_primary },
-  chipText: { color: THEME.text_secondary, fontSize: 12 },
-  chipTextOn: { color: THEME.background, fontWeight: '600' },
-  primaryBtn: {
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: THEME.accent,
-  },
-  primaryBtnText: { color: THEME.background, fontSize: 14, fontWeight: '700' },
-  btnDisabled: { opacity: 0.5 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background, paddingTop: 48 },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+    pressed: { opacity: 0.6 },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 16,
+      paddingBottom: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    headerBack: { padding: 4 },
+    headerIcon: { color: theme.text_primary, fontSize: 20 },
+    headerOverline: { color: theme.text_muted, fontSize: 11, textTransform: 'uppercase' },
+    headerTitle: { color: theme.text_primary, fontSize: 18, fontWeight: '700' },
+    scroll: { padding: 16, gap: 16, paddingBottom: 48 },
+    muted: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+    footnote: { color: theme.text_muted, fontSize: 11, lineHeight: 15 },
+    bannerError: {
+      color: theme.danger,
+      fontSize: 12,
+      lineHeight: 17,
+      backgroundColor: theme.surface_raised,
+      borderRadius: 8,
+      padding: 10,
+    },
+    bannerOk: { color: theme.text_secondary, fontSize: 12 },
+    phase: {
+      gap: 8,
+      padding: 12,
+      borderRadius: 10,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    phaseHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    phaseTitle: { color: theme.text_primary, fontSize: 15, fontWeight: '600' },
+    tag: { color: theme.warning, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
+    phaseDesc: { color: theme.text_muted, fontSize: 12, lineHeight: 16 },
+    optionLabel: { color: theme.text_secondary, fontSize: 11, textTransform: 'uppercase' },
+    chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+    chip: {
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    chipOn: { backgroundColor: theme.text_primary, borderColor: theme.text_primary },
+    chipText: { color: theme.text_secondary, fontSize: 12 },
+    chipTextOn: { color: theme.background, fontWeight: '600' },
+    primaryBtn: {
+      alignItems: 'center',
+      paddingVertical: 12,
+      borderRadius: 10,
+      backgroundColor: theme.accent,
+    },
+    primaryBtnText: { color: theme.background, fontSize: 14, fontWeight: '700' },
+    btnDisabled: { opacity: 0.5 },
+  });

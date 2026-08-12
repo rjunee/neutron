@@ -25,6 +25,8 @@ import {
   type ProjectBackupStatus,
 } from '../../lib/admin-client';
 import { formatError, formatIso, formatNext } from './format';
+import type { NeutronTheme } from '../../lib/theme';
+import { useTheme, useThemedStyles } from '../../lib/theme-context';
 
 interface BackupCardEntry {
   project_id: string;
@@ -33,6 +35,8 @@ interface BackupCardEntry {
 }
 
 export function BackupPane({ client }: { client: AdminClient }): React.ReactElement {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [entries, setEntries] = useState<BackupCardEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [configured, setConfigured] = useState<boolean>(true);
@@ -107,7 +111,7 @@ export function BackupPane({ client }: { client: AdminClient }): React.ReactElem
   if (loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator color="#cfcfcf" />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -182,6 +186,7 @@ function BackupCard(props: {
   onConnect: () => void;
   onDisconnect: () => void;
 }): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   const { entry, now, busy, onRunNow, onConnect, onDisconnect } = props;
   const status = entry.status;
   return (
@@ -280,6 +285,7 @@ function BackupStateBadge({
 }: {
   state: ProjectBackupStatus['state'];
 }): React.ReactElement {
+  const styles = useThemedStyles(makeStyles);
   const label = backupStateLabel(state);
   const cls =
     state === 'ok'
@@ -315,6 +321,8 @@ function ConnectRemoteModal(props: {
   onClose: () => void;
   onSuccess: (result: ProjectBackupResult) => void;
 }): React.ReactElement | null {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { client, project_id, onClose, onSuccess } = props;
   const [remoteUrl, setRemoteUrl] = useState('');
   const [keyPem, setKeyPem] = useState('');
@@ -423,7 +431,7 @@ function ConnectRemoteModal(props: {
             autoCapitalize="none"
             autoCorrect={false}
             placeholder="git@github.com:example/project-backup.git"
-            placeholderTextColor="#5a5a5a"
+            placeholderTextColor={theme.text_muted}
             style={styles.textarea}
             testID="admin-backup-modal-remote-url"
           />
@@ -437,7 +445,7 @@ function ConnectRemoteModal(props: {
                 autoCapitalize="none"
                 autoCorrect={false}
                 placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                placeholderTextColor="#5a5a5a"
+                placeholderTextColor={theme.text_muted}
                 style={[styles.textarea, { minHeight: 100 }]}
                 testID="admin-backup-modal-key-pem"
               />
@@ -500,15 +508,16 @@ function ConnectRemoteModal(props: {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   paneScroll: { padding: 16, gap: 12 },
   intro: { gap: 6, marginBottom: 8 },
-  paneTitle: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  paneSubtitle: { color: '#9a9a9a', fontSize: 13, lineHeight: 18 },
-  code: { color: '#cfcfcf', fontFamily: 'Menlo', fontSize: 12 },
+  paneTitle: { color: theme.text_primary, fontSize: 22, fontWeight: '700' },
+  paneSubtitle: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+  code: { color: theme.text_secondary, fontFamily: 'Menlo', fontSize: 12 },
   label: {
-    color: '#6a6a6a',
+    color: theme.text_muted,
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0.5,
@@ -516,21 +525,21 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   bannerError: {
-    backgroundColor: '#3b1212',
-    color: '#fecaca',
+    backgroundColor: theme.danger_surface,
+    color: theme.danger,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#7f1d1d',
+    borderColor: theme.danger_border,
     fontSize: 12,
   },
-  muted: { color: '#7a7a7a', fontSize: 13 },
+  muted: { color: theme.text_muted, fontSize: 13 },
   connectorCard: {
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 12,
     gap: 4,
   },
@@ -540,35 +549,35 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 8,
   },
-  connectorTitle: { color: '#fafafa', fontSize: 15, fontWeight: '600' },
-  connectorMeta: { color: '#9a9a9a', fontSize: 12 },
-  coreError: { color: '#fecaca', fontSize: 11, fontFamily: 'Menlo' },
+  connectorTitle: { color: theme.text_primary, fontSize: 15, fontWeight: '600' },
+  connectorMeta: { color: theme.text_muted, fontSize: 12 },
+  coreError: { color: theme.danger, fontSize: 11, fontFamily: 'Menlo' },
   coreActionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
   primaryActionBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#ffffff',
+    backgroundColor: theme.accent,
   },
-  primaryActionBtnText: { color: '#0a0a0a', fontSize: 13, fontWeight: '600' },
+  primaryActionBtnText: { color: theme.background, fontSize: 13, fontWeight: '600' },
   secondaryActionBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  secondaryActionBtnText: { color: '#e0e0e0', fontSize: 13, fontWeight: '500' },
+  secondaryActionBtnText: { color: theme.accent, fontSize: 13, fontWeight: '500' },
   tertiaryActionBtn: {
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
     backgroundColor: 'transparent',
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  tertiaryActionBtnText: { color: '#9a9a9a', fontSize: 13, fontWeight: '500' },
+  tertiaryActionBtnText: { color: theme.text_muted, fontSize: 13, fontWeight: '500' },
   actionBtnDisabled: { opacity: 0.5 },
   coreBadge: {
     fontSize: 10,
@@ -580,18 +589,18 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     overflow: 'hidden',
   },
-  coreBadgeOk: { color: '#bbf7d0', backgroundColor: '#0f2418' },
-  coreBadgeNeutral: { color: '#bdbdbd', backgroundColor: '#1f1f1f' },
-  coreBadgeWarn: { color: '#fed7aa', backgroundColor: '#3b1d12' },
+  coreBadgeOk: { color: theme.success, backgroundColor: theme.success_surface },
+  coreBadgeNeutral: { color: theme.text_secondary, backgroundColor: theme.surface },
+  coreBadgeWarn: { color: theme.warning, backgroundColor: theme.warning_surface },
   textarea: {
     minHeight: 220,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    color: '#fafafa',
+    color: theme.text_primary,
     fontSize: 13,
     lineHeight: 18,
     textAlignVertical: 'top',
@@ -601,16 +610,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 999,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
   },
-  choiceChipActive: { backgroundColor: '#1f2937', borderColor: '#374151' },
-  choiceLabel: { color: '#9a9a9a', fontSize: 12, fontWeight: '500' },
-  choiceLabelActive: { color: '#fafafa', fontWeight: '600' },
+  choiceChipActive: { backgroundColor: theme.surface_raised, borderColor: theme.hairline },
+  choiceLabel: { color: theme.text_muted, fontSize: 12, fontWeight: '500' },
+  choiceLabelActive: { color: theme.text_primary, fontWeight: '600' },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: theme.scrim,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
@@ -618,33 +627,33 @@ const styles = StyleSheet.create({
   modalPanel: {
     width: '100%',
     maxWidth: 360,
-    backgroundColor: '#121212',
+    backgroundColor: theme.background,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#1f1f1f',
+    borderColor: theme.hairline,
     padding: 18,
     gap: 12,
   },
-  modalTitle: { color: '#fafafa', fontSize: 16, fontWeight: '700' },
+  modalTitle: { color: theme.text_primary, fontSize: 16, fontWeight: '700' },
   modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
   secondaryBtn: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 10,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: theme.hairline,
   },
-  secondaryBtnText: { color: '#e0e0e0', fontSize: 13, fontWeight: '500' },
+  secondaryBtnText: { color: theme.accent, fontSize: 13, fontWeight: '500' },
   primaryBtn: {
     marginTop: 12,
     paddingHorizontal: 18,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#ffffff',
+    backgroundColor: theme.accent,
     alignSelf: 'flex-start',
   },
   primaryBtnDisabled: { opacity: 0.5 },
-  primaryBtnText: { color: '#0a0a0a', fontSize: 14, fontWeight: '600' },
+  primaryBtnText: { color: theme.background, fontSize: 14, fontWeight: '600' },
   pressed: { opacity: 0.7 },
 });

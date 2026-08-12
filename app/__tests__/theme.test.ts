@@ -9,10 +9,17 @@
 
 import { describe, expect, it } from 'bun:test';
 
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import {
+  DARK_THEME as THEME,
+  DENSITY,
+  LIGHT_THEME,
+  MOTION,
+  SPACING,
+  TYPOGRAPHY,
+} from '../lib/theme';
 
-describe('THEME', () => {
-  it('exports the locked P5.0 dark palette plus the P5.1 warning + link + PR-6 rail tokens', () => {
+describe('DARK_THEME', () => {
+  it('exports the locked dark palette plus the P5.1 warning + link + PR-6 rail tokens', () => {
     expect(THEME).toEqual({
       // LIFTED + BLUE-TINTED 2026-08-07 on owner feedback ("colors are too dark …
       // more variation between the chat bubbles and the background"). This lock
@@ -22,13 +29,13 @@ describe('THEME', () => {
       surface_raised: '#222834',
       text_primary: '#eceff4',
       text_secondary: '#b6becb',
-      text_muted: '#7c848f',
+      text_muted: '#8f97a5',
       accent: '#e0e0e0',
       hairline: '#2b3240',
       danger: '#ff5c5c',
       warning: '#ffae42',
       link: '#5fb6ff',
-      user_bubble: '#0a84ff',
+      user_bubble: '#1064cc',
       user_ink: '#ffffff',
       // SELECTED RAIL ROW 2026-08-07 on owner feedback ("it's VERY hard to see what
       // project is selected"). Selection moved from elevation to HUE, so this is
@@ -43,11 +50,61 @@ describe('THEME', () => {
       usage_nominal: '#4bbf73',
       usage_warning: '#e0a832',
       usage_critical: '#e0553f',
+      // STATUS FAMILIES (2026-08-11). Added when the admin panes, the Cores
+      // screens, the docs tab and the backup diff viewer were converted off their
+      // own inline hexes — those files never imported the palette, so nothing had
+      // ever needed a token for "the wash a warning sits on".
+      success: '#7ddf9b',
+      success_surface: '#12251a',
+      success_border: '#1f5133',
+      danger_surface: '#2e1416',
+      danger_border: '#7a2c2c',
+      danger_fill: '#8f2222',
+      danger_ink: '#ffffff',
+      info: '#8cc6ff',
+      info_surface: '#132234',
+      info_border: '#2a4a70',
+      warning_surface: '#2c2113',
+      warning_border: '#5f4a1f',
+      shadow: '#000000',
+      scrim: 'rgba(0,0,0,0.6)',
+      veil: 'rgba(0,0,0,0.7)',
+      veil_ink: '#ffffff',
     });
   });
 
   it('is frozen — no consumer can mutate the palette at runtime', () => {
     expect(Object.isFrozen(THEME)).toBe(true);
+    expect(Object.isFrozen(LIGHT_THEME)).toBe(true);
+  });
+
+  it('the two palettes have EXACTLY the same token set', () => {
+    // A light palette missing a token would resolve to `undefined` at paint time,
+    // which React Native renders as "no colour" rather than as an error — an
+    // invisible label instead of a failing test. Shape equality is what stops it.
+    expect(Object.keys(LIGHT_THEME).sort()).toEqual(Object.keys(THEME).sort());
+  });
+
+  it('the two palettes are actually DIFFERENT, and inverted', () => {
+    // Guards the copy-paste failure: a light palette that is a duplicate of dark
+    // would satisfy every shape assertion above and ship a dark "light mode".
+    expect(LIGHT_THEME).not.toEqual(THEME);
+    const luma = (hex: string): number => {
+      const n = parseInt(hex.slice(1), 16);
+      return 0.2126 * ((n >> 16) & 0xff) + 0.7152 * ((n >> 8) & 0xff) + 0.0722 * (n & 0xff);
+    };
+    // The grounds invert: light's page is brighter than its cards' text, dark's
+    // is darker. Asserted as a RELATION so it survives any future re-tuning.
+    expect(luma(LIGHT_THEME.background)).toBeGreaterThan(luma(LIGHT_THEME.text_primary));
+    expect(luma(THEME.background)).toBeLessThan(luma(THEME.text_primary));
+  });
+
+  it('the owner\'s bubble is the SAME blue in both palettes, with white ink', () => {
+    // Owner decision 2026-08-10: white text on blue in both themes. One hex, so
+    // the most recognisable object in the product does not change hue with theme.
+    expect(LIGHT_THEME.user_bubble).toBe(THEME.user_bubble);
+    expect(LIGHT_THEME.user_ink).toBe('#ffffff');
+    expect(THEME.user_ink).toBe('#ffffff');
   });
 });
 
@@ -57,13 +114,13 @@ describe('TYPOGRAPHY', () => {
   });
 
   it('pins the chat-surface typography scale', () => {
-    expect(TYPOGRAPHY.h1.fontSize).toBe(22);
-    expect(TYPOGRAPHY.h2.fontSize).toBe(19);
-    expect(TYPOGRAPHY.h3.fontSize).toBe(17);
-    expect(TYPOGRAPHY.h4.fontSize).toBe(15);
-    expect(TYPOGRAPHY.body.fontSize).toBe(15);
-    expect(TYPOGRAPHY.body.lineHeight).toBe(22);
-    expect(TYPOGRAPHY.caption.fontSize).toBe(11);
+    expect(TYPOGRAPHY.h1.fontSize).toBe(24);
+    expect(TYPOGRAPHY.h2.fontSize).toBe(21);
+    expect(TYPOGRAPHY.h3.fontSize).toBe(19);
+    expect(TYPOGRAPHY.h4.fontSize).toBe(17);
+    expect(TYPOGRAPHY.body.fontSize).toBe(17);
+    expect(TYPOGRAPHY.body.lineHeight).toBe(25);
+    expect(TYPOGRAPHY.caption.fontSize).toBe(13);
   });
 
   it('uses platform-specific monospace stack', () => {
@@ -109,7 +166,7 @@ describe('DENSITY', () => {
  * owner actually asked for, so a future edit that satisfies the letter and loses the
  * point fails here instead.
  */
-describe('THEME — the properties the owner asked for', () => {
+describe('DARK_THEME — the properties the owner asked for', () => {
   /** Perceived lightness, 0–255, weighted for how the eye reads each channel. */
   function luma(hex: string): number {
     const n = parseInt(hex.slice(1), 16);

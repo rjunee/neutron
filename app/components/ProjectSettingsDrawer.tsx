@@ -45,7 +45,8 @@ import {
 } from 'react-native';
 
 import { copyToClipboard } from '../lib/clipboard';
-import { BREAKPOINTS, DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/composer-constants';
+import { BREAKPOINTS, DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/composer-constants';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { loadAppConfig } from '../lib/config';
 import {
   type ConnectBadgeTone,
@@ -255,6 +256,7 @@ function toConnectError(err: unknown): { code: string; message: string } {
 }
 
 export function ProjectSettingsDrawer({ open, onClose }: ProjectSettingsDrawerProps) {
+  const styles = useThemedStyles(makeStyles);
   const { project, loading, error, pending_privacy, updatePrivacy } = useProjectState();
   const { user } = useAuthSession();
   const connect = useConnectMembers(project?.id ?? null, open && project !== null);
@@ -387,6 +389,7 @@ export function ProjectSettingsDrawer({ open, onClose }: ProjectSettingsDrawerPr
 }
 
 function PanelHeader({ projectName, onClose }: { projectName: string; onClose: () => void }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.panelHeader}>
       <View style={styles.panelHeaderText}>
@@ -429,6 +432,7 @@ function ProjectSections({
   onPrivacyChange,
   onOpenBackups,
 }: SectionsProps) {
+  const styles = useThemedStyles(makeStyles);
   const sortedMembers = sortMembers(project.members);
   const privacyError = error !== null && pendingPrivacy === null ? error : null;
   return (
@@ -504,6 +508,7 @@ function ProjectSections({
 }
 
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.section}>
       <Text style={styles.sectionLabel}>{label}</Text>
@@ -514,31 +519,45 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 
 /** Glyph + colour per badge tone — the single place tone → visuals map. Two
  *  roles only: owner and collaborator. There is no guest-vs-trusted distinction;
- *  hosting shape is an auth mechanism, never a visible tier. */
-const BADGE_TONE_STYLE: Record<
-  ConnectBadgeTone,
-  { color: string; bg: string; border: string; glyph: string }
-> = {
+ *  hosting shape is an auth mechanism, never a visible tier. A function of the
+ *  active palette, because a badge painted from a captured one stayed dark. */
+function badgeToneStyle(
+  tone: ConnectBadgeTone,
+  theme: NeutronTheme,
+): { color: string; bg: string; border: string; glyph: string } {
   // Owner reads plain — neutral surface, no attention pull.
-  owner: {
-    color: THEME.text_secondary,
-    bg: THEME.surface_raised,
-    border: THEME.hairline,
-    glyph: '★',
-  },
+  if (tone === 'owner') {
+    return {
+      color: theme.text_secondary,
+      bg: theme.surface_raised,
+      border: theme.hairline,
+      glyph: '\u2605',
+    };
+  }
   // Collaborator: one cool link-blue tint for everyone who isn't the owner,
-  // regardless of how they're hosted or how they authenticated.
-  collaborator: {
-    color: THEME.link,
-    bg: 'rgba(95,182,255,0.12)',
-    border: 'rgba(95,182,255,0.32)',
-    glyph: '◆',
-  },
-};
+  // regardless of how they're hosted or how they authenticated. The tints are
+  // derived from the ACTIVE `link` rather than hardcoded rgba of the dark one —
+  // the two hardcoded values here were the dark #5fb6ff and read as a blue haze
+  // on a white card.
+  return {
+    color: theme.link,
+    bg: withLinkAlpha(theme.link, 0.12),
+    border: withLinkAlpha(theme.link, 0.32),
+    glyph: '\u25c6',
+  };
+}
 
+/** `#rrggbb` -> `rgba(r,g,b,a)`. Returns the input unchanged if it isn't a hex. */
+function withLinkAlpha(hex: string, alpha: number): string {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (m === null) return hex;
+  return `rgba(${parseInt(m[1]!, 16)},${parseInt(m[2]!, 16)},${parseInt(m[3]!, 16)},${alpha})`;
+}
 function RoleBadge({ role }: { role: ConnectMemberView['role'] }) {
+  const styles = useThemedStyles(makeStyles);
+  const theme = useTheme();
   const { label, tone } = connectBadge(role);
-  const t = BADGE_TONE_STYLE[tone];
+  const t = badgeToneStyle(tone, theme);
   return (
     <View
       style={[styles.trustBadge, { backgroundColor: t.bg, borderColor: t.border }]}
@@ -572,6 +591,8 @@ function ConnectSection({
   currentUserId: string | null;
   connect: ConnectController;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const canManage = canManageConnectMembers(project, currentUserId);
   const canRevoke = canRevokeConnectMember(project, currentUserId);
   const sorted = useMemo(() => connectMemberSort(connect.members), [connect.members]);
@@ -645,7 +666,7 @@ function ConnectSection({
     <Section label="Neutron Connect">
       {connect.loading && !connect.loaded ? (
         <View style={styles.connectLoading}>
-          <ActivityIndicator color={THEME.text_muted} />
+          <ActivityIndicator color={theme.text_muted} />
           <Text style={styles.fieldHint}>Loading connected members…</Text>
         </View>
       ) : connect.error !== null ? (
@@ -758,7 +779,7 @@ function ConnectSection({
                     onChangeText={setInviteeEmail}
                     editable={!issuing}
                     placeholder="collaborator@example.com"
-                    placeholderTextColor={THEME.text_muted}
+                    placeholderTextColor={theme.text_muted}
                     autoCapitalize="none"
                     autoCorrect={false}
                     keyboardType="email-address"
@@ -806,7 +827,7 @@ function ConnectSection({
                     ]}
                   >
                     {issuing ? (
-                      <ActivityIndicator color={THEME.background} />
+                      <ActivityIndicator color={theme.background} />
                     ) : (
                       <Text style={styles.primaryBtnText}>
                         {delivery === 'email' ? 'Send invite' : 'Create link'}
@@ -888,6 +909,7 @@ function SmallSegmented<T extends string>({
   disabled: boolean;
   testIdPrefix: string;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.smallSegmented} accessibilityRole="tablist">
       {options.map((opt) => {
@@ -927,6 +949,7 @@ function PrivacySegmentedControl({
   pending: PrivacyMode | null;
   onChange: (mode: PrivacyMode) => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.segmented} accessibilityRole="tablist">
       {ALL_PRIVACY_MODES.map((mode) => {
@@ -976,414 +999,415 @@ function nonEmpty(value: string | null | undefined, fallback: string): string {
   return trimmed.length === 0 ? fallback : trimmed;
 }
 
-const styles = StyleSheet.create({
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    flexDirection: 'row',
-  },
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-  },
-  backdropPressable: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  panel: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: THEME.surface,
-    borderLeftWidth: 1,
-    borderLeftColor: THEME.hairline,
-    shadowColor: '#000000',
-    shadowOpacity: 0.35,
-    shadowOffset: { width: -4, height: 0 },
-    shadowRadius: 16,
-    elevation: 12,
-  },
-  panelContent: {
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.xxl + SPACING.md,
-    paddingBottom: SPACING.xl,
-    gap: SPACING.lg,
-  },
-  panelHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: SPACING.sm,
-  },
-  panelHeaderText: { flex: 1 },
-  panelTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h2.fontSize,
-    lineHeight: TYPOGRAPHY.h2.lineHeight,
-    fontWeight: TYPOGRAPHY.h2.fontWeight,
-    marginTop: SPACING.xs / 2,
-  },
-  overline: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: DENSITY.banner_radius,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  closeGlyph: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-  },
-  sections: { gap: SPACING.lg },
-  section: { gap: SPACING.xs },
-  sectionLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
-  fieldValue: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  fieldHint: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontStyle: 'italic',
-    marginTop: SPACING.xs / 2,
-  },
-  fieldError: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    marginTop: SPACING.xs,
-  },
-  badge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs,
-    borderRadius: DENSITY.chip_radius,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  badgeText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-  },
-  linkRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  linkRowPressed: { opacity: 0.7 },
-  linkRowLabel: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '500',
-  },
-  linkRowGlyph: {
-    color: THEME.text_muted,
-    fontSize: 18,
-    fontWeight: '300',
-  },
-  memberList: { gap: SPACING.xs },
-  memberRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  memberName: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-  },
-  memberRole: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  segmented: {
-    flexDirection: 'row',
-    backgroundColor: THEME.surface_raised,
-    borderRadius: DENSITY.composer_radius,
-    padding: SPACING.xs / 2,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    gap: SPACING.xs / 2,
-  },
-  segment: {
-    flex: 1,
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-    borderRadius: DENSITY.composer_radius - 2,
-    alignItems: 'center',
-    backgroundColor: 'transparent',
-  },
-  segmentActive: {
-    backgroundColor: THEME.background,
-  },
-  segmentDisabled: {
-    opacity: 0.6,
-  },
-  segmentLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-  },
-  segmentLabelActive: {
-    color: THEME.text_primary,
-    fontWeight: '600',
-  },
-  segmentPending: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  connectLoading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-  },
-  connectRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  connectRowRevoked: {
-    opacity: 0.55,
-  },
-  connectRowMain: {
-    flex: 1,
-    gap: SPACING.xs,
-  },
-  connectMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-  },
-  connectStatus: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    letterSpacing: 0.3,
-  },
-  connectTextRevoked: {
-    textDecorationLine: 'line-through',
-    color: THEME.text_muted,
-  },
-  trustBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs / 2,
-    borderRadius: DENSITY.chip_radius,
-    borderWidth: 1,
-  },
-  trustBadgeGlyph: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-  },
-  trustBadgeLabel: {
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 0.4,
-  },
-  revokeBtn: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs + 1,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: 'transparent',
-  },
-  revokeBtnText: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-  },
-  inviteCta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    borderRadius: DENSITY.banner_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface_raised,
-    marginTop: SPACING.xs,
-  },
-  inviteCtaGlyph: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h4.fontSize,
-    fontWeight: '600',
-  },
-  inviteCtaText: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-  },
-  composer: {
-    gap: SPACING.sm,
-    padding: SPACING.md,
-    marginTop: SPACING.xs,
-    borderRadius: DENSITY.composer_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.background,
-  },
-  composerLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  composerInput: {
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    borderRadius: DENSITY.composer_radius,
-    backgroundColor: THEME.surface_raised,
-    color: THEME.text_primary,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  composerActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  ghostBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    borderRadius: DENSITY.banner_radius,
-    backgroundColor: THEME.surface_raised,
-  },
-  ghostBtnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
-  primaryBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    borderRadius: DENSITY.banner_radius,
-    minWidth: 96,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.text_primary,
-  },
-  primaryBtnText: {
-    color: THEME.background,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
-  btnDisabled: { opacity: 0.5 },
-  linkBox: {
-    backgroundColor: THEME.surface,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm + 2,
-    minHeight: 52,
-    justifyContent: 'center',
-  },
-  linkText: {
-    color: THEME.link,
-    fontSize: TYPOGRAPHY.mono.fontSize,
-    lineHeight: TYPOGRAPHY.mono.lineHeight,
-    fontFamily: TYPOGRAPHY.mono.fontFamily,
-  },
-  smallSegmented: {
-    flexDirection: 'row',
-    backgroundColor: THEME.surface_raised,
-    borderRadius: DENSITY.composer_radius,
-    padding: SPACING.xs / 2,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    gap: SPACING.xs / 2,
-  },
-  smallSegment: {
-    flex: 1,
-    paddingVertical: SPACING.xs + 2,
-    paddingHorizontal: SPACING.sm,
-    borderRadius: DENSITY.composer_radius - 2,
-    alignItems: 'center',
-    backgroundColor: 'transparent',
-  },
-  smallSegmentActive: {
-    backgroundColor: THEME.background,
-  },
-  smallSegmentLabel: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-  },
-  smallSegmentLabelActive: {
-    color: THEME.text_primary,
-    fontWeight: '600',
-  },
-  loadingText: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  errorText: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      flexDirection: 'row',
+    },
+    backdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: theme.scrim,
+    },
+    backdropPressable: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    panel: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: theme.surface,
+      borderLeftWidth: 1,
+      borderLeftColor: theme.hairline,
+      shadowColor: theme.shadow,
+      shadowOpacity: 0.35,
+      shadowOffset: { width: -4, height: 0 },
+      shadowRadius: 16,
+      elevation: 12,
+    },
+    panelContent: {
+      paddingHorizontal: SPACING.lg,
+      paddingTop: SPACING.xxl + SPACING.md,
+      paddingBottom: SPACING.xl,
+      gap: SPACING.lg,
+    },
+    panelHeader: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: SPACING.sm,
+    },
+    panelHeaderText: { flex: 1 },
+    panelTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h2.fontSize,
+      lineHeight: TYPOGRAPHY.h2.lineHeight,
+      fontWeight: TYPOGRAPHY.h2.fontWeight,
+      marginTop: SPACING.xs / 2,
+    },
+    overline: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+    },
+    closeBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: DENSITY.banner_radius,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    closeGlyph: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+    },
+    sections: { gap: SPACING.lg },
+    section: { gap: SPACING.xs },
+    sectionLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+    },
+    fieldValue: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    fieldHint: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontStyle: 'italic',
+      marginTop: SPACING.xs / 2,
+    },
+    fieldError: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      marginTop: SPACING.xs,
+    },
+    badge: {
+      alignSelf: 'flex-start',
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs,
+      borderRadius: DENSITY.chip_radius,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    badgeText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+    },
+    linkRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      backgroundColor: theme.surface_raised,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    linkRowPressed: { opacity: 0.7 },
+    linkRowLabel: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '500',
+    },
+    linkRowGlyph: {
+      color: theme.text_muted,
+      fontSize: 18,
+      fontWeight: '300',
+    },
+    memberList: { gap: SPACING.xs },
+    memberRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      paddingVertical: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      backgroundColor: theme.surface_raised,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    memberName: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+    },
+    memberRole: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+    },
+    segmented: {
+      flexDirection: 'row',
+      backgroundColor: theme.surface_raised,
+      borderRadius: DENSITY.composer_radius,
+      padding: SPACING.xs / 2,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      gap: SPACING.xs / 2,
+    },
+    segment: {
+      flex: 1,
+      paddingVertical: SPACING.sm,
+      paddingHorizontal: SPACING.sm,
+      borderRadius: DENSITY.composer_radius - 2,
+      alignItems: 'center',
+      backgroundColor: 'transparent',
+    },
+    segmentActive: {
+      backgroundColor: theme.background,
+    },
+    segmentDisabled: {
+      opacity: 0.6,
+    },
+    segmentLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+    },
+    segmentLabelActive: {
+      color: theme.text_primary,
+      fontWeight: '600',
+    },
+    segmentPending: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    connectLoading: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+    },
+    connectRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      paddingVertical: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      backgroundColor: theme.surface_raised,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    connectRowRevoked: {
+      opacity: 0.55,
+    },
+    connectRowMain: {
+      flex: 1,
+      gap: SPACING.xs,
+    },
+    connectMeta: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+    },
+    connectStatus: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      letterSpacing: 0.3,
+    },
+    connectTextRevoked: {
+      textDecorationLine: 'line-through',
+      color: theme.text_muted,
+    },
+    trustBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.xs,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs / 2,
+      borderRadius: DENSITY.chip_radius,
+      borderWidth: 1,
+    },
+    trustBadgeGlyph: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+    },
+    trustBadgeLabel: {
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 0.4,
+    },
+    revokeBtn: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs + 1,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: 'transparent',
+    },
+    revokeBtnText: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+    },
+    inviteCta: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.sm,
+      paddingVertical: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      borderRadius: DENSITY.banner_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.surface_raised,
+      marginTop: SPACING.xs,
+    },
+    inviteCtaGlyph: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h4.fontSize,
+      fontWeight: '600',
+    },
+    inviteCtaText: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+    },
+    composer: {
+      gap: SPACING.sm,
+      padding: SPACING.md,
+      marginTop: SPACING.xs,
+      borderRadius: DENSITY.composer_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.background,
+    },
+    composerLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontWeight: '600',
+      letterSpacing: 0.5,
+      textTransform: 'uppercase',
+    },
+    composerInput: {
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      borderRadius: DENSITY.composer_radius,
+      backgroundColor: theme.surface_raised,
+      color: theme.text_primary,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    composerActions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    ghostBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm,
+      borderRadius: DENSITY.banner_radius,
+      backgroundColor: theme.surface_raised,
+    },
+    ghostBtnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+    },
+    primaryBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm,
+      borderRadius: DENSITY.banner_radius,
+      minWidth: 96,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.text_primary,
+    },
+    primaryBtnText: {
+      color: theme.background,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+    },
+    btnDisabled: { opacity: 0.5 },
+    linkBox: {
+      backgroundColor: theme.surface,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.composer_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm + 2,
+      minHeight: 52,
+      justifyContent: 'center',
+    },
+    linkText: {
+      color: theme.link,
+      fontSize: TYPOGRAPHY.mono.fontSize,
+      lineHeight: TYPOGRAPHY.mono.lineHeight,
+      fontFamily: TYPOGRAPHY.mono.fontFamily,
+    },
+    smallSegmented: {
+      flexDirection: 'row',
+      backgroundColor: theme.surface_raised,
+      borderRadius: DENSITY.composer_radius,
+      padding: SPACING.xs / 2,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      gap: SPACING.xs / 2,
+    },
+    smallSegment: {
+      flex: 1,
+      paddingVertical: SPACING.xs + 2,
+      paddingHorizontal: SPACING.sm,
+      borderRadius: DENSITY.composer_radius - 2,
+      alignItems: 'center',
+      backgroundColor: 'transparent',
+    },
+    smallSegmentActive: {
+      backgroundColor: theme.background,
+    },
+    smallSegmentLabel: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+    },
+    smallSegmentLabelActive: {
+      color: theme.text_primary,
+      fontWeight: '600',
+    },
+    loadingText: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    errorText: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    pressed: { opacity: 0.7 },
+  });

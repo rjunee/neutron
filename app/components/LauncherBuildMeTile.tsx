@@ -16,7 +16,8 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 const TILE_RADIUS = DENSITY.bubble_radius + 4;
 const TILE_EMOJI_FONT_SIZE = Math.round(TYPOGRAPHY.h1.fontSize * 1.55);
@@ -28,6 +29,7 @@ export interface LauncherBuildMeTileProps {
 }
 
 export function LauncherBuildMeTile({ size, onPress }: LauncherBuildMeTileProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={[styles.tileWrap, { width: size }]}>
       <Pressable
@@ -48,29 +50,30 @@ export function LauncherBuildMeTile({ size, onPress }: LauncherBuildMeTileProps)
   );
 }
 
-const styles = StyleSheet.create({
-  tileWrap: {},
-  tile: {
-    borderRadius: TILE_RADIUS,
-    backgroundColor: THEME.background,
-    borderWidth: 1,
-    borderColor: THEME.text_muted,
-    borderStyle: 'dashed',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-  },
-  tilePressed: {
-    backgroundColor: THEME.surface_raised,
-    borderColor: THEME.text_secondary,
-  },
-  tileEmoji: { fontSize: TILE_EMOJI_FONT_SIZE, lineHeight: TILE_EMOJI_FONT_SIZE + 4 },
-  tileLabel: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    tileWrap: {},
+    tile: {
+      borderRadius: TILE_RADIUS,
+      backgroundColor: theme.background,
+      borderWidth: 1,
+      borderColor: theme.text_muted,
+      borderStyle: 'dashed',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: SPACING.sm,
+      paddingHorizontal: SPACING.sm,
+    },
+    tilePressed: {
+      backgroundColor: theme.surface_raised,
+      borderColor: theme.text_secondary,
+    },
+    tileEmoji: { fontSize: TILE_EMOJI_FONT_SIZE, lineHeight: TILE_EMOJI_FONT_SIZE + 4 },
+    tileLabel: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+      textAlign: 'center',
+    },
+  });

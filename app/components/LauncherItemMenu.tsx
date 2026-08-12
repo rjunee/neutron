@@ -27,7 +27,8 @@ import type {
   LauncherEntry,
   LauncherEntryLongPressEntry,
 } from '../lib/launcher-client';
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 export interface LauncherItemMenuTarget {
   entry: LauncherEntry;
@@ -62,6 +63,7 @@ export function LauncherItemMenu({
   onMoveRight,
   onLongPressEntry,
 }: LauncherItemMenuProps) {
+  const styles = useThemedStyles(makeStyles);
   if (menu === null) return null;
   const { entry, index } = menu;
   const canMoveLeft = index > 0;
@@ -159,6 +161,7 @@ function ActionRow({
   disabled = false,
   disabledHint,
 }: ActionRowProps) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <Pressable
       accessibilityRole="menuitem"
@@ -189,86 +192,87 @@ function ActionRow({
   );
 }
 
-const styles = StyleSheet.create({
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.xl,
-  },
-  actionSheet: {
-    width: '100%',
-    maxWidth: 340,
-    backgroundColor: THEME.surface,
-    borderRadius: DENSITY.bubble_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.md,
-    gap: SPACING.xs,
-  },
-  actionSheetTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h4.fontSize,
-    lineHeight: TYPOGRAPHY.h4.lineHeight,
-    fontWeight: '700',
-    paddingHorizontal: SPACING.sm,
-  },
-  actionSheetSubtitle: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    paddingHorizontal: SPACING.sm,
-    paddingBottom: SPACING.sm,
-    fontStyle: 'italic',
-  },
-  actionRow: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.md,
-    borderRadius: DENSITY.banner_radius,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    minHeight: 48,
-  },
-  actionRowDestructive: { backgroundColor: `${THEME.danger}1a` /* THEME.danger @ ~10% alpha */ },
-  actionRowDisabled: { opacity: 0.5 },
-  actionRowText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '500',
-  },
-  actionRowTextDestructive: { color: THEME.danger },
-  actionRowTextDisabled: { color: THEME.text_muted },
-  actionRowHint: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    fontStyle: 'italic',
-  },
-  longPressGroup: {
-    gap: SPACING.xs,
-  },
-  longPressDivider: {
-    height: 1,
-    backgroundColor: THEME.hairline,
-    marginVertical: SPACING.xs,
-  },
-  cancelRow: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.md,
-    marginTop: SPACING.xs,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: DENSITY.banner_radius,
-    alignItems: 'center',
-    minHeight: 48,
-  },
-  cancelText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: theme.scrim,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.xl,
+    },
+    actionSheet: {
+      width: '100%',
+      maxWidth: 340,
+      backgroundColor: theme.surface,
+      borderRadius: DENSITY.bubble_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.md,
+      gap: SPACING.xs,
+    },
+    actionSheetTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h4.fontSize,
+      lineHeight: TYPOGRAPHY.h4.lineHeight,
+      fontWeight: '700',
+      paddingHorizontal: SPACING.sm,
+    },
+    actionSheetSubtitle: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      paddingHorizontal: SPACING.sm,
+      paddingBottom: SPACING.sm,
+      fontStyle: 'italic',
+    },
+    actionRow: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.md,
+      borderRadius: DENSITY.banner_radius,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      minHeight: 48,
+    },
+    actionRowDestructive: { backgroundColor: `${theme.danger}1a` /* theme.danger @ ~10% alpha */ },
+    actionRowDisabled: { opacity: 0.5 },
+    actionRowText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '500',
+    },
+    actionRowTextDestructive: { color: theme.danger },
+    actionRowTextDisabled: { color: theme.text_muted },
+    actionRowHint: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      fontStyle: 'italic',
+    },
+    longPressGroup: {
+      gap: SPACING.xs,
+    },
+    longPressDivider: {
+      height: 1,
+      backgroundColor: theme.hairline,
+      marginVertical: SPACING.xs,
+    },
+    cancelRow: {
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.md,
+      marginTop: SPACING.xs,
+      backgroundColor: theme.surface_raised,
+      borderRadius: DENSITY.banner_radius,
+      alignItems: 'center',
+      minHeight: 48,
+    },
+    cancelText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    pressed: { opacity: 0.7 },
+  });

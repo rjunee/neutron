@@ -697,6 +697,117 @@ deletes a forged pack.
   run no tick loop could ever advance. Wiring is pinned end-to-end over a live
   socket by `open/__tests__/open-code-command-wiring.test.ts`.
 
+## Mobile theming — two palettes, one path (`app/lib/theme.ts`, `app/lib/theme-context.tsx`)
+
+The app had ONE frozen palette and every component captured its colours at module
+load, inside `StyleSheet.create({...})`. The owner asked for light mode, so there
+are now two palettes and a live selection seam between them.
+
+**The palettes.** `app/lib/theme.ts` exports `DARK_THEME` and `LIGHT_THEME`, both
+`NeutronTheme`, plus `DARK_PHASE` / `LIGHT_PHASE` for the work-phase tag ramp and
+`paletteFor(scheme)` to pick a `NeutronPalette` (`{ scheme, colors, phase }`). There
+is no `THEME` constant any more — it was DELETED rather than aliased, so a component
+that still tries to capture a fixed palette is a compile error instead of a dark
+card in a light screen. `app/lib/composer-constants.ts` re-exports the
+theme-independent tokens (spacing, radii, motion, type) and deliberately does NOT
+re-export a palette; passing `THEME` through that barrel is how six components ended
+up capturing dark without ever naming `lib/theme` in their imports.
+
+**The seam.** `app/lib/theme-context.tsx` owns `ThemeProvider` + `useTheme()`
+(colours), `usePhase()` (phase ramp), `useThemeState()` (the whole state, for the
+control) and `useThemedStyles(factory)`. A component declares a module-scope
+`const makeStyles = (theme: NeutronTheme) => StyleSheet.create({...})` and calls
+`useThemedStyles(makeStyles)` in its body; the result is memoised per palette
+object, and both palettes are frozen singletons, so each sheet is built at most
+twice for the life of the process. Roughly 70 components follow that shape.
+
+**The preference.** `ThemePreference` is `light | dark | system`, defaulting to
+`system`, persisted under `neutron-theme` (localStorage on web, AsyncStorage on
+native — same key the web chat uses). `resolveTheme(pref, osScheme)` is the one
+rule: an explicit choice is an OVERRIDE and is never shadowed by the OS; `system`
+follows `useColorScheme()`, which is already a subscription, so flipping the OS
+theme re-themes a foregrounded app. `app/app.json`'s long-standing
+`"userInterfaceStyle": "automatic"` is finally true rather than aspirational.
+
+**Boot order, and the pre-paint read.** `RootLayout` renders
+`DiagnosticsErrorBoundary` → `ThemeProvider` → `RootLayoutShell`. The preference is
+seeded from a SYNCHRONOUS store read where the platform has one
+(`readStoredPreferenceSync`, satisfied by `localStorage`), so on web the very first
+render already carries the owner's choice and there is no wrong-theme frame at all —
+the direct counterpart of the web chat's pre-paint inline script. AsyncStorage cannot
+answer synchronously, so on native the boot gate waits on `hydrated` as well as the
+server-config hydrate, and the gate's own spinner is themed.
+
+Two limits are stated rather than glossed. The NATIVE SPLASH renders before any JS
+exists to consult, so it follows the OS scheme (`splash.dark` in `app/app.json`) and
+cannot follow a stored override. And the error boundary is OUTSIDE the provider on
+purpose — it is the one screen that must render when theming is what broke, so
+`useTheme()` answers with the dark palette outside a provider rather than throwing.
+That totality also covers a component invoked with no React dispatcher at all (the
+`HookRuntime` DI seam in `app/lib/hook-runtime.ts`), which is how ~8 diagnostics and
+docs tests drive real components from plain JavaScript.
+
+**Native system chrome.** `RootLayoutShell` renders `expo-status-bar`'s `StatusBar`
+with `style` derived from the RESOLVED scheme. `userInterfaceStyle: "automatic"`
+leaves icon styling to the OS, which is right for `system` and wrong for an
+override — an explicit Light choice on a dark-OS phone otherwise gives a light app
+under light-on-dark status-bar icons.
+
+**The control.** `app/components/ThemeControl.tsx` is a three-way segmented control
+in Settings (above the navigation rows, because it changes what all of them look
+like). Each segment is a real `Pressable` with an accessible name, so the probe in
+`app/__tests__/theme-preference.test.tsx` PRESSES it and then reads the resolved
+`backgroundColor` a component received — not the tree.
+
+Two test files, covering two different things.
+`theme-preference.test.tsx` mounts the control DIRECTLY, and five of its cases mount
+with NO `osScheme` prop so they drive the PRODUCTION seam
+(`require('react-native').useColorScheme`); `react-native-web` implements no such
+hook, so the harness's `react-native` stub provides one as a real subscription, the
+same treatment `Keyboard` gets there. `theme-control-reachable-in-settings.test.tsx`
+mounts the REAL Settings route and presses through it, which is what makes deleting
+the `<ThemeControl />` call site a failure — the direct-mount file stays green when
+the control is unreachable.
+
+**Status families.** Beyond the base ramp, `NeutronTheme` carries a TRIPLE per status
+— ink + the low-contrast wash it is drawn on + that wash's border — for success,
+danger, info and warning, plus `danger_fill` / `danger_ink` for a destructive button.
+They exist because the admin panes, the Cores screens, the docs tab and the backup
+diff viewer all draw status callouts and each had written its own dark hex inline.
+Two tokens are deliberately the SAME in both palettes and say so: `scrim` (a modal
+dim darkens in both themes, as iOS does) and `veil` / `veil_ink` (a strip over a
+thumbnail — an image is not one of this palette's grounds, so its ink cannot follow
+the theme).
+
+**Contrast is a gate.** `app/__tests__/contrast.test.ts` computes WCAG ratios over
+FOUR surfaces (mobile light/dark from these palettes, web light/dark parsed out of
+`landing/chat-react.html`), for every ground a token can land on. Mobile grounds are
+`background` / `surface` / `surface_raised`; web grounds are `--bg` / `--surface` /
+`--agent-bubble`. That third web ground was missing until 2026-08-11 while mobile had
+always included its equivalent, and adding it exposed six sub-AA pairs that cleared
+both page grounds and failed only inside a bubble. Each status ink is also measured
+against its OWN WASH — the ground introduced by the same commit as the ink, and
+therefore the one nothing prompts you to measure — and `rail_selected` against the two
+inks actually drawn on it.
+
+Text tokens must clear 4.5:1; dots and meter bars clear the 3:1 non-text bar;
+`attention` in light is the ONE documented exemption (owner decision FIX #345 fixed
+its hue). `contrast-gate-selfcheck.test.ts` feeds the gate every historical failing
+value and asserts it still calls them failures, so the gate cannot rot into a
+pass-everything.
+
+**No colour literal exists outside the palette module.**
+`app/__tests__/no-captured-palette.test.ts` is the one-missed-component guard, and as
+of 2026-08-11 it is absolute: zero hex / `rgb()` / named-colour literals anywhere in
+`app/` outside `lib/theme.ts` and `lib/theme-context.tsx`, with no per-file budget and
+no exempt files. It previously carried a frozen count of ~380 literals across 19
+files — and its exemption list named the two files holding the worst defect in the
+change (1.10:1 body text in the docs viewer), which is why a ratchet over a defect is
+treated here as a decision to ship it. The guard also enumerates the four syntactic
+forms a colour can take and feeds each a known positive, because the old
+single-quote-only matcher could not see double-quoted JSX attributes and missed 25
+real defects, including `<ActivityIndicator color="#cfcfcf" />` at 1.56:1 on white.
+
 ## Mobile app boot + server URL (ISSUES #385) — `app/lib/server-url.ts`, `app/lib/config.ts`
 
 The Expo app is a client of the owner's OWN instance (a box on their LAN, a

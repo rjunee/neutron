@@ -34,6 +34,27 @@ export interface MountedScreen {
   press(accessibilityLabel: string): Promise<void>;
   /** Find a node by `testID`. */
   byTestId(testId: string): HTMLElement | null;
+  /**
+   * Re-render the SAME root with a new element tree, then settle.
+   *
+   * For the cases where the thing under test is a change that arrives from
+   * OUTSIDE React — the OS switching colour scheme, a native module answering
+   * differently — and the component's job is to follow it. A fresh `mountScreen`
+   * cannot express that: it is a relaunch, not a change, and a provider that only
+   * read its input once at mount would pass it. Re-rendering in place is what
+   * `Appearance` does on the device.
+   */
+  rerender(element: ReactElement): Promise<void>;
+  /**
+   * Run a mutation that originates OUTSIDE React — the OS reporting a new colour
+   * scheme, a native module firing a listener — inside `act`, then settle.
+   *
+   * `rerender` is the wrong tool for these: it hands the tree a NEW element, so a
+   * component that merely re-read a prop would pass. This changes nothing about
+   * the tree and lets the component's own subscription do the work, which is the
+   * only way to tell "subscribed" from "read once at mount".
+   */
+  act(mutate: () => void): Promise<void>;
   /** Let queued microtasks + effects settle. */
   settle(): Promise<void>;
   unmount(): void;
@@ -122,6 +143,12 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
     text: () => host.textContent ?? '',
     composer,
     settle,
+    async rerender(next: ReactElement): Promise<void> {
+      await act(async () => {
+        root.render(withComposerDock(next));
+      });
+      await settle();
+    },
     async type(value: string): Promise<void> {
       const input = composer();
       await act(async () => {
@@ -186,7 +213,34 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
       // the call site, where the risk is visible.
       return host.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
     },
+    async act(mutate: () => void): Promise<void> {
+      await act(async () => {
+        mutate();
+      });
+      await settle();
+    },
     unmount(): void {
+      // DELIBERATELY NOT WRAPPED IN `act`, AND THAT WAS MEASURED.
+      //
+      // Unmounting runs cleanup effects, which are React work, so calling this bare
+      // makes React log an unwrapped-act warning on every teardown. Review flagged
+      // that noise and it is a fair observation — it is what a real warning would
+      // have to be spotted among.
+      //
+      // The obvious fix makes it much worse. Wrapping this in `act(() => { … })`
+      // took the 18-file device-harness set from 138 pass / 10 fail to
+      // **53 pass / 95 fail**; reverting it restored the baseline exactly. The
+      // harness runs several files per PROCESS against one shared happy-dom, and an
+      // `act` scope opened during teardown interleaves with the next file's mount,
+      // so React's work queue is entered from two places at once. Eighty-five extra
+      // failures across unrelated suites is a far worse signal-to-noise outcome than
+      // the warning it silences.
+      //
+      // So the warning stays. This is the "an instruction can be right about the
+      // MECHANISM and wrong about the CONTENT" case from CLAUDE.md: `act` genuinely
+      // is how you wrap React work, and applying it here breaks the suite. If the
+      // noise ever has to go, the fix is process-per-file isolation (what the device
+      // lane already does at a coarser grain), not a wrapper here.
       root.unmount();
       host.remove();
     },

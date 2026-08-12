@@ -41,7 +41,9 @@ import {
 } from '../lib/diagnostics-send-state';
 import { disablePushForUser } from '../lib/push';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
+import { ThemeControl } from '../components/ThemeControl';
 import {
   VoiceTranscriptionClient,
   type TranscriptionBackendChoice,
@@ -54,6 +56,8 @@ import {
 } from '../lib/voice-transcription-view';
 
 export default function SettingsScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user, status, clear } = useAuthSession();
   const [editingServer, setEditingServer] = useState(false);
@@ -279,7 +283,7 @@ export default function SettingsScreen() {
     // useEffect above handles the actual redirect once `status === 'ready'`.
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -389,6 +393,10 @@ export default function SettingsScreen() {
           </View>
           <Text style={styles.navRowChevron}>›</Text>
         </Pressable>
+
+        {/* Appearance sits ABOVE the navigation rows because it changes what all of
+            them look like — it is a property of the app, not another place to go. */}
+        <ThemeControl />
 
         {/* Placed directly above Code generation's sibling rows on purpose: the only
             reason to read quota in a settings pane is to decide where to spend it, and
@@ -507,137 +515,141 @@ function initial(name: string): string {
   return trimmed.slice(0, 1).toUpperCase();
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingBottom: 12,
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  headerIconBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  headerIcon: { color: THEME.accent, fontSize: 18, fontWeight: '600' },
-  headerCenter: { flex: 1, paddingHorizontal: 4 },
-  headerSpacer: { width: 40 },
-  headerOverline: {
-    color: THEME.text_muted,
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  headerTitle: { color: THEME.text_primary, fontSize: 18, fontWeight: '700', marginTop: 1 },
-  pressed: { opacity: 0.7 },
-  body: { padding: 16, gap: 16 },
-  userCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  avatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: THEME.surface_raised,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  avatarInitial: {
-    color: THEME.text_primary,
-    fontSize: 22,
-    fontWeight: '700',
-  },
-  userText: { flex: 1, gap: 2 },
-  userName: { color: THEME.text_primary, fontSize: 17, fontWeight: '600' },
-  userEmail: { color: THEME.text_secondary, fontSize: 13 },
-  providerBadge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    marginTop: 4,
-  },
-  providerBadgeText: {
-    color: THEME.text_secondary,
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 0.6,
-  },
-  navRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  serverCard: {
-    gap: 10,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  serverUrl: {
-    color: THEME.text_secondary,
-    fontSize: 13,
-    fontFamily: 'Menlo',
-  },
-  secondaryBtn: {
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  secondaryBtnText: { color: THEME.text_secondary, fontSize: 15, fontWeight: '600' },
-  navRowText: { flex: 1, gap: 3 },
-  navRowTitle: { color: THEME.text_primary, fontSize: 15, fontWeight: '600' },
-  navRowSubtitle: { color: THEME.text_secondary, fontSize: 12, lineHeight: 16 },
-  diagnosticsError: { color: THEME.danger, fontSize: 12, lineHeight: 16 },
-  navRowChevron: { color: THEME.text_muted, fontSize: 22, fontWeight: '400' },
-  signOutBtn: {
-    height: 48,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.danger,
-  },
-  signOutText: { color: THEME.danger, fontSize: 15, fontWeight: '600' },
-  footnote: {
-    color: THEME.text_muted,
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 16,
-  },
-});
+/** Exported so `__tests__/theme-control-reachable-in-settings.test.tsx` can build
+ *  this screen's sheet from BOTH palettes and assert its colours actually differ —
+ *  the screen carrying the appearance toggle is the one that must not stay dark. */
+export const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background, paddingTop: 48 },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 8,
+      paddingBottom: 12,
+      gap: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    headerIconBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    headerIcon: { color: theme.accent, fontSize: 18, fontWeight: '600' },
+    headerCenter: { flex: 1, paddingHorizontal: 4 },
+    headerSpacer: { width: 40 },
+    headerOverline: {
+      color: theme.text_muted,
+      fontSize: 10,
+      fontWeight: '600',
+      letterSpacing: 1,
+      textTransform: 'uppercase',
+    },
+    headerTitle: { color: theme.text_primary, fontSize: 18, fontWeight: '700', marginTop: 1 },
+    pressed: { opacity: 0.7 },
+    body: { padding: 16, gap: 16 },
+    userCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 16,
+      padding: 16,
+      borderRadius: 12,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    avatar: {
+      width: 56,
+      height: 56,
+      borderRadius: 28,
+      backgroundColor: theme.surface_raised,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    avatarInitial: {
+      color: theme.text_primary,
+      fontSize: 22,
+      fontWeight: '700',
+    },
+    userText: { flex: 1, gap: 2 },
+    userName: { color: theme.text_primary, fontSize: 17, fontWeight: '600' },
+    userEmail: { color: theme.text_secondary, fontSize: 13 },
+    providerBadge: {
+      alignSelf: 'flex-start',
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 6,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      marginTop: 4,
+    },
+    providerBadgeText: {
+      color: theme.text_secondary,
+      fontSize: 10,
+      fontWeight: '600',
+      letterSpacing: 0.6,
+    },
+    navRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      padding: 16,
+      borderRadius: 12,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    serverCard: {
+      gap: 10,
+      padding: 16,
+      borderRadius: 12,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    serverUrl: {
+      color: theme.text_secondary,
+      fontSize: 13,
+      fontFamily: 'Menlo',
+    },
+    secondaryBtn: {
+      height: 44,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    secondaryBtnText: { color: theme.text_secondary, fontSize: 15, fontWeight: '600' },
+    navRowText: { flex: 1, gap: 3 },
+    navRowTitle: { color: theme.text_primary, fontSize: 15, fontWeight: '600' },
+    navRowSubtitle: { color: theme.text_secondary, fontSize: 12, lineHeight: 16 },
+    diagnosticsError: { color: theme.danger, fontSize: 12, lineHeight: 16 },
+    navRowChevron: { color: theme.text_muted, fontSize: 22, fontWeight: '400' },
+    signOutBtn: {
+      height: 48,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.danger,
+    },
+    signOutText: { color: theme.danger, fontSize: 15, fontWeight: '600' },
+    footnote: {
+      color: theme.text_muted,
+      fontSize: 12,
+      textAlign: 'center',
+      marginTop: 8,
+      lineHeight: 16,
+    },
+  });

@@ -17,7 +17,8 @@
 import { useState } from 'react';
 import { Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from './theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from './theme';
+import { useThemedStyles } from './theme-context';
 
 const URL_ALLOW = /^(https?:\/\/|neutron:\/\/docs\/|app:\/\/|\/)/;
 
@@ -51,6 +52,7 @@ function safeTitle(title: string): string {
 }
 
 export function CitationChipRow({ citations, onOpen }: CitationChipRowProps) {
+  const styles = useThemedStyles(makeStyles);
   if (citations.length === 0) return null;
   const dispatch = onOpen ?? ((url: string) => {
     if (!URL_ALLOW.test(url)) return;
@@ -77,6 +79,7 @@ function CitationChip({
   citation: Citation;
   onOpen: (url: string) => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const [iconFailed, setIconFailed] = useState(false);
   const iconSrc = iconFailed ? null : faviconUrl(citation.url);
   return (
@@ -103,39 +106,40 @@ function CitationChip({
   );
 }
 
-const styles = StyleSheet.create({
-  row: {
-    gap: SPACING.xs + 2,
-    paddingVertical: SPACING.xs,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs + 2,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.xs + 2,
-    borderRadius: DENSITY.chip_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface,
-  },
-  favicon: {
-    width: 14,
-    height: 14,
-    borderRadius: 3,
-  },
-  faviconFallback: {
-    width: 14,
-    height: 14,
-    textAlign: 'center',
-    fontSize: 12,
-    lineHeight: 14,
-    color: THEME.text_muted,
-  },
-  chipText: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_secondary,
-    fontWeight: '500',
-  },
-  pressed: { opacity: 0.6 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    row: {
+      gap: SPACING.xs + 2,
+      paddingVertical: SPACING.xs,
+    },
+    chip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: SPACING.xs + 2,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.xs + 2,
+      borderRadius: DENSITY.chip_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.surface,
+    },
+    favicon: {
+      width: 14,
+      height: 14,
+      borderRadius: 3,
+    },
+    faviconFallback: {
+      width: 14,
+      height: 14,
+      textAlign: 'center',
+      fontSize: 12,
+      lineHeight: 14,
+      color: theme.text_muted,
+    },
+    chipText: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_secondary,
+      fontWeight: '500',
+    },
+    pressed: { opacity: 0.6 },
+  });

@@ -2,10 +2,20 @@
  * @neutronai/app — D7 RENDER coverage for the extracted presentational
  * panes (`DocViewerPane`, `DocHistoryPane`).
  *
- * The panes are pure (no hooks) → we call them directly and walk the
- * returned React element tree (we never mount/invoke the host stubs), so
- * we get executable proof of WHICH branch renders for a given hook state,
- * not just that identifiers survive in the source.
+ * The panes take their PROPS as their whole input and are called directly, so we
+ * walk the returned React element tree (we never mount/invoke the host stubs) and
+ * get executable proof of WHICH branch renders for a given hook state, not just
+ * that identifiers survive in the source.
+ *
+ * They are no longer literally hook-free: since light mode landed (2026-08-10) each
+ * pane resolves its stylesheet from the ACTIVE palette via `useThemedStyles`, which
+ * is a `useContext` underneath. Calling a component outside a renderer means there
+ * is no hook dispatcher at all, so that call throws inside React itself — before any
+ * defaulting in our own code can help. The theme context is therefore stubbed here
+ * alongside the other heavy deps, resolving every sheet against the DARK palette.
+ * That keeps this file's question ("which branch renders?") answerable without
+ * mounting, and leaves "does the right palette arrive?" to
+ * `theme-preference.test.tsx`, which mounts for exactly that reason.
  *
  * react-native can't be parsed by bun (Flow) and the heavy pane children
  * (RenderMarkdown / CommentsSidePane / CommentsProvider) pull Flow-typed
@@ -44,6 +54,12 @@ beforeAll(async () => {
   mock.module('../lib/markdown-render', () => ({ RenderMarkdown: stub('RenderMarkdown') }));
   mock.module('../lib/comments-state', () => ({ CommentsProvider: stub('CommentsProvider') }));
   mock.module('../components/CommentsSidePane', () => ({ CommentsSidePane: stub('CommentsSidePane') }));
+  const { DARK_THEME, DARK_PHASE } = await import('../lib/theme');
+  mock.module('../lib/theme-context', () => ({
+    useThemedStyles: (factory: (t: unknown, p: unknown) => unknown) => factory(DARK_THEME, DARK_PHASE),
+    useTheme: () => DARK_THEME,
+    usePhase: () => DARK_PHASE,
+  }));
   P = await import('../features/docs/docs-panes');
 });
 

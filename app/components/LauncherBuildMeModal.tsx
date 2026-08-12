@@ -18,7 +18,8 @@
 
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { DENSITY, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 export interface LauncherBuildMeModalProps {
   open: boolean;
@@ -37,6 +38,8 @@ export function LauncherBuildMeModal({
   onCancel,
   onSubmit,
 }: LauncherBuildMeModalProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   if (!open) return null;
   const sendDisabled = submitting || draft.trim().length === 0;
   return (
@@ -51,7 +54,7 @@ export function LauncherBuildMeModal({
           <TextInput
             accessibilityLabel="Describe the Core"
             placeholder="…tracks my running mileage and writes a weekly summary."
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             value={draft}
             onChangeText={onDraftChange}
             style={[styles.modalInput, styles.modalInputMultiline]}
@@ -82,7 +85,7 @@ export function LauncherBuildMeModal({
               ]}
             >
               {submitting ? (
-                <ActivityIndicator color={THEME.background} />
+                <ActivityIndicator color={theme.background} />
               ) : (
                 <Text style={[styles.modalBtnText, styles.modalBtnTextPrimary]}>Send</Text>
               )}
@@ -94,70 +97,71 @@ export function LauncherBuildMeModal({
   );
 }
 
-const styles = StyleSheet.create({
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.xl,
-  },
-  modalPanel: {
-    width: '100%',
-    maxWidth: 360,
-    backgroundColor: THEME.surface,
-    borderRadius: DENSITY.bubble_radius,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    padding: SPACING.lg,
-    gap: SPACING.sm,
-  },
-  modalTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h4.fontSize,
-    lineHeight: TYPOGRAPHY.h4.lineHeight,
-    fontWeight: '700',
-  },
-  modalSubtitle: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  modalInput: {
-    color: THEME.text_primary,
-    backgroundColor: THEME.background,
-    borderColor: THEME.hairline,
-    borderWidth: 1,
-    borderRadius: DENSITY.composer_radius,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  modalInputMultiline: { minHeight: 96, textAlignVertical: 'top' },
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-    marginTop: SPACING.xs,
-  },
-  modalBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm,
-    borderRadius: DENSITY.composer_radius,
-    backgroundColor: THEME.surface_raised,
-    minWidth: 88,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modalBtnPrimary: { backgroundColor: THEME.text_primary },
-  modalBtnDisabled: { opacity: 0.5 },
-  modalBtnText: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  modalBtnTextPrimary: { color: THEME.background },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    modalBackdrop: {
+      flex: 1,
+      backgroundColor: theme.scrim,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: SPACING.xl,
+    },
+    modalPanel: {
+      width: '100%',
+      maxWidth: 360,
+      backgroundColor: theme.surface,
+      borderRadius: DENSITY.bubble_radius,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      padding: SPACING.lg,
+      gap: SPACING.sm,
+    },
+    modalTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h4.fontSize,
+      lineHeight: TYPOGRAPHY.h4.lineHeight,
+      fontWeight: '700',
+    },
+    modalSubtitle: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    modalInput: {
+      color: theme.text_primary,
+      backgroundColor: theme.background,
+      borderColor: theme.hairline,
+      borderWidth: 1,
+      borderRadius: DENSITY.composer_radius,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    modalInputMultiline: { minHeight: 96, textAlignVertical: 'top' },
+    modalActions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+      marginTop: SPACING.xs,
+    },
+    modalBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm,
+      borderRadius: DENSITY.composer_radius,
+      backgroundColor: theme.surface_raised,
+      minWidth: 88,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    modalBtnPrimary: { backgroundColor: theme.text_primary },
+    modalBtnDisabled: { opacity: 0.5 },
+    modalBtnText: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    modalBtnTextPrimary: { color: theme.background },
+    pressed: { opacity: 0.7 },
+  });

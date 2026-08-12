@@ -120,10 +120,16 @@ describe('<ReminderList> — highlight + scroll wiring (ISSUE #38)', () => {
     // The highlighted-row wrap must use the dedicated style so the
     // visual cue lands. Source-pin both the conditional and the style
     // shape (border + raised surface).
+    //
+    // The colour is read off the sheet FACTORY's `theme` parameter, not a
+    // module-scope `THEME` — the palette is per-render now, so the same two
+    // tokens resolve to the light values in light mode and the dark ones in dark.
+    // The tokens are what this pins; which palette supplies them is not this
+    // test's business (see `__tests__/contrast.test.ts` for the values).
     expect(REMINDER_LIST_SRC).toMatch(/isHighlighted\s*=\s*highlightReminderId\s*===\s*entry\.id/);
     expect(REMINDER_LIST_SRC).toMatch(/isHighlighted\s*\?\s*styles\.highlightedWrap\s*:\s*undefined/);
     expect(REMINDER_LIST_SRC).toMatch(
-      /highlightedWrap:\s*\{[\s\S]*?borderColor:\s*THEME\.text_secondary[\s\S]*?backgroundColor:\s*THEME\.surface_raised[\s\S]*?\}/,
+      /highlightedWrap:\s*\{[\s\S]*?borderColor:\s*theme\.text_secondary[\s\S]*?backgroundColor:\s*theme\.surface_raised[\s\S]*?\}/,
     );
   });
 

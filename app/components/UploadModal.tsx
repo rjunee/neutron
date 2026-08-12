@@ -30,7 +30,8 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import { Animated, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 export type UploadModalPhase =
   | 'uploading'
@@ -86,6 +87,7 @@ export function UploadModal({
   onRetry,
   onDismiss,
 }: UploadModalProps) {
+  const styles = useThemedStyles(makeStyles);
   const progressFraction = useMemo(() => {
     if (phase === 'complete') return 1;
     if (typeof bytes_total === 'number' && bytes_total > 0 && typeof bytes_sent === 'number') {
@@ -226,6 +228,7 @@ function PhaseChip({
   done: boolean;
   error: boolean;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View
       style={[
@@ -250,6 +253,7 @@ function PhaseChip({
 }
 
 function IndeterminateShimmer() {
+  const styles = useThemedStyles(makeStyles);
   const anim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     const loop = Animated.loop(
@@ -296,122 +300,123 @@ function formatSize(bytes: number | undefined): string | null {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const styles = StyleSheet.create({
-  scrim: {
-    flex: 1,
-    backgroundColor: 'rgba(10,10,10,0.72)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.lg,
-  },
-  card: {
-    width: '100%',
-    maxWidth: 480,
-    borderRadius: 14,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    paddingHorizontal: SPACING.xl,
-    paddingTop: SPACING.xl,
-    paddingBottom: SPACING.lg,
-    gap: SPACING.md,
-  },
-  title: {
-    ...TYPOGRAPHY.h4,
-    color: THEME.text_primary,
-  },
-  meta: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_muted,
-  },
-  bar: {
-    width: '100%',
-    height: 6,
-    borderRadius: 999,
-    backgroundColor: THEME.surface_raised,
-    overflow: 'hidden',
-  },
-  barFill: {
-    height: '100%',
-    backgroundColor: THEME.accent,
-  },
-  barFillError: {
-    backgroundColor: THEME.danger,
-  },
-  shimmer: {
-    height: '100%',
-    width: '100%',
-    backgroundColor: THEME.accent,
-  },
-  phaseRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.xs + 2,
-  },
-  phaseChip: {
-    paddingHorizontal: SPACING.sm + 2,
-    paddingVertical: SPACING.xs,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    backgroundColor: THEME.surface_raised,
-  },
-  phaseChipActive: {
-    borderColor: THEME.accent,
-  },
-  phaseChipDone: {
-    backgroundColor: 'rgba(224,224,224,0.10)',
-  },
-  phaseChipError: {
-    borderColor: THEME.danger,
-  },
-  phaseChipText: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_muted,
-  },
-  phaseChipTextActive: {
-    color: THEME.text_primary,
-    fontWeight: '600',
-  },
-  phaseChipTextDone: {
-    color: THEME.text_secondary,
-  },
-  completeHint: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_secondary,
-    fontStyle: 'italic',
-  },
-  errorText: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.danger,
-  },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: SPACING.sm,
-  },
-  primaryBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: 10,
-    backgroundColor: THEME.accent,
-  },
-  primaryBtnText: {
-    ...TYPOGRAPHY.body_small,
-    fontWeight: '700',
-    color: THEME.background,
-  },
-  secondaryBtn: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.sm + 2,
-    borderRadius: 10,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  secondaryBtnText: {
-    ...TYPOGRAPHY.body_small,
-    color: THEME.text_primary,
-  },
-  pressed: { opacity: 0.7 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    scrim: {
+      flex: 1,
+      backgroundColor: theme.scrim,
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.lg,
+    },
+    card: {
+      width: '100%',
+      maxWidth: 480,
+      borderRadius: 14,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      paddingHorizontal: SPACING.xl,
+      paddingTop: SPACING.xl,
+      paddingBottom: SPACING.lg,
+      gap: SPACING.md,
+    },
+    title: {
+      ...TYPOGRAPHY.h4,
+      color: theme.text_primary,
+    },
+    meta: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_muted,
+    },
+    bar: {
+      width: '100%',
+      height: 6,
+      borderRadius: 999,
+      backgroundColor: theme.surface_raised,
+      overflow: 'hidden',
+    },
+    barFill: {
+      height: '100%',
+      backgroundColor: theme.accent,
+    },
+    barFillError: {
+      backgroundColor: theme.danger,
+    },
+    shimmer: {
+      height: '100%',
+      width: '100%',
+      backgroundColor: theme.accent,
+    },
+    phaseRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: SPACING.xs + 2,
+    },
+    phaseChip: {
+      paddingHorizontal: SPACING.sm + 2,
+      paddingVertical: SPACING.xs,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      backgroundColor: theme.surface_raised,
+    },
+    phaseChipActive: {
+      borderColor: theme.accent,
+    },
+    phaseChipDone: {
+      backgroundColor: theme.surface_raised,
+    },
+    phaseChipError: {
+      borderColor: theme.danger,
+    },
+    phaseChipText: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_muted,
+    },
+    phaseChipTextActive: {
+      color: theme.text_primary,
+      fontWeight: '600',
+    },
+    phaseChipTextDone: {
+      color: theme.text_secondary,
+    },
+    completeHint: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_secondary,
+      fontStyle: 'italic',
+    },
+    errorText: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.danger,
+    },
+    actions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: SPACING.sm,
+    },
+    primaryBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm + 2,
+      borderRadius: 10,
+      backgroundColor: theme.accent,
+    },
+    primaryBtnText: {
+      ...TYPOGRAPHY.body_small,
+      fontWeight: '700',
+      color: theme.background,
+    },
+    secondaryBtn: {
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.sm + 2,
+      borderRadius: 10,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    secondaryBtnText: {
+      ...TYPOGRAPHY.body_small,
+      color: theme.text_primary,
+    },
+    pressed: { opacity: 0.7 },
+  });

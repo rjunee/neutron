@@ -17,7 +17,8 @@
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { LauncherEntry, LauncherIcon } from '../lib/launcher-client';
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
+import { DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from '../lib/theme';
+import { useThemedStyles } from '../lib/theme-context';
 
 /** Long-press delay — sits inside Apple HIG's 250–500ms band. */
 export const LONG_PRESS_DELAY = MOTION.fast * 2;
@@ -52,6 +53,7 @@ export function LauncherItem({
   onLongPress,
   dragHandlers,
 }: LauncherItemProps) {
+  const styles = useThemedStyles(makeStyles);
   // RN-web translates `View` → `<div>`. HTML5 drag attributes aren't
   // in React Native's typed surface so we pass them via a
   // `Record<string, unknown>` cast that RN-web honours and native
@@ -97,6 +99,7 @@ export function LauncherItem({
 }
 
 function LauncherIconView({ icon }: { icon: LauncherIcon }) {
+  const styles = useThemedStyles(makeStyles);
   if (icon.kind === 'emoji') {
     return <Text style={styles.tileEmoji}>{icon.value}</Text>;
   }
@@ -106,32 +109,33 @@ function LauncherIconView({ icon }: { icon: LauncherIcon }) {
   return <Text style={styles.tileEmoji}>🧩</Text>;
 }
 
-const styles = StyleSheet.create({
-  tileWrap: {
-    // width is set per-instance from the `size` prop. The wrapper
-    // exists so the inner Pressable's pressed-state border doesn't
-    // shift the layout when the user taps.
-  },
-  tile: {
-    borderRadius: TILE_RADIUS,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-  },
-  tilePressed: {
-    backgroundColor: THEME.surface_raised,
-    borderColor: THEME.surface_raised,
-  },
-  tileEmoji: { fontSize: TILE_EMOJI_FONT_SIZE, lineHeight: TILE_EMOJI_FONT_SIZE + 4 },
-  tileLabel: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    tileWrap: {
+      // width is set per-instance from the `size` prop. The wrapper
+      // exists so the inner Pressable's pressed-state border doesn't
+      // shift the layout when the user taps.
+    },
+    tile: {
+      borderRadius: TILE_RADIUS,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: SPACING.sm,
+      paddingHorizontal: SPACING.sm,
+    },
+    tilePressed: {
+      backgroundColor: theme.surface_raised,
+      borderColor: theme.surface_raised,
+    },
+    tileEmoji: { fontSize: TILE_EMOJI_FONT_SIZE, lineHeight: TILE_EMOJI_FONT_SIZE + 4 },
+    tileLabel: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      fontWeight: '500',
+      textAlign: 'center',
+    },
+  });

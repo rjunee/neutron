@@ -42,7 +42,8 @@ import {
   parseBlocks,
   tokeniseInline,
 } from './markdown-grammar';
-import { DENSITY, MOTION, SPACING, THEME, TYPOGRAPHY } from './theme';
+import { DENSITY, MOTION, SPACING, TYPOGRAPHY, type NeutronTheme } from './theme';
+import { useTheme, useThemedStyles } from './theme-context';
 
 /**
  * P7.5 — resolves a relative `![alt](relpath)` link in markdown to the
@@ -56,6 +57,23 @@ export type BinarySourceResolver = (relPath: string) =>
 
 export interface RenderMarkdownProps {
   source: string;
+  /**
+   * Ink for the body runs. OMIT IT and the active palette's `text_primary` is
+   * used, which is what almost every caller wants.
+   *
+   * It used to default to a literal `'#f4f4f4'`. That is the exact defect this
+   * whole change exists to remove, and it survived the first pass because a
+   * DEFAULT PARAMETER is not a stylesheet — the sheet here was converted to a
+   * factory and looked done, while the ink went on being a hardcoded near-white.
+   * The docs viewer renders markdown without passing this prop, so in light mode
+   * it drew #f4f4f4 body text on a themed white page: 1.10:1, i.e. the document
+   * was invisible rather than merely low-contrast. Only the chat surface passed a
+   * theme-derived value (`ChatSyncSurface`), so only the chat surface was right.
+   *
+   * Pass it explicitly ONLY to override the ink deliberately — the bubble
+   * renderer does, because ink on the owner's blue bubble is `user_ink`, not the
+   * page's primary text.
+   */
   textColor?: string;
   /** Used to resolve relative `image` tokens. */
   binarySource?: BinarySourceResolver;
@@ -69,20 +87,29 @@ function safeOpenUrl(url: string): void {
   Linking.openURL(url).catch(() => undefined);
 }
 
-export function RenderMarkdown({ source, textColor = '#f4f4f4', binarySource }: RenderMarkdownProps) {
+export function RenderMarkdown({ source, textColor, binarySource }: RenderMarkdownProps) {
+  const styles = useThemedStyles(makeStyles);
+  const theme = useTheme();
+  const ink = textColor ?? theme.text_primary;
   const blocks = parseBlocks(source);
   return (
     <View>
-      {blocks.map((block, idx) => renderBlock(block, idx, textColor, binarySource))}
+      {blocks.map((block, idx) => renderBlock(block, idx, ink, binarySource, styles))}
     </View>
   );
 }
+
+/** The active markdown sheet. Threaded as an argument through the pure render
+ *  helpers below — they are not components, so they cannot call the hook, and a
+ *  module-scope sheet is exactly the capture this refactor removes. */
+type MarkdownStyles = ReturnType<typeof makeStyles>;
 
 function renderBlock(
   block: Block,
   idx: number,
   textColor: string,
   binarySource: BinarySourceResolver | undefined,
+  styles: MarkdownStyles,
 ): ReactNode {
   switch (block.kind) {
     case 'code':
@@ -121,6 +148,7 @@ function renderBlock(
 }
 
 function CodeBlock({ text, lang }: { text: string; lang?: string }) {
+  const styles = useThemedStyles(makeStyles);
   const [copied, setCopied] = useState(false);
   const onCopy = useCallback(() => {
     if (Platform.OS === 'web') {
@@ -166,11 +194,13 @@ function HeadingBlock({
   text: string;
   binarySource: BinarySourceResolver | undefined;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const tokenStyle =
     level === 1 ? TYPOGRAPHY.h1 : level === 2 ? TYPOGRAPHY.h2 : level === 3 ? TYPOGRAPHY.h3 : TYPOGRAPHY.h4;
   return (
-    <Text style={[styles.heading, tokenStyle, { color: THEME.text_primary }]}>
-      {renderInline(text, THEME.text_primary, binarySource)}
+    <Text style={[styles.heading, tokenStyle, { color: theme.text_primary }]}>
+      {renderInline(text, theme.text_primary, binarySource, styles)}
     </Text>
   );
 }
@@ -184,11 +214,12 @@ function BlockquoteBlock({
   textColor: string;
   binarySource: BinarySourceResolver | undefined;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const body = lines.join('\n');
   return (
     <View style={styles.blockquote}>
       <Text style={[styles.paragraph, { color: textColor, fontStyle: 'italic', opacity: 0.85 }]}>
-        {renderInline(body, textColor, binarySource)}
+        {renderInline(body, textColor, binarySource, styles)}
       </Text>
     </View>
   );
@@ -205,6 +236,7 @@ function ListBlock({
   textColor: string;
   binarySource: BinarySourceResolver | undefined;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.list}>
       {items.map((item, i) => (
@@ -236,6 +268,7 @@ function ListItemRow({
   binarySource: BinarySourceResolver | undefined;
   nested?: boolean;
 }) {
+  const styles = useThemedStyles(makeStyles);
   const marker = ordered ? `${index + 1}.` : '•';
   const isTask = item.checked !== undefined;
   return (
@@ -249,7 +282,7 @@ function ListItemRow({
           <Text style={[styles.bullet, { color: textColor }]}>{marker}</Text>
         )}
         <Text style={[styles.paragraph, { color: textColor, flex: 1 }]}>
-          {renderInline(item.text, textColor, binarySource)}
+          {renderInline(item.text, textColor, binarySource, styles)}
         </Text>
       </View>
       {item.children !== undefined && item.children.length > 0 ? (
@@ -283,6 +316,8 @@ function TableBlock({
   rows: string[][];
   textColor: string;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const truncated = header.length > TABLE_COL_CAP || rows.length > TABLE_ROW_CAP;
   const cappedHeader = header.slice(0, TABLE_COL_CAP);
   const cappedRows = rows.slice(0, TABLE_ROW_CAP).map((r) => r.slice(0, TABLE_COL_CAP));
@@ -290,7 +325,7 @@ function TableBlock({
     <View style={styles.tableWrap}>
       <View style={[styles.tableRow, styles.tableHeaderRow]}>
         {cappedHeader.map((cell, i) => (
-          <Text key={i} style={[styles.tableCell, styles.tableHeaderCell, { color: THEME.text_primary }]}>
+          <Text key={i} style={[styles.tableCell, styles.tableHeaderCell, { color: theme.text_primary }]}>
             {cell.trim()}
           </Text>
         ))}
@@ -320,6 +355,7 @@ interface ParagraphRenderProps {
 }
 
 function ParagraphRender({ text, textColor, binarySource }: ParagraphRenderProps) {
+  const styles = useThemedStyles(makeStyles);
   const tokens = tokeniseInline(text);
   // Split into runs separated by image tokens.
   const runs: Array<Inline[] | { image: Extract<Inline, { kind: 'image' }> }> = [];
@@ -342,7 +378,7 @@ function ParagraphRender({ text, textColor, binarySource }: ParagraphRenderProps
         if (Array.isArray(run)) {
           return (
             <Text key={i} style={[styles.paragraph, { color: textColor }]}>
-              {run.map((tok, j) => renderToken(tok, j, textColor, binarySource))}
+              {run.map((tok, j) => renderToken(tok, j, textColor, binarySource, styles))}
             </Text>
           );
         }
@@ -366,6 +402,8 @@ interface BinaryRenderProps {
 }
 
 function BinaryRender({ token, textColor, binarySource }: BinaryRenderProps) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const url = token.url;
   const isAbsolute = /^https?:\/\//i.test(url);
   const lower = url.toLowerCase();
@@ -395,7 +433,7 @@ function BinaryRender({ token, textColor, binarySource }: BinaryRenderProps) {
         : null;
     return (
       <Text
-        style={[styles.paragraph, styles.link, { color: THEME.link }]}
+        style={[styles.paragraph, styles.link, { color: theme.link }]}
         accessibilityRole="link"
         onPress={() => {
           if (src === null || src === undefined) return;
@@ -417,9 +455,10 @@ function renderInline(
   source: string,
   color: string,
   binarySource: BinarySourceResolver | undefined,
+  styles: MarkdownStyles,
 ): ReactNode {
   const tokens = tokeniseInline(source);
-  return tokens.map((tok, i) => renderToken(tok, i, color, binarySource));
+  return tokens.map((tok, i) => renderToken(tok, i, color, binarySource, styles));
 }
 
 function renderToken(
@@ -427,6 +466,7 @@ function renderToken(
   i: number,
   color: string,
   _binarySource: BinarySourceResolver | undefined,
+  styles: MarkdownStyles,
 ): ReactNode {
   switch (tok.kind) {
     case 'bold':
@@ -485,144 +525,150 @@ function renderToken(
   }
 }
 
-const styles = StyleSheet.create({
-  paragraph: {
-    ...TYPOGRAPHY.body,
-    marginBottom: SPACING.xs + 2,
-  },
-  paragraphBlock: {
-    marginBottom: SPACING.xs + 2,
-  },
-  inlineImage: {
-    width: '100%',
-    aspectRatio: 16 / 9,
-    marginVertical: SPACING.sm,
-    backgroundColor: THEME.surface_raised,
-    borderRadius: 6,
-  },
-  bold: { fontWeight: '700' },
-  italic: { fontStyle: 'italic' },
-  strike: { textDecorationLine: 'line-through' },
-  inlineCode: {
-    fontFamily: TYPOGRAPHY.mono.fontFamily,
-    fontSize: 14,
-    backgroundColor: THEME.surface_raised,
-    color: THEME.text_secondary,
-    paddingHorizontal: SPACING.xs,
-    borderRadius: 4,
-  },
-  link: {
-    color: THEME.link,
-    textDecorationLine: 'underline',
-  },
-  codeBlock: {
-    backgroundColor: THEME.surface,
-    borderRadius: 8,
-    marginBottom: SPACING.sm,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  codeHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.md,
-    paddingTop: SPACING.sm,
-    paddingBottom: SPACING.xs,
-  },
-  codeLang: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_muted,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  copyBtn: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: 6,
-    backgroundColor: THEME.surface_raised,
-  },
-  copyBtnText: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_secondary,
-    fontWeight: '600',
-  },
-  codeText: {
-    ...TYPOGRAPHY.mono,
-    color: THEME.text_secondary,
-    paddingHorizontal: SPACING.md,
-    paddingBottom: SPACING.md,
-  },
-  heading: {
-    marginTop: SPACING.sm,
-    marginBottom: SPACING.xs,
-  },
-  blockquote: {
-    borderLeftWidth: 3,
-    borderLeftColor: THEME.hairline,
-    paddingLeft: SPACING.md,
-    marginVertical: SPACING.xs,
-    opacity: 0.95,
-  },
-  hr: {
-    height: 1,
-    backgroundColor: THEME.hairline,
-    marginVertical: SPACING.md,
-  },
-  list: {
-    marginBottom: SPACING.xs + 2,
-  },
-  listItem: {
-    flexDirection: 'row',
-    marginBottom: SPACING.xs,
-    gap: SPACING.sm,
-  },
-  listItemNested: {
-    marginLeft: SPACING.lg,
-  },
-  listChildren: {
-    marginLeft: 0,
-  },
-  bullet: {
-    ...TYPOGRAPHY.body,
-    minWidth: 14,
-    textAlign: 'center',
-  },
-  tableWrap: {
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    borderRadius: 6,
-    marginVertical: SPACING.sm,
-    overflow: 'hidden',
-  },
-  tableRow: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  tableHeaderRow: {
-    backgroundColor: THEME.surface,
-  },
-  tableCell: {
-    flex: 1,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    ...TYPOGRAPHY.body_small,
-  },
-  tableHeaderCell: {
-    fontWeight: '700',
-  },
-  tableTruncated: {
-    ...TYPOGRAPHY.caption,
-    color: THEME.text_muted,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-  pressed: { opacity: 0.7 },
-  // The DENSITY token is exported for primitives — exposed here so the
-  // bundler doesn't tree-shake it when the renderer is the only
-  // consumer in scope.
-  _density_keepalive: { borderRadius: DENSITY.bubble_radius },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    paragraph: {
+      ...TYPOGRAPHY.body,
+      marginBottom: SPACING.xs + 2,
+    },
+    paragraphBlock: {
+      marginBottom: SPACING.xs + 2,
+    },
+    inlineImage: {
+      width: '100%',
+      aspectRatio: 16 / 9,
+      marginVertical: SPACING.sm,
+      backgroundColor: theme.surface_raised,
+      borderRadius: 6,
+    },
+    bold: { fontWeight: '700' },
+    italic: { fontStyle: 'italic' },
+    strike: { textDecorationLine: 'line-through' },
+    inlineCode: {
+      fontFamily: TYPOGRAPHY.mono.fontFamily,
+      // `TYPOGRAPHY.mono`, not a literal 14. This was the last magic size left after
+      // the scale moved: body went 15 → 17 and inline code stayed at 14, so the gap
+      // between prose and code WIDENED in the change meant to make code more
+      // legible. `mono` is 15, which tracks the ramp — and the module docblock in
+      // `lib/theme.ts` already forbids inline sizes for exactly this reason.
+      fontSize: TYPOGRAPHY.mono.fontSize,
+      backgroundColor: theme.surface_raised,
+      color: theme.text_secondary,
+      paddingHorizontal: SPACING.xs,
+      borderRadius: 4,
+    },
+    link: {
+      color: theme.link,
+      textDecorationLine: 'underline',
+    },
+    codeBlock: {
+      backgroundColor: theme.surface,
+      borderRadius: 8,
+      marginBottom: SPACING.sm,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    codeHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.md,
+      paddingTop: SPACING.sm,
+      paddingBottom: SPACING.xs,
+    },
+    codeLang: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_muted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+    },
+    copyBtn: {
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      borderRadius: 6,
+      backgroundColor: theme.surface_raised,
+    },
+    copyBtnText: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_secondary,
+      fontWeight: '600',
+    },
+    codeText: {
+      ...TYPOGRAPHY.mono,
+      color: theme.text_secondary,
+      paddingHorizontal: SPACING.md,
+      paddingBottom: SPACING.md,
+    },
+    heading: {
+      marginTop: SPACING.sm,
+      marginBottom: SPACING.xs,
+    },
+    blockquote: {
+      borderLeftWidth: 3,
+      borderLeftColor: theme.hairline,
+      paddingLeft: SPACING.md,
+      marginVertical: SPACING.xs,
+      opacity: 0.95,
+    },
+    hr: {
+      height: 1,
+      backgroundColor: theme.hairline,
+      marginVertical: SPACING.md,
+    },
+    list: {
+      marginBottom: SPACING.xs + 2,
+    },
+    listItem: {
+      flexDirection: 'row',
+      marginBottom: SPACING.xs,
+      gap: SPACING.sm,
+    },
+    listItemNested: {
+      marginLeft: SPACING.lg,
+    },
+    listChildren: {
+      marginLeft: 0,
+    },
+    bullet: {
+      ...TYPOGRAPHY.body,
+      minWidth: 14,
+      textAlign: 'center',
+    },
+    tableWrap: {
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      borderRadius: 6,
+      marginVertical: SPACING.sm,
+      overflow: 'hidden',
+    },
+    tableRow: {
+      flexDirection: 'row',
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    tableHeaderRow: {
+      backgroundColor: theme.surface,
+    },
+    tableCell: {
+      flex: 1,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      ...TYPOGRAPHY.body_small,
+    },
+    tableHeaderCell: {
+      fontWeight: '700',
+    },
+    tableTruncated: {
+      ...TYPOGRAPHY.caption,
+      color: theme.text_muted,
+      paddingHorizontal: SPACING.sm,
+      paddingVertical: SPACING.xs,
+      textAlign: 'center',
+      fontStyle: 'italic',
+    },
+    pressed: { opacity: 0.7 },
+    // The DENSITY token is exported for primitives — exposed here so the
+    // bundler doesn't tree-shake it when the renderer is the only
+    // consumer in scope.
+    _density_keepalive: { borderRadius: DENSITY.bubble_radius },
+  });

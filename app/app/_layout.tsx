@@ -1,5 +1,6 @@
 import { Stack, useRouter } from 'expo-router';
 import * as Linking from 'expo-linking';
+import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
@@ -16,7 +17,8 @@ import { installDiagnostics, setDiagnosticsOrigin } from '../lib/diagnostics';
 import { AuthSessionProvider } from '../lib/session';
 import { docLinkToRouterPath, parseDocLink } from '../lib/doc-links';
 import { installPushTapHandler } from '../lib/push';
-import { THEME } from '../lib/theme';
+import { type NeutronTheme, type ResolvedTheme } from '../lib/theme';
+import { ThemeProvider, useTheme, useThemeState, useThemedStyles } from '../lib/theme-context';
 
 /**
  * Remote diagnostics — installed at MODULE SCOPE, not in an effect.
@@ -167,7 +169,46 @@ function useServerConfigEpoch(): number {
   return epoch;
 }
 
+/**
+ * THE THEME BOUNDARY, and why it is the outermost thing in the app.
+ *
+ * `RootLayout` itself reads the palette (the boot spinner is themed), so the
+ * provider cannot live inside it — it has to wrap it. The error boundary wraps
+ * BOTH, deliberately: it is the only component that must still render when the
+ * theming layer is the thing that threw, and it is written to survive having no
+ * provider above it (see `CrashFallback`).
+ */
 export default function RootLayout() {
+  return (
+    <DiagnosticsErrorBoundary>
+      <ThemeProvider>
+        <RootLayoutShell />
+      </ThemeProvider>
+    </DiagnosticsErrorBoundary>
+  );
+}
+
+/**
+ * NATIVE SYSTEM CHROME follows the RESOLVED scheme, not the OS.
+ *
+ * `app.json` sets `userInterfaceStyle: "automatic"`, which hands the status-bar
+ * icon styling to the OS. That is right for a preference of `system` and WRONG
+ * for an explicit override: an owner who picks Light on a dark-OS phone got a
+ * light app under light-on-dark status-bar icons, i.e. invisible time and battery.
+ * The whole point of an override is that it overrides.
+ *
+ * `style` names the CONTENT: `light` = light icons, for a dark ground. So it is
+ * the inverse of the scheme name, which reads backwards and is why it is spelled
+ * out here.
+ */
+function NeutronStatusBar({ scheme }: { scheme: ResolvedTheme }) {
+  return <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />;
+}
+
+function RootLayoutShell() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
+  const { hydrated: themeHydrated, scheme } = useThemeState();
   const [phase, setPhase] = useState<BootPhase>('hydrating');
   const serverEpoch = useServerConfigEpoch();
   // Read fresh on every render, deliberately NOT memoised. `loadAppConfig()`
@@ -200,16 +241,24 @@ export default function RootLayout() {
     };
   }, []);
 
-  if (phase === 'hydrating') {
+  // The boot gate also waits for the stored theme PREFERENCE. This is mobile's
+  // equivalent of the web's pre-paint inline script (`landing/chat-react.html`):
+  // reading the preference is a storage round-trip, so without this gate the first
+  // real screen paints with the OS-resolved theme and then snaps to the owner's
+  // override a frame later — the flash of the wrong theme that script exists to
+  // prevent. The spinner itself is themed, so it is never a white flash either.
+  if (phase === 'hydrating' || !themeHydrated) {
     return (
       <View style={styles.booting}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <NeutronStatusBar scheme={scheme} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
 
   return (
-    <DiagnosticsErrorBoundary>
+    <>
+      <NeutronStatusBar scheme={scheme} />
       {/* `key` = the server epoch: changing the server rebuilds the entire
           tree so no mounted screen keeps a `useMemo`-frozen config pointing
           at the old host (Argus r2 MAJOR). */}
@@ -228,15 +277,16 @@ export default function RootLayout() {
           <Stack.Screen name="usage" />
         </Stack>
       </AuthSessionProvider>
-    </DiagnosticsErrorBoundary>
+    </>
   );
 }
 
-const styles = StyleSheet.create({
-  booting: {
-    flex: 1,
-    backgroundColor: THEME.background,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    booting: {
+      flex: 1,
+      backgroundColor: theme.background,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+  });

@@ -38,7 +38,8 @@ import {
 
 import { loadAppConfig } from '../lib/config';
 import { useAuthSession } from '../lib/session';
-import { THEME } from '../lib/theme';
+import { type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 import { clampFraction, usageBand } from '@neutronai/contracts/credential-usage.ts';
 
 import {
@@ -52,11 +53,13 @@ import {
   type UsageWindow,
 } from '../lib/usage-dashboard-client';
 
-const BAND_COLOUR: Record<string, string> = {
-  nominal: THEME.usage_nominal,
-  warning: THEME.usage_warning,
-  critical: THEME.usage_critical,
-};
+/** The band ramp, per palette — see the twin in `components/UsageMeter.tsx` for
+ *  why this is a function of the active theme and not a module-scope map. */
+function bandColour(band: string, theme: NeutronTheme): string {
+  if (band === 'critical') return theme.usage_critical;
+  if (band === 'warning') return theme.usage_warning;
+  return theme.usage_nominal;
+}
 
 /** One window: a bar, the percent, when it resets, and the pace. */
 function WindowRow({
@@ -68,6 +71,8 @@ function WindowRow({
   testID: string;
   win: UsageWindow | null;
 }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   if (win === null) {
     // No track at all. An empty coloured track is the specific claim "0% used",
     // which nothing measured.
@@ -106,7 +111,7 @@ function WindowRow({
             styles.fill,
             {
               width: `${(clampFraction(win.fraction) * 100).toFixed(2)}%` as DimensionValue,
-              backgroundColor: BAND_COLOUR[band],
+              backgroundColor: bandColour(band, theme),
             },
           ]}
         />
@@ -140,6 +145,8 @@ function WindowRow({
 }
 
 export default function ModelUsageScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const router = useRouter();
   const { user } = useAuthSession();
   const config = useMemo(() => loadAppConfig(), []);
@@ -170,7 +177,7 @@ export default function ModelUsageScreen() {
   if (user === null) {
     return (
       <View style={[styles.container, styles.centered]}>
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -200,7 +207,7 @@ export default function ModelUsageScreen() {
         </Text>
 
         {usage === null ? (
-          <ActivityIndicator color={THEME.text_secondary} testID="usage-loading" />
+          <ActivityIndicator color={theme.text_secondary} testID="usage-loading" />
         ) : !usage.reachable ? (
           <Text style={styles.muted} testID="usage-unreachable">
             Usage history isn&apos;t available from this server.
@@ -259,72 +266,73 @@ export default function ModelUsageScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: THEME.background, paddingTop: 48 },
-  centered: { alignItems: 'center', justifyContent: 'center' },
-  pressed: { opacity: 0.6 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  headerBack: { padding: 4 },
-  headerIcon: { color: THEME.text_primary, fontSize: 20 },
-  headerOverline: { color: THEME.text_muted, fontSize: 11, textTransform: 'uppercase' },
-  headerTitle: { color: THEME.text_primary, fontSize: 18, fontWeight: '700' },
-  scroll: { padding: 16, gap: 16, paddingBottom: 48 },
-  muted: { color: THEME.text_muted, fontSize: 13, lineHeight: 18 },
-  footnote: { color: THEME.text_muted, fontSize: 11, lineHeight: 15 },
-  pool: {
-    gap: 14,
-    padding: 12,
-    borderRadius: 10,
-    backgroundColor: THEME.surface_raised,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  poolTitle: {
-    color: THEME.text_secondary,
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  row: { gap: 6 },
-  rowHead: { flexDirection: 'row', alignItems: 'center' },
-  rowLabel: { color: THEME.text_primary, fontSize: 14, fontWeight: '600' },
-  rowPct: { color: THEME.text_primary, fontSize: 14, fontWeight: '700', marginLeft: 'auto' },
-  track: {
-    height: 6,
-    borderRadius: 999,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    overflow: 'hidden',
-  },
-  // A measured-but-tiny fraction still shows: without a floor, 0.4% renders as
-  // nothing and is indistinguishable from unmeasured.
-  fill: { height: '100%', minWidth: 2, borderRadius: 999 },
-  facts: { flexDirection: 'row', flexWrap: 'wrap', gap: 16 },
-  fact: { gap: 1 },
-  factLabel: {
-    color: THEME.text_muted,
-    fontSize: 10,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  factValue: { color: THEME.text_primary, fontSize: 13 },
-  factNote: { color: THEME.text_muted, fontSize: 11 },
-  secondaryBtn: {
-    alignItems: 'center',
-    paddingVertical: 11,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  secondaryBtnText: { color: THEME.text_secondary, fontSize: 13, fontWeight: '600' },
-  btnDisabled: { opacity: 0.5 },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background, paddingTop: 48 },
+    centered: { alignItems: 'center', justifyContent: 'center' },
+    pressed: { opacity: 0.6 },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 16,
+      paddingBottom: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    headerBack: { padding: 4 },
+    headerIcon: { color: theme.text_primary, fontSize: 20 },
+    headerOverline: { color: theme.text_muted, fontSize: 11, textTransform: 'uppercase' },
+    headerTitle: { color: theme.text_primary, fontSize: 18, fontWeight: '700' },
+    scroll: { padding: 16, gap: 16, paddingBottom: 48 },
+    muted: { color: theme.text_muted, fontSize: 13, lineHeight: 18 },
+    footnote: { color: theme.text_muted, fontSize: 11, lineHeight: 15 },
+    pool: {
+      gap: 14,
+      padding: 12,
+      borderRadius: 10,
+      backgroundColor: theme.surface_raised,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    poolTitle: {
+      color: theme.text_secondary,
+      fontSize: 11,
+      fontWeight: '700',
+      textTransform: 'uppercase',
+    },
+    row: { gap: 6 },
+    rowHead: { flexDirection: 'row', alignItems: 'center' },
+    rowLabel: { color: theme.text_primary, fontSize: 14, fontWeight: '600' },
+    rowPct: { color: theme.text_primary, fontSize: 14, fontWeight: '700', marginLeft: 'auto' },
+    track: {
+      height: 6,
+      borderRadius: 999,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      overflow: 'hidden',
+    },
+    // A measured-but-tiny fraction still shows: without a floor, 0.4% renders as
+    // nothing and is indistinguishable from unmeasured.
+    fill: { height: '100%', minWidth: 2, borderRadius: 999 },
+    facts: { flexDirection: 'row', flexWrap: 'wrap', gap: 16 },
+    fact: { gap: 1 },
+    factLabel: {
+      color: theme.text_muted,
+      fontSize: 10,
+      fontWeight: '700',
+      textTransform: 'uppercase',
+    },
+    factValue: { color: theme.text_primary, fontSize: 13 },
+    factNote: { color: theme.text_muted, fontSize: 11 },
+    secondaryBtn: {
+      alignItems: 'center',
+      paddingVertical: 11,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    secondaryBtnText: { color: theme.text_secondary, fontSize: 13, fontWeight: '600' },
+    btnDisabled: { opacity: 0.5 },
+  });

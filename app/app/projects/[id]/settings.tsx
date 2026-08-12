@@ -48,9 +48,12 @@ import {
 } from '../../../lib/project-credentials-client';
 import { ProjectsClient, type ProjectMember } from '../../../lib/projects-client';
 import { useAuthSession } from '../../../lib/session';
-import { SPACING, THEME, TYPOGRAPHY } from '../../../lib/theme';
+import { SPACING, TYPOGRAPHY, type NeutronTheme } from '../../../lib/theme';
+import { useTheme, useThemedStyles } from '../../../lib/theme-context';
 
 export default function SettingsTab() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { id } = useLocalSearchParams<{ id: string }>();
   const project_id = typeof id === 'string' ? id : '';
   const { user } = useAuthSession();
@@ -58,7 +61,7 @@ export default function SettingsTab() {
   if (user === null || project_id.length === 0) {
     return (
       <View style={[styles.container, styles.centered]} testID="settings-bootstrapping">
-        <ActivityIndicator color={THEME.text_secondary} />
+        <ActivityIndicator color={theme.text_secondary} />
       </View>
     );
   }
@@ -67,6 +70,8 @@ export default function SettingsTab() {
 }
 
 function SettingsBody({ projectId, token }: { projectId: string; token: string }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const config = useMemo(() => loadAppConfig(), []);
   const credClient = useMemo(
     () => new ProjectCredentialsClient({ base_url: config.base_url, token }),
@@ -307,7 +312,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
 
       {credsLoading ? (
         <View style={styles.sectionLoading} testID="settings-creds-loading">
-          <ActivityIndicator color={THEME.text_secondary} />
+          <ActivityIndicator color={theme.text_secondary} />
         </View>
       ) : credsError !== null ? (
         <Text style={styles.error} testID="settings-creds-error">
@@ -345,7 +350,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
         <TextInput
           style={styles.input}
           placeholder="Service (e.g. openai)"
-          placeholderTextColor={THEME.text_muted}
+          placeholderTextColor={theme.text_muted}
           autoCapitalize="none"
           autoCorrect={false}
           value={addService}
@@ -356,7 +361,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
         <TextInput
           style={styles.input}
           placeholder="Token"
-          placeholderTextColor={THEME.text_muted}
+          placeholderTextColor={theme.text_muted}
           autoCapitalize="none"
           autoCorrect={false}
           secureTextEntry
@@ -368,7 +373,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
         <TextInput
           style={styles.input}
           placeholder="Label (optional)"
-          placeholderTextColor={THEME.text_muted}
+          placeholderTextColor={theme.text_muted}
           value={addLabel}
           onChangeText={setAddLabel}
           accessibilityLabel="Credential label"
@@ -404,7 +409,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
 
       {acctLoading ? (
         <View style={styles.sectionLoading} testID="settings-accounts-loading">
-          <ActivityIndicator color={THEME.text_secondary} />
+          <ActivityIndicator color={theme.text_secondary} />
         </View>
       ) : acctError !== null ? (
         <Text style={styles.error} testID="settings-accounts-error">
@@ -470,7 +475,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
       <Text style={[styles.sectionTitle, styles.sectionSpacer]}>Project</Text>
       {projectLoading ? (
         <View style={styles.sectionLoading} testID="settings-project-loading">
-          <ActivityIndicator color={THEME.text_secondary} />
+          <ActivityIndicator color={theme.text_secondary} />
         </View>
       ) : (
         <View>
@@ -478,7 +483,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
           <TextInput
             style={styles.input}
             placeholder="Project name"
-            placeholderTextColor={THEME.text_muted}
+            placeholderTextColor={theme.text_muted}
             value={nameDraft}
             onChangeText={setNameDraft}
             onSubmitEditing={renameProject}
@@ -508,7 +513,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
             <TextInput
               style={[styles.input, styles.emojiInput]}
               placeholder="📁"
-              placeholderTextColor={THEME.text_muted}
+              placeholderTextColor={theme.text_muted}
               value={emojiDraft}
               onChangeText={setEmojiDraft}
               onSubmitEditing={saveEmoji}
@@ -590,6 +595,7 @@ function CredentialRow({
   busy: boolean;
   onDelete?: () => void;
 }) {
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.credRow} testID={`settings-cred-row-${rec.service}`}>
       <View style={styles.credInfo}>
@@ -617,162 +623,163 @@ function CredentialRow({
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: THEME.background },
-  content: { padding: SPACING.md, paddingBottom: SPACING.xxl },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.background },
+    content: { padding: SPACING.md, paddingBottom: SPACING.xxl },
+    centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
-  sectionTitle: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.h3.fontSize,
-    lineHeight: TYPOGRAPHY.h3.lineHeight,
-    fontWeight: TYPOGRAPHY.h3.fontWeight,
-  },
-  acctService: { marginTop: SPACING.sm },
-  acctServiceName: {
-    color: THEME.text_secondary,
-    fontSize: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-    marginBottom: 4,
-  },
-  acctAllOff: { color: THEME.warning, fontSize: 12, marginBottom: 4 },
-  acctRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: THEME.hairline,
-  },
-  acctRowText: { flex: 1, minWidth: 0, paddingRight: SPACING.sm },
-  acctLabel: { color: THEME.text_primary, fontSize: 15 },
-  acctEmail: { color: THEME.text_muted, fontSize: 12, marginTop: 1 },
-  acctOn: { color: THEME.accent, fontSize: 13, fontWeight: '600' },
-  acctOff: { color: THEME.text_muted, fontSize: 13 },
-  sectionSpacer: { marginTop: SPACING.xl },
-  sectionHint: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    marginTop: SPACING.xs,
-    marginBottom: SPACING.md,
-  },
-  sectionLoading: { paddingVertical: SPACING.lg, alignItems: 'flex-start' },
+    sectionTitle: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.h3.fontSize,
+      lineHeight: TYPOGRAPHY.h3.lineHeight,
+      fontWeight: TYPOGRAPHY.h3.fontWeight,
+    },
+    acctService: { marginTop: SPACING.sm },
+    acctServiceName: {
+      color: theme.text_secondary,
+      fontSize: 12,
+      textTransform: 'uppercase',
+      letterSpacing: 0.6,
+      marginBottom: 4,
+    },
+    acctAllOff: { color: theme.warning, fontSize: 12, marginBottom: 4 },
+    acctRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: SPACING.sm,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.hairline,
+    },
+    acctRowText: { flex: 1, minWidth: 0, paddingRight: SPACING.sm },
+    acctLabel: { color: theme.text_primary, fontSize: 15 },
+    acctEmail: { color: theme.text_muted, fontSize: 12, marginTop: 1 },
+    acctOn: { color: theme.accent, fontSize: 13, fontWeight: '600' },
+    acctOff: { color: theme.text_muted, fontSize: 13 },
+    sectionSpacer: { marginTop: SPACING.xl },
+    sectionHint: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      marginTop: SPACING.xs,
+      marginBottom: SPACING.md,
+    },
+    sectionLoading: { paddingVertical: SPACING.lg, alignItems: 'flex-start' },
 
-  error: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    marginTop: SPACING.sm,
-  },
-  empty: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    paddingVertical: SPACING.sm,
-  },
+    error: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      marginTop: SPACING.sm,
+    },
+    empty: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      paddingVertical: SPACING.sm,
+    },
 
-  // Credential rows
-  credRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  credInfo: { flex: 1, gap: SPACING.xs / 2 },
-  credService: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-    fontWeight: '600',
-  },
-  credLabel: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-  },
-  credScope: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    lineHeight: TYPOGRAPHY.caption.lineHeight,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  deleteBtn: {
-    marginLeft: SPACING.md,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: SPACING.sm,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-  },
-  deleteBtnText: {
-    color: THEME.danger,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    fontWeight: '600',
-  },
+    // Credential rows
+    credRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: SPACING.sm,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    credInfo: { flex: 1, gap: SPACING.xs / 2 },
+    credService: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+      fontWeight: '600',
+    },
+    credLabel: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+    },
+    credScope: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      lineHeight: TYPOGRAPHY.caption.lineHeight,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+    },
+    deleteBtn: {
+      marginLeft: SPACING.md,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      borderRadius: SPACING.sm,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+    },
+    deleteBtnText: {
+      color: theme.danger,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      fontWeight: '600',
+    },
 
-  // Add form
-  addForm: { marginTop: SPACING.md, gap: SPACING.sm },
-  input: {
-    color: THEME.text_primary,
-    backgroundColor: THEME.surface,
-    borderWidth: 1,
-    borderColor: THEME.hairline,
-    borderRadius: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  primaryBtn: {
-    alignItems: 'center',
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md - SPACING.xs / 2,
-    borderRadius: SPACING.sm,
-    backgroundColor: THEME.link,
-  },
-  primaryBtnText: {
-    color: THEME.background,
-    fontWeight: '600',
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-  },
-  btnDisabled: { opacity: 0.4 },
-  pressed: { opacity: 0.7 },
+    // Add form
+    addForm: { marginTop: SPACING.md, gap: SPACING.sm },
+    input: {
+      color: theme.text_primary,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.hairline,
+      borderRadius: SPACING.sm,
+      paddingHorizontal: SPACING.md,
+      paddingVertical: SPACING.sm,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    primaryBtn: {
+      alignItems: 'center',
+      paddingHorizontal: SPACING.lg,
+      paddingVertical: SPACING.md - SPACING.xs / 2,
+      borderRadius: SPACING.sm,
+      backgroundColor: theme.link,
+    },
+    primaryBtnText: {
+      color: theme.background,
+      fontWeight: '600',
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+    },
+    btnDisabled: { opacity: 0.4 },
+    pressed: { opacity: 0.7 },
 
-  // Project
-  fieldLabel: {
-    color: THEME.text_secondary,
-    fontSize: TYPOGRAPHY.body_small.fontSize,
-    lineHeight: TYPOGRAPHY.body_small.lineHeight,
-    marginBottom: SPACING.xs,
-  },
-  saveBtn: { marginTop: SPACING.sm, alignSelf: 'flex-start' },
-  emojiRow: { marginTop: SPACING.lg },
-  emojiInput: { alignSelf: 'flex-start', minWidth: 96, fontSize: TYPOGRAPHY.h3.fontSize },
+    // Project
+    fieldLabel: {
+      color: theme.text_secondary,
+      fontSize: TYPOGRAPHY.body_small.fontSize,
+      lineHeight: TYPOGRAPHY.body_small.lineHeight,
+      marginBottom: SPACING.xs,
+    },
+    saveBtn: { marginTop: SPACING.sm, alignSelf: 'flex-start' },
+    emojiRow: { marginTop: SPACING.lg },
+    emojiInput: { alignSelf: 'flex-start', minWidth: 96, fontSize: TYPOGRAPHY.h3.fontSize },
 
-  // Collaborators
-  collabRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.hairline,
-  },
-  collabName: {
-    color: THEME.text_primary,
-    fontSize: TYPOGRAPHY.body.fontSize,
-    lineHeight: TYPOGRAPHY.body.lineHeight,
-  },
-  collabRole: {
-    color: THEME.text_muted,
-    fontSize: TYPOGRAPHY.caption.fontSize,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  collabInvite: { marginTop: SPACING.md, backgroundColor: THEME.surface_raised },
-});
+    // Collaborators
+    collabRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: SPACING.sm,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.hairline,
+    },
+    collabName: {
+      color: theme.text_primary,
+      fontSize: TYPOGRAPHY.body.fontSize,
+      lineHeight: TYPOGRAPHY.body.lineHeight,
+    },
+    collabRole: {
+      color: theme.text_muted,
+      fontSize: TYPOGRAPHY.caption.fontSize,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+    },
+    collabInvite: { marginTop: SPACING.md, backgroundColor: theme.surface_raised },
+  });

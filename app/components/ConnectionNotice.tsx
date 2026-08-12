@@ -35,7 +35,8 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import type { ConnStatus } from '@neutronai/chat-core';
 
-import { THEME, TYPOGRAPHY, SPACING } from '../lib/theme';
+import { TYPOGRAPHY, SPACING, type NeutronTheme } from '../lib/theme';
+import { useTheme, useThemedStyles } from '../lib/theme-context';
 
 /**
  * How long the connection has to be down before the owner is told anything.
@@ -149,11 +150,13 @@ export function ConnectionNotice({
   sendError,
   offlineAfterMs = OFFLINE_NOTICE_AFTER_MS,
 }: ConnectionNoticeProps): React.JSX.Element | null {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const outageElapsed = useExtendedOutage(status, offlineAfterMs);
   if (sendError !== null) {
     return (
       <View style={styles.statusStrip} testID="chat-send-error">
-        <Text style={[styles.statusText, { color: THEME.danger }]} accessibilityRole="alert">
+        <Text style={[styles.statusText, { color: theme.danger }]} accessibilityRole="alert">
           {sendError}
         </Text>
       </View>
@@ -167,23 +170,24 @@ export function ConnectionNotice({
   if (label === null) return null;
   return (
     <View style={styles.statusStrip} testID="chat-offline-notice">
-      <Text style={[styles.statusText, { color: THEME.warning }]}>{label}</Text>
+      <Text style={[styles.statusText, { color: theme.warning }]}>{label}</Text>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  // Unchanged from the strip this replaces — a hairline-separated caption band
-  // above the transcript. The point of this change is that it is now RARE, not
-  // that it looks new; a fresh visual pattern for the exceptional case would be
-  // its own kind of alarm.
-  statusStrip: {
-    paddingVertical: SPACING.xs,
-    paddingHorizontal: SPACING.md,
-    alignItems: 'center',
-    backgroundColor: THEME.surface,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: THEME.hairline,
-  },
-  statusText: { ...TYPOGRAPHY.caption },
-});
+const makeStyles = (theme: NeutronTheme) =>
+  StyleSheet.create({
+    // Unchanged from the strip this replaces — a hairline-separated caption band
+    // above the transcript. The point of this change is that it is now RARE, not
+    // that it looks new; a fresh visual pattern for the exceptional case would be
+    // its own kind of alarm.
+    statusStrip: {
+      paddingVertical: SPACING.xs,
+      paddingHorizontal: SPACING.md,
+      alignItems: 'center',
+      backgroundColor: theme.surface,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.hairline,
+    },
+    statusText: { ...TYPOGRAPHY.caption },
+  });
