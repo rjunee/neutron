@@ -1659,6 +1659,46 @@ describe('buildMergeCleanupDeps — base-drift hold, pr mode (#542)', () => {
     await cleanupAfterMerge(prRun, deps)
     expect(calls).toContain(`gh pr merge 42 --squash --match-head-commit ${REVIEWED_HEAD}`)
   })
+
+  // `run.branch` is a LOCAL record; `gh pr merge` merges the PR's head. When the
+  // two disagree — an adopted run, a row re-pointed at another PR — scoring the
+  // row's branch measures a ref the merge will not touch, and the worst case is
+  // silent: `run.branch: 'main'` compares `origin/main` with ITSELF and reports
+  // all clear, then merges `feat-x` against a base nobody looked at.
+  test('a STALE run.branch does not decide what gets scored — GitHub names the head', async () => {
+    const staleRow = makeRun({
+      merge_mode: 'pr',
+      pr: 42,
+      branch: 'main', // wrong, and wrong in the direction that scores clean
+      repo_path: '/drift-pr',
+      inner_result: innerResult(REVIEWED_HEAD),
+    })
+    const { host, calls } = driftHost({
+      base: 'main',
+      branch: 'feat-x', // what the PR ACTUALLY merges, and where the drift is
+      review_base: SHA_A,
+      current_base: SHA_B,
+      base_touched: ['shared.ts'],
+      reviewed_files: ['shared.ts'],
+      pr_head_branch: 'feat-x',
+      pr_cross_repo: false,
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    const err = await cleanupAfterMerge(staleRow, deps).catch((e: unknown) => e)
+    // BEHAVIOUR: the drift in `feat-x` was found and the merge was REFUSED …
+    expect(err).toBeInstanceOf(TridentBaseDriftHold)
+    expect((err as TridentBaseDriftHold).detail.silent_overlap).toEqual(['shared.ts'])
+    expect(calls.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+    // … because the gate scored the PR's head against the base. Pinned on the
+    // merge-base PAIR, which names both sides at once: preferring the row's
+    // branch made this `merge-base origin/main origin/main` — a ref compared
+    // with itself, which is why that bug reported "clean" instead of failing.
+    expect(calls).toContain('git -C /drift-pr merge-base origin/main origin/feat-x')
+    expect(calls).toContain('git -C /drift-pr rev-parse --verify --quiet origin/feat-x^{commit}')
+    expect(calls).toContain(
+      'git -C /drift-pr fetch origin +refs/heads/main:refs/remotes/origin/main +refs/heads/feat-x:refs/remotes/origin/feat-x',
+    )
+  })
 })
 
 // ISSUES #541 — the OUTER twin of the inner workflow's force-removing cleanup.

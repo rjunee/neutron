@@ -1110,11 +1110,17 @@ export function buildMergeCleanupDeps(
             { review_base_sha: null, current_base_sha: null, silent_overlap: [] },
           )
         }
-        // The branch is what makes the gate answerable. `run.branch` is nullable
-        // (a resumed/adopted run may carry the PR but not the branch), so
-        // recover it from the PR itself rather than skipping the gate — skipping
-        // it was a hole big enough to drive the whole un-reviewed merge through.
-        const branchForGate = branch ?? head.branch
+        // GITHUB'S ANSWER WINS. `gh pr merge` below merges the PR's head branch,
+        // whatever this row says — so that is the only branch worth scoring.
+        // Preferring `run.branch` scored a DIFFERENT branch whenever the column
+        // was stale or simply wrong (an adopted run, a row re-pointed at another
+        // PR), and the worst case is silent rather than loud: a `run.branch` of
+        // `main` makes the gate compare `origin/main` with ITSELF, report no
+        // drift, and then merge `feat-x`, whose overlap with the moved base
+        // nothing ever looked at. `run.branch` survives only as the fallback for
+        // a PR that names no head at all — and only the teardown still reads it,
+        // so nothing deletes a branch this row never claimed.
+        const branchForGate = head.branch ?? branch
         if (branchForGate === null) {
           throw new TridentMergeError(
             'pr-mode merge could not determine the PR head branch, so base drift could not be assessed',
