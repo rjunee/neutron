@@ -83,8 +83,11 @@ let extraOnStart: Record<string, unknown> = {};
 let opened: string[] = [];
 /** Text handed to the clipboard. */
 let copied: string[] = [];
-/** Poll callbacks the screen registered at the documented cadence. */
-let pollCallbacks: Array<() => void> = [];
+/** LIVE poll callbacks the screen registered at the documented cadence, by the
+ *  fake id handed back for each. An entry leaves when the screen clears it, so
+ *  emptiness here means "the screen stopped polling", not "it never started". */
+let pollTimers = new Map<number, () => void>();
+let nextPollId = -1;
 
 function installFetch(): void {
   (globalThis as unknown as { fetch: unknown }).fetch = async (
@@ -120,32 +123,50 @@ function installFetch(): void {
 }
 
 /**
- * Intercept ONLY the screen's poll timer.
+ * Intercept ONLY the screen's poll timer — both ends of it.
  *
  * Every other interval — React's scheduler, happy-dom's own — is delegated to the
  * real implementation untouched, so this cannot silently freeze the harness. The
  * narrow match on the delay is deliberate: it means "the screen scheduled a poll
  * at the cadence it documents", which is itself part of what is being asserted.
+ *
+ * `clearInterval` is intercepted TOO, and that is the half worth explaining: a
+ * capture that only sees `setInterval` can prove a poll STARTED and can never
+ * prove it stopped, so a flow that settles and then hammers the server every five
+ * seconds forever would pass. Clearing a fake id drops it from `pollTimers`;
+ * every other id goes to the real implementation.
  */
 let realSetInterval: typeof setInterval;
+let realClearInterval: typeof clearInterval;
 function installPollCapture(): void {
   realSetInterval = globalThis.setInterval;
+  realClearInterval = globalThis.clearInterval;
   (globalThis as unknown as { setInterval: unknown }).setInterval = ((
     fn: () => void,
     ms?: number,
     ...rest: unknown[]
   ): unknown => {
     if (ms === POLL_MS) {
-      pollCallbacks.push(fn);
-      return -1;
+      const id = nextPollId--;
+      pollTimers.set(id, fn);
+      return id;
     }
     return (realSetInterval as unknown as (...a: unknown[]) => unknown)(fn, ms, ...rest);
   }) as unknown as typeof setInterval;
+  (globalThis as unknown as { clearInterval: unknown }).clearInterval = ((
+    id?: unknown,
+  ): void => {
+    if (typeof id === 'number' && pollTimers.has(id)) {
+      pollTimers.delete(id);
+      return;
+    }
+    (realClearInterval as unknown as (...a: unknown[]) => void)(id);
+  }) as unknown as typeof clearInterval;
 }
 
-/** Run every registered poll once, the way five elapsed seconds would. */
+/** Run every LIVE poll once, the way five elapsed seconds would. */
 async function firePoll(): Promise<void> {
-  const callbacks = [...pollCallbacks];
+  const callbacks = [...pollTimers.values()];
   await act(async () => {
     for (const cb of callbacks) cb();
     await new Promise((r) => setTimeout(r, 0));
@@ -159,6 +180,9 @@ beforeAll(() => {
 afterAll(() => {
   if (realSetInterval !== undefined) {
     (globalThis as unknown as { setInterval: unknown }).setInterval = realSetInterval;
+  }
+  if (realClearInterval !== undefined) {
+    (globalThis as unknown as { clearInterval: unknown }).clearInterval = realClearInterval;
   }
   resetHarnessGlobals();
 });
@@ -174,7 +198,7 @@ beforeEach(() => {
   sent = [];
   opened = [];
   copied = [];
-  pollCallbacks = [];
+  pollTimers = new Map();
   state = { status: 'not_connected' };
   startFailure = null;
   extraOnStart = {};
@@ -284,12 +308,47 @@ describe('GitHub — reachable from a phone at all', () => {
     await press('github-connect');
     // A poll must have been scheduled at all; without one the owner approves at
     // GitHub and this screen keeps showing a code forever.
-    expect(pollCallbacks.length).toBeGreaterThan(0);
+    expect(pollTimers.size).toBeGreaterThan(0);
     // The owner approves at GitHub, on some other device. Nothing tells the phone.
     state = { status: 'connected' };
     await firePoll();
     expect(byTestId('github-status')?.textContent ?? '').toContain('Connected');
     expect(byTestId('github-user-code')).toBeNull();
+  });
+
+  it('STOPS polling once connected — a settled flow must not hammer the server', async () => {
+    // Starting a poll is half the requirement. A screen that never tears it down
+    // asks the gateway for a status it already has, every five seconds, for as
+    // long as the app is open — and on a phone that is battery and data.
+    await mountIntegrations();
+    await press('github-connect');
+    state = { status: 'connected' };
+    await firePoll();
+    expect(pollTimers.size).toBe(0);
+    const settled = githubRequests().length;
+    await firePoll();
+    expect(githubRequests().length).toBe(settled);
+  });
+
+  it('a DROPPED poll keeps the code on screen instead of blanking the flow', async () => {
+    // The owner is at GitHub typing the code when one poll hits a flaky network.
+    // Treating that as "not connected" would take the code away AND tear down the
+    // poll that was about to see the approval — the flow would look like it had
+    // failed at the exact moment it was working.
+    await mountIntegrations();
+    await press('github-connect');
+    const failing = (globalThis as unknown as { fetch: unknown }).fetch;
+    (globalThis as unknown as { fetch: unknown }).fetch = async (): Promise<Response> => {
+      throw new Error('server unreachable');
+    };
+    await firePoll();
+    expect(byTestId('github-user-code')?.textContent).toBe(USER_CODE);
+    expect(pollTimers.size).toBeGreaterThan(0);
+    // …and the very next poll, on a network that came back, still finishes it.
+    (globalThis as unknown as { fetch: unknown }).fetch = failing;
+    state = { status: 'connected' };
+    await firePoll();
+    expect(byTestId('github-status')?.textContent ?? '').toContain('Connected');
   });
 
   it('an ALREADY-CONNECTED account renders connected, with no code and no Connect', async () => {

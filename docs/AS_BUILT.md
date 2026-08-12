@@ -30,8 +30,12 @@ puts it on the clipboard in one press (the owner is usually reading it off a
 phone and typing it into something else); the `verification_uri` is a real link;
 and the client polls the status route at GitHub's own 5s floor until it answers
 `connected`, then re-renders — no manual refresh, which is what separates a flow
-from a wall of instructions. The mobile screen additionally re-reads on
-foreground, since "tap Open GitHub, approve, come back" is one gesture there. The
+from a wall of instructions. The poll stops the moment the flow settles, and a
+DROPPED poll is not treated as a failed flow on either surface — the code stays
+on screen and the next tick tries again, because the owner is mid-flow on another
+device and one flaky read is not a disconnection. The mobile screen additionally
+re-reads on foreground, since "tap Open GitHub, approve, come back" is one
+gesture there. The
 `device_code` is the bearer half of the exchange; the surface never returns it and
 neither client renders it, asserted against a response that carries one anyway.
 The web section sits OUTSIDE the `/api/cores/integrations` load: the control a
@@ -57,11 +61,16 @@ component was fine and nothing reached it.
   third probe phase, `inAdmin`, because the things you adjust live behind that
   menu rather than in the tab band.
 - `landing/chat-react/__tests__/github-connect-reachable.test.tsx` (12) and
-  `app/__tests__/github-connect-reachable.test.tsx` (12) PRESS the control and
+  `app/__tests__/github-connect-reachable.test.tsx` (14) PRESS the control and
   assert the wire: the POST leaves, the code renders, Copy reaches the clipboard,
-  `Linking` gets the URL, the poll flips to connected and then STOPS, an
+  `Linking` gets the URL, the poll flips to connected and then STOPS, a DROPPED
+  poll leaves the code on screen rather than blanking a flow that is working, an
   in-flight flow shows its existing code without starting a second, the
-  gateway's error is shown verbatim, and the `device_code` never renders.
+  gateway's error is shown verbatim, and the `device_code` never renders. The web
+  harness lets a real 5ms interval elapse and counts requests; the mobile one
+  intercepts the timer, and intercepts `clearInterval` as well as `setInterval`,
+  because a capture that sees only the start can prove a poll BEGAN and never
+  that it ended.
 - The doctrine rule is asserted against the COMPOSED system prompt in
   `gateway/wiring/__tests__/build-live-agent-turn.test.ts`, not only against the
   module — a rule nothing splices in is the same defect one layer up.

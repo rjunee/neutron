@@ -2778,7 +2778,11 @@ the machine, which is what the agent recommended when a push failed — see
   the `user_code` is displayed large and monospaced, Copy puts it on the
   clipboard in one press, the `verification_uri` is a real link, and the client
   POLLS the status route (5s, GitHub's own floor) until it answers `connected`
-  and re-renders. Typing that code into another device IS the interaction.
+  and re-renders. Typing that code into another device IS the interaction. The
+  poll runs ONLY while a code is on screen — `not_connected` never spins one — it
+  is torn down the moment the flow settles, and a poll that fails to reach the
+  server leaves the code where it is rather than reporting a disconnection the
+  owner did not experience.
 - **Both surfaces.** Web `landing/chat-react/IntegrationsTab.tsx` § GitHub over
   `landing/chat-react/github-connect-client.ts`, rendered OUTSIDE the
   `/api/cores/integrations` load so a blocked owner's control never waits on an
@@ -2792,8 +2796,9 @@ the machine, which is what the agent recommended when a push failed — see
   width. Alongside it, `landing/chat-react/__tests__/github-connect-reachable.test.tsx`
   and `app/__tests__/github-connect-reachable.test.tsx` PRESS the control and
   assert the wire: the POST leaves, the code renders, Copy reaches the clipboard,
-  the link opens, the poll flips to connected and then stops, and the
-  `device_code` is not rendered even when a response carries one.
+  the link opens, the poll flips to connected and then stops, a dropped poll does
+  not blank a flow that is working, and the `device_code` is not rendered even
+  when a response carries one.
 
 ## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 

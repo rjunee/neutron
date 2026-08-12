@@ -192,7 +192,16 @@ export default function IntegrationsScreen() {
     } catch {
       // Same rule as Codex: an unreachable server reads as "not connected" and
       // writes nothing. It must never look like a credential to supply again.
-      setGithub({ status: 'not_connected' });
+      //
+      // EXCEPT while a code is on screen. A dropped POLL is not a failed flow:
+      // the owner is mid-flow at GitHub on another device, and blanking the
+      // state on one flaky read would take the code away AND tear down the very
+      // poll that was about to see the approval. So `awaiting_owner` survives a
+      // failed read and only a successful one can leave it — the same rule the
+      // web sibling follows in `IntegrationsTab.tsx`.
+      setGithub((prev) =>
+        prev !== null && prev.status === 'awaiting_owner' ? prev : { status: 'not_connected' },
+      );
     }
   }, [githubClient]);
 
