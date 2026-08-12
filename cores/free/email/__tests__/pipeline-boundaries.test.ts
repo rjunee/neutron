@@ -191,6 +191,54 @@ describe('a delivered escalation is never re-posted', () => {
   })
 })
 
+describe('a resolved deliver call is not automatically a delivered escalation', () => {
+  test('persisted:false is a FAILURE — not marked escalated, and retried', async () => {
+    await withStore(async (store) => {
+      store.insertEmail({
+        id: 'msg-2',
+        thread_id: 't-2',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+
+      // The real seam does NOT throw when the durable write fails: it resolves
+      // with persisted:false. Trusting the absence of an exception marked the
+      // owner told when nothing was written anywhere, and suppressed the retry
+      // forever.
+      const out = await escalateEmail(
+        {
+          id: 'msg-2',
+          sender: 'Vendor Billing <billing@vendor.example.com>',
+          subject: 'Action required: payment failed',
+          reason: 'billing action',
+        },
+        {
+          deliver: async (): Promise<unknown> => ({ persisted: false, delivered_live: false }),
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+          store,
+          now: () => NOW,
+        },
+      )
+
+      expect(out.delivered).toBe(false)
+      const row = store.getEmail('msg-2')
+      expect(row?.escalated_at).toBeNull()
+      // Counted as an attempt, so the resume pass picks it up next tick.
+      expect(row?.escalation_attempts).toBe(1)
+      expect(store.listPendingEscalations(5).map((r) => r.id)).toContain('msg-2')
+    })
+  })
+})
+
 describe('a write for a disconnected account fails closed', () => {
   /** Only `acct-b` is still connected; `acct-a` was disconnected. */
   function twoAccountsOneGone(): {

@@ -255,3 +255,45 @@ describe('classifyEmail — cache and LLM', () => {
     expect(c.source).toBe('default')
   })
 })
+
+describe('sender_rules.handling is honoured, not just stored', () => {
+  test('handling:escalate on a newsletter-shaped sender still escalates', async () => {
+    // The owner asked to be told about this sender. `category` says what the
+    // mail IS; `handling` says what to DO about it, and the second was being
+    // persisted and then ignored — so this rule filed the message as a
+    // newsletter and archived it, silently overruling the owner.
+    const verdict = await classifyEmail(
+      message({
+        sender: 'The Shop <news@list.example.com>',
+        subject: 'This week at the shop',
+        body_text: 'Lots of news. Unsubscribe at any time.',
+      }),
+      {
+        rules: [rule({ pattern: 'list.example.com', kind: 'domain', category: 'newsletter', handling: 'escalate' })],
+        cache_lookup: () => null,
+        cache_store: () => undefined,
+        llm: null,
+      },
+    )
+    expect(verdict.important).toBe(true)
+    expect(verdict.source).toBe('rule')
+    expect(verdict.reason).toContain('handling=escalate')
+  })
+
+  test('handling:archive keeps an otherwise-important sender quiet', async () => {
+    const verdict = await classifyEmail(
+      message({
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        body_text: 'Your card was declined.',
+      }),
+      {
+        rules: [rule({ pattern: 'vendor.example.com', kind: 'domain', handling: 'archive' })],
+        cache_lookup: () => null,
+        cache_store: () => undefined,
+        llm: null,
+      },
+    )
+    expect(verdict.important).toBe(false)
+  })
+})

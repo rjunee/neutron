@@ -170,6 +170,23 @@ export async function classifyEmail(
         protected: true,
       }
     }
+    // `handling` is the owner saying WHAT TO DO, a different claim from
+    // `category` (what this IS). It was persisted and then ignored, so a rule
+    // of {category:'newsletter', handling:'escalate'} was filed as a newsletter
+    // and archived — the owner asked to be told and was not. An explicit
+    // handling therefore decides, and it is immune to the mass-mailer
+    // downgrade: an owner naming a sender outranks the heuristic that bulk mail
+    // is rarely important.
+    if (rule.handling !== null) {
+      const escalate = rule.handling === 'escalate'
+      return {
+        category: rule.category ?? (escalate ? 'important' : 'newsletter'),
+        important: escalate,
+        reason: `sender rule (${rule.kind}, handling=${rule.handling})`,
+        source: 'rule',
+        protected: false,
+      }
+    }
     if (rule.category !== null) {
       const important = rule.category === 'important'
       return applyDowngrade({

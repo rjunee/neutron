@@ -407,9 +407,29 @@ the scheduler's deletion) and PR #114 (push self-heal).
   fake Gmail backend asserts the label mutations issued AND the sink received an
   `OutgoingMessage` whose text contains the sender + subject (a digest/escalation that
   fires-but-says-nothing kills it); dedup test: second tick after a delivered escalation
-  posts nothing (removing the `escalated_at` guard kills it); go-live test: pre-cutoff
-  mail is archived, never classified (dropping the cutoff check kills it).
+  posts nothing (removing the `escalated_at` guard kills it); backlog test: the one-time
+  sweep marks the existing inbox `preexisting` and MUTATES NOTHING (letting it fall
+  through to the processing path kills it).
 - Out of scope: the digest, scheduler deletion, settings, scribe fan-out.
+
+> **SUPERSEDED 2026-08-12 — the backlog is MARKED, not archived.** This phase
+> originally specified a per-message go-live cutoff: `received_at < go_live_after` ⇒
+> archive (processed label added, `INBOX` removed) without classifying. The owner
+> rejected both halves: *"I don't want to mess with my current inbox. Items in my inbox
+> have already been processed and determined as important (do not brief) and they stay
+> in my inbox."*
+>
+> Two things were wrong with the original. The archive was a real mutation of a mailbox
+> the owner had already triaged by hand — at the default tick rate it would have drained
+> an existing inbox over days. And the per-message date test re-decided "is this
+> history?" on every message forever, from a value it could not always trust.
+>
+> AS BUILT: a ONE-TIME sweep records every message already in the inbox as
+> `handling='preexisting'` and issues NO Gmail writes at all — no label, no archive,
+> nothing classified, nothing escalated. Afterwards "already handled" is a row lookup
+> (`store.hasEmail`), not a date comparison. `go_live_after` is still stamped, as
+> provenance for P2 only. The acceptance criterion for the backlog is therefore that the
+> mailbox is UNTOUCHED, not that it is archived. See `docs/AS_BUILT.md`.
 
 **Phase 2 — twice-daily brief + settings toggle (capability 1).**
 - Scope: `digest/` modules (owner-tz windows at 10:00 and 15:00 local; category

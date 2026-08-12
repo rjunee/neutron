@@ -20,12 +20,28 @@
 
 import type { EmailPipelineStore, EmailRow } from './store.ts'
 
+/**
+ * What `deliver` reports back. THE SEAM DOES NOT THROW WHEN THE DURABLE WRITE
+ * FAILS — for `durability: 'reply'` it RESOLVES with `persisted: false`
+ * (`gateway/http/deliver.ts`). A caller that only catches exceptions therefore
+ * reads a total failure as a success: no durable chat row, no live delivery,
+ * and the message marked escalated so it is never retried. The owner is never
+ * told and nothing remains to notice.
+ *
+ * `persisted` is the fact that matters. The chat transcript is the guaranteed
+ * surface; `delivered_live` only says whether a socket happened to be open.
+ */
+export interface EscalationDeliveryResult {
+  persisted?: boolean
+  delivered_live?: boolean
+}
+
 /** Structural mirror of `gateway/http/deliver.ts`'s `Deliver` — this Core does
  *  not import the gateway. */
 export type EscalationDeliver = (
   topic_id: string,
   envelope: { body: string; durability: 'reply'; idempotency_key?: string },
-) => Promise<unknown>
+) => Promise<EscalationDeliveryResult | unknown>
 
 /** Structural mirror of `PushDispatcher.pushAll`. */
 export interface EscalationPush {
@@ -95,7 +111,21 @@ export async function escalateEmail(
 
   let delivered = false
   try {
-    await deps.deliver(deps.topic_id, { body: text, durability: 'reply', idempotency_key })
+    const outcome = await deps.deliver(deps.topic_id, {
+      body: text,
+      durability: 'reply',
+      idempotency_key,
+    })
+    // A RESOLVED CALL IS NOT A DELIVERED ESCALATION. The seam reports a failed
+    // durable write as `persisted: false` rather than throwing, so trusting
+    // the absence of an exception marks the message told when nothing was
+    // written anywhere. Only an explicit `persisted === false` is treated as
+    // failure; a seam that reports nothing (or a test double returning null)
+    // keeps the old permissive behaviour rather than failing every escalation.
+    const reported = (outcome ?? {}) as EscalationDeliveryResult
+    if (reported.persisted === false) {
+      throw new Error('deliver reported persisted:false — no durable chat row was written')
+    }
     delivered = true
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
