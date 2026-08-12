@@ -279,8 +279,18 @@ export function IntegrationsTab({
         // An unreachable server is displayed as "not connected" and NOTHING is
         // written — the same rule the Codex row follows. It must never look like
         // a credential the owner has to supply again.
+        //
+        // EXCEPT while a code is on screen. This read re-fires whenever the
+        // client is rebuilt (the token rotating mid-flow is enough), and a flaky
+        // one blanking `awaiting_owner` would take the code away and tear down
+        // the poll that was about to see the approval — at the exact moment the
+        // flow was working. Only a SUCCESSFUL read may leave that state, which
+        // is the rule the poll already follows and the one the mobile screen
+        // documents as shared.
         if (!mountedRef.current) return
-        setGithub({ status: 'not_connected' })
+        setGithub((prev) =>
+          prev !== null && prev.status === 'awaiting_owner' ? prev : { status: 'not_connected' },
+        )
       })
   }, [githubClient])
 

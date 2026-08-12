@@ -83,6 +83,11 @@ const VERIFICATION_URI = 'https://github.example.com/login/device'
 interface Sent {
   url: string
   method: string
+  /** The bearer this request carried. Recorded so a read made by a REBUILT
+   *  client (a rotated token) is distinguishable from one the existing poll
+   *  would have made anyway — otherwise "a request went out" proves nothing
+   *  about WHICH code path sent it. */
+  token: string | null
 }
 let sent: Sent[] = []
 /** What GET answers. Mutated by the POST handler and by individual tests. */
@@ -96,25 +101,33 @@ let networkDown = false
 
 function fetchImpl(url: string, init?: RequestInit): Promise<Response> {
   const method = init?.method ?? 'GET'
-  sent.push({ url, method })
+  const headers = (init?.headers ?? {}) as Record<string, string>
+  sent.push({ url, method, token: headers['authorization'] ?? null })
   if (networkDown) return Promise.reject(new Error('server unreachable'))
   const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), {
       status,
       headers: { 'content-type': 'application/json' },
     })
+  // The ENVELOPE is the gateway's, not a convenient bare payload: every
+  // `gateway/http` surface answers `{ ok: true, ... }` on success and
+  // `{ ok: false, code, message }` on failure (`surface-kit.ts`). A fixture that
+  // drops it is not the wire, and a client that started reading `ok` would be
+  // tested against a shape no server sends.
   if (url.endsWith('/api/app/github-auth')) {
     if (method === 'POST') {
-      if (startFailure !== null) return Promise.resolve(json(startFailure.body, startFailure.status))
+      if (startFailure !== null) {
+        return Promise.resolve(json({ ok: false, ...startFailure.body }, startFailure.status))
+      }
       state = {
         status: 'awaiting_owner',
         user_code: USER_CODE,
         verification_uri: VERIFICATION_URI,
         expires_in_seconds: 900,
       }
-      return Promise.resolve(json({ ...state, ...extraOnStart }))
+      return Promise.resolve(json({ ok: true, ...state, ...extraOnStart }))
     }
-    return Promise.resolve(json(state))
+    return Promise.resolve(json({ ok: true, ...state }))
   }
   // Everything else the tab loads on mount, answered as a fresh install would.
   if (url.endsWith('/api/cores/integrations')) {
@@ -130,6 +143,10 @@ function fetchImpl(url: string, init?: RequestInit): Promise<Response> {
 let copied: string[] = []
 
 let mounted: { unmount(): Promise<void>; root: HTMLElement } | null = null
+/** Re-render the MOUNTED tab with a changed config — set by `mountTab`. */
+let rerenderTab: (patch: Record<string, unknown>) => Promise<void> = async () => {
+  throw new Error('nothing is mounted')
+}
 
 /** Mount the REAL Admin/Integrations tab and let its mount-time reads settle. */
 async function mountTab(pollMs = 5): Promise<HTMLElement> {
@@ -141,21 +158,25 @@ async function mountTab(pollMs = 5): Promise<HTMLElement> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
-  await act(async () => {
-    root.render(
-      React.createElement(IntegrationsTab, {
-        config: config as never,
-        fetchImpl,
-        githubPollMs: pollMs,
-        navigate: () => {},
-        confirmImpl: () => true,
-      }),
-    )
-  })
-  await act(async () => {
-    await tick()
-    await tick()
-  })
+  const render = async (patch: Record<string, unknown> = {}): Promise<void> => {
+    await act(async () => {
+      root.render(
+        React.createElement(IntegrationsTab, {
+          config: { ...config, ...patch } as never,
+          fetchImpl,
+          githubPollMs: pollMs,
+          navigate: () => {},
+          confirmImpl: () => true,
+        }),
+      )
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+  }
+  rerenderTab = render
+  await render()
   mounted = {
     root: container,
     async unmount(): Promise<void> {
@@ -203,6 +224,10 @@ async function click(root: HTMLElement, sel: string): Promise<void> {
     await tick()
   })
 }
+
+/** How many requests the tab has made to the GitHub surface so far. */
+const githubReqCount = (): number =>
+  sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length
 
 /** Let `n` poll intervals elapse (the tab is mounted with a 5ms interval). */
 async function pollTicks(n: number): Promise<void> {
@@ -280,11 +305,17 @@ describe('GitHub — the owner can start the flow from the web', () => {
   it('STOPS polling once connected — a settled flow must not hammer the server', async () => {
     const root = await mountTab()
     await click(root, 'button.cint-github-connect')
+    // A poll must be RUNNING first. Without this the test certifies a tab whose
+    // poll effect never armed: the request count would be flat for the trivial
+    // reason that nothing was ever polling.
+    const beforeIdle = githubReqCount()
+    await pollTicks(3)
+    expect(githubReqCount()).toBeGreaterThan(beforeIdle)
     state = { status: 'connected' }
     await pollTicks(3)
-    const settled = sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length
+    const settled = githubReqCount()
     await pollTicks(5)
-    expect(sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length).toBe(settled)
+    expect(githubReqCount()).toBe(settled)
   })
 
   it('a DROPPED poll keeps the code on screen instead of blanking the flow', async () => {
@@ -304,6 +335,39 @@ describe('GitHub — the owner can start the flow from the web', () => {
     )
     // …and the poll is still armed, so the very next tick on a network that came
     // back still finishes the flow.
+    networkDown = false
+    state = { status: 'connected' }
+    await pollTicks(3)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'connected',
+    )
+  })
+
+  it('a failed MOUNT-READ mid-flow keeps the code, the way a dropped poll does', async () => {
+    // The status read is not a mount-only event: it re-fires whenever the client
+    // is rebuilt, and the token rotating under a long-lived tab is enough to do
+    // that. If a failed read blanked `awaiting_owner`, a token refresh landing
+    // on a flaky moment would take the owner's live code away and tear down the
+    // poll — the same defect as a dropped poll, one layer up, and the mobile
+    // screen's comment claims this surface follows the same rule.
+    const root = await mountTab()
+    await click(root, 'button.cint-github-connect')
+    expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
+
+    networkDown = true
+    await rerenderTab({ token: 'dev:owner-rotated' })
+    // The re-read must have actually gone out — and be THIS one, not a poll tick
+    // that would have fired regardless. Only the rebuilt client carries the
+    // rotated bearer, and `networkDown` means every request it made failed.
+    expect(
+      sent.some((s) => s.url.endsWith('/api/app/github-auth') && s.token === 'Bearer dev:owner-rotated'),
+    ).toBe(true)
+
+    expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'awaiting_owner',
+    )
+    // …and the flow still finishes on the next good tick.
     networkDown = false
     state = { status: 'connected' }
     await pollTicks(3)

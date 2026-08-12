@@ -2788,6 +2788,18 @@ the machine, which is what the agent recommended when a push failed — see
   is torn down the moment the flow settles, and a poll that fails to reach the
   server leaves the code where it is rather than reporting a disconnection the
   owner did not experience.
+- **A failed READ never blanks a live flow, on either surface.** The same rule
+  covers the mount-time status read, not only the poll: that read re-fires
+  whenever the client is rebuilt (the token rotating under a long-lived tab is
+  enough), so `awaiting_owner` survives any failed read and only a SUCCESSFUL one
+  can leave it. Otherwise one flaky moment mid-flow takes the owner's code away
+  and tears down the poll that was about to see the approval.
+- **Every state that is not connected and not mid-flow offers Connect.** The
+  clients CAST the wire payload to the three-state union without validating it,
+  so a gateway that grows a fourth state arrives as a plain string; gating the
+  control positively on `not_connected` would render a row saying "Not connected"
+  with nothing to press. Both surfaces gate it negatively instead — a screen with
+  no way out is worse than one offering an action that may be redundant.
 - **Both surfaces.** Web `landing/chat-react/IntegrationsTab.tsx` § GitHub over
   `landing/chat-react/github-connect-client.ts`, rendered OUTSIDE the
   `/api/cores/integrations` load so a blocked owner's control never waits on an

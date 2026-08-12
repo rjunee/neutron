@@ -102,20 +102,27 @@ function installFetch(): void {
         status,
         headers: { 'content-type': 'application/json' },
       });
+    // The ENVELOPE is the gateway's, not a convenient bare payload: every
+    // `gateway/http` surface answers `{ ok: true, ... }` on success and
+    // `{ ok: false, code, message }` on failure (`surface-kit.ts`). A fixture
+    // that drops it is not the wire, and a client that started reading `ok`
+    // would be tested against a shape no server sends.
     if (url.includes('/api/app/github-auth')) {
       if (method === 'POST') {
-        if (startFailure !== null) return json(startFailure.body, startFailure.status);
+        if (startFailure !== null) {
+          return json({ ok: false, ...startFailure.body }, startFailure.status);
+        }
         state = {
           status: 'awaiting_owner',
           user_code: USER_CODE,
           verification_uri: VERIFICATION_URI,
           expires_in_seconds: 900,
         };
-        return json({ ...state, ...extraOnStart });
+        return json({ ok: true, ...state, ...extraOnStart });
       }
-      return json(state);
+      return json({ ok: true, ...state });
     }
-    if (url.includes('/api/app/codex-auth')) return json({ status: 'not_connected' });
+    if (url.includes('/api/app/codex-auth')) return json({ ok: true, status: 'not_connected' });
     if (url.includes('/api/app/credentials')) return json({ global: [] });
     // Everything else the screen loads on mount (the integrations overview).
     return json({ oauth: [], api_keys: [], services: [] });
@@ -322,6 +329,10 @@ describe('GitHub — reachable from a phone at all', () => {
     // long as the app is open — and on a phone that is battery and data.
     await mountIntegrations();
     await press('github-connect');
+    // A poll must be ARMED first, or "it stopped" is true of a screen that never
+    // started one: `pollTimers.size` is 0 when the poll effect is disabled
+    // entirely, and this test would certify that as a settled flow.
+    expect(pollTimers.size).toBeGreaterThan(0);
     state = { status: 'connected' };
     await firePoll();
     expect(pollTimers.size).toBe(0);
@@ -393,14 +404,68 @@ describe('GitHub — reachable from a phone at all', () => {
   });
 
   it('a failed status read shows not-connected WITHOUT disconnecting anything', async () => {
-    (globalThis as unknown as { fetch: unknown }).fetch = async (): Promise<Response> => {
+    // THE THROWER RECORDS BEFORE IT THROWS. A bare thrower replaces `installFetch`'s
+    // closure, so nothing lands in `sent` and "no write went out" passes because
+    // NOTHING went out — a review found this test green against a screen whose
+    // whole failure handler had been deleted, because its other assertion was
+    // satisfied by the unconditionally-rendered row while it read "Checking…".
+    (globalThis as unknown as { fetch: unknown }).fetch = async (
+      input: string | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      sent.push({
+        url: typeof input === 'string' ? input : input.toString(),
+        method: init?.method ?? 'GET',
+      });
       throw new Error('server unreachable');
     };
     await mountIntegrations();
+    // It ASKED — so the next assertion is about what the screen CHOSE to send,
+    // not about a request log that was never written to.
+    expect(githubRequests().some((s) => s.method === 'GET')).toBe(true);
     // An unreachable server must never look like a credential to re-supply, and
     // it must certainly not send a write.
     expect(sent.some((s) => s.method !== 'GET')).toBe(false);
-    expect(byTestId('github-status')).not.toBeNull();
+    // And it must RESOLVE, to the same state the web sibling shows: a screen
+    // stuck on "Checking…" has no Connect control, which is a dead end the owner
+    // cannot leave — worse than the wrong answer, because it looks like loading.
+    expect(byTestId('github-status')?.textContent ?? '').toContain('Not connected');
+    expect(byTestId('github-connect')).not.toBeNull();
+  });
+
+  it('an UNRECOGNISED status still offers a way out, not a row with no control', async () => {
+    // The status is CAST, never validated (`lib/github-connect-client.ts` returns
+    // `json as GitHubConnectState`), so a gateway that grows a fourth state
+    // reaches this screen as a plain string the union says cannot exist. Under a
+    // positive `=== 'not_connected'` gate the row rendered "Not connected" with
+    // nothing to press — a dead end the owner cannot leave.
+    state = { status: 'revoked_at_github' };
+    await mountIntegrations();
+    expect(byTestId('github-status')?.textContent ?? '').toContain('Not connected');
+    expect(byTestId('github-connect')).not.toBeNull();
+  });
+
+  it('a failed OPEN clears its banner on the next try — the code is still good', async () => {
+    // A hand-off can fail for reasons that pass (no browser yet, a transient OS
+    // refusal), and there is NO Connect control on screen while a code is live —
+    // Connect is the only other thing that clears this banner. So a stale error
+    // would sit under a perfectly good code for the whole flow.
+    await mountIntegrations();
+    await press('github-connect');
+    (globalThis as unknown as { open: unknown }).open = (): null => {
+      throw new Error('no application can open this address');
+    };
+    await press('github-open');
+    expect(byTestId('github-error')?.textContent ?? '').toContain(
+      'no application can open this address',
+    );
+    (globalThis as unknown as { open: unknown }).open = (url: string): null => {
+      opened.push(url);
+      return null;
+    };
+    await press('github-open');
+    expect(byTestId('github-error')).toBeNull();
+    expect(opened).toEqual([VERIFICATION_URI]);
   });
 
   it('NEVER renders the device_code, even when a response carries one', async () => {

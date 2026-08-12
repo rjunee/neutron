@@ -1153,6 +1153,67 @@ guard is green again.
 **Out of scope, deliberately:** the twice-daily brief/digest, the
 `email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
 fan-out migration. Those are P2/P3.
+## 2026-08-12 — the GitHub-connect test that could not fail, and four dead ends behind it (#204 review)
+
+Review of the entry below found its mobile "a failed status read" test **fail
+open**: it replaced `globalThis.fetch` with a bare thrower, which also replaced
+the harness closure that records outgoing requests, so `sent` stayed empty and
+`expect(sent.some((s) => s.method !== 'GET')).toBe(false)` passed because NOTHING
+had been sent. Its only other assertion — that the status row exists — is true of
+a row that is unconditionally rendered, including while it reads "Checking…".
+Reproduced here before fixing: deleting the screen's entire status-read failure
+handler left **14 of 14 mobile tests green**, while the screen became a permanent
+"Checking…" with no Connect control and no way out. The test now records before
+it throws, asserts the read actually went out, and asserts the OUTCOME — "Not
+connected" plus a live Connect control. The same deletion now reds exactly that
+test.
+
+Four more failure paths found in the same review, each fixed with its own
+mutation-checked test:
+
+- **An unrecognised status was a dead end.** The client CASTS the wire payload to
+  a three-state union without validating it, so a gateway that grows a fourth
+  state arrives as a plain string. The mobile Connect control was gated
+  positively on `status === 'not_connected'`, so that row rendered "Not
+  connected" with nothing to press. The gate is now negative — anything not
+  connected and not mid-flow offers Connect — matching the web's else-branch.
+- **The web blanked a live device code on a failed status read**, while the
+  mobile comment claimed the web followed the same preserve-`awaiting_owner`
+  rule. That read re-fires whenever the client is rebuilt (a token rotating under
+  a long-lived tab is enough), so a flaky moment mid-flow would have taken the
+  owner's code away and torn down the poll about to see the approval. The web now
+  follows the rule the comment describes, held there by a test that re-renders
+  the tab with a rotated token while the network is down.
+- **"STOPS polling once connected" had no precondition that a poll ever armed**,
+  on either surface, so it was green against a tab with the poll effect disabled
+  entirely. Both now assert polling is live before asserting it stopped: the
+  mutation that disables the effect reds 3 mobile and 4 web tests, up from 2 and
+  3.
+- **A failed Open GitHub left its error banner up for the life of the flow.**
+  There is no Connect control on screen while a code is live, and Connect was the
+  only thing that cleared the banner — so a transient hand-off failure sat under
+  a perfectly good code even after a later tap succeeded. The handler now clears
+  it on every attempt.
+
+Two honesty fixes with no runtime behaviour: the doctrine named a **"Connect
+GitHub" control** the phone owner cannot see (the web button reads that, the
+phone's reads "Connect"), and now names the Connect control in the GitHub row —
+true on both; and the doctrine test called `UNCONDITIONAL` only searched for four
+banned words, which a rule that really did branch in neutral wording would pass.
+It is renamed for what it checks and now asserts the structural half too: the
+rule is byte-identical for every input shape the builder accepts. Both test
+fixtures also carry the gateway's real `{ ok: true, … }` / `{ ok: false, code,
+message }` envelope instead of a bare payload, so the fixture is the wire.
+
+**Verified.** 16 mobile + 14 web + 41 doctrine/composition tests pass. Every
+mutation below was grep-confirmed present in the file before its run was
+believed, and reverted after: deleting the status-read failure handler reds the
+failed-read test (1); restoring the positive `=== 'not_connected'` gate reds the
+unrecognised-status test (1); dropping the banner reset reds the Open-retry test
+(1); disabling the mobile poll effect reds 3; disabling the web poll effect reds
+4; reverting the web guard to an unconditional blank reds the mid-flow re-read
+test (1). Full 51-tsconfig matrix, lint and leak gate clean.
+
 ## 2026-08-12 — the owner can connect GitHub, and the agent stops pointing at a terminal (#551, #552)
 
 Two halves of one failure, so one change. The owner's codegen could not push or
@@ -1225,17 +1286,21 @@ component was fine and nothing reached it.
 - The doctrine rule is asserted against the COMPOSED system prompt in
   `gateway/wiring/__tests__/build-live-agent-turn.test.ts`, not only against the
   module — a rule nothing splices in is the same defect one layer up.
-- Mutation-proved, each mutation confirmed APPLIED by grep before the result was
-  believed (two mutation tests in this repo have silently not applied and gone
-  green): renaming the web control's class reds both layouts of the reachability
-  gate; skipping the probe's walk to Admin reds both layouts too, so those two
-  steps are load-bearing and not decoration; making Connect call status instead
-  of start reds 7 of the 13 web tests and 8 of the 14 mobile ones; disabling the poll
-  effect reds exactly the two tests that need a poll; blanking the state on a failed poll reds the
-  dropped-poll test on EACH surface and nothing else. The web dropped-poll test
-  was added in review, after that mutation was found to leave the whole web file
-  green — the behaviour was already correct there and only the mobile side was
-  holding it to the rule.
+- Checked with HAND-APPLIED mutations, each one grep-confirmed present in the
+  file before its result was believed (mutations in this repo have silently not
+  applied and gone green): renaming the web control's class reds both layouts of
+  the reachability gate; skipping the probe's walk to Admin reds both layouts
+  too, so those two steps are load-bearing and not decoration; making Connect
+  call status instead of start reds most of both files; disabling the poll effect
+  reds the tests that need a poll; blanking the state on a failed poll reds the
+  dropped-poll test on EACH surface. The web dropped-poll test was added in
+  review, after that mutation was found to leave the whole web file green — the
+  behaviour was already correct there and only the mobile side was holding it to
+  the rule. **This bullet originally claimed exact red-counts and a completeness
+  the cycle did not have**: review afterwards found one counted mobile test could
+  not red at all (see the follow-up entry below), so the counts described a suite
+  that was not doing what they implied. Corrected rather than deleted, because
+  the mutations named above did run.
 - `bash scripts/ci/typecheck-all.sh > /tmp/neutron-typecheck.log 2>&1` — 51
   tsconfigs, all pass. `scripts/ci/lint.sh` and `scripts/ci/leak-gate.sh` clean.
 

@@ -457,7 +457,9 @@ describe('build-live-agent-turn — operating-doctrine layer (gap-audit item 10)
     const prompt = specs[0]!.prompt
     expect(prompt).toContain(MISSING_CREDENTIAL_DOCTRINE)
     // Named concretely enough to act on, and pinned to the failure the owner hit.
-    expect(prompt).toContain('Connect GitHub')
+    // The control is named by its ROW, not by one surface's button text: the web
+    // button reads "Connect GitHub", the phone's reads "Connect".
+    expect(prompt).toContain('Connect control in the GitHub row')
     expect(prompt).toContain('Integrations')
     expect(prompt.toLowerCase()).toContain('git push')
   })

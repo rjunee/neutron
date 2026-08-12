@@ -155,9 +155,10 @@ export const MISSING_CREDENTIAL_DOCTRINE =
   'You cannot assume the owner has a shell on the machine you are running on, and telling ' +
   'someone to run a command they cannot run is the same as telling them nothing. ' +
   'CONCRETELY: when a git push or a pull request fails for want of a GitHub token, the ' +
-  'answer is that GitHub is not connected yet and the fix is the "Connect GitHub" control ' +
-  'on the Integrations surface — it shows a short code to enter at GitHub and finishes on ' +
-  'its own. The same rule holds for every other credential. If no in-product surface exists ' +
+  'answer is that GitHub is not connected yet and the fix is the Connect control in the ' +
+  'GitHub row of the Integrations surface — it shows a short code to enter at GitHub and ' +
+  'finishes on its own. The same rule holds for every other credential. If no in-product ' +
+  'surface exists ' +
   'for one, say exactly that rather than substituting a command.'
 
 /**
