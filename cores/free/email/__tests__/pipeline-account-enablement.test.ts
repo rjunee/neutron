@@ -143,6 +143,25 @@ describe('per-account enablement', () => {
     })
   })
 
+  test('a row that was never enabled does NOT flip the pipeline into allow-list mode', async () => {
+    // Defence in depth for the CLI's destructive-typo case: even if a
+    // disabled-only row reaches the store by some other path, it must not
+    // silence every real mailbox. Curation is proven by `enabled_at`, which is
+    // stamped only when something is actually turned ON.
+    await withStore(async (store) => {
+      store.setAccountEnabled('never-enabled-typo', false, null, BOOT)
+      const fakes = {
+        [KEEP]: accountFake([meta('k-1', BOOT - 86_400_000)]),
+        [DROP]: accountFake([meta('d-1', BOOT - 86_400_000)]),
+      }
+
+      await tick(fanOut(fakes), store, [])
+
+      expect(fakes[KEEP].lists.length).toBeGreaterThan(0)
+      expect(fakes[DROP].lists.length).toBeGreaterThan(0)
+    })
+  })
+
   test('a disabled account is NEVER QUERIED — not queried then filtered', async () => {
     await withStore(async (store) => {
       store.setAccountEnabled(KEEP, true, `${KEEP}@example.com`, BOOT)
@@ -165,7 +184,10 @@ describe('per-account enablement', () => {
 
   test('EVERYTHING off is a decision, not an absence — no reads at all', async () => {
     await withStore(async (store) => {
-      store.setAccountEnabled(KEEP, false, `${KEEP}@example.com`, BOOT)
+      // Turned ON and then OFF again — a curated list the owner emptied, which
+      // is different from a list that never existed. The pipeline honours it.
+      store.setAccountEnabled(KEEP, true, `${KEEP}@example.com`, BOOT)
+      store.setAccountEnabled(KEEP, false, `${KEEP}@example.com`, BOOT + 1_000)
       const fakes = { [KEEP]: accountFake([meta('k-1', BOOT - 86_400_000)]) }
 
       const r = await tick(fanOut(fakes), store, [])

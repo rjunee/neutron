@@ -87,9 +87,23 @@ function main(): number {
         return 2
       }
       const enable = command === 'enable'
+      // DISABLING INTO AN EMPTY LIST SILENCES EVERYTHING. Until the owner has
+      // enabled something, the pipeline polls every connected account; the
+      // first settings row is what flips it into allow-list mode. So
+      // `disable typo` on a fresh install would report that one imaginary
+      // account had been turned off while actually stopping every real
+      // mailbox. Refuse, and say which way round it works.
+      if (!enable && !store.hasCuratedAccounts()) {
+        process.stderr.write(
+          'nothing is enabled yet, so nothing can be disabled: the pipeline currently polls EVERY\n' +
+            'connected account. enable the ones you want first — the list becomes authoritative as\n' +
+            'soon as one account is on, and everything not on it is off.\n',
+        )
+        return 2
+      }
       const prior = store.getAccountSetting(account_id)
       const was_on = prior !== null && prior.enabled === 1
-      store.setAccountEnabled(account_id, enable, address ?? null)
+      if (enable || prior !== null) store.setAccountEnabled(account_id, enable, address ?? null)
       const after = store.getAccountSetting(account_id)
 
       if (enable && !was_on) {
@@ -100,6 +114,13 @@ function main(): number {
         )
       } else if (enable) {
         process.stdout.write(`${account_id} was already enabled — nothing changed.\n`)
+      } else if (prior === null) {
+        // Absence already means disabled in an allow-list, so writing a row for
+        // an id nobody has ever enabled adds a fact that changes nothing and
+        // clutters `list` with the owner's typos.
+        process.stdout.write(
+          `${account_id} was not on the list — nothing changed. (run 'list' to see the ids.)\n`,
+        )
       } else {
         process.stdout.write(
           `disabled ${account_id}. it will not be polled, classified, escalated or labelled.\n` +

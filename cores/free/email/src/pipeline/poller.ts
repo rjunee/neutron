@@ -329,10 +329,9 @@ export async function runEmailPipelineTick(
     // on a fresh install. The moment ONE row exists the owner has curated, and
     // from then on the list is authoritative — including when they have turned
     // everything off, which is a decision, not an absence.
-    const account_settings = store.listAccountSettings()
+    const curated = store.hasCuratedAccounts()
     const enabled_accounts = store.enabledAccounts()
-    const account_filter: readonly string[] | null =
-      account_settings.length === 0 ? null : [...enabled_accounts]
+    const account_filter: readonly string[] | null = curated ? [...enabled_accounts] : null
     const listScope = account_filter === null ? {} : { account_ids: account_filter }
     /**
      * Is this row's mailbox still switched on? `null` filter ⇒ unconfigured ⇒
@@ -348,7 +347,7 @@ export async function runEmailPipelineTick(
       // deliberately silent and one that is broken look identical in a log that
       // only reports work done.
       log?.('email pipeline has no enabled accounts; nothing will be polled', {
-        configured: account_settings.length,
+        configured: store.listAccountSettings().length,
       })
       store.setCheckpoint(CHECKPOINT_LAST_POLL_AT, String(now()))
       return result
