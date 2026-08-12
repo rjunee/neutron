@@ -365,15 +365,22 @@ const VERDICT_SCHEMA = {
 // The codex reviewer's verdict carries an extra `codexStatus` so the synthesis
 // can distinguish a real cross-model verdict ('connected') from the graceful
 // never-set-up path ('not_connected') and the never-silent-downgrade path
-// ('deferred' — configured but the codex call failed/timed out).
+// ('deferred' — configured but the codex call failed/timed out), plus
+// `codexTruncated` so a verdict formed from PART of the diff can never be
+// recorded as one about the whole change.
 const CODEX_VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['verdict', 'findings', 'codexStatus'],
+  required: ['verdict', 'findings', 'codexStatus', 'codexTruncated'],
   properties: {
     verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
     findings: VERDICT_SCHEMA.properties.findings,
     codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
+    codexTruncated: {
+      type: 'boolean',
+      description:
+        'true when the wrapper capped the diff (CODEX_TRUNCATED=1) — codex saw only its first N lines, so its verdict covers only that portion.',
+    },
   },
 }
 
@@ -1169,7 +1176,7 @@ function deferredCrossModelPeers(statuses) {
       name: 'Codex',
       title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
       evidence:
-        'codex was configured (CODEX_HOME set) but the review call failed/timed out; per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Re-run once codex auth is restored.',
+        'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
     })
   }
   if (statuses.kimi === 'deferred') {
@@ -1181,6 +1188,30 @@ function deferredCrossModelPeers(statuses) {
     })
   }
   return out
+}
+
+// What the synthesis is TOLD about Verdict C. Hoisted out of the synthesis call for
+// the same reason `deferredCrossModelPeers` is: the mapping status → panel text is
+// the load-bearing part, and it is testable on its own.
+//
+// THE TRUNCATED CASE IS WHY THIS IS A FUNCTION. The wrapper caps the diff at its
+// line limit and tells the MODEL so; but the model's answer still arrives as a
+// verdict with no scope attached, and the synthesis then read "codex APPROVE" as a
+// cross-model approval of the whole change when codex had seen its first 3000 lines.
+// `codexTruncated` comes from a deterministic grep of the wrapper's stderr (see
+// codexReviewerPrompt), so the re-scoping happens HERE, in code, rather than
+// depending on GPT-5 having remembered to hedge.
+function codexPanelLine(status, review) {
+  if (status === 'deferred') {
+    return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, or the diff was EMPTY so there was nothing to review). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
+  }
+  if (status !== 'connected') {
+    return `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+  }
+  if (review && review.codexTruncated === true) {
+    return `Verdict C (codex cross-model, GPT-5) — PARTIAL, SCOPED TO PART OF THE DIFF: ${JSON.stringify(review)}. The wrapper TRUNCATED the diff at its line cap (CODEX_REVIEW_DIFF_TRUNCATED), so codex read only the FIRST lines of this change and NEVER SAW the rest. Its blockers still VETO APPROVE, but a codex APPROVE here means ONLY "no blocker in the portion codex read" — do NOT record it as a whole-change cross-model approval, do NOT let it offset a finding in code codex never saw, and SAY in your findings that the cross-model review covered only part of the diff.`
+  }
+  return `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(review)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
 }
 
 // The codex cross-model reviewer prompt. It shells out to the wrapper
@@ -1201,11 +1232,20 @@ function codexReviewerPrompt(diffFile) {
   // `git diff` in repoPath — repoPath is still on the base branch (Forge builds in
   // an isolated worktree), so a git-diff there would be empty/stale and codex
   // could approve without reviewing the change (Codex review [P2]).
+  //
+  // The command also GREPS the wrapper's stderr for the truncation marker and echoes
+  // CODEX_TRUNCATED=0/1. The wrapper caps the diff at its line limit and discloses
+  // that IN THE PROMPT, but a disclosure only the model sees is a disclosure the
+  // WORKFLOW cannot act on: exit 0 is exit 0, so a review of the first 3000 lines of
+  // an 11k-line diff came back as a clean whole-change APPROVE. The grep is what
+  // makes it a FACT the synthesis is handed (see codexPanelLine), not a hope about
+  // how GPT-5 worded its answer.
   return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"
+  CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
+- codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
 - EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.
 - EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, or the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
@@ -1368,12 +1408,7 @@ TASK: ${task}`,
   // cross-model verdict is a full panelist when connected; a 'not_connected' codex
   // is noted + ignored; a 'deferred' codex is hard-gated below.
   phase('Synthesis')
-  const codexPanelLine =
-    codexStatus === 'connected'
-      ? `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(codexReview)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
-      : codexStatus === 'deferred'
-        ? `Verdict C (codex cross-model): DEFERRED — codex was configured but the review call FAILED/timed out. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
-        : `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+  const codexPanel = codexPanelLine(codexStatus, codexReview)
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
   // how the panel's verdicts are merged (see the trust-boundary note above).
@@ -1393,7 +1428,7 @@ TASK: ${task}`,
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
 ${corePanelLine('A', 'Claude rubric', verdicts[0])}
 ${corePanelLine('B', 'Claude adversarial', verdicts[1])}
-${codexPanelLine}
+${codexPanel}
 ${kimiPanelLine}`,
     withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
   )

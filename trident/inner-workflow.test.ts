@@ -308,6 +308,18 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     expect(SRC).toContain('full third panelist')
   })
 
+  test('the bridge READS BACK the truncation marker — the wrapper tells the model, the grep tells the workflow', () => {
+    // The wrapper caps the diff and discloses it IN THE PROMPT, but exit 0 is exit 0:
+    // without this grep a review of the first 3000 lines of an 11k-line diff came
+    // back as a clean whole-change APPROVE, and nothing downstream could tell.
+    expect(SRC).toContain('grep -q CODEX_REVIEW_DIFF_TRUNCATED')
+    expect(SRC).toContain('CODEX_TRUNCATED=1')
+    expect(SRC).toContain('CODEX_TRUNCATED=0')
+    // …and it is a REQUIRED schema field, copied from that line rather than judged.
+    expect(SRC).toContain("required: ['verdict', 'findings', 'codexStatus', 'codexTruncated']")
+    expect(SRC).toContain('copy the CODEX_TRUNCATED line VERBATIM')
+  })
+
   test('a deterministic never-silent-downgrade guard forces REQUEST_CHANGES on deferred+APPROVE', () => {
     expect(SRC).toContain('function enforceCrossModelGate(')
     expect(SRC).toContain('function deferredCrossModelPeers(')
@@ -357,6 +369,7 @@ function loadRealGate(): {
   coreSeats: Array<{ slot: number; name: string }>
   classifyBlock: (s: unknown, peers: unknown[]) => string
   corePanelLine: (letter: string, label: string, verdict: unknown) => string
+  codexPanelLine: (status: string, review: unknown) => string
 } {
   const grab = (name: string): string => {
     const at = SRC.indexOf(`function ${name}(`)
@@ -404,8 +417,9 @@ function loadRealGate(): {
       grab('hasUsableVerdict'),
       grab('missingCoreReviewers'),
       grab('corePanelLine'),
+      grab('codexPanelLine'),
       grab('classifyBlock'),
-      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, coreSeats: CORE_REVIEWER_SEATS, classifyBlock, corePanelLine }',
+      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, coreSeats: CORE_REVIEWER_SEATS, classifyBlock, corePanelLine, codexPanelLine }',
     ].join('\n'),
   ) as () => ReturnType<typeof loadRealGate>
   return factory()
@@ -423,6 +437,58 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const g = gate()
     expect(typeof g.enforceCrossModelGate).toBe('function')
     expect(typeof g.deferredCrossModelPeers).toBe('function')
+    expect(typeof g.codexPanelLine).toBe('function')
+  })
+
+  test('a TRUNCATED codex APPROVE is handed to the synthesis as PARTIAL, not as a whole-change approval', () => {
+    // The defect: codex read the first N lines of the diff, said APPROVE about them,
+    // and the panel line presented it as "a full third panelist" — a cross-model
+    // approval of code codex never saw.
+    const { codexPanelLine } = gate()
+    const line = codexPanelLine('connected', {
+      verdict: 'APPROVE',
+      findings: [],
+      codexStatus: 'connected',
+      codexTruncated: true,
+    })
+    expect(line).toContain('PARTIAL')
+    expect(line).toContain('CODEX_REVIEW_DIFF_TRUNCATED')
+    expect(line).toContain('do NOT record it as a whole-change cross-model approval')
+    expect(line).not.toContain('full third panelist')
+    // Its BLOCKERS are not softened — only its approval is re-scoped.
+    expect(line).toContain('VETO')
+  })
+
+  test('an UNtruncated connected codex is still the full third panelist (the re-scoping is not blanket)', () => {
+    const { codexPanelLine } = gate()
+    const line = codexPanelLine('connected', {
+      verdict: 'APPROVE',
+      findings: [],
+      codexStatus: 'connected',
+      codexTruncated: false,
+    })
+    expect(line).toContain('full third panelist')
+    expect(line).not.toContain('PARTIAL')
+  })
+
+  test('deferred/not_connected panel lines are unchanged by the truncation flag', () => {
+    const { codexPanelLine } = gate()
+    const deferredLine = codexPanelLine('deferred', { codexTruncated: true })
+    expect(deferredLine).toContain('DEFERRED')
+    expect(deferredLine).toContain('do NOT return APPROVE')
+    // The deferral no longer claims the CALL failed — an empty diff is the other way in.
+    expect(deferredLine).toContain('EMPTY')
+    expect(codexPanelLine('not_connected', { codexTruncated: true })).toContain('NOT CONNECTED')
+  })
+
+  test('the deferred-codex blocker text names the EMPTY-DIFF cause, not just auth', () => {
+    // An operator whose diff file failed to write was told to re-run "once codex auth
+    // is restored" — a correct-looking instruction that fixes nothing.
+    const { deferredCrossModelPeers } = gate()
+    const [codexPeer] = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
+    expect(codexPeer?.evidence).toContain('EMPTY')
+    expect(codexPeer?.evidence).toContain('CODEX_REVIEW_EMPTY_DIFF')
+    expect(codexPeer?.evidence).not.toContain('Re-run once codex auth is restored')
   })
 
   test('deferred codex + APPROVE synthesis → forced REQUEST_CHANGES with a blocker prepended', () => {

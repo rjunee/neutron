@@ -23,7 +23,8 @@
 #                          review (empty diff — see CODEX_REVIEW_EMPTY_DIFF below).
 #   exit 5   DEFERRED    — configured + authed, but the review call itself failed.
 #
-# DEFERRED (3/5) means "configured but the call FAILED" → the synthesis must
+# DEFERRED (3/5) means "configured, but NO REVIEW HAPPENED" — the call failed, or
+# there was nothing to review (empty diff) → the synthesis must
 # NEVER silently APPROVE (mirror the legacy harness CODEX_REVIEW_PRECHECK_FAILED /
 # CODEX_REVIEW_TIMEOUT never-silent-downgrade). NOT_CONNECTED (10/11) is the
 # benign never-set-up path and degrades to Claude-only.
@@ -90,41 +91,69 @@ fi
 # here would see an EMPTY/stale diff and codex could "approve" without reviewing
 # the actual change. Every trident reviewer reviews that diff file; so does codex.
 # Fall back to `git diff base..HEAD` for standalone use (the legacy harness-style).
-# DIFF_TOTAL_LINES is the FULL size before truncation — `awk END{print NR}` counts
-# a final unterminated line too, which `wc -l` would drop.
+# BOTH sources land in FULL_DIFF first so truncation is decided ONE way. `$(<file)`
+# and `$(...)` strip trailing newlines, which is what makes the comparison below
+# exact: a diff whose only "extra" lines are trailing blanks was NOT truncated.
 if [ -n "${NEUTRON_CODEX_DIFF_FILE:-}" ] && [ -f "$NEUTRON_CODEX_DIFF_FILE" ]; then
-  DIFF=$(head -n "$DIFF_LINE_LIMIT" "$NEUTRON_CODEX_DIFF_FILE")
-  DIFF_TOTAL_LINES=$(awk 'END { print NR }' "$NEUTRON_CODEX_DIFF_FILE")
+  FULL_DIFF=$(<"$NEUTRON_CODEX_DIFF_FILE")
   DIFF_SRC="$NEUTRON_CODEX_DIFF_FILE"
 else
   FULL_DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null)
-  DIFF=$(printf '%s' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")
-  DIFF_TOTAL_LINES=$(printf '%s' "$FULL_DIFF" | awk 'END { print NR }')
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
+DIFF=$(printf '%s\n' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")
+# The FULL size, for the disclosure text only — `awk END{print NR}` counts a final
+# unterminated line too, which `wc -l` would drop. Truncation itself is decided
+# WITHOUT it (below), so a missing/broken awk cannot silence the disclosure.
+DIFF_TOTAL_LINES=$(printf '%s\n' "$FULL_DIFF" | awk 'END { print NR }' 2>/dev/null)
+case "$DIFF_TOTAL_LINES" in
+  '' | *[!0-9]*) DIFF_TOTAL_LINES='' ;;
+esac
+
 # A diff that is only WHITESPACE is nothing to review either. `$(...)` already eats
 # trailing newlines, but spaces/tabs survive and would sail past a bare -z test and
 # hand codex a blank DIFF section — the very approval-about-nothing this guards.
-if [ -z "${DIFF//[[:space:]]/}" ]; then
-  # NOTHING TO REVIEW — the diff file failed to write, the base ref resolved wrong,
-  # or the branch is empty. This is DEFERRED, never an approval: a reviewer handed
-  # nothing to review must not answer, or the cross-model seat returns a confident
-  # APPROVE about nothing and the bridge records it as connected. Mirrors the kimi
-  # lane (trident/kimi-review.ts — empty diff → status 'deferred').
-  echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${DIFF_SRC} — nothing to review. DEFERRED — do NOT treat as an approval." >&2
-  exit 3
-fi
+# `case` and not `[ -z "${DIFF//[[:space:]]/}" ]`: that substitution is QUADRATIC in
+# bash (33s on a 550KB diff, and it runs on EVERY review); this form is O(n).
+case "$DIFF" in
+  *[![:space:]]*) ;;
+  *)
+    # NOTHING TO REVIEW — the diff file failed to write, the base ref resolved wrong,
+    # the branch is empty, or the diff could not be read at all. This is DEFERRED,
+    # never an approval: a reviewer handed nothing to review must not answer, or the
+    # cross-model seat returns a confident APPROVE about nothing and the bridge
+    # records it as connected. Mirrors the kimi lane (trident/kimi-review.ts — empty
+    # diff → status 'deferred').
+    echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${DIFF_SRC} — nothing to review. DEFERRED — do NOT treat as an approval." >&2
+    exit 3
+    ;;
+esac
 
 # ── TRUNCATION DISCLOSURE ─────────────────────────────────────────────────────
 # The diff is capped at DIFF_LINE_LIMIT lines above. Told nothing, the model scopes
 # its verdict to "the diff" and APPROVEs an 11k-line change on the strength of its
 # first 3000 lines. So when we truncate, SAY SO in the prompt and make the verdict
 # scope itself to what was actually read.
+#
+# TRUNCATION IS A STRING COMPARISON, NOT A LINE COUNT. Comparing what we will send
+# against the whole diff is exact and needs no external tool: it can neither MISS a
+# truncation (a line count that failed to compute used to fail OPEN — silently
+# truncated, no notice) nor INVENT one (trailing blank lines used to inflate the
+# count into a false "content was withheld" claim about a diff delivered in full).
+# The line NUMBERS are cosmetic, so they degrade on their own when awk is unusable.
 TRUNCATION_NOTICE=""
-if [ "$DIFF_TOTAL_LINES" -gt "$DIFF_LINE_LIMIT" ]; then
-  echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} diff lines to codex." >&2
-  TRUNCATION_NOTICE="!! TRUNCATED DIFF — YOU ARE NOT SEEING THE WHOLE CHANGE. You have ONLY the FIRST ${DIFF_LINE_LIMIT} lines of a ${DIFF_TOTAL_LINES}-line diff; the remaining $((DIFF_TOTAL_LINES - DIFF_LINE_LIMIT)) lines were NOT provided and you cannot request them.
-SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ: say in your findings that you reviewed only the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} lines, and NEVER claim the change as a whole is correct or complete. APPROVE means only 'no blocker in the portion I read'.
+if [ "$DIFF" != "$FULL_DIFF" ]; then
+  if [ -n "$DIFF_TOTAL_LINES" ]; then
+    SEEN="the FIRST ${DIFF_LINE_LIMIT} lines of a ${DIFF_TOTAL_LINES}-line diff; the remaining $((DIFF_TOTAL_LINES - DIFF_LINE_LIMIT)) lines were NOT provided"
+    SCOPE="reviewed only the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} lines"
+    echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} diff lines to codex." >&2
+  else
+    SEEN="the FIRST ${DIFF_LINE_LIMIT} lines of a LONGER diff (its total length could not be measured); the rest was NOT provided"
+    SCOPE="reviewed only the first ${DIFF_LINE_LIMIT} lines of a longer diff"
+    echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} diff lines to codex (total length unmeasurable)." >&2
+  fi
+  TRUNCATION_NOTICE="!! TRUNCATED DIFF — YOU ARE NOT SEEING THE WHOLE CHANGE. You have ONLY ${SEEN} and you cannot request them.
+SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ: say in your findings that you ${SCOPE}, and NEVER claim the change as a whole is correct or complete. APPROVE means only 'no blocker in the portion I read'.
 "
 fi
 
