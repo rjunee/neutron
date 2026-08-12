@@ -2,6 +2,68 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — a chat message that arrives now leaves a trace, so a silent chat is diagnosable (ISSUES #557)
+
+The chat surface logged a socket opening and a socket closing and nothing in
+between. When the newest USER row in `app_chat_messages` stopped advancing while
+the same database was still taking AGENT writes, the service healthy and the
+client demonstrably connecting, the server could not distinguish the two
+hypotheses that matter: the message never arrived, or the message arrived and
+was collapsed by the `client_msg_id` idempotency check in
+`persistence/app-chat-store.ts`, which returns `{was_new:false}` and writes
+nothing. Those have opposite fixes. Filtering the journal for the window left
+only `[app-ws] event=session_open` / `session_close` — and a window in which a
+turn demonstrably ran and replied looked exactly the same, so the absence of a
+line carried no information at all.
+
+**What now emits, all under the existing `[app-ws] event=… k=v` prefix so one
+grep covers the whole conversation lifecycle.**
+
+- `message_received topic=… transport=ws|http seq=… client_msg_id=… was_new=…`
+  from `channels/adapters/app-ws/adapter.ts` `ingestUserMessage` — the single
+  chokepoint both inbound paths (`/ws/app/chat` and `POST /api/app/chat/send`)
+  funnel through, so the two can never drift. **It logs on the de-duped outcome
+  too.** Logging only the insert would have left precisely the hole this issue
+  is about; `was_new=false` is the line that answers the question above.
+- `turn_dispatched topic=… session=… turn=…` then exactly one of
+  `turn_completed … ms=…` / `turn_failed … ms=… error=…`, from `dispatchInbound`
+  — the one place a turn crosses from the surface into the agent. The duration
+  is the point: without it a SLOW turn reads identically to a dead one.
+- `message_refused topic=… transport=… reason=…` at every refusal on
+  `gateway/http/app-ws-surface.ts` (malformed json, malformed envelope, dispatch
+  failure, missing bearer, a rejected token, empty payload, over-length body),
+  and `turn_skipped … reason=duplicate_client_msg_id|chat_command|prompt_already_answered`
+  wherever a message is accepted but no turn runs. Silent refusal is the failure
+  mode that produced ISSUES #516 — a mid-turn message accepted and never
+  acknowledged — so a drop now always names itself.
+- `session_open` / `session_close` gained `device=`, the same value
+  `turn_dispatched` reports as `session`, so a turn ties back to the socket it
+  arrived on.
+
+**Privacy is a constraint, not a note.** No line carries a message body, a token
+or any credential material — ids, a seq, booleans and durations only. Both test
+files assert that positively: the body is a nonsense marker string and every
+captured line is searched for it, and the refusal suite asserts a rejected
+bearer never reaches the journal.
+
+**What was deliberately NOT done.** No line was added inside a per-tick cron
+loop. The journal is already ~97% `[import-running-cron] event=tick`, which is
+why real events are invisible in the first place; adding volume to a flooded log
+makes this worse. This work neither depends on nor touches the open fix for that
+flood.
+
+**Verification.** Assertions are on the EMITTED LINE captured off the logger's
+real console sink, never on a spy proving a function ran — a logger that is
+invoked but whose output never reaches the journal is the same class of defect
+as the one being fixed. `gateway/__tests__/app-ws-chat-observability.test.ts`
+drives a real `Bun.serve` with the real surface, the real `AppWsAdapter` and a
+real `AppChatStore` over real SQLite, across BOTH transports, and includes the
+deduped-`client_msg_id` case on each. `channels/adapters/app-ws/__tests__/chat-observability-log.test.ts`
+pins the adapter lines exactly, including a turn whose injected clock advances
+1500ms so a never-measured duration cannot pass. Mutation-verified: forcing
+`was_new` to `true` on the emitted line fails the dedupe test. Full 51-tsconfig
+typecheck matrix green. NO FEATURE FLAGS — on by default, one code path.
+
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 
 `PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through

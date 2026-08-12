@@ -6398,6 +6398,44 @@ live agent's onboarding seam carries the interview until the owner is onboarded,
 then it is steady-state chat. A free-Core slash command is intercepted first by
 the chained `chat_command_filter` (`app-ws-surface.ts:605` / `:783`).
 
+**Conversation-lifecycle logging (ISSUES #557).** The whole lifecycle is
+greppable under the one `[app-ws] event=… k=v` prefix the surface already used
+for `session_open` / `session_close`. There is no second format and no flag —
+it is on, one code path.
+
+- `message_received topic=… transport=ws|http seq=… client_msg_id=… was_new=…` —
+  emitted by `AppWsAdapter.ingestUserMessage`
+  (`channels/adapters/app-ws/adapter.ts`), the single chokepoint BOTH inbound
+  paths funnel through (`/ws/app/chat` and `POST /api/app/chat/send`), so the
+  two transports cannot drift apart. It is emitted on EVERY outcome including
+  the de-duplicated one. That matters more than it looks: a repeated
+  `client_msg_id` collapses onto the existing row in
+  `persistence/app-chat-store.ts` and writes nothing, so before this line
+  "arrived and was de-duplicated" and "never arrived" were indistinguishable
+  from the server — two problems with opposite fixes.
+- `turn_dispatched topic=… session=… turn=…`, then exactly one of
+  `turn_completed … ms=…` or `turn_failed … ms=… error=…` — emitted by
+  `AppWsAdapter.dispatchInbound`, the one place a turn crosses into the agent.
+  `session` is the socket's device id (`http` for the HTTP fallback) and is
+  echoed as `device=` on `session_open` / `session_close`, so a turn ties back
+  to the connection it arrived on. `turn_failed` still rethrows. The `ms` is
+  load-bearing: a long turn must read as long rather than as a dead one.
+- `message_refused topic=… transport=… reason=…` at every refusal in
+  `gateway/http/app-ws-surface.ts` — `malformed_json`, `malformed_envelope`,
+  `dispatch_failed`, `missing_bearer`, the auth resolver's own rejection code,
+  `missing_body`, `body_too_long` — and
+  `turn_skipped … reason=duplicate_client_msg_id | chat_command | prompt_already_answered`
+  wherever a message is accepted but no turn runs. A silent refusal is what
+  produced ISSUES #516, so a drop always names its reason.
+
+Bodies are NEVER logged, nor tokens nor any credential material — ids, a seq,
+booleans and durations only. `gateway/__tests__/app-ws-chat-observability.test.ts`
+and `channels/adapters/app-ws/__tests__/chat-observability-log.test.ts` assert on
+the emitted lines (captured off the logger's real console sink, not on a spy) and
+both assert positively that the body never appears. No line was added inside a
+per-tick cron loop — a flooded journal is what made real events invisible to
+begin with.
+
 **Owner-timezone capture on connect (ISSUES #40, WRITE path landed #392).** The
 web + Expo clients detect their own IANA zone client-side
 (`Intl.DateTimeFormat().resolvedOptions().timeZone` via `detectClientTimezone` —
