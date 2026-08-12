@@ -12,7 +12,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { buildBoardReconcileObserver } from './board-reconcile.ts'
 import { dispatchBoardBoundBuild } from './board-dispatch.ts'
-import { buildSimFirer } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
@@ -94,6 +94,9 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
       run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
+      // Sim gate: the real post-APPROVE prover needs a real repo (see
+      // `buildSimMutationProofGate`); this file's subject is board reconciliation.
+      prove_mutation: buildSimMutationProofGate(),
     })
     const reconcile = buildBoardReconcileObserver(board)!
     const loop = new TridentTickLoop({

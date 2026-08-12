@@ -6,7 +6,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
-import { buildSimFirer, type SimPlan } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate, type SimPlan } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator, isTridentHarvestTerminal } from './orchestrator.ts'
 import { runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -67,6 +67,11 @@ function buildHarness(opts: {
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
+  /** Post-APPROVE mutation-prover phase. Default: a SIMULATED pass — these
+   *  tests are about the outer loop, and the real prover needs a real repo (see
+   *  `buildSimMutationProofGate`). Set false to assert the block path; OMIT the
+   *  seam entirely (build the orchestrator directly) to exercise the real gate. */
+  mutation_proof_ok?: boolean
 }): Harness {
   const hostCalls: string[][] = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
@@ -94,6 +99,7 @@ function buildHarness(opts: {
       refirePatches.push(patch)
       return store.update(id, patch).then(() => {})
     },
+    prove_mutation: buildSimMutationProofGate({ ok: opts.mutation_proof_ok ?? true }),
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
@@ -917,5 +923,54 @@ describe('applyResult stamps harvested_at (the outer loop is the ONLY writer)', 
     expect(terminated?.phase).toBe('failed')
     expect(terminated?.harvested_at).toBeNull() // terminalTransition never sets it
     expect(isTridentHarvestTerminal(terminated!)).toBe(false)
+  })
+})
+
+describe('the post-APPROVE MUTATION PROVER stands between APPROVE and merge', () => {
+  test('an unproved APPROVE does NOT merge — it fails, with the prover\'s reason', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+      mutation_proof_ok: false,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toBe('simulated mutation proof failure')
+    // The verdict is preserved: the review DID approve. What is missing is the
+    // proof, and the row must say that rather than pretend Argus rejected it.
+    expect(final.inner_verdict).toBe('APPROVE')
+    expect(final.inner_checkpoint).toBe('argus-approved')
+    // THE IRREVERSIBLE STEP NEVER RAN.
+    expect(h.hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
+  })
+
+  test('with NO seam wired at all, a run whose build nominated no mutation still does not merge', async () => {
+    // The DEFAULT path — `prove_mutation` unset, so the orchestrator uses the
+    // real `runMutationProofGate`. This is the fail-closed wiring assertion: if
+    // someone deletes the call, this test merges and goes red.
+    const hostCalls: string[][] = []
+    const sim = buildSimFirer(store, () => ({
+      result: { verdict: 'APPROVE', prNumber: 77, branch: 'feat-x' },
+    }))
+    const orch = buildTridentOrchestrator({
+      fire_workflow: sim.fire_workflow,
+      db_path: join(tmp, 'project.db'),
+      run_host: async (cmd) => {
+        hostCalls.push(cmd)
+        // `git diff --name-only` returns nothing readable → the prose-only
+        // predicate fails closed → the proof is required → there is no claim.
+        return ok()
+      },
+      base_branch: 'main',
+      now: () => new Date(0).toISOString(),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal({ loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches: [] }, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('nominated no mutation')
+    expect(hostCalls.some((c) => c.join(' ').includes('gh pr merge'))).toBe(false)
   })
 })

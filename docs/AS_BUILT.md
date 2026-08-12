@@ -2,6 +2,47 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-12 — a mutation-verified claim now has to be a mutation that ran
+
+`trident/mutation-prover.ts` adds the post-APPROVE phase that stands between an
+Argus APPROVE and the irreversible merge. It is deterministic TypeScript, and it
+does the thing rather than asking for a report of it: it provisions a throwaway
+worktree detached at the branch head, applies the nominated mutation, watches the
+guard go RED, watches a control stay GREEN, restores the file, watches the guard
+come back GREEN — and writes the evidence block from those observations.
+`orchestrator.applyResult` calls it before `cleanupAfterMerge`, so an APPROVE
+that cannot be proved fails the run instead of merging it.
+
+The gap it closes is not that reviewers were lax. It is that an agent can write a
+completely convincing "mutation-verified" paragraph without having run one, and a
+gate that reads text accepts it: on PR #477 a hand-written evidence block with
+invented keys reached the parser, and it was refused for its shape — a well-formed
+fake would have armed the gate. So no agent composes the block. Forge NOMINATES a
+mutation (`mutationClaim` on `FORGE_SCHEMA`: file, find, replace, guard argv,
+control argv) and that nomination is untrusted input the prover EXECUTES; the
+schema keeps `claimed` and `observed` apart, and `proved` is a function of
+`observed` alone. Every block is signed with an HMAC keyed by a secret minted in
+memory per prover — no disk, no DB, no prompt — so a block that was written rather
+than produced cannot verify, and neither can a real one that was edited afterwards
+or replayed from another process. Placeholder-shaped observations (`"<sha256>"`, a
+"RED" run that exited 0, a red and a green run with byte-identical output) are
+rejected first, by name, so a fake is told what was wrong with it.
+
+Docs-only PRs are exempt through a predicate that fails closed at every step: an
+unreadable diff, an empty list, one unrecognised path — each requires the proof.
+A `.md` under `skills/`, `prompts/`, `.claude/` or `.github/` is executable prose,
+not documentation, and takes the proof path.
+
+NO FEATURE FLAGS: there is no config, env var or operator switch that turns the
+proof off, only a `prove_mutation` test seam of the same kind as `merge_deps`,
+which production does not wire.
+
+Mutation-verified, eight ways: deleting the guard-must-go-RED check, the signature
+check, the placeholder-digest check, the ambiguity refusal, the restore step, the
+fail-closed prose predicate, the untrusted-claim shape check, and the gate call in
+the merge path each redden the suite, and each mutation was confirmed applied
+(exactly one occurrence, changed bytes) before its test was run.
+
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 
 `PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through

@@ -74,6 +74,34 @@ export async function writeSimulatedResult(
   })
 }
 
+/**
+ * A stand-in for the post-APPROVE MUTATION PROVER phase
+ * (`mutation-prover.ts:runMutationProofGate`), for the many orchestrator tests
+ * whose subject is the outer loop — harvest, provenance, re-fire, merge — and
+ * which run against a `/repo` path that does not exist and a `run_host` that
+ * answers every command `ok`. The real gate provisions a git worktree at the
+ * branch head, edits a real file and runs a real test command; none of that is
+ * simulatable, and making every one of those tests build a repo would bury what
+ * they are actually asserting.
+ *
+ * The PROVER'S OWN behaviour is tested for real in `mutation-prover.test.ts`,
+ * and `orchestrator.test.ts` covers the WIRING both ways: that a run with no
+ * override gets the real fail-closed gate (an APPROVE that cannot be proved does
+ * not merge), and that a blocked proof stops the merge. A test only ever gets a
+ * pass here by asking for one, by name, at its call site.
+ */
+export function buildSimMutationProofGate(
+  outcome: { ok?: boolean; reason?: string } = {},
+): (input: unknown) => Promise<{ ok: boolean; reason: string; exempt: boolean; evidence: null }> {
+  const ok = outcome.ok ?? true
+  return async () => ({
+    ok,
+    reason: outcome.reason ?? (ok ? 'simulated mutation proof' : 'simulated mutation proof failure'),
+    exempt: false,
+    evidence: null,
+  })
+}
+
 /** A test's per-run plan for what the simulated fire + workflow do. */
 export interface SimPlan {
   /** What the FIRE seam returns (did the launching turn settle?). Default fired. */

@@ -23,7 +23,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
-import { buildSimFirer } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
@@ -70,6 +70,9 @@ function freshBoot(
     run_host: async () => ok(),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
+    // The post-APPROVE mutation prover needs a real repo; this file's subject is
+    // orphan resume (see `buildSimMutationProofGate`).
+    prove_mutation: buildSimMutationProofGate(),
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   const orch = buildTridentOrchestrator(o)
@@ -139,6 +142,7 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
       run_host: async () => ok(),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
+      prove_mutation: buildSimMutationProofGate(),
     })
     const loop = new TridentTickLoop({ store, step: orch.step })
 
