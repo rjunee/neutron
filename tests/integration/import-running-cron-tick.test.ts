@@ -383,7 +383,8 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
   // That is not enough on its own — the window is PROCESS-global state that outlives a
   // test, so the reset below is what keeps the file independent of ITSELF. Without it a
   // second pass in the same process (`bun test --rerun-each 2`) reuses run 1's stamps
-  // and three of these cases go red.
+  // and some of these cases go red. (Not a count: the number depends on how many cases
+  // this block holds, and a number written here rots the next time one is added.)
   beforeEach(resetLoggerStateForTests)
 
   const T0 = 1_700_000_000_000
@@ -434,7 +435,10 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     }
   }
 
-  test('the FIRST idle tick logs — a fresh process must prove it came up', async () => {
+  test('the FIRST idle tick into an empty window logs', async () => {
+    // The empty window comes from the `beforeEach` reset above, NOT from a process
+    // boundary — this case does not restart anything. The restart claim has its own
+    // case below.
     const tick = makeTicker('idle-first')
     captureLogLines()
     await tick(T0)
@@ -462,6 +466,31 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     await tick(T0 + IDLE_TICK_LOG_INTERVAL_MS - 1)
     expect(tickLines()).toEqual([tickLine(slug, 0)])
     await tick(T0 + IDLE_TICK_LOG_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0), tickLine(slug, 0)])
+  })
+
+  test('a restarted process logs its first idle tick at once — the window does not survive', async () => {
+    // The handler comment says the in-memory window is deliberate because "did it come
+    // back up?" is the question a heartbeat answers. This is that claim, executable.
+    //
+    // What a restart IS at this seam: the window lives in module-level state a new
+    // process starts empty, and the handler is rebuilt at boot
+    // (build-core-modules.ts). Clearing that state and building a second ticker is
+    // therefore a faithful stand-in — it is NOT a real process spawn, and this case
+    // does not claim to be one. It goes red if the window is ever moved somewhere a
+    // restart does not wipe.
+    const slug = 'idle-restart'
+    const tick = makeTicker(slug)
+    captureLogLines()
+    await tick(T0)
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0)])
+
+    resetLoggerStateForTests()
+    const afterRestart = makeTicker(slug)
+    // Deep inside the window the tick above was suppressed in: this line appears only
+    // because the restart dropped the stamp.
+    await afterRestart(T0 + 2 * DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
     expect(tickLines()).toEqual([tickLine(slug, 0), tickLine(slug, 0)])
   })
 
@@ -609,8 +638,8 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
   })
 
   test('the interval is long enough to matter and short enough to notice', async () => {
-    // A guard on the constant itself: at 5s sweeps this is the difference between
-    // ~17,280 and ~144 lines/day.
+    // A guard on the constant, closed by an observation of the handler at both edges
+    // of it: at 5s sweeps this is the difference between ~17,280 and ~144 lines/day.
     //
     // Both bounds are a BUDGET, not a derivation. Upper: one interval must pass
     // before "the line stopped appearing" means anything, so keep that inside a
@@ -621,11 +650,33 @@ describe('the idle tick heartbeat is throttled, not silenced', () => {
     // does not make it negotiable in passing: moving the constant past it should
     // be a deliberate change that moves this bound with it, which is the whole
     // job of a guard on a chosen budget.
-    expect(IDLE_TICK_LOG_INTERVAL_MS).toBeLessThan(15 * 60_000)
-    // Lower bound — the lines/day ceiling IS the floor (it forces ≳ 2.9 min), so a
-    // separate small-ms assertion would be unreachable and would read as covering
-    // something it cannot fail on.
+    const OPERATOR_BUDGET_MS = 15 * 60_000
+    expect(IDLE_TICK_LOG_INTERVAL_MS).toBeLessThan(OPERATOR_BUDGET_MS)
     const idleLinesPerDay = 86_400_000 / IDLE_TICK_LOG_INTERVAL_MS
     expect(idleLinesPerDay).toBeLessThan(500)
+    // Lower bound. An earlier round left this out on the reasoning that the
+    // lines/day ceiling already forces ≳ 2.9 min, so a small-ms assertion could not
+    // fail. That is false for anything ≤ 0: at `IDLE_TICK_LOG_INTERVAL_MS = -1` the
+    // division is NEGATIVE and both bounds above stay green, while `elapsed >= -1`
+    // is true for every reading and the throttle is off entirely. A window no longer
+    // than one sweep suppresses nothing, so the cadence is the real floor.
+    expect(IDLE_TICK_LOG_INTERVAL_MS).toBeGreaterThan(
+      DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS,
+    )
+
+    // The three assertions above read the constant back to itself; on their own they
+    // are a statement of the budget, not evidence the handler honours it. So drive
+    // the real handler at both edges of that budget and read the sink.
+    const slug = 'idle-budget'
+    const tick = makeTicker(slug)
+    captureLogLines()
+    await tick(T0)
+    // Floor, observed: one sweep later the line is REFUSED, so a throttle is in force.
+    await tick(T0 + DEFAULT_IMPORT_RUNNING_TICK_INTERVAL_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0)])
+    // Ceiling, observed: silence never outlasts the operator's budget, whatever the
+    // constant is set to.
+    await tick(T0 + OPERATOR_BUDGET_MS)
+    expect(tickLines()).toEqual([tickLine(slug, 0), tickLine(slug, 0)])
   })
 })

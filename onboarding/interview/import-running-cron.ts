@@ -260,7 +260,10 @@ export function buildImportRunningHandler(
     // `input.project_slug`), so that is one window in practice; the key is
     // scoping, not a claim that anything sweeps more than one. It is in-memory on
     // purpose: a restart SHOULD log immediately, since "did it come back up?" is
-    // exactly the question a heartbeat answers.
+    // exactly the question a heartbeat answers — pinned by 'a restarted process logs
+    // its first idle tick at once' in tests/integration/import-running-cron-tick.test.ts,
+    // which stands in for the process boundary by clearing the module-level window and
+    // rebuilding the handler (it does not spawn a process).
     const idle = rows.length === 0
     const tickEmitter = idle
       ? tickLog.rateLimited(`idle_tick:${ctx.owner_slug}`, IDLE_TICK_LOG_INTERVAL_MS)
