@@ -40,6 +40,31 @@ export const SUMMARY_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
 export const DEFAULT_MIGRATIONS_DIR = join(HERE, '..', 'migrations')
 
+/**
+ * The email Core's ONE seam onto the platform migration runner.
+ *
+ * A bundled Core may not import `migrations/` — `cores-use-sdk-only` in
+ * `.dependency-cruiser.cjs` calls that the "third-party fiction" violation, and
+ * the ratchet in `scripts/ci/depcruise-ratchet-guard.sh` lets the grandfathered
+ * baseline SHRINK ONLY, so a second module in this package reaching for the
+ * runner is a build failure rather than a second grandfathered line. The SDK
+ * does not expose a migration seam yet (four Cores carry the same baselined
+ * edge for the same reason), so until it does, this module — which already owns
+ * the edge for the cache tree — owns it for the whole Core, and the pipeline
+ * sidecar goes through here.
+ *
+ * That is also the shape `cores/free/calendar/migrations/runner.ts` uses: one
+ * module per Core owns the platform seam, everything else imports that module.
+ * When the SDK grows a migration API there is exactly ONE import in this package
+ * to move.
+ */
+export function applyEmailSidecarMigrations(
+  db: Database,
+  dir: string,
+): ReturnType<typeof applyProjectScopedMigrations> {
+  return applyProjectScopedMigrations(db, dir)
+}
+
 export class EmailSidecarMismatchError extends Error {
   readonly code = 'email_sidecar_mismatch' as const
   constructor(message: string) {

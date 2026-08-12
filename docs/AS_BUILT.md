@@ -201,6 +201,167 @@ rejecting a string exit code, dropping the `___EXIT=` fallback, dropping the
 PRESERVED-records fallback, removing the dirty-list cap, and dropping
 `GIT_TERMINAL_PROMPT=0` / the `ls-remote` deadline.
 
+## 2026-08-11 — an important email now reaches the owner's chat within five minutes
+
+Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation
+P1 (SPEC.md § "Email Core consolidation"; plan
+`docs/plans/2026-08-06-email-core-consolidation-plan.md` § 5-6).
+
+**The composition seam is `open/composer.ts`.** A new
+`CompositionInput.email_pipeline` bundle is assembled next to `tasks:
+tasksConfig` and turned into a cron job + handler on the shared registries by
+`gateway/composition/build-core-modules.ts` (tasksModule init, immediately after
+the proactive block), through the new `gateway/cores/email-pipeline-wiring.ts`.
+The bundle is where the four things the Core cannot reach for itself are
+threaded: `deliver` (the ONE out-of-turn chat seam), the `PushDispatcher`,
+`readOwnerTimezone`, and the substrate one-shot LLM. Registration is the
+`registerIdleNudgeSweepCron` shape verbatim — `email-pipeline-poll`,
+`{kind:'interval_ms', interval_ms:300000}`, `skip_if_running:true`.
+
+**Chat is the guaranteed surface; push is alongside, never instead.**
+Escalations post through `deliver(topic_id, {durability:'reply'})` onto
+`appWsTopicId(OWNER_USER_ID)` — the owner's BARE app topic, the one topic the
+client both binds and hydrates. That is the exact discipline the PR #105
+deliver-to-nobody incident produced, and it is what makes the escalation
+survive an offline device: the durable row is written before any live push is
+attempted. `PushDispatcher.pushAll` is then fired in its own try/catch, and its
+outcome NEVER touches `escalated_at`. Marking an escalation delivered because a
+push returned would silently swallow every escalation on a box with zero
+registered devices — which, until PR #114's self-heal, was every box.
+
+**Most mail classifies with no model at all.** `src/pipeline/classify.ts` is a
+deterministic-first cascade: owner `sender_rules` (exact address beats domain,
+`protected` rules are important and immune to everything below), then three
+importance patterns (authentication code / billing action / deadline), then the
+mass-mailer downgrade (an `unsubscribe` affordance or `CATEGORY_PROMOTIONS`
+forces `newsletter`, not-important), then the learned `sender_cache`, then the
+LLM, then a plain default. The ordering is load-bearing twice: a "payment
+failed" notice with a marketing footer stays important, and bulk mail — the bulk
+of an inbox — never reaches the model. The LLM seam is the substrate one-shot
+caller ONLY (`buildOneShotSubstrateLlm`, now exported); there is no provider
+dependency and no new secret. A `null` LLM or a throwing one falls through to
+the default, so an LLM-less box degrades instead of failing a tick.
+
+**Turning it on does not escalate a decade of backlog — and does not touch it
+either.** Before anything is processed, a ONE-TIME sweep pages the inbox and
+records every message already there as `handling='preexisting'` with
+`category NULL`. It issues NO Gmail writes at all: no processed label, no
+archive, nothing classified, nothing escalated. The owner's existing mail was
+triaged by hand and stays exactly where they left it (owner decision,
+2026-08-12). The sweep is resumable across ticks via a `backlog_cursor`
+checkpoint and completes at `backlog_marked='1'`; until then the tick returns
+early, so the code path that could escalate old mail is never entered.
+
+Afterwards, "is this history?" is a ROW LOOKUP — `store.hasEmail(id)` — not a
+date comparison re-run on every message for the life of the install. The
+earlier design gated each message on `received_at < go_live_after`, which had
+to be right forever and resolved an unparseable date toward "treat as new";
+`go_live_after` is still stamped, but only as provenance for P2. Marking the
+backlog once is what makes the invariant structural instead of conditional.
+An escalated message deliberately KEEPS `INBOX` (the owner still has to act on
+it in their mail client), so the label set cannot double as "handled"; the row
+in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
+failed chat delivery increments `escalation_attempts`, records `last_error`, and
+is retried by the next tick's resume step under an attempt cap. Exhausting that
+cap is NOT silent: the row stops matching the resume query, so the tick counts
+it (`abandoned`) and logs it on every tick for as long as it holds — an
+important email nobody was told about must not be visible only as an absence.
+
+**The sidecar is owner-level, with its own migration tree.**
+`<owner_home>/email/pipeline.db`, opened `openSidecar` +
+`applyProjectScopedMigrations` exactly like `cache.ts:328-329` but with no
+`project_id` and no `ProjectSidecarResolver` — the inbox belongs to the owner
+and the multi-account client merges their accounts into one stream. The tree is
+`cores/free/email/migrations-pipeline/0001_email_pipeline.sql` and it starts at
+0001, not 0002: a migration namespace is per-DB-FILE
+(`migrations/runner.ts:58-63`), and reusing the per-project cache tree would
+drag `triage_cache` into the pipeline DB. `sender_rules` ships EMPTY — there is
+no seed row anywhere in the tree, because every rule is owner data and lands at
+runtime only (P2.5's survey/interview, or the P4 importer).
+
+**The steady-state walk reads the HEAD first, then continues where it paused.**
+An escalated message keeps `INBOX`, so the top of the inbox fills with mail the
+pipeline has already handled and a single-page poll starves behind it. The tick
+therefore walks pages under a budget (20 x 25 by default) and, when the budget
+runs out, saves a continuation cursor so the next tick resumes there instead of
+giving up in the same place forever. That cursor alone then delayed NEW mail,
+which lands at the TOP: a 1,200-message inbox takes three ticks to walk, so an
+important email arriving during the first waited fifteen minutes against an
+acceptance criterion of ONE poll interval. So a resuming tick spends its first
+`DEFAULT_POLL_HEAD_PAGES` (2) on the newest pages and the REST on the
+continuation — never the whole budget on either, so neither half starves the
+other. `pipeline-boundaries.test.ts` pins both directions.
+
+**Contract additions.** `modifyMessage` (`users.messages.modify`) and a
+generalized `ensureLabel({name})` on both Gmail backends and the multi-account
+router. `modifyMessage` is deliberately message-scoped rather than
+thread-scoped: archiving a whole conversation because one of its messages was
+bulk mail is a data-loss-shaped bug. The router honours the `account_id` the
+fan-out already stamps on every row, so a write derived from a read addresses
+the mailbox the message actually lives in; without an id it falls back to the
+same by-id probe `getMessage` uses. The former private
+`ensureLabelImpl(project_id)` is now `ensureLabelByName(name)` and
+`ensureProjectLabel` delegates to it — one mechanism, two callers.
+
+**Tests + mutation results.** Four named mutations, each verified red by hand
+and reverted: inverting the `has_unsubscribe` downgrade reds two
+`pipeline-classify.test.ts` arms; an escalation that fires but says nothing
+(boilerplate body) reds two arms across `pipeline-poller` / `pipeline-dedup`;
+removing the `hasEmail` skip reds three dedup arms and removing the
+`escalated_at IS NULL` guard reds the resume arm; letting the backlog sweep
+fall through to the processing path reds the two sweep arms, which assert the
+mailbox is untouched (`modified` and `ensured` both empty, `backlog-1` still
+carrying exactly `['INBOX']`) — the seeded backlog message is deliberately
+shaped like the billing escalation, so a regression escalates it rather than
+failing quietly. The producer side is pinned too:
+`open/__tests__/open-email-pipeline-wiring.test.ts` boots the REAL composer and
+reads `composition.email_pipeline`, so deleting the composer block reds rather
+than shipping a declared capability nobody wires (the ISSUES #439/#440 lesson).
+Every fixture address is `*.example.com`.
+
+**The classifier's address parse was quadratic on a header the SENDER picks.**
+CodeQL flagged `js/polynomial-redos` at `classify.ts:78`: `bareAddress` was
+`/<([^>]*)>/.exec(from)`, and because `[^>]` also matches `<`, a `From:` of N
+`<` and no `>` scans to end-of-string from all N positions. Measured on the
+pre-fix code, 8/16/32/64 KB took 104 ms / 437 ms / 1.6 s / 6.8 s — a clean
+quadruple per doubling. `from` is an RFC 5322 header, so this was a
+denial-of-service any stranger could post into any self-hoster's mail path, and
+it was the SECOND such regex in this one file (ISSUES #547). Fixed by deleting
+the regex rather than tuning it — two `indexOf` calls cannot backtrack at all —
+with equivalence checked differentially over all 137,267 strings up to length 6
+from an alphabet containing both brackets (zero mismatches). Every other regex
+the branch adds or touches was enumerated and timed on its own worst-case input
+and cleared on the evidence: the three importance alternations are
+attacker-controlled but have no unbounded quantifier (3.3 ms over 200 KB), and
+`in-memory.ts`'s `split(/\s+/)` and `replace(/^p/)` are non-ambiguous over input
+the pipeline composes itself. `pipeline-classify-redos.test.ts` pins LINEARITY,
+which no correctness test can — a ReDoS regression returns the same value, just
+far later — and it is mutation-proven: restoring the old regex turns its two
+`bareAddress` arms red at 53 s each.
+
+**The pipeline sidecar no longer reaches past the Core boundary.**
+`pipeline/store.ts` imported `@neutronai/migrations/runner.ts` directly, which
+`cores-use-sdk-only` calls the "third-party fiction" violation, and the G8
+ratchet lets the grandfathered baseline SHRINK ONLY — so a second module in this
+package holding that edge is a red build, not a second grandfathered line. The
+SDK exposes no migration seam yet (four Cores carry the same baselined edge for
+the same reason), so the Core now funnels through the one module that already
+owns it: `cache.ts` exports `applyEmailSidecarMigrations` and the pipeline store
+calls that. Same shape as `cores/free/calendar/migrations/runner.ts` — one
+module per Core owns the platform seam — and when the SDK grows a migration API
+there is exactly one import in this package to move. Baseline stays at 8.
+
+Also corrected here: an earlier round of this branch added
+`cores_oauth_broker_surface` to `EXPECTED_COMPOSITION_KEYS` and described it as
+pre-existing drift that had already reddened `main`. Checked out and run, `main`
+is green without it — the field is spread in conditionally and needs Google
+OAuth configured, which that boot does not do — so the line reddened the
+characterization rather than fixing it, and is removed.
+
+**Out of scope, deliberately:** the twice-daily brief/digest, the
+`email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
+fan-out migration. Those are P2/P3.
+
 ## 2026-08-11 — the inactivity watchdog no longer kills a build whose planner is thinking (#185)
 
 `PROFILE_WARM_FIRE` now sets a 30-minute inactivity window, threaded through

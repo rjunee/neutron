@@ -67,7 +67,22 @@ function fakeAccountClient(rows: GmailMessageMeta[]): GmailClient {
       }
     },
     ensureProjectLabel: notImplemented,
+    async ensureLabel(input) {
+      return {
+        label_id: `label-on-${rows[0]?.id ?? 'empty'}`,
+        label_name: input.name,
+        created: true,
+      }
+    },
     modifyThread: notImplemented,
+    async modifyMessage(input) {
+      const found = rows.find((r) => r.id === input.message_id)
+      if (found === undefined) throw new MessageNotFoundError(input.message_id)
+      return {
+        message_id: `modified-on-${rows[0]?.id ?? 'empty'}`,
+        label_ids: [...input.add_label_ids],
+      }
+    },
   }
 }
 
@@ -160,4 +175,43 @@ test('a page cursor is withheld once several accounts are connected, and passed 
   // Two per-account cursors cannot be merged into one meaningful cursor, so
   // none is returned rather than one that would silently page a single account.
   expect((await pair.listMessages({ label: 'INBOX' })).next_page_token).toBeUndefined()
+})
+
+test('modifyMessage with account_id routes to THAT account, not the primary', async () => {
+  // A merged inbox stamps every row with the account it came from. Routing the
+  // write to the primary instead would label the wrong mailbox — or nothing.
+  const client = build([
+    { id: 'work', email: WORK, client: fakeAccountClient([meta('w1', '2026-08-11T09:00:00.000Z')]) },
+    { id: 'home', email: HOME, client: fakeAccountClient([meta('h1', '2026-08-11T09:00:00.000Z')]) },
+  ])
+  const result = await client.modifyMessage({
+    message_id: 'h1',
+    add_label_ids: ['Label_processed'],
+    remove_label_ids: ['INBOX'],
+    account_id: 'home',
+  })
+  expect(result.message_id).toBe('modified-on-h1')
+})
+
+test('modifyMessage WITHOUT account_id falls back to the by-id probe across accounts', async () => {
+  const client = build([
+    { id: 'work', email: WORK, client: fakeAccountClient([meta('w1', '2026-08-11T09:00:00.000Z')]) },
+    { id: 'home', email: HOME, client: fakeAccountClient([meta('h1', '2026-08-11T09:00:00.000Z')]) },
+  ])
+  const result = await client.modifyMessage({
+    message_id: 'h1',
+    add_label_ids: ['Label_processed'],
+  })
+  expect(result.message_id).toBe('modified-on-h1')
+})
+
+test('ensureLabel routes by account_id — a label id is per-account', async () => {
+  const client = build([
+    { id: 'work', email: WORK, client: fakeAccountClient([meta('w1', '2026-08-11T09:00:00.000Z')]) },
+    { id: 'home', email: HOME, client: fakeAccountClient([meta('h1', '2026-08-11T09:00:00.000Z')]) },
+  ])
+  const targeted = await client.ensureLabel({ name: 'Neutron/processed', account_id: 'home' })
+  expect(targeted.label_id).toBe('label-on-h1')
+  const fallback = await client.ensureLabel({ name: 'Neutron/processed' })
+  expect(fallback.label_id).toBe('label-on-w1')
 })

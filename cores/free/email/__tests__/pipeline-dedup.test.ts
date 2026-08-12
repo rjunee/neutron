@@ -1,0 +1,199 @@
+/**
+ * Email pipeline — escalation DEDUP and RESUME.
+ *
+ * The escalated message deliberately stays in INBOX, so the label set cannot
+ * say "handled": `emails.id` (the row's existence) and `emails.escalated_at`
+ * are the only things stopping a second tick from telling the owner about the
+ * same email again — every five minutes, forever.
+ *
+ * Every fixture address is `*.example.com`.
+ */
+
+import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import type { GmailClient } from '../src/contract.ts'
+import { buildSeededInMemoryGmailClient } from '../src/in-memory.ts'
+import {
+  backlogDoneKey,
+  CHECKPOINT_BACKLOG_DONE,
+  CHECKPOINT_GO_LIVE_AFTER,
+  runEmailPipelineTick,
+} from '../src/pipeline/poller.ts'
+import { openEmailPipelineStore, type EmailPipelineStore } from '../src/pipeline/store.ts'
+
+const GO_LIVE = Date.parse('2026-08-11T09:00:00.000Z')
+const NOW = GO_LIVE + 60_000
+
+interface Fixture {
+  store: EmailPipelineStore
+  gmail: GmailClient
+  delivered: string[]
+  close: () => void
+}
+
+function fixture(): Fixture {
+  const home = mkdtempSync(join(tmpdir(), 'email-pipeline-dedup-'))
+  const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
+  store.setCheckpoint(CHECKPOINT_GO_LIVE_AFTER, String(GO_LIVE))
+  // These cases exercise the STEADY state, so the one-time backlog sweep is
+  // already finished — otherwise every tick would return early having marked
+  // the seeded mail as pre-existing.
+  store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
+  store.setCheckpoint(backlogDoneKey(null), '1')
+  const gmail = buildSeededInMemoryGmailClient({ now: () => NOW })
+  gmail.seed({
+    id: 'important-1',
+    thread_id: 'thread-important-1',
+    subject: 'Action required: payment failed',
+    from: 'Vendor Billing <billing@vendor.example.com>',
+    snippet: 'Card declined',
+    body_text: 'Your card was declined.',
+    internal_date: new Date(GO_LIVE + 30_000).toISOString(),
+    label_ids: ['INBOX'],
+  })
+  return {
+    store,
+    gmail,
+    delivered: [],
+    close: () => {
+      store.close()
+      rmSync(home, { recursive: true, force: true })
+    },
+  }
+}
+
+function tick(
+  f: Fixture,
+  deliver: (topic_id: string, envelope: { body: string; durability: 'reply' }) => Promise<unknown>,
+  log?: (message: string, meta?: Record<string, unknown>) => void,
+): ReturnType<typeof runEmailPipelineTick> {
+  return runEmailPipelineTick({
+    gmail: f.gmail,
+    store: f.store,
+    classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+    escalate: { deliver, topic_id: 'app:owner', push: null, project_slug: 'owner' },
+    now: () => NOW,
+    max_escalation_attempts: 3,
+    ...(log !== undefined ? { log } : {}),
+  })
+}
+
+describe('escalation dedup', () => {
+  test('a SECOND tick over the same mailbox posts nothing', async () => {
+    const f = fixture()
+    try {
+      const ok = async (_t: string, e: { body: string }): Promise<unknown> => {
+        f.delivered.push(e.body)
+        // The REAL seam reports the durable write; a double that returns
+        // nothing is claiming a delivery it cannot evidence.
+        return { prompt_id: 'p1', persisted: true, delivered_live: true }
+      }
+      const first = await tick(f, ok)
+      expect(first.escalated).toBe(1)
+      expect(f.delivered).toHaveLength(1)
+
+      // The message is STILL in the inbox (that is the point) — so the second
+      // tick sees it again and must recognise it.
+      expect((await f.gmail.getMessage({ message_id: 'important-1' })).label_ids).toContain(
+        'INBOX',
+      )
+      const second = await tick(f, ok)
+      expect(second.escalated).toBe(0)
+      expect(second.scanned).toBe(0)
+      expect(f.delivered).toHaveLength(1)
+    } finally {
+      f.close()
+    }
+  })
+})
+
+describe('escalation resume', () => {
+  test('a FAILED deliver leaves escalated_at NULL with attempts=1 + last_error', async () => {
+    const f = fixture()
+    try {
+      const boom = async (): Promise<unknown> => {
+        throw new Error('socket closed')
+      }
+      const first = await tick(f, boom)
+      expect(first.escalated).toBe(0)
+      const row = f.store.getEmail('important-1')
+      expect(row?.escalated_at).toBeNull()
+      expect(row?.escalation_attempts).toBe(1)
+      expect(row?.last_error).toBe('socket closed')
+    } finally {
+      f.close()
+    }
+  })
+
+  test('the next tick resumes and delivers EXACTLY ONCE', async () => {
+    const f = fixture()
+    try {
+      await tick(f, async (): Promise<unknown> => {
+        throw new Error('socket closed')
+      })
+      const ok = async (_t: string, e: { body: string }): Promise<unknown> => {
+        f.delivered.push(e.body)
+        // The REAL seam reports the durable write; a double that returns
+        // nothing is claiming a delivery it cannot evidence.
+        return { prompt_id: 'p1', persisted: true, delivered_live: true }
+      }
+      const second = await tick(f, ok)
+      expect(second.resumed).toBe(1)
+      expect(f.delivered).toHaveLength(1)
+      expect(f.delivered[0]).toContain('billing@vendor.example.com')
+      expect(f.store.getEmail('important-1')?.escalated_at).toBe(NOW)
+
+      // ...and a third tick says nothing more.
+      const third = await tick(f, ok)
+      expect(third.resumed).toBe(0)
+      expect(f.delivered).toHaveLength(1)
+    } finally {
+      f.close()
+    }
+  })
+
+  test('the attempt cap is honoured — a permanently broken sink stops retrying', async () => {
+    const f = fixture()
+    try {
+      let attempts = 0
+      const boom = async (): Promise<unknown> => {
+        attempts++
+        throw new Error('socket closed')
+      }
+      // max_escalation_attempts: 3 → the poll attempt plus two resumes.
+      const lines: string[] = []
+      const log = (message: string): void => {
+        lines.push(message)
+      }
+      await tick(f, boom, log)
+      await tick(f, boom, log)
+      await tick(f, boom, log)
+      const over = await tick(f, boom, log)
+      expect(attempts).toBe(3)
+      expect(f.store.getEmail('important-1')?.escalation_attempts).toBe(3)
+      expect(f.store.listPendingEscalations(3)).toHaveLength(0)
+
+      // STOPPING IS NOT RESOLVING. The cap is right — a permanently broken sink
+      // must not be retried forever — but the owner was never told about an
+      // important email, and this used to be the end of it: the row simply stops
+      // matching the resume query, and nothing counts, logs or reports it. The
+      // pipeline-dedup test that asserted only the empty queue PINNED that
+      // silence. So the tick reports it, every tick, for as long as it holds.
+      expect(over.abandoned).toBe(1)
+      expect(
+        lines.filter((l) => l.includes('over the attempt cap')).length,
+      ).toBeGreaterThan(0)
+
+      // ...and it stays visible on later ticks, not only on the one where the
+      // cap happened to be reached.
+      const later = await tick(f, boom, log)
+      expect(later.abandoned).toBe(1)
+      expect(attempts).toBe(3)
+    } finally {
+      f.close()
+    }
+  })
+})

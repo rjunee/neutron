@@ -17,6 +17,11 @@
     "./substrate-llm": "./src/substrate-llm.ts",
     "./per-project-resolver": "./src/per-project-resolver.ts",
     "./cache": "./src/cache.ts",
+    "./pipeline/store": "./src/pipeline/store.ts",
+    "./pipeline/classify": "./src/pipeline/classify.ts",
+    "./pipeline/prompts": "./src/pipeline/prompts.ts",
+    "./pipeline/escalate": "./src/pipeline/escalate.ts",
+    "./pipeline/poller": "./src/pipeline/poller.ts",
     "./ui/launcher-icon": "./src/ui/launcher-icon.ts",
     "./ui/app-tab-surface": "./src/ui/app-tab-surface.ts"
   },

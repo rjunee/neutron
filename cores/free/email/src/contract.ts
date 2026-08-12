@@ -65,12 +65,83 @@ export interface GmailListInput {
    * AND-s the project label with the inbox label server-side.
    */
   project_id?: string
+  /**
+   * PER-ACCOUNT resume cursors, keyed by `account_id` — the input twin of
+   * `GmailListResult.next_page_tokens`. Each account resumes from its own
+   * cursor; an account absent from the map starts from its newest page. The
+   * multi-account fan-out reads this; single-backend clients ignore it and use
+   * `page_token`.
+   */
+  page_tokens?: Readonly<Record<string, string>>
+  /**
+   * ENUMERATION MODE. `max_results` is a PER-ACCOUNT request size, so a
+   * fan-out across N accounts legitimately reads up to N×max_results rows.
+   * Capping the merged set back to `max_results` while every account's cursor
+   * advanced past everything it returned makes the dropped rows unreachable
+   * FOREVER — the next page resumes after them. A caller that is enumerating
+   * a whole mailbox (the pipeline's backlog sweep) sets this to receive every
+   * row that was read; display callers leave it unset and get the cap, plus
+   * `truncated: true` and NO cursor, because a cursor that skips dropped rows
+   * is worse than no cursor at all. Single-backend clients never merge, so
+   * they ignore this field.
+   */
+  exhaustive?: boolean
 }
+
+/**
+ * The "this mailbox is finished" marker for `page_tokens`.
+ *
+ * ABSENT and EXHAUSTED are different states and cannot share a representation.
+ * The fan-out returns a cursor only for accounts that have another page, so
+ * once one account runs out the returned map names only the others — and a
+ * caller resuming from that map restarts the finished account at its newest
+ * page. With two mailboxes of unequal depth the maps then ALTERNATE: `{B:p2}`
+ * restarts A, whose next map `{A:p1}` restarts B, forever. The backlog sweep
+ * never completes and steady-state paging never converges.
+ *
+ * A caller paging a whole mailbox therefore carries finished accounts forward
+ * with this sentinel, and the fan-out SKIPS them: no request, no rows, and
+ * `ok: true`, because "already finished" is not a failure.
+ */
+export const PAGE_TOKEN_EXHAUSTED = '__neutron_exhausted__'
 
 export interface GmailListResult {
   results: GmailMessageMeta[]
-  /** Opaque cursor — present when Gmail returned a `nextPageToken`. */
+  /**
+   * Opaque cursor — present when Gmail returned a `nextPageToken`.
+   *
+   * MEANINGFUL ONLY FOR A SINGLE-BACKEND READ. The fan-out cannot express one
+   * cursor for N mailboxes, so it omits this whenever more than one account is
+   * connected. ABSENCE THEREFORE DOES NOT MEAN "no more mail" — a caller that
+   * must enumerate a whole mailbox has to use `next_page_tokens`. Treating a
+   * missing `next_page_token` as completion silently truncates every
+   * multi-account install to a single page.
+   */
   next_page_token?: string
+  /**
+   * PER-ACCOUNT cursors keyed by `account_id`, for callers that must page an
+   * entire mailbox rather than read its newest page. Only accounts that
+   * returned a cursor appear, so an EMPTY map means "every account that
+   * answered is exhausted" — the only safe completion signal when several
+   * mailboxes are merged. Single-backend clients omit it.
+   */
+  next_page_tokens?: Readonly<Record<string, string>>
+  /**
+   * TRUE when the merged set was capped and rows were DROPPED — see
+   * `GmailListInput.exhaustive`. Cursors are withheld on the same result,
+   * because advancing past rows the caller never received is how mail goes
+   * missing. An enumerating caller must treat this as a hard error rather
+   * than as completion: with no cursor there is nothing to resume from, so
+   * "capped" and "exhausted" would otherwise be indistinguishable.
+   */
+  truncated?: boolean
+  /**
+   * Per-account read outcomes, present only on the fan-out client. A caller
+   * that must enumerate a whole mailbox has to know whether every account
+   * actually ANSWERED: one failed account means the merged set is incomplete,
+   * and concluding "exhausted" from it would skip that mailbox entirely.
+   */
+  accounts?: AccountReadOutcome[]
 }
 
 export interface GmailSearchInput {
@@ -87,6 +158,16 @@ export interface GmailSearchInput {
 
 export interface GmailGetInput {
   message_id: string
+  /**
+   * WHICH mailbox to read from. Gmail message ids are ACCOUNT-LOCAL, so the id
+   * alone does not identify a message across a multi-account install: the
+   * fan-out's by-id probe returns whichever account recognises it FIRST, which
+   * on a collision reads account A's body for account B's row — classified from
+   * the wrong message, while the label mutation correctly targets B. The poller
+   * knows the account it listed from and names it here. Omitted ⇒ the by-id
+   * probe, which is still correct when only one account is connected.
+   */
+  account_id?: string
 }
 
 export interface GmailThreadGetInput {
@@ -220,6 +301,47 @@ export interface GmailThreadModifyResult {
 }
 
 /**
+ * MESSAGE-label mutation input (Gmail's `users.messages.modify`). Distinct
+ * from `GmailThreadModifyInput` on purpose: the pipeline archives / labels ONE
+ * message, and applying that to the whole thread would archive a conversation
+ * because one of its messages was bulk mail.
+ *
+ * `account_id` names WHICH connected account owns the message — a merged inbox
+ * has no other way to route a write, since Gmail ids are per-account. Ignored
+ * by single-account clients.
+ */
+export interface GmailMessageModifyInput {
+  message_id: string
+  add_label_ids: readonly string[]
+  remove_label_ids?: readonly string[]
+  account_id?: string
+}
+
+export interface GmailMessageModifyResult {
+  message_id: string
+  /** Final label set on the message after the modify call. */
+  label_ids: string[]
+}
+
+/**
+ * Generalized label-ensure input: any label NAME, not just the per-project
+ * `Neutron/<project_id>` shape `ensureProjectLabel` mints. The pipeline's
+ * processed label (`Neutron/processed`) is owner-level and belongs to no
+ * project.
+ */
+export interface GmailEnsureLabelInput {
+  name: string
+  account_id?: string
+}
+
+/**
+ * The label the pipeline stamps on every message it has handled. Owner-level
+ * (no project segment) — it marks "Neutron has seen this", which is a property
+ * of the mailbox, not of a project.
+ */
+export const PROCESSED_LABEL_NAME = 'Neutron/processed'
+
+/**
  * Backend contract every GmailClient implementation satisfies. The
  * shape mirrors the MCP tool inputs the manifest declares (list /
  * read / search / draft / send) — `summarize` is implemented at the
@@ -269,11 +391,24 @@ export interface GmailClient {
    */
   ensureProjectLabel(input: GmailLabelEnsureInput): Promise<GmailLabelEnsureResult>
   /**
+   * Ensure an ARBITRARY Gmail user-label exists, by name. Same create-first /
+   * list-and-match idempotency `ensureProjectLabel` has (which now delegates
+   * here); `label_name` in the result echoes `input.name`. The pipeline uses
+   * it for the owner-level `Neutron/processed` label.
+   */
+  ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult>
+  /**
    * Apply / remove labels on a Gmail thread. Used by the draft-policy
    * layer to atomically add `INBOX + IMPORTANT + UNREAD` (+ optionally
    * `Neutron/<project_id>`) to a freshly-created draft's thread.
    */
   modifyThread(input: GmailThreadModifyInput): Promise<GmailThreadModifyResult>
+  /**
+   * Apply / remove labels on a single MESSAGE (`users.messages.modify`). The
+   * pipeline's archive step is `add Neutron/processed, remove INBOX` on the
+   * one message — never on its thread.
+   */
+  modifyMessage(input: GmailMessageModifyInput): Promise<GmailMessageModifyResult>
   /**
    * `listMessages`, plus the per-account outcome of the read. Present ONLY on
    * the fan-out client — a single-backend client has nothing to report.

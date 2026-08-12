@@ -296,7 +296,9 @@ cores/free/email/
   src/digest/
     window.ts        # owner-tz brief windows (generalized computeBriefWindow)
     generator.ts     # capability (1): group by category, batch-summarize, anti-drift validate
-    render.ts        # chat-markdown digest render (~40 LOC; replaces template.ts)
+    render.ts        # brief EMAIL body render (~40 LOC; replaces template.ts). NOT a
+                     # chat render — decision D1: the brief is an email, chat and
+                     # push carry escalations ONLY.
   src/taxonomy.ts    # data-driven categories: shipped generic default + per-owner override file
   migrations-pipeline/0001_email_pipeline.sql  # OWN migration tree for the new sidecar —
                      # a sidecar namespace is per-DB-FILE (each gets its own _migrations,
@@ -407,29 +409,59 @@ the scheduler's deletion) and PR #114 (push self-heal).
   fake Gmail backend asserts the label mutations issued AND the sink received an
   `OutgoingMessage` whose text contains the sender + subject (a digest/escalation that
   fires-but-says-nothing kills it); dedup test: second tick after a delivered escalation
-  posts nothing (removing the `escalated_at` guard kills it); go-live test: pre-cutoff
-  mail is archived, never classified (dropping the cutoff check kills it).
+  posts nothing (removing the `escalated_at` guard kills it); backlog test: the one-time
+  sweep marks the existing inbox `preexisting` and MUTATES NOTHING (letting it fall
+  through to the processing path kills it).
 - Out of scope: the digest, scheduler deletion, settings, scribe fan-out.
+
+> **SUPERSEDED 2026-08-12 — the backlog is MARKED, not archived.** This phase
+> originally specified a per-message go-live cutoff: `received_at < go_live_after` ⇒
+> archive (processed label added, `INBOX` removed) without classifying. The owner
+> rejected both halves: *"I don't want to mess with my current inbox. Items in my inbox
+> have already been processed and determined as important (do not brief) and they stay
+> in my inbox."*
+>
+> Two things were wrong with the original. The archive was a real mutation of a mailbox
+> the owner had already triaged by hand — at the default tick rate it would have drained
+> an existing inbox over days. And the per-message date test re-decided "is this
+> history?" on every message forever, from a value it could not always trust.
+>
+> AS BUILT: a ONE-TIME sweep records every message already in the inbox as
+> `handling='preexisting'` and issues NO Gmail writes at all — no label, no archive,
+> nothing classified, nothing escalated. Afterwards "already handled" is a row lookup
+> (`store.hasEmail`), not a date comparison. `go_live_after` is still stamped, as
+> provenance for P2 only. The acceptance criterion for the backlog is therefore that the
+> mailbox is UNTOUCHED, not that it is archived. See `docs/AS_BUILT.md`.
 
 **Phase 2 — twice-daily brief + settings toggle (capability 1).**
 - Scope: `digest/` modules (owner-tz windows at 10:00 and 15:00 local; category
   grouping; batch summarize with the ported sibling-drift/identity validation,
-  `generator.ts:56-183`; chat-markdown render with Gmail thread deep-links); per-day
+  `generator.ts:56-183`; EMAIL body render with Gmail thread deep-links); per-day
   delivered-gate; `instance_metadata.email_digest_enabled` column (top-level migration
   0116) + owner-metadata accessors + settings surface + `settings.tsx` section; digest
   fire wired into the Phase-1 poll job.
 - Composition seam: `email-pipeline-wiring.ts` (digest duty on the existing job) +
   `gateway/http` settings surface + `app/app/settings.tsx`.
-- Acceptance (real install): at the next window boundary a digest chat post appears
-  grouping the day's test emails with LLM summaries and correct Gmail links; flip the
-  toggle off in Settings → the next window produces nothing; flip on → it resumes.
+- Acceptance (real install): at the next window boundary a brief arrives IN THE
+  OWNER'S INBOX — an EMAIL, never a chat post — grouping the day's test emails with
+  LLM summaries and correct Gmail links; flip the toggle off in Settings → the next
+  window produces nothing; flip on → it resumes.
+
+  > **CORRECTED 2026-08-12 (owner decision D1, SPEC.md § P2).** This section
+  > previously specified a digest CHAT POST, which contradicts the locked spec: the
+  > brief is an EMAIL, and chat and push carry escalations ONLY — a digest is never
+  > posted to chat. The distinction is the whole point of the two surfaces: chat is
+  > the channel the owner is asked to react to, so putting a twice-daily summary
+  > there trains them to ignore the one place escalations arrive.
 - Tests + mutations: window math across a DST transition in a non-UTC zone (hardcoding
   UTC hours kills it); per-day dedup (removing the delivered-gate → the double-brief
   test fails — the exact failure shape excluded from the reminders lane); summary→email
   identity validation (swapping two summaries in the LLM stub output kills it — the
-  anti-drift guard); content assertion that the rendered digest contains each queued
-  email's subject or summary (an empty-but-fired digest kills it); toggle honored
-  (ignoring the setting kills it).
+  anti-drift guard); content assertion that the rendered brief EMAIL contains each
+  queued email's subject or summary (an empty-but-fired brief kills it); a delivery
+  assertion that the brief went out as MAIL and that nothing was posted to chat
+  (routing it to the chat sink kills it); toggle honored (ignoring the setting kills
+  it).
 - Out of scope: scheduler deletion, scribe fan-out move, HTML-email delivery (pending
   § 7 Q1).
 

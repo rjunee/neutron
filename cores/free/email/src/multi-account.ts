@@ -9,27 +9,31 @@
  * ── READ: fan out, then merge ──────────────────────────────────────────────────
  * `listMessages` and `search` query every account concurrently and merge:
  *
- *   1. DEDUPE by message id, first account in fan-out order winning. Gmail ids
- *      are per-account so genuine collisions are rare, but deduping first keeps
- *      "first wins" deterministic if two accounts ever do agree on an id, and
- *      costs one Set.
+ *   1. DEDUPE by (ACCOUNT, message id) — never by the id alone. Gmail ids are
+ *      account-local, so a global id set silently drops a second mailbox's
+ *      message whenever the first happens to use the same id. That is a
+ *      message the owner never hears about, and it contradicts the store's
+ *      `(account_id, id)` primary key.
  *   2. SORT by `internal_date` DESCENDING — newest first, which is the ordering
  *      the single-account contract already documents and the only ordering an
  *      inbox is readable in.
- *   3. TRUNCATE to `max_results`. Each account is asked for the full count so
- *      the merged set can fill from one account when the others are quiet, and
- *      truncating last keeps the newest overall rather than the newest per
- *      account.
+ *   3. CAP to `max_results` — but only for callers that did not ask to
+ *      enumerate. `max_results` is the PER-ACCOUNT request size, so N accounts
+ *      can legitimately return N×max_results rows. See `mode` on `fanOutList`:
+ *      an 'exhaustive' caller receives every row read; a 'capped' caller
+ *      receives the newest `max_results` AND, if anything was dropped,
+ *      `truncated: true` with NO cursor. Reporting a cursor that advanced past
+ *      dropped rows is how historical mail escapes the backlog sweep.
  *
  * Every returned message is stamped with the account it came from — without
  * that, a merged inbox cannot be triaged and a reply's from-address is a guess.
  *
- * PAGINATION across accounts is deliberately not offered: Gmail's page tokens
- * are per-account opaque cursors, and a merged cursor would have to encode one
- * per account and re-derive the merge on every page. With more than one account
- * connected, `next_page_token` is omitted rather than returned wrong — a caller
- * that needs more mail raises `max_results`. With exactly one account the
- * client is pass-through and the real cursor is returned unchanged.
+ * PAGINATION across accounts is per-account, not merged: `next_page_tokens`
+ * maps `account_id` → cursor, and `page_tokens` on the input resumes each
+ * account from its own. The scalar `next_page_token` is only meaningful with
+ * exactly one account connected (pass-through); a caller enumerating a whole
+ * mailbox must read the MAP, because treating the scalar's absence as
+ * completion truncates every multi-account install to a single page.
  *
  * ── PARTIAL FAILURE IS NOT TOTAL FAILURE ───────────────────────────────────────
  * One expired grant must not empty the inbox. Accounts that answer are
@@ -53,6 +57,7 @@ import {
   type GmailClient,
   type GmailDraftInput,
   type GmailDraftResult,
+  type GmailEnsureLabelInput,
   type GmailGetInput,
   type GmailLabelEnsureInput,
   type GmailLabelEnsureResult,
@@ -61,6 +66,9 @@ import {
   type GmailListResult,
   type GmailMessageFull,
   type GmailMessageMeta,
+  type GmailMessageModifyInput,
+  type GmailMessageModifyResult,
+  PAGE_TOKEN_EXHAUSTED,
   type GmailSearchInput,
   type GmailSendInput,
   type GmailSendResult,
@@ -121,6 +129,18 @@ export interface MultiAccountGmailClientOptions {
   }) => void
 }
 
+/** The accounts a caller has marked finished via the exhausted sentinel. */
+function exhaustedFrom(
+  page_tokens: Readonly<Record<string, string>> | undefined,
+): ReadonlySet<string> {
+  const out = new Set<string>()
+  if (page_tokens === undefined) return out
+  for (const [id, token] of Object.entries(page_tokens)) {
+    if (token === PAGE_TOKEN_EXHAUSTED) out.add(id)
+  }
+  return out
+}
+
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
@@ -161,6 +181,23 @@ export function buildMultiAccountGmailClient(
     const accounts = await accountsOrThrow()
     // Non-null: accountsOrThrow guarantees a non-empty list.
     return buildClient(accounts[0] as GmailAccountDescriptor)
+  }
+
+  /**
+   * The client for a NAMED account, or null when no connected account carries
+   * that id. The pipeline stamps `account_id` onto every row it reads, so a
+   * write derived from a read can address the account the message actually
+   * lives in — writing it to the primary would label (or archive) nothing, or
+   * worse, the wrong mailbox's message with a colliding id.
+   */
+  async function accountById(account_id: string): Promise<GmailAccountDescriptor | null> {
+    const accounts = await accountsOrThrow()
+    return accounts.find((a) => a.account_id === account_id) ?? null
+  }
+
+  async function byAccountId(account_id: string): Promise<GmailClient | null> {
+    const match = await accountById(account_id)
+    return match === null ? null : buildClient(match)
   }
 
   /** The account-tag fields for one account. */
@@ -209,21 +246,61 @@ export function buildMultiAccountGmailClient(
     throw notFound
   }
 
-  /** The shared fan-out + merge both read paths use. */
+  /**
+   * The shared fan-out + merge both read paths use.
+   *
+   * `mode` decides what happens when N accounts return more rows than the
+   * caller's `max_results` — see `GmailListInput.exhaustive`:
+   *
+   *   'exhaustive' — every row read is returned, cursors reported. The merged
+   *                  set may exceed `limit`, because `limit` is the PER-ACCOUNT
+   *                  request size. This is the only safe mode for a caller
+   *                  enumerating a whole mailbox.
+   *   'capped'     — the merged set is cut to `limit` and, IF anything was
+   *                  dropped, the cursors are withheld and `truncated` is set.
+   *                  Handing back a cursor that has advanced past rows the
+   *                  caller never saw is precisely how historical mail escapes
+   *                  the backlog sweep and reaches live classification.
+   */
   async function fanOutList(
     operation: 'listMessages' | 'search',
     limit: number,
-    read: (client: GmailClient) => Promise<GmailListResult>,
-  ): Promise<GmailListAcrossAccounts & { next_page_token?: string }> {
+    mode: 'exhaustive' | 'capped',
+    read: (client: GmailClient, account: GmailAccountDescriptor) => Promise<GmailListResult>,
+    exhausted: ReadonlySet<string> = new Set(),
+  ): Promise<
+    GmailListAcrossAccounts & {
+      next_page_token?: string
+      next_page_tokens?: Readonly<Record<string, string>>
+      truncated?: boolean
+    }
+  > {
     const accounts = await accountsOrThrow()
-    const settled = await Promise.allSettled(accounts.map((a) => read(buildClient(a))))
+    // An account the caller marked EXHAUSTED is SKIPPED, not re-read from its
+    // newest page. Without this a finished mailbox restarts every time a deeper
+    // one is still paging, so the cursor maps alternate and never empty — the
+    // sweep never completes. Skipping resolves to an empty OK result, because
+    // "already finished" is a completed read, not a failed one.
+    const settled = await Promise.allSettled(
+      accounts.map(async (a): Promise<GmailListResult> =>
+        exhausted.has(a.account_id) ? { results: [] } : await read(buildClient(a), a),
+      ),
+    )
 
     const outcomes: AccountReadOutcome[] = []
     const merged: GmailMessageMeta[] = []
+    /**
+     * Keyed by (account, id), NOT id — Gmail ids are ACCOUNT-LOCAL, so a
+     * global id set drops a second mailbox's message the moment the first
+     * happens to use the same id. That is a message the owner never hears
+     * about, and it contradicts the `(account_id, id)` key the store uses.
+     */
     const seen = new Set<string>()
     let firstFailure: unknown = null
     let okCount = 0
     let solePageToken: string | undefined
+    /** account_id → cursor, for callers that must page a whole mailbox. */
+    const pageTokens: Record<string, string> = {}
 
     for (let i = 0; i < accounts.length; i++) {
       // Non-null: index-aligned with `accounts` by construction.
@@ -254,9 +331,18 @@ export function buildMultiAccountGmailClient(
       })
       // Only meaningful when exactly one account is connected; see the header.
       if (accounts.length === 1) solePageToken = result.value.next_page_token
+      // The per-account cursor is reported ALWAYS, however many accounts are
+      // connected. `solePageToken` collapses to nothing for N>1, and a caller
+      // enumerating a whole mailbox (the pipeline's backlog sweep) would read
+      // that absence as "no more mail" and stop after a single page.
+      const token = result.value.next_page_token
+      if (token !== undefined && token.length > 0) pageTokens[account.account_id] = token
       for (const row of result.value.results) {
-        if (seen.has(row.id)) continue
-        seen.add(row.id)
+        // NUL separator: it cannot appear in either component, so 'a'+'bc'
+        // and 'ab'+'c' can never collapse into the same key.
+        const key = `${account.account_id}\u0000${row.id}`
+        if (seen.has(key)) continue
+        seen.add(key)
         merged.push(tag(row, account))
       }
     }
@@ -271,10 +357,24 @@ export function buildMultiAccountGmailClient(
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     })
 
+    // ROWS AND CURSORS MUST AGREE. Every account's cursor has advanced past
+    // everything that account returned, so a row dropped here is unreachable
+    // forever — the next page resumes after it. Either return every row (and
+    // the cursors), or drop the cursors along with the rows and say so.
+    const dropped = mode === 'capped' && merged.length > limit
+    if (dropped) {
+      return {
+        results: merged.slice(0, limit),
+        accounts: outcomes,
+        truncated: true,
+      }
+    }
+
     return {
-      results: merged.slice(0, limit),
+      results: merged,
       accounts: outcomes,
       ...(solePageToken !== undefined ? { next_page_token: solePageToken } : {}),
+      next_page_tokens: pageTokens,
     }
   }
 
@@ -282,8 +382,11 @@ export function buildMultiAccountGmailClient(
     input: GmailListInput,
   ): Promise<GmailListAcrossAccounts> {
     const max_results = input.max_results ?? DEFAULT_LIST_LIMIT
-    return await fanOutList('listMessages', max_results, (client) =>
-      client.listMessages({ ...input, max_results }),
+    return await fanOutList(
+      'listMessages',
+      max_results,
+      input.exhaustive === true ? 'exhaustive' : 'capped',
+      (client) => client.listMessages({ ...input, max_results }),
     )
   }
 
@@ -291,19 +394,39 @@ export function buildMultiAccountGmailClient(
     listMessagesAcrossAccounts,
     async listMessages(input: GmailListInput): Promise<GmailListResult> {
       const max_results = input.max_results ?? DEFAULT_LIST_LIMIT
-      const out = await fanOutList('listMessages', max_results, (client) =>
-        client.listMessages({ ...input, max_results }),
+      const out = await fanOutList(
+        'listMessages',
+        max_results,
+        input.exhaustive === true ? 'exhaustive' : 'capped',
+        (client, account) =>
+          client.listMessages({
+            ...input,
+            max_results,
+            // Each account resumes from ITS OWN cursor when the caller is paging
+            // a whole mailbox; absent ⇒ that account starts at its newest page.
+            ...(input.page_tokens?.[account.account_id] !== undefined
+              ? { page_token: input.page_tokens[account.account_id] as string }
+              : {}),
+          }),
+        exhaustedFrom(input.page_tokens),
       )
       return {
         results: out.results,
         ...(out.next_page_token !== undefined
           ? { next_page_token: out.next_page_token }
           : {}),
+        ...(out.next_page_tokens !== undefined
+          ? { next_page_tokens: out.next_page_tokens }
+          : {}),
+        ...(out.truncated === true ? { truncated: true } : {}),
+        accounts: out.accounts,
       }
     },
     async search(input: GmailSearchInput): Promise<GmailListResult> {
       const max_results = input.max_results ?? DEFAULT_LIST_LIMIT
-      const out = await fanOutList('search', max_results, (client) =>
+      // Search is a display path: it never hands back the per-account cursor
+      // map, so nothing can page past a dropped row. Capping is lossless here.
+      const out = await fanOutList('search', max_results, 'capped', (client) =>
         client.search({ ...input, max_results }),
       )
       return {
@@ -314,6 +437,27 @@ export function buildMultiAccountGmailClient(
       }
     },
     async getMessage(input: GmailGetInput): Promise<GmailMessageFull> {
+      // A NAMED account is addressed directly. The by-id probe returns
+      // whichever account recognises the id FIRST, so on a collision it reads
+      // account A's body for a row the poller listed from account B — the
+      // classifier then judges the wrong message while the label mutation
+      // correctly targets B. The caller knows which mailbox it read from.
+      if (input.account_id !== undefined) {
+        const account = await accountById(input.account_id)
+        if (account !== null) {
+          const value = await buildClient(account).getMessage(input)
+          return { ...value, ...stamp(account) }
+        }
+        // NAMED BUT UNKNOWN ⇒ FAIL CLOSED. Falling through to the by-id probe
+        // looked generous ("a disconnected account is a reason to look
+        // elsewhere") and is in fact how the wrong mailbox gets read: Gmail
+        // ids are account-local, so if `acct-a` is disconnected while `acct-b`
+        // happens to hold the same id, the probe returns account B's message
+        // for a row that belongs to A. The caller then classifies B's content
+        // and marks A's row. An unnamed account may probe; a NAMED one must
+        // resolve or fail.
+        throw new MessageNotFoundError(input.message_id)
+      }
       const { value, account } = await byId((client) => client.getMessage(input))
       return { ...value, ...stamp(account) }
     },
@@ -335,10 +479,44 @@ export function buildMultiAccountGmailClient(
     ): Promise<GmailLabelEnsureResult> {
       return await (await primary()).ensureProjectLabel(input)
     },
+    async ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult> {
+      // A label id is per-account, so the pipeline ensures the processed label
+      // once PER ACCOUNT and passes the account it is about to write to.
+      if (input.account_id !== undefined) {
+        const targeted = await byAccountId(input.account_id)
+        // NAMED BUT UNKNOWN ⇒ FAIL CLOSED. Silently falling back to the
+        // primary mints the label in the WRONG mailbox and hands back an id
+        // that is meaningless in the intended one — the caller then writes
+        // that id onto a message somewhere else entirely.
+        if (targeted === null) throw new OAuthMissingError()
+        return await targeted.ensureLabel(input)
+      }
+      return await (await primary()).ensureLabel(input)
+    },
     async modifyThread(
       input: GmailThreadModifyInput,
     ): Promise<GmailThreadModifyResult> {
       return await (await primary()).modifyThread(input)
+    },
+    async modifyMessage(
+      input: GmailMessageModifyInput,
+    ): Promise<GmailMessageModifyResult> {
+      if (input.account_id !== undefined) {
+        const targeted = await byAccountId(input.account_id)
+        // NAMED BUT UNKNOWN ⇒ FAIL CLOSED. This is the most dangerous of the
+        // three: `modifyMessage` ARCHIVES. Probing on a disconnected account
+        // means a pending mutation for (acct-a, shared-id) can strip INBOX
+        // from acct-b's unrelated message that happens to share the id, and
+        // then mark acct-a's row complete. A write must land in the mailbox it
+        // was computed for, or not at all.
+        if (targeted === null) throw new MessageNotFoundError(input.message_id)
+        return await targeted.modifyMessage(input)
+      }
+      // No account named: the by-id probe is still correct — the same walk
+      // `getMessage` uses, so a message in the third account is labelled
+      // rather than 404-ing against the first.
+      const { value } = await byId((client) => client.modifyMessage(input))
+      return value
     },
   }
 }

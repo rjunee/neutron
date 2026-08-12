@@ -88,6 +88,10 @@ import {
   buildIdleNudgeSweepHandler,
   registerIdleNudgeSweepCron,
 } from '../proactive/cron.ts'
+import {
+  buildEmailPipelinePollHandler,
+  registerEmailPipelineCron,
+} from '../cores/email-pipeline-wiring.ts'
 import type {
   IdleNudgeSweepDeps,
   ProactiveTopicCandidate,
@@ -1124,6 +1128,24 @@ export function buildCoreModules(
           }
           registerIdleNudgeSweepCron(sweepRegister)
         }
+      }
+
+      // Email Core consolidation P1 — the `email-pipeline-poll` cron. Gated on
+      // the composition root supplying the bundle (`open/composer.ts`): the
+      // tick needs a Gmail client, the `deliver` seam, the owner's app topic
+      // and (optionally) the substrate LLM, none of which this module can
+      // reach. Absent ⇒ nothing registers, exactly like the proactive block
+      // above. Registration shape is the idle-nudge precedent.
+      if (input.email_pipeline !== undefined) {
+        const emailPipelineHandler = buildEmailPipelinePollHandler(input.email_pipeline)
+        registerEmailPipelineCron({
+          jobs: cronDeps.jobs,
+          handlers: cronDeps.handlers,
+          handler: emailPipelineHandler,
+          ...(input.email_pipeline.interval_ms !== undefined
+            ? { interval_ms: input.email_pipeline.interval_ms }
+            : {}),
+        })
       }
 
       let projection: ProjectionWriter | null = null

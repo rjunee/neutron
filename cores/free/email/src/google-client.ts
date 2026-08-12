@@ -20,6 +20,7 @@ import type {
   GmailClient,
   GmailDraftInput,
   GmailDraftResult,
+  GmailEnsureLabelInput,
   GmailGetInput,
   GmailLabelEnsureInput,
   GmailLabelEnsureResult,
@@ -27,6 +28,8 @@ import type {
   GmailListResult,
   GmailMessageFull,
   GmailMessageMeta,
+  GmailMessageModifyInput,
+  GmailMessageModifyResult,
   GmailSearchInput,
   GmailSendInput,
   GmailSendResult,
@@ -193,7 +196,7 @@ export function buildGoogleGmailClient(
       // Not an edge case — it fired on every single daily triage against the
       // live instance and the digest never once succeeded. This file already
       // knew better in two places: the draft/send paths resolve the name through
-      // `ensureLabelImpl` because "threads.modify wants a label_id, NOT a
+      // `ensureLabelByName` because "threads.modify wants a label_id, NOT a
       // label_name" (:338), and `search` below AND-s `label:<name>` into `q`.
       // Query syntax matches on NAMES, so the fix is to do here what `search`
       // already does — one consistent mechanism for both read paths.
@@ -355,7 +358,7 @@ export function buildGoogleGmailClient(
         // Resolve / create the per-project label before the modify
         // call; threads.modify wants a label_id, NOT a label_name.
         // Idempotent.
-        const ensure = await ensureLabelImpl(input.project_id)
+        const ensure = await ensureLabelByName(projectLabelName(input.project_id))
         addLabels.push(ensure.label_id)
       }
       try {
@@ -426,7 +429,7 @@ export function buildGoogleGmailClient(
       // retry.
       const addLabels: string[] = [...DEFAULT_DRAFT_LABEL_IDS]
       if (input.project_id !== undefined) {
-        const ensure = await ensureLabelImpl(input.project_id)
+        const ensure = await ensureLabelByName(projectLabelName(input.project_id))
         addLabels.push(ensure.label_id)
       }
       try {
@@ -447,7 +450,33 @@ export function buildGoogleGmailClient(
     async ensureProjectLabel(
       input: GmailLabelEnsureInput,
     ): Promise<GmailLabelEnsureResult> {
-      return ensureLabelImpl(input.project_id)
+      return ensureLabelByName(projectLabelName(input.project_id))
+    },
+
+    async ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult> {
+      // `account_id` is meaningless on a single-account client — the token
+      // this client holds already names the account.
+      return ensureLabelByName(input.name)
+    },
+
+    async modifyMessage(
+      input: GmailMessageModifyInput,
+    ): Promise<GmailMessageModifyResult> {
+      const body: Record<string, unknown> = {
+        addLabelIds: [...input.add_label_ids],
+      }
+      if (input.remove_label_ids !== undefined && input.remove_label_ids.length > 0) {
+        body['removeLabelIds'] = [...input.remove_label_ids]
+      }
+      const raw = (await call(
+        'POST',
+        `/messages/${encodeURIComponent(input.message_id)}/modify`,
+        body,
+      )) as { id?: string; labelIds?: string[] }
+      return {
+        message_id: input.message_id,
+        label_ids: raw.labelIds ?? [...input.add_label_ids],
+      }
     },
 
     async modifyThread(
@@ -472,14 +501,16 @@ export function buildGoogleGmailClient(
   }
 
   /**
-   * Resolve the Gmail user-label `Neutron/<project_id>` to its
-   * Gmail-side `Label_*` id; create the label via
-   * `users.labels.create` if it doesn't exist. Idempotent — Gmail
-   * returns 409 / 400 on duplicate name, in which case we list
-   * labels and find the existing one.
+   * Resolve a Gmail user-label BY NAME to its Gmail-side `Label_*` id;
+   * create the label via `users.labels.create` if it doesn't exist.
+   * Idempotent — Gmail returns 409 / 400 on duplicate name, in which case we
+   * list labels and find the existing one.
+   *
+   * Generalized from the former project-only `ensureLabelImpl(project_id)`:
+   * `ensureProjectLabel` now passes `projectLabelName(project_id)` and the
+   * pipeline passes its owner-level `Neutron/processed`. Same mechanics.
    */
-  async function ensureLabelImpl(project_id: string): Promise<GmailLabelEnsureResult> {
-    const labelName = projectLabelName(project_id)
+  async function ensureLabelByName(labelName: string): Promise<GmailLabelEnsureResult> {
     // Try create first (one round-trip when the label is new). On
     // duplicate, fall back to list + match.
     try {
