@@ -55,6 +55,14 @@ export const CHECKPOINT_BACKLOG_DONE = 'backlog_marked'
 export const CHECKPOINT_BACKLOG_CURSOR = 'backlog_cursor'
 /** JSON `account_id -> cursor` map for a multi-account backlog sweep. */
 export const CHECKPOINT_BACKLOG_CURSORS = 'backlog_cursors'
+/**
+ * STEADY-STATE continuation cursors. Set only when a tick exhausted its page
+ * budget without reaching unhandled mail, so the next tick resumes there
+ * instead of re-walking the same opening pages forever. Cleared the moment the
+ * walk finds mail or runs out of pages.
+ */
+export const CHECKPOINT_POLL_CURSOR = 'poll_cursor'
+export const CHECKPOINT_POLL_CURSORS = 'poll_cursors'
 
 /** Messages marked per tick while the backlog sweep is running. */
 export const DEFAULT_BACKLOG_PAGE_SIZE = 100
@@ -112,13 +120,27 @@ export function backlogDoneKey(account_id: string | null): string {
   return `${CHECKPOINT_BACKLOG_DONE}:${account_id ?? ''}`
 }
 
-/** The accounts a list response actually covered. */
-function accountsOnThisPage(page: {
-  accounts?: ReadonlyArray<{ account_id: string; ok: boolean }>
-  results: ReadonlyArray<{ account_id?: string }>
-}): string[] {
+/**
+ * The accounts a list response covered.
+ *
+ * `ok_only` distinguishes two different questions, and conflating them let a
+ * mailbox skip its sweep:
+ *   - COMPLETION ("whose backlog did we finish?") needs ok-only — an account
+ *     that did not answer proves nothing about its inbox.
+ *   - PRESENCE ("who is connected?") must count FAILED accounts too. A newly
+ *     connected mailbox whose probe happened to fail is still connected, and
+ *     treating it as absent left it unswept while the same tick went on to read
+ *     its history as new mail.
+ */
+function accountsOnThisPage(
+  page: {
+    accounts?: ReadonlyArray<{ account_id: string; ok: boolean }>
+    results: ReadonlyArray<{ account_id?: string }>
+  },
+  ok_only = true,
+): string[] {
   if (page.accounts !== undefined) {
-    return page.accounts.filter((a) => a.ok).map((a) => a.account_id)
+    return page.accounts.filter((a) => (ok_only ? a.ok : true)).map((a) => a.account_id)
   }
   // Single-backend client: no per-account reporting, one implicit mailbox.
   const stamped = new Set<string>()
@@ -185,7 +207,11 @@ export async function runEmailPipelineTick(
     let backlogPending = store.getCheckpoint(CHECKPOINT_BACKLOG_DONE) !== '1'
     if (!backlogPending) {
       const probe = await gmail.listMessages({ label: DEFAULT_LABEL, max_results: 1 })
-      const unmarked = accountsOnThisPage(probe).filter(
+      // PRESENCE, not success — include accounts that failed this probe. A new
+      // mailbox whose probe errors is still connected; skipping it here left it
+      // unswept while the same tick's steady-state list read its history as new
+      // mail the moment it recovered.
+      const unmarked = accountsOnThisPage(probe, false).filter(
         (id) => store.getCheckpoint(backlogDoneKey(id)) !== '1',
       )
       if (unmarked.length > 0) {
@@ -503,8 +529,19 @@ export async function runEmailPipelineTick(
     }
 
     const page_budget = deps.max_poll_pages ?? DEFAULT_MAX_POLL_PAGES
-    let cursor: string | undefined
-    let cursors: Record<string, string> = {}
+    // RESUME WHERE THE LAST TICK RAN OUT. A budget that always restarts at the
+    // top is not a bound on work, it is permanent starvation: with more than
+    // `page_budget × max_results` handled messages retained above it, an
+    // unhandled message is never reached, because every tick re-walks the same
+    // opening pages and gives up in the same place. The continuation cursor is
+    // what turns "bounded per tick" into "bounded per tick AND eventually
+    // reached". It is cleared as soon as the walk finds mail or runs out, so
+    // the next tick starts at the top again where new mail arrives.
+    const savedCursor = store.getCheckpoint(CHECKPOINT_POLL_CURSOR)
+    const savedCursors = parseCursorMap(store.getCheckpoint(CHECKPOINT_POLL_CURSORS))
+    let cursor: string | undefined =
+      savedCursor !== null && savedCursor.length > 0 ? savedCursor : undefined
+    let cursors: Record<string, string> = savedCursors
     let pages = 0
     let exhausted = false
 
@@ -549,10 +586,19 @@ export async function runEmailPipelineTick(
     }
 
     if (!exhausted) {
-      log?.('email pipeline poll hit its page budget without reaching unhandled mail', {
+      // Out of budget with nothing found: REMEMBER the place. Discarding the
+      // cursor here is what made the budget a wall instead of a pause.
+      store.setCheckpoint(CHECKPOINT_POLL_CURSOR, cursor ?? '')
+      store.setCheckpoint(CHECKPOINT_POLL_CURSORS, JSON.stringify(cursors))
+      log?.('email pipeline poll hit its page budget; will resume from here', {
         pages,
         page_budget,
       })
+    } else {
+      // Found mail, or reached the end. Either way the next tick starts at the
+      // top, which is where new mail arrives.
+      store.setCheckpoint(CHECKPOINT_POLL_CURSOR, '')
+      store.setCheckpoint(CHECKPOINT_POLL_CURSORS, '')
     }
 
     // (4) Checkpoints. A clean tick clears the failure streak.

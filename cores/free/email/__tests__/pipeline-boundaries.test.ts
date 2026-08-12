@@ -316,3 +316,82 @@ describe('a write for a disconnected account fails closed', () => {
     ).rejects.toThrow()
   })
 })
+
+describe('the page budget pauses the walk, it does not end it', () => {
+  test('mail behind MORE than budget×page_size pages is still reached', async () => {
+    await withStore(async (store) => {
+      // Three pages of already-handled mail, a budget of 2, and the unhandled
+      // message on page 3. Tick one runs out of budget; tick two must RESUME
+      // rather than re-walk pages 1-2 and give up in the same place forever.
+      const handled = (n: number): GmailMessageMeta[] => [meta(`handled-${n}`)]
+      for (const n of [1, 2]) {
+        const m = handled(n)[0] as GmailMessageMeta
+        store.insertEmail({
+          id: m.id,
+          thread_id: m.thread_id,
+          account_id: null,
+          sender: m.from,
+          subject: m.subject,
+          snippet: m.snippet,
+          body_text: 'x',
+          received_at: NOW,
+          processed_at: NOW,
+          category: 'billing action',
+          handling: 'escalate',
+        })
+        store.markEscalated(m.id, NOW, null)
+      }
+
+      const byCursor: Record<string, GmailListResult> = {
+        START: { results: handled(1), next_page_token: 'p2' },
+        p2: { results: handled(2), next_page_token: 'p3' },
+        p3: { results: [meta('deep-new')], next_page_tokens: {} },
+      }
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          return byCursor[input.page_token ?? 'START'] as GmailListResult
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const run = (): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (_t, e): Promise<unknown> => {
+              delivered.push(e.body)
+              return { prompt_id: 'p1', persisted: true, delivered_live: true }
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'instance',
+          },
+          now: () => NOW,
+          max_results: 1,
+          max_poll_pages: 2,
+        })
+
+      const first = await run()
+      expect(first.scanned).toBe(0)
+
+      // THE REGRESSION: without a continuation cursor this tick re-walks pages
+      // 1-2 and stops again — the message on page 3 is never reached, on any
+      // tick, forever.
+      const second = await run()
+      expect(second.scanned).toBe(1)
+      expect(delivered).toHaveLength(1)
+      expect(store.getEmail('deep-new')).not.toBeNull()
+    })
+  })
+})

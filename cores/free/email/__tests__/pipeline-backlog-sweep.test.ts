@@ -260,3 +260,36 @@ describe('a re-opened sweep does not bury live mail in an already-swept mailbox'
     })
   })
 })
+
+describe('a new mailbox whose probe FAILS still gets its sweep', () => {
+  test('a transient probe failure does not let acct-b bypass the backlog', async () => {
+    await withStore(async (store) => {
+      const withA = scriptedClient([
+        {
+          results: [msg('a-1', 'acct-a')],
+          next_page_tokens: {},
+          accounts: [{ account_id: 'acct-a', account_email: 'a@example.com', ok: true }],
+        },
+      ])
+      await tick(withA, store)
+
+      // The probe sees acct-b, but acct-b's request FAILED. It is connected all
+      // the same — reading "not ok" as "not present" left it unswept, and the
+      // same tick then read its history as new mail once it recovered.
+      const probeFailsForB = scriptedClient([
+        {
+          results: [msg('a-1', 'acct-a')],
+          next_page_tokens: {},
+          accounts: [
+            { account_id: 'acct-a', account_email: 'a@example.com', ok: true },
+            { account_id: 'acct-b', account_email: 'b@example.com', ok: false, error: 'token expired' },
+          ],
+        },
+      ])
+      const r = await tick(probeFailsForB, store)
+      expect(r.backlog_sweeping).toBe(true)
+      // acct-b is still unmarked, so the sweep stays open for it.
+      expect(store.getCheckpoint(`backlog_marked:acct-b`)).not.toBe('1')
+    })
+  })
+})
