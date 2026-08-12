@@ -1,4 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { cleanupAfterMerge } from './git-mode.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import {
@@ -225,7 +228,7 @@ describe('buildMergeCleanupDeps — local mode', () => {
     expect(joined.some((c) => c.startsWith('git -C /repo merge --no-ff feat-x'))).toBe(true)
     expect(joined).toContain('git -C /repo branch -D feat-x')
     // The worktree is torn down + never touches the remote / gh.
-    expect(joined.some((c) => c.includes(`worktree remove --force ${wt}`))).toBe(true)
+    expect(joined.some((c) => c.includes(`worktree remove ${wt}`))).toBe(true)
     expect(joined.some((c) => c.includes('push origin'))).toBe(false)
     expect(joined.some((c) => c.startsWith('gh '))).toBe(false)
   })
@@ -264,7 +267,7 @@ describe('buildMergeCleanupDeps — local mode', () => {
     const joined = calls.map((c) => c.join(' '))
     expect(joined.some((c) => c.includes('branch -D'))).toBe(false)
     // Even on failure the worktree is cleaned up (the `finally`).
-    expect(joined.some((c) => c.includes(`worktree remove --force ${wt}`))).toBe(true)
+    expect(joined.some((c) => c.includes(`worktree remove ${wt}`))).toBe(true)
   })
 
   test('a null branch throws before any host call', async () => {
@@ -422,7 +425,7 @@ describe('buildMergeCleanupDeps — local mode rebase-onto-latest + conflict res
     const wt = wtOf('/shared', run)
     await cleanupAfterMerge(run, deps)
     const joined = calls
-    const freeIdx = joined.findIndex((c) => c.includes(`worktree remove --force ${stray}`))
+    const freeIdx = joined.findIndex((c) => c.includes(`worktree remove ${stray}`))
     const checkoutIdx = joined.findIndex((c) => c === `git -C ${wt} checkout feat-x`)
     expect(freeIdx).toBeGreaterThanOrEqual(0)
     expect(checkoutIdx).toBeGreaterThanOrEqual(0)
@@ -499,7 +502,7 @@ describe('buildMergeCleanupDeps — local mode rebase-onto-latest + conflict res
     // Escalated → never merged, never deleted the branch. The worktree is torn down.
     expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(false)
     expect(joined.some((c) => c.includes('branch -D'))).toBe(false)
-    expect(joined.some((c) => c.includes(`worktree remove --force ${wt}`))).toBe(true)
+    expect(joined.some((c) => c.includes(`worktree remove ${wt}`))).toBe(true)
   })
 
   test('a conflict with NO resolver configured escalates to chat (never a silent hard-fail)', async () => {
@@ -575,5 +578,104 @@ describe('buildMergeCleanupDeps — local mode rebase-onto-latest + conflict res
     for (const id of ['aaaaaaaa', 'bbbbbbbb', 'cccccccc']) {
       expect(adds.some((c) => c.includes(`/proj/.trident-worktrees/s-${id} main`))).toBe(true)
     }
+  })
+})
+
+// ISSUES #541 — the OUTER twin of the inner workflow's force-removing cleanup.
+// `git worktree remove --force` from a cleanup path destroyed 197 insertions
+// across 7 files on PR #171, so every removal in merge.ts is now gated on the
+// tree being PROVABLY clean (untracked files included) and none of them may pass
+// `--force`. These tests use a REAL temp directory as the worktree path, because
+// the dirty probe is skipped for a path that does not exist (nothing to preserve).
+describe('merge.ts — a DIRTY worktree is preserved, never force-removed (#541)', () => {
+  const dirs: string[] = []
+  afterAll(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true })
+  })
+  const realDir = (): string => {
+    const d = mkdtempSync(join(tmpdir(), 'trident-merge-wt-'))
+    dirs.push(d)
+    return d
+  }
+  /** A host whose `status --porcelain` reports `dirt` for `wt` (empty = clean). */
+  const hostWithDirt = (wt: string, dirt: string) =>
+    recordingHost((cmd) =>
+      cmd.includes('status') && cmd.includes(wt) ? ok(dirt) : cmd.includes('--abort') ? fail() : ok(),
+    )
+
+  test('post-merge cleanup PRESERVES a dirty run.worktree (untracked files count)', async () => {
+    const wt = realDir()
+    // Untracked-only: the exact shape #541 lost, and the shape a bare
+    // `git status --porcelain` (no -uall) would have called clean.
+    const { host, calls } = hostWithDirt(wt, '?? brand-new.ts\n')
+    const deps = buildMergeCleanupDeps(host)
+    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    const joined = calls.map((c) => c.join(' '))
+    // The merge still happened; the worktree simply survived it.
+    expect(joined).toContain('gh pr merge 42 --squash')
+    expect(joined).toContain(`git -C ${wt} status --porcelain --untracked-files=all`)
+    expect(joined.some((c) => c.includes('worktree remove'))).toBe(false)
+    expect(joined.some((c) => c.includes('worktree prune'))).toBe(false)
+  })
+
+  test('post-merge cleanup still removes a CLEAN run.worktree — WITHOUT --force', async () => {
+    const wt = realDir()
+    const { host, calls } = hostWithDirt(wt, '')
+    const deps = buildMergeCleanupDeps(host)
+    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    const joined = calls.map((c) => c.join(' '))
+    expect(joined).toContain(`git -C /repo worktree remove ${wt}`)
+    expect(joined).toContain('git -C /repo worktree prune')
+    expect(joined.some((c) => c.includes('--force'))).toBe(false)
+  })
+
+  test('a worktree whose status probe FAILS counts as dirty (unverifiable → preserve)', async () => {
+    const wt = realDir()
+    const { host, calls } = recordingHost((cmd) =>
+      cmd.includes('status') && cmd.includes(wt) ? fail('not a git repository') : ok(),
+    )
+    const deps = buildMergeCleanupDeps(host)
+    await cleanupAfterMerge(makeRun({ merge_mode: 'pr', pr: 42, branch: 'feat-x', worktree: wt }), deps)
+    expect(calls.map((c) => c.join(' ')).some((c) => c.includes('worktree remove'))).toBe(false)
+  })
+
+  test('a DIRTY stale merge worktree FAILS the merge loudly instead of being force-removed', async () => {
+    // Provisioning reuses a deterministic per-run path. A dirty tree there may hold
+    // a half-finished conflict resolution; the merge must stop, naming the path.
+    const wt = realDir()
+    const run = makeRun({
+      merge_mode: 'local',
+      branch: 'feat-x',
+      pr: null,
+      repo_path: '/repo',
+      worktree: wt,
+    })
+    const { host, calls } = hostWithDirt(wt, ' M resolved.ts\n')
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await expect(cleanupAfterMerge(run, deps)).rejects.toThrow(/uncommitted changes that exist nowhere else/)
+    const joined = calls.map((c) => c.join(' '))
+    expect(joined.some((c) => c.includes('worktree remove'))).toBe(false)
+    // It never got as far as merging or deleting the branch.
+    expect(joined.some((c) => c.includes('merge --no-ff'))).toBe(false)
+    expect(joined.some((c) => c.includes('branch -D'))).toBe(false)
+  })
+
+  test('a DIRTY lingering BUILD worktree on the branch is left alone by freeBranchFromWorktrees', async () => {
+    const stray = realDir()
+    const run = makeRun({ merge_mode: 'local', branch: 'feat-x', pr: null, repo_path: '/shared' })
+    const { host, calls } = recordingHost((cmd) => {
+      if (cmd.includes('worktree') && cmd.includes('list')) {
+        return ok(`worktree ${stray}\nHEAD abc\nbranch refs/heads/feat-x\n`)
+      }
+      if (cmd.includes('status') && cmd.includes(stray)) return ok('?? forge-was-mid-edit.ts\n')
+      if (cmd.includes('--abort')) return fail()
+      return ok()
+    })
+    const deps = buildMergeCleanupDeps(host, { base_branch: 'main' })
+    await cleanupAfterMerge(run, deps)
+    const joined = calls.map((c) => c.join(' '))
+    // The stray build worktree — the one the inner cleanup preserved — survives.
+    expect(joined.some((c) => c.includes(`worktree remove ${stray}`))).toBe(false)
+    expect(joined.some((c) => c.includes('--force') && c.includes(stray))).toBe(false)
   })
 })

@@ -25,7 +25,12 @@ import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
 import { cleanupAfterMerge } from './git-mode.ts'
-import { buildMergeCleanupDeps, runWorktreePath, TridentMergeConflictEscalation } from './merge.ts'
+import {
+  buildMergeCleanupDeps,
+  runWorktreePath,
+  TridentMergeConflictEscalation,
+  TridentMergeError,
+} from './merge.ts'
 import type { TridentRun } from './store.ts'
 
 const GIT_ID = ['-c', 'user.name=T', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false']
@@ -299,5 +304,60 @@ describe('REAL git — failure isolation: an unrecoverable conflict never poison
     await cleanupAfterMerge(localRun(repo, 'zzzzzzzz', 'trident/z'), deps)
     await git(repo, 'checkout', '-q', 'main')
     expect(existsSync(join(repo, 'z.txt'))).toBe(true)
+  }, 30_000)
+})
+
+describe('REAL git — a dirty lingering build worktree is PRESERVED (#541)', () => {
+  test('mergeLocal never force-removes it: the uncommitted work survives and the merge fails loudly', async () => {
+    const repo = await makeBaseRepo()
+    const branch = 'trident/mid-edit'
+    // A build that committed once and then DIED mid-edit: its worktree is still
+    // registered on the branch and holds an untracked file that exists nowhere
+    // else. This is the PR #171 state — 197 insertions that only lived here.
+    const wt = join(repo, '.build-mid-edit')
+    await git(repo, 'branch', branch, 'main')
+    await git(repo, 'worktree', 'add', '-q', wt, branch)
+    writeFileSync(join(wt, 'committed.txt'), 'landed\n')
+    await git(wt, 'add', '.')
+    await git(wt, ...GIT_ID, 'commit', '-q', '-m', 'build')
+    writeFileSync(join(wt, 'never-committed.ts'), 'export const insertions = 197\n')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    // The merge cannot check the branch out (it is held by the preserved
+    // worktree), so it fails — LOUDLY, which is the correct trade: an operator
+    // recovers the work, and nothing was destroyed to make the merge convenient.
+    await expect(cleanupAfterMerge(localRun(repo, 'dddddddd', branch), deps)).rejects.toBeInstanceOf(
+      TridentMergeError,
+    )
+
+    // THE POINT: the uncommitted work is still there, byte for byte.
+    expect(existsSync(join(wt, 'never-committed.ts'))).toBe(true)
+    expect(await Bun.file(join(wt, 'never-committed.ts')).text()).toBe(
+      'export const insertions = 197\n',
+    )
+    // …and git still knows about the worktree + the branch (nothing was pruned
+    // out from under it, nothing was `branch -D`'d).
+    const list = await gitOut(repo, 'worktree', 'list', '--porcelain')
+    expect(list).toContain(`worktree ${wt}`)
+    expect((await gitOut(repo, 'branch', '--list', branch)).trim()).toContain(branch)
+  }, 30_000)
+
+  test('a CLEAN lingering build worktree is still freed, so the merge lands', async () => {
+    const repo = await makeBaseRepo()
+    const branch = 'trident/clean-linger'
+    const wt = join(repo, '.build-clean-linger')
+    await git(repo, 'branch', branch, 'main')
+    await git(repo, 'worktree', 'add', '-q', wt, branch)
+    writeFileSync(join(wt, 'clean.txt'), 'all committed\n')
+    await git(wt, 'add', '.')
+    await git(wt, ...GIT_ID, 'commit', '-q', '-m', 'build')
+
+    const deps = buildMergeCleanupDeps(spawnCapture, { base_branch: 'main' })
+    await cleanupAfterMerge(localRun(repo, 'eeeeeeee', branch), deps)
+
+    await git(repo, 'checkout', '-q', 'main')
+    expect(existsSync(join(repo, 'clean.txt'))).toBe(true)
+    expect(existsSync(wt)).toBe(false)
+    expect(await worktreeCount(repo)).toBe(1)
   }, 30_000)
 })

@@ -48,6 +48,22 @@ function grabFunction(name: string): string {
 // its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
 const CHECKPOINT_SH = readFileSync(fileURLToPath(new URL('./checkpoint.sh', import.meta.url)), 'utf8')
 
+/** `SRC` with whole-line comments stripped. Used ONLY by the assertions that a
+ *  destructive command is GONE: the comments deliberately quote the exact
+ *  `git worktree remove --force` / `git branch -D` line #541 removed, and a
+ *  grep over the raw source could never tell the ban from its own rationale. */
+const CODE = SRC.split('\n')
+  .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+  .join('\n')
+
+// The checked-in worktree cleanup the workflow's finally{} invokes (#541) — its
+// decision table is asserted here; its runtime behavior against real git repos in
+// worktree-cleanup-sh.test.ts.
+const CLEANUP_SH = readFileSync(
+  fileURLToPath(new URL('./worktree-cleanup.sh', import.meta.url)),
+  'utf8',
+)
+
 describe('inner-workflow.mjs — meta + phases', () => {
   test('exports a pure meta literal named trident-v2-inner with the three phases', () => {
     expect(SRC).toContain("name: 'trident-v2-inner'")
@@ -1149,24 +1165,60 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
   })
 })
 
-describe('inner-workflow.mjs — mandatory worktree cleanup on ALL paths', () => {
-  test('a finally{} block scans git worktree list for the trident/<slug> branch and removes the WORKTREE on every path (D-1, unconditional)', () => {
+describe('inner-workflow.mjs — worktree cleanup on ALL paths, destructive on NONE', () => {
+  test('a finally{} block cleans up the trident/<slug> worktree on every path (D-1) via the checked-in script', () => {
     expect(SRC).toContain('} finally {')
-    expect(SRC).toContain('git worktree list --porcelain')
-    expect(SRC).toContain('git worktree remove --force')
-    expect(SRC).toContain('git worktree prune')
-    // Independent of Forge's return value — scans for the deterministic branch.
     expect(SRC).toContain("label: 'cleanup:worktree'")
+    // Independent of Forge's return value — the script scans for the
+    // DETERMINISTIC branch, so it holds even when Forge threw before returning.
+    expect(SRC).toContain(
+      'bash ${shSingleQuote(worktreeCleanupSh)} ${shSingleQuote(repoPath)} ${shSingleQuote(forgeBranch)} ${cleanupMode}',
+    )
+    expect(SRC).toContain('worktreeCleanupScript = null')
+    expect(SRC).toMatch(
+      /const worktreeCleanupSh = worktreeCleanupScript \|\| `\$\{repoPath\}\/trident\/worktree-cleanup\.sh`/,
+    )
   })
 
-  test('branch teardown is MODE-AWARE: deleted only in pr-mode; KEPT in local-mode for the outer merge', () => {
-    // D-1 removes the worktree unconditionally, but the branch holds the only
-    // copy of the un-merged commits in local mode — the OUTER loop merges it.
-    expect(SRC).toContain('const branchTeardownStep = isPr')
-    // pr-mode: delete the local branch (work is on origin/the PR).
-    expect(SRC).toContain('git branch -D ${forgeBranch}')
-    // local-mode: KEEP the branch so the outer mergeLocal can merge it.
-    expect(SRC).toMatch(/KEEP the branch '\$\{forgeBranch\}'/)
+  // ISSUES #541 — the cleanup step USED to be a cheap-model agent told to "ignore
+  // individual command failures" while running `git worktree remove --force` +
+  // `git branch -D`, from a finally{} that fires on THROW and ABORT. On PR #171 it
+  // destroyed 197 insertions across 7 files. Both halves of that must stay gone:
+  // the force-removal AND the LLM judgement wrapped around it.
+  test('the finally{} NEVER force-removes a worktree and NEVER deletes a branch itself', () => {
+    expect(CODE).not.toContain('worktree remove --force')
+    expect(CODE).not.toContain('git branch -D')
+    // No "best-effort, ignore failures" licence anywhere near the destructive path.
+    expect(CODE).not.toContain('ignore individual command failures')
+  })
+
+  test('the cleanup agent has NO judgement: one fixed command, output reported verbatim', () => {
+    // Same shape as the head/CI probes: schema'd raw+exit_code, an explicit ban on
+    // running anything else, and an explicit ban on "fixing" the non-zero exit that
+    // MEANS work was preserved.
+    expect(SRC).toContain('const CLEANUP_SCHEMA = {')
+    expect(SRC).toContain('schema: CLEANUP_SCHEMA')
+    expect(SRC).toContain('Run EXACTLY this single Bash command')
+    expect(SRC).toMatch(/do NOT remove or modify any worktree, branch or file yourself/)
+    expect(SRC).toMatch(/exit 3 means the script PRESERVED work ON PURPOSE/)
+    // A preservation is logged in full — it is the operator's only notice.
+    expect(SRC).toContain('cleanup:worktree PRESERVED WORK')
+  })
+
+  test('branch teardown is MODE-AWARE: delete-branch only in pr-mode; keep-branch in local-mode', () => {
+    // The branch holds the only copy of the un-merged commits in local mode — the
+    // OUTER loop merges it — so the mode is passed to the script as a flag and the
+    // script (not a model) decides whether the pr-mode branch is safe to delete.
+    expect(SRC).toContain("const cleanupMode = isPr ? 'delete-branch' : 'keep-branch'")
+    expect(CLEANUP_SH).toContain('PRESERVED branch $branch reason=not-on-origin')
+    expect(CLEANUP_SH).toContain('PRESERVED branch $branch reason=unpushed')
+  })
+
+  test('the script preserves a DIRTY tree — including UNTRACKED files — and exits non-zero', () => {
+    // Behavior is proven in worktree-cleanup-sh.test.ts against real git; these two
+    // lines are the ones a future edit is most likely to "simplify" away.
+    expect(CLEANUP_SH).toContain('git -C "$wt" status --porcelain --untracked-files=all')
+    expect(CLEANUP_SH).toContain('[ "$preserved" -eq 0 ] || exit 3')
   })
 
   test('the top-level return carries the Workflow result API shape', () => {

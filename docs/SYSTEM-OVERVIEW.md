@@ -5199,12 +5199,24 @@ deleted, no dual path):
   the dedicated warm `cc-trident-fire-*` substrate (one warm pool entry per repo
   cwd, since the persistent pool keys on instance not cwd, and the workflow's
   `isolation:'worktree'` forks from the fire turn's git cwd).
-- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` scans `git
-  worktree list` for the deterministic `trident/<slug>` branch and removes it on
-  every path (independent of Forge's return value — the harness only auto-cleans
-  an UNCHANGED worktree, and a Forge build always commits). `merge.ts` adds the
-  OUTER backstop (best-effort `git worktree remove --force` + `prune` after a
-  landed merge), flipping the old "NO `git worktree remove`" lock.
+- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` runs the
+  checked-in `trident/worktree-cleanup.sh` against the deterministic
+  `trident/<slug>` branch on every path (independent of Forge's return value —
+  the harness only auto-cleans an UNCHANGED worktree, and a Forge build always
+  commits). `merge.ts` adds the OUTER backstop (best-effort `git worktree remove`
+  + `prune` after a landed merge), flipping the old "NO `git worktree remove`"
+  lock.
+- **…but cleanup is NEVER destructive (ISSUES #541):** that `finally{}` also
+  fires on THROW and ABORT — exactly when Forge died mid-edit — and it used to be
+  a cheap-model agent told to "ignore individual command failures" while running
+  `git worktree remove --force` + `git branch -D`. On PR #171 it destroyed 197
+  insertions across 7 files. The decision is now deterministic shell with no LLM
+  judgement in it: a worktree that is DIRTY (uncommitted changes **including
+  untracked files**) or unverifiable is PRESERVED, its paths printed, exit 3; a
+  clean one is removed with a plain `git worktree remove` (no `--force`, so git's
+  own dirty check is a second gate); the pr-mode `git branch -D` runs only once
+  `git ls-remote` proves origin holds the same sha (local mode never deletes it).
+  `merge.ts` applies the same gate to every worktree removal it does.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
