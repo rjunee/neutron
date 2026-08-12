@@ -68,9 +68,18 @@ same unenforced-rule shape this section exists to remove. Known gap, recorded
 rather than papered over.
 
 Tested against the real function extracted from the `.mjs` and evaluated rather
-than a hand-copied duplicate. 17 tests, 52 assertions, mutation-verified:
+than a hand-copied duplicate. 18 tests, 55 assertions, mutation-verified:
 admitting `major` to the non-blocking set fails two of them, and dropping the
 empty-findings guard fails one.
+
+The prose guards that police the docblock are mutation-verified too, and the
+carve-out that exempts the one past-tense record of #184's claim is bounded by a
+literal at BOTH ends. It used to run to the next `)`, which meant deleting the
+citation's closing paren — an ordinary copy-edit — silently stretched the
+exemption over the entire IMPLEMENTED section: a present-tense "the mutation
+prover still vetoes a bad APPROVE today" written in the swallowed region passed
+at 17 pass / 0 fail. An exemption that widens on its own is a gate that stops
+firing with nobody watching, so an edit to either end now throws instead.
 
 ## 2026-08-08 — one cancel surface reads and stops both build lifecycles (#515)
 

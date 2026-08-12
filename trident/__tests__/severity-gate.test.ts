@@ -102,6 +102,9 @@ function codeOutsideDocblock(): string {
   return SRC.slice(0, at) + SRC.slice(at + doc.length)
 }
 
+const HISTORY_OPEN = '(PR #184 asserted here'
+const HISTORY_CLOSE = 'do not reintroduce it in any form.)'
+
 /**
  * The docblock MINUS its one sanctioned mention of the deleted claim.
  *
@@ -110,16 +113,36 @@ function codeOutsideDocblock(): string {
  * recognise the claim if it came back. Everything outside it is held to a flat ban,
  * because scoping the ban to the IMPLEMENTED bullets let a plain rewording survive
  * in the surrounding prose ("the mutation prover still vetoes a bad APPROVE").
+ *
+ * THE CARVE-OUT IS BOUNDED BY A LITERAL, not by "the next `)`". A paren scan is
+ * unbounded in the one direction that matters: deleting the citation's closing
+ * paren — an ordinary copy-edit — silently extends the exemption over the whole
+ * IMPLEMENTED section, and a live present-tense claim written in the swallowed
+ * region then passes the ban with all 17 tests green. An exemption that grows on
+ * its own is a gate that stops firing without anyone seeing it, which is the exact
+ * defect class this file exists to catch. So both ends are fixed strings, an edit
+ * to either fails LOUD, and the carved span may never reach the claim bullets.
+ *
+ * Takes the docblock as a parameter so the bounding can be tested against a
+ * mutated block; production callers pass nothing and get the real one.
  */
-function docblockOutsideHistory(): string {
-  const doc = gateDocblock()
-  const at = doc.indexOf('(PR #184 asserted here')
+function docblockOutsideHistory(doc: string = gateDocblock()): string {
+  const at = doc.indexOf(HISTORY_OPEN)
   if (at === -1) {
     throw new Error('the docblock no longer records what #184 claimed — the ban below has no carve-out to justify')
   }
-  const end = doc.indexOf(')', at)
-  if (end === -1) throw new Error('the #184 citation is unterminated')
-  return doc.slice(0, at) + doc.slice(end + 1)
+  const closeAt = doc.indexOf(HISTORY_CLOSE, at)
+  if (closeAt === -1) {
+    throw new Error(
+      'the #184 citation no longer ends with its sanctioned closing sentence — without that bound the exemption would widen silently',
+    )
+  }
+  const end = closeAt + HISTORY_CLOSE.length
+  const carved = doc.slice(at, end)
+  if (carved.includes('IMPLEMENTED')) {
+    throw new Error('the #184 carve-out reached the claim bullets — the prover ban would be vacuous over them')
+  }
+  return doc.slice(0, at) + doc.slice(end)
 }
 
 function loadReal(): {
@@ -300,6 +323,25 @@ describe('the docblock may not claim a safeguard that no code implements (#184 �
     expect(doc).not.toMatch(/\b(stands?|sits?)\s+between\s+APPROVE\s+and\s+merge/i)
     // And it may not come back as a promise instead of a statement.
     expect(docblockOutsideHistory()).not.toMatch(/(TODO|FIXME|XXX|later|planned|will\s+be)[^\n]*phase/i)
+  })
+
+  test('the history carve-out cannot widen to swallow a live claim', () => {
+    // The evasion this bounds, verified by mutation before the bound existed: delete
+    // the citation's closing paren and write a present-tense claim under it. With an
+    // unbounded `indexOf(')')` scan the carve-out grew 227 → 961 chars, ate the whole
+    // IMPLEMENTED section, and "the mutation prover still vetoes a bad APPROVE today"
+    // sat in the docblock at 17 pass / 0 fail. The ban had silently stopped existing.
+    const evaded = gateDocblock().replace(
+      HISTORY_CLOSE,
+      'do not reintroduce it in any form.\n//\n// Note: the mutation prover still vetoes a bad APPROVE today.',
+    )
+    // Prove the mutation APPLIED before believing anything about the result — a
+    // no-op replace would make the expectation below pass for the wrong reason.
+    expect(evaded).not.toBe(gateDocblock())
+    expect(evaded).toContain('still vetoes a bad APPROVE today')
+    // REFUSED, loudly. Not "returns a string that happens to still contain prover":
+    // the bound must reject the block outright rather than silently exempt more.
+    expect(() => docblockOutsideHistory(evaded)).toThrow(/widen silently|vacuous/)
   })
 
   test('the IMPLEMENTED claims never mention a prover, and each names real code', () => {
