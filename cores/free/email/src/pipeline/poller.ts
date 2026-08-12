@@ -670,6 +670,12 @@ export async function runEmailPipelineTick(
         message_id: meta.id,
         ...(meta.account_id !== undefined ? { account_id: meta.account_id } : {}),
       })
+      // Two different bounds, deliberately. STORAGE keeps a fixed excerpt;
+      // CLASSIFICATION receives the full body because it bounds each of its own
+      // reads (the excerpt for the patterns and the model, head+footer spans for
+      // the mass-mailer scan) — and the footer is the half a stored-excerpt-only
+      // hand-off would throw away, which is exactly where an unsubscribe
+      // affordance lives. No unbounded work is done on it here or there.
       const body_text = full.body_text.slice(0, STORED_BODY_LIMIT)
       const verdict: Classification = await classifyEmail(
         {
