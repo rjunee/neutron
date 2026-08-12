@@ -20,7 +20,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -126,7 +126,7 @@ describe('worktree-cleanup.sh — a DIRTY worktree is PRESERVED (the #541 incide
     expect(res.out).toContain('RESULT preserved=')
     // Nothing was destroyed.
     expect(existsSync(join(wt, 'brand-new.ts'))).toBe(true)
-    expect(Bun.file(join(wt, 'brand-new.ts')).text()).resolves.toContain('197')
+    expect(readFileSync(join(wt, 'brand-new.ts'), 'utf8')).toContain('197')
     expect(worktreesFor(repo, BRANCH)).toEqual([wt])
     // …and the branch went with it (its commits are under the preserved tree).
     expect(branchExists(repo, BRANCH)).toBe(true)
@@ -144,7 +144,7 @@ describe('worktree-cleanup.sh — a DIRTY worktree is PRESERVED (the #541 incide
     expect(res.code).toBe(3)
     expect(res.out).toContain('reason=dirty')
     expect(res.out).toContain('built.txt')
-    expect(Bun.file(join(wt, 'built.txt')).text()).resolves.toBe('edited, never committed\n')
+    expect(readFileSync(join(wt, 'built.txt'), 'utf8')).toBe('edited, never committed\n')
     expect(worktreesFor(repo, BRANCH)).toEqual([wt])
   })
 
