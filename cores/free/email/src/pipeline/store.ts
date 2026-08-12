@@ -189,13 +189,18 @@ export class EmailPipelineStore {
   }
 
   /**
-   * Escalations that were ATTEMPTED and failed, and are still under the
-   * attempt cap. `escalated_at IS NULL` is the dedup guard itself — a
-   * delivered escalation can never come back through this query.
+   * EVERY escalation the owner has not been told about, under the attempt cap.
+   * `escalated_at IS NULL` is the dedup guard itself — a delivered escalation
+   * can never come back through this query.
    *
-   * `escalation_attempts > 0` keeps the first attempt in the poll path (where
-   * the freshly-classified message is escalated inline) rather than making
-   * the resume step re-deliver everything it just posted.
+   * This deliberately includes rows with ZERO attempts. The query used to
+   * require `attempts > 0` on the reasoning that the first attempt belongs to
+   * the poll path — but that stranded any row inserted just before a crash:
+   * the poll path skips it (`hasEmail` is true) and the resume path skipped it
+   * too, so an important message sat in the store forever, undelivered and
+   * invisible. Nothing is double-posted by including them, because a delivered
+   * row has `escalated_at` set and a row this tick just posted is not visible
+   * to a resume pass that already ran.
    */
   listPendingEscalations(max_attempts: number): EmailRow[] {
     return this.db
@@ -203,7 +208,6 @@ export class EmailPipelineStore {
         `SELECT * FROM emails
           WHERE handling = 'escalate'
             AND escalated_at IS NULL
-            AND escalation_attempts > 0
             AND escalation_attempts < ?
           ORDER BY received_at ASC`,
       )
@@ -226,6 +230,33 @@ export class EmailPipelineStore {
     )
   }
 
+  /**
+   * Record that an escalation attempt is ABOUT TO BE MADE — before the call,
+   * not after it fails.
+   *
+   * Counting the attempt afterwards left a crash-shaped hole. The row is
+   * inserted before `deliver` runs, so a process exit in between left
+   * `escalated_at NULL` with `escalation_attempts = 0`. The poll path then
+   * skipped that message forever (`hasEmail` is true) and the resume query
+   * skipped it too — it requires `attempts > 0` so a freshly-posted message is
+   * not immediately re-posted. The message existed, was important, and could
+   * never be delivered by anything.
+   *
+   * Incrementing FIRST closes it: an INTERRUPTED attempt becomes
+   * indistinguishable from a FAILED one, which is exactly right — in both cases
+   * the owner has not been told and the work is still owed.
+   */
+  beginEscalationAttempt(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(
+      `UPDATE emails
+          SET escalation_attempts = escalation_attempts + 1,
+              processed_at = ?
+        WHERE id = ? AND account_id = ?`,
+      [at, id, account_id ?? ''],
+    )
+  }
+
+  /** The attempt itself was already counted by `beginEscalationAttempt`. */
   recordEscalationFailure(
     id: string,
     error: string,
@@ -234,8 +265,7 @@ export class EmailPipelineStore {
   ): void {
     this.db.run(
       `UPDATE emails
-          SET escalation_attempts = escalation_attempts + 1,
-              last_error = ?,
+          SET last_error = ?,
               processed_at = ?
         WHERE id = ? AND account_id = ?`,
       [error, at, id, account_id ?? ''],

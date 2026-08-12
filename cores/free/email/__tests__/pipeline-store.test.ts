@@ -108,10 +108,16 @@ describe('openEmailPipelineStore', () => {
         handling: 'escalate',
       })
       expect(store.hasEmail('m1')).toBe(true)
-      // A never-attempted escalation is NOT pending — the poll path delivers
-      // the first attempt inline; resume exists for the failures.
-      expect(store.listPendingEscalations(5)).toHaveLength(0)
+      // A never-attempted escalation IS pending. It used to be excluded so the
+      // poll path could own the first attempt — but that stranded any row
+      // written just before a crash: skipped by the poll (hasEmail) and by the
+      // resume (attempts = 0), undeliverable by anything.
+      expect(store.listPendingEscalations(5)).toHaveLength(1)
 
+      // The ATTEMPT is counted before it is made, so an interrupted attempt is
+      // recoverable exactly like a failed one; the failure then records only
+      // what went wrong.
+      store.beginEscalationAttempt('m1', 200)
       store.recordEscalationFailure('m1', 'socket closed', 200)
       const pending = store.listPendingEscalations(5)
       expect(pending).toHaveLength(1)

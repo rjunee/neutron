@@ -152,12 +152,15 @@ describe('a delivered escalation is never re-posted', () => {
       })
 
       const posts: Array<{ body: string; idempotency_key?: string }> = []
-      const broken = {
-        ...store,
-        markEscalated: (): void => {
+      // Delegate to the REAL store and override one method. A spread of a class
+      // instance copies own fields but not prototype methods, so `{...store}`
+      // is a store that has forgotten how to do anything.
+      const broken = Object.create(store) as EmailPipelineStore
+      Object.defineProperty(broken, 'markEscalated', {
+        value: (): void => {
           throw new Error('disk full')
         },
-      } as unknown as EmailPipelineStore
+      })
 
       const out = await escalateEmail(
         {
@@ -187,8 +190,11 @@ describe('a delivered escalation is never re-posted', () => {
       // seam instead of writing a second durable chat row.
       expect(posts[0]?.idempotency_key).toBe('email-escalation::msg-1')
 
-      // The failure was NOT counted against the delivery attempt cap.
-      expect(store.getEmail('msg-1')?.escalation_attempts).toBe(0)
+      // The attempt is counted (it was made, and counting it before the call is
+      // what makes an interrupted attempt recoverable) — but crucially NO
+      // failure was recorded against it, because the delivery did not fail.
+      expect(store.getEmail('msg-1')?.escalation_attempts).toBe(1)
+      expect(store.getEmail('msg-1')?.last_error).toBeNull()
     })
   })
 })
@@ -459,6 +465,77 @@ describe('a retried escalation does not buzz the phone again', () => {
       // THE REGRESSION: the push used to fire on every attempt — five buzzes
       // for one email, while the chat post the owner relies on never landed.
       expect(pushes).toHaveLength(1)
+    })
+  })
+})
+
+describe('a crash between the insert and the delivery is recoverable', () => {
+  test('a row persisted but never delivered IS escalated by the next tick, once', async () => {
+    await withStore(async (store) => {
+      // Exactly the crash window: the poller inserts the row, then the process
+      // dies before `deliver` is ever called. `escalated_at` is NULL and
+      // `escalation_attempts` is 0 — the poll path skips it because hasEmail is
+      // true, and the resume query used to skip it because attempts was 0. The
+      // message was important, existed, and could never be delivered.
+      store.insertEmail({
+        id: 'msg-crash',
+        thread_id: 't-crash',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+      expect(store.getEmail('msg-crash')?.escalation_attempts).toBe(0)
+
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(): Promise<GmailListResult> {
+          // The message is still in INBOX (escalated mail keeps it), so the
+          // poll sees it and skips it via hasEmail — recovery cannot come from
+          // the poll path.
+          return { results: [meta('msg-crash')], next_page_tokens: {} }
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'x', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'msg-crash', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const run = (): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (_t, e): Promise<unknown> => {
+              delivered.push(e.body)
+              return { prompt_id: 'p1', persisted: true, delivered_live: true }
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'instance',
+          },
+          now: () => NOW,
+        })
+
+      const first = await run()
+      expect(first.resumed).toBe(1)
+      expect(delivered).toHaveLength(1)
+      expect(store.getEmail('msg-crash')?.escalated_at).toBe(NOW)
+
+      // EXACTLY once — the next tick says nothing more.
+      await run()
+      expect(delivered).toHaveLength(1)
     })
   })
 })

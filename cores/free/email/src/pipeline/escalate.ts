@@ -114,6 +114,15 @@ export async function escalateEmail(
   const account = email.account_id ?? null
   const idempotency_key = `email-escalation:${account ?? ''}:${email.id}`
 
+  // COUNT THE ATTEMPT BEFORE MAKING IT. The row is inserted before this
+  // function is called, so a crash between the insert and the delivery used to
+  // leave `escalated_at NULL` with `escalation_attempts = 0` — invisible to the
+  // poll path (`hasEmail` is true) AND to the resume query (which requires
+  // attempts > 0). An important message that could never be delivered by
+  // anything. Recording first makes an interrupted attempt look like a failed
+  // one, and a failed one is recoverable.
+  deps.store.beginEscalationAttempt(email.id, deps.now(), account)
+
   let delivered = false
   try {
     const outcome = await deps.deliver(deps.topic_id, {
