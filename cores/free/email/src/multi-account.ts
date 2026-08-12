@@ -424,9 +424,15 @@ export function buildMultiAccountGmailClient(
           const value = await buildClient(account).getMessage(input)
           return { ...value, ...stamp(account) }
         }
-        // The id names an account that is no longer connected. Fall through to
-        // the probe rather than 404-ing: a disconnected account is a reason to
-        // look elsewhere, not a reason to lose the message.
+        // NAMED BUT UNKNOWN ⇒ FAIL CLOSED. Falling through to the by-id probe
+        // looked generous ("a disconnected account is a reason to look
+        // elsewhere") and is in fact how the wrong mailbox gets read: Gmail
+        // ids are account-local, so if `acct-a` is disconnected while `acct-b`
+        // happens to hold the same id, the probe returns account B's message
+        // for a row that belongs to A. The caller then classifies B's content
+        // and marks A's row. An unnamed account may probe; a NAMED one must
+        // resolve or fail.
+        throw new MessageNotFoundError(input.message_id)
       }
       const { value, account } = await byId((client) => client.getMessage(input))
       return { ...value, ...stamp(account) }
@@ -452,9 +458,16 @@ export function buildMultiAccountGmailClient(
     async ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult> {
       // A label id is per-account, so the pipeline ensures the processed label
       // once PER ACCOUNT and passes the account it is about to write to.
-      const targeted =
-        input.account_id !== undefined ? await byAccountId(input.account_id) : null
-      return await (targeted ?? (await primary())).ensureLabel(input)
+      if (input.account_id !== undefined) {
+        const targeted = await byAccountId(input.account_id)
+        // NAMED BUT UNKNOWN ⇒ FAIL CLOSED. Silently falling back to the
+        // primary mints the label in the WRONG mailbox and hands back an id
+        // that is meaningless in the intended one — the caller then writes
+        // that id onto a message somewhere else entirely.
+        if (targeted === null) throw new OAuthMissingError()
+        return await targeted.ensureLabel(input)
+      }
+      return await (await primary()).ensureLabel(input)
     },
     async modifyThread(
       input: GmailThreadModifyInput,
@@ -464,12 +477,20 @@ export function buildMultiAccountGmailClient(
     async modifyMessage(
       input: GmailMessageModifyInput,
     ): Promise<GmailMessageModifyResult> {
-      const targeted =
-        input.account_id !== undefined ? await byAccountId(input.account_id) : null
-      if (targeted !== null) return await targeted.modifyMessage(input)
-      // No account named (or an id no longer connected): fall back to the
-      // by-id probe — the same walk `getMessage` uses, so a message in the
-      // third account is still labelled rather than 404-ing against the first.
+      if (input.account_id !== undefined) {
+        const targeted = await byAccountId(input.account_id)
+        // NAMED BUT UNKNOWN ⇒ FAIL CLOSED. This is the most dangerous of the
+        // three: `modifyMessage` ARCHIVES. Probing on a disconnected account
+        // means a pending mutation for (acct-a, shared-id) can strip INBOX
+        // from acct-b's unrelated message that happens to share the id, and
+        // then mark acct-a's row complete. A write must land in the mailbox it
+        // was computed for, or not at all.
+        if (targeted === null) throw new MessageNotFoundError(input.message_id)
+        return await targeted.modifyMessage(input)
+      }
+      // No account named: the by-id probe is still correct — the same walk
+      // `getMessage` uses, so a message in the third account is labelled
+      // rather than 404-ing against the first.
       const { value } = await byId((client) => client.modifyMessage(input))
       return value
     },

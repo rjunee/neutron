@@ -24,7 +24,7 @@ import type { EmailPipelineStore, EmailRow } from './store.ts'
  *  not import the gateway. */
 export type EscalationDeliver = (
   topic_id: string,
-  envelope: { body: string; durability: 'reply' },
+  envelope: { body: string; durability: 'reply'; idempotency_key?: string },
 ) => Promise<unknown>
 
 /** Structural mirror of `PushDispatcher.pushAll`. */
@@ -78,15 +78,43 @@ export async function escalateEmail(
     reason: email.reason,
   })
 
+  // TWO FAILURES, NOT ONE. Delivering to chat and recording that we delivered
+  // are separate acts that fail separately, and collapsing them into a single
+  // try meant a throw from `markEscalated` — the LOCAL write, after the owner
+  // had already been told — was recorded as a DELIVERY failure. The row stayed
+  // eligible and the next tick posted the same escalation again.
+  //
+  // So: the deliver call gets its own try, and the acknowledgement gets
+  // another. And because a durable post that we failed to record is exactly
+  // the case that re-fires, every post carries a deterministic
+  // `idempotency_key` — the seam collapses a re-emit of the same key rather
+  // than writing a second row (`gateway/http/deliver.ts`). Belt and braces:
+  // the key makes the retry harmless, the split makes it rare.
+  const account = email.account_id ?? null
+  const idempotency_key = `email-escalation:${account ?? ''}:${email.id}`
+
   let delivered = false
   try {
-    await deps.deliver(deps.topic_id, { body: text, durability: 'reply' })
-    deps.store.markEscalated(email.id, deps.now(), email.account_id ?? null)
+    await deps.deliver(deps.topic_id, { body: text, durability: 'reply', idempotency_key })
     delivered = true
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    deps.store.recordEscalationFailure(email.id, msg, deps.now(), email.account_id ?? null)
+    deps.store.recordEscalationFailure(email.id, msg, deps.now(), account)
     deps.log?.('email escalation chat delivery failed', { email_id: email.id, error: msg })
+  }
+
+  if (delivered) {
+    try {
+      deps.store.markEscalated(email.id, deps.now(), account)
+    } catch (err) {
+      // The owner HAS been told; only our note of it failed. Never counted as
+      // a delivery failure — the retry is guarded by the idempotency key.
+      const msg = err instanceof Error ? err.message : String(err)
+      deps.log?.('email escalation delivered but the acknowledgement write failed', {
+        email_id: email.id,
+        error: msg,
+      })
+    }
   }
 
   // Best-effort, ALONGSIDE. Fired regardless of the chat outcome (the owner's

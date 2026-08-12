@@ -64,6 +64,14 @@ export const STORED_BODY_LIMIT = 4000
 
 export const DEFAULT_MAX_RESULTS = 25
 export const DEFAULT_MAX_ESCALATION_ATTEMPTS = 5
+/**
+ * How many list pages ONE steady-state tick may walk looking for unhandled
+ * mail. Escalated messages retain INBOX, so the handled set at the top of the
+ * inbox grows; without a walk the poll starves behind it, and without a bound
+ * a tick could page an entire mailbox. 20 pages x 25 = 500 retained messages
+ * before a tick reports it ran out of budget.
+ */
+export const DEFAULT_MAX_POLL_PAGES = 20
 
 export type PipelineLog = (message: string, meta?: Record<string, unknown>) => void
 
@@ -81,6 +89,8 @@ export interface EmailPipelineTickDeps {
   max_escalation_attempts?: number
   /** Backlog messages marked per tick during the one-time sweep. */
   backlog_page_size?: number
+  /** List pages one steady-state tick may walk before giving up for now. */
+  max_poll_pages?: number
 }
 
 export interface EmailPipelineTickResult {
@@ -316,11 +326,18 @@ export async function runEmailPipelineTick(
     // stamped with the account it was read from. `exhaustive` because every
     // listed row is processed here — a capped merge would drop rows that no
     // later tick re-lists once they age out of the newest page.
-    const listed = await gmail.listMessages({
-      label: DEFAULT_LABEL,
-      max_results,
-      exhaustive: true,
-    })
+    // PAGE UNTIL NEW MAIL IS REACHED, not once. An ESCALATED message keeps
+    // INBOX on purpose — the owner still has to act on it — so the top of the
+    // inbox fills with messages this pipeline has already handled. A
+    // single-page poll therefore starves: with `max_results` retained
+    // escalations sitting at the top, every tick re-reads the same handled
+    // page, skips all of it via `hasEmail`, and NEVER reaches the message
+    // behind them. The owner's next important email would simply never arrive.
+    //
+    // So the tick walks pages until it has seen unhandled mail or run out,
+    // bounded by a page budget so one tick cannot run forever. Hitting the
+    // budget is LOGGED, never silent — a silently truncated poll is the same
+    // starvation wearing a different hat.
     const rules = store.listSenderRules()
     const classifyDeps: ClassifyDeps = { ...deps.classify, rules }
 
@@ -418,18 +435,57 @@ export async function runEmailPipelineTick(
       result.archived++
     }
 
-    for (const meta of listed.results) {
-      if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
-      result.scanned++
-      try {
-        await handleMessage(meta)
-      } catch (err) {
-        result.errors++
-        log?.('email pipeline message failed', {
-          email_id: meta.id,
-          error: err instanceof Error ? err.message : String(err),
-        })
+    const page_budget = deps.max_poll_pages ?? DEFAULT_MAX_POLL_PAGES
+    let cursor: string | undefined
+    let cursors: Record<string, string> = {}
+    let pages = 0
+    let exhausted = false
+
+    while (pages < page_budget) {
+      const listed = await gmail.listMessages({
+        label: DEFAULT_LABEL,
+        max_results,
+        exhaustive: true,
+        ...(cursor !== undefined ? { page_token: cursor } : {}),
+        ...(Object.keys(cursors).length > 0 ? { page_tokens: cursors } : {}),
+      })
+      pages++
+
+      for (const meta of listed.results) {
+        if (store.hasEmail(meta.id, meta.account_id ?? null)) continue
+        result.scanned++
+        try {
+          await handleMessage(meta)
+        } catch (err) {
+          result.errors++
+          log?.('email pipeline message failed', {
+            email_id: meta.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
+
+      // Stop as soon as this tick has done real work: the remaining pages are
+      // older mail that is not going anywhere, and the next tick resumes from
+      // the top in five minutes. Only a page that was ENTIRELY already-handled
+      // forces the walk onward — that is the starvation case.
+      if (result.scanned > 0) {
+        exhausted = true
+        break
+      }
+      cursor = listed.next_page_token
+      cursors = { ...(listed.next_page_tokens ?? {}) }
+      if (cursor === undefined && Object.keys(cursors).length === 0) {
+        exhausted = true
+        break
+      }
+    }
+
+    if (!exhausted) {
+      log?.('email pipeline poll hit its page budget without reaching unhandled mail', {
+        pages,
+        page_budget,
+      })
     }
 
     // (4) Checkpoints. A clean tick clears the failure streak.
