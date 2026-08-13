@@ -2236,6 +2236,11 @@ export function buildOpenGraphComposer(
         const nowMs = Date.now()
         for (const item of workBoardStore.list(scopeKey)) {
           if (item.inline_active) hasInlineActive = true
+          // Durable failure signal: status='failed' is written only by terminal
+          // reconcile (detachRun), so it is positive data even when the link is
+          // cleared (research/dispatch runs, reconcile link clear). Check before
+          // the runId skip so runless-but-failed items are not missed.
+          if (item.status === 'failed' && item.status !== 'done') hasFailedNotDone = true
           const runId = item.linked_run_id
           if (runId === null || runId.length === 0) continue
           const run = boardRunStore.get(runId)

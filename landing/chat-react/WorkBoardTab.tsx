@@ -103,21 +103,24 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
 }
 
 /**
- * True when the ▶/↻ (start/retry) control should render: the item is NOT done
- * and has NO live linked run. Gated on the LIVE run, not the status lane —
- * an in_progress card whose run is dead must offer ↻ (owner defect 2026-08-12;
+ * True when the ▶/↻ (start/retry) control should render: the item is NOT done,
+ * has NO live linked run, and is NOT inline-active (agent is working inline —
+ * no competing build). Gated on the LIVE run, not the status lane — an
+ * in_progress card whose run is dead must offer ↻ (owner defect 2026-08-12;
  * the old `status !== 'in_progress'` clause made a failed-run in_progress card
- * unrecoverable from the UI). Only `done` and a live linked run suppress the
- * control.
+ * unrecoverable from the UI).
  */
 function canPlay(item: WorkBoardItem): boolean {
-  return item.status !== 'done' && !isLinkedRunning(item)
+  return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active
 }
 
-/** ▶ vs ↻ — a card that carries a (now-detached) binding or a failed run RETRIES. */
+/** ▶ vs ↻ — a card that carries a (now-detached) binding, a failed run, or a
+ *  durable status='failed' lane RETRIES. The last check covers the runless failed
+ *  card whose link was cleared by reconcile. */
 function isRetry(item: WorkBoardItem): boolean {
   if (item.linked_run_id !== null && item.linked_run_id.length > 0) return true
-  return item.run_progress?.step_label === 'failed'
+  if (item.run_progress?.step_label === 'failed') return true
+  return item.status === 'failed'
 }
 
 /* ── M1 redesign — dot / tag / round derivations ─────────────────────────── */
@@ -196,9 +199,10 @@ function dotState(item: WorkBoardItem): DotState {
   // (work-board/store.ts detachRun), so this is positive data, NOT inferring
   // failure from absence of run_progress.
   if (item.status === 'failed') return { cls: 'cwb-dot-failed', pulse: false }
-  // A pulse is a claim that something is moving, so only a LIVE bound run earns
-  // one. A runless in_progress card renders a STATIC dot.
-  if (item.status === 'in_progress') return { cls: 'cwb-dot-build', pulse: isLinkedRunning(item) }
+  // A pulse is a claim that something is moving: either a LIVE bound run OR
+  // an inline agent action (inline_active). The status lane alone never earns
+  // a pulse — a runless, non-inline in_progress card renders a STATIC dot.
+  if (item.status === 'in_progress') return { cls: 'cwb-dot-build', pulse: isLinkedRunning(item) || item.inline_active }
   return { cls: 'cwb-dot-upcoming', pulse: false }
 }
 
@@ -261,7 +265,8 @@ export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
   for (const it of items) {
     if (isLinkedRunning(it)) {
       running += 1
-    } else if (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed') {
+    } else if (it.status === 'failed' || (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed')) {
+      // Count durable status='failed' cards even when run_progress has been cleared.
       failed += 1
     } else if (it.status !== 'done' && (it.status === 'in_progress' || it.inline_active)) {
       // A plain in-flight card (no live run, not terminal) — in_progress OR

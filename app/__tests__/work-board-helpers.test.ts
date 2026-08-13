@@ -175,6 +175,10 @@ describe('dotState', () => {
     expect(dotState(item({ status: 'in_progress', linked_run_id: null }))).toEqual({ colorKey: 'build', pulse: false });
   });
 
+  it('an inline_active card pulses even without a bound run (inline agent action = movement)', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: null, inline_active: true }))).toEqual({ colorKey: 'build', pulse: true });
+  });
+
   it('an in_progress card with a live bound run (no progress row yet — e.g. a research dispatch) pulses', () => {
     expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' }))).toEqual({ colorKey: 'build', pulse: true });
   });
@@ -219,6 +223,10 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
     expect(canPlay(item({ status: 'done' }))).toBe(false);
   });
 
+  it('an inline_active card (agent working inline) cannot play — no competing build', () => {
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: null, inline_active: true }))).toBe(false);
+  });
+
   it('an in_progress card whose run is DEAD offers ↻ — the card must be recoverable from the UI', () => {
     const dead = item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) });
     expect(isLinkedRunning(dead)).toBe(false);
@@ -235,6 +243,12 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
     const failed = item({ status: 'failed', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) });
     expect(canPlay(failed)).toBe(true);
     expect(isRetry(failed)).toBe(true);
+  });
+
+  it('a durable status=failed card with no linked_run_id and no run_progress retries (↻, not ▶)', () => {
+    const runless = item({ status: 'failed', linked_run_id: null });
+    expect(canPlay(runless)).toBe(true);
+    expect(isRetry(runless)).toBe(true);
   });
 });
 
@@ -318,8 +332,13 @@ describe('row/rail lockstep — the row dot and the project rail dot must agree 
     expect(railDotKind('working', false)).toBe('work');
   });
 
-  it('runless in_progress: NEITHER side claims movement — static row dot, idle rail', () => {
+  it('runless, non-inline in_progress: NEITHER side claims movement — static row dot, idle rail', () => {
     expect(dotState(item({ status: 'in_progress', linked_run_id: null })).pulse).toBe(false);
     expect(railDotKind('idle', false)).toBe('idle');
+  });
+
+  it('inline_active: row pulses (working) and rail shows work — movement claimed together', () => {
+    expect(dotState(item({ status: 'in_progress', inline_active: true, linked_run_id: null })).pulse).toBe(true);
+    expect(railDotKind('working', false)).toBe('work');
   });
 });

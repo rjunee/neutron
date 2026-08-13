@@ -735,9 +735,9 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
-  it('failed card with no run_progress: static cwb-dot-failed dot + Start build control (A)', async () => {
+  it('failed card with no run_progress: static cwb-dot-failed dot + Retry build control (A)', async () => {
     // Fixture (A): status='failed', no linked_run_id, no run_progress.
-    // isLinkedRunning → false (no binding); canPlay → true; isRetry → false → '▶' 'Start build'.
+    // isLinkedRunning → false (no binding); canPlay → true; isRetry → true (status='failed') → '↻' 'Retry build'.
     // dotState fallback branch: status='failed' → cwb-dot-failed, no pulse.
     const rows = [item({ id: 'wf', status: 'failed', linked_run_id: null })]
     const { container, root, act } = await mount(listOf(rows))
@@ -748,7 +748,8 @@ describe('WorkBoardTab (happy-dom)', () => {
 
     const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
     expect(playBtn).not.toBeNull()
-    expect(playBtn!.getAttribute('aria-label')).toBe('Start build')
+    expect(playBtn!.getAttribute('aria-label')).toBe('Retry build')
+    expect(playBtn!.textContent).toBe('↻')
 
     await act(async () => root.unmount())
   })
@@ -788,12 +789,12 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
-  it('runless in_progress card: static cwb-dot-build dot (no pulse) + Start build control (B)', async () => {
-    // Fixture (B): status='in_progress', no binding, no run_progress.
+  it('runless non-inline in_progress card: static cwb-dot-build dot (no pulse) + Start build control (B)', async () => {
+    // Fixture (B): status='in_progress', no binding, no run_progress, inline_active=false.
     // isLinkedRunning → false; dotState fallback: in_progress → cwb-dot-build, pulse=false.
-    // canPlay → true (no `status !== 'in_progress'` clause); isRetry → false → 'Start build'.
+    // canPlay → true (no live run, not inline_active); isRetry → false → 'Start build'.
     // Mutation-resistant: re-adding pulse:true on the status lane fails this; re-adding
-    // `status !== 'in_progress'` to canPlay fails the play-control assertion.
+    // `status !== 'in_progress'` or `inline_active=true` to canPlay fails the play-control assertion.
     const rows = [item({ id: 'wp', status: 'in_progress', linked_run_id: null })]
     const { container, root, act } = await mount(listOf(rows))
 
@@ -804,6 +805,24 @@ describe('WorkBoardTab (happy-dom)', () => {
     const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
     expect(playBtn).not.toBeNull()
     expect(playBtn!.getAttribute('aria-label')).toBe('Start build')
+
+    await act(async () => root.unmount())
+  })
+
+  it('inline_active card: static cwb-dot-build dot (pulse) + NO play control (C)', async () => {
+    // Fixture (C): status='in_progress', no binding, inline_active=true.
+    // Agent is working inline — the ▶ must be hidden to prevent a competing build.
+    // dotState: in_progress + inline_active → cwb-dot-build, pulse=true (rail also pulses).
+    // canPlay → false (inline_active); isRetry irrelevant (control absent).
+    const rows = [item({ id: 'wi', status: 'in_progress', linked_run_id: null, inline_active: true })]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-build')
+    expect(dot!.className).toContain('cwb-dot-pulse')
+
+    const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
+    expect(playBtn).toBeNull()
 
     await act(async () => root.unmount())
   })
