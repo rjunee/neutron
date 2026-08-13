@@ -189,7 +189,7 @@ function json(body: unknown, status = 200): Response {
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
 
 /** Mounts the REAL SettingsTab; only the dashboard route varies per test. */
-async function mount(dashboard: () => Response): Promise<{
+async function mount(dashboard: () => Response | Promise<Response>): Promise<{
   container: HTMLElement
   root: { unmount: () => void }
 }> {
@@ -645,6 +645,95 @@ describe('the card REFETCHES, not just re-renders', () => {
       ).toBe('just now')
     } finally {
       setSystemTime()
+      ;(globalThis as unknown as Record<string, unknown>)['setInterval'] = realSetInterval
+      mounted?.root.unmount()
+    }
+  })
+})
+
+describe('a slow poll never rolls the card backwards', () => {
+  it('drops a superseded response instead of rendering it over a newer one', async () => {
+    // TWO POLLS IN FLIGHT AT ONCE. The interval does not wait for the previous
+    // response, so a slow request and the fresh one behind it overlap — and if the
+    // slow one settles LAST it wins purely by arriving late. The card then shows a
+    // reading it already knows is superseded, wearing the age chip of the newer one:
+    // fabricated freshness, which is the exact class this card exists to prevent.
+    // The mobile twin (`app/__tests__/usage-dashboard-reachable.test.tsx`) pins the
+    // same behaviour; the guard is on both clients or it is documentation.
+    const { USAGE_POLL_MS } = await import('../usage-dashboard-client.ts')
+    const { act } = await import('react')
+    const ticks: Array<() => void> = []
+    const realSetInterval = globalThis.setInterval
+    // Each POLLED response is held open until this test releases it, so the settle
+    // ORDER is chosen here rather than raced for. The mount load is not gated —
+    // StrictMode double-invokes it and it is not what this test is about.
+    let gating = false
+    const gates: Array<() => void> = []
+    let polls = 0
+    const payload = (fraction: number): Response =>
+      json({
+        pools: [
+          poolOf({
+            accounts: [
+              account({
+                measured_at: Date.now(),
+                weekly: null,
+                session: window_({ fraction, pace: null, exhausts_at: null }),
+              }),
+            ],
+          }),
+        ],
+      })
+    const dashboard = (): Response | Promise<Response> => {
+      if (!gating) return payload(0.5)
+      // Poll 0 is the OLD reading (25%), poll 1 the NEW one (75%).
+      const body = payload(polls++ === 0 ? 0.25 : 0.75)
+      return new Promise<Response>((release) => gates.push(() => release(body)))
+    }
+    ;(globalThis as unknown as Record<string, unknown>)['setInterval'] = ((
+      fn: () => void,
+      ms: number,
+    ) => {
+      if (ms === USAGE_POLL_MS) ticks.push(fn)
+      return 0
+    }) as unknown as typeof setInterval
+    let mounted: { container: HTMLElement; root: { unmount: () => void } } | null = null
+    const pct = (c: HTMLElement): string | undefined =>
+      c.querySelector('[data-testid="usage-anthropic-acct-0-session-pct"]')?.textContent ?? undefined
+    try {
+      mounted = await mount(dashboard)
+      const { container } = mounted
+      expect(pct(container)).toBe('50%')
+      expect(ticks.length).toBeGreaterThan(0)
+
+      // Two polls, both outstanding.
+      gating = true
+      await act(async () => {
+        ticks[ticks.length - 1]!()
+        await tick()
+        ticks[ticks.length - 1]!()
+        await tick()
+      })
+      expect(gates.length).toBe(2)
+
+      // THE NEWER ONE LANDS FIRST…
+      await act(async () => {
+        gates[1]!()
+        await tick()
+        await tick()
+      })
+      expect(pct(container)).toBe('75%')
+
+      // …and then the OLDER one, which must be discarded. THE MUTANT THIS KILLS:
+      // drop the sequence guard and this flips back to '25%' — the card rolling
+      // backwards onto a reading it had already replaced.
+      await act(async () => {
+        gates[0]!()
+        await tick()
+        await tick()
+      })
+      expect(pct(container)).toBe('75%')
+    } finally {
       ;(globalThis as unknown as Record<string, unknown>)['setInterval'] = realSetInterval
       mounted?.root.unmount()
     }

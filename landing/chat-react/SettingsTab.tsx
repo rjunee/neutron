@@ -179,9 +179,22 @@ export function SettingsTab({
   // ever visibly wrong.
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
 
+  // WHICH LOAD IS THE LATEST ONE ASKED FOR. Polls overlap: the interval below fires
+  // every `USAGE_POLL_MS` and does not wait for the previous response, so a slow
+  // request and the fresh one behind it are in flight together and can settle in
+  // either order. Without a sequence the older answer wins simply by landing last,
+  // and the card rolls BACKWARDS onto a stale sample — countdowns jumping back up,
+  // capacity re-appearing after it was spent. That is a fabricated-freshness bug
+  // wearing the age chip of the newer reading, which is the one class this card
+  // exists to make impossible. The mobile twin (`app/app/usage.tsx`) carries the
+  // same guard, for the same reason.
+  const usageSeqRef = useRef(0)
   const loadUsage = useCallback((): void => {
+    const seq = (usageSeqRef.current += 1)
     void usageDashboardClient.load().then((next) => {
       if (!mountedRef.current) return
+      // A superseded response is DROPPED, never rendered.
+      if (seq !== usageSeqRef.current) return
       setUsage(next)
     })
   }, [usageDashboardClient])

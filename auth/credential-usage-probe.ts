@@ -112,8 +112,40 @@ export interface UsageProbeDeps {
   timeoutMs?: number
   /** The clock the reset plausibility bound is measured against. */
   now?: () => number
-  /** Override the API base — tests point this at a mock. */
+  /**
+   * Override the API base — tests point this at a mock, and `ANTHROPIC_BASE_URL`
+   * points it at a gateway. See {@link probeMessagesUrl} for why it is joined by
+   * concatenation rather than by `new URL`.
+   */
   apiBaseUrl?: string
+}
+
+/**
+ * The probe's endpoint under a given base, joined the ONE way that is safe here.
+ *
+ * `new URL('/v1/messages', base)` is wrong twice over for an operator-supplied base,
+ * and both failures are silent at the call site:
+ *
+ *   - IT THROWS on a base with no scheme. `ANTHROPIC_BASE_URL=api.example.com` is an
+ *     ordinary thing for an operator to type, and `new URL` answers it with a
+ *     `TypeError`. Thrown from the probe body it would escape {@link
+ *     probeCredentialUsage}'s "NEVER throws" contract — past the `try` that only
+ *     wraps the fetch — and take out the 60-second tick loop that calls it, for a
+ *     typo. Concatenation cannot throw; a malformed base becomes a failed FETCH,
+ *     which is already a tagged `error` outcome, retried on the next tick.
+ *   - IT DISCARDS THE BASE'S PATH. A root-relative reference resolves against the
+ *     ORIGIN, so a gateway at `https://gw.example.com/anthropic` is probed at
+ *     `https://gw.example.com/v1/messages` — a different service. The probe then
+ *     reports whatever that answers, and a 401 from the wrong door reads exactly
+ *     like a dead credential: enough to fire a "reconnect your account" notice about
+ *     a credential that is fine.
+ *
+ * So the path is APPENDED, trailing slashes trimmed, exactly as the Kimi twin does
+ * it (`trident/kimi-usage-probe.ts`). The default is used verbatim.
+ */
+export function probeMessagesUrl(apiBaseUrl: string | undefined): string {
+  if (apiBaseUrl === undefined) return ANTHROPIC_MESSAGES_URL
+  return `${apiBaseUrl.replace(/\/+$/, '')}/v1/messages`
 }
 
 function numberHeader(headers: Headers, name: string): number | undefined {
@@ -185,10 +217,7 @@ export async function probeCredentialUsage(
   deps: UsageProbeDeps = {},
 ): Promise<CredentialUsageProbeOutcome> {
   const doFetch = deps.fetch ?? fetch
-  const url =
-    deps.apiBaseUrl === undefined
-      ? ANTHROPIC_MESSAGES_URL
-      : new URL('/v1/messages', deps.apiBaseUrl).toString()
+  const url = probeMessagesUrl(deps.apiBaseUrl)
   let res: Response
   try {
     res = await doFetch(url, {

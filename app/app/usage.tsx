@@ -330,6 +330,20 @@ export default function ModelUsageScreen() {
     };
   }, []);
 
+  // WHICH LOAD IS THE LATEST ONE ASKED FOR. Polls overlap: the interval fires every
+  // `USAGE_POLL_MS` and does not wait for the previous response, so a slow request
+  // and the fresh one behind it are in flight together and can settle in either
+  // order. Without a sequence the older answer wins simply by landing last, and the
+  // screen rolls BACKWARDS onto a stale sample — countdowns jumping back up,
+  // capacity re-appearing after it was spent. That is a fabricated-freshness bug
+  // wearing the age chip of the newer reading, which is the one class this screen
+  // exists to make impossible.
+  //
+  // A counter rather than an AbortController: a superseded response is still a
+  // perfectly good reading and the next tick is seconds away, so there is nothing to
+  // gain by cancelling it — only a discarded one to avoid rendering.
+  const loadSeqRef = useRef(0);
+
   const load = useCallback(
     async (visible: boolean) => {
       if (client === null) return;
@@ -337,9 +351,13 @@ export default function ModelUsageScreen() {
       // background poll that flipped it would make the screen look busy every
       // thirty seconds forever, and would disable the control he came to press.
       if (visible) setRefreshing(true);
+      const seq = (loadSeqRef.current += 1);
       const next = await client.load();
       if (!mountedRef.current) return;
-      setUsage(next);
+      // A response from a load that has already been superseded is DROPPED, never
+      // rendered. The spinner still clears: the owner pressed the button and it has
+      // to stop saying "Refreshing…", and the newer load will paint what he asked for.
+      if (seq === loadSeqRef.current) setUsage(next);
       if (visible) setRefreshing(false);
     },
     [client],

@@ -153,6 +153,23 @@ export type UsagePoolConnection =
   /** Configured, but this credential has no subscription window to read. */
   | 'no_meter'
   /**
+   * Configured, and THIS BUILD SHIPS NO GAUGE FOR IT — the provider's poller has
+   * not landed yet.
+   *
+   * The distinction from `connected` is the same one `unreadable` draws, one step
+   * earlier: "no readings yet" promises a first reading is coming, and for a pool
+   * with no writer in the binary that is a promise nothing can keep. Codex is the
+   * live case — its credential resolves, its gauge is a later phase — and a card
+   * that said "No readings yet." would have the owner waiting on a poller that does
+   * not exist. Unlike `unreadable` it is not a fault: nothing is misconfigured and
+   * there is nothing to go and fix.
+   *
+   * IT DISAPPEARS BY DELETION. When a provider's poller lands, its composer arm
+   * stops returning this and the state is simply unreachable for that pool — there
+   * is no flag to unset and no second code path to remove.
+   */
+  | 'no_gauge'
+  /**
    * Configured, the gauge was asked, and the answer could not be turned into a
    * reading — the key was rejected, or the payload was in a shape this build does
    * not understand.

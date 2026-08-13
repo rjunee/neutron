@@ -291,10 +291,13 @@ and a response that names no account carries a null label.
 ## What the surface says, and what it refuses to
 
 Three pools are served every time, in `USAGE_POOLS` order, each with a `connection`
-of `connected` / `not_connected` / `no_meter` / `unreadable` resolved from the SAME
-functions the rest of the product uses. Codex has no writer until Phase 3 and renders
-"Not connected." rather than a row of zeros — a connected-and-idle account and an
-unconfigured one are different problems with different fixes. A per-token Anthropic
+of `connected` / `not_connected` / `no_meter` / `no_gauge` / `unreadable` resolved
+from the SAME
+functions the rest of the product uses. Codex has no writer until Phase 3: with no
+credential it renders "Not connected.", and WITH one it renders `no_gauge` — never a
+row of zeros. A connected-and-idle account, an unconfigured one and one this build
+does not meter at all are three different problems with three different fixes (and
+the third is not a fix at all). A per-token Anthropic
 API key is `no_meter`, not "not connected", because telling the owner to reconnect a
 working account sends them to fix the wrong thing.
 
@@ -359,10 +362,10 @@ through every comparison and prints "NaNd NaNh", which is neither a countdown no
 admission that there is none. One comparison makes the bad render unreachable rather
 than merely unreached.
 
-## "Asked and refused" is not "no readings yet"
+## "Asked and refused" is not "no readings yet" — and neither is "nothing is asking"
 
-A fourth `connection` value, `unreadable`, and it is the one that does not resolve
-itself. "No readings yet." promises a first reading is coming; when the gauge has
+Two more `connection` values, `unreadable` and `no_gauge`, and they are the two that
+do not resolve themselves. Take `unreadable` first. "No readings yet." promises a first reading is coming; when the gauge has
 been asked and its answer refused — a rejected key, a non-auth 4xx from a path this
 build has wrong, or a payload shape it does not model — none is. Kimi's usages schema
 is unpublished, so that is the realistic first-install failure, and without this the
@@ -397,6 +400,30 @@ answering 200 with an unmodelled body, and
 a subscription token on disk. A hand-built `connection: 'unreadable'` literal would
 prove only that a test file can write one.
 
+**And `no_gauge` is the same promise broken one step earlier: nothing is polling that
+provider at all.** Codex is the live case. Its credential resolves through
+`resolveActiveCodexHome`, so the pool used to report `connected` — which means "empty
+because the first reading has not landed YET" — and the card said "No readings yet." on
+every install that has Codex connected. No writer records `pool: 'codex'` in this
+build: grepping the sample writers hits the positive controls `pool: 'anthropic'` and
+`pool: 'kimi'` in `open/composer.ts` and nothing for `'codex'`, so the tick being
+waited for is not in the binary. `not_connected` would be the opposite lie on a box
+that HAS the credential. So the arm reports `no_gauge` and the card says "Connected.
+This build doesn't meter this provider yet, so there is nothing to read." It is kept
+apart from `unreadable` because the two send the owner to different places: a refusal
+is a FAULT (check the key, then the logs), an unshipped phase is not — nothing is
+misconfigured and there is nothing to go and fix. It disappears BY DELETION when the
+Codex gauge lands: that arm stops returning it and the state is simply unreachable for
+the pool. No flag, no second path.
+
+`open/__tests__/usage-dashboard-wiring.test.ts` pins it against the production
+composer: it reads the composed payload with no Codex credential (`not_connected`),
+stores one through the SAME credential store the Settings pane writes to, re-fetches
+from the SAME composition — which also pins that the connection is resolved PER
+REQUEST rather than latched at boot — and asserts `no_gauge`, still no accounts, still
+no `measured_at`, and the sentence the shipped client renders from it. The mutant is
+returning `'connected'`, which flips the sentence back to the promise.
+
 ## The one thing this phase still cannot demonstrate
 
 **The Kimi alias list has never been checked against a real response**, and no
@@ -418,6 +445,94 @@ What this build does about it, given it cannot fix it:
 
 Correcting the alias list from that log line is a one-line follow-up and is
 deliberately NOT guessed at here.
+
+**So the first `kimi_usage_shape_unrecognised` log on a real install is EXPECTED
+CALIBRATION WORK, not a regression.** Stating it here is the point: without it, the
+line reads as a defect against a parser that was never validated end to end, and the
+demonstrated acceptance for this pool is the honest failure path rather than a live
+reading. The log carries the key names; the fix is to add them to `WINDOW_LIST_KEYS` /
+`PERCENT_KEYS` / `FRACTION_KEYS` / `WINDOW_LENGTH_KEYS` / `RESET_KEYS` in
+`trident/kimi-usage-probe.ts` and nothing else.
+
+**One input on that path was unbounded and now is not: the window LENGTH.** The reset
+INSTANTS were plausibility-checked from the start, but `window_seconds` was believed
+for any positive finite value — so a field that meant something else produced a
+confident label ("11574074d window") and, worse, silently decided the SLOT, since every
+length above the 24-hour divider is filed as the WEEKLY window. One absurd number put a
+short-window standing in the seven-day row under the right name. `MAX_WINDOW_LENGTH_MS`
+is 400 days, deliberately the same figure as `RESET_FUTURE_PLAUSIBILITY_MS`: a rolling
+window of length L resets at most L away, so a length the parser believes but whose
+resets it would refuse is two bounds disagreeing with each other. Out of range REFUSES
+rather than clamps — a clamped length is a made-up number driving the same slot
+decision — which makes the entry unreadable and the whole response `unrecognised`,
+loud, with the key names travelling out. Pinned with a positive control that a real
+7-day window expressed in seconds is still believed.
+
+## The gauge's own base URL was operator input, joined the one way that breaks
+
+`open/composer.ts` threads `ANTHROPIC_BASE_URL` straight into the probe's
+`apiBaseUrl`, so whatever the operator typed is what the probe is handed. It was
+joined with `new URL('/v1/messages', base)`, which is wrong twice over on that input
+and silent both times.
+
+**It THROWS on a base with no scheme.** `ANTHROPIC_BASE_URL=api.example.com` is an
+ordinary thing to type and `new URL` answers it with a `TypeError`. The URL was built
+BEFORE the probe's `try`, which only wraps the fetch — so the throw escaped a function
+whose header promises it NEVER throws, out of a body running inside a 60-second tick
+loop. `SupervisedLoop`'s catch-all meant nothing crashed and nothing recovered either:
+every tick failed identically, the monitor never left its pre-tick state, the card
+never got a reading, and five ticks in the loop escalated. A one-character typo took
+the whole meter out quietly.
+
+**And it DISCARDS the base's path.** A root-relative reference resolves against the
+ORIGIN, so a gateway at `https://gw.example.com/anthropic` was probed at
+`https://gw.example.com/v1/messages` — a different service. The probe then reported
+whatever that answered, and a 401 from the wrong door is indistinguishable from a dead
+credential: enough to fire the "reconnect your account" lapse notice about a
+credential that is fine.
+
+The fix is the join the Kimi twin already used: trim trailing slashes and APPEND, in a
+named `probeMessagesUrl`. Concatenation cannot throw, so a malformed base becomes a
+failed FETCH — already a tagged `error` outcome, transient, retried next tick — and a
+path prefix is kept.
+
+Two tests, at two altitudes. `auth/__tests__/credential-usage-probe.test.ts` pins the
+join itself (prefix kept, trailing slash not doubled, scheme-less base does not throw,
+default used verbatim) and that the probe reports a scheme-less base as an ordinary
+`error`. `open/__tests__/usage-dashboard-base-url-wiring.test.ts` pins the COMPOSED
+path: it boots the real composer with a scheme-less `ANTHROPIC_BASE_URL`, waits for the
+monitor to leave `not_measured_yet` — which is exactly what the bug prevented — and
+asserts the loop's own error sink logged no escaped throw, then that the card stays
+`connected` with no accounts and no `measured_at` rather than accusing a working
+credential or drawing a zero. Restoring `new URL` turns it red on the reached-an-outcome
+assertion, verified.
+
+## Two client-side fixes in the same pass
+
+**A slow poll could roll a screen backwards.** Both screens refetch on a 30-second
+interval that does not wait for the previous response, so two requests are routinely
+in flight together and either can settle first. Nothing sequenced them: an older
+response landing last won purely by arriving late, repainting a reading already known
+to be superseded — with the newer reading's age chip beside it. That is fabricated
+freshness reached from the client side, the one class this surface exists to prevent.
+Each load now takes a generation number and a superseded response is dropped rather
+than rendered. A counter rather than an `AbortController`: a late reading is still a
+good reading and the next tick is seconds away, so there is nothing to gain by
+cancelling it, only a discarded one to avoid painting. The owner-pressed refresh still
+clears its spinner either way — he pressed the button and it has to stop saying
+"Refreshing…". Pinned on BOTH screens with two gated responses released newest-first.
+
+**And "Next up:" named an account nobody could vouch for.** `capacityRank` documents
+that an `unknown` standing sorts LAST, "not the one to point the owner at" — but the
+note was rendered for any pool with two or more accounts regardless of standing. With
+every reading stale, all accounts rank equal and the "winner" is whichever the
+tie-break reached first, so the card printed "Next capacity unknown (2 unknown)" and
+"Next up: ‹account›" directly beneath it: the one line that admits ignorance with a
+confident answer stapled to it. The owner reads that name as where to send
+concurrency, which makes it the same failure class as an absent reset rendering as
+"now". It now returns null on an `unknown` standing — the headline already said why —
+with a positive control that a KNOWN standing still names its account, so a note that
+returned null unconditionally would go red.
 
 ## What the tests assert, and where
 
@@ -451,6 +566,13 @@ deliberately NOT guessed at here.
   401: the composed payload reports `unreadable` for the Anthropic pool, still with no
   accounts and no `measured_at`, and the sentence comes from the shipped client. The
   mutant it kills is deriving "connected" from the credential file.
+- `open/__tests__/usage-dashboard-base-url-wiring.test.ts` — **also against the
+  production composer's output.** A scheme-less `ANTHROPIC_BASE_URL`: the monitor
+  leaves its pre-tick state (so the tick REACHED an outcome rather than throwing past
+  its own `try`), the loop's error sink logged no escaped throw, and the card stays
+  `connected` with no accounts and no `measured_at` — a transport failure is transient
+  and must not accuse a working credential. No host is contacted; a scheme-less base
+  cannot be fetched at all, which is the point.
 - `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` — **also against the
   production composer's output.** The sibling wiring test points the poller at a
   CLOSED port, so it can only ever produce a transport error; this one boots the real
@@ -484,14 +606,19 @@ deliberately NOT guessed at here.
   at exactly 95%, and a window that rolled between measurement and paint rendering
   "just reset" rather than at its pre-roll percentage. Both screens additionally assert
   that a REFUSED pool which already has readings shows the figures AND the sentence,
-  with a control that a healthy pool carries no banner.
+  with a control that a healthy pool carries no banner. Both screens also pin poll
+  SEQUENCING — two responses held open and released newest-first, where the superseded
+  one must be discarded rather than painted — and the parity test pins that "Next up:"
+  names nobody when every account's standing is unknown, with a positive control that a
+  known standing still names its account.
 
 ## Wire-shape change worth naming
 
 `PoolSummary` moved its windows from the pool level onto `accounts[]` and gained
 `connection` and `stale_after_ms`. It deliberately does NOT carry `age_ms`, `stale`,
 `floor`, `binding`, `capacity` or `resets_in_ms`: every one of those is a delta, and
-the section above is why. `connection` gained a fourth value, `unreadable`; an older
+the section above is why. `connection` gained two values beyond the meter's
+vocabulary, `unreadable` and `no_gauge`; an older
 client decodes an unknown value as `connected`, which is the honest degradation — it
 says nothing rather than blaming the owner's setup. There is no dual path and no flag: the two clients ship in
 this PR. A client older than this one decodes zero accounts and renders its honest

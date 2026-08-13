@@ -47,9 +47,10 @@ import {
   UsageSamplesStore,
   type PoolSummary,
 } from '@neutronai/persistence/usage-samples-store.ts'
-import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
+import { GLOBAL_PROJECT_ID, ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { KIMI_CREDENTIAL_SERVICE } from '@neutronai/trident/kimi-key.ts'
+import { CODEX_CREDENTIAL_SERVICE } from '@neutronai/trident/codex-credential.ts'
 import { USAGE_POLL_INTERVAL_MS } from '../credential-usage-monitor.ts'
 import { KIMI_USAGE_POLL_INTERVAL_MS } from '../kimi-usage-monitor.ts'
 
@@ -87,6 +88,9 @@ let db: ProjectDb
 let pools: PoolSummary[]
 let loopNames: string[]
 let cleanup: () => Promise<void> = async () => {}
+/** Re-issued against the SAME composition, so a per-request resolver can be seen. */
+let fetchPools: () => Promise<PoolSummary[]> = async () => []
+let credentials: ProjectCredentialStore
 
 /** The reading a card renders from, written straight into the composed database. */
 async function seedSamples(now: number): Promise<void> {
@@ -137,7 +141,7 @@ beforeAll(async () => {
   // A stored Kimi key — the same credential the Settings pane writes and the
   // review panel reads. This is what makes the Kimi card `connected`.
   const secrets = new SecretsStore({ data_dir: tmpDir, db })
-  const credentials = new ProjectCredentialStore(db, { crypto: secrets })
+  credentials = new ProjectCredentialStore(db, { crypto: secrets })
   await credentials.set(asOwnerHandle('owner'), {
     scope: 'global',
     service: KIMI_CREDENTIAL_SERVICE,
@@ -161,13 +165,16 @@ beforeAll(async () => {
 
   // The handler the composition CARRIES — the one the route ladder serves.
   // Loopback bind ⇒ dev-bypass auth ⇒ the `dev:owner` bearer resolves to the owner.
-  const res = await composition.app_usage_surface!.handler(
-    new Request('http://127.0.0.1/api/app/usage/dashboard', {
-      headers: { authorization: 'Bearer dev:owner' },
-    }),
-  )
-  expect(res?.status).toBe(200)
-  pools = ((await res!.json()) as { pools: PoolSummary[] }).pools
+  fetchPools = async (): Promise<PoolSummary[]> => {
+    const res = await composition.app_usage_surface!.handler(
+      new Request('http://127.0.0.1/api/app/usage/dashboard', {
+        headers: { authorization: 'Bearer dev:owner' },
+      }),
+    )
+    expect(res?.status).toBe(200)
+    return ((await res!.json()) as { pools: PoolSummary[] }).pools
+  }
+  pools = await fetchPools()
 }, 30_000)
 
 afterAll(async () => {
@@ -283,6 +290,60 @@ test('the Codex card is honestly empty — no accounts, no zeros, and a reason',
   const view = projectPool(decoded.pools.find((p) => p.pool === 'codex')!, Date.now())
   expect(connectionNote(view)).toBe('Not connected.')
   expect(capacityLine(view)).toBeNull()
+})
+
+/**
+ * A CONNECTED CODEX CREDENTIAL MUST NOT SAY "No readings yet."
+ *
+ * `connected` means "empty because the first reading has not landed YET", and the
+ * card renders it as a sentence promising that reading. No writer records
+ * `pool: 'codex'` in this build — the positive controls `pool: 'anthropic'` and
+ * `pool: 'kimi'` both appear in `open/composer.ts` and `'codex'` does not — so the
+ * promise is one nothing in the binary can keep, and the owner would wait forever on
+ * a poller that is not there.
+ *
+ * The credential is stored through the SAME store the Settings pane writes to, and
+ * the dashboard is re-fetched from the SAME composition: the connection is resolved
+ * PER REQUEST, so this also pins that the card follows the credential without a
+ * restart. It reads a real value out of the composed response before asserting on
+ * it, rather than trusting the field name.
+ */
+test('a Codex credential renders "no gauge", not a promise of a first reading', async () => {
+  const before = (await fetchPools()).find((p) => p.pool === 'codex')!
+  expect(before.connection).toBe('not_connected')
+
+  await credentials.set(asOwnerHandle('owner'), {
+    scope: 'global',
+    service: CODEX_CREDENTIAL_SERVICE,
+    // The subscription bundle shape `validateCodexSubscriptionAuth` accepts. No real
+    // token: every value here is a placeholder.
+    plaintext: JSON.stringify({
+      OPENAI_API_KEY: null,
+      tokens: { id_token: 'id', access_token: 'acc', refresh_token: 'ref', account_id: 'a' },
+      last_refresh: '2026-06-30T00:00:00.000Z',
+    }),
+  })
+
+  const after = (await fetchPools()).find((p) => p.pool === 'codex')!
+  // THE MUTANT: return `'connected'` from the composer's codex arm and this flips to
+  // "No readings yet." — the sentence with no writer behind it.
+  expect(after.connection).toBe('no_gauge')
+  // STILL no zeros. A pool nobody measured has no row to draw a bar from.
+  expect(after.accounts).toEqual([])
+  expect(after.measured_at).toBeNull()
+
+  const decoded = decodeDashboard({ pools: [after] })
+  if (!decoded.reachable) throw new Error('unreachable: the composed response is a payload')
+  const view = projectPool(decoded.pools[0]!, Date.now())
+  const note = connectionNote(view)
+  expect(note).not.toBe('No readings yet.')
+  expect(note).toBe(
+    "Connected. This build doesn't meter this provider yet, so there is nothing to read.",
+  )
+  expect(capacityLine(view)).toBeNull()
+
+  // Put the composition back the way the other tests found it — they share one boot.
+  await credentials.delete(asOwnerHandle('owner'), GLOBAL_PROJECT_ID, CODEX_CREDENTIAL_SERVICE)
 })
 
 test('each pool reports its connection from the SAME resolver the product uses', () => {

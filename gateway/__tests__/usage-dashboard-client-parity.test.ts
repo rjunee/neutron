@@ -369,7 +369,7 @@ describe('the two clients format identically', () => {
     expect(line(COOLING_POOL, later)).toBe('Next capacity unknown (1 unknown)')
   })
 
-  test('connectionNote agrees, and distinguishes the FOUR empty cards', () => {
+  test('connectionNote agrees, and distinguishes the FIVE empty cards', () => {
     const note = (connection: web.UsagePoolConnection): string | null => {
       const pool = project(poolOf([], { connection }), NOW)
       const w = web.connectionNote(pool)
@@ -391,6 +391,16 @@ describe('the two clients format identically', () => {
     expect(unreadable).toContain("didn't produce a reading")
     // Still no number. Loud and EMPTY — never a zero.
     expect(unreadable).not.toContain('0%')
+    // THE FIFTH is the same promise broken one step earlier: the credential is fine
+    // and NOTHING IS POLLING this provider in this build, so no tick is even going to
+    // be attempted. Codex is the live case. It must not read as a fault either — a
+    // phase that has not shipped is nothing for the owner to go and fix.
+    const noGauge = note('no_gauge')
+    expect(noGauge).not.toBe('No readings yet.')
+    expect(noGauge).not.toBe('Not connected.')
+    expect(noGauge).not.toContain("didn't produce a reading")
+    expect(noGauge).toContain("doesn't meter this provider yet")
+    expect(noGauge).not.toContain('0%')
   })
 
   test('a REFUSED pool that already has readings still says so — history does not silence it', () => {
@@ -909,6 +919,34 @@ describe('the pool headline names WHICH account it is about', () => {
     ])
     expect(project(unlabelled, NOW).capacity.next_account_label).toBeNull()
     expect(nextUp(unlabelled, NOW)).toBeNull()
+  })
+
+  test('it names NOBODY when no account can be vouched for', () => {
+    // TWO STALE ACCOUNTS. Every reading is far past the pool's staleness deadline, so
+    // `capacityRank` sorts both to the same sentinel and the "winner" is whichever the
+    // tie-break happened to reach — not a ranking by capacity at all.
+    const pool = poolOf([
+      { account_label: 'owner-a', session: win({ fraction: 0.2 }), measured_at: NOW - DAY },
+      { account_label: 'owner-b', session: win({ fraction: 0.3 }), measured_at: NOW - DAY },
+    ])
+    const view = project(pool, NOW)
+    expect(view.capacity.unknown).toBe(2)
+    expect(line(pool, NOW)).toBe('Next capacity unknown (2 unknown)')
+    // THE MUTANT: drop the `unknown` guard from `nextAccountNote` and this returns
+    // 'Next up: owner-a', printed directly beneath a headline that just said nobody
+    // knows. The owner reads that name as where to send concurrency.
+    expect(nextUp(pool, NOW)).toBeNull()
+  })
+
+  test('but a KNOWN standing still names its account — the guard is not a blanket', () => {
+    // THE POSITIVE CONTROL for the case above. Without it, a `nextAccountNote` that
+    // returned null unconditionally would pass every assertion in this block.
+    const pool = poolOf([
+      { account_label: 'owner-a', session: win({ fraction: 0.99, reset_at: NOW + 3 * HOUR }) },
+      { account_label: 'owner-b', session: win({ fraction: 0.2, reset_at: NOW + 2 * HOUR }) },
+    ])
+    expect(project(pool, NOW).capacity.next.state).toBe('available')
+    expect(nextUp(pool, NOW)).toBe('Next up: owner-b')
   })
 })
 

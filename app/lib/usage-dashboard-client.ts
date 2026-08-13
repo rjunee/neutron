@@ -110,13 +110,19 @@ export interface UsageAccount {
 /**
  * Why a pool has no readings, when it has none — one value per DIFFERENT FIX.
  *
- * `unreadable` is the one that is not a rounding of the others: the gauge was
- * asked and the answer could not be turned into a reading (key rejected, or a
- * payload shape this build does not understand). It is separate from `connected`
- * precisely because "no readings yet" promises a first reading is coming, and this
- * one is not.
+ * TWO OF THEM EXIST BECAUSE "no readings yet" IS A PROMISE, and both are cases
+ * where that promise cannot be kept:
+ *   - `unreadable` — the gauge was asked and the answer could not be turned into a
+ *     reading (key rejected, or a payload shape this build does not understand).
+ *   - `no_gauge` — the credential is fine and this build ships no poller for the
+ *     provider at all, so nothing will ever ask. Not a fault, and nothing to fix.
  */
-export type UsagePoolConnection = 'connected' | 'not_connected' | 'no_meter' | 'unreadable'
+export type UsagePoolConnection =
+  | 'connected'
+  | 'not_connected'
+  | 'no_meter'
+  | 'no_gauge'
+  | 'unreadable'
 
 export interface UsagePool {
   pool: string
@@ -234,7 +240,11 @@ function decodeConnection(v: unknown): UsagePoolConnection {
   // An unknown value decodes as `connected`, so an older or newer server never
   // makes a populated card claim "not connected" — the honest degradation is the
   // one that says nothing rather than the one that blames the owner's setup.
-  return v === 'not_connected' || v === 'no_meter' || v === 'connected' || v === 'unreadable'
+  return v === 'not_connected' ||
+    v === 'no_meter' ||
+    v === 'no_gauge' ||
+    v === 'connected' ||
+    v === 'unreadable'
     ? (v as UsagePoolConnection)
     : 'connected'
 }
@@ -1009,16 +1019,28 @@ export function capacityLine(pool: ProjectedPool): string | null {
  * than a clause inside the headline so the headline stays the one short sentence
  * that has to be readable without scrolling.
  *
- * NULL IN TWO CASES, both of them "this would add no information":
+ * NULL IN THREE CASES. The first two are "this would add no information":
  *   - a single-account pool, where the headline is already about the only account;
  *   - an unlabelled winner, where the honest name is "active credential" — naming
  *     it would read as a second account rather than as the one already on screen.
+ *
+ * ── AND THE THIRD IS A RECOMMENDATION NOTHING SUPPORTS ──────────────────────
+ * An `unknown` standing means no account in the pool could be vouched for at all —
+ * every reading is too old to prove anything, so {@link capacityRank} sorted them
+ * all to `POSITIVE_INFINITY` and the "winner" is whichever one the tie-break reached
+ * first. {@link capacityLine} says exactly that ("Next capacity unknown (2
+ * unknown)"), and printing "Next up: <account>" underneath it takes the one line
+ * that admits ignorance and puts a confident answer beside it. THE OWNER READS THIS
+ * TO DECIDE WHERE TO SEND CONCURRENCY: a name is an instruction, and an instruction
+ * derived from an arbitrary tie-break is the same failure class as an absent reset
+ * rendering as "now". Say nothing; the headline already said why.
  *
  * It NEVER invents a name; the label is whatever the reading was stamped with, and
  * an unnamed account stays unnamed.
  */
 export function nextAccountNote(pool: ProjectedPool): string | null {
   if (pool.accounts.length < 2) return null
+  if (pool.capacity.next.state === 'unknown') return null
   const label = pool.capacity.next_account_label
   if (label === null) return null
   return `Next up: ${label}`
@@ -1028,18 +1050,24 @@ export function nextAccountNote(pool: ProjectedPool): string | null {
  * Why a pool has nothing to show, in the owner's terms. Null when it has
  * readings, because a card with numbers on it needs no excuse.
  *
- * Four different fixes hide behind one empty card, so they get four sentences:
+ * Five different situations hide behind one empty card, so they get five sentences:
  * connect an account, wait for the first reading, fix a gauge that answered with
- * something unreadable, or nothing at all — a per-token API key has no window to
- * meter and never will.
+ * something unreadable, wait for a release rather than a tick because this build
+ * ships no poller for that provider, or nothing at all — a per-token API key has no
+ * window to meter and never will.
  *
- * THE FOURTH IS THE ONE THAT DOES NOT RESOLVE ITSELF, and it is why this is not a
- * three-way branch. "No readings yet." promises a first reading is coming. When the
- * gauge has been asked and its answer refused — a rejected key, or a payload shape
- * this build does not model — no amount of waiting produces one, and the owner
- * would sit in front of a sentence that is quietly false. So it says what happened
- * and where to look, and still shows no number: a failed gauge read is loud and
- * empty, never a zero.
+ * TWO OF THEM DO NOT RESOLVE THEMSELVES, and they are why this is not a two-way
+ * branch. "No readings yet." promises a first reading is coming, and it is false in
+ * both: when the gauge has been asked and its answer refused (a rejected key, or a
+ * payload shape this build does not model) no amount of waiting produces one; and
+ * when NOTHING IS POLLING the provider at all, nothing is even going to ask. The
+ * owner would sit in front of a sentence that is quietly false either way, so each
+ * says what is actually true, and both still show no number: a gauge that did not
+ * read is loud and empty, never a zero.
+ *
+ * The two are kept apart because they send the owner to different places. A refusal
+ * is a FAULT — check the key, then the logs. `no_gauge` is not: the credential is
+ * fine, the phase simply has not shipped, and there is nothing to go and fix.
  *
  * ── AND THE REFUSAL OUTRANKS "IT HAS NUMBERS ON IT" ───────────────────────
  * Which is why `unreadable` is checked BEFORE the "has readings" shortcut, and it is
@@ -1065,6 +1093,13 @@ export function connectionNote(pool: ProjectedPool): string | null {
   if (pool.connection === 'not_connected') return 'Not connected.'
   if (pool.connection === 'no_meter') {
     return 'Connected, but this credential is billed per token and has no window to meter.'
+  }
+  if (pool.connection === 'no_gauge') {
+    // NOT "no readings yet". Nothing is polling this provider in this build, so the
+    // first reading is not late — it is not coming, and the owner has nothing to
+    // wait for and nothing to fix. Saying so is the difference between an honest
+    // empty card and a card quietly waiting on a poller that does not exist.
+    return "Connected. This build doesn't meter this provider yet, so there is nothing to read."
   }
   return 'No readings yet.'
 }

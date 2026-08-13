@@ -118,6 +118,49 @@ describe('parseKimiUsages — a field name is not a contract', () => {
     expect(out.kind).toBe('unrecognised')
   })
 
+  test('an ABSURD window LENGTH is refused, not rendered as a confident label', () => {
+    // `window_seconds` read off a field that meant something else is a positive
+    // finite number, so it used to sail through: 1e12 seconds renders as an
+    // "11574074d window", and — the part that is not cosmetic — every length above
+    // the 24-hour divider is filed as the WEEKLY slot, so one absurd number puts a
+    // short-window standing in the seven-day row under the right name.
+    //
+    // The reset instants were already bounded; this is the LENGTH bound that was
+    // missing, and it is deliberately the same 400 days, because a length whose
+    // resets would all be refused is a pair of bounds disagreeing with each other.
+    const out = parseKimiUsages(
+      {
+        usages: [
+          { window_minutes: 300, used_percent: 42 },
+          { window_seconds: 1e12, used_percent: 64 },
+        ],
+      },
+      NOW,
+    )
+    // Loud, not clamped: the key names travel out and NOTHING is stored.
+    expect(out.kind).toBe('unrecognised')
+    if (out.kind !== 'unrecognised') return
+    expect(out.observed).toContain('window_seconds')
+  })
+
+  test('but a real 7-day window in SECONDS is still believed', () => {
+    // THE POSITIVE CONTROL. Without it a ceiling set absurdly low — or a parser that
+    // refused `window_seconds` outright — would pass the case above.
+    const out = parseKimiUsages(
+      {
+        usages: [
+          { window_seconds: 5 * 60 * 60, used_percent: 42 },
+          { window_seconds: 7 * 24 * 60 * 60, used_percent: 64 },
+        ],
+      },
+      NOW,
+    )
+    expect(out.kind).toBe('ok')
+    if (out.kind !== 'ok') return
+    expect(out.sample.session!.window_ms).toBe(5 * HOUR)
+    expect(out.sample.weekly!.window_ms).toBe(7 * 24 * HOUR)
+  })
+
   test('a window with no usable utilisation is skipped', () => {
     const out = parseKimiUsages({ usages: [{ window_minutes: 300, note: 'ok' }] }, NOW)
     expect(out.kind).toBe('unrecognised')

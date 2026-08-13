@@ -10,8 +10,10 @@
 import { describe, expect, it } from 'bun:test'
 
 import {
+  ANTHROPIC_MESSAGES_URL,
   parseUnifiedRateLimitHeaders,
   probeCredentialUsage,
+  probeMessagesUrl,
   UNIFIED_5H_RESET_HEADER,
   UNIFIED_5H_UTILIZATION_HEADER,
   UNIFIED_7D_RESET_HEADER,
@@ -191,5 +193,70 @@ describe('probeCredentialUsage', () => {
     expect(call.url).toBe('https://anthropic.example.com/v1/messages')
     expect((call.init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${TOKEN}`)
     expect(JSON.parse(String(call.init.body))['max_tokens']).toBe(1)
+  })
+})
+
+/**
+ * THE BASE URL IS OPERATOR INPUT, and it reaches this module straight from the
+ * environment (`open/composer.ts` threads `ANTHROPIC_BASE_URL` into `probeDeps`).
+ * Both cases below were live defects of `new URL('/v1/messages', base)`: one killed
+ * the tick loop with a `TypeError` from OUTSIDE the probe's `try`, the other silently
+ * probed a different service and could report its 401 as a lapsed credential.
+ */
+describe('probeMessagesUrl', () => {
+  it('uses the Anthropic endpoint verbatim when no base is configured', () => {
+    expect(probeMessagesUrl(undefined)).toBe(ANTHROPIC_MESSAGES_URL)
+  })
+
+  it("KEEPS a gateway base's path prefix instead of resolving against its origin", () => {
+    // `new URL('/v1/messages', 'https://gw.example.com/anthropic')` answers
+    // 'https://gw.example.com/v1/messages' — the prefix dropped, a different door.
+    expect(probeMessagesUrl('https://gw.example.com/anthropic')).toBe(
+      'https://gw.example.com/anthropic/v1/messages',
+    )
+  })
+
+  it('does not double the separator on a base with a trailing slash', () => {
+    expect(probeMessagesUrl('https://gw.example.com/anthropic/')).toBe(
+      'https://gw.example.com/anthropic/v1/messages',
+    )
+  })
+
+  it('does not throw on a scheme-less base', () => {
+    // `new URL` threw `TypeError: Invalid URL` here.
+    expect(() => probeMessagesUrl('anthropic.example.com')).not.toThrow()
+  })
+})
+
+describe('probeCredentialUsage honours the contract that it NEVER throws', () => {
+  it('reports a scheme-less base as a transient error rather than throwing', async () => {
+    // The failure this pins: the URL was built BEFORE the `try`, so a typo'd
+    // `ANTHROPIC_BASE_URL` threw out of a function documented as never throwing and
+    // took the monitor's tick loop with it. It must be an ordinary tagged outcome —
+    // the next tick retries, and nothing else in the loop notices.
+    const outcome = await probeCredentialUsage(TOKEN, {
+      apiBaseUrl: 'anthropic.example.com',
+      fetch: (async (url: string) => {
+        // A real `fetch` rejects a relative URL; the stub reproduces that rather
+        // than asserting on which message the runtime chooses.
+        throw new TypeError(`Failed to parse URL from ${url}`)
+      }) as unknown as typeof fetch,
+    })
+    expect(outcome.kind).toBe('error')
+  })
+
+  it('probes a path-prefixed gateway at the prefixed path', async () => {
+    let seen = ''
+    await probeCredentialUsage(TOKEN, {
+      apiBaseUrl: 'https://gw.example.com/anthropic',
+      fetch: (async (url: string) => {
+        seen = url
+        return response(200, {
+          [UNIFIED_5H_UTILIZATION_HEADER]: '0.2',
+          [UNIFIED_7D_UTILIZATION_HEADER]: '0.4',
+        })
+      }) as unknown as typeof fetch,
+    })
+    expect(seen).toBe('https://gw.example.com/anthropic/v1/messages')
   })
 })

@@ -4837,8 +4837,14 @@ throughput decision of whether to raise build concurrency.
 - **Pools — `UsagePool = 'anthropic' | 'codex' | 'kimi'`.** Every pool is served
   every time, in `USAGE_POOLS` order, so a provider can vanish from the screen
   only by being deleted from that list. Codex has no writer yet (its gauge is
-  harvested from real `codex` runs and lands with the lane writers), and renders
-  "not connected / no samples yet" rather than a row of zeros.
+  harvested from real `codex` runs and lands with the lane writers). With no Codex
+  credential it renders "Not connected."; WITH one it renders `no_gauge` — "this
+  build doesn't meter this provider yet" — and never a row of zeros. `connected`
+  would be wrong there: it means "empty because the first reading has not landed
+  YET", and no writer records `pool: 'codex'` in this binary (the positive controls
+  `pool: 'anthropic'` and `pool: 'kimi'` both appear in `open/composer.ts`), so the
+  card would promise a tick from a poller that does not exist. The state disappears
+  by deletion when the Codex gauge lands — no flag, no second path.
 - **The second gauge — `open/kimi-usage-monitor.ts` + `trident/kimi-usage-probe.ts`.**
   Kimi publishes no rate-limit headers, so its standing is read from
   `GET {KIMI_BASE_URL}/v1/usages` on a 10-minute `SupervisedLoop`, armed
@@ -4946,16 +4952,20 @@ throughput decision of whether to raise build concurrency.
   render "capacity in available now".
 - **Serving — `gateway/http/app-usage-surface.ts`, `GET /api/app/usage/dashboard`,
   composed in `open/composer.ts`.** Owner-gated, always 200. Each pool carries a
-  `connection` of `connected` / `not_connected` / `no_meter` / `unreadable`, resolved
+  `connection` of `connected` / `not_connected` / `no_meter` / `no_gauge` /
+  `unreadable`, resolved
   from the SAME functions the rest of the product uses (`kimiConfigured`,
   `resolveActiveCodexHome`, `resolveActiveCredential`) — a per-token API key is
   `no_meter`, not "not connected", because telling the owner to reconnect a
-  working account sends them to fix the wrong thing. `unreadable` is the fourth
-  because it is the one that does NOT resolve itself: the gauge was asked and its
+  working account sends them to fix the wrong thing. TWO OF THE FIVE EXIST BECAUSE
+  "No readings yet." IS A PROMISE, and each is a case where nothing can keep it.
+  `unreadable`: the gauge was asked and its
   answer could not be turned into a reading (a rejected key, a non-auth 4xx from a path
-  this build has wrong, or a payload shape it does not model), where "No readings yet."
-  would promise a first reading that is never coming — the realistic first-install
-  failure against Kimi's unpublished schema.
+  this build has wrong, or a payload shape it does not model) — the realistic
+  first-install failure against Kimi's unpublished schema. `no_gauge`: the credential
+  is fine and NOTHING IS POLLING that provider in this build, so no tick is even going
+  to be attempted. They are kept apart because they send the owner to different places
+  — a refusal is a fault to go and fix, an unshipped phase is not.
 
   IT IS DECIDED BY THE LIVE PROBE, NEVER BY A CREDENTIAL FILE, and on BOTH pools that
   have a writer. `resolveActiveCredential` answers "is a credential present", which is
@@ -5006,6 +5016,17 @@ throughput decision of whether to raise build concurrency.
   deadlines), so a pool cannot get a deadline tighter than the screens can keep up
   with. Each screen has a mutation-checked test: a tick that advances the clock and
   does not refetch turns it red.
+
+  AND THE POLLS ARE SEQUENCED, because they overlap. The interval does not wait for
+  the previous response, so two requests are routinely in flight together and a slow
+  one settling LAST would win by arriving late — repainting a reading already known to
+  be superseded, wearing the newer one's age chip. That is fabricated freshness, the
+  one class this surface exists to prevent, reached from the client side. Each load
+  takes a generation number and a superseded response is dropped rather than rendered.
+  A counter rather than an `AbortController`: a late reading is still a good reading
+  and the next tick is seconds away, so there is nothing to gain by cancelling it —
+  only a discarded one to avoid painting. Both screens pin it with two gated responses
+  released newest-first, and removing the guard turns each red.
 
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 

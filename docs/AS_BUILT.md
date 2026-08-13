@@ -85,8 +85,14 @@ repaint the card as broken.
 
 Per provider, in its own unit, never summed, and **no dollar value anywhere** — the
 subscription is flat, so a currency figure would assert a marginal cost the owner does
-not incur. Codex has no writer until Phase 3 and renders "Not connected." rather than
-a row of zeros. Shipped on both clients, no flag and no dual path.
+not incur. Codex has no sample writer in this build — the positive controls
+`pool: 'anthropic'` and `pool: 'kimi'` both hit in `open/composer.ts` and `'codex'`
+does not — so its arm reports a fifth connection state, `no_gauge`: "Connected. This
+build doesn't meter this provider yet, so there is nothing to read." `connected` was
+wrong there and the card said "No readings yet.", promising a tick from a poller that
+is not in the binary; `not_connected` is wrong too on a box that HAS Codex credentials.
+Either way no zeros are drawn. The state disappears by deletion when the Codex gauge
+lands. Shipped on both clients, no flag and no dual path.
 
 Detail: `docs/as-built/2026-08-13-usage-dashboard-phase-1.md`.
 

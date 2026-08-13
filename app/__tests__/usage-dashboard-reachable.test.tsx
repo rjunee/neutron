@@ -504,6 +504,95 @@ describe('the screen REFETCHES, not just re-renders', () => {
   });
 });
 
+describe('a slow poll never rolls the screen backwards', () => {
+  it('drops a superseded response instead of rendering it over a newer one', async () => {
+    // TWO POLLS IN FLIGHT AT ONCE. The interval does not wait for the previous
+    // response, so a slow request and the fresh one behind it overlap — and if the
+    // slow one settles LAST it wins purely by arriving late. The screen then shows a
+    // reading it already knows is superseded, wearing the age chip of the newer one:
+    // fabricated freshness, which is the exact class this screen exists to prevent.
+    const { USAGE_POLL_MS } = await import('../lib/usage-dashboard-client');
+    const ticks: Array<() => void> = [];
+    const realSetInterval = globalThis.setInterval;
+    // Each response is held open until this test releases it, so the settle ORDER is
+    // chosen here rather than raced for.
+    const gates: Array<() => void> = [];
+    let call = 0;
+    (globalThis as unknown as { fetch: unknown }).fetch = async (
+      input: string | URL,
+    ): Promise<Response> => {
+      requested.push(String(input));
+      const n = call++;
+      // Call 0 is the OLD reading (25%), call 1 the NEW one (75%).
+      const fraction = n === 0 ? 0.25 : 0.75;
+      const at = Date.now();
+      const body = {
+        pools: [
+          poolOf({
+            accounts: [
+              account({
+                measured_at: at,
+                session: { ...HOT_SESSION, fraction, reset_at: at + 2 * HOUR },
+              }),
+            ],
+          }),
+        ],
+      };
+      await new Promise<void>((release) => gates.push(release));
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    (globalThis as unknown as Record<string, unknown>)['setInterval'] = ((
+      fn: () => void,
+      ms: number,
+    ) => {
+      if (ms === USAGE_POLL_MS) ticks.push(fn);
+      return 0;
+    }) as unknown as typeof setInterval;
+    try {
+      const mod = await import('../app/usage');
+      const Screen = mod.default as () => unknown;
+      const screen = await mountScreen(
+        createElement(AuthSessionProvider, { initialUser: OWNER }, createElement(Screen as never)),
+      );
+      mounted = screen as unknown as { unmount(): void };
+      // The mount load is in flight and HELD. A poll tick fires behind it, so both
+      // requests are outstanding together.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(ticks.length).toBeGreaterThan(0);
+      await act(async () => {
+        ticks[ticks.length - 1]!();
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(gates.length).toBe(2);
+
+      // THE NEWER ONE LANDS FIRST…
+      await act(async () => {
+        gates[1]!();
+        await new Promise((r) => setTimeout(r, 0));
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('75%');
+
+      // …and then the OLDER one, which must be discarded. THE MUTANT THIS KILLS:
+      // drop the sequence guard and this flips back to '25%' — the screen rolling
+      // backwards onto a reading it had already replaced.
+      await act(async () => {
+        gates[0]!();
+        await new Promise((r) => setTimeout(r, 0));
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('75%');
+    } finally {
+      (globalThis as unknown as Record<string, unknown>)['setInterval'] = realSetInterval;
+    }
+  });
+});
+
 describe('staleness is shown, never hidden', () => {
   it('floors a stale reading with a ≥ and shows its age', async () => {
     response = {

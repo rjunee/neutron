@@ -4045,12 +4045,18 @@ export function buildOpenGraphComposer(
           return kimiUsageMonitor.readStanding() === 'refused' ? 'unreadable' : 'connected'
         }
         case 'codex':
-          // The gauge itself lands with the Codex lane writer; until then this
-          // reports the credential honestly and the card says "no samples yet"
-          // rather than drawing zeros for an account nobody has measured.
+          // NO POLLER EXISTS FOR THIS POOL IN THIS BUILD, so a connected Codex
+          // credential must NOT report `connected`. That state means "empty because
+          // the first reading has not landed yet", and the card renders it as "No
+          // readings yet." — a sentence promising a tick from a writer that is not in
+          // the binary. Grep for a `pool: 'codex'` sample writer and the positive
+          // controls (`'anthropic'`, `'kimi'`) hit while this one does not; the gauge
+          // lands with the Codex lane. Until then `no_gauge` says the true thing: the
+          // credential is fine, nothing is measuring it, and there is nothing to fix.
+          // No zeros are drawn either way — an unmeasured account has no row.
           return codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !==
             null
-            ? 'connected'
+            ? 'no_gauge'
             : 'not_connected'
       }
     }

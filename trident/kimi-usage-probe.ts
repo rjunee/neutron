@@ -92,6 +92,32 @@ export const RESET_PAST_TOLERANCE_MS = 5 * 60_000
 /** The divider between the two window slots the series keeps. */
 export const SHORT_WINDOW_CEILING_MS = 24 * 60 * 60 * 1000
 
+/**
+ * The longest window LENGTH this parser will believe.
+ *
+ * THE RESET INSTANTS WERE BOUNDED AND THE LENGTHS WERE NOT, which left one input
+ * unchecked on a schema nobody has published. `window_seconds` read off a field that
+ * meant something else — an epoch, a byte count, a request quota — is a positive
+ * finite number, so it sailed through and became a confident label: 1e12 seconds
+ * renders as "11574074d window", and, worse, it silently decides the SLOT. Every
+ * length above {@link SHORT_WINDOW_CEILING_MS} is filed as the WEEKLY window, so one
+ * absurd number does not merely render badly — it puts a five-hour standing in the
+ * seven-day row and shows the owner the wrong ceiling under the right name.
+ *
+ * 400 days, the same figure {@link RESET_FUTURE_PLAUSIBILITY_MS} uses, and
+ * deliberately the same one: a rolling window of length L resets at most L away, so a
+ * length this parser would believe but whose resets it would refuse is a pair of
+ * bounds that disagree with each other. It is far above any real subscription window
+ * (the largest this product models is seven days) and far below every unit error.
+ *
+ * REFUSING IS LOUD. A length outside the bound makes the entry unreadable, which
+ * makes the whole payload `unrecognised` — the all-or-nothing rule the header states
+ * — so the key names are logged and the card says "asked and refused" instead of
+ * quietly re-slotting a window. Never a silent clamp: a clamped length would be a
+ * made-up number driving the same slot decision.
+ */
+export const MAX_WINDOW_LENGTH_MS = RESET_FUTURE_PLAUSIBILITY_MS
+
 /** One window's standing, normalised into this repo's units (0..1, epoch MS). */
 export interface KimiUsageWindow {
   fraction: number
@@ -289,7 +315,14 @@ export function parseFraction(entry: Record<string, unknown>): number | null {
 function parseWindowLength(entry: Record<string, unknown>): number | null {
   for (const [key, multiplier] of WINDOW_LENGTH_KEYS) {
     const n = finiteNumber(entry[key])
-    if (n !== null && n > 0) return Math.round(n * multiplier)
+    if (n === null || n <= 0) continue
+    const ms = Math.round(n * multiplier)
+    // OUT OF RANGE IS A REFUSAL, NOT A FALLTHROUGH: the field this parser named is
+    // the field the response used, so moving on to the next alias would answer with
+    // some other key's number under this one's meaning. See {@link
+    // MAX_WINDOW_LENGTH_MS}.
+    if (ms > MAX_WINDOW_LENGTH_MS) return null
+    return ms
   }
   return null
 }
