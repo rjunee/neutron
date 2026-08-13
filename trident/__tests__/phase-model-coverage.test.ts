@@ -278,10 +278,21 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'k3' } })
     expect(config).toEqual({})
     expect(errors[0]).toContain('k3')
-    expect(errors[0]).toContain('subprocess')
+    expect(errors[0]).toContain('kimi executor')
     // The message names the executors this step DOES dispatch on, so the owner can
     // tell "wrong family" from "not wired yet".
     expect(errors[0]).toContain('claude or codex')
+    // AND IT NEVER NAMES A SCRIPT. A tier's registered `wrapper` is the CROSS-MODEL
+    // REVIEW wrapper; the build reaches the same codex tiers through
+    // `trident/codex-build.sh`. Interpolating it told a BUILD-row owner their tier
+    // "runs as a trident/codex-review.sh subprocess" — a true sentence about a phase
+    // they were not configuring. Pinned on the codex tier, where the wrong name was.
+    const codexOnKimiRow = parsePhaseModelConfig({ review_kimi: { model: 'sol' } })
+    expect(codexOnKimiRow.errors[0]).toContain('codex executor')
+    for (const message of [...errors, ...codexOnKimiRow.errors]) {
+      expect(message).not.toContain('codex-review.sh')
+      expect(message).not.toContain('.sh')
+    }
     expect(rejected['build']).toEqual({ model: 'k3' })
     // And the mirror: the codex review lane cannot be pointed at a Claude tier.
     expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
@@ -318,24 +329,54 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(errors[0]).toContain('not settable')
   })
 
-  it('REJECTS an effort paired with a codex model on a phase that normally has one', () => {
+  it('DROPS — never rejects — an effort paired with a codex model on the build row', () => {
     // `build` HAS an effort control, because its default executor reads one. Move the
-    // row to the codex executor and that stops being true — a CLI picks its own
-    // reasoning effort — so the PAIR is refused rather than stored as a number
-    // nothing reads. The model half survives; only the inert half is dropped.
+    // row to the codex executor and that stops being true: a CLI picks its own
+    // reasoning effort. The effort is a LEFTOVER from the executor the owner just
+    // left, not a bad value, so it is dropped into `rejected` and the write SUCCEEDS.
+    //
+    // THE SAVE MUST NOT FAIL. An error here is a 400 on the whole PUT, which discards
+    // every other row's pending edit and — for any owner who had ever touched the
+    // build's effort — makes the codex tiers a selectable option that cannot be
+    // selected. That is strictly worse than the greyed control this route removed.
     const { config, errors, rejected } = parsePhaseModelConfig({
       build: { model: 'sol', effort: 'max' },
     })
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('not settable')
-    expect(errors[0]).toContain('sol')
+    expect(errors).toEqual([])
     expect(config).toEqual({ build: { model: 'sol' } })
     expect(rejected['build']).toEqual({ effort: 'max' })
     // Field ORDER must not change the answer: the model decides, and JSON has no
     // guaranteed order. Checked because the rule reads the two fields together.
-    expect(parsePhaseModelConfig({ build: { effort: 'max', model: 'sol' } }).errors).toHaveLength(1)
+    const reversed = parsePhaseModelConfig({ build: { effort: 'max', model: 'sol' } })
+    expect(reversed.errors).toEqual([])
+    expect(reversed.config).toEqual({ build: { model: 'sol' } })
     // …and the same effort with a Claude model is still perfectly fine.
-    expect(parsePhaseModelConfig({ build: { model: 'sonnet', effort: 'max' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ build: { model: 'sonnet', effort: 'max' } })).toEqual({
+      config: { build: { model: 'sonnet', effort: 'max' } },
+      errors: [],
+      rejected: {},
+    })
+    // The drop is scoped to the pair. A phase that never had an effort control still
+    // gets a loud error, because there the owner cannot even see a cell to explain it.
+    expect(parsePhaseModelConfig({ review_codex: { effort: 'max' } }).errors).toHaveLength(1)
+  })
+
+  it('a codex build alongside other rows saves ALL of them, not none', () => {
+    // The end-to-end shape of the bug: one settings save carries every row. When the
+    // codex+effort pair was an error, moving the build to codex threw away the
+    // synthesis change made in the same pass — and the owner was told only that the
+    // build was wrong.
+    const { config, errors } = parsePhaseModelConfig({
+      build: { model: 'sol', effort: 'max' },
+      synthesis: { effort: 'max' },
+      review_rubric: { model: 'sonnet' },
+    })
+    expect(errors).toEqual([])
+    expect(config).toEqual({
+      build: { model: 'sol' },
+      synthesis: { effort: 'max' },
+      review_rubric: { model: 'sonnet' },
+    })
   })
 
   it('drops an entry that sets nothing, so {} never persists as configuration', () => {

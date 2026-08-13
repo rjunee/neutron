@@ -55,8 +55,14 @@ afterAll(async () => {
   await GlobalRegistrator.unregister()
 })
 
-const { WebPhaseModelsClient, applyRowEdit, effectiveRow, rejectedModel, tierChoices } =
-  await import('../phase-models-client.ts')
+const {
+  WebPhaseModelsClient,
+  applyRowEdit,
+  effectiveRow,
+  effortSettable,
+  rejectedModel,
+  tierChoices,
+} = await import('../phase-models-client.ts')
 
 /** The build row — the one with TWO executors, Claude by default and codex. */
 const BUILD = {
@@ -87,6 +93,7 @@ const TIERS = [
     provider: 'anthropic',
     model_id: 'claude-opus-5',
     group: 'claude',
+    effort_supported: true,
     available: true,
     unavailable_reason: null,
   },
@@ -95,6 +102,7 @@ const TIERS = [
     provider: 'anthropic',
     model_id: 'claude-haiku-4-5',
     group: 'claude',
+    effort_supported: true,
     available: true,
     unavailable_reason: null,
   },
@@ -103,6 +111,7 @@ const TIERS = [
     provider: 'openai',
     model_id: 'gpt-5.6-sol',
     group: 'codex',
+    effort_supported: false,
     available: true,
     unavailable_reason: null,
   },
@@ -111,6 +120,7 @@ const TIERS = [
     provider: 'openai',
     model_id: 'gpt-5.6-terra',
     group: 'codex',
+    effort_supported: false,
     available: true,
     unavailable_reason: null,
   },
@@ -119,6 +129,7 @@ const TIERS = [
     provider: 'moonshot',
     model_id: 'kimi-k3',
     group: 'kimi',
+    effort_supported: false,
     available: false,
     unavailable_reason: 'needs a Kimi key',
   },
@@ -243,19 +254,19 @@ describe('the display + edit rules', () => {
     // Storing `opus` for a phase already defaulting to `opus` would freeze it
     // against a future change to that default — the owner would have pinned
     // something they only meant to leave alone.
-    const after = applyRowEdit({ build: { model: 'sonnet' } }, BUILD, { model: 'opus' })
+    const after = applyRowEdit({ build: { model: 'sonnet' } }, BUILD, { model: 'opus' }, TIERS)
     expect(after).toEqual({})
   })
 
   it('keeps the other half of a partly-overridden phase', () => {
     const after = applyRowEdit({ build: { model: 'sonnet', effort: 'max' } }, BUILD, {
       model: 'opus',
-    })
+    }, TIERS)
     expect(after).toEqual({ build: { effort: 'max' } })
   })
 
   it('leaves other phases untouched', () => {
-    const after = applyRowEdit({ synthesis: { model: 'opus' } }, BUILD, { effort: 'low' })
+    const after = applyRowEdit({ synthesis: { model: 'opus' } }, BUILD, { effort: 'low' }, TIERS)
     expect(after).toEqual({ synthesis: { model: 'opus' }, build: { effort: 'low' } })
   })
 
@@ -274,6 +285,26 @@ describe('the display + edit rules', () => {
     // The Claude default is still there, and Kimi keeps the honest reason.
     expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
     expect(choices.find((c) => c.tier === 'k3')!.selectable).toBe(false)
+    // …naming BOTH executors the step reaches, not just the one it defaults to.
+    expect(choices.find((c) => c.tier === 'k3')!.reason).toBe(
+      'Kimi is not wired for this step yet — it runs on Claude or Codex',
+    )
+  })
+
+  it('moving the BUILD row to codex DROPS the effort — the pair fails the save', () => {
+    // The blocker this pins: the effort cell stayed live on a codex build, so the
+    // stale value was merged into the PUT and the server refused the WHOLE payload —
+    // every other row's pending edit with it. The cell is answered by the chosen tier
+    // now, and the edit clears what that tier cannot use.
+    expect(effortSettable(BUILD, 'opus', TIERS)).toBe(true)
+    expect(effortSettable(BUILD, 'sol', TIERS)).toBe(false)
+    expect(applyRowEdit({ build: { effort: 'max' } }, BUILD, { model: 'sol' }, TIERS)).toEqual({
+      build: { model: 'sol' },
+    })
+    // …and moving back restores it, so this is a live rule and not a one-way door.
+    expect(applyRowEdit({ build: { model: 'sol' } }, BUILD, { model: 'fast', effort: 'max' }, TIERS)).toEqual(
+      { build: { model: 'fast', effort: 'max' } },
+    )
   })
 })
 

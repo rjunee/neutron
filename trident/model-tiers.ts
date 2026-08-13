@@ -77,9 +77,19 @@ export interface ModelTierDescriptor {
   /** What the tier resolves to RIGHT NOW. Never persisted — always re-resolved. */
   model_id: string
   transport: Transport
-  /** `cli` only: the wrapper the workflow shells into, repo-relative. */
+  /**
+   * `cli` only: the CROSS-MODEL REVIEW wrapper this tier is reached through,
+   * repo-relative.
+   *
+   * SCOPED TO THE REVIEW LANE ON PURPOSE. A tier is not owned by one script: the codex
+   * tiers are also reachable from the BUILD phase, which shells into
+   * `trident/codex-build.sh` with its own knob (`CODEX_BUILD_MODEL`). So this pair
+   * answers "how does the review panel reach this tier", and anything that must speak
+   * about a tier phase-independently — an owner-facing message, a greying rule — uses
+   * {@link ModelTierDescriptor.group} instead.
+   */
   wrapper: string | null
-  /** `cli` only: the env knob that wrapper reads to pick its model. */
+  /** `cli` only: the env knob that REVIEW wrapper reads to pick its model. */
   env_var: string | null
   /** `cli` only: the credential this tier needs. */
   requires: TierRequirement | null
@@ -204,22 +214,4 @@ export function modelTier(tier: string): ModelTierDescriptor | null {
 /** Every tier, resolved as of NOW, in pane order. */
 export function modelTierRegistry(): ReadonlyArray<ModelTierDescriptor> {
   return MODEL_TIERS.map((tier) => modelTier(tier)!)
-}
-
-/**
- * Can a phase running on `phaseTier` be moved to `candidate`?
- *
- * Only within one {@link TierGroup}, because the executor is a capability and not a
- * preference: pointing the Claude build agent at `sol` would hand a GPT id to
- * `agent({model})`, which resolves against Claude Code's endpoint and cannot reach it;
- * pointing the Codex wrapper at `k3` would set `CODEX_REVIEW_MODEL=kimi-k3`. Both are
- * dispatches that CANNOT work, so they are refused at the settings boundary where the
- * owner is present to be told, rather than discovered as a build that ran on the wrong
- * model.
- */
-export function tiersAreInterchangeable(phaseTier: ModelTier, candidate: ModelTier): boolean {
-  const a = modelTier(phaseTier)
-  const b = modelTier(candidate)
-  if (a === null || b === null) return false
-  return a.group === b.group
 }

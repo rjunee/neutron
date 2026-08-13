@@ -2836,18 +2836,30 @@ generation"), mobile `app/app/codegen.tsx`, both over
   planner's complexity tag) to `sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
   hands the assembled Forge brief to `trident/codex-build.sh` instead of to
   `agent({model})`; no Anthropic model id is requested for the phase. The wrapper
-  runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree
-  (narrower policies cannot commit — a worktree's `.git` points outside the workspace
-  — and have no network for `git push` / `gh pr create`), and its own knob is
-  `CODEX_BUILD_MODEL`, never the reviewer's `CODEX_REVIEW_MODEL`.
-  - **The downstream contract is MEASURED, not narrated.** `codex exec` has no result
-    schema, so after it exits the wrapper prints a `NEUTRON_CODEX_BUILD_*` trailer it
-    read from `git rev-parse --verify HEAD`, `git ls-remote` (the PUSHED sha, which is
-    what `--match-head-commit` pins), `gh pr list`, and the diff file's existence. Any
-    value it cannot establish is EMPTY, and empty fails closed at `roundLanded` and at
-    the merge. A thin bridge agent copies those six values into the result schema —
-    the same shape the codex REVIEW seat has, because `agent()` is the only primitive
-    the workflow runtime gives this script.
+  runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree,
+  and its own knob is `CODEX_BUILD_MODEL`, never the reviewer's `CODEX_REVIEW_MODEL`.
+  `workspace-write` writes only inside the workspace and a build writes outside it
+  twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
+  goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
+  that `git push` / `gh pr create` need.
+  - **The downstream contract is MEASURED, not narrated.** `codex exec` does accept
+    `--output-schema`, but a schema-shaped answer is still the model reporting on
+    itself and the failing case is the build that believes it committed. So after it
+    exits the wrapper WRITES a six-line `NEUTRON_CODEX_BUILD_*` trailer it read from
+    `git rev-parse --verify HEAD`, `git ls-remote`, `gh pr list`, and the diff file's
+    existence. Any value it cannot establish is EMPTY, and empty fails closed at
+    `roundLanded` and at the merge. A thin bridge agent copies those six values into
+    the result schema — the same shape the codex REVIEW seat has, because `agent()` is
+    the only primitive the workflow runtime gives this script.
+  - **The trailer is a FILE, and both shas are about THIS build.** It goes to
+    `NEUTRON_CODEX_BUILD_TRAILER_FILE` (required; the bridge `cat`s exactly that) so a
+    transcript narrating trailer-shaped lines cannot compete with the measurement on
+    one stream. `HEAD` is reported only when it moved past where it stood before codex
+    launched, so a build that edited and never committed reports nothing rather than
+    the base commit. `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
+    remote tip equals it — because a fresh probe of a shared ref is what
+    `inner-workflow.mjs` forbids for `reviewedHead`: a third-party push read back there
+    would be pinned by `--match-head-commit` and certified as reviewed.
   - **No fallback to Claude.** A lane reporting `not_connected`/`deferred` stops the
     run with the status named. Re-Forging on Opus would spend the quota the owner
     moved the phase to protect, invisibly.
@@ -2855,11 +2867,19 @@ generation"), mobile `app/app/codegen.tsx`, both over
     unchanged and still cannot turn a deferred review into an APPROVE, but on a codex
     build the panel's family diversity comes from `argus:claude`,
     `argus:adversarial` and `review_kimi`.
+- **The effort cell follows the CHOSEN tier, not just the step.** The payload carries
+  `effort_supported` on each PHASE (does its default executor read one) and on each
+  TIER (does that tier read one), and both clients disable the cell when either says
+  no — the build row keeps its control on `opus` and loses it on `sol`. `applyRowEdit`
+  clears an effort the newly-chosen tier cannot use; `parsePhaseModelConfig` drops one
+  that arrives anyway and lets the write SUCCEED, because failing it
+  400s the whole PUT and makes the codex tiers unpickable for anyone who ever touched
+  the build's effort. An effort on a phase that never had a control is still an error.
 - **Otherwise a row offers only its own executor's tiers, and says so about the
   rest.** The payload carries `groups` (every executor the step dispatches on) beside
   `group` (its default), and `tierChoices` greys by `groups`. Every tier is listed;
   one from a group this step cannot reach renders disabled with "<Executor> is not
-  wired for this step yet — it runs on <Executor>", and one this install has no
+  wired for this step yet — it runs on <every executor the step reaches>", and one this install has no
   credential for with "needs a Codex connection" — never disappearing. The surface
   answers availability from the SAME resolvers the build uses (`open/composer.ts`:
   `codexCredentialService.resolveActiveCodexHome`, and the shared `kimiConfigured()`

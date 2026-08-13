@@ -45,8 +45,13 @@ export interface PhaseDescriptor {
    * group; the build step has two, because its forge dispatch reaches the codex
    * executor as well. The server decides; this file just compares strings.
    */
-  groups: string[];
-  /** False for a CLI step, whose reasoning effort is the CLI's own. */
+  groups?: string[];
+  /**
+   * False for a step whose DEFAULT executor is a CLI, whose reasoning effort is its own.
+   *
+   * Not the whole answer for a row: a step with two executors keeps this true while the
+   * owner has it on a tier that cannot use an effort. Ask {@link effortSettable}.
+   */
   effort_supported: boolean;
   default: { model: string; effort: string };
 }
@@ -58,6 +63,8 @@ export interface TierOption {
   /** What the tier points at RIGHT NOW — `fast → claude-haiku-4-5-…`. */
   model_id: string;
   group: string;
+  /** False for a subprocess tier, which chooses its own reasoning effort. */
+  effort_supported: boolean;
   /** False when this install has no credential for it. Still shown, never hidden. */
   available: boolean;
   unavailable_reason: string | null;
@@ -180,6 +187,50 @@ export function effectiveRow(
   return { model, effort, overridden };
 }
 
+/** `codex` → `Codex`. Executor names are shown to the owner mid-sentence. */
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/**
+ * Every executor the step can dispatch on, falling back to its default one.
+ *
+ * THE FALLBACK IS FOR AN OLDER SERVER. `groups` arrived with the build's second
+ * executor; a gateway predating it sends `group` alone, and this client ships
+ * separately from it. Reading through here means that payload renders the way it always
+ * did instead of throwing and blanking the whole settings pane.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#phaseGroupsOf`.
+ */
+export function phaseGroupsOf(phase: PhaseDescriptor): string[] {
+  return phase.groups ?? [phase.group];
+}
+
+/**
+ * Is the EFFORT control live for this row, given the tier it is set to?
+ *
+ * TWO QUESTIONS, BOTH OF WHICH MUST BE YES: the step has to have an effort control at
+ * all (`phase.effort_supported`), and the chosen TIER has to be one that reads it. The
+ * second is what the build row needs — it keeps its control on `opus` and loses it on
+ * `sol`, because a `codex exec` subprocess picks its own reasoning effort. Asking only
+ * the phase left the cell live on a codex build and posted an effort with the model,
+ * which the server then had to throw away.
+ *
+ * An unknown tier (a saved override the server no longer resolves) keeps the phase's
+ * own answer: the row is already telling the owner that value is dead.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#effortSettable`.
+ */
+export function effortSettable(
+  phase: PhaseDescriptor,
+  tier: string,
+  tiers: TierOption[],
+): boolean {
+  if (!phase.effort_supported) return false;
+  const chosen = tiers.find((t) => t.tier === tier);
+  return chosen === undefined ? true : chosen.effort_supported;
+}
+
 /**
  * The tiers a row may offer, each with whether it can be CHOSEN and why not.
  *
@@ -196,8 +247,9 @@ export function tierChoices(
   phase: PhaseDescriptor,
   tiers: TierOption[],
 ): Array<{ tier: string; model_id: string; selectable: boolean; reason: string | null }> {
+  const groups = phaseGroupsOf(phase);
   return tiers.map((t) => {
-    if (!phase.groups.includes(t.group)) {
+    if (!groups.includes(t.group)) {
       // #565 — SAY WHY, AND WHAT WOULD CHANGE IT. The old reason read `Codex steps
       // only`, naming a category the reader has never heard of and explaining
       // nothing; the owner's first words on seeing it were "Wtf does that mean?".
@@ -212,8 +264,12 @@ export function tierChoices(
       // lands: the build step now dispatches to the codex executor, so `groups`
       // carries `codex` for that row and the GPT tiers here are selectable rather
       // than greyed with a reason that has become false.
-      const optionExecutor = t.group.charAt(0).toUpperCase() + t.group.slice(1);
-      const stepExecutor = phase.group.charAt(0).toUpperCase() + phase.group.slice(1);
+      // NAMES EVERY EXECUTOR THE STEP REACHES, not just its default one. On the build
+      // row — the one row this sentence was written for — "it runs on Claude" stopped
+      // being the whole truth the moment the codex route landed, and a Kimi tier greyed
+      // with a half-true reason is the same defect in a smaller size.
+      const optionExecutor = capitalize(t.group);
+      const stepExecutor = groups.map(capitalize).join(' or ');
       return {
         tier: t.tier,
         model_id: t.model_id,
@@ -269,16 +325,30 @@ export function rejectedModel(
  * tier it happens to hold today — so a later change to the default would silently not
  * reach it. Choosing the default value therefore means "no override", which is also
  * what makes the UI's reset behaviour fall out for free.
+ *
+ * IT ALSO DROPS AN EFFORT THE NEW TIER CANNOT USE. Moving the build row from `opus` to
+ * a codex tier leaves any previously-chosen effort sitting in the map, and sending the
+ * pair fails the save. The effort is not a second choice the owner is making here; it
+ * is a leftover from the executor they just left.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#applyRowEdit`.
  */
 export function applyRowEdit(
   overrides: Record<string, PhaseOverride>,
   phase: PhaseDescriptor,
   patch: { model?: string; effort?: string },
+  tiers: TierOption[],
 ): Record<string, PhaseOverride> {
   const current = overrides[phase.key] ?? {};
   const next: PhaseOverride = { ...current, ...patch };
   if (next.model === phase.default.model) delete next.model;
   if (next.effort === phase.default.effort) delete next.effort;
+  if (
+    next.effort !== undefined &&
+    !effortSettable(phase, next.model ?? phase.default.model, tiers)
+  ) {
+    delete next.effort;
+  }
   const out = { ...overrides };
   if (next.model === undefined && next.effort === undefined) {
     delete out[phase.key];

@@ -48,6 +48,7 @@ import {
   WebPhaseModelsClient,
   applyRowEdit,
   effectiveRow,
+  effortSettable,
   rejectedModel,
   tierChoices,
   type PhaseModelsPayload,
@@ -197,7 +198,9 @@ export function SettingsTab({
       setPhaseModels((current) => {
         if (current === null) return current
         const phase = current.phases.find((p) => p.key === phaseKey)
-        if (phase !== undefined) setPhaseOverrides((prev) => applyRowEdit(prev, phase, patch))
+        if (phase !== undefined) {
+          setPhaseOverrides((prev) => applyRowEdit(prev, phase, patch, current.model_tiers))
+        }
         return current
       })
       // A pending edit invalidates the confirmation — leaving it up would say the
@@ -1134,7 +1137,10 @@ export function SettingsTab({
                   </label>
                   <label className="cset-cg-cell">
                     <span className="cset-cg-a11y">{phase.label} effort</span>
-                    {phase.effort_supported ? (
+                    {/* Asked of the CHOSEN tier, not just the step: the build row has a
+                        live effort control on a Claude tier and none on a codex one,
+                        because the subprocess picks its own. */}
+                    {effortSettable(phase, row.model, phaseModels.model_tiers) ? (
                       <select
                         className="cset-cg-select"
                         data-testid={`phase-${phase.key}-effort`}

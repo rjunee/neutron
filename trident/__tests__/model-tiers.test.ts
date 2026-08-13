@@ -27,7 +27,6 @@ import {
   isModelTier,
   modelTier,
   modelTierRegistry,
-  tiersAreInterchangeable,
 } from '../model-tiers.ts'
 
 const CODEX_WRAPPER = await Bun.file(new URL('../codex-review.sh', import.meta.url)).text()
@@ -176,22 +175,3 @@ describe('a tier follows the model, not the process it booted in', () => {
   })
 })
 
-describe('interchangeability is about the executor, not taste', () => {
-  it('allows a swap within one transport and refuses one across', () => {
-    expect(tiersAreInterchangeable('opus', 'sonnet')).toBe(true)
-    expect(tiersAreInterchangeable('sol', 'terra')).toBe(true)
-    expect(tiersAreInterchangeable('sol', 'luna')).toBe(true)
-    // `agent({model})` resolves against Claude Code's own endpoint — a GPT id there
-    // reaches nothing.
-    expect(tiersAreInterchangeable('opus', 'sol')).toBe(false)
-    expect(tiersAreInterchangeable('sol', 'opus')).toBe(false)
-    // Both are CLI, but `CODEX_REVIEW_MODEL=kimi-k3` is not a review, it is an error.
-    expect(tiersAreInterchangeable('sol', 'k3')).toBe(false)
-    expect(tiersAreInterchangeable('k3', 'sol')).toBe(false)
-  })
-
-  it('refuses an unknown tier on either side', () => {
-    expect(tiersAreInterchangeable('opus', 'fable-2' as never)).toBe(false)
-    expect(tiersAreInterchangeable('fable-2' as never, 'opus')).toBe(false)
-  })
-})

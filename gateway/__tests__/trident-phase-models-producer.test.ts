@@ -277,6 +277,35 @@ describe('the HTTP surface', () => {
     expect(fast['group']).toBe('claude')
   })
 
+  it('says PER TIER whether picking it leaves the effort cell live', async () => {
+    // `effort_supported` on a PHASE answers for its default executor. That was the
+    // whole answer while every row had one; the build row has two, and a pane that
+    // asked only the phase kept a live effort dropdown after the owner moved the row
+    // to codex — then posted the effort alongside the model, and the server refused
+    // the entire save. The per-tier flag is the missing half, derived here so the
+    // rule is stated once rather than re-derived from `group` by each client.
+    const s = await surfaceFor()
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const tiers = json['model_tiers'] as Array<Record<string, unknown>>
+    const flag = (tier: string): unknown => tiers.find((t) => t['tier'] === tier)!['effort_supported']
+    // An Anthropic tier is dispatched as `agent({model, effort})` and reads it.
+    expect(flag('opus')).toBe(true)
+    expect(flag('fast')).toBe(true)
+    // A subprocess picks its own reasoning effort, whichever wrapper reaches it.
+    expect(flag('sol')).toBe(false)
+    expect(flag('terra')).toBe(false)
+    expect(flag('k3')).toBe(false)
+    // Every tier carries the field — a missing one reads as `false` in a client and
+    // would silently disable a control that works.
+    for (const t of tiers) expect(typeof t['effort_supported']).toBe('boolean')
+    // The BUILD row keeps its phase-level answer, which is the pair the clients
+    // combine: true here, false on `sol`, and the cell is live only when both are.
+    const phases = json['phases'] as Array<Record<string, unknown>>
+    expect(phases.find((p) => p['key'] === 'build')!['effort_supported']).toBe(true)
+    expect(phases.find((p) => p['key'] === 'review_codex')!['effort_supported']).toBe(false)
+  })
+
   it('shows an unrunnable tier DISABLED WITH THE REASON, never omitted', async () => {
     // The install with no Codex connection and no Kimi key. Dropping those options
     // would leave the owner unable to account for a missing choice — which is how a

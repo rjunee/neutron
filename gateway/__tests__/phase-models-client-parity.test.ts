@@ -69,10 +69,10 @@ const KIMI = {
  * whether to grey an option or drop it.
  */
 const TIERS = [
-  { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', available: true, unavailable_reason: null },
-  { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', available: true, unavailable_reason: null },
-  { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', available: true, unavailable_reason: null },
-  { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', available: false, unavailable_reason: 'needs a Kimi key' },
+  { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
+  { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
+  { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
+  { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', effort_supported: false, available: false, unavailable_reason: 'needs a Kimi key' },
 ]
 
 /**
@@ -127,6 +127,21 @@ const EDITS: Array<{
     overrides: {},
     patch: { model: 'fast', effort: 'low' },
   },
+  {
+    name: 'move to a codex tier ON TOP of an effort — the effort must go',
+    overrides: { build: { effort: 'max' } },
+    patch: { model: 'sol' },
+  },
+  {
+    name: 'set an effort while ALREADY on a codex tier — still nothing to store',
+    overrides: { build: { model: 'sol' } },
+    patch: { effort: 'max' },
+  },
+  {
+    name: 'move BACK to a Claude tier — the effort control is live again',
+    overrides: { build: { model: 'sol' } },
+    patch: { model: 'fast', effort: 'max' },
+  },
 ]
 
 const DISPLAY: Array<Record<string, { model?: string; effort?: string }>> = [
@@ -142,8 +157,8 @@ const DISPLAY: Array<Record<string, { model?: string; effort?: string }>> = [
 describe('applyRowEdit — the phone and the browser make the same edit', () => {
   for (const c of EDITS) {
     test(c.name, () => {
-      const fromWeb = web.applyRowEdit(c.overrides, BUILD, c.patch)
-      const fromMobile = mobile.applyRowEdit(c.overrides, BUILD, c.patch)
+      const fromWeb = web.applyRowEdit(c.overrides, BUILD, c.patch, TIERS)
+      const fromMobile = mobile.applyRowEdit(c.overrides, BUILD, c.patch, TIERS)
       expect(fromWeb).toEqual(fromMobile)
     })
   }
@@ -154,9 +169,9 @@ describe('applyRowEdit — the phone and the browser make the same edit', () => 
     // divergence. Asserted on both.
     const original = { build: { model: 'sonnet' } }
     const snapshot = JSON.stringify(original)
-    web.applyRowEdit(original, BUILD, { model: 'opus' })
+    web.applyRowEdit(original, BUILD, { model: 'opus' }, TIERS)
     expect(JSON.stringify(original)).toBe(snapshot)
-    mobile.applyRowEdit(original, BUILD, { model: 'opus' })
+    mobile.applyRowEdit(original, BUILD, { model: 'opus' }, TIERS)
     expect(JSON.stringify(original)).toBe(snapshot)
   })
 })
@@ -189,8 +204,9 @@ describe('tierChoices — the phone and the browser grey the same options, for t
       // The Claude tiers are still selectable — a second executor ADDS a choice.
       expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
       // Kimi is NOT wired for the build, so it keeps the honest reason.
+      // …and the reason names BOTH executors the step reaches, not just its default.
       expect(choices.find((c) => c.tier === 'k3')!.reason).toBe(
-        'Kimi is not wired for this step yet — it runs on Claude',
+        'Kimi is not wired for this step yet — it runs on Claude or Codex',
       )
     }
   })
@@ -223,7 +239,7 @@ describe('the agreement is real, not vacuous', () => {
   test('the helpers actually do something — a positive control', () => {
     // WITHOUT THIS, two functions that both returned their input unchanged would
     // pass every comparison above. The suite must be able to fail.
-    expect(web.applyRowEdit({}, BUILD, { effort: 'xhigh' })).toEqual({
+    expect(web.applyRowEdit({}, BUILD, { effort: 'xhigh' }, TIERS)).toEqual({
       build: { effort: 'xhigh' },
     })
     expect(web.effectiveRow(BUILD, {}).model).toBe('opus')
@@ -232,6 +248,13 @@ describe('the agreement is real, not vacuous', () => {
     const choices = web.tierChoices(CODEX, TIERS)
     expect(choices.find((c) => c.tier === 'sol')!.selectable).toBe(true)
     expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('Claude is not wired for this step yet')
+    // A payload from a gateway that predates `groups` still renders, on both clients:
+    // the settings pane must not blank out because one field is missing.
+    const { groups: _omitted, ...legacyBuild } = BUILD
+    expect(web.tierChoices(legacyBuild, TIERS)).toEqual(mobile.tierChoices(legacyBuild, TIERS))
+    expect(web.tierChoices(legacyBuild, TIERS).find((c) => c.tier === 'sol')!.reason).toBe(
+      'Codex is not wired for this step yet — it runs on Claude',
+    )
     // WRONG-GROUP BEATS UNAVAILABLE, deliberately: telling the owner of a Codex row
     // to go get a Kimi key would send them to fix something that would not help.
     expect(choices.find((c) => c.tier === 'k3')!.reason).toContain('Kimi is not wired for this step yet')
@@ -252,5 +275,44 @@ describe('the agreement is real, not vacuous', () => {
     expect(web.tierChoices.length).toBe(mobile.tierChoices.length)
     expect(web.resolvedModel.length).toBe(mobile.resolvedModel.length)
     expect(web.rejectedModel.length).toBe(mobile.rejectedModel.length)
+    expect(web.effortSettable.length).toBe(mobile.effortSettable.length)
+    expect(web.phaseGroupsOf.length).toBe(mobile.phaseGroupsOf.length)
+  })
+})
+
+describe('effortSettable — both clients disable the same cell', () => {
+  // THE BUG THIS PINS. `effort_supported` on the PHASE answers for its DEFAULT tier,
+  // so the build row kept a live effort dropdown after the owner moved it to codex —
+  // and `applyRowEdit` then merged the stale effort into the PUT, which the server
+  // refused. The whole save failed, taking every other row's pending edit with it.
+  const CASES: Array<[string, boolean]> = [
+    ['opus', true],
+    ['fast', true],
+    ['sol', false],
+    ['k3', false],
+    // A saved override the server no longer resolves keeps the phase's own answer —
+    // the row is already telling the owner that value is dead.
+    ['retired-tier', true],
+  ]
+  for (const [tier, expected] of CASES) {
+    test(`build on ${tier} → ${expected}`, () => {
+      expect(web.effortSettable(BUILD, tier, TIERS)).toBe(expected)
+      expect(mobile.effortSettable(BUILD, tier, TIERS)).toBe(expected)
+    })
+  }
+
+  test('a row with no effort control at all stays off, whatever the tier', () => {
+    expect(web.effortSettable(CODEX, 'sol', TIERS)).toBe(false)
+    expect(mobile.effortSettable(CODEX, 'opus', TIERS)).toBe(false)
+  })
+
+  test('the whole point: a codex build never PUTs an effort', () => {
+    // End to end on the pure helpers — what the pane would send after the owner
+    // picks `sol` on a row that had an effort pinned.
+    for (const client of [web, mobile]) {
+      expect(client.applyRowEdit({ build: { effort: 'max' } }, BUILD, { model: 'sol' }, TIERS)).toEqual({
+        build: { model: 'sol' },
+      })
+    }
   })
 })

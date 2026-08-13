@@ -27,35 +27,74 @@ repository already treats as the answer to "built but never connected".
 brief — the SAME `forgeBuildContract` text the Claude builder gets, plus a coda about
 reporting — reaches the wrapper as a heredoc-written file and goes to `codex exec` on
 stdin. The hard part is downstream: `reviewedHead` pins the merge to the reviewed
-commit (#545) and `roundLanded` refuses to re-review a round that left no trace, and
-a `codex exec` subprocess has no result schema to report either through. The naive
-port asks the model to print its sha, which fails in exactly the case that matters —
-the build that believes it committed. So the wrapper does not ask. After codex exits
-it MEASURES `git rev-parse --verify HEAD`, `git ls-remote` (the PUSHED sha, which is
-the one a merge pins to), `gh pr list`, and whether the diff file exists and is
-non-empty, and prints six `NEUTRON_CODEX_BUILD_*` lines. Every one is EMPTY rather
-than wrong when it cannot be established, and empty fails closed at both gates.
-`testsPassed` is the only field left as the build's own claim.
+commit (#545) and `roundLanded` refuses to re-review a round that left no trace. A
+`codex exec` subprocess CAN be handed `--output-schema`, but a schema-shaped answer is
+still the model's claim about its own work, and the case that matters is exactly the
+one where the model believes it committed — a schema constrains the shape of a wrong
+answer, not its truth. So the wrapper does not ask. After codex exits it MEASURES the
+six facts with `git`/`gh` and writes them itself, and each one is EMPTY rather than
+wrong when it cannot be established. `testsPassed` is the only field left as the
+build's own claim.
 
-**The sandbox grant is `danger-full-access`, deliberately.** `read-only` cannot edit;
-`workspace-write` cannot COMMIT (a worktree's `.git` is a file pointing outside the
-workspace) and has no network, so `git push` / `gh pr create` / any install fails.
-The grant makes the codex builder EQUAL to the Claude builder, which already has
-those powers, and the blast radius is bounded the same way: an isolated worktree on
-its own branch, a panel that reads the diff, a merge pinned to the reviewed commit.
+Three things make the measurement honest rather than merely measured:
+
+- **The trailer has its own FILE.** It used to share stdout with the codex transcript,
+  and the bridge was shown the last N lines of that stream — so a build narrating
+  `NEUTRON_CODEX_BUILD_HEAD=<sha>` put a second, fabricated trailer in the reader's
+  window with no rule about which one won. The wrapper writes (truncating) to
+  `NEUTRON_CODEX_BUILD_TRAILER_FILE` and the bridge `cat`s exactly that; the path is
+  required, refused up front, because a completed build with nowhere to report has
+  already spent its tokens.
+- **`HEAD` is the commit THIS RUN made.** The wrapper records the head before it
+  launches codex and reports nothing if it has not moved. A build that edited files
+  and never committed would otherwise report the base commit, whose tree holds none of
+  its work — and `roundLanded` would see a landed round while the merge pinned to a
+  commit the build did not make. The shape check is charset AND length: 40 hex, so an
+  abbreviation cannot pass as a sha.
+- **`REMOTE_HEAD` is that sha CONFIRMED PUSHED, not the branch tip.** A fresh probe of
+  a shared ref is the pattern `inner-workflow.mjs` forbids for `reviewedHead`: a stale
+  or concurrently-pushed third-party head would be read back, and `--match-head-commit`
+  would then pin the merge to it and SUCCEED, certifying as reviewed a commit nobody
+  read. The remote is a WITNESS for our own sha — reported only when the tip equals it,
+  empty on every disagreement. The probe is wall-clock bounded like the auth precheck.
+
+**The sandbox grant is `danger-full-access`, deliberately.** `read-only` cannot edit a
+file. `workspace-write` writes only inside the workspace, and a build writes outside it
+twice over — a worktree's `.git` is a file pointing at `<repo>/.git/worktrees/<name>`,
+and the branch diff goes to a path under `/tmp`. `--add-dir` (a real flag on this CLI)
+can widen the write set to cover both; what it cannot grant is NETWORK, which
+`workspace-write` denies and which steps 3 and 4 of the Forge contract — `git push`,
+`gh pr create` — require. Re-widening along both axes one flag at a time arrives at the
+same reach with more moving parts. The grant makes the codex builder EQUAL to the
+Claude builder, which already has those powers, and the blast radius is bounded the
+same way: an isolated worktree on its own branch, a panel that reads the diff, a merge
+pinned to the reviewed commit.
 
 **No silent fallback to Claude, ever.** A build lane that reports `not_connected` or
 `deferred` throws with the status named. Re-Forging on Opus would spend precisely the
 quota the owner moved the phase to protect and would hide that it had done so — so
-the run stops, and no reviewer is paid to read an unbuilt branch. An effort override
-paired with a codex model is refused at the settings boundary too: a CLI picks its own
-reasoning effort, so storing one would be a control nothing reads.
+the run stops, and no reviewer is paid to read an unbuilt branch.
+
+**The effort control follows the CHOSEN tier, and a leftover is dropped rather than
+refused.** `effort_supported` on a phase answers for its DEFAULT executor, which was
+the whole answer while every row had one. The build row has two, so the payload now
+carries `effort_supported` per TIER as well and both clients disable the cell when
+either says no. `applyRowEdit` clears an effort the newly-chosen tier cannot use, and
+`parsePhaseModelConfig` — the backstop for any client that does not — DROPS that
+effort and lets the write succeed; the row that comes back renders the same disabled
+"set by the CLI" cell, so nothing is hidden by the drop. Rejecting it 400s the entire PUT, discarding
+every other row's pending edit and making the codex tiers unpickable for any owner who
+had ever touched the build's effort: a selectable option that cannot be selected, which
+is worse than the greyed one this change removed. An effort on a phase that never had a
+control is still a loud error, because there the owner cannot see a cell to explain it.
 
 **Two knobs, not one.** The build wrapper reads `CODEX_BUILD_MODEL`; the review
 wrapper keeps `CODEX_REVIEW_MODEL`. A shared name would let a box that exports one
 silently steer the other, and `model-tiers.test.ts` now asserts neither wrapper
 mentions the other's knob (comments stripped) and that the workflow sets the name the
-build wrapper reads.
+build wrapper reads. The test seam is split the same way: the build wrapper reads
+`NEUTRON_CODEX_BUILD_EXEC_CMD`, so a value exported to stub the reviewer cannot replace
+the build's entire invocation.
 
 **An observation for the owner, not a change.** Moving the build to codex means a
 codex REVIEWER is no longer reviewing a different family's work. The cross-model gate

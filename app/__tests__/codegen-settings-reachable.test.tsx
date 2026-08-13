@@ -80,13 +80,13 @@ function payload(
       },
     ],
     model_tiers: [
-      { tier: 'fable', provider: 'anthropic', model_id: 'claude-fable-5', group: 'claude', available: true, unavailable_reason: null },
-      { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', available: true, unavailable_reason: null },
-      { tier: 'sonnet', provider: 'anthropic', model_id: 'claude-sonnet-4-6', group: 'claude', available: true, unavailable_reason: null },
-      { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', available: true, unavailable_reason: null },
-      { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', available: true, unavailable_reason: null },
-      { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', available: true, unavailable_reason: null },
-      { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', available: false, unavailable_reason: 'needs a Kimi key' },
+      { tier: 'fable', provider: 'anthropic', model_id: 'claude-fable-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
+      { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
+      { tier: 'sonnet', provider: 'anthropic', model_id: 'claude-sonnet-4-6', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
+      { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
+      { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
+      { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
+      { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', effort_supported: false, available: false, unavailable_reason: 'needs a Kimi key' },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaults: {
@@ -257,6 +257,27 @@ describe('the screen renders what the SERVER says the phases are', () => {
     expect(byTestId('phase-review_codex-effort-na')!.textContent ?? '').toContain(
       'set by the CLI',
     );
+  });
+
+  it('the BUILD row LOSES its effort control the moment it moves to codex, and the PUT drops the effort', async () => {
+    // THE BLOCKER THIS PINS, driven the way the owner hits it: set an effort, then
+    // move the row to a GPT tier. The cell used to stay live and the stale effort
+    // rode along in the PUT, which the server refused — failing the ENTIRE save,
+    // including every other row edited in the same pass.
+    await mountCodegen();
+    await choose('build', 'effort', 'max');
+    // The control is live while the row is on its Claude default.
+    expect(byTestId('phase-build-effort')).not.toBeNull();
+    expect(byTestId('phase-build-effort-na')).toBeNull();
+
+    await choose('build', 'model', 'sol');
+    expect(byTestId('phase-build-effort')).toBeNull();
+    expect(byTestId('phase-build-effort-na')!.textContent ?? '').toContain('set by the CLI');
+
+    // …and a second row edited in the same pass still reaches the server.
+    await choose('synthesis', 'model', 'opus');
+    await press('codegen-save');
+    expect(lastPut()).toEqual({ build: { model: 'sol' }, synthesis: { model: 'opus' } });
   });
 
   it('shows a REFUSED stored value struck through, and what is running instead', async () => {

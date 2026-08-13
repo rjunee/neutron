@@ -153,9 +153,12 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     default: { tier: 'opus', effort: 'high' },
     // THE BUILD RUNS ON CODEX WHEN THE OWNER PICKS A GPT TIER. The workflow's forge
     // dispatch hands the assembled build brief to `trident/codex-build.sh` instead of
-    // to `agent()`, and NO Anthropic call is made for the phase — which is the point:
-    // the reason to move a build off Claude is the Anthropic quota, so a route that
-    // still spends it would be a route that did not work.
+    // to `agent({model})`, and NO ANTHROPIC MODEL ID IS REQUESTED FOR THE PHASE — the
+    // build's tokens are spent at OpenAI, which is the point: the reason to move a
+    // build off Claude is the Anthropic quota. (The subprocess is still LAUNCHED by a
+    // thin bridge agent running on the launcher's own default, because a workflow step
+    // has no other way to reach a shell; that agent runs one command and copies six
+    // measured values, and the build itself never touches Anthropic.)
     alsoRunsOn: ['codex'],
   },
   {
@@ -320,8 +323,9 @@ export function phaseGroups(phase: TridentPhase): ReadonlyArray<TierGroup> {
  *
  * Asked of the PHASE, not of two tiers, because "what can substitute for what" depends
  * on which dispatches the phase has — and that is a property of the workflow's wiring,
- * not of the tier registry. `tiersAreInterchangeable` answers the narrower tier-to-tier
- * question and is still the right check for a single-executor step.
+ * not of the tier registry. THE ONLY form of this question in the codebase: the
+ * tier-to-tier version it replaced (`tiersAreInterchangeable`) was deleted rather than
+ * left beside it, because two answers to one question is how the pane and the run drift.
  */
 export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean {
   const group = modelTier(tier)?.group
@@ -336,10 +340,12 @@ export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean 
  * with the reason instead of offering a dropdown that changes nothing. (A phase's
  * stored `default.effort` is inert for those rows and never reaches a dispatch.)
  *
- * This answers for the phase's DEFAULT tier. A phase with a second executor
- * ({@link TridentPhase.alsoRunsOn}) can be moved to a tier whose effort is inert even
- * though this returns true; `parsePhaseModelConfig` refuses that pair by name, so the
- * owner is told rather than left with a control nothing reads.
+ * THIS ANSWERS FOR THE PHASE'S DEFAULT TIER — "could this row ever have an effort
+ * control", not "does it have one right now". A phase with a second executor
+ * ({@link TridentPhase.alsoRunsOn}) can be moved to a tier whose effort is inert while
+ * this still returns true, so a pane must ALSO ask the chosen tier (the surface ships
+ * `effort_supported` per tier for exactly that) and `parsePhaseModelConfig` drops the
+ * effort when the chosen tier cannot use it.
  */
 export function phaseSupportsEffort(phase: TridentPhase): boolean {
   return phaseTransport(phase) === 'agent'
@@ -406,6 +412,10 @@ const MODEL_ID_MAX = 128
  * the phase cannot dispatch, an effort on a phase that has no effort control, and an
  * effort outside {@link EFFORTS}. An entry that validates but sets nothing is dropped
  * rather than stored, so `{}` never reads as "configured".
+ *
+ * ONE THING IS DROPPED RATHER THAN REJECTED: an effort paired with a CLI tier on a
+ * phase that DOES have an effort control (the build moved to codex). It lands in
+ * `rejected` and the write succeeds — see the comment at the end of the loop.
  */
 export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
   const errors: string[] = []
@@ -478,9 +488,16 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
         }
         if (!phaseAcceptsTier(phase, model)) {
           // Not a preference — a capability. See `phaseAcceptsTier`.
+          //
+          // NAMES THE EXECUTOR GROUP, NOT A SCRIPT. A tier's `wrapper` is the CROSS-MODEL
+          // REVIEW wrapper it was registered with, and the build lane reaches the same
+          // codex tiers through a different script — so interpolating it here told a
+          // BUILD-row owner their tier "runs as a trident/codex-review.sh subprocess",
+          // which is a sentence about a phase they were not configuring. The group is
+          // true for every phase that can reach the tier.
           const got = modelTier(model)
           errors.push(
-            `phase '${key}': '${model}' runs ${got?.transport === 'cli' ? `as a ${got.wrapper ?? 'CLI'} subprocess` : 'as a Claude agent'}, which cannot run this step — ${key} dispatches on ${phaseGroups(phase).join(' or ')}`,
+            `phase '${key}': '${model}' runs on the ${got?.group ?? 'unknown'} executor, which cannot run this step — ${key} dispatches on ${phaseGroups(phase).join(' or ')}`,
           )
           reject(key, { model })
           continue
@@ -515,12 +532,23 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
     // reasoning effort — so the pair `{model: 'sol', effort: 'max'}` would store a
     // number no dispatch reads. Checked AFTER the field loop because the two fields
     // arrive in whatever order the JSON had them, and the model is what decides.
+    //
+    // DROPPED, NOT AN ERROR, and this is the one place in this function that does not
+    // fail the write. The pair is not a bad value, it is a LEFTOVER: the row had a
+    // live effort control until the same save moved it to a subprocess. Rejecting it
+    // would 400 the whole PUT — every other row's pending edit with it — and make the
+    // codex tiers unpickable for any owner who had ever touched the effort control,
+    // which is a settable option that cannot be set.
+    //
+    // NOTHING IS HIDDEN BY THE DROP. A current pane never sends this pair at all (the
+    // effort cell is answered by the chosen tier, and `applyRowEdit` clears what that
+    // tier cannot use); a client that does send it renders the same disabled cell —
+    // "set by the CLI" — the moment the response comes back. It is reported in
+    // `rejected` for the caller in this pass, which is how the read path already
+    // describes a stored value it could not use.
     if (entry.effort !== undefined && entry.model !== undefined) {
       const chosen = modelTier(entry.model)
       if (chosen?.transport === 'cli') {
-        errors.push(
-          `phase '${key}': 'effort' is not settable with model '${entry.model}' — that tier runs as a ${chosen.wrapper ?? 'CLI'} subprocess, which chooses its own reasoning effort`,
-        )
         reject(key, { effort: entry.effort })
         delete entry.effort
       }

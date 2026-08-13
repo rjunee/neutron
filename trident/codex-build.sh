@@ -23,6 +23,8 @@
 #   in  NEUTRON_CODEX_BUILD_DIFF_FILE   where the brief told the build to write the
 #                                       branch diff, so this script can report whether
 #                                       it actually appeared.
+#   in  NEUTRON_CODEX_BUILD_TRAILER_FILE where to WRITE the measured trailer. Required
+#                                       — see below for why it is not stdout.
 #   in  CODEX_HOME                      the per-project subscription credential dir.
 #   in  CODEX_BUILD_MODEL               which GPT tier to build on. A DIFFERENT knob
 #                                       from the reviewer's `CODEX_REVIEW_MODEL` on
@@ -31,7 +33,7 @@
 #                                       build's model (or the reverse).
 #   arg $1                              the branch the build is expected to land on.
 #
-#   out  the codex transcript on stdout, then a MEASURED trailer (see below).
+#   out  the codex transcript on stdout; the MEASURED trailer in the trailer file.
 #
 # ── THE TRAILER IS THE POINT ─────────────────────────────────────────────────
 # The inner loop needs four facts from a build — branch, commit sha, PR number,
@@ -39,15 +41,16 @@
 # merge to the reviewed commit (`gh pr merge --match-head-commit`, #545) and
 # `roundLanded` refuses to re-review a round that left no trace on the branch.
 #
-# A Claude Forge agent REPORTS those through a schema; it is reporting on itself. A
-# `codex exec` subprocess has no schema tool at all, so the naive port would be "ask
-# the model to print them" — and the failing case is exactly the one where the model
-# believes it succeeded. So this script does not ask. After codex exits it MEASURES
-# them with git and gh and prints them itself:
+# A Claude Forge agent REPORTS those through a schema; it is reporting on itself.
+# `codex exec` can be handed `--output-schema` (this CLI has the flag) — but a
+# schema-shaped answer is still the MODEL's claim about its own work, and the failing
+# case is exactly the one where the model believes it committed. A schema constrains
+# the SHAPE of a wrong answer, not its truth. So this script does not ask. After codex
+# exits it MEASURES the facts with git and gh and writes them itself:
 #
 #   NEUTRON_CODEX_BUILD_BRANCH=      `git rev-parse --abbrev-ref HEAD`
-#   NEUTRON_CODEX_BUILD_HEAD=        `git rev-parse HEAD` — the LOCAL commit
-#   NEUTRON_CODEX_BUILD_REMOTE_HEAD= `git ls-remote` — the PUSHED commit, or empty
+#   NEUTRON_CODEX_BUILD_HEAD=        the commit THIS RUN produced (see below)
+#   NEUTRON_CODEX_BUILD_REMOTE_HEAD= that same commit, confirmed pushed, or empty
 #   NEUTRON_CODEX_BUILD_PR=          `gh pr list --head` — the PR number, or empty
 #   NEUTRON_CODEX_BUILD_DIFF=        the diff file path, or empty if it is missing
 #                                    or empty
@@ -57,17 +60,46 @@
 # the bridge that reads them passes the empty value straight through. An empty sha
 # fails closed at both gates: no review of an unbuilt branch, and no merge.
 #
+# ── THE TWO SHAS ARE BOTH ABOUT *THIS* BUILD, NEVER ABOUT THE BRANCH ─────────
+# `HEAD` is recorded only when the local head is not where it was when codex STARTED.
+# A build that edited files and never committed leaves HEAD on the base commit, and
+# reporting that would hand the round a sha whose tree contains none of its work —
+# `roundLanded` would see a "landed" round and the merge would pin to a commit the
+# build did not make. Unmoved head → empty, which is the invariant above.
+#
+# `REMOTE_HEAD` is that measured local sha CONFIRMED PUSHED — it is emitted only when
+# the remote branch tip EQUALS it, and is otherwise empty. It is deliberately not "the
+# current tip of the remote branch": that is a fresh probe of a shared ref, and
+# `trident/inner-workflow.mjs` forbids exactly that for `reviewedHead` (a commit pushed
+# by anything else between the build and the probe would be read back and then pinned
+# by `--match-head-commit`, certifying as reviewed a commit no reviewer saw). Equality
+# turns the remote into a WITNESS for our own sha instead of a source for someone
+# else's, and every disagreement — stale branch, concurrent push, failed push — comes
+# out empty and fails closed.
+#
+# ── WHY THE TRAILER IS A FILE AND NOT THE TAIL OF STDOUT ─────────────────────
+# stdout also carries the codex transcript, which is model-controlled text. A build
+# that quotes this header, or narrates "I printed NEUTRON_CODEX_BUILD_HEAD=<sha>",
+# puts a second trailer-shaped block in front of the reader with no way to tell which
+# one was measured. The bridge reads THIS FILE and nothing else, and the file is
+# written (truncating) after codex exits, so anything the model wrote there is gone.
+#
 # ── THE SANDBOX GRANT, AND WHY IT IS THIS WIDE ───────────────────────────────
-# `--sandbox danger-full-access`. Deliberate, and the narrower policies were tried
-# against what a build actually does:
+# `--sandbox danger-full-access`. Deliberate, and the narrower policies were checked
+# against what a build actually does rather than assumed:
 #
 #   • `read-only` (the exec default) cannot edit a file.
-#   • `workspace-write` cannot COMMIT. The build runs in a git WORKTREE, whose `.git`
-#     is a file pointing at `<repo>/.git/worktrees/<name>` — so every commit writes
-#     outside the workspace, and the first `git commit` fails.
-#   • `workspace-write` has no network by default, so `git push`, `gh pr create` and
-#     any dependency install fail. Steps 3 and 4 of the Forge contract are exactly
-#     those.
+#   • `workspace-write` writes only inside the workspace, and a trident build writes
+#     outside it twice over: it runs in a git WORKTREE, whose `.git` is a file pointing
+#     at `<repo>/.git/worktrees/<name>` (so the first `git commit` writes out of tree),
+#     and it writes its branch diff to a path under /tmp. `--add-dir` — a real flag on
+#     this CLI — can widen the write set to cover both.
+#   • What `--add-dir` cannot grant is NETWORK, which `workspace-write` denies. Steps 3
+#     and 4 of the Forge contract are `git push` and `gh pr create`, and a build that
+#     installs a dependency needs it too.
+#
+# So the narrow policy would have to be re-widened along both axes, one flag at a time,
+# to arrive at the same reach with more moving parts and more ways to be subtly wrong.
 #
 # A build that cannot commit, push or open a PR is not a build; it produces no sha
 # and the run stops at the trailer above. The blast radius is bounded by the same
@@ -78,7 +110,7 @@
 #
 # Usage (from inside the build worktree):
 #   CODEX_HOME=<dir> NEUTRON_CODEX_BUILD_BRIEF_FILE=<file> \
-#     bash trident/codex-build.sh <branch>
+#     NEUTRON_CODEX_BUILD_TRAILER_FILE=<file> bash trident/codex-build.sh <branch>
 #
 # Exit codes mirror `trident/codex-review.sh`, and the bridge maps them the same way:
 #   0   BUILT         — codex ran to completion. Read the trailer.
@@ -99,8 +131,22 @@ set -uo pipefail
 BRANCH="${1:-}"
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
+# The head as it stood BEFORE codex ran, set just before the launch below. A head
+# still equal to this one means no commit was made, whatever the transcript says.
+BASE_HEAD=''
 
-# ── The trailer, printed on EVERY path that got as far as running codex ───────
+# A 40-character lowercase-hex sha, or the empty string. Charset AND length, because
+# `git rev-parse --verify HEAD` in a repo with no commits echoes the literal `HEAD`
+# back, and a truncated or abbreviated value would be accepted by a charset test
+# alone while being useless to `--match-head-commit`.
+sha_or_empty() {
+  case "$1" in
+    *[!0-9a-f]* | '') printf '' ;;
+    *) [ "${#1}" -eq 40 ] && printf '%s' "$1" || printf '' ;;
+  esac
+}
+
+# ── The trailer, written on EVERY path that got as far as running codex ───────
 # A function so the measurement is written once and cannot drift between the
 # success and failure exits. It measures; it never infers.
 emit_trailer() {
@@ -108,22 +154,23 @@ emit_trailer() {
   branch_name="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   # A detached HEAD has no branch name, and `--abbrev-ref` spells that "HEAD".
   [ "$branch_name" = "HEAD" ] && branch_name=''
-  # `--verify`, because a repo with NO commits makes plain `git rev-parse HEAD` echo
-  # the literal string `HEAD` back on stdout — a value that is not a sha and is not
-  # empty either, which is the worst of both. The shape check below is the backstop:
-  # nothing that is not 40 hex characters is allowed to be reported as a commit.
-  head="$(git rev-parse --verify HEAD 2>/dev/null || true)"
-  case "$head" in
-    *[!0-9a-f]* | '') head='' ;;
-  esac
+  head="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
+  # A HEAD THAT DID NOT MOVE IS NOT THIS BUILD'S COMMIT. See the header: reporting the
+  # pre-existing head for a build that edited but never committed would hand the round
+  # a sha whose tree holds none of its work, and both downstream gates would accept it.
+  [ -n "$head" ] && [ "$head" = "$BASE_HEAD" ] && head=''
   remote_head=''
-  if [ -n "$BRANCH" ]; then
-    # The PUSHED head, which is the only one a reviewer or a merge will ever see.
-    # `awk` splits the `<sha>\trefs/heads/<branch>` line; no match prints nothing.
-    remote_head="$(git ls-remote origin "refs/heads/${BRANCH}" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
-    case "$remote_head" in
-      *[!0-9a-f]* | '') remote_head='' ;;
-    esac
+  if [ -n "$head" ] && [ -n "$BRANCH" ]; then
+    local tip
+    # THE REMOTE IS A WITNESS, NOT A SOURCE — this answers "was OUR sha pushed?", and
+    # any other answer is discarded (header: the `reviewedHead` rule). `awk` splits the
+    # `<sha>\trefs/heads/<branch>` line; no match prints nothing.
+    #
+    # Bounded the same way the auth precheck is: by this point the codex tokens are
+    # already spent, so a remote that hangs must cost the run a fact, not the build.
+    tip="$(GIT_TERMINAL_PROMPT=0 perl -e 'alarm 10; exec @ARGV or exit 1' \
+      git ls-remote origin "refs/heads/${BRANCH}" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
+    [ "$(sha_or_empty "$tip")" = "$head" ] && remote_head="$head"
   fi
   pr_number=''
   if [ -n "$BRANCH" ] && command -v gh >/dev/null 2>&1; then
@@ -138,13 +185,17 @@ emit_trailer() {
   if [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && [ -s "${NEUTRON_CODEX_BUILD_DIFF_FILE}" ]; then
     diff_path="${NEUTRON_CODEX_BUILD_DIFF_FILE}"
   fi
+  # `>` TRUNCATES, deliberately: the build had full write access and may have created
+  # this path itself. What the reader gets is what this function measured, nothing
+  # appended to it.
   printf '%s\n' \
     "NEUTRON_CODEX_BUILD_BRANCH=${branch_name}" \
     "NEUTRON_CODEX_BUILD_HEAD=${head}" \
     "NEUTRON_CODEX_BUILD_REMOTE_HEAD=${remote_head}" \
     "NEUTRON_CODEX_BUILD_PR=${pr_number}" \
     "NEUTRON_CODEX_BUILD_DIFF=${diff_path}" \
-    "NEUTRON_CODEX_BUILD_WORKTREE=${WORKTREE}"
+    "NEUTRON_CODEX_BUILD_WORKTREE=${WORKTREE}" \
+    > "$TRAILER_FILE"
 }
 
 # ── NOT CONNECTED: no per-project credential configured ───────────────────────
@@ -180,6 +231,15 @@ if [ -z "$BRIEF_FILE" ] || [ ! -s "$BRIEF_FILE" ]; then
   exit 3
 fi
 
+# ── DEFERRED: nowhere to put the trailer ──────────────────────────────────────
+# Refused before codex is launched rather than discovered after it: without a place to
+# write the measurement, a completed build reports nothing and the tokens are spent.
+TRAILER_FILE="${NEUTRON_CODEX_BUILD_TRAILER_FILE:-}"
+if [ -z "$TRAILER_FILE" ]; then
+  echo "CODEX_BUILD_NO_TRAILER_FILE: NEUTRON_CODEX_BUILD_TRAILER_FILE is unset — there is nowhere to write the measured trailer, so a completed build could not be reported. DEFERRED." >&2
+  exit 3
+fi
+
 # ── DEFERRED precheck: auth must be live. 3× retry, 6s per-attempt wall cap ────
 # Ported from the review wrapper: a genuine expiry fails every attempt; a transient
 # blip recovers on attempt 2/3, so a flaky network is not a failed build.
@@ -203,12 +263,22 @@ fi
 # ARG_MAX and fail before codex starts — the same hazard the review wrapper hit with
 # a near-cap diff.
 #
-# A test seam (NEUTRON_CODEX_EXEC_CMD) replaces the real invocation so tests never
-# call OpenAI. It reads the same STDIN and runs in the same cwd, so the trailer below
-# measures a REAL git state either way — which is what makes the seam worth having:
-# the interesting behaviour here is the measurement, not the model.
-if [ -n "${NEUTRON_CODEX_EXEC_CMD:-}" ]; then
-  if <"$BRIEF_FILE" sh -c "$NEUTRON_CODEX_EXEC_CMD"; then
+# THE HEAD BEFORE THE BUILD, captured here and nowhere else: everything after this
+# line is the build's, and the trailer's "did it commit" question is answered by
+# comparing against this value.
+BASE_HEAD="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
+
+# A test seam (NEUTRON_CODEX_BUILD_EXEC_CMD) replaces the real invocation so tests
+# never call OpenAI. It reads the same STDIN and runs in the same cwd, so the trailer
+# below measures a REAL git state either way — which is what makes the seam worth
+# having: the interesting behaviour here is the measurement, not the model.
+#
+# NAMED FOR THIS WRAPPER, not shared with the review one. `codex-review.sh` has its own
+# `NEUTRON_CODEX_EXEC_CMD`; one name across both would mean a value exported to stub
+# the reviewer silently replaced the BUILD's entire invocation — the same cross-talk
+# the two model knobs (CODEX_BUILD_MODEL vs CODEX_REVIEW_MODEL) exist to prevent.
+if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
+  if <"$BRIEF_FILE" sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
     emit_trailer
     exit 0
   fi
