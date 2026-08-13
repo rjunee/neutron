@@ -9,15 +9,17 @@
  *
  * That coupling existed and was written down in prose; nothing enforced it.
  * This file enforces it. It is deliberately written against the LIVE exports
- * rather than a hand-copied list of ids, because a hand-copied list is the
- * thing that rotted in the first place — `config/index.ts` carried its own copy
- * of these literals and drifted a whole generation behind on Sonnet without any
- * test noticing, which is exactly what the owner hit in the model-selector pane.
+ * rather than a hand-copied list of ids, because a hand-copied list is the thing
+ * that rotted in the first place.
+ *
+ * The companion guard — that `config/index.ts`'s hand-copied DEFAULTS table still
+ * agrees with these exports — lives in `gateway/__tests__/model-defaults-drift.test.ts`
+ * rather than here, because `runtime` does not depend on `config` and must not
+ * start: `gateway` is the layer that legitimately sees both.
  */
 
 import { describe, expect, test } from 'bun:test'
 
-import { DEFAULTS } from '../../config/index.ts'
 import { resolveModelPricing } from '../model-pricing.ts'
 import { BEST_MODEL, FABLE_MODEL, FAST_MODEL, PROBE_MODEL, SONNET_MODEL } from '../models.ts'
 
@@ -45,33 +47,6 @@ describe('every default model id has a pricing row', () => {
       expect(entry.source_url).toMatch(/^https:\/\//)
     })
   }
-})
-
-describe('the boot-config defaults table has not drifted from the model registry', () => {
-  // `config/index.ts` re-declares these ids as literals so the boot config can
-  // resolve without importing the runtime. That duplication is what drifted:
-  // Sonnet sat on 4.6 in BOTH files while opus and fable moved to 5, and the
-  // existing defaults test could not catch it because it asserted the same
-  // hand-copied literal. Comparing the two SOURCES, rather than each against a
-  // literal, is the assertion that survives the next bump.
-  test('DEFAULTS mirror runtime/models.ts exactly', () => {
-    // Widened to `string` on purpose: `DEFAULTS` is a const-asserted literal
-    // table, so leaving it narrow makes `toEqual` infer the literal type and
-    // reject the (correctly typed `string`) runtime exports at compile time —
-    // a type error that says nothing about whether the two agree.
-    const declared: Record<string, string> = {
-      best: DEFAULTS.bestModel,
-      fable: DEFAULTS.fableModel,
-      sonnet: DEFAULTS.sonnetModel,
-      fast: DEFAULTS.fastModel,
-    }
-    expect(declared).toEqual({
-      best: BEST_MODEL,
-      fable: FABLE_MODEL,
-      sonnet: SONNET_MODEL,
-      fast: FAST_MODEL,
-    })
-  })
 })
 
 describe('Sonnet 5 pricing is the read number, not the inherited one', () => {
