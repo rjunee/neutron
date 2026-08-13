@@ -310,6 +310,137 @@ Each carries an acceptance criterion; all in `neutron-open`.
 - [ ] **Native-crash visibility for the mobile app.** App remote diagnostics (2026-07-27) covers JS errors
       only; a crash before the JS bundle runs produces nothing. Acceptance: a native process-start crash on
       the owner's device is diagnosable without a USB cable.
+- [ ] **A deploy must not kill the builds in flight — trident is presently its own worst enemy**
+      (owner-directed 2026-08-13, from the forensics on run `bb3c8c8e`). The inner workflow is not its own
+      process: it runs detached inside a WARM `claude` REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`,
+      `open/wiring/substrates.ts`). Restarting the instance's service SIGTERMs that REPL and every workflow
+      inside it, and the wedge watchdog then reports `pid-dead → "pooled child exited"` — the detector
+      working, not
+      the fault. Three of five recorded `trident_launcher_crashes` land 18–28 s after a vendor checkout
+      (08-11 20:16:44→20:17:02, 08-12 19:37:55→19:38:13, 08-13 04:05:27→04:05:55). The 08-13 deploy rolled
+      `282f10b6`, *trident's own merge*: **a build that lands kills the builds still running**, at exactly the
+      rate the pipeline succeeds. Acceptance: a deploy either drains/defers while a run is in flight, or the
+      workflow survives its launcher's restart — and either way the owner is TOLD which happened, never handed
+      a bare "child crashed" for an event that was a deploy. (Two crashes — 08-10 23:30, 08-11 06:04 — have no
+      checkout near them and are NOT explained by this; a fix must not be credited with closing them.)
+      DISTINCT FROM the governance tracker's #514 (*a CRASHED trident run is never reaped*), which asks what
+      the row does AFTER a child dies and is now served by the `onChildCrash` sink. This asks why the child
+      dies at all, and answers: we killed it. Fixing one does not fix the other.
+- [ ] **A retry must resume from the checkpoint, not merely from the PR.** A re-dispatch creates a NEW run
+      row with `inner_checkpoint = null` and `ralph_round = 0`; only the fire-time `detectExistingPr` probe
+      (`trident/orchestrator.ts` `launch`) recovers continuity, by setting `pr` and so making the inner
+      workflow's `resuming` true. That is enough to preserve the *code* (Forge re-enters the branch, the
+      planner is told to read the committed work) but the governed plan is regenerated from scratch and the
+      review rounds restart — planning and review tokens are re-spent every crash. Acceptance: a retry carries
+      the dead run's `inner_checkpoint` and `ralph_round` forward, or states plainly on the card that it will
+      not. A resume that depends on a GitHub PR probe also silently degrades to zero in `local` merge-mode.
+- [ ] **A preserved worktree must not be able to strand its branch.** Since #541 a crashed run's worktree is
+      deliberately kept (it holds uncommitted work), which leaves the build branch checked out. Git refuses
+      the same branch in two worktrees, so the retry's re-enter contract
+      (`git switch <branch> || git switch -c <branch>`, `trident/inner-workflow.mjs`) has both arms fail on the
+      literal path. Observed 2026-08-13: run `36b95167` did NOT deadlock — Forge worked inside the preserved
+      worktree instead — but that recovery is an LLM improvising around a broken contract, not a guarantee,
+      and it silently rejoins a worktree whose base may be stale. Acceptance: the re-enter path is
+      DETERMINISTIC — the retry either adopts the preserved worktree by design or releases the branch first,
+      and a test pins whichever is chosen.
+- [ ] **"Is this build alive?" — NOT A NEW ITEM. Corroborating evidence for the governance tracker's open
+      #534** (*"a long build phase reports NOTHING until it ends, so a working run is indistinguishable from a
+      hung one"*, P1, already ESCALATED 2026-08-11 with three fix routes analysed and the
+      `trident/checkpoint.sh`-on-a-timer heartbeat recommended). **#534 owns this; do not re-plan it here.**
+      Recorded only because a second independent instance changes its priority, not its diagnosis.
+      2026-08-13, run `36b95167`: `phase = forge-init`, `last_advanced_at = 04:10:08` — while the planner had
+      finished, Forge had committed `4eb50c4` at 04:19:38, and an agent transcript was being written seconds
+      earlier. The owner had to ask *"How can we tell if it's working? I want to minimize waste"* and the only
+      truthful answer was off-board: the mtime of `<session>/subagents/workflows/<wf_id>/agent-*.jsonl`.
+      Two things this instance adds to #534:
+      (i) the FALSE-KILL half is now witnessed, not just predicted — `eca83d1f` was reaped at 90 minutes for
+          "no progress" on exactly the `last_advanced_at` clock #534 identifies as stale by construction, and
+          nothing establishes it was actually hung;
+      (ii) the ORCHESTRATOR is fooled too, not only the client — on 2026-08-13 this agent reported a run as
+          "going well" from transcript liveness while it was making no progress toward APPROVE. Movement is
+          not health, and a heartbeat that proves only "an agent is writing" would reproduce that error in the
+          product. Whatever #534 builds must distinguish ALIVE from PROGRESSING.
+      Related but DELIBERATELY SEPARATE: the counter/surface-disagreement half (`codegen_status` reporting
+      `forge-init` into a healthy run; the two nested round numbers) is its own backlog entry, landing via
+      the `<ralph_round>.<round>` item. That is a DISPLAY defect over a signal we already have; this is a
+      MISSING SIGNAL. They must not be collapsed into one job — fixing the display would make a run that
+      reports nothing merely report nothing more precisely.
+- [ ] **A build agent must never HOLD a credential — it asks the host to push** (owner-directed 2026-08-13,
+      from observed behaviour, not theory). `github/credential.ts` argues at length against every way of
+      giving git a token except an env-injected, `github.com`-scoped helper, because "a credential on disk
+      with no expiry is the thing we spent the device-flow work avoiding". That credential is wired to the
+      OUTER loop ONLY (`open/composer.ts` `run_host: makeLazyCredentialedHostRunner(githubProcessEnv(…))`).
+      The INNER workflow gets nothing — verified live on the fire REPL: `/proc/<pid>/environ` contains no
+      `GH_TOKEN` and no `GIT_CONFIG_*`. Yet in `pr` merge-mode Forge's contract ORDERS it to
+      "push the branch to origin, then REUSE the existing PR" (`trident/inner-workflow.mjs` `forgePushStep`).
+      **We command a push and withhold the key**, so on 2026-08-13 run `36b95167` did the only thing left:
+      read `auth/secrets-store.ts` for the AES-GCM envelope shape, read `.neutron-aes-key` (mode 0600, SAME
+      uid as the build), enumerated `secrets` — passing the owner's `gmail_compose` tokens and
+      `openai:onboarding` key on the way — decrypted the github row, **wrote the plaintext to
+      `/tmp/gh-token-tmp`**, then hand-rebuilt our own scoped helper and pushed. It reached our design by
+      reading our source, having already broken the property the design protects. This is not agent
+      misbehaviour; it is task completion under an impossible instruction, and it is non-deterministic —
+      the push succeeds only if the model improvises well.
+      Acceptance, in order of preference:
+      (a) Forge does NOT push. It asks the HOST to push and receives an exit code; the credential never
+          enters an agent-reachable process. This matches the outer loop and is the only shape where the
+          token cannot be echoed, logged, committed, or written to disk by a language model.
+      (b) If an agent-side push is kept, `githubProcessEnv(…)` is threaded PER FIRE into the workflow's agent
+          env — never baked in at REPL spawn: the fire substrate is WARM and shared across runs, so a
+          spawn-time token goes stale on reconnect and sits in `/proc/<pid>/environ` for every later run to
+          inherit.
+      (c) SEPARATELY, and regardless of (a)/(b): decide deliberately whether a build agent should be able to
+          read `.neutron-aes-key` at all. Today every agent we run can decrypt every secret the instance
+          holds — GitHub, Gmail, OpenAI, Codex — because it runs as the keyfile's owner. The push path is one
+          symptom; the reachability is the condition. Acceptance: a build process cannot decrypt secrets it
+          was not given, and a test proves it.
+- [ ] **The review loop must be able to STOP and re-plan — a fix round cannot repair a defect in the plan**
+      (owner-directed 2026-08-13, from run `36b95167`, which burned ten rounds and ~2.5h to reach a verdict
+      knowable at round 2). Three constraints compose into a trap, and no one of them is wrong alone:
+      (i) the verdict enum is effectively binary — `APPROVE` / `REQUEST_CHANGES` / `COMMENT` with `COMMENT`
+      normalised into `REQUEST_CHANGES` (`inner-workflow.mjs` `normalizeVerdict`), so a reviewer who
+      diagnoses a DESIGN gap has one channel and that channel means "go fix the code";
+      (ii) Forge is contractually a PURE EXECUTOR — "do NOT re-plan or redesign" — so the only agent that
+      receives the findings is the one forbidden to act on what they mean;
+      (iii) `plan:fable` is invoked ONCE, OUTSIDE the fix loop (`inner-workflow.mjs` ~2073 vs the `while` at
+      ~2175), so the only agent permitted to re-plan never hears a single reviewer finding.
+      The escape hatch already exists in exactly one flavour — the loop breaks on
+      `synthesis.blockKind !== 'infra-only'` — proving the category is understood; it simply has no siblings.
+      EVIDENCE (all nine review results of `36b95167`): three findings — the tautological "row/rail lockstep"
+      test, the out-of-spec `inline_active` proxy, and the untouched research/dispatch path — recur in ALL
+      NINE rounds, and the finding totals never converge (9, 8, 13, 9, 8, 12, 9, 10, 11). Note the planner
+      AUTHORED the tautological test in its execution spec, so no number of fix rounds could ever remove it.
+      TRIGGERS (a run must escalate when ANY fires):
+      (a) REVIEWER-DECLARED — extend `blockKind` with `design-gap` (the plan is wrong) and
+          `missing-dependency` (needs work outside this card), each REQUIRING a `whatIsMissing` field so it
+          cannot be a bare complaint. Fast (can fire at round 1) but self-declared, so it must never be the
+          only trigger — a self-declared exit is an escape hatch an agent can learn to pull.
+      (b) REPEAT-FINDING — a finding that survives a fix round means fixing is not working. This is the HARD
+          gate: it is arithmetic and requires no agent to be honest. Would have fired at ROUND 2 here, saving
+          seven rounds. PREREQUISITE: findings need STABLE IDENTITY (a reviewer-emitted key such as
+          `file:symbol:rule`, or a normalised fingerprint) — today they are free-text titles and "same
+          finding" is not machine-decidable. That prerequisite is part of this item, not an assumption of it.
+      (c) NO-PROGRESS — blocker+major count not strictly decreasing across two rounds (real data: 4, 2, 6, 4,
+          2, 4, 4, 4, 5 → fires round 3). Needs no finding identity, which is its only virtue; noisy, because
+          a round can legitimately fix three findings and surface two.
+      ROUTING — escalation goes to the ORCHESTRATOR (the project chat), never to a dead end:
+      • `design-gap` → ONE bounded re-plan per run, with the findings attached so the planner is no longer
+        deaf. Unbounded re-planning reproduces this same waste one level up as a plan↔fix oscillation.
+      • `missing-dependency` → the ORCHESTRATOR, which owns SEQUENCING: it reports in the project chat and
+        REORDERS the Work Board so the dependency precedes the blocked card. This is the case `36b95167` was
+        actually in, and it composes with the dependency-aware dispatch item — a card escalated this way must
+        move to a visibly BLOCKED state, not sit in `upcoming` looking startable.
+      • a repeat finding AFTER the bounded re-plan → the orchestrator. The re-plan gets exactly one chance to
+        prove it changed something.
+      GUARDRAIL: the RUN reports; the ORCHESTRATOR decides. A build must never mutate the board itself, or an
+      autonomous run could reorder the owner's priorities with no judgement in between. Creating a card for a
+      dependency that does not yet exist still follows the standing intake rule — spec first, then card;
+      reordering cards that ALREADY exist is the sequencing call the orchestrator may make and must report.
+      Escalating is cheap to make safe: branch and PR already survive a terminal failure, so stopping early
+      loses nothing. Round 10 bought nothing over round 2 except cost.
+      Acceptance: a run whose reviewers repeat a finding stops and escalates instead of iterating; the round
+      cap becomes the backstop it was meant to be rather than the primary exit; and the owner can see, on the
+      card, that a build stopped because it was blocked rather than because it failed.
 
 ### Email Core consolidation — absorb the standalone email system (owner-directed 2026-08-07)
 

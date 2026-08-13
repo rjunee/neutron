@@ -190,8 +190,23 @@ export function tierChoices(
 ): Array<{ tier: string; model_id: string; selectable: boolean; reason: string | null }> {
   return tiers.map((t) => {
     if (t.group !== phase.group) {
-      const name = t.group.charAt(0).toUpperCase() + t.group.slice(1);
-      return { tier: t.tier, model_id: t.model_id, selectable: false, reason: `${name} steps only` };
+      // #565 — SAY WHY, AND WHAT WOULD CHANGE IT. The old reason read `Codex steps
+      // only`, naming a category the reader has never heard of and explaining
+      // nothing; the owner's first words on seeing it were "Wtf does that mean?".
+      // The accurate statement is about WIRING, not existence: a codex substrate
+      // adapter is already built and registered (`runtime/adapters/codex-cli/`,
+      // selected in `runtime/adapters/select-substrate.ts`), and trident's own
+      // review seat already shells into `codex exec` — what is missing is a route
+      // from THIS step to it. Saying "no executor exists" would be a second false
+      // claim in place of the first.
+      const optionExecutor = t.group.charAt(0).toUpperCase() + t.group.slice(1);
+      const stepExecutor = phase.group.charAt(0).toUpperCase() + phase.group.slice(1);
+      return {
+        tier: t.tier,
+        model_id: t.model_id,
+        selectable: false,
+        reason: `${optionExecutor} is not wired for this step yet — it runs on ${stepExecutor}`,
+      };
     }
     if (!t.available) {
       return {

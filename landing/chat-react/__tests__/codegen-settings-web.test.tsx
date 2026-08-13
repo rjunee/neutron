@@ -260,7 +260,7 @@ describe('the display + edit rules', () => {
     const choices = tierChoices(CODEX, TIERS)
     expect(choices).toHaveLength(TIERS.length)
     expect(choices.find((c) => c.tier === 'terra')!.selectable).toBe(true)
-    expect(choices.find((c) => c.tier === 'opus')!.reason).toBe('Claude steps only')
+    expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('Claude is not wired for this step yet')
     expect(rejectedModel(BUILD, { build: { model: 'gone-tier' } })).toBe('gone-tier')
   })
 })
@@ -416,9 +416,9 @@ describe('the TABLE, pressed for real', () => {
       expect(option.disabled).toBe(true)
       // …and it SAYS WHY. A greyed row with no explanation is a dead end; this one
       // tells the owner what to go and fix.
-      expect(option.textContent).toContain('Kimi steps only')
+      expect(option.textContent).toContain('Kimi is not wired for this step yet')
       const claudeRow = testId(container, 'phase-build-model-k3') as HTMLOptionElement
-      expect(claudeRow.textContent).toContain('Kimi steps only')
+      expect(claudeRow.textContent).toContain('Kimi is not wired for this step yet')
     } finally {
       await unmount()
     }

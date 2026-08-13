@@ -208,10 +208,10 @@ describe('the agreement is real, not vacuous', () => {
     // …and the new helpers can distinguish the three outcomes they exist for.
     const choices = web.tierChoices(CODEX, TIERS)
     expect(choices.find((c) => c.tier === 'sol')!.selectable).toBe(true)
-    expect(choices.find((c) => c.tier === 'opus')!.reason).toBe('Claude steps only')
+    expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('Claude is not wired for this step yet')
     // WRONG-GROUP BEATS UNAVAILABLE, deliberately: telling the owner of a Codex row
     // to go get a Kimi key would send them to fix something that would not help.
-    expect(choices.find((c) => c.tier === 'k3')!.reason).toBe('Kimi steps only')
+    expect(choices.find((c) => c.tier === 'k3')!.reason).toContain('Kimi is not wired for this step yet')
     // On the row that COULD use it, the missing credential is the reason — and the
     // option is still listed rather than hidden.
     const kimiChoices = web.tierChoices(KIMI, TIERS)
