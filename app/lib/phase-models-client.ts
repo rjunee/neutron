@@ -46,6 +46,7 @@ export interface PhaseDescriptor {
    * executor as well. The server decides; this file just compares strings.
    */
   groups?: string[];
+  dispatch_constraint?: string | null;
   /**
    * False for a step whose DEFAULT executor is a CLI, whose reasoning effort is its own.
    *
@@ -290,7 +291,7 @@ export function tierChoices(
         tier: t.tier,
         model_id: t.model_id,
         selectable: false,
-        reason: `${optionExecutor} is not wired for this step yet — it runs on ${stepExecutor}`,
+        reason: phase.dispatch_constraint ?? `${optionExecutor} is not wired for this step yet — it runs on ${stepExecutor}`,
       };
     }
     if (!t.available) {

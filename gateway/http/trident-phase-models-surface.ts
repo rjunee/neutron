@@ -143,6 +143,7 @@ function vocabulary(connections: CrossModelConnections): object {
       // row that compared against `group` alone would grey the codex tiers on a step
       // that now genuinely reaches them.
       groups: phaseGroups(p),
+      dispatch_constraint: p.dispatchConstraint ?? null,
       // Could this step EVER have an effort control — i.e. does its default executor
       // read one. Whether the cell is live right now also depends on the tier the
       // owner has chosen (see `effort_supported` on each tier below), because the
@@ -186,7 +187,7 @@ function vocabulary(connections: CrossModelConnections): object {
         // build's effort control is real on `opus` and inert on `sol`, and a pane that
         // asked only the PHASE kept the cell live and posted an effort the chosen tier
         // cannot use.
-        effort_supported: t.transport === 'agent',
+        effort_supported: t.transport === 'agent' && t.group !== 'none',
         available,
         unavailable_reason: reason,
       }

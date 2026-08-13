@@ -10757,6 +10757,23 @@ detached child. It also pins the killed-wrapper message and artifact paths, the
 uncommitted-work recovery message, the existing failed-trailer mapping, and the happy
 path reaching review.
 
+## 2026-08-13 — model rows describe dispatch capability, and review seats can be off
+
+`trident/phase-models.ts` now declares the complete executor set on every phase rather
+than deriving it from the default tier and relying on an optional escape hatch. Both
+clients consume that server declaration, keep their older-server fallback, and show an
+actionable constraint for every row that remains Claude-only.
+
+The persisted `review_codex` and `review_kimi` keys render as provider-agnostic review
+slots 1 and 2. Existing values remain attached to their original slot; either slot now
+accepts every non-Claude registry tier. All four review rows accept the first-class
+`none` tier. An off seat dispatches nothing and does not fail completeness, while a
+configured seat that dies or defers still blocks. With all seats off, the terminal
+record explicitly says no review ran and that only build and CI gates supported merge.
+
+Mutation checks: `NONE_DISPATCH_GUARD` (forcing the rubric NONE branch to dispatch)
+failed the no-agent assertion; `CONFIGURED_DEAD_COMPLETENESS` (removing core missing-seat
+collection) produced APPROVE for a dead configured reviewer and failed four gate tests.
 ## 2026-08-13 — typing catches up on connect and explains the live step
 
 Typing is now level-triggered for a socket opening during a turn and remains

@@ -44,6 +44,7 @@ export type Transport = (typeof TRANSPORTS)[number]
 
 /** Every tier the owner may choose, in the order a pane should offer them. */
 export const MODEL_TIERS = [
+  'none',
   'fable',
   'opus',
   'sonnet',
@@ -65,14 +66,14 @@ export type TierRequirement = 'codex' | 'kimi'
  * So the group is stated once here and every "can this phase take that tier"
  * question — in the validator, in the workflow, in the pane — answers from it.
  */
-export const TIER_GROUPS = ['claude', 'codex', 'kimi'] as const
+export const TIER_GROUPS = ['none', 'claude', 'codex', 'kimi'] as const
 export type TierGroup = (typeof TIER_GROUPS)[number]
 
 /** One tier, fully resolved. */
 export interface ModelTierDescriptor {
   tier: ModelTier
   /** Who makes the model. Shown in the pane so a cross-model peer is obviously one. */
-  provider: 'anthropic' | 'openai' | 'moonshot'
+  provider: 'none' | 'anthropic' | 'openai' | 'moonshot'
   group: TierGroup
   /** What the tier resolves to RIGHT NOW. Never persisted — always re-resolved. */
   model_id: string
@@ -107,6 +108,15 @@ export interface ModelTierDescriptor {
 const RESOLVERS: Readonly<
   Record<ModelTier, Omit<ModelTierDescriptor, 'tier' | 'model_id'> & { resolve: () => string }>
 > = Object.freeze({
+  none: {
+    provider: 'none',
+    group: 'none',
+    resolve: () => 'none',
+    transport: 'agent',
+    wrapper: null,
+    env_var: null,
+    requires: null,
+  },
   fable: {
     provider: 'anthropic',
     group: 'claude',

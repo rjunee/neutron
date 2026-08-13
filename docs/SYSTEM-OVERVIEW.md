@@ -2862,6 +2862,23 @@ generation"), mobile `app/app/codegen.tsx`, both over
   `agent({model})`; no Anthropic model id is requested for the phase. The wrapper
   runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree,
   and its own knob is `CODEX_BUILD_MODEL`, never the reviewer's `CODEX_REVIEW_MODEL`.
+
+The two persisted cross-model phase keys now render as provider-agnostic “Cross-model
+review 1” and “Cross-model review 2” slots. Either slot accepts every non-Claude tier
+in the registry, so adding a future CLI reviewer tier automatically adds it to both
+slots. Stored `review_codex` and `review_kimi` overrides keep their keys and therefore
+migrate without losing the selected tier.
+
+Every review phase also accepts the first-class `none` tier. NONE means deliberately
+off: no agent is dispatched and that seat is excluded from completeness. This differs
+from a configured seat that returns no usable verdict, which remains a blocking
+deferral. All four seats may be NONE; synthesis and the terminal result then state that
+no review ran and that merge relied on build and CI gates alone.
+
+Each phase declares its complete `dispatchGroups` once in `trident/phase-models.ts`.
+The settings payload uses that set verbatim, validation accepts exactly its tiers, and
+the workflow route carries the same set. A deliberately Claude-only phase carries an
+actionable `dispatchConstraint` describing the wrapper or executor required to widen it.
   `workspace-write` writes only inside the workspace and a build writes outside it
   twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
   goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
