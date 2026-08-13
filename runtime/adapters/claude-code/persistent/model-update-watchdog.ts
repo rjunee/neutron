@@ -194,6 +194,88 @@ export function compareModelRecency(probed: string, baseline: string): ModelRece
   return 'same'
 }
 
+/**
+ * ── THE GAP THE LIVE PROBE STRUCTURALLY CANNOT SEE (ISSUES #564) ────────────
+ *
+ * Everything above watches ONE model: the id the live CLI session answers with. That
+ * is the top tier, and it is the only tier a probe can report — so `SONNET_MODEL`,
+ * `FAST_MODEL` and `FABLE_MODEL` were never compared to anything. Worse, they could
+ * not have been even accidentally: {@link compareModelRecency} is FAMILY-SCOPED (an
+ * `opus` answer ranks `unknown` against a `sonnet` baseline, deliberately, so a
+ * cross-family downgrade can never be adopted), so the one comparison the watchdog does
+ * make is guaranteed to skip every non-Opus tier.
+ *
+ * The result was Sonnet sitting a full generation behind for weeks and being noticed by
+ * the OWNER reading a settings pane. This closes that specific gap, and closes it
+ * without a probe:
+ *
+ *   THE PRICING TABLE IS ALREADY THE REGISTRY OF IDS THIS BUILD KNOWS ABOUT.
+ *   `resolveModelPricing` THROWS on an unregistered id rather than defaulting, so a
+ *   model cannot be dispatched until someone adds a verified row for it. That makes
+ *   "an id exists in the pricing table that is newer, in the same family, than a tier
+ *   default" a precise, deterministic statement of "this tier default is stale" —
+ *   computable with no network, no credential and no API call, which is exactly what
+ *   lets a TEST be the thing that notices instead of a person.
+ *
+ * REUSING `parseModelId`/`compareModelRecency` rather than writing a second ranker is
+ * the point. There is one definition of "newer" in this codebase, it is family-scoped
+ * and snapshot-tolerant, and both the live-session path and this one answer from it.
+ */
+export interface StaleTierDefault {
+  /** The constant that is behind — `SONNET_MODEL`. */
+  constant: string
+  /** What it currently resolves to. */
+  current: string
+  /** The newest same-family id this build knows about. */
+  newest: string
+}
+
+/**
+ * Which tier defaults are a generation behind, given the ids this build knows.
+ *
+ * PURE, so the check can be a unit test as easily as a watchdog log line. `known` is
+ * every model id the process can price (`Object.keys(MODEL_PRICING_TABLE)`); the caller
+ * supplies it rather than this module importing the table, so the ranking stays free of
+ * a billing dependency and a test can drive it with a fixture.
+ *
+ * An id that cannot be parsed on either side is skipped rather than reported: an
+ * operator's `NEUTRON_SONNET_MODEL` alias is not evidence of staleness, and a false
+ * alarm on a deliberate pin is how a check like this gets muted.
+ */
+export function staleTierDefaults(
+  defaults: ReadonlyArray<{ constant: string; model: string }>,
+  known: ReadonlyArray<string>,
+): StaleTierDefault[] {
+  const out: StaleTierDefault[] = []
+  for (const entry of defaults) {
+    if (parseModelId(entry.model) === undefined) continue
+    let newest = entry.model
+    for (const candidate of known) {
+      if (compareModelRecency(candidate, newest) === 'newer') newest = candidate
+    }
+    if (normalizeModelId(newest) !== normalizeModelId(entry.model)) {
+      out.push({ constant: entry.constant, current: entry.model, newest })
+    }
+  }
+  return out
+}
+
+/**
+ * The one line a run emits when a tier default is behind.
+ *
+ * Names the CONSTANT to edit, not just the ids, because "sonnet is old" is not
+ * actionable at 3am and `runtime/models.ts:SONNET_MODEL` is.
+ */
+export function staleTierDefaultNotice(stale: StaleTierDefault): string {
+  return (
+    `model-update: TIER DEFAULT IS A GENERATION BEHIND — runtime/models.ts:${stale.constant} ` +
+    `resolves to ${stale.current} but this build already knows ${stale.newest}. ` +
+    'The live-session probe cannot see this (it watches the top tier only, and recency ' +
+    'ranking is family-scoped), which is why it is checked here. Bump the constant and ' +
+    'confirm the pricing row before relying on the new id.'
+  )
+}
+
 /** Persisted across ticks (small JSON file). All timestamps ISO-8601 strings. */
 export interface ModelUpdateState {
   /** The model id currently adopted/known. Baseline for "is this new?". */
@@ -561,6 +643,12 @@ export async function runGracefulUpgrade(deps: GracefulUpgradeDeps): Promise<Gra
 // ── The cadence watchdog (generic, fully DI-driven) ────────────────────────
 
 export interface ModelUpdateWatchdogDeps {
+  /** The tier default constants to check for staleness. Absent → the check is skipped,
+   *  so a caller that has not wired it degrades to today's behaviour rather than
+   *  crashing. See {@link staleTierDefaults}. */
+  tierDefaults?: () => ReadonlyArray<{ constant: string; model: string }>
+  /** Every model id this build knows about (the pricing table's keys). Absent → skip. */
+  knownModelIds?: () => ReadonlyArray<string>
   /** Run one probe (async). Production: `() => realProbeModel({...})`. */
   probeModel: () => Promise<ProbeResult>
   /** Load / save the persisted state. */
@@ -648,6 +736,21 @@ export function startModelUpdateWatchdog(deps: ModelUpdateWatchdogDeps): ModelUp
     ) {
       deps.adoptModel(adopted)
       log(`model-update: re-applied persisted model ${adopted} on start`)
+    }
+  } catch (e) {
+    onError(e)
+  }
+
+  // ── THE TIER DEFAULTS ARE CHECKED ONCE, AT START (ISSUES #564) ───────────
+  // No probe, no credential, no network: `staleTierDefaults` ranks each tier constant
+  // against every model id this build can price. Once at start rather than every tick
+  // because the inputs are compile-time constants — the answer cannot change while the
+  // process runs, and re-logging it every 15 minutes would train an operator to filter
+  // the line out. CI is where this is meant to go red (see the test that walks the same
+  // function); the log is for a box already in production on a stale build.
+  try {
+    for (const stale of staleTierDefaults(deps.tierDefaults?.() ?? [], deps.knownModelIds?.() ?? [])) {
+      log(staleTierDefaultNotice(stale))
     }
   } catch (e) {
     onError(e)

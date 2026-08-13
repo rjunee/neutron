@@ -51,7 +51,7 @@ function makeInput(overrides: Partial<SubagentDispatchInput> = {}): SubagentDisp
   return {
     instance_key: 't-1',
     kind: 'forge',
-    model: 'claude-sonnet-4-6',
+    model: SONNET_MODEL,
     system: 'be excellent',
     user_message: 'do the thing',
     worktree_path: '/tmp/ws',
@@ -570,7 +570,7 @@ describe('buildCannedCodegenLlmCall', () => {
         system: 's',
         messages: [{ role: 'user', content: msg }],
         max_tokens: 8192,
-        model: 'claude-sonnet-4-6',
+        model: SONNET_MODEL,
       })
 
     const r1 = await fire('one')
@@ -593,7 +593,7 @@ describe('buildCannedCodegenLlmCall', () => {
         system: 's',
         messages: [{ role: 'user', content: 'x' }],
         max_tokens: 8192,
-        model: 'claude-sonnet-4-6',
+        model: SONNET_MODEL,
       }),
     ).rejects.toThrow(/no response configured/)
   })
@@ -608,7 +608,7 @@ describe('buildCannedCodegenLlmCall', () => {
       system: 's',
       messages: [{ role: 'user', content: 'go' }],
       max_tokens: 1024,
-      model: 'claude-sonnet-4-6',
+      model: SONNET_MODEL,
     })
     expect(result.model).toBe(SONNET_MODEL)
   })

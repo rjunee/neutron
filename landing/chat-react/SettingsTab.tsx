@@ -48,7 +48,9 @@ import {
   WebPhaseModelsClient,
   applyRowEdit,
   effectiveRow,
+  panelIsSingleFamily,
   rejectedModel,
+  slotIsOff,
   tierChoices,
   type PhaseModelsPayload,
   type PhaseOverride,
@@ -1085,10 +1087,23 @@ export function SettingsTab({
               <span>Model</span>
               <span>Effort</span>
             </div>
+            {/* ISSUES #566 — BOTH CROSS-MODEL SEATS OFF IS A KNOWING OPT-OUT, AND THE
+                PANE SAYS SO. Legitimate, so this is a note and not an error — but a
+                panel of Claude reviewers only is a panel with one set of blind spots,
+                and a pane that stayed silent would let the owner go on believing a
+                second model family is checking the work. */}
+            {panelIsSingleFamily(phaseModels.phases, phaseOverrides, phaseModels.none_value) ? (
+              <p className="cset-cg-stale" data-testid="codegen-single-family">
+                Both cross-model reviews are off — every reviewer on the panel is a
+                Claude model, so their agreement is weaker evidence than the seat count
+                suggests.
+              </p>
+            ) : null}
             {phaseModels.phases.map((phase) => {
               const row = effectiveRow(phase, phaseOverrides)
               const choices = tierChoices(phase, phaseModels.model_tiers)
               const dead = rejectedModel(phase, phaseModels.rejected)
+              const off = slotIsOff(phase, phaseOverrides, phaseModels.none_value)
               return (
                 <div className="cset-cg-row" key={phase.key} data-testid={`phase-${phase.key}`}>
                   <div className="cset-cg-name">
@@ -1113,9 +1128,23 @@ export function SettingsTab({
                     <select
                       className="cset-cg-select"
                       data-testid={`phase-${phase.key}-model`}
-                      value={row.model}
+                      value={off ? phaseModels.none_value : row.model}
                       onChange={(e) => editPhase(phase.key, { model: e.target.value })}
                     >
+                      {/* NONE, and ONLY on a cross-model review slot. Turning a build
+                          step off would be a run with no builder; turning a Claude
+                          reviewer off would silently shrink the merge gate. Turning a
+                          cross-model seat off is a choice the owner is allowed to make,
+                          and the label says what it costs rather than reading as a
+                          neutral "unset". */}
+                      {phase.allows_none ? (
+                        <option
+                          value={phaseModels.none_value}
+                          data-testid={`phase-${phase.key}-model-none`}
+                        >
+                          none — run no reviewer in this seat
+                        </option>
+                      ) : null}
                       {choices.map((c) => (
                         // NEVER HIDDEN, only disabled with the reason: an option the
                         // owner cannot see is one they cannot ask about.

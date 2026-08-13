@@ -183,6 +183,27 @@ const {
   // resolve through MODELS, and the cross-model wrappers are invoked with NO env
   // override, i.e. exactly the command they were invoked with before this existed.
   modelTiers = null,
+  // THE EXECUTOR GROUPS EACH PHASE CAN DISPATCH ON — phase key → ['claude','codex'].
+  // Threaded (not hardcoded) for the same reason `modelTiers` is: `trident/
+  // phase-models.ts` owns the answer and this script cannot import it. It is what lets
+  // the build step accept a codex tier at all: before ISSUES #565 every phase was
+  // pinned to its DEFAULT tier's executor, so an owner override naming `sol` on the
+  // build row was logged as a transport mismatch and thrown away. Absent → each phase
+  // keeps exactly its default tier's executor, i.e. the pre-#565 behaviour.
+  phaseExecutors = null,
+  // THE TWO CROSS-MODEL REVIEW SLOTS, ALREADY RESOLVED (ISSUES #566/#567). Each entry
+  // is `{key,label,title,disposition,tier,model_id,wrapper,env_var,reason}` from
+  // `trident/cross-model-slots.ts#resolveCrossModelSlots`. The DISPOSITION is the field
+  // this script must never re-derive: `none` means the owner deliberately emptied the
+  // seat and it must not block a verdict, while `configured` means a failure MUST bar
+  // the APPROVE. Those two are indistinguishable by "did a verdict arrive", which is
+  // exactly why the answer is computed in typed, tested code and threaded in.
+  // Absent → NO cross-model seats run, and none of them block. That is the safe
+  // degradation for a legacy caller: a reduced panel that says it is reduced.
+  crossModelSlots = null,
+  // Absolute path to `trident/codex-build.sh` (same threading contract as
+  // `checkpointScript`: this script cannot resolve its own location).
+  codexBuildScript = null,
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -288,39 +309,81 @@ const threadedTiers =
 const resolveTier = (name) => {
   const entry = threadedTiers[name]
   if (entry && typeof entry === 'object' && typeof entry.model_id === 'string' && entry.model_id) {
+    const str = (v) => (typeof v === 'string' && v ? v : null)
     return {
       model_id: entry.model_id,
       transport: entry.transport === 'cli' ? 'cli' : 'agent',
-      env_var: typeof entry.env_var === 'string' && entry.env_var ? entry.env_var : null,
+      env_var: str(entry.env_var),
+      // The EXECUTOR this tier runs on (`claude` / `codex` / `kimi`). Transport alone
+      // cannot answer "may this phase take this tier": codex and kimi are both `cli`
+      // and are not interchangeable with each other.
+      group: str(entry.group) ?? 'claude',
+      // The BUILD role's wrapper + env knob, null for an executor that has none.
+      // Kimi's are null, and that is the verified reason the build row refuses `k3`.
+      build_wrapper: str(entry.build_wrapper),
+      build_env_var: str(entry.build_env_var),
     }
   }
   if (Object.prototype.hasOwnProperty.call(MODELS, name)) {
-    return { model_id: MODELS[name], transport: 'agent', env_var: null }
+    return {
+      model_id: MODELS[name],
+      transport: 'agent',
+      env_var: null,
+      group: 'claude',
+      build_wrapper: null,
+      build_env_var: null,
+    }
   }
   return null
+}
+
+// phase key → the executor groups its dispatch can reach. Threaded; see the arg.
+const threadedExecutors =
+  phaseExecutors && typeof phaseExecutors === 'object' && !Array.isArray(phaseExecutors)
+    ? phaseExecutors
+    : {}
+const executorsFor = (phaseKey, fallbackTier) => {
+  const declared = threadedExecutors[phaseKey]
+  if (Array.isArray(declared) && declared.length > 0) return declared.filter((g) => typeof g === 'string')
+  const t = fallbackTier ? resolveTier(fallbackTier) : null
+  return [t !== null ? t.group : 'claude']
 }
 
 // A CLI-transport route: the model is not handed to agent(), it is handed to the
 // WRAPPER through its env knob. `model: null` (no registry threaded) means "invoke the
 // wrapper with no override", which is the wrapper's own pinned default.
-const cliRoute = ({ tier, phaseKey }) => {
+//
+// `role` picks WHICH wrapper. A codex tier has two — `codex-review.sh` reads
+// CODEX_REVIEW_MODEL and takes a diff, `codex-build.sh` reads CODEX_BUILD_MODEL and
+// takes a worktree — and handing a build prompt to the review wrapper would produce a
+// review of nothing. One field, decided at the call site that knows the role.
+const cliRoute = ({ tier, phaseKey, role = 'review' }) => {
   const resolved = resolveTier(tier)
+  const usable = resolved !== null && resolved.transport === 'cli'
+  const wrapper = !usable ? null : role === 'build' ? resolved.build_wrapper : resolved.wrapper
+  const envVar = !usable ? null : role === 'build' ? resolved.build_env_var : resolved.env_var
   return {
-    model: resolved !== null && resolved.transport === 'cli' ? resolved.model_id : null,
+    model: usable ? resolved.model_id : null,
     effort: null,
     transport: 'cli',
-    envVar: resolved !== null ? resolved.env_var : null,
+    role,
+    wrapper,
+    envVar,
     phaseKey,
   }
 }
 
 // forge:* routes BY the planner's complexity tag: '[mechanical]' (boilerplate,
 // tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
-// ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
+// ambiguous → Opus (bias to Opus — Argus + the cross-model seats are the backstop).
+//
+// The route is `role: 'build'` even on the Claude arm, so an owner override that moves
+// the phase to a codex tier lands on `codex-build.sh` rather than on the review
+// wrapper. `applyPhaseOverride` is what performs that move; this only names the role.
 const modelForTag = (tag) =>
   tag === 'mechanical'
-    ? { model: MODELS.sonnet, effort: 'medium', phaseKey: 'build_mechanical' }
-    : { model: MODELS.opus, effort: 'high', phaseKey: 'build' }
+    ? { model: MODELS.sonnet, effort: 'medium', phaseKey: 'build_mechanical', role: 'build' }
+    : { model: MODELS.opus, effort: 'high', phaseKey: 'build', role: 'build' }
 
 // label → {model, effort, phase}. forge:* is resolved dynamically (modelForTag)
 // since its model depends on the task; the rest are static. Fable orchestrates
@@ -335,21 +398,74 @@ const modelForTag = (tag) =>
 // wrong one gets read. The mapping's completeness is enforced by
 // `trident/__tests__/phase-model-coverage.test.ts`, which walks the `label:`
 // literals in THIS file — see the head-probe note below for why that matters.
+// ── THE RESOLVED CROSS-MODEL SLOTS ──────────────────────────────────────────
+// Absent → an EMPTY list, which means no cross-model seat is dispatched and none
+// blocks. A legacy caller therefore gets a reduced panel that reports itself as
+// reduced, rather than a seat that silently cannot run.
+const threadedSlots = Array.isArray(crossModelSlots)
+  ? crossModelSlots.filter((s) => s !== null && typeof s === 'object')
+  : []
+
+// A slot's DISPOSITION, read as a field and never inferred. See the arg's note: `none`
+// and a dead `configured` seat both produce no verdict, and telling them apart by
+// emptiness is precisely the collapse that would restore a single-family panel while
+// still reporting a cross-model review.
+const slotAt = (i) => threadedSlots[i] ?? null
+const slotDisposition = (i) => {
+  const slot = slotAt(i)
+  if (slot === null) return 'none'
+  return slot.disposition === 'configured' || slot.disposition === 'not_configured'
+    ? slot.disposition
+    : 'none'
+}
+const slotTitle = (i) => {
+  const slot = slotAt(i)
+  return (slot && typeof slot.title === 'string' && slot.title) || `Cross-model review ${i + 1}`
+}
+/**
+ * THE SEAT LITERALS, WRITTEN OUT.
+ *
+ * `argus:cross-1` and `review_cross_1` could be computed from the index — and were, in
+ * a first cut — but `__tests__/phase-model-coverage.test.ts` walks the `label:` and
+ * `phaseKey:` LITERALS in this file to prove every workflow label is claimed by a phase
+ * and every phase key is routed. A computed label is invisible to that walk, so the
+ * check would go quietly vacuous for exactly the two seats this change touches. Spelled
+ * out here, once, and read everywhere else.
+ */
+const CROSS_SEAT_DEFS = [
+  { label: 'argus:cross-1', retryLabel: 'argus:cross-1-retry', phaseKey: 'review_cross_1' },
+  { label: 'argus:cross-2', retryLabel: 'argus:cross-2-retry', phaseKey: 'review_cross_2' },
+]
+
+const slotRoute = (i) => {
+  const slot = slotAt(i)
+  const str = (v) => (typeof v === 'string' && v ? v : null)
+  return {
+    model: slot === null ? null : str(slot.model_id),
+    effort: null,
+    transport: 'cli',
+    role: 'review',
+    wrapper: slot === null ? null : str(slot.wrapper),
+    envVar: slot === null ? null : str(slot.env_var),
+    phaseKey: CROSS_SEAT_DEFS[i].phaseKey,
+  }
+}
+
 const ROLE_MODEL = {
   'plan:fable': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition' },
   'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric' },
   'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial' },
   'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis' },
-  // THE TWO CROSS-MODEL LANES ARE ROUTED NOW. They used to be listed as deliberately
-  // unconfigurable ("the reviewing model is the CLI's own configuration"), which was
-  // true only while nothing threaded a model IN. Both wrappers read an env knob, so
-  // the owner picks a tier and the resolved id reaches the subprocess — the model is
-  // NOT handed to agent() (that resolves against Claude Code's endpoint and cannot
-  // reach a GPT/Kimi model; see the `modelTiers` arg). The thin Claude agent wrapping
-  // each still runs on the launcher default: its whole job is to run one command and
-  // map an exit code.
-  'argus:codex': cliRoute({ tier: 'sol', phaseKey: 'review_codex' }),
-  'argus:kimi': cliRoute({ tier: 'k3', phaseKey: 'review_kimi' }),
+  // THE TWO CROSS-MODEL SEATS ARE SLOTS, NOT VENDORS (ISSUES #566). They used to be
+  // `argus:codex` and `argus:kimi`, which baked the occupant into the label — so
+  // "point this seat at a different model" had no expressible form. Each slot's tier,
+  // wrapper and env knob now arrive already resolved in `crossModelSlots`, and the
+  // route is built from that rather than from a literal here. The model is NOT handed
+  // to agent() (that resolves against Claude Code's endpoint and cannot reach a
+  // GPT/Kimi model); the thin Claude agent wrapping each still runs on the launcher
+  // default, because its whole job is to run one command and map an exit code.
+  'argus:cross-1': slotRoute(0),
+  'argus:cross-2': slotRoute(1),
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
@@ -385,7 +501,11 @@ function applyPhaseOverride(route, phaseKey) {
   const override = threadedPhaseModels[phaseKey]
   if (!override || typeof override !== 'object' || Array.isArray(override)) return route
   let { model, effort } = route
-  const transport = route.transport === 'cli' ? 'cli' : 'agent'
+  let transport = route.transport === 'cli' ? 'cli' : 'agent'
+  let wrapper = route.wrapper ?? null
+  let envVar = route.envVar ?? null
+  const role = route.role === 'build' ? 'build' : 'review'
+  const allowed = executorsFor(phaseKey, null)
   if (typeof override.model === 'string' && override.model.trim()) {
     const requested = override.model.trim()
     const tier = resolveTier(requested)
@@ -397,14 +517,42 @@ function applyPhaseOverride(route, phaseKey) {
       // (or on nothing at all). The typed boundary drops these first; this is the
       // backstop for a config that got past it.
       log(`trident.phase-override IGNORED phase=${phaseKey} reason=unknown-tier tier=${requested}`)
-    } else if (tier.transport !== transport || (tier.env_var ?? null) !== (route.envVar ?? null)) {
-      // Transport is a capability, not a preference: a GPT tier cannot run a Claude
-      // agent step, and the codex wrapper cannot be pointed at a Kimi model.
+    } else if (!allowed.includes(tier.group)) {
+      // THE EXECUTOR IS A CAPABILITY, NOT A PREFERENCE — but it is no longer derived
+      // from the phase's own default tier, which is the whole of ISSUES #565. This used
+      // to compare the candidate's TRANSPORT and ENV KNOB against the route's, so the
+      // build step (a Claude agent route) rejected every codex tier by construction and
+      // the owner's choice was logged away as a mismatch. It now asks the threaded
+      // executor list — the same list the settings pane greys options from — so a phase
+      // whose dispatch was actually built for two executors can take either.
       log(
-        `trident.phase-override IGNORED phase=${phaseKey} reason=transport-mismatch tier=${requested} tier-transport=${tier.transport} phase-transport=${transport}`,
+        `trident.phase-override IGNORED phase=${phaseKey} reason=executor-not-reachable tier=${requested} tier-executor=${tier.group} phase-executors=${allowed.join('|')}`,
+      )
+    } else if (tier.transport === 'cli' && (role === 'build' ? tier.build_wrapper : tier.wrapper) === null) {
+      // Right executor, wrong ROLE. `k3` is a legitimate non-Claude tier and the
+      // cross-model slots take it, but nothing in this repo hands Kimi a worktree, so a
+      // BUILD that resolved to it would have no command to run. Refusing here keeps the
+      // failure at the routing line, where the log names the tier, instead of at a
+      // wrapper path that resolves to null.
+      log(
+        `trident.phase-override IGNORED phase=${phaseKey} reason=no-${role}-wrapper tier=${requested} tier-executor=${tier.group}`,
       )
     } else {
+      // THE MOVE ITSELF. A Claude→codex switch changes the TRANSPORT, so the route's
+      // wrapper and env knob move with the model — otherwise the build would resolve a
+      // GPT id and then hand it to agent(), which is the exact silent-wrong-model
+      // failure the transport field exists to prevent.
       model = tier.model_id
+      transport = tier.transport
+      if (tier.transport === 'cli') {
+        wrapper = role === 'build' ? tier.build_wrapper : tier.wrapper
+        envVar = role === 'build' ? tier.build_env_var : tier.env_var
+        // A CLI chooses its own reasoning effort and no wrapper exposes a knob for it.
+        effort = null
+      } else {
+        wrapper = null
+        envVar = null
+      }
     }
   } else if (override.model !== undefined) {
     log(`trident.phase-override IGNORED phase=${phaseKey} reason=model-not-a-nonempty-string`)
@@ -420,7 +568,7 @@ function applyPhaseOverride(route, phaseKey) {
       `trident.phase-override IGNORED phase=${phaseKey} reason=effort-not-in(${VALID_EFFORTS.join('|')}) got=${JSON.stringify(override.effort)}`,
     )
   }
-  return { ...route, model, effort }
+  return { ...route, model, effort, transport, wrapper, envVar, role }
 }
 
 // Resolve {model, effort} for a spawn keyed on its label (+ optional complexity
@@ -439,10 +587,10 @@ function routeModel(label, tag) {
           // A retry lane is the SAME lane. Routing it separately (or letting it fall
           // through to the default) would mean the owner's choice applied to the
           // first attempt and silently not to the second.
-          : label === 'argus:codex-retry'
-            ? ROLE_MODEL['argus:codex']
-          : label === 'argus:kimi-retry'
-            ? ROLE_MODEL['argus:kimi']
+          : label === 'argus:cross-1-retry'
+            ? ROLE_MODEL['argus:cross-1']
+          : label === 'argus:cross-2-retry'
+            ? ROLE_MODEL['argus:cross-2']
           : ROLE_MODEL[label] || { model: MODELS.opus, effort: 'high', phaseKey: null }
   return applyPhaseOverride(base, base.phaseKey)
 }
@@ -494,6 +642,20 @@ function crossModelEnvPrefix(label) {
 }
 
 /**
+ * Does this label's BUILD dispatch go to a subprocess rather than to agent()?
+ *
+ * The one question the Forge call sites need answered. Reading the ROUTE (rather than
+ * re-checking the owner's config) is what keeps the pane's promise and the run's
+ * behaviour the same fact: if `applyPhaseOverride` refused the move for any reason —
+ * unknown tier, unreachable executor, no build wrapper — this is false and the build
+ * runs on Claude, which is the honest outcome and is logged by name at the refusal.
+ */
+function buildRunsOnCli(label, tag) {
+  const route = routeModel(label, tag)
+  return route.transport === 'cli' && typeof route.wrapper === 'string' && route.wrapper.length > 0
+}
+
+/**
  * Tally one cross-model spawn, naming the model the SUBPROCESS will actually run.
  *
  * The lane used to log a placeholder (`model=codex-runtime`) because the reviewing
@@ -517,8 +679,7 @@ function logCrossModelSpawn(label, fallback) {
 // of this file and executed on its own — which is exactly how the codex bridge's
 // truncation-readback test proves the SHIPPED command, rather than a retyped copy of
 // it (`inner-workflow.test.ts`). A closure value it can pass in keeps that possible.
-const CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:codex')
-const KIMI_ENV_PREFIX = crossModelEnvPrefix('argus:kimi')
+const CROSS_ENV_PREFIX = ['argus:cross-1', 'argus:cross-2'].map((l) => crossModelEnvPrefix(l))
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -544,38 +705,39 @@ const VERDICT_SCHEMA = {
   },
 }
 
-// The codex reviewer's verdict carries an extra `codexStatus` so the synthesis
-// can distinguish a real cross-model verdict ('connected') from the graceful
-// never-set-up path ('not_connected') and the never-silent-downgrade path
-// ('deferred' — configured but the codex call failed/timed out), plus
-// `codexTruncated` so a verdict formed from PART of the diff can never be
-// recorded as one about the whole change.
-const CODEX_VERDICT_SCHEMA = {
+// ── THE CROSS-MODEL SEAT'S VERDICT ──────────────────────────────────────────
+// ONE SCHEMA FOR BOTH SLOTS. There used to be two near-identical schemas differing
+// only in a status field name (`codexStatus` / `kimiStatus`), which is how the panel
+// acquired a latent positional-indexing bug: read the wrong slot and the status field
+// comes back `undefined`, defaults to the permissive answer, and the gate silently
+// disarms for a reviewer that failed. A seat is a seat; which model sits in it is data.
+//
+// `crossStatus` carries FOUR states, and the fourth is the point of ISSUES #567:
+//   • connected     — the reviewer ran and returned a verdict.
+//   • not_connected — no credential on this install. Graceful, never blocking.
+//   • deferred      — configured, but the call FAILED or timed out. BLOCKS, and is
+//                     worth retrying because it may be transient.
+//   • exhausted     — the provider reports NO REMAINING QUOTA. Also BLOCKS, but is
+//                     NOT retried and NOT substituted: quota is a spending decision
+//                     the owner has to make, and swapping in another model silently
+//                     would make that decision invisible. Distinct from `deferred`
+//                     precisely so the run can stop paying to rediscover it.
+const CROSS_MODEL_VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['verdict', 'findings', 'codexStatus', 'codexTruncated'],
+  required: ['verdict', 'findings', 'crossStatus', 'crossTruncated'],
   properties: {
     verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
     findings: VERDICT_SCHEMA.properties.findings,
-    codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
-    codexTruncated: {
+    crossStatus: {
+      type: 'string',
+      enum: ['connected', 'not_connected', 'deferred', 'exhausted'],
+    },
+    crossTruncated: {
       type: 'boolean',
       description:
-        'true when the wrapper capped the diff (CODEX_TRUNCATED=1) — codex saw only its first N lines, so its verdict covers only that portion.',
+        'true when the wrapper capped the diff — the reviewer saw only its first N lines, so its verdict covers only that portion.',
     },
-  },
-}
-
-// Same shape as the codex peer's, with its own status field so the two can never
-// be confused for one another (see the positional-indexing note in the panel).
-const KIMI_VERDICT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['verdict', 'findings', 'kimiStatus'],
-  properties: {
-    verdict: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
-    findings: VERDICT_SCHEMA.properties.findings,
-    kimiStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
   },
 }
 
@@ -948,7 +1110,7 @@ function enforceSeverityGate(synthesis) {
 // configured-but-failed codex blocks. Pure + side-effect-free so it can be
 // unit-tested behaviorally (see inner-workflow.test.ts).
 // GENERALISED over every cross-model peer (codex, kimi, …). It used to take a
-// single `codexStatus`; adding a second peer with its own near-identical gate is
+// single codex status; adding a second peer with its own near-identical gate is
 // how one of the two quietly stops being enforced, so there is ONE gate and peers
 // are data. Every deferred peer contributes its own blocker finding, because
 // "which cross-model reviewer is down" is the actionable part.
@@ -1518,9 +1680,9 @@ ${cmd}`,
  * THE BUG THIS REPLACES FAILED OPEN, which is the direction that ships unreviewed
  * code. The caller used to write, for each optional peer:
  *
- *     codexSlot !== null && verdicts[codexSlot]
- *       ? verdicts[codexSlot]
- *       : { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected' }
+ *     crossSlot !== null && verdicts[crossSlot]
+ *       ? verdicts[crossSlot]
+ *       : { verdict: 'COMMENT', findings: [], crossStatus: 'not_connected' }
  *
  * Two DIFFERENT situations collapse into that one else-branch: the peer was never
  * configured (no credential — a legitimate reduced panel), and the peer WAS
@@ -1539,7 +1701,14 @@ ${cmd}`,
  * DEFAULT — only by the reviewer explicitly saying so (exit 10/11, which is the real
  * graceful path and is preserved).
  */
-function crossModelPeerStatus(slot, verdicts, statusKey) {
+function crossModelPeerStatus(slot, verdicts, statusKey, disposition) {
+  // THE DISPOSITION IS AUTHORITATIVE FOR THE TWO NON-DISPATCHED STATES. `none` and
+  // `not_configured` are decided before the run by `resolveCrossModelSlots`, and they
+  // must NOT be re-derived from an absent verdict here — that is exactly the collapse
+  // ISSUES #566 warns about, where a deliberately empty seat and a dead one become one
+  // state and the panel reports a cross-model review it never got.
+  if (disposition === 'none') return 'none'
+  if (disposition === 'not_configured') return 'not_connected'
   if (slot === null || slot === undefined) return 'not_connected'
   const verdict = verdicts[slot]
   const status = verdict && typeof verdict[statusKey] === 'string' ? verdict[statusKey] : ''
@@ -1564,8 +1733,8 @@ function crossModelPeerStatus(slot, verdicts, statusKey) {
  *
  * THE SEAT LIST IS NO LONGER A HARD-CODED `[{ slot: 0 }, { slot: 1 }]`. That was the
  * SAME positional-index pattern this file already documents as a latent bug for the
- * cross-model peers ("POSITIONAL INDEXING WAS A LATENT BUG" — codexSlot is recorded
- * as `reviewers.length` at push time for exactly this reason). Insert a reviewer at
+ * cross-model peers ("POSITIONAL INDEXING WAS A LATENT BUG" — a cross-model seat's
+ * slot is recorded as `reviewers.length` at push time for exactly this reason). Insert a reviewer at
  * the HEAD of the panel and the literals point at the wrong seats: the new reviewer
  * is ungated (fail-OPEN, the shape of #536 all over again) and the panel labels are
  * misassigned, so Verdict A is described to the synthesis model as the wrong review.
@@ -1574,7 +1743,7 @@ function crossModelPeerStatus(slot, verdicts, statusKey) {
  * moment it pushes, and carries the seat's prompt letter + label with it.
  *
  * `statusKey: 'verdict'` is the field whose presence proves the seat ANSWERED — the
- * core analogue of `codexStatus`/`kimiStatus` — so a dead core seat is retryable by
+ * core analogue of a cross-model seat's `crossStatus` — so a dead core seat is retryable by
  * the same `retryDeferredPeers` the peers use, rather than ending the run on one
  * transient crash.
  */
@@ -1637,135 +1806,206 @@ function corePanelLine(letter, label, verdict) {
     : `Verdict ${letter} (${label}): DID NOT COMPLETE — this reviewer was dispatched and returned NO verdict (its agent died, timed out, or returned a malformed result). It raised nothing because it NEVER RAN, which is NOT the same as finding nothing. The panel is incomplete: do NOT return APPROVE.`
 }
 
-// Which cross-model peers were configured but failed. Kept separate from the gate
-// so the mapping status → blocker text is readable and testable on its own.
-function deferredCrossModelPeers(statuses) {
+// WHICH CROSS-MODEL SEATS WERE CONFIGURED AND PRODUCED NOTHING.
+//
+// Kept separate from the gate so the mapping status → blocker text is readable and
+// testable on its own. TWO blocking statuses now, and they are deliberately different
+// findings rather than one shared "deferred" message:
+//
+//   • `deferred`  — the call failed. It may be transient; the lane retry has already
+//     had its go by the time this runs, so what remains is a real infra failure.
+//   • `exhausted` — the provider is out of quota (ISSUES #567). Nothing the run can do
+//     will clear it, so the finding names the three remedies that are the OWNER'S:
+//     add capacity, re-point the slot, or set it to NONE. Reporting this as "deferred"
+//     is what let a maxed-out account read as a blip and cost a full panel per run to
+//     rediscover.
+//
+// `none` and `not_connected` deliberately never reach here. A seat the owner turned
+// off, and a seat this install cannot authenticate, are both legitimate reduced panels.
+function deferredCrossModelPeers(seats) {
   const out = []
-  if (statuses.codex === 'deferred') {
-    out.push({
-      name: 'Codex',
-      title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
-      evidence:
-        'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
-    })
-  }
-  if (statuses.kimi === 'deferred') {
-    out.push({
-      name: 'Kimi K3',
-      title: 'Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE',
-      evidence:
-        'a Kimi API key was configured but the review call failed, timed out, or returned no answer text (the thinking-budget case). A deferred cross-model review cannot be treated as an approval, and there is deliberately NO fallback to a Claude-family reviewer — that would restore the single-family panel this peer exists to break.',
-    })
+  for (const seat of seats) {
+    if (seat.status === 'exhausted') {
+      out.push({
+        name: seat.title,
+        title: `${seat.title} — PROVIDER OUT OF QUOTA, refusing to silently APPROVE`,
+        evidence:
+          `${seat.title} is pointed at ${seat.model_id || 'a cross-model provider'}, and that provider reports NO REMAINING QUOTA, so no review happened. ` +
+          'This will NOT clear on its own and nothing is being retried against it: quota is a spending decision, and substituting a model the owner did not choose would make that decision invisible. ' +
+          'Three ways forward, all the owner\u2019s: add capacity with the provider, re-point this slot at a different non-Claude model, or set the slot to NONE to run without it. ' +
+          'Until then this seat produces no review, and a configured seat that produces no review cannot be counted as an approval. ' +
+          'There is deliberately NO fallback to a Claude-family reviewer \u2014 that would restore the single-family panel this seat exists to break.',
+      })
+      continue
+    }
+    if (seat.status === 'deferred') {
+      out.push({
+        name: seat.title,
+        title: `${seat.title} DEFERRED — refusing to silently APPROVE`,
+        evidence:
+          `${seat.title} was configured (${seat.model_id || 'a cross-model provider'}) but NO REVIEW HAPPENED: the credential precheck failed, the call failed/timed out, it returned no answer text, or the diff was EMPTY so there was nothing to review. ` +
+          'Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval, and there is deliberately NO fallback to a Claude-family reviewer \u2014 that would restore the single-family panel this seat exists to break. ' +
+          'Read the wrapper stderr for WHICH of those it was before re-running: an empty diff is NOT an auth problem.',
+      })
+    }
   }
   return out
 }
 
-// What the synthesis is TOLD about Verdict C. Hoisted out of the synthesis call for
-// the same reason `deferredCrossModelPeers` is: the mapping status → panel text is
-// the load-bearing part, and it is testable on its own.
+// WHAT THE SYNTHESIS IS TOLD ABOUT ONE CROSS-MODEL SEAT.
 //
-// THE TRUNCATED CASE IS WHY THIS IS A FUNCTION. The wrapper caps the diff at its
-// line limit and tells the MODEL so; but the model's answer still arrives as a
-// verdict with no scope attached, and the synthesis then read "codex APPROVE" as a
-// cross-model approval of the whole change when codex had seen its first 3000 lines.
-// The FACT itself is decided by a grep the bridge command runs (see
-// codexReviewerPrompt), not by GPT-5 judging its own coverage — so the re-scoping
-// stops depending on the reviewer having remembered to hedge.
+// Hoisted out of the synthesis call because the mapping status → panel text is the
+// load-bearing part and is testable on its own. FIVE outcomes, and the differences
+// between them are the whole of ISSUES #566/#567:
 //
-// WHAT THIS IS AND IS NOT. Be precise about the strength of this guard, because the
-// comment that used to sit here ("deterministic") overstated it: the flag still
-// TRAVELS through the codex agent copying the CODEX_TRUNCATED line into a schema
-// field, and what it buys is PROMPT TEXT for the synthesis model. It is NOT a hard
-// gate like 'deferred' (enforceCrossModelGate / deferredCrossModelPeers), and a
-// truncated codex APPROVE with every other seat APPROVE can still merge.
-//
-// Which is exactly why the DEFAULT is fail-safe. The "full third panelist" framing
-// — the one that lets a codex APPROVE offset another reviewer's doubt — is earned
-// ONLY by an explicit boolean `false`. A missing field, a stringified 'true'/'false',
-// null: every one of those is a flag that did not arrive, and an unknown scope is
-// read as a PARTIAL one. This mirrors crossModelPeerStatus, where a configured seat
-// with no status defaults to 'deferred' rather than to the permissive answer.
-function codexPanelLine(status, review) {
+//   • connected      — a real panelist. Its blockers veto.
+//   • truncated/unknown scope — a PARTIAL panelist. Its blockers still veto, but its
+//     APPROVE covers only what it read. The DEFAULT is fail-safe: the "full panelist"
+//     framing is earned only by an explicit `crossTruncated === false`, so a missing
+//     flag, a stringified boolean or a null all read as partial. Note precisely what
+//     this buys: PROMPT TEXT. It is not a hard gate like `deferred`, and a truncated
+//     APPROVE alongside four other APPROVEs can still merge.
+//   • none           — the owner turned this seat OFF. Not a failure, does not block,
+//     and the wording says "deliberately empty" rather than anything that could be
+//     read as a reviewer having found nothing.
+//   • not_connected  — configured but this install has no credential. Also does not
+//     block (the long-standing graceful path), and is deliberately worded differently
+//     from `none` so the panel record shows which of the two it was.
+//   • deferred / exhausted — configured and produced NO review. Both bar an APPROVE.
+function crossPanelLine(letter, slotTitle, status, review) {
+  if (status === 'none') {
+    return `Verdict ${letter} (${slotTitle}): DELIBERATELY EMPTY — the owner turned this cross-model seat off. This is a CHOICE, not a failure: do NOT block on it and do NOT treat it as a reviewer that raised nothing. Judge on the seats that ran.`
+  }
+  if (status === 'exhausted') {
+    return `Verdict ${letter} (${slotTitle}): PROVIDER OUT OF QUOTA — this seat was configured but its provider reports no remaining capacity, so NO REVIEW HAPPENED. Per the never-silent-downgrade rule, do NOT return APPROVE. This is an account/spend problem for the owner to resolve, not a defect in the diff — do not invent code findings for it.`
+  }
   if (status === 'deferred') {
-    return `Verdict C (codex cross-model): DEFERRED — codex was configured but NO REVIEW HAPPENED (auth precheck failed, the call FAILED/timed out, or the diff was EMPTY so there was nothing to review). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
+    return `Verdict ${letter} (${slotTitle}): DEFERRED — this seat was configured but NO REVIEW HAPPENED (the call FAILED, timed out, or the diff was EMPTY so there was nothing to review). Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
   }
   if (status !== 'connected') {
-    return `Verdict C (codex cross-model): NOT CONNECTED — no codex credential for this project, so this is a Claude-only review. Note "codex not connected" and proceed on Verdicts A+B (do NOT block on codex).`
+    return `Verdict ${letter} (${slotTitle}): NOT CONNECTED — this install has no credential for the model in this seat, so it could not run. Note it and proceed on the other verdicts (do NOT block on it).`
   }
-  if (review && review.codexTruncated === true) {
-    return `Verdict C (codex cross-model, GPT-5) — PARTIAL, SCOPED TO PART OF THE DIFF: ${JSON.stringify(review)}. The wrapper TRUNCATED the diff at its line cap (CODEX_REVIEW_DIFF_TRUNCATED), so codex read only the FIRST lines of this change and NEVER SAW the rest. Its blockers still VETO APPROVE, but a codex APPROVE here means ONLY "no blocker in the portion codex read" — do NOT record it as a whole-change cross-model approval, do NOT let it offset a finding in code codex never saw, and SAY in your findings that the cross-model review covered only part of the diff.`
+  if (review && review.crossTruncated === true) {
+    return `Verdict ${letter} (${slotTitle}) — PARTIAL, SCOPED TO PART OF THE DIFF: ${JSON.stringify(review)}. The wrapper TRUNCATED the diff at its line cap, so this reviewer read only the FIRST lines of the change and NEVER SAW the rest. Its blockers still VETO APPROVE, but its APPROVE means ONLY "no blocker in the portion it read" — do NOT record it as a whole-change cross-model approval, do NOT let it offset a finding in code it never saw, and SAY in your findings that the cross-model review covered only part of the diff.`
   }
-  if (!review || typeof review.codexTruncated !== 'boolean') {
-    return `Verdict C (codex cross-model, GPT-5) — PARTIAL, SCOPE UNKNOWN: ${JSON.stringify(review)}. The bridge did NOT report whether the wrapper truncated the diff (codexTruncated is missing or not a boolean), so it is UNKNOWN whether codex saw the whole change. Treat it exactly as a truncated review: its blockers still VETO APPROVE, but its APPROVE is NOT a whole-change cross-model approval, must not offset a finding elsewhere in the diff, and you must SAY in your findings that the cross-model review's coverage could not be confirmed.`
+  if (!review || typeof review.crossTruncated !== 'boolean') {
+    return `Verdict ${letter} (${slotTitle}) — PARTIAL, SCOPE UNKNOWN: ${JSON.stringify(review)}. The bridge did NOT report whether the wrapper truncated the diff (crossTruncated is missing or not a boolean), so it is UNKNOWN whether this reviewer saw the whole change. Treat it exactly as a truncated review: its blockers still VETO APPROVE, its APPROVE is NOT a whole-change cross-model approval, and you must SAY that the coverage could not be confirmed.`
   }
-  return `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(review)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
+  return `Verdict ${letter} (${slotTitle}) — a reviewer from a DIFFERENT MODEL FAMILY than the Claude seats: ${JSON.stringify(review)}. Treat it as a full panelist. Its DISAGREEMENTS are the most informative signal on this panel, because it does not share the Claude reviewers' blind spots; an evidence-backed blocker here VETOES APPROVE.`
 }
 
-
-// The codex cross-model reviewer prompt. It shells out to the wrapper
-// (trident/codex-review.sh) SYNCHRONOUSLY in the foreground (never backgrounded)
-// with the per-project CODEX_HOME, then maps the wrapper's EXIT CODE to a
-// CODEX_VERDICT_SCHEMA result. Only built when a codex credential is configured.
-function codexReviewerPrompt(diffFile) {
-  // GLOBALLY-UNIQUE temp files: trident runs detached workflows concurrently and
-  // slugs are only unique WITHIN a project, so two same-slug runs in different
-  // projects would collide on /tmp and cross-read each other's verdict. Key on
-  // runId (uuid) — matching writeTerminalResult's /tmp/trident-terminal-${runId}
-  // — falling back to slug only for a dry source check with no runId (Codex [P2]).
+/**
+ * THE CROSS-MODEL REVIEWER PROMPT FOR ONE SLOT.
+ *
+ * One function for both seats, built from the slot's own resolved wrapper — where
+ * there used to be two near-copies naming `codex-review.sh` and `kimi-review-cli.ts` as
+ * literals. That duplication is what made the seats un-repointable: the wrapper, the
+ * env knob, the exit-code table and the status field were all baked into the prompt
+ * text, so "put a different model in this seat" had nowhere to be expressed.
+ *
+ * The argv still differs by executor, because the two wrappers genuinely take different
+ * arguments — codex reviews a diff FILE against a base ref with a per-project
+ * CODEX_HOME, kimi takes the diff file and the task. That is a two-line branch on the
+ * credential the slot requires, not a reason for two prompts.
+ *
+ * Both read the SAME diff FILE Forge wrote rather than running `git diff` in repoPath:
+ * repoPath is still on the base branch (Forge builds in an isolated worktree), so a
+ * git-diff there would be empty or stale and the reviewer could approve without having
+ * reviewed the change.
+ */
+function crossModelReviewerPrompt(index, diffFile) {
+  const slot = slotAt(index)
   const uniq = runId || slug
-  const outFile = `/tmp/trident-codex-${uniq}.out`
-  const errFile = `/tmp/trident-codex-${uniq}.err`
-  const script = `${repoPath}/trident/codex-review.sh`
-  // Codex reviews the SAME diff FILE Forge wrote (as the other reviewers do), NOT
-  // `git diff` in repoPath — repoPath is still on the base branch (Forge builds in
-  // an isolated worktree), so a git-diff there would be empty/stale and codex
-  // could approve without reviewing the change (Codex review [P2]).
-  //
-  // The command also GREPS the wrapper's stderr for the truncation marker and echoes
-  // CODEX_TRUNCATED=0/1. The wrapper caps the diff at its line limit and discloses
-  // that IN THE PROMPT, but a disclosure only the model sees is a disclosure the
-  // WORKFLOW cannot act on: exit 0 is exit 0, so a review of the first 3000 lines of
-  // an 11k-line diff came back as a clean whole-change APPROVE. The grep is what
-  // makes it a FACT the synthesis is handed (see codexPanelLine), not a hope about
-  // how GPT-5 worded its answer.
-  return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+  const outFile = `/tmp/trident-cross${index + 1}-${uniq}.out`
+  const errFile = `/tmp/trident-cross${index + 1}-${uniq}.err`
+  const wrapper = `${repoPath}/${(slot && slot.wrapper) || 'trident/codex-review.sh'}`
+  const envPrefix = CROSS_ENV_PREFIX[index] || ''
+  const title = slotTitle(index)
+  const model = (slot && slot.model_id) || 'the wrapper default'
+  const isKimi = !!slot && slot.requires === 'kimi'
+  // The codex wrapper additionally discloses truncation on stderr; the workflow greps
+  // for the marker rather than trusting the reviewer to have hedged, because exit 0 is
+  // exit 0 and a review of the first 3000 lines of an 11k-line diff came back as a
+  // clean whole-change APPROVE before that grep existed.
+  const command = isKimi
+    ? `${envPrefix}bun run ${shSingleQuote(wrapper)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CROSS_EXIT=$?"; echo "CROSS_TRUNCATED=0"`
+    : `${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(wrapper)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CROSS_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CROSS_TRUNCATED=1"; else echo "CROSS_TRUNCATED=0"; fi`
+  // Exit-code vocabularies differ slightly between the two wrappers (kimi has no
+  // "CLI missing" code and uses 2 for usage errors), so the mapping is stated per
+  // executor rather than fudged into one list that is wrong for one of them.
+  const notConnected = isKimi ? 'EXIT 10' : 'EXIT 10 or 11'
+  const deferred = isKimi ? 'EXIT 2 or 3' : 'EXIT 3 or 5'
+  return `You are the CROSS-MODEL REVIEW bridge for trident's "${title}" seat (read-only). This seat runs ${model} — an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than the Claude reviewers on this panel, which is the entire reason it exists. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${CODEX_ENV_PREFIX}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
-Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
-- codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
-- EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.
-- EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, or the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
-Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
+  ${command}
+Read the CROSS_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
+- EXIT 0 → crossStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
+- crossTruncated: copy the CROSS_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether the reviewer was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
+- ${notConnected} → crossStatus='not_connected' (no credential / no CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
+- EXIT 4 → crossStatus='exhausted'. The provider has NO REMAINING QUOTA. Return verdict='REQUEST_CHANGES' with ONE finding {severity:'blocker', title:'${title} — provider out of quota', evidence:<tail of ${errFile}>}. Do NOT retry and do NOT review the diff yourself: this seat exists to be a different model family, and substituting yourself would report a cross-model review that did not happen.
+- ${deferred} → crossStatus='deferred' (configured but the review could not be performed — the call FAILED, timed out, returned no answer text, or an EMPTY diff left nothing to review). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'${title} deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred reviewer, and NEVER substitute your own review for it.
+Return via the schema. NEVER exit silently — if the command itself could not run, return crossStatus='deferred' with the reason.`
 }
 
-// The Kimi K3 cross-model reviewer prompt. Mirrors the codex bridge: shell out
-// SYNCHRONOUSLY to a CLI, map its EXIT CODE to a schema result. The CLI reads
-// KIMI_API_KEY from its OWN environment, so the credential never appears here.
-function kimiReviewerPrompt(diffFile) {
+/**
+ * THE CODEX BUILD BRIDGE — how a build step actually reaches the Codex CLI (#565).
+ *
+ * Same shape as the cross-model REVIEW bridge above: a thin Claude agent runs ONE
+ * synchronous command and maps its exit code onto the schema the workflow already
+ * expects. What differs is the payload — the Forge contract and the task go IN on
+ * stdin and a commit comes out — and that the wrapper is `codex-build.sh` rather than
+ * `codex-review.sh`.
+ *
+ * WHY A BRIDGE AGENT AT ALL, when codex does the work. Two things the CLI cannot do:
+ * it cannot return FORGE_SCHEMA, and it cannot decide what happens when it is not
+ * connected. The bridge reads the exit code, harvests the branch/PR/sha facts from
+ * codex's own transcript (the Forge contract already REQUIRES those as unfenced last
+ * lines, precisely so they survive a parser-free channel), and — on exit 10/11 —
+ * BUILDS THE TASK ITSELF ON CLAUDE and says so. That last part is the honest
+ * degradation: an install with no codex credential still gets its build, and the run
+ * records which executor produced it rather than reporting a codex build that never
+ * happened.
+ *
+ * EXHAUSTION IS NOT A FALLBACK CASE (#567). Exit 4 means the provider has no quota
+ * left, which is the owner's decision to resolve; the bridge reports it and does NOT
+ * quietly rebuild on Claude, because a substituted model would make a spending
+ * decision invisible.
+ */
+function codexBuildBridgePrompt(contract, tag) {
   const uniq = runId || slug
-  const outFile = `/tmp/trident-kimi-${uniq}.out`
-  const errFile = `/tmp/trident-kimi-${uniq}.err`
-  const cli = `${repoPath}/trident/kimi-review-cli.ts`
-  // Reviews the SAME diff FILE Forge wrote, for the same reason codex does:
-  // repoPath is still on the base branch, so a `git diff` there would be empty
-  // and the reviewer could approve without having reviewed the change.
-  return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
-Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${KIMI_ENV_PREFIX}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
-Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
-- EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
-- EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
-- EXIT 2 or 3 → kimiStatus='deferred' (configured but the call FAILED, timed out, or returned no answer text). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Kimi review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred reviewer, and NEVER substitute your own review for it.
-Return via the schema. NEVER exit silently — if the command itself could not run, return kimiStatus='deferred' with the reason.`
+  const outFile = `/tmp/trident-codex-build-${uniq}.out`
+  const errFile = `/tmp/trident-codex-build-${uniq}.err`
+  const promptFile = `/tmp/trident-codex-build-${uniq}.prompt`
+  const script = codexBuildScript || `${repoPath}/trident/codex-build.sh`
+  const route = routeModel('forge:build', tag)
+  const envPrefix = route.envVar && route.model ? `${route.envVar}=${shSingleQuote(route.model)} ` : ''
+  return `You are the CODEX BUILD BRIDGE for trident. The owner has configured this build step to run on ${route.model || 'the codex CLI default'} rather than on Claude, and your job is to make that happen and report what came of it. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+
+STEP 1 — write the build brief to ${promptFile}. Write EXACTLY the text between the BRIEF markers below, with nothing added and nothing summarised. Use a quoted heredoc so nothing in it is expanded by the shell.
+---BRIEF-START---
+${contract}
+---BRIEF-END---
+
+STEP 2 — run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
+  ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} bash ${shSingleQuote(script)} ${shSingleQuote(repoPath)} < ${shSingleQuote(promptFile)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_BUILD_EXIT=$?"
+
+STEP 3 — map the exit code:
+- EXIT 0 → codex built it. Read the TAIL of ${outFile} and harvest the last lines the contract required: PR_NUMBER=, BRANCH=, WORKTREE=. Fill the schema from those, plus \`git -C <worktree> rev-parse HEAD\` for commitSha, and write the branch diff to a file for diffFile. If codex committed but a required fact is missing from its transcript, recover it with git rather than guessing, and NEVER invent a PR number.
+- EXIT 10 or 11 → codex is NOT CONNECTED on this install (no credential, or no codex CLI on PATH). Do NOT fail: BUILD THE TASK YOURSELF, following the contract in the brief above to the letter, and note in your final text that codex was unavailable so the build ran on Claude.
+- EXIT 4 → the codex account has NO REMAINING QUOTA. Do NOT rebuild on Claude and do NOT retry: substituting a model the owner did not choose would hide a spending decision they need to make. Report testsPassed=false and put the tail of ${errFile} in your final text so the owner sees the quota message verbatim.
+- EXIT 3 or 5 → codex was configured but the build could not be performed, or failed part-way. Report testsPassed=false with the tail of ${errFile}. Do NOT silently rebuild on Claude — say what failed.
+Return via the schema on every path. NEVER exit silently.`
 }
 
 // Parallel adversarial review + asymmetric-gated synthesis. Returns the
 // synthesised verdict object (VERDICT_SCHEMA).
 async function reviewAndSynthesize(diffFile, round, prForCi) {
   phase('Review')
+  // The credential booleans are logged as the INSTALL's capability, next to the seats
+  // that were actually resolved from it — so a run whose seat says `not_connected`
+  // can be read against whether the credential was ever there.
   log(
-    `trident-v2 review: round=${round} diff=${diffFile} codex=${codexConfigured ? 'configured' : 'not-connected'}`,
+    `trident-v2 review: round=${round} diff=${diffFile} credentials=codex:${codexConfigured ? 'yes' : 'no'},kimi:${kimiConfigured ? 'yes' : 'no'} seats=${threadedSlots.map((sl) => `${sl.key}:${sl.disposition}`).join(',') || 'none-threaded'}`,
   )
   // The review PANEL: Claude rubric + Claude adversarial ALWAYS run; the codex
   // cross-model reviewer joins ONLY when a per-project credential is configured
@@ -1782,7 +2022,7 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
   // path), never how the diff is JUDGED — the reviewers must apply fixed criteria
   // independently. (argus:codex was already excluded — see its note.)
   const reviewers = []
-  // THE CORE SEATS RECORD THEIR OWN SLOT, like codexSlot/kimiSlot below — never a
+  // THE CORE SEATS RECORD THEIR OWN SLOT, like the cross-model seats below — never a
   // literal 0/1 written down elsewhere (see CORE_SEAT_STATUS_KEY's docblock). The
   // seat carries everything the three readers need: the gate's blocker `name`, the
   // synthesis prompt's `letter`/`label`, and the `statusKey` the lane retry reads.
@@ -1811,98 +2051,91 @@ TASK: ${task}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
   )
-  let codexSlot = null
-  let kimiSlot = null
-  if (codexConfigured) {
-    // argus:codex runs on the CODEX runtime (an independent GPT-5 peer), not a
-    // Claude model — the thin claude agent just shells out to codex-review.sh, so
-    // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
-    // per-run tally still counts the cross-model reviewer ("C on Codex").
-    // RB2 (b) — DELIBERATELY no `reflectionGuidance` here (two reasons): this thin
-    // launcher only invokes the external codex CLI, whose GPT-5 review sees ONLY the
-    // raw git diff (never this claude prompt text), so injecting owner corrections
-    // would be inert; AND argus:codex is part of the independent MERGE GATE, which
-    // must never carry the untrusted reflection block (see the trust-boundary note
-    // above the reviewers array).
-    logCrossModelSpawn('argus:codex', 'codex-runtime')
-    codexSlot = reviewers.length
+  // ── THE CROSS-MODEL SEATS ────────────────────────────────────────────────
+  // Driven by the RESOLVED slots rather than by two booleans naming two vendors. Only
+  // a `configured` seat costs an agent; `none` and `not_configured` are skipped for
+  // the same reason an unconfigured codex was always skipped — there is nothing to
+  // call. What changed is that the REASON they were skipped travels with them, so the
+  // gate below can block on one and not the other.
+  //
+  // RB2 (b) — DELIBERATELY no `reflectionGuidance` on these, for both reasons that
+  // excluded the old codex seat: the subprocess sees only the diff file (never this
+  // prompt text), so injecting owner corrections would be inert; AND these seats are
+  // part of the independent MERGE GATE, which must never carry the untrusted
+  // reflection block (see the trust-boundary note above the reviewers array).
+  const crossSeats = CROSS_SEAT_DEFS.map((def, index) => ({
+    index,
+    key: def.phaseKey,
+    label: def.label,
+    retryLabel: def.retryLabel,
+    title: slotTitle(index),
+    disposition: slotDisposition(index),
+    model_id: (slotAt(index) && slotAt(index).model_id) || null,
+    reason: (slotAt(index) && slotAt(index).reason) || null,
+    slot: null,
+    statusKey: 'crossStatus',
+  }))
+  for (const seat of crossSeats) {
+    if (seat.disposition !== 'configured') {
+      log(
+        `trident.cross-model seat=${seat.key} disposition=${seat.disposition} model=${seat.model_id ?? 'none'} reason=${seat.reason ?? 'n/a'}`,
+      )
+      continue
+    }
+    logCrossModelSpawn(seat.label, seat.model_id || 'cross-model-runtime')
+    seat.slot = reviewers.length
     reviewers.push(() =>
-      agent(codexReviewerPrompt(diffFile), {
-        label: 'argus:codex',
+      agent(crossModelReviewerPrompt(seat.index, diffFile), {
+        label: seat.label,
         phase: 'Review',
-        schema: CODEX_VERDICT_SCHEMA,
+        schema: CROSS_MODEL_VERDICT_SCHEMA,
       }),
     )
   }
-  // argus:kimi runs on the KIMI K3 runtime — a DIFFERENT MODEL FAMILY, which is
-  // the entire point: two Claude reviewers plus codex still leaves two of three
-  // sharing a family, so K3's DISAGREEMENTS are what this panelist is for. The
-  // thin claude agent only shells out to the CLI, so it keeps the launcher-default
-  // model; log it as `model=kimi-runtime` for the per-run tally.
-  // RB2 (b) — DELIBERATELY no `reflectionGuidance`, for both reasons that exclude
-  // argus:codex: K3 sees only the diff file (never this prompt text), so injecting
-  // owner corrections would be inert; and this is part of the independent MERGE
-  // GATE, which must never carry the untrusted reflection block.
-  if (kimiConfigured) {
-    logCrossModelSpawn('argus:kimi', 'kimi-runtime')
-    kimiSlot = reviewers.length
-    reviewers.push(() =>
-      agent(kimiReviewerPrompt(diffFile), {
-        label: 'argus:kimi',
-        phase: 'Review',
-        schema: KIMI_VERDICT_SCHEMA,
-      }),
+  // BOTH SEATS EMPTY IS A KNOWING OPT-OUT, AND THE RUN SAYS SO. It does not block —
+  // that is the owner's call — but a panel of two Claude reviewers is a panel with one
+  // set of blind spots, and letting that pass unremarked is how "we run cross-model
+  // review" quietly stops being true.
+  if (crossSeats.every((seat) => seat.disposition !== 'configured')) {
+    log(
+      'trident.cross-model PANEL IS CLAUDE-ONLY — no cross-model seat will run this round. This does not block a merge, but the panel shares one model family and its agreements are weaker evidence than the seat count suggests.',
     )
   }
   let verdicts = await parallel(reviewers)
-  // Retry ONLY a cross-model lane that came back `deferred`, before any of this is
-  // read. A flaked lane costs one more call here; letting it through costs a whole
-  // round of four reviewers plus a pointless re-Forge (see retryDeferredPeers).
+  // Retry ONLY a lane that came back `deferred`, before any of this is read. A flaked
+  // lane costs one more call here; letting it through costs a whole round of reviewers
+  // plus a pointless re-Forge (see retryDeferredPeers). An `exhausted` seat is
+  // deliberately NOT retried — `retryDeferredPeers` only acts on the exact string
+  // 'deferred', and quota does not clear between two calls a second apart.
   //
-  // THE CORE SEATS ARE RETRIED TOO. They were omitted, so the retry rationale above
-  // ("an infra failure should not trigger four fresh LLM reviews") applied to the two
-  // OPTIONAL peers and not to the two seats that always run: one transient
-  // argus:claude crash produced an infra-only block, exited the loop on round 1, and
-  // threw away the entire Forge build — the most expensive possible response to the
-  // cheapest possible failure. A core seat's `statusKey` is `verdict` itself, so a
-  // real review ('APPROVE'/'REQUEST_CHANGES') is never retried and only a seat that
-  // produced nothing is. The retry re-runs the SEAT'S OWN THUNK rather than a second
-  // copy of the prompt, so the retried review cannot drift from the original.
+  // THE CORE SEATS ARE RETRIED TOO. They were omitted, so the retry rationale ("an
+  // infra failure should not trigger four fresh LLM reviews") applied to the optional
+  // peers and not to the two seats that always run: one transient argus:claude crash
+  // produced an infra-only block, exited the loop on round 1, and threw away the entire
+  // Forge build — the most expensive possible response to the cheapest possible
+  // failure. A core seat's `statusKey` is `verdict` itself, so a real review is never
+  // retried and only a seat that produced nothing is. The retry re-runs the SEAT'S OWN
+  // THUNK rather than a second copy of the prompt, so it cannot drift from the original.
   verdicts = await retryDeferredPeers({
     verdicts,
     slots: [
       ...coreSeats,
-      { name: 'codex', slot: codexSlot, statusKey: 'codexStatus' },
-      { name: 'kimi', slot: kimiSlot, statusKey: 'kimiStatus' },
+      ...crossSeats.map((seat) => ({ name: seat.key, slot: seat.slot, statusKey: seat.statusKey })),
     ],
     attempts: LANE_RETRY_ATTEMPTS,
     log,
     invoke: async (name) => {
       const core = coreSeats.find((s) => s.name === name)
       if (core) return await reviewers[core.slot]()
-      return name === 'codex'
-        ? await agent(codexReviewerPrompt(diffFile), {
-            label: 'argus:codex-retry',
-            phase: 'Review',
-            schema: CODEX_VERDICT_SCHEMA,
-          })
-        : await agent(kimiReviewerPrompt(diffFile), {
-            label: 'argus:kimi-retry',
-            phase: 'Review',
-            schema: KIMI_VERDICT_SCHEMA,
-          })
+      const seat = crossSeats.find((s) => s.key === name)
+      if (!seat) return null
+      return await agent(crossModelReviewerPrompt(seat.index, diffFile), {
+        label: seat.retryLabel,
+        phase: 'Review',
+        schema: CROSS_MODEL_VERDICT_SCHEMA,
+      })
     },
   })
-  // POSITIONAL INDEXING WAS A LATENT BUG. This read `verdicts[2]` for codex,
-  // which held only while codex was the sole CONDITIONAL panelist. With a second
-  // optional peer, a run with kimi configured and codex NOT would have read the
-  // kimi verdict as the codex one — and since the shapes differ only by a status
-  // field name, `codexStatus` would come back undefined and default to
-  // 'not_connected', silently disarming the gate for a DEFERRED reviewer. So the
-  // panel now records the slot each optional peer occupies as it is pushed.
-  // CI is probed CONCURRENTLY with the reviewers: the push already happened, so the
-  // checks are running while the panel reads the diff and the probe costs no extra
-  // wall-clock.
   const ci = await probeCi(prForCi, round)
   log(`trident-v2 ci: round=${round} status=${ci.status} failing=${ci.failing.length}`)
 
@@ -1911,36 +2144,41 @@ TASK: ${task}`,
   // default applied to a missing verdict, which is how a crashed reviewer used to read
   // as one that was never set up. See `crossModelPeerStatus` / `missingCoreReviewers`.
   const missingCore = missingCoreReviewers(verdicts, coreSeats)
-  const codexStatus = crossModelPeerStatus(codexSlot, verdicts, 'codexStatus')
-  const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, 'kimiStatus')
-  // Only read for the 'connected' panel line, where the verdict is present by
-  // definition — a status of 'connected' can only come off a real verdict object.
-  const codexReview = codexSlot === null ? null : verdicts[codexSlot]
-  const kimiReview = kimiSlot === null ? null : verdicts[kimiSlot]
+  // EVERY SEAT'S STATUS COMES FROM ITS DISPOSITION PLUS WHETHER IT ANSWERED — never
+  // from a default applied to a missing verdict, which is how a crashed reviewer used
+  // to read as one that was never set up (see `crossModelPeerStatus`). Stamped onto
+  // the seat so the panel text, the gate and the log all read ONE value.
+  for (const seat of crossSeats) {
+    seat.status = crossModelPeerStatus(seat.slot, verdicts, seat.statusKey, seat.disposition)
+    seat.review = seat.slot === null ? null : verdicts[seat.slot]
+    log(
+      `trident.cross-model seat=${seat.key} status=${seat.status} model=${seat.model_id ?? 'none'}`,
+    )
+  }
 
   // ASYMMETRIC GATING (minority-veto): findings BOTH reviewers confirm → confirmed;
   // ONE credible evidence-backed BLOCKER vetoes APPROVE; a single-reviewer
-  // non-blocker → labelled `unverified` (surfaced, not merge-blocking). The codex
-  // cross-model verdict is a full panelist when connected; a 'not_connected' codex
-  // is noted + ignored; a 'deferred' codex is hard-gated below.
+  // non-blocker → labelled `unverified` (surfaced, not merge-blocking). A connected
+  // cross-model seat is a full panelist; a `none`/`not_connected` seat is noted and
+  // ignored; a `deferred`/`exhausted` seat is hard-gated below.
   phase('Synthesis')
-  const codexPanel = codexPanelLine(codexStatus, codexReview)
   // NB: NO `reflectionGuidance` — the synthesis step is the verdict INTERPRETER of
   // the independent merge gate; the untrusted reflection block must never influence
   // how the panel's verdicts are merged (see the trust-boundary note above).
-  const kimiPanelLine =
-    kimiStatus === 'connected'
-      ? `Verdict D (kimi K3 cross-model, a DIFFERENT model family): ${JSON.stringify(kimiReview)} — treat as a full panelist. Its DISAGREEMENTS with the Claude reviewers are the most informative signal on this panel, because it does not share their blind spots; an evidence-backed kimi blocker VETOES APPROVE.`
-      : kimiStatus === 'deferred'
-        ? `Verdict D (kimi K3 cross-model): DEFERRED — a key was configured but the review call FAILED/timed out/returned no answer. Per the never-silent-downgrade rule, do NOT return APPROVE; surface the deferral.`
-        : `Verdict D (kimi K3 cross-model): NOT CONNECTED — no Kimi key for this instance. Note it and proceed on the other verdicts (do NOT block on kimi).`
+  // Letters continue after the core seats, so a panel with three Claude reviewers does
+  // not label a cross-model seat `C` while the synthesis prompt calls something else C.
   // A CORE SEAT THAT DIED MUST NOT ARRIVE AS THE TOKEN `null` — see `corePanelLine`,
-  // which is top-level (and behaviourally tested) rather than inlined here.
-  // DERIVED FROM THE SAME `coreSeats` THE GATE READS, so a seat inserted at the head
-  // of the panel cannot label Verdict A with the wrong reviewer's review (and cannot
-  // be described to the model at all without also being gated).
+  // which is top-level (and behaviourally tested) rather than inlined here. DERIVED
+  // FROM THE SAME `coreSeats` THE GATE READS, so a seat inserted at the head of the
+  // panel cannot label Verdict A with the wrong reviewer's review (and cannot be
+  // described to the model at all without also being gated).
   const corePanelLines = coreSeats
     .map((seat) => corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot]))
+    .join('\n')
+  const crossPanelLines = crossSeats
+    .map((seat, i) =>
+      crossPanelLine(String.fromCharCode(65 + coreSeats.length + i), seat.title, seat.status, seat.review),
+    )
     .join('\n')
   const synthesisRaw = await agent(
     `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
@@ -1949,8 +2187,7 @@ TASK: ${task}`,
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
 - Only return APPROVE when NO reviewer left a credible evidence-backed blocker.
 ${corePanelLines}
-${codexPanel}
-${kimiPanelLine}`,
+${crossPanelLines}`,
     withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
   )
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
@@ -1959,7 +2196,7 @@ ${kimiPanelLine}`,
   // anything it lets through. See enforceSeverityGate for why the ordering is the
   // load-bearing part rather than an implementation detail.
   const severityGated = enforceSeverityGate(synthesisRaw)
-  const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus })
+  const deferred = deferredCrossModelPeers(crossSeats)
   // THE CI GATE, folded into the SAME gate rather than added beside it.
   //
   // A red build is a CODE blocker: it joins the findings so the fix loop re-Forges
@@ -2088,11 +2325,19 @@ try {
   // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
   // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
   // planner's complexity tag.
-  const forge = await agent(
-    `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
+  // THE OWNER'S EXECUTOR CHOICE IS HONOURED HERE (#565). `buildRunsOnCli` reads the
+  // RESOLVED route, so this fork fires only when the build phase actually resolved to a
+  // codex tier with a build wrapper — an override that was refused upstream (unknown
+  // tier, unreachable executor, no build wrapper for that executor) is already logged
+  // by name and lands on the Claude arm, which is the honest outcome.
+  const round1Brief = `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
-${task}${reflectionGuidance}`,
+${task}${reflectionGuidance}`
+  const forge = await agent(
+    buildRunsOnCli('forge:build', complexityTag)
+      ? codexBuildBridgePrompt(round1Brief, complexityTag)
+      : round1Brief,
     withModel({ label: 'forge:build', phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA }, complexityTag),
   )
 
@@ -2182,15 +2427,22 @@ ${task}${reflectionGuidance}`,
     // Fix round (> 1): the branch/PR were created in round 1, so ALWAYS re-enter
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
     // reuses the PR (no duplicate). Codex [P1] fix.
-    const fix = await agent(
-      `${forgeBuildContract(true)}
+    // A FIX ROUND IS THE SAME PHASE AS THE BUILD, so it takes the same executor. Routing
+    // only round 1 to codex would mean the owner's choice applied to the first attempt
+    // and silently not to the revisions — the same asymmetry the retry lanes exist to
+    // avoid on the review side.
+    const fixBrief = `${forgeBuildContract(true)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
 ARGUS FINDINGS (round ${round - 1}):
 ${JSON.stringify(synthesis.findings)}
 
 TASK:
-${task}${reflectionGuidance}`,
+${task}${reflectionGuidance}`
+    const fix = await agent(
+      buildRunsOnCli(`forge:fix-round-${round}`, complexityTag)
+        ? codexBuildBridgePrompt(fixBrief, complexityTag)
+        : fixBrief,
       withModel(
         { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA },
         complexityTag,

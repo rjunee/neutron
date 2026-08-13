@@ -54,7 +54,9 @@ import { modelTierRegistry } from '@neutronai/trident/model-tiers.ts'
 import {
   EFFORTS,
   TRIDENT_PHASES,
-  phaseGroup,
+  NO_MODEL,
+  phaseExecutors,
+  phaseTierOptions,
   phaseModelDefaults,
   phaseSupportsEffort,
 } from '@neutronai/trident/phase-models.ts'
@@ -117,9 +119,25 @@ function vocabulary(connections: CrossModelConnections): object {
       key: p.key,
       label: p.label,
       description: p.description,
-      // WHICH EXECUTOR runs this step. The pane needs it to know which tiers a row
-      // can legally take: a Claude step cannot run a GPT tier and vice versa.
-      group: phaseGroup(p),
+      // WHICH EXECUTORS this step can dispatch on. A LIST, because `build` genuinely
+      // reaches two now — before ISSUES #565 it was one group derived from the phase's
+      // default tier, which is what locked the build row to Claude forever.
+      executors: [...phaseExecutors(p)],
+      // WHETHER THIS ROW MAY BE EMPTIED. Only the cross-model review slots may: an
+      // empty build step is a run with no builder, and an empty Claude reviewer
+      // silently shrinks the merge gate.
+      allows_none: p.cross_model_slot === true,
+      // THE PER-ROW OPTION LIST, DECIDED SERVER-SIDE. The clients used to compare
+      // group strings themselves, which put the rule in three places (validator,
+      // mobile, web) and let them disagree — invisibly, until an owner saved a value
+      // one client offered and the server refused it. The reason strings are the
+      // product decision here, so they are computed once next to the validator that
+      // enforces them.
+      tier_options: phaseTierOptions(p).map((o) => ({
+        tier: o.tier,
+        selectable: o.selectable,
+        reason: o.reason,
+      })),
       // A `cli` step's reasoning effort is the CLI's own; the pane disables that cell
       // and says so rather than offering a control nothing reads.
       effort_supported: phaseSupportsEffort(p),
@@ -149,6 +167,10 @@ function vocabulary(connections: CrossModelConnections): object {
       }
     }),
     efforts: [...EFFORTS],
+    // The sentinel a cross-model slot stores when the owner turns it off. Sent rather
+    // than hardcoded in each client so "what does NONE look like on the wire" has one
+    // answer, and so a client cannot invent a spelling the validator rejects.
+    none_value: NO_MODEL,
   }
 }
 

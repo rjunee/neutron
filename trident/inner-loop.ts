@@ -54,7 +54,8 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { modelTierRegistry } from './model-tiers.ts'
-import { parsePhaseModelConfig } from './phase-models.ts'
+import { TRIDENT_PHASES, migratePhaseModelConfig, parsePhaseModelConfig, phaseExecutors } from './phase-models.ts'
+import { resolveCrossModelSlots } from './cross-model-slots.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { fileURLToPath } from 'node:url'
@@ -200,6 +201,11 @@ export const CHECKPOINT_SCRIPT_PATH = fileURLToPath(new URL('./checkpoint.sh', i
  *  that exists nowhere else. Threaded via args for the same reason as
  *  CHECKPOINT_SCRIPT_PATH (no module resolution; the TARGET repo need not
  *  contain trident/). */
+/** Absolute path to the codex BUILD wrapper (ISSUES #565). Same threading contract as
+ *  CHECKPOINT_SCRIPT_PATH: the workflow script cannot resolve its own location, and the
+ *  TARGET repo being built need not contain a copy of trident's own scripts. */
+export const CODEX_BUILD_SCRIPT_PATH = fileURLToPath(new URL('./codex-build.sh', import.meta.url))
+
 export const WORKTREE_CLEANUP_SCRIPT_PATH = fileURLToPath(
   new URL('./worktree-cleanup.sh', import.meta.url),
 )
@@ -312,6 +318,24 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // the pre-existing role-routing map for the four Claude tiers, and rewriting it
     // through the registry would change a working default path for no behaviour.
     modelTiers: modelTierArgs(),
+    // WHICH EXECUTORS EACH PHASE CAN DISPATCH ON (ISSUES #565). Derived from the phase
+    // table rather than restated, so a row the pane offers and a row the run honours
+    // cannot disagree — the failure mode being an owner who selects `sol` for the build,
+    // sees it saved, and gets a Claude build anyway.
+    phaseExecutors: phaseExecutorArgs(),
+    // THE TWO CROSS-MODEL SEATS, RESOLVED HERE (ISSUES #566/#567). Resolution needs
+    // three things the workflow cannot see: the phase table, the tier registry, and
+    // which credentials this install holds. The DISPOSITION it produces (`configured` /
+    // `none` / `not_configured`) is the field the merge gate reads — it is computed
+    // once, in tested TypeScript, precisely so the workflow never has to infer "was
+    // this seat deliberately empty?" from an absent verdict.
+    crossModelSlots: resolveCrossModelSlots(parsePhaseModelConfig(migratePhaseModelConfig(input.phase_models ?? {})).config, {
+      codex: typeof input.codex_home === 'string' && input.codex_home.length > 0,
+      kimi: input.kimi_configured === true,
+    }),
+    // The codex BUILD wrapper's absolute path — the seam that makes "switch build to
+    // sol" a real dispatch rather than a saved preference.
+    codexBuildScript: CODEX_BUILD_SCRIPT_PATH,
     // Per-phase overrides, re-validated at this boundary (see `phase_models`).
     // OMITTED rather than sent as `{}` when there is nothing to override, so a run
     // on an instance that has never touched the setting produces the same args it
@@ -330,18 +354,38 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
  * name. Resolved at BUILD-ARGS time (not module load) so a watchdog model upgrade
  * reaches the very next run.
  */
-function modelTierArgs(): Record<
-  string,
-  { model_id: string; transport: string; env_var: string | null }
-> {
-  const out: Record<string, { model_id: string; transport: string; env_var: string | null }> = {}
+interface TierArg {
+  model_id: string
+  transport: string
+  env_var: string | null
+  /** The executor — `claude` / `codex` / `kimi`. Transport alone cannot answer
+   *  "may this phase take this tier": codex and kimi are both `cli` and are not
+   *  interchangeable with each other. */
+  group: string
+  /** The BUILD role's wrapper + knob, null for an executor with no build route. */
+  build_wrapper: string | null
+  build_env_var: string | null
+}
+
+function modelTierArgs(): Record<string, TierArg> {
+  const out: Record<string, TierArg> = {}
   for (const entry of modelTierRegistry()) {
     out[entry.tier] = {
       model_id: entry.model_id,
       transport: entry.transport,
       env_var: entry.env_var,
+      group: entry.group,
+      build_wrapper: entry.build_wrapper,
+      build_env_var: entry.build_env_var,
     }
   }
+  return out
+}
+
+/** phase key → the executor groups its dispatch can reach. See `phaseExecutors`. */
+function phaseExecutorArgs(): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const phase of TRIDENT_PHASES) out[phase.key] = [...phaseExecutors(phase)]
   return out
 }
 
@@ -356,7 +400,11 @@ function phaseModelArgs(
   raw: Record<string, { model?: string; effort?: string }> | null | undefined,
 ): { phaseModels?: Record<string, { model?: string; effort?: string }> } {
   if (raw === null || raw === undefined) return {}
-  const { config } = parsePhaseModelConfig(raw)
+  // MIGRATE FIRST. A config written before the cross-model seats were renamed still
+  // holds `review_codex`/`review_kimi`, and `parsePhaseModelConfig` would reject those
+  // as unknown phases — silently dropping a choice the owner made and can still see in
+  // his own settings history.
+  const { config } = parsePhaseModelConfig(migratePhaseModelConfig(raw))
   return Object.keys(config).length > 0 ? { phaseModels: config } : {}
 }
 

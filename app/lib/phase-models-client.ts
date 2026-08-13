@@ -30,14 +30,25 @@ export interface PhaseDescriptor {
   label: string;
   description: string;
   /**
-   * Which executor runs this step (`claude`, `codex`, `kimi`).
+   * Which executors this step can dispatch on (`claude`, `codex`, `kimi`).
    *
-   * A row can only take a tier from its OWN group: a Claude step cannot run a GPT
-   * model (`agent({model})` resolves against Claude Code's endpoint), and the Codex
-   * wrapper cannot be pointed at Kimi. The server decides the grouping; this file just
-   * compares two strings.
+   * A LIST, because a step can genuinely reach more than one: the build row runs on
+   * Claude or on the Codex CLI. It used to be a single `group`, which is what locked
+   * every row to one executor forever.
    */
-  group: string;
+  executors: string[];
+  /** True only for the cross-model review slots, which may be emptied. */
+  allows_none: boolean;
+  /**
+   * WHICH TIERS THIS ROW MAY OFFER, AND WHY NOT — decided by the SERVER.
+   *
+   * The clients used to derive this by comparing group strings themselves, so the rule
+   * lived in three places (the validator, this file, and the web copy) and could
+   * disagree. The disagreement is invisible until an owner picks a value one client
+   * offered and the server refuses the save, at which point the pane looks broken. The
+   * server owns the rule; these files render it.
+   */
+  tier_options: Array<{ tier: string; selectable: boolean; reason: string | null }>;
   /** False for a CLI step, whose reasoning effort is the CLI's own. */
   effort_supported: boolean;
   default: { model: string; effort: string };
@@ -65,6 +76,8 @@ export interface PhaseModelsPayload {
   phases: PhaseDescriptor[];
   model_tiers: TierOption[];
   efforts: string[];
+  /** The sentinel a cross-model slot stores when the owner turns it off (`none`). */
+  none_value: string;
   defaults: Record<string, { model: string; effort: string }>;
   overrides: Record<string, PhaseOverride>;
   /**
@@ -175,12 +188,22 @@ export function effectiveRow(
 /**
  * The tiers a row may offer, each with whether it can be CHOSEN and why not.
  *
- * NOTHING IS FILTERED OUT. A tier from another executor, or one this install has no
- * credential for, comes back `selectable: false` WITH a reason so the row can render
- * it greyed and say "needs a Codex connection". Hiding it would leave the owner unable
- * to account for a missing option — which is exactly how a whole capability stayed
- * invisible for weeks (ISSUES #551). The reason is the product decision here, so it
- * lives in the shared helper rather than in either component.
+ * NOTHING IS FILTERED OUT. A tier this row's dispatch cannot reach, or one this
+ * install has no credential for, comes back `selectable: false` WITH a reason so the
+ * row can render it greyed and say why. Hiding it would leave the owner unable to
+ * account for a missing option — which is exactly how a whole capability stayed
+ * invisible for weeks (ISSUES #551).
+ *
+ * TWO INDEPENDENT REASONS TO GREY, AND THEY ARE ORDERED. Capability first (`this step
+ * cannot dispatch that executor`), credential second (`this install has no key`). A
+ * tier that fails both is a tier the owner cannot use even after connecting an
+ * account, so leading with the credential would send them to set up a connection that
+ * changes nothing.
+ *
+ * THE CAPABILITY ANSWER IS THE SERVER'S. `phase.tier_options` is computed next to the
+ * validator that enforces it, so the option this row greys out and the value the
+ * server would refuse are the same fact, phrased once. This file no longer compares
+ * group strings — that was the copy that could drift.
  *
  * MUST MATCH `landing/chat-react/phase-models-client.ts#tierChoices`.
  */
@@ -188,24 +211,15 @@ export function tierChoices(
   phase: PhaseDescriptor,
   tiers: TierOption[],
 ): Array<{ tier: string; model_id: string; selectable: boolean; reason: string | null }> {
+  const byTier = new Map(phase.tier_options.map((o) => [o.tier, o]));
   return tiers.map((t) => {
-    if (t.group !== phase.group) {
-      // #565 — SAY WHY, AND WHAT WOULD CHANGE IT. The old reason read `Codex steps
-      // only`, naming a category the reader has never heard of and explaining
-      // nothing; the owner's first words on seeing it were "Wtf does that mean?".
-      // The accurate statement is about WIRING, not existence: a codex substrate
-      // adapter is already built and registered (`runtime/adapters/codex-cli/`,
-      // selected in `runtime/adapters/select-substrate.ts`), and trident's own
-      // review seat already shells into `codex exec` — what is missing is a route
-      // from THIS step to it. Saying "no executor exists" would be a second false
-      // claim in place of the first.
-      const optionExecutor = t.group.charAt(0).toUpperCase() + t.group.slice(1);
-      const stepExecutor = phase.group.charAt(0).toUpperCase() + phase.group.slice(1);
+    const option = byTier.get(t.tier);
+    if (option === undefined || !option.selectable) {
       return {
         tier: t.tier,
         model_id: t.model_id,
         selectable: false,
-        reason: `${optionExecutor} is not wired for this step yet — it runs on ${stepExecutor}`,
+        reason: option?.reason ?? 'not available for this step',
       };
     }
     if (!t.available) {
@@ -218,6 +232,43 @@ export function tierChoices(
     }
     return { tier: t.tier, model_id: t.model_id, selectable: true, reason: null };
   });
+}
+
+/**
+ * Is this row's cross-model seat turned OFF?
+ *
+ * A pure predicate rather than an inline `=== 'none'`, because the string is a wire
+ * value the server sends and both panes must read it the same way. A seat the owner
+ * emptied and a seat that merely has no verdict are different states everywhere else
+ * in this feature; they must not become the same one in the UI either.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#slotIsOff`.
+ */
+export function slotIsOff(
+  phase: PhaseDescriptor,
+  overrides: Record<string, PhaseOverride>,
+  noneValue: string,
+): boolean {
+  return phase.allows_none && overrides[phase.key]?.model === noneValue;
+}
+
+/**
+ * Is the review panel deliberately single-family?
+ *
+ * True when every cross-model slot is off. It is a legitimate configuration and must
+ * not be presented as an error — but a panel of Claude reviewers only is a panel with
+ * one set of blind spots, and a pane that stays silent about it lets the owner keep
+ * believing a second family is checking the work.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#panelIsSingleFamily`.
+ */
+export function panelIsSingleFamily(
+  phases: PhaseDescriptor[],
+  overrides: Record<string, PhaseOverride>,
+  noneValue: string,
+): boolean {
+  const slots = phases.filter((p) => p.allows_none);
+  return slots.length > 0 && slots.every((p) => slotIsOff(p, overrides, noneValue));
 }
 
 /**

@@ -53,7 +53,18 @@ function payload(
         key: 'build',
         label: 'Build',
         description: 'Writes the code and the tests, and re-writes them against findings.',
-        group: 'claude',
+        // TWO EXECUTORS since ISSUES #565 — the build row can be moved to Codex.
+        executors: ['claude', 'codex'],
+        allows_none: false,
+        tier_options: [
+          { tier: 'fable', selectable: true, reason: null },
+          { tier: 'opus', selectable: true, reason: null },
+          { tier: 'sonnet', selectable: true, reason: null },
+          { tier: 'fast', selectable: true, reason: null },
+          { tier: 'sol', selectable: true, reason: null },
+          { tier: 'terra', selectable: true, reason: null },
+          { tier: 'k3', selectable: false, reason: "'k3' runs on kimi, which has no build wrapper in this repo — it can review, but it cannot run Build" },
+        ],
         effort_supported: true,
         default: { model: 'opus', effort: 'high' },
       },
@@ -61,16 +72,37 @@ function payload(
         key: 'synthesis',
         label: 'Synthesis / arbitration',
         description: 'Merges every reviewer’s verdict into one and decides what blocks a merge.',
-        group: 'claude',
+        executors: ['claude'],
+        allows_none: false,
+        tier_options: [
+          { tier: 'fable', selectable: true, reason: null },
+          { tier: 'opus', selectable: true, reason: null },
+          { tier: 'sonnet', selectable: true, reason: null },
+          { tier: 'fast', selectable: true, reason: null },
+          { tier: 'sol', selectable: false, reason: "'sol' (gpt-5.6-sol) runs on codex, and Synthesis / arbitration runs on claude — it cannot dispatch a codex model" },
+          { tier: 'terra', selectable: false, reason: "'terra' (gpt-5.6-terra) runs on codex, and Synthesis / arbitration runs on claude — it cannot dispatch a codex model" },
+          { tier: 'k3', selectable: false, reason: "'k3' (kimi-k3) runs on kimi, and Synthesis / arbitration runs on claude — it cannot dispatch a kimi model" },
+        ],
         effort_supported: true,
         default: { model: 'fable', effort: 'high' },
       },
       {
-        // The cross-model row: a different executor, and no effort control of its own.
-        key: 'review_codex',
-        label: 'Cross-model review (Codex)',
-        description: 'A second opinion from a GPT model, run through the Codex CLI.',
-        group: 'codex',
+        // A cross-model SLOT: any non-Claude tier or NONE, and no effort control of
+        // its own (a CLI picks its own reasoning effort).
+        key: 'review_cross_1',
+        label: 'Cross-model review ONE',
+        description: 'A second opinion from outside the Claude family, or NONE to turn it off.',
+        executors: ['codex', 'kimi'],
+        allows_none: true,
+        tier_options: [
+          { tier: 'fable', selectable: false, reason: "'fable' (claude-fable-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model" },
+          { tier: 'opus', selectable: false, reason: "'opus' (claude-opus-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model" },
+          { tier: 'sonnet', selectable: false, reason: "'sonnet' (claude-sonnet-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model" },
+          { tier: 'fast', selectable: false, reason: "'fast' (claude-haiku-4-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model" },
+          { tier: 'sol', selectable: true, reason: null },
+          { tier: 'terra', selectable: true, reason: null },
+          { tier: 'k3', selectable: true, reason: null },
+        ],
         effort_supported: false,
         default: { model: 'sol', effort: 'high' },
       },
@@ -78,17 +110,18 @@ function payload(
     model_tiers: [
       { tier: 'fable', provider: 'anthropic', model_id: 'claude-fable-5', group: 'claude', available: true, unavailable_reason: null },
       { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', available: true, unavailable_reason: null },
-      { tier: 'sonnet', provider: 'anthropic', model_id: 'claude-sonnet-4-6', group: 'claude', available: true, unavailable_reason: null },
+      { tier: 'sonnet', provider: 'anthropic', model_id: 'claude-sonnet-5', group: 'claude', available: true, unavailable_reason: null },
       { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', available: true, unavailable_reason: null },
       { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', available: true, unavailable_reason: null },
       { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', available: true, unavailable_reason: null },
       { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', available: false, unavailable_reason: 'needs a Kimi key' },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    none_value: 'none',
     defaults: {
       build: { model: 'opus', effort: 'high' },
       synthesis: { model: 'fable', effort: 'high' },
-      review_codex: { model: 'sol', effort: 'high' },
+      review_cross_1: { model: 'sol', effort: 'high' },
     },
     overrides,
     rejected,
@@ -219,20 +252,59 @@ describe('the screen renders what the SERVER says the phases are', () => {
 
   it('shows a tier this install cannot run DISABLED, with the reason, never hidden', async () => {
     await mountCodegen();
-    await press('phase-review_codex-model');
+    await press('phase-review_cross_1-model');
     // Listed on the row that could use it, greyed, saying what to go and fix.
-    const k3 = byTestId('phase-review_codex-model-k3');
+    const k3 = byTestId('phase-review_cross_1-model-k3');
     expect(k3).not.toBeNull();
-    expect(k3!.textContent ?? '').toContain('Kimi is not wired for this step yet');
+    // THE SEAT CAN take Kimi (#566 made both slots executor-agnostic), so the honest
+    // reason is the missing credential — the thing the owner can actually go and fix —
+    // and NOT a capability message that would send them nowhere.
+    expect(k3!.textContent ?? '').toContain('needs a Kimi key');
     // …and pressing it changes nothing, which is the half a render check misses.
-    await press('phase-review_codex-model-k3');
-    expect(byTestId('phase-review_codex-changed')).toBeNull();
+    await press('phase-review_cross_1-model-k3');
+    expect(byTestId('phase-review_cross_1-changed')).toBeNull();
+  });
+
+  it('ISSUES #565 — the build row OFFERS a codex tier, and refuses kimi for a stated reason', async () => {
+    await mountCodegen();
+    await press('phase-build-model');
+    // THE POSITIVE HALF. This option was greyed before the route existed; it is
+    // selectable now because `trident/codex-build.sh` is dispatched for it. If the
+    // route is ever removed while the option stays, this must fail.
+    const sol = byTestId('phase-build-model-sol')!;
+    expect(sol).not.toBeNull();
+    expect(sol.textContent ?? '').not.toContain('—');
+    // …and the honest half, read from the SAME open menu: Kimi is a real cross-model
+    // reviewer with NO build wrapper, so the row says that rather than sending the
+    // owner to connect an account that would not help.
+    expect(byTestId('phase-build-model-k3')!.textContent ?? '').toContain('no build wrapper');
+    // Selecting the codex tier is a real edit, not a greyed no-op.
+    await press('phase-build-model-sol');
+    expect(byTestId('phase-build-changed')).not.toBeNull();
+  });
+
+  it('ISSUES #566 — a cross-model SLOT offers NONE, and a build row does not', async () => {
+    await mountCodegen();
+    await press('phase-review_cross_1-model');
+    const none = byTestId('phase-review_cross_1-model-none');
+    expect(none).not.toBeNull();
+    expect(none!.textContent ?? '').toContain('run no reviewer in this seat');
+    // Choosing it is a real edit, not a no-op…
+    await press('phase-review_cross_1-model-none');
+    expect(byTestId('phase-review_cross_1-changed')).not.toBeNull();
+    // …and the closed control then SAYS the seat is off rather than showing a model
+    // the run will not use.
+    expect(byTestId('phase-review_cross_1-model')!.textContent ?? '').toContain('this review is off');
+    // THE ROWS THAT MAY NOT BE EMPTIED DO NOT OFFER IT. An emptied build step is a run
+    // with no builder; only the cross-model seats are the owner's to switch off.
+    await press('phase-build-model');
+    expect(byTestId('phase-build-model-none')).toBeNull();
   });
 
   it('says a CLI step has no effort control instead of offering an inert one', async () => {
     await mountCodegen();
-    expect(byTestId('phase-review_codex-effort')).toBeNull();
-    expect(byTestId('phase-review_codex-effort-na')!.textContent ?? '').toContain(
+    expect(byTestId('phase-review_cross_1-effort')).toBeNull();
+    expect(byTestId('phase-review_cross_1-effort-na')!.textContent ?? '').toContain(
       'set by the CLI',
     );
   });

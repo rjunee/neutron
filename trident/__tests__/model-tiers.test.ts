@@ -27,7 +27,8 @@ import {
   isModelTier,
   modelTier,
   modelTierRegistry,
-  tiersAreInterchangeable,
+  crossModelTiers,
+  tierRunsOn,
 } from '../model-tiers.ts'
 
 const CODEX_WRAPPER = await Bun.file(new URL('../codex-review.sh', import.meta.url)).text()
@@ -144,22 +145,42 @@ describe('a tier follows the model, not the process it booted in', () => {
   })
 })
 
-describe('interchangeability is about the executor, not taste', () => {
-  it('allows a swap within one transport and refuses one across', () => {
-    expect(tiersAreInterchangeable('opus', 'sonnet')).toBe(true)
-    expect(tiersAreInterchangeable('sol', 'terra')).toBe(true)
-    expect(tiersAreInterchangeable('sol', 'luna')).toBe(true)
-    // `agent({model})` resolves against Claude Code's own endpoint — a GPT id there
-    // reaches nothing.
-    expect(tiersAreInterchangeable('opus', 'sol')).toBe(false)
-    expect(tiersAreInterchangeable('sol', 'opus')).toBe(false)
+describe('reachability is about the executor, not taste', () => {
+  it('answers from the executor SET a step can dispatch, not from one default tier', () => {
+    // THE SIGNATURE CHANGE IS THE FIX (#565). This used to take the phase's DEFAULT
+    // TIER and compare groups, which meant a row could only ever offer its own default
+    // executor — the build row was locked to Claude forever, no matter what dispatch
+    // was later built for it. A step's reachable executors are a property of the code
+    // written for it, so the caller passes the set.
+    expect(tierRunsOn(['claude'], 'sonnet')).toBe(true)
+    expect(tierRunsOn(['codex'], 'terra')).toBe(true)
+    expect(tierRunsOn(['codex'], 'luna')).toBe(true)
+    // A step wired for BOTH takes either — the case that could not be expressed before.
+    expect(tierRunsOn(['claude', 'codex'], 'opus')).toBe(true)
+    expect(tierRunsOn(['claude', 'codex'], 'sol')).toBe(true)
+    // …and still refuses what it cannot reach. `agent({model})` resolves against Claude
+    // Code's own endpoint, so a GPT id handed to a Claude-only step reaches nothing.
+    expect(tierRunsOn(['claude'], 'sol')).toBe(false)
+    expect(tierRunsOn(['codex'], 'opus')).toBe(false)
     // Both are CLI, but `CODEX_REVIEW_MODEL=kimi-k3` is not a review, it is an error.
-    expect(tiersAreInterchangeable('sol', 'k3')).toBe(false)
-    expect(tiersAreInterchangeable('k3', 'sol')).toBe(false)
+    expect(tierRunsOn(['codex'], 'k3')).toBe(false)
+    expect(tierRunsOn(['kimi'], 'sol')).toBe(false)
   })
 
-  it('refuses an unknown tier on either side', () => {
-    expect(tiersAreInterchangeable('opus', 'fable-2' as never)).toBe(false)
-    expect(tiersAreInterchangeable('fable-2' as never, 'opus')).toBe(false)
+  it('refuses an unknown tier, and an empty executor set', () => {
+    expect(tierRunsOn(['claude'], 'fable-2' as never)).toBe(false)
+    // An empty set is a step with no dispatch. Answering `true` would be the
+    // fail-open direction, and this whole module exists to keep that from happening.
+    expect(tierRunsOn([], 'opus')).toBe(false)
+  })
+
+  it('crossModelTiers is DERIVED, so a new provider reaches both seats for free', () => {
+    // The cross-model slots take "any tier that is not Claude". Listing them by hand
+    // would mean adding a provider to the registry and having it silently not appear in
+    // the two seats that exist to break the single-family panel.
+    const cross = crossModelTiers().map((t) => t.tier)
+    expect(cross).toEqual(['sol', 'terra', 'luna', 'k3'])
+    expect(cross).not.toContain('opus')
+    expect(crossModelTiers().every((t) => t.group !== 'claude')).toBe(true)
   })
 })

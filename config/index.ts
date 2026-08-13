@@ -51,7 +51,12 @@ export const DEFAULTS = {
   // runtime/models.ts:53/71/89/96
   bestModel: 'claude-opus-5',
   fableModel: 'claude-fable-5',
-  sonnetModel: 'claude-sonnet-4-6',
+  // ISSUES #564 — bumped with `runtime/models.ts:SONNET_MODEL`. THESE TWO ARE A COPY,
+  // and the copy is checked: `__tests__/bootconfig-defaults.test.ts` now asserts this
+  // table against the live constants rather than against re-typed literals, so the pair
+  // cannot drift again. A hand-copied default that silently disagrees with its source
+  // is the same defect class the tier-staleness check exists for.
+  sonnetModel: 'claude-sonnet-5',
   fastModel: 'claude-haiku-4-5-20251001',
   // runtime/adapters/claude-code/index.ts (CLAUDE_BIN ?? 'claude')
   claudeBin: 'claude',

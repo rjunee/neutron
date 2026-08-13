@@ -26,35 +26,60 @@ import { describe, expect, test } from 'bun:test'
 import * as mobile from '@neutronai/app/lib/phase-models-client'
 import * as web from '@neutronai/landing/chat-react/phase-models-client.ts'
 
-/** A phase whose two defaults differ, so a rule that confuses them is visible. */
+/**
+ * THE FIXTURES ARE THE SERVER'S ANSWER, NOT A RE-DERIVED ONE.
+ *
+ * `tier_options` is the list `phaseTierOptions` produces on the server, carried on the
+ * payload. It is spelled out here rather than imported so this file stays a check on
+ * the two CLIENT copies agreeing with each other; whether the server's own answer is
+ * right is `trident/__tests__/phase-models.test.ts`'s job.
+ */
+
+/** The build row: TWO executors since ISSUES #565, and a real effort control. */
 const BUILD = {
   key: 'build',
   label: 'Build',
   description: 'Writes the code and the tests.',
-  group: 'claude',
+  executors: ['claude', 'codex'],
+  allows_none: false,
+  tier_options: [
+    { tier: 'opus', selectable: true, reason: null },
+    { tier: 'fast', selectable: true, reason: null },
+    { tier: 'sol', selectable: true, reason: null },
+    // Right family, wrong ROLE: kimi is a non-Claude tier but has no build wrapper.
+    { tier: 'k3', selectable: false, reason: "'k3' runs on kimi, which has no build wrapper in this repo — it can review, but it cannot run Build" },
+  ],
   effort_supported: true,
   default: { model: 'opus', effort: 'high' },
 }
 
-/** The codex review row: a different executor, and no effort control at all. */
-const CODEX = {
-  key: 'review_codex',
-  label: 'Cross-model review (Codex)',
-  description: 'A second opinion from a GPT model.',
-  group: 'codex',
+/** Cross-model slot ONE: any non-Claude tier, or none, and no effort control. */
+const CROSS_1 = {
+  key: 'review_cross_1',
+  label: 'Cross-model review ONE',
+  description: 'A second opinion from outside the Claude family.',
+  executors: ['codex', 'kimi'],
+  allows_none: true,
+  tier_options: [
+    { tier: 'opus', selectable: false, reason: "'opus' (claude-opus-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model" },
+    { tier: 'fast', selectable: false, reason: "'opus' (claude-opus-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model" },
+    { tier: 'sol', selectable: true, reason: null },
+    { tier: 'k3', selectable: true, reason: null },
+  ],
   effort_supported: false,
   default: { model: 'sol', effort: 'high' },
 }
 
-/** The kimi review row — the one whose only tier this install cannot run. */
-const KIMI = {
-  key: 'review_kimi',
-  label: 'Cross-model review (Kimi)',
-  description: 'A second opinion from Kimi K3.',
-  group: 'kimi',
-  effort_supported: false,
+/** Cross-model slot TWO — the one whose default tier this install cannot run. */
+const CROSS_2 = {
+  ...CROSS_1,
+  key: 'review_cross_2',
+  label: 'Cross-model review TWO',
   default: { model: 'k3', effort: 'high' },
 }
+
+/** The wire sentinel for an emptied slot, as the server sends it. */
+const NONE = 'none'
 
 /**
  * The tier vocabulary as the server sends it, with ONE tier deliberately
@@ -163,7 +188,7 @@ describe('effectiveRow — the phone and the browser show the same row', () => {
 })
 
 describe('tierChoices — the phone and the browser grey the same options, for the same reason', () => {
-  for (const phase of [BUILD, CODEX, KIMI]) {
+  for (const phase of [BUILD, CROSS_1, CROSS_2]) {
     test(`${phase.key} offers the same set`, () => {
       // The reason STRING is compared too, not just the boolean: "needs a Kimi key"
       // and a blank grey box are very different answers to "why can't I pick this",
@@ -176,7 +201,7 @@ describe('tierChoices — the phone and the browser grey the same options, for t
     // Hiding an option the owner cannot account for is how a capability stays
     // invisible for weeks. Both copies must show all four.
     expect(web.tierChoices(BUILD, TIERS)).toHaveLength(TIERS.length)
-    expect(mobile.tierChoices(CODEX, TIERS)).toHaveLength(TIERS.length)
+    expect(mobile.tierChoices(CROSS_1, TIERS)).toHaveLength(TIERS.length)
   })
 })
 
@@ -189,10 +214,10 @@ describe('resolvedModel / rejectedModel — the same answer on both', () => {
   })
 
   test('a refused stored value surfaces identically', () => {
-    const rejected = { build: { model: 'gpt-5.7-nova' }, review_codex: { effort: 'max' } }
+    const rejected = { build: { model: 'gpt-5.7-nova' }, review_cross_1: { effort: 'max' } }
     expect(web.rejectedModel(BUILD, rejected)).toBe(mobile.rejectedModel(BUILD, rejected))
     // An effort-only rejection is NOT a struck-through model on either client.
-    expect(web.rejectedModel(CODEX, rejected)).toBe(mobile.rejectedModel(CODEX, rejected))
+    expect(web.rejectedModel(CROSS_1, rejected)).toBe(mobile.rejectedModel(CROSS_1, rejected))
   })
 })
 
@@ -205,28 +230,52 @@ describe('the agreement is real, not vacuous', () => {
     })
     expect(web.effectiveRow(BUILD, {}).model).toBe('opus')
     expect(web.effectiveRow(BUILD, { build: { model: 'fast' } }).overridden).toBe(true)
-    // …and the new helpers can distinguish the three outcomes they exist for.
-    const choices = web.tierChoices(CODEX, TIERS)
+    // …and the new helpers can distinguish the outcomes they exist for.
+    const choices = web.tierChoices(CROSS_1, TIERS)
     expect(choices.find((c) => c.tier === 'sol')!.selectable).toBe(true)
-    expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('Claude is not wired for this step yet')
-    // WRONG-GROUP BEATS UNAVAILABLE, deliberately: telling the owner of a Codex row
-    // to go get a Kimi key would send them to fix something that would not help.
-    expect(choices.find((c) => c.tier === 'k3')!.reason).toContain('Kimi is not wired for this step yet')
-    // On the row that COULD use it, the missing credential is the reason — and the
-    // option is still listed rather than hidden.
-    const kimiChoices = web.tierChoices(KIMI, TIERS)
-    expect(kimiChoices.find((c) => c.tier === 'k3')).toEqual({
+    expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('cannot dispatch a claude model')
+    // NOT-SELECTABLE BEATS UNAVAILABLE, deliberately: telling the owner of a row that
+    // cannot reach an executor to go get that executor's key would send them to fix
+    // something that would not help. Here `k3` IS reachable for a cross-model slot, so
+    // the missing credential is the honest reason — and the option is still listed.
+    expect(choices.find((c) => c.tier === 'k3')).toEqual({
       tier: 'k3',
       model_id: 'kimi-k3',
       selectable: false,
       reason: 'needs a Kimi key',
     })
+    // ISSUES #565 — THE BUILD ROW NOW OFFERS A CODEX TIER. This is the assertion that
+    // would have failed before the wiring existed, and it is the one that must fail
+    // again if the route is ever removed while the option stays.
+    const buildChoices = web.tierChoices(BUILD, TIERS)
+    expect(buildChoices.find((c) => c.tier === 'sol')!.selectable).toBe(true)
+    expect(buildChoices.find((c) => c.tier === 'sol')!.reason).toBeNull()
+    // …and it still refuses the executor that genuinely cannot build, with a reason
+    // that says WHY rather than naming a category the reader has never heard of.
+    expect(buildChoices.find((c) => c.tier === 'k3')!.selectable).toBe(false)
+    expect(buildChoices.find((c) => c.tier === 'k3')!.reason).toContain('no build wrapper')
+    // ISSUES #566 — NONE is a value both panes read the same way, and both agree when
+    // the panel has become single-family.
+    expect(web.slotIsOff(CROSS_1, { review_cross_1: { model: NONE } }, NONE)).toBe(true)
+    expect(mobile.slotIsOff(CROSS_1, { review_cross_1: { model: NONE } }, NONE)).toBe(true)
+    // A row that may NOT be emptied never reads as off, even if `none` somehow got in.
+    expect(web.slotIsOff(BUILD, { build: { model: NONE } }, NONE)).toBe(false)
+    const bothOff = { review_cross_1: { model: NONE }, review_cross_2: { model: NONE } }
+    expect(web.panelIsSingleFamily([BUILD, CROSS_1, CROSS_2], bothOff, NONE)).toBe(true)
+    expect(mobile.panelIsSingleFamily([BUILD, CROSS_1, CROSS_2], bothOff, NONE)).toBe(true)
+    // ONE seat still filled is NOT a single-family panel — the distinction the whole
+    // feature turns on, asserted rather than assumed.
+    expect(
+      web.panelIsSingleFamily([BUILD, CROSS_1, CROSS_2], { review_cross_1: { model: NONE } }, NONE),
+    ).toBe(false)
   })
 
   test('both copies are the SAME shape of function, not one wrapping the other', () => {
     expect(web.applyRowEdit.length).toBe(mobile.applyRowEdit.length)
     expect(web.effectiveRow.length).toBe(mobile.effectiveRow.length)
     expect(web.tierChoices.length).toBe(mobile.tierChoices.length)
+    expect(web.slotIsOff.length).toBe(mobile.slotIsOff.length)
+    expect(web.panelIsSingleFamily.length).toBe(mobile.panelIsSingleFamily.length)
     expect(web.resolvedModel.length).toBe(mobile.resolvedModel.length)
     expect(web.rejectedModel.length).toBe(mobile.rejectedModel.length)
   })

@@ -21,6 +21,10 @@
  *   0   connected     — review text on stdout
  *   10  not_connected — no credential; the GRACEFUL path, never blocking
  *   3   deferred      — configured but failed/timed out/answerless. BLOCKS.
+ *   4   exhausted     — the account has no quota left (#567). BLOCKS, and is
+ *                       deliberately NOT retried: quota does not clear between two
+ *                       calls, and substituting another model would turn the owner's
+ *                       spending decision into an invisible one.
  *
  * Usage: bun run trident/kimi-review-cli.ts <diff-file> [task...]
  */
@@ -28,10 +32,16 @@
 import { readFileSync } from 'node:fs'
 
 import { reviewWithKimi } from './kimi-review.ts'
+import { EXIT_PROVIDER_EXHAUSTED } from './provider-health.ts'
 
 const EXIT_CONNECTED = 0
 const EXIT_USAGE = 2
 const EXIT_DEFERRED = 3
+/** ISSUES #567 — the provider has no quota left. DISTINCT from `deferred` on purpose:
+ *  the caller must surface it rather than retry it, and retrying is exactly what a
+ *  shared code would cause. Shared with the codex wrapper so one exit code means one
+ *  thing across every cross-model seat. */
+const EXIT_EXHAUSTED = EXIT_PROVIDER_EXHAUSTED
 const EXIT_NOT_CONNECTED = 10
 
 async function main(): Promise<number> {
@@ -66,7 +76,9 @@ async function main(): Promise<number> {
   // The reason goes to stderr so the panelist can quote it as evidence without
   // it being mistaken for review text on stdout.
   process.stderr.write(`${result.reason ?? result.status}\n`)
-  return result.status === 'not_connected' ? EXIT_NOT_CONNECTED : EXIT_DEFERRED
+  if (result.status === 'not_connected') return EXIT_NOT_CONNECTED
+  if (result.status === 'exhausted') return EXIT_EXHAUSTED
+  return EXIT_DEFERRED
 }
 
 main().then(

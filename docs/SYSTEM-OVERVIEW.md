@@ -2823,20 +2823,70 @@ generation"), mobile `app/app/codegen.tsx`, both over
   registry is threaded to the workflow as `args.modelTiers` (`trident/inner-loop.ts`
   `buildWorkflowArgs`), alongside the existing `args.models`, because the `.mjs` has
   no module resolution.
-- **The cross-model lanes are routed phases now.** `argus:codex` / `argus:kimi` (and
-  their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
-  `review_kimi` phases in `trident/phase-models.ts`, defaulting to `sol` and `k3` —
-  the same models the wrappers pinned themselves, so an install that never opens the
-  pane is unchanged. `trident/__tests__/model-tiers.test.ts` pins the registry
-  against each wrapper's own default (and against the `${VAR-x}` form that lets an
-  explicitly EMPTY `CODEX_REVIEW_MODEL` mean "the CLI default").
-- **A row offers only its own executor's tiers, and says so about the rest.** Every
-  tier is listed; one from another group, or one this install has no credential for,
-  renders DISABLED WITH THE REASON ("needs a Codex connection") rather than
-  disappearing. The surface answers availability from the SAME resolvers the build
+- **The cross-model seats are SLOTS, not vendors (#566).** `argus:cross-1` /
+  `argus:cross-2`, configured by the `review_cross_1` / `review_cross_2` phases, each
+  accepting ANY non-Claude tier plus `NONE`. They default to `sol` and `k3` — the same
+  models the wrappers pinned themselves, so an install that never opens the pane is
+  unchanged — and `migratePhaseModelConfig` maps the legacy `review_codex` /
+  `review_kimi` keys on read so a rename never costs an owner their configuration.
+  `trident/__tests__/model-tiers.test.ts` pins the registry against each wrapper's own
+  default (and against the `${VAR-x}` form that lets an explicitly EMPTY
+  `CODEX_REVIEW_MODEL` mean "the CLI default").
+- **A seat's DISPOSITION is data, and the merge gate reads the field (#566).**
+  `trident/cross-model-slots.ts` resolves each seat once per launch into
+  `configured` / `none` / `not_configured` and threads it as `args.crossModelSlots`.
+  This is the invariant the seats exist for: a deliberately empty seat and a
+  configured-but-dead one BOTH produce no verdict, so a gate that told them apart by
+  emptiness would either block every merge for an owner who opted out, or stop
+  blocking on a reviewer that died — the second lets a run report a cross-model review
+  that never happened while merging on a single-family panel. `none` never blocks; a
+  configured seat that fails still bars the APPROVE. Both seats `none` is legitimate,
+  and the pane says the panel has become single-family rather than implying otherwise.
+- **EXHAUSTED is a distinct status from DEFERRED (#567).** A provider with no quota
+  left reports `crossStatus: 'exhausted'` (exit code 4 in both wrappers, classified by
+  `trident/provider-health.ts`). It BLOCKS like a deferral but is never retried and
+  never substituted — quota does not clear between two calls, and swapping in a model
+  the owner did not choose would turn a spending decision into an invisible one. The
+  blocker names the three remedies: add capacity, re-point the slot, or set it to
+  NONE. The codex build wrapper's `codex login status` precheck costs no quota and
+  runs BEFORE the build, so exhaustion is reported in seconds rather than after a full
+  panel. HTTP 429 is resolved by the response BODY, since these providers return it for
+  both a per-minute rate limit and an empty account.
+- **A row offers the tiers ITS DISPATCH can reach, and says why about the rest (#565).**
+  `TridentPhase.executors` declares the executor groups a step's dispatch actually
+  reaches — a LIST, because the build rows reach two: Claude via `agent({model})` and
+  Codex via `trident/codex-build.sh`, forked in `inner-workflow.mjs` and proven against
+  the shipped workflow body by `trident/__tests__/codex-build-dispatch.test.ts`. It
+  replaced deriving the answer from the phase's DEFAULT tier, which locked every row to
+  one executor forever. The rule for editing the list: add a group only once a test
+  asserts the production composer routes that step to it — a selectable option that
+  does not dispatch is worse than a greyed one. `k3` carries `build_wrapper: null`
+  (there is no Kimi substrate under `runtime/adapters/`), so the build row refuses it
+  with "no build wrapper" rather than a message the owner could act on and get nowhere.
+  Trident deliberately does NOT route through `runtime/adapters/select-substrate.ts`:
+  that selector's own header scopes it to conversational turns and
+  `providerCapabilities('openai-codex-cli').detachedWorkflows` is `false`.
+- **Every tier is listed, never hidden.** One this row's dispatch cannot reach, or one
+  this install has no credential for, renders DISABLED WITH THE REASON ("needs a Codex
+  connection") rather than disappearing. Capability is reported before credential: a
+  tier that fails both cannot be used even after connecting an account, so leading with
+  the credential would send the owner to set up something that changes nothing. The
+  option list is computed SERVER-side (`phaseTierOptions`), next to the validator that
+  enforces it, so the pane and a rejected save cannot phrase the same rule differently. The surface answers availability from the SAME resolvers the build
   uses (`open/composer.ts`: `codexCredentialService.resolveActiveCodexHome`, and the
   shared `kimiConfigured()` that `resolve_kimi_configured` also uses), so the pane
   and the run cannot disagree.
+- **The tier DEFAULT CONSTANTS are checked by a machine (#564).** The model-update
+  watchdog probes the LIVE SESSION, which is always the top tier, and
+  `compareModelRecency` is family-scoped on purpose so a Haiku id leaked during an Opus
+  outage can never be adopted. Together those guarantee the probe can never rank a
+  `claude-opus-*` answer against a `claude-sonnet-*` baseline — which is why
+  `SONNET_MODEL` sat a generation behind until the owner noticed it in this pane.
+  `staleTierDefaults()` closes that gap with no probe, ranking each constant in
+  `runtime/models.ts:tierDefaults()` against the keys of `MODEL_PRICING_TABLE`
+  (`resolveModelPricing` THROWS on an unregistered id, so that key set is exactly the
+  ids this build can dispatch). It runs as a test
+  (`runtime/__tests__/tier-default-staleness.test.ts`) and logs once at watchdog start.
 - **A refused stored value degrades visibly.** `model` must name a tier (the old
   literal-id escape hatch is closed: a bare id carries no transport). A retired tier
   or a legacy literal is rejected at the boundary, the phase falls back to its

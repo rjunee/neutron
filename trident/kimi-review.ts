@@ -57,6 +57,8 @@
  * Overridable via KIMI_BASE_URL so a platform key can still be used
  * deliberately rather than by accident.
  */
+import { classifyProviderResponse } from './provider-health.ts'
+
 export const KIMI_BASE_URL =
   process.env['KIMI_BASE_URL'] ?? 'https://api.kimi.com/coding'
 export const KIMI_DEFAULT_MODEL = 'kimi-k3'
@@ -67,7 +69,7 @@ export const KIMI_DEFAULT_MODEL = 'kimi-k3'
  */
 export const KIMI_DEFAULT_MAX_TOKENS = 20_000
 
-/** Mirrors `codexStatus` so the panel has ONE vocabulary for cross-model peers. */
+/** ONE vocabulary for every cross-model seat, whichever model is sitting in it. */
 export type CrossModelStatus =
   /** Ran, returned review text. */
   | 'connected'
@@ -75,6 +77,16 @@ export type CrossModelStatus =
   | 'not_connected'
   /** Configured but the call failed, timed out, or returned no answer. BLOCKS. */
   | 'deferred'
+  /**
+   * Configured, but the account has NO REMAINING QUOTA (ISSUES #567). BLOCKS, like
+   * `deferred` — and split out from it because the two need opposite handling. A
+   * deferral may be transient and is worth one retry; exhaustion will not clear on its
+   * own, so retrying it only spends the rest of the panel to rediscover a fact the
+   * owner already has to act on. It is also the one status whose remedy is a business
+   * decision (buy capacity, re-point the seat, or set it to NONE), which is why it must
+   * never be silently substituted.
+   */
+  | 'exhausted'
 
 export interface KimiReviewResult {
   status: CrossModelStatus
@@ -184,10 +196,22 @@ export async function reviewWithKimi(input: KimiReviewInput): Promise<KimiReview
   }
 
   if (!ok) {
-    // 401/403 is a rejected key and 429 is no credit. Both are still DEFERRED
-    // rather than a distinct 'auth' status: the panel's only question is whether
-    // a configured reviewer produced a review, and neither of these did. The
-    // status code goes in the reason so the operator can tell them apart.
+    // 401/403 is a rejected key; 429 is EITHER a per-minute rate limit OR an
+    // out-of-credit account, and the two are not the same problem. `classifyProviderResponse`
+    // reads the BODY to tell them apart, because the status code alone cannot: a
+    // quota-exhausted account and a burst of traffic get the same 429 from this
+    // provider. An exhausted account reports `exhausted` so the panel can surface the
+    // remedy instead of retrying into a wall; everything else stays `deferred`, since
+    // the panel's remaining question is only whether a configured reviewer produced a
+    // review — and none of these did.
+    const health = classifyProviderResponse(status, raw)
+    if (health === 'exhausted') {
+      return {
+        status: 'exhausted',
+        text: '',
+        reason: `Kimi reports no remaining quota (HTTP ${status}) — add capacity, re-point this cross-model slot, or set it to NONE`,
+      }
+    }
     return { status: 'deferred', text: '', reason: `Kimi API returned HTTP ${status}` }
   }
 

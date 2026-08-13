@@ -2,6 +2,99 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — the code-gen selector, fixed on first use: build runs on Codex, the cross-model seats become slots with NONE, quota exhaustion is surfaced early, and Sonnet is bumped with a machine to notice next time (#564–#567)
+
+Four defects the owner found the first time he opened the pane the previous entry
+shipped. They are one change because they share one seam: the pane promised things
+the dispatch did not do.
+
+**#565 — a build step can now be moved to the Codex executor, and it actually
+dispatches there.** Every row was locked to its default tier's executor:
+`phaseGroup()` returned the group of the phase's DEFAULT tier and both clients greyed
+out everything else, so "switch build to sol" had no expressible form. The lock is
+gone. `TridentPhase` now DECLARES the executor groups its dispatch can reach
+(`executors: ['claude', 'codex']` on the build rows), `phaseExecutors()` reads that
+list, and the workflow threads it as `args.phaseExecutors` so the pane and the run
+answer from one fact.
+
+The route itself is the CLI, not a new adapter and not a substrate swap. That was
+mis-reported twice; the owner's correction is the design — *"We do not have to swap
+the substrate. Codex builds can be kicked off from cli, doesn't need to be an inner
+agent."* `trident/codex-build.sh` is the build-role sibling of `codex-review.sh`:
+same subscription-OAuth billing contract, same exit-code vocabulary, `codex exec
+--full-auto --cd <worktree>` with the Forge brief on STDIN. `inner-workflow.mjs`
+forks `forge:build` and every `forge:fix-round-*` onto a bridge agent when the phase
+resolved to a codex tier. **Deliberately NOT routed through
+`runtime/adapters/select-substrate.ts`**, whose own header forbids it — that selector
+is for conversational turns, trident drives the native Workflow tool, and
+`providerCapabilities('openai-codex-cli').detachedWorkflows` is `false` with a
+comment saying trident must gate on it. The adapter is real; it is not a route for a
+detached build.
+
+**Kimi build is NOT offered, and the reason is verified rather than assumed.**
+`grep -ril 'kimi\|moonshot' runtime/adapters/` returns nothing while the same grep
+for `codex` returns the whole `codex-cli` tree. `k3` therefore carries
+`build_wrapper: null`, the build row refuses it, and the message says "no build
+wrapper — it can review, but it cannot run Build" instead of sending the owner to
+connect an account that would not help.
+
+**The wiring test is the claim.** `trident/__tests__/codex-build-dispatch.test.ts`
+runs the PRODUCTION launcher (`buildWorkflowArgs`) into the SHIPPED workflow body and
+asserts on the command string: `CODEX_BUILD_MODEL='gpt-5.6-sol'` reaches the
+subprocess environment, the GPT id is never handed to `agent()`, a fix round takes
+the same executor, and an unconfigured row still runs on Claude with no bridge.
+
+**#566 — the cross-model seats are SLOTS, not vendors.** *"the cross model reviews
+should not be NAMED codex and Kimi that's stupid. How can I then change them to a
+different model?"* `review_codex` / `review_kimi` are now `review_cross_1` /
+`review_cross_2` (`argus:cross-1` / `argus:cross-2`), each accepting ANY non-Claude
+tier plus NONE. `migratePhaseModelConfig` maps the legacy keys on read so nobody
+loses a configuration to a rename. Two near-identical verdict schemas collapsed into
+one `CROSS_MODEL_VERDICT_SCHEMA`; one `crossModelReviewerPrompt(index, diffFile)`
+replaces two near-copies that had the wrapper, env knob and status field baked in —
+which is what made the seats un-repointable in the first place.
+
+**THE INVARIANT THAT SURVIVED, and the shape that protects it.** A deliberately empty
+seat and a configured-but-dead seat both produce no verdict. Told apart by emptiness,
+either NONE blocks every merge or a dead reviewer stops blocking — and the second
+lets a run report a cross-model review that never happened while merging on a
+single-family panel. So the DISPOSITION (`configured` / `none` / `not_configured`) is
+computed once in `trident/cross-model-slots.ts`, threaded as data, and read as a
+FIELD by the gate. `none` never blocks; a configured seat that fails still bars the
+APPROVE exactly as before. Both slots NONE is legitimate and the pane SAYS the panel
+has become single-family rather than implying a diverse one.
+
+**#567 — an exhausted provider is surfaced early instead of blocking every merge
+after the fact.** A maxed-out account reported as `deferred`, which reads as a blip:
+the run retried, paid for the whole panel, and still could not merge — every time,
+because quota does not clear on its own. `exhausted` is now a distinct status
+(`trident/provider-health.ts`, exit code 4 in both wrappers), never retried, never
+substituted — per the owner's 2026-08-11 decision, quota exhaustion must not be
+silently swapped, since that turns a business decision into an invisible one. The
+blocker names the three remedies, all his: add capacity, re-point the slot, or set it
+to NONE. The codex build wrapper's `codex login status` precheck costs no quota and
+runs BEFORE the build, so an exhausted account is reported in seconds. 429 is
+resolved by the BODY, not the code — this provider returns it for both a rate limit
+and an empty account.
+
+**#564 — Sonnet was a generation behind, and now a machine notices.** `SONNET_MODEL`
+moves to `claude-sonnet-5` with a verified `$3/$15` pricing row. The row records that
+an introductory `$2/$10` applies through 2026-08-31 and is deliberately NOT encoded:
+the table has no time-varying rate, so until then it OVER-estimates by a third, which
+is the safe direction for a spend figure and becomes exact when the window closes.
+The bigger half is WHY nothing noticed: the model-update watchdog probes the LIVE
+SESSION (always the top tier) and `compareModelRecency` is family-scoped on purpose,
+so an `opus` answer can never rank against a `sonnet` baseline. The tier constants
+were outside every check by construction. `staleTierDefaults()` closes that gap with
+no probe by ranking each tier default against the pricing table's keys —
+`resolveModelPricing` throws on an unregistered id, so that key set IS the registry
+of ids this build can dispatch. It runs as a test and logs at watchdog start. It
+immediately found a second, pre-existing gap: `FABLE_MODEL` had no pricing row at
+all, so every attempt to price a Fable completion threw. Added, verified.
+`config/index.ts:DEFAULTS` is now pinned to `runtime/models.ts` rather than to
+re-typed literals — the copy used to pin itself, which is exactly how it stayed on
+the old id with every assertion green.
+
 ## 2026-08-13 — the code-generation model selector: a table, three model families, and the wiring that makes GPT and Kimi selectable (#560)
 
 The pane could already put a build step on a different Claude tier. It could not

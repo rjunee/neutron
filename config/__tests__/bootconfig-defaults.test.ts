@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolveBootConfig } from '../index.ts'
+import { BEST_MODEL, FABLE_MODEL, FAST_MODEL, SONNET_MODEL } from '@neutronai/runtime/models.ts'
 
 describe('C1 BootConfig — defaults table (verbatim fidelity)', () => {
   // Resolve against a fully-empty bag so ONLY the defaults show through.
@@ -22,8 +23,21 @@ describe('C1 BootConfig — defaults table (verbatim fidelity)', () => {
   test('models — runtime/models.ts', () => {
     expect(c.models.best).toBe('claude-opus-5') // :53
     expect(c.models.fable).toBe('claude-fable-5') // :71
-    expect(c.models.sonnet).toBe('claude-sonnet-4-6') // :89
+    expect(c.models.sonnet).toBe('claude-sonnet-5') // ISSUES #564
     expect(c.models.fast).toBe('claude-haiku-4-5-20251001') // :96
+  })
+
+  // ISSUES #564 — THE COPY IS PINNED TO ITS SOURCE, not to a re-typed literal.
+  // `config/index.ts:DEFAULTS` duplicates `runtime/models.ts` by hand, and the literals
+  // above pinned the copy to ITSELF: bumping the constant in runtime/models.ts left
+  // this table on the old id with every assertion still green. That is precisely how a
+  // tier default goes a generation stale without a machine noticing, so the test now
+  // compares the two. If they diverge on purpose, this assertion is the place to say so.
+  test('the defaults table does not drift from runtime/models.ts', () => {
+    expect(c.models.best).toBe(BEST_MODEL)
+    expect(c.models.fable).toBe(FABLE_MODEL)
+    expect(c.models.sonnet).toBe(SONNET_MODEL)
+    expect(c.models.fast).toBe(FAST_MODEL)
   })
 
   test('claude bin — CLAUDE_BIN ?? "claude"', () => {

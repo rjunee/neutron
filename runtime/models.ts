@@ -83,10 +83,18 @@ export const FABLE_MODEL: string =
  * defensive parser) and trades a stylistically-different result for a
  * successful one.
  *
- * Override via `NEUTRON_SONNET_MODEL`. Defaults to Claude Sonnet 4.6.
+ * BUMPED TO SONNET 5 (2026-08-13, ISSUES #564). This sat on `claude-sonnet-4-6` a
+ * full generation after Sonnet 5 shipped, and nothing noticed: the model-update
+ * watchdog watches the LIVE SESSION's model, which is the Opus tier, and
+ * `compareModelRecency` is family-scoped, so an `opus` probe answer can never rank
+ * against a `sonnet` baseline. The tier default constants were therefore outside every
+ * automated check, and the staleness surfaced only when the owner read it in a settings
+ * pane. {@link staleTierDefaults} closes that specific gap.
+ *
+ * Override via `NEUTRON_SONNET_MODEL`. Defaults to Claude Sonnet 5.
  */
 export const SONNET_MODEL: string =
-  process.env['NEUTRON_SONNET_MODEL'] ?? 'claude-sonnet-4-6'
+  process.env['NEUTRON_SONNET_MODEL'] ?? 'claude-sonnet-5'
 
 /**
  * The fast/cheap model. Override via `NEUTRON_FAST_MODEL`. Defaults to
@@ -159,6 +167,39 @@ export function getKnownFallbackModels(): ReadonlySet<string> {
     FAST_MODEL,
     SONNET_MODEL,
     'claude-haiku-4-5',
+    // The PREVIOUS Sonnet generation stays listed after the #564 bump. The set is a
+    // downgrade guard, and an install pinning `NEUTRON_SONNET_MODEL=claude-sonnet-4-6`
+    // — or a provider outage leaking that id — must still be recognised as a fallback
+    // rather than adopted as a new top tier.
     'claude-sonnet-4-6',
+    'claude-sonnet-5',
   ])
+}
+
+/**
+ * THE TIER DEFAULT CONSTANTS, as data a machine can check (ISSUES #564).
+ *
+ * These four are the ids every non-Opus dispatch in Neutron resolves through, and until
+ * now nothing compared them to anything: the model-update watchdog probes the LIVE
+ * SESSION, which is the top tier, and its recency ranking is family-scoped, so a
+ * `claude-opus-*` probe answer can never rank against a `claude-sonnet-*` baseline.
+ * Sonnet consequently sat a generation behind and was found by the owner reading a
+ * settings pane rather than by any check.
+ *
+ * Exposing them as a LIST is what makes the check possible at all — a constant is not
+ * enumerable, and "walk every tier default" is the whole shape of the missing test. The
+ * accessor reads the live values (including `getBestModel()`'s watchdog override), so
+ * it reports what the next dispatch will actually use rather than what the process
+ * booted with.
+ *
+ * Paired with `staleTierDefaults` in
+ * `runtime/adapters/claude-code/persistent/model-update-watchdog.ts`.
+ */
+export function tierDefaults(): ReadonlyArray<{ constant: string; model: string }> {
+  return [
+    { constant: 'FABLE_MODEL', model: FABLE_MODEL },
+    { constant: 'BEST_MODEL', model: getBestModel() },
+    { constant: 'SONNET_MODEL', model: SONNET_MODEL },
+    { constant: 'FAST_MODEL', model: FAST_MODEL },
+  ]
 }

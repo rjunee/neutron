@@ -55,27 +55,70 @@ afterAll(async () => {
   await GlobalRegistrator.unregister()
 })
 
-const { WebPhaseModelsClient, applyRowEdit, effectiveRow, rejectedModel, tierChoices } =
-  await import('../phase-models-client.ts')
+const {
+  WebPhaseModelsClient,
+  applyRowEdit,
+  effectiveRow,
+  panelIsSingleFamily,
+  rejectedModel,
+  slotIsOff,
+  tierChoices,
+} = await import('../phase-models-client.ts')
 
 const BUILD = {
   key: 'build',
   label: 'Build',
   description: 'Writes the code and the tests.',
-  group: 'claude',
+  // TWO executors since ISSUES #565 — the build row can be moved to Codex, and the
+  // option list the server sends is what says so.
+  executors: ['claude', 'codex'],
+  allows_none: false,
+  tier_options: [
+    { tier: 'opus', selectable: true, reason: null },
+    { tier: 'fast', selectable: true, reason: null },
+    { tier: 'sol', selectable: true, reason: null },
+    { tier: 'terra', selectable: true, reason: null },
+    {
+      tier: 'k3',
+      selectable: false,
+      reason:
+        "'k3' runs on kimi, which has no build wrapper in this repo — it can review, but it cannot run Build",
+    },
+  ],
   effort_supported: true,
   default: { model: 'opus', effort: 'high' },
 }
 
-/** The codex row: a different executor, and no effort control of its own. */
+/** A cross-model SLOT: any non-Claude tier or NONE, and no effort control of its own. */
 const CODEX = {
-  key: 'review_codex',
-  label: 'Cross-model review (Codex)',
-  description: 'A second opinion from a GPT model, run through the Codex CLI.',
-  group: 'codex',
+  key: 'review_cross_1',
+  label: 'Cross-model review ONE',
+  description: 'A second opinion from outside the Claude family, or NONE to turn it off.',
+  executors: ['codex', 'kimi'],
+  allows_none: true,
+  tier_options: [
+    {
+      tier: 'opus',
+      selectable: false,
+      reason:
+        "'opus' (claude-opus-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model",
+    },
+    {
+      tier: 'fast',
+      selectable: false,
+      reason:
+        "'fast' (claude-haiku-4-5) runs on claude, and Cross-model review ONE runs on codex or kimi — it cannot dispatch a claude model",
+    },
+    { tier: 'sol', selectable: true, reason: null },
+    { tier: 'terra', selectable: true, reason: null },
+    { tier: 'k3', selectable: true, reason: null },
+  ],
   effort_supported: false,
   default: { model: 'sol', effort: 'high' },
 }
+
+/** A SECOND slot, so the "both seats off" state has two seats to turn off. */
+const CROSS_2 = { ...CODEX, key: 'review_cross_2', label: 'Cross-model review TWO' }
 
 /** Two Claude tiers, two Codex tiers, and one Kimi tier this install cannot run. */
 const TIERS = [
@@ -126,12 +169,14 @@ function payload(
   rejected: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
-    phases: [BUILD, CODEX],
+    phases: [BUILD, CODEX, CROSS_2],
     model_tiers: TIERS,
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    none_value: 'none',
     defaults: {
       build: { model: 'opus', effort: 'high' },
-      review_codex: { model: 'sol', effort: 'high' },
+      review_cross_1: { model: 'sol', effort: 'high' },
+      review_cross_2: { model: 'sol', effort: 'high' },
     },
     overrides,
     rejected,
@@ -260,7 +305,9 @@ describe('the display + edit rules', () => {
     const choices = tierChoices(CODEX, TIERS)
     expect(choices).toHaveLength(TIERS.length)
     expect(choices.find((c) => c.tier === 'terra')!.selectable).toBe(true)
-    expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('Claude is not wired for this step yet')
+    expect(choices.find((c) => c.tier === 'opus')!.reason).toContain(
+      'it cannot dispatch a claude model',
+    )
     expect(rejectedModel(BUILD, { build: { model: 'gone-tier' } })).toBe('gone-tier')
   })
 })
@@ -358,11 +405,11 @@ describe('the TABLE, pressed for real', () => {
     const { container, unmount } = await mountTab(payload())
     try {
       expect(testId(container, 'phase-build')).not.toBeNull()
-      expect(testId(container, 'phase-review_codex')).not.toBeNull()
+      expect(testId(container, 'phase-review_cross_1')).not.toBeNull()
       // The one-line explanation is the only thing telling the owner what the step
       // is. A table that dropped it would be a grid of nouns.
-      expect(testId(container, 'phase-review_codex')!.textContent).toContain(
-        'A second opinion from a GPT model',
+      expect(testId(container, 'phase-review_cross_1')!.textContent).toContain(
+        'A second opinion from outside the Claude family',
       )
     } finally {
       await unmount()
@@ -386,21 +433,67 @@ describe('the TABLE, pressed for real', () => {
   it('CHANGING A ROW AND SAVING sends that choice to the server', async () => {
     const { container, act, puts, unmount } = await mountTab(payload())
     try {
-      const select = testId(container, 'phase-review_codex-model') as HTMLSelectElement
+      const select = testId(container, 'phase-review_cross_1-model') as HTMLSelectElement
       await act(async () => {
         select.value = 'terra'
         select.dispatchEvent(new Event('change', { bubbles: true }))
         await tick()
       })
       // The row admits it is no longer on the default.
-      expect(testId(container, 'phase-review_codex-changed')).not.toBeNull()
+      expect(testId(container, 'phase-review_cross_1-changed')).not.toBeNull()
       await act(async () => {
         ;(testId(container, 'phase-models-save') as HTMLButtonElement).click()
         await tick()
       })
       // THE ASSERTION THAT MATTERS: the choice left the browser.
-      expect(puts).toEqual([{ review_codex: { model: 'terra' } }])
+      expect(puts).toEqual([{ review_cross_1: { model: 'terra' } }])
       expect(testId(container, 'phase-models-saved')!.textContent).toContain('Saved')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('ISSUES #566 — a cross-model SLOT offers NONE, and a build row does not', async () => {
+    const { container, unmount } = await mountTab(payload())
+    try {
+      // The seat may be emptied, and the label says what emptying it means rather than
+      // reading as a neutral "unset".
+      const none = testId(container, 'phase-review_cross_1-model-none') as HTMLOptionElement
+      expect(none).not.toBeNull()
+      expect(none.textContent).toContain('run no reviewer in this seat')
+      // THE ROWS THAT MAY NOT BE EMPTIED DO NOT OFFER IT. An emptied build step is a
+      // run with no builder; an emptied Claude reviewer silently shrinks the merge
+      // gate. Only the cross-model seats are the owner's to switch off.
+      expect(testId(container, 'phase-build-model-none')).toBeNull()
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('ISSUES #566 — BOTH seats off is called out as a single-family panel', async () => {
+    const both = payload({
+      review_cross_1: { model: 'none' },
+      review_cross_2: { model: 'none' },
+    })
+    const { container, unmount } = await mountTab(both)
+    try {
+      // It is a legitimate configuration, so this is a NOTE and not an error — but a
+      // pane that stayed silent would let the owner go on believing a second model
+      // family is checking the work when no reviewer outside Claude will run.
+      const note = testId(container, 'codegen-single-family')
+      expect(note).not.toBeNull()
+      expect(note!.textContent).toContain('every reviewer on the panel is a')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('ONE seat off is NOT a single-family panel — the notice is not always-on', async () => {
+    // Without this control the assertion above would pass on a banner that rendered
+    // unconditionally, which would train the owner to ignore it.
+    const { container, unmount } = await mountTab(payload({ review_cross_1: { model: 'none' } }))
+    try {
+      expect(testId(container, 'codegen-single-family')).toBeNull()
     } finally {
       await unmount()
     }
@@ -409,16 +502,31 @@ describe('the TABLE, pressed for real', () => {
   it('shows a tier it cannot run DISABLED, with the reason, never hidden', async () => {
     const { container, unmount } = await mountTab(payload())
     try {
-      const option = testId(container, 'phase-review_codex-model-k3') as HTMLOptionElement
+      const option = testId(container, 'phase-review_cross_1-model-k3') as HTMLOptionElement
       // Present…
       expect(option).not.toBeNull()
       // …unpickable…
       expect(option.disabled).toBe(true)
       // …and it SAYS WHY. A greyed row with no explanation is a dead end; this one
       // tells the owner what to go and fix.
-      expect(option.textContent).toContain('Kimi is not wired for this step yet')
-      const claudeRow = testId(container, 'phase-build-model-k3') as HTMLOptionElement
-      expect(claudeRow.textContent).toContain('Kimi is not wired for this step yet')
+      // THE SEAT CAN take Kimi (#566 made both slots executor-agnostic), so the honest
+      // reason is the missing credential — the thing the owner can actually go and fix
+      // — and NOT a capability message that would send them nowhere.
+      expect(option.textContent).toContain('needs a Kimi key')
+      // …and on the BUILD row the same tier is refused for a different reason, which
+      // the pane must not blur: Kimi is a legitimate cross-model reviewer with no build
+      // wrapper, so "get a Kimi key" would send the owner to fix something that would
+      // not help. The greyed option says which of the two it is.
+      const buildRow = testId(container, 'phase-build-model-k3') as HTMLOptionElement
+      expect(buildRow.disabled).toBe(true)
+      expect(buildRow.textContent).toContain('no build wrapper')
+      // ISSUES #565 — AND THE POSITIVE HALF: the codex tier on the build row is now
+      // SELECTABLE, with no reason attached, because the route exists. This is the
+      // assertion that would have failed before the wiring and must fail again if the
+      // route is ever removed while the option stays.
+      const buildSol = testId(container, 'phase-build-model-sol') as HTMLOptionElement
+      expect(buildSol.disabled).toBe(false)
+      expect(buildSol.textContent).not.toContain('—')
     } finally {
       await unmount()
     }
@@ -427,8 +535,8 @@ describe('the TABLE, pressed for real', () => {
   it('says a CLI step has no effort control instead of offering an inert one', async () => {
     const { container, unmount } = await mountTab(payload())
     try {
-      expect(testId(container, 'phase-review_codex-effort')).toBeNull()
-      expect(testId(container, 'phase-review_codex-effort-na')!.textContent).toContain(
+      expect(testId(container, 'phase-review_cross_1-effort')).toBeNull()
+      expect(testId(container, 'phase-review_cross_1-effort-na')!.textContent).toContain(
         'set by the CLI',
       )
       // The Claude row still has its real control.
