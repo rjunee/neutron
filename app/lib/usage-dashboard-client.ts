@@ -419,29 +419,18 @@ const SPENT_HEADROOM_FRACTION = 0.05
  *     or `unknown` when no instant was reported — never "now";
  *   - room → available.
  */
-// THE OVERLOAD IS LOAD-BEARING, not decoration: `null` comes back for exactly one
-// reason — a null window in — so a caller holding a window it has already
-// null-checked gets a `CapacityStanding` and needs no second check. That is what
-// keeps {@link accountCapacity} free of a defensive branch that could never fire.
+// IT TAKES A WINDOW, NEVER A NULL, and that is the smaller half of the rule above
+// it: "what does this reading prove" has no answer for a reading that does not
+// exist. An earlier version overloaded on `UsageWindow | null` and returned null
+// for null — which read as tolerance and was really the door the half-measured
+// account walked through. {@link accountCapacity} refuses the pair up front, so
+// there is no caller left with a null to pass and no branch here to defend with.
 export function windowCapacity(
   win: UsageWindow,
   window: 'session' | 'weekly',
   now: number,
   stale: boolean,
-): CapacityStanding
-export function windowCapacity(
-  win: UsageWindow | null,
-  window: 'session' | 'weekly',
-  now: number,
-  stale: boolean,
-): CapacityStanding | null
-export function windowCapacity(
-  win: UsageWindow | null,
-  window: 'session' | 'weekly',
-  now: number,
-  stale: boolean,
-): CapacityStanding | null {
-  if (win === null) return null
+): CapacityStanding {
   const rolled = win.reset_at !== null && win.reset_at <= now
   const spent = 1 - win.fraction <= SPENT_HEADROOM_FRACTION
   if (stale) {
