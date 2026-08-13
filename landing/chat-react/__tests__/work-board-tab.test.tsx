@@ -735,6 +735,79 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('failed card with no run_progress: static cwb-dot-failed dot + Start build control (A)', async () => {
+    // Fixture (A): status='failed', no linked_run_id, no run_progress.
+    // isLinkedRunning → false (no binding); canPlay → true; isRetry → false → '▶' 'Start build'.
+    // dotState fallback branch: status='failed' → cwb-dot-failed, no pulse.
+    const rows = [item({ id: 'wf', status: 'failed', linked_run_id: null })]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-failed')
+    expect(dot!.className).not.toContain('cwb-dot-pulse')
+
+    const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
+    expect(playBtn).not.toBeNull()
+    expect(playBtn!.getAttribute('aria-label')).toBe('Start build')
+
+    await act(async () => root.unmount())
+  })
+
+  it('failed card with kept #340 binding + terminal run_progress: static dot + Retry build control (A2)', async () => {
+    // Fixture (A2): status='failed', kept linked_run_id, terminal run_progress.
+    // isLinkedRunning → false (terminal phase); canPlay → true; isRetry → true → '↻' 'Retry build'.
+    // dotState: run_progress present with step='failed' → switch returns cwb-dot-failed, no pulse.
+    const terminalProgress: RunProgress = {
+      run_id: 'run-dead',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 1,
+      started_at: '2026-07-02T00:00:00Z',
+      last_advanced_at: '2026-07-02T00:00:30Z',
+      elapsed_ms: 1000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      verdict: null,
+      failure_reason: 'tests failed',
+    }
+    const rows = [
+      item({ id: 'wf2', status: 'failed', linked_run_id: 'run-dead', run_progress: terminalProgress }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-failed')
+    expect(dot!.className).not.toContain('cwb-dot-pulse')
+
+    const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
+    expect(playBtn).not.toBeNull()
+    expect(playBtn!.getAttribute('aria-label')).toBe('Retry build')
+    expect(playBtn!.textContent).toBe('↻')
+
+    await act(async () => root.unmount())
+  })
+
+  it('runless in_progress card: static cwb-dot-build dot (no pulse) + Start build control (B)', async () => {
+    // Fixture (B): status='in_progress', no binding, no run_progress.
+    // isLinkedRunning → false; dotState fallback: in_progress → cwb-dot-build, pulse=false.
+    // canPlay → true (no `status !== 'in_progress'` clause); isRetry → false → 'Start build'.
+    // Mutation-resistant: re-adding pulse:true on the status lane fails this; re-adding
+    // `status !== 'in_progress'` to canPlay fails the play-control assertion.
+    const rows = [item({ id: 'wp', status: 'in_progress', linked_run_id: null })]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-build')
+    expect(dot!.className).not.toContain('cwb-dot-pulse')
+
+    const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
+    expect(playBtn).not.toBeNull()
+    expect(playBtn!.getAttribute('aria-label')).toBe('Start build')
+
+    await act(async () => root.unmount())
+  })
+
   it('renders the empty state when the board is empty', async () => {
     const { container, root, act } = await mount(listOf([]))
     expect(container.querySelector('.cwb-empty-zero')).not.toBeNull()

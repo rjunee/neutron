@@ -103,13 +103,15 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
 }
 
 /**
- * True when the ▶/↻ (start/retry) control should render: the item is NOT
- * in_progress and NOT done and has NO live linked run. That's an `upcoming` card
- * that has never been dispatched (START) OR whose last build failed/stopped
- * (RETRY). A live build shows the dot pulse + the X-cancel instead.
+ * True when the ▶/↻ (start/retry) control should render: the item is NOT done
+ * and has NO live linked run. Gated on the LIVE run, not the status lane —
+ * an in_progress card whose run is dead must offer ↻ (owner defect 2026-08-12;
+ * the old `status !== 'in_progress'` clause made a failed-run in_progress card
+ * unrecoverable from the UI). Only `done` and a live linked run suppress the
+ * control.
  */
 function canPlay(item: WorkBoardItem): boolean {
-  return item.status !== 'in_progress' && item.status !== 'done' && !isLinkedRunning(item)
+  return item.status !== 'done' && !isLinkedRunning(item)
 }
 
 /** ▶ vs ↻ — a card that carries a (now-detached) binding or a failed run RETRIES. */
@@ -167,7 +169,8 @@ interface DotState {
  * The leading dot's colour class + whether it pulses. A live run's step drives
  * the colour (pulsing while building/reviewing/fixing/merging, solid on
  * done/failed); otherwise it falls back to the item's status (done → green,
- * in_progress → running blue, upcoming → faint gray outline).
+ * failed → static amber, in_progress → build blue pulsing ONLY when a live run
+ * is bound, upcoming → faint gray outline).
  */
 function dotState(item: WorkBoardItem): DotState {
   const rp = item.run_progress
@@ -188,7 +191,14 @@ function dotState(item: WorkBoardItem): DotState {
     }
   }
   if (item.status === 'done') return { cls: 'cwb-dot-done', pulse: false }
-  if (item.status === 'in_progress') return { cls: 'cwb-dot-build', pulse: true }
+  // A failed card whose run_progress is unavailable still paints the durable
+  // failed lane. status='failed' is written only by the terminal reconcile
+  // (work-board/store.ts detachRun), so this is positive data, NOT inferring
+  // failure from absence of run_progress.
+  if (item.status === 'failed') return { cls: 'cwb-dot-failed', pulse: false }
+  // A pulse is a claim that something is moving, so only a LIVE bound run earns
+  // one. A runless in_progress card renders a STATIC dot.
+  if (item.status === 'in_progress') return { cls: 'cwb-dot-build', pulse: isLinkedRunning(item) }
   return { cls: 'cwb-dot-upcoming', pulse: false }
 }
 
