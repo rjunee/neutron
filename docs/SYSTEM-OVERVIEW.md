@@ -1636,7 +1636,9 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    workflow's `inner_checkpoint` (which `trident/inner-workflow.mjs` `checkpoint()`
 >    already re-stamps at every phase boundary), since checkpoints are end-of-phase
 >    markers (`forge-done`→reviewing, `argus-request-changes`→fixing,
->    `fix-round-N`→reviewing, `argus-approved`→merging). CRITICALLY, the durable
+>    `fix-round-N`→reviewing, `argus-approved`→merging, `pr-merged`→merging — #563's
+>    terminal-on-merge checkpoint, so a shipped change never renders as still
+>    building). CRITICALLY, the durable
 >    tick loop (`trident/tick.ts`) now carries an `on_transition` hook: it re-loads
 >    every non-terminal run each tick and, when a run's progress signature
 >    (`phase|inner_checkpoint|round|pr|last_advanced_at`) advances, fans a
@@ -5708,6 +5710,32 @@ deleted, no dual path):
   when the Argus phase's OWN recorded `inner_checkpoint = 'argus-approved'` (written
   by the synthesis-phase Bash step) backs it — a self-asserted `APPROVE` in the
   result line with no recorded provenance is REJECTED to `failed`, never merged.
+- **A MERGE IS TERMINAL (ISSUES #563):** the run lifecycle ENDS where the change
+  ships. The inner loop probes the PR's merge state the instant a Forge round
+  returns — ahead of the review panel, the Ralph re-fire, the round-1 empty-build
+  refusal and any round increment — and a merged PR ends the run right there
+  (`inner_checkpoint = 'pr-merged'`, result `{prMerged:true, verdict:'APPROVE',
+  blockKind:'none'}`, no `reviewedHead`). It had to be probed rather than signalled:
+  the loop-continuation decision is the fix loop's `while` condition (verdict /
+  round / blockKind — no fact about the PR in it) while the merge is performed by a
+  DIFFERENT component (`orchestrator.applyResult` → `cleanupAfterMerge` → `mergePr`,
+  strictly after this workflow's result is harvested) or by an agent INSIDE the run,
+  and the workflow never re-reads its own row (`checkpoint.sh` only WRITES). Before
+  this, a lane that merged spent roughly another review cycle — measured at ~19
+  minutes — fixing a branch the merge had deleted, silently: a merged PR is green,
+  so nothing downstream complains. The OUTER loop reads `pr_merged` BEFORE the
+  verdict branches and finishes the run WITHOUT touching the remote (a second
+  `gh pr merge` on a merged PR fails, which would record a shipped change as
+  `merge failed`). Only GitHub says "merged": one fixed `gh pr view <n> --json
+  state,mergedAt`, classified in JS, where unreadable is `unknown` — never "merged"
+  and never "not merged".
+- **…and a deleted branch is NOT a lost round (#563 × Open #148):** the round-lost
+  guard decides by reading the branch head, and a merge DELETES the branch, so a
+  merged run presents to it as the failure it exists to catch. `roundOutcome`
+  (`inner-workflow.mjs`) is the one place the two are ordered: the merge question is
+  asked BEFORE any `round-lost` verdict is written, and only a non-merge lets the
+  head comparison speak. The guard's behaviour for a fix round that genuinely never
+  pushed is unchanged.
 - **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2):** the
   workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
   (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`

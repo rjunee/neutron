@@ -152,7 +152,13 @@ describe('the loop honours the gate', () => {
   })
 
   test('a lost round breaks the loop rather than continuing it', () => {
-    expect(SRC).toContain('if (!roundLanded(branchHead, headAfter))')
+    // #563 put the decision behind `roundOutcome`, which asks GitHub whether the PR
+    // MERGED before this guard is allowed to speak — a merge deletes the branch and
+    // would otherwise present here as exactly the failure this guard catches. The
+    // predicate itself is unchanged and is EXECUTED above; what is pinned here is
+    // that the loop still breaks on its verdict and still records the lost round.
+    expect(SRC).toContain('const outcome = roundOutcome(await probePrMerged(pr, `r${round}`), branchHead, headAfter)')
+    expect(SRC).toContain("if (outcome === 'round-lost')")
     expect(SRC).toContain('roundLostItsWork = { round, head:')
   })
 

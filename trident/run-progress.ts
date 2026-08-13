@@ -120,6 +120,9 @@ export function deriveStepLabel(phase: TridentPhase, inner_checkpoint: string | 
   const cp = inner_checkpoint
   if (cp === null) return 'building' // round-1 build in flight (no checkpoint yet)
   if (cp === 'argus-approved') return 'merging' // approved → outer loop merging
+  // #563 — the inner loop found the PR already MERGED and stopped there. The run is
+  // finished in substance; the outer loop stamps `done` on its next tick.
+  if (cp === 'pr-merged') return 'merging'
   if (cp === 'argus-request-changes') return 'fixing' // changes asked → fix building
   if (cp === 'forge-done') return 'reviewing' // build done → review running
   if (/^fix-round-\d+$/.test(cp)) return 'reviewing' // fix built → re-review running
@@ -166,6 +169,10 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
     } else if (cp === 'forge-done' || cp === 'argus-approved') {
       // Build finished → reviewing (or approved, about to merge).
       phase_label = 'reviewing'
+    } else if (cp === 'pr-merged') {
+      // #563 — the PR is merged; the outer loop has yet to stamp `done`. Saying
+      // 'reviewing' here would show a shipped change as still being read.
+      phase_label = 'merged'
     } else if (cp === 'argus-request-changes') {
       // Review asked for changes → a fix round (round ≥ 2) is starting.
       round = Math.max(round, 2)

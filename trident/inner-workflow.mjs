@@ -401,6 +401,10 @@ const ROLE_MODEL = {
   // output verbatim, interpret nothing. Routed explicitly rather than left to the
   // fallback, which is how head-probe silently sat on the most expensive tier.
   'ci-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
+  // The merge probe (#563) is the third of the same shape. It runs once per round,
+  // so a fallback to the most expensive tier would be a per-round tax on the step
+  // that exists to REMOVE a per-lane tax.
+  'merge-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
 }
 
 // OWNER PHASE OVERRIDES, threaded in as `args.phaseModels` (phase key →
@@ -523,6 +527,8 @@ function routeModel(label, tag) {
           ? ROLE_MODEL['head-probe']
           : label.startsWith('ci-probe-round-')
             ? ROLE_MODEL['ci-probe']
+          : label.startsWith('merge-probe-round-')
+            ? ROLE_MODEL['merge-probe']
           // A retry lane is the SAME lane. Routing it separately (or letting it fall
           // through to the default) would mean the owner's choice applied to the
           // first attempt and silently not to the second.
@@ -1654,6 +1660,119 @@ function roundLanded(headBefore, headAfter) {
 }
 
 /**
+ * A MERGE IS TERMINAL (ISSUES #563).
+ *
+ * WHAT WENT WRONG. A lane approved and MERGED its PR, the merge deleted the head
+ * branch, and the workflow then entered `forge:fix-round-2` and ran ~19 more
+ * minutes — a live executor plus an 18-minute cross-model reviewer — generating
+ * fixes for a branch with nowhere to push. Nothing downstream complains about
+ * that: the PR is green and merged, so from outside the lane merely looks slow.
+ *
+ * WHY THE LOOP COULD NOT KNOW. The merge decision and the loop-continuation
+ * decision are made by two different components with NO channel between them.
+ * The continuation is decided ENTIRELY by the `while` condition below
+ * (`finalVerdict` / `round` / `blockKind`) — three facts computed from the review
+ * synthesis, none of them a fact about the PR. The merge is performed either by
+ * the OUTER driver (`trident/orchestrator.ts` `applyResult` → `cleanupAfterMerge`
+ * → `trident/merge.ts` `mergePr`), which only runs AFTER this workflow's terminal
+ * result is harvested, or by an agent INSIDE the run (a task whose whole job is to
+ * sign off on a PR merges it during its Forge round) — and this script never
+ * re-reads its own run row (`trident/checkpoint.sh` only ever WRITES), so a merge
+ * that happens mid-run is invisible to every subsequent decision here.
+ *
+ * SO THE MERGE ITSELF IS PROBED, at the earliest instant it can have happened —
+ * the moment a Forge round returns — and BEFORE anything else is dispatched. A
+ * check at the top of the NEXT round has already paid for the round that is being
+ * removed.
+ *
+ * FAIL-CLOSED IN THE DIRECTION THAT MATTERS. Only an explicit merge marker from
+ * GitHub counts as merged; an unreadable answer is 'unknown' and the run carries
+ * on exactly as before, because terminating a LIVE run as "merged" would abandon
+ * real work. `mergedAt` is accepted as well as `state` because either one is
+ * GitHub stating the fact, and the pair is printed to the run log before anything
+ * is keyed off it.
+ */
+function classifyPrMerged(res) {
+  const raw = res && typeof res.raw === 'string' ? res.raw : ''
+  const exit = res && typeof res.exit_code === 'number' ? res.exit_code : null
+  // A non-zero (or unreported) exit is `gh` failing, not a PR that is open: the
+  // command could not answer, so neither can we.
+  if (exit !== 0) return 'unknown'
+  const open = raw.indexOf('{')
+  const close = raw.lastIndexOf('}')
+  if (open === -1 || close <= open) return 'unknown'
+  let parsed = null
+  try {
+    parsed = JSON.parse(raw.slice(open, close + 1))
+  } catch {
+    return 'unknown'
+  }
+  if (parsed === null || typeof parsed !== 'object') return 'unknown'
+  const state = typeof parsed.state === 'string' ? parsed.state.trim().toUpperCase() : ''
+  const mergedAt = typeof parsed.mergedAt === 'string' ? parsed.mergedAt.trim() : ''
+  if (state === 'MERGED' || mergedAt.length > 0) return 'merged'
+  // OPEN and CLOSED are GitHub saying "not merged" — a CLOSED PR was abandoned,
+  // which is NOT a merge and must not end the run as a success.
+  if (state === 'OPEN' || state === 'CLOSED') return 'not-merged'
+  return 'unknown'
+}
+
+/**
+ * WHAT A FIX ROUND'S OUTCOME MEANS ONCE THE MERGE STATE IS KNOWN — and the ONE
+ * place the two guards are ordered against each other (ISSUES #563, Open #148).
+ *
+ * THE ROUND-LOST GUARD AND THIS ONE LOOK AT THE SAME EVIDENCE AND MEAN OPPOSITE
+ * THINGS. `roundLanded` decides by reading the branch head, and a merge DELETES
+ * that branch — so a run that landed everything and got merged presents to it as
+ * an UNREADABLE head, i.e. as the failure it exists to catch. Recording a merged
+ * run as `round-lost` would replace a wasteful defect with a worse one: successful
+ * work reported as broken, and an operator sent to `git stash list` to recover
+ * work that is already on the base branch.
+ *
+ * So the merge question is asked FIRST and its answer WINS. Only when GitHub did
+ * not say "merged" does the head comparison get to speak, and its behaviour for
+ * the case it was built for — a fix round that genuinely never pushed — is
+ * untouched.
+ */
+function roundOutcome(mergeStatus, headBefore, headAfter) {
+  if (mergeStatus === 'merged') return 'merged'
+  return roundLanded(headBefore, headAfter) ? 'landed' : 'round-lost'
+}
+
+/**
+ * THE TERMINAL RESULT OF A RUN WHOSE PR IS ALREADY MERGED (ISSUES #563).
+ *
+ * A SUCCESS, EXPLICITLY. `ok`/`verdict: 'APPROVE'`/`blockKind: 'none'` because the
+ * change shipped — the thing every other terminal path is trying to reach.
+ *
+ * `prMerged: true` IS THE FIELD THE OUTER LOOP KEYS ON, and it exists because
+ * "APPROVE" alone would send `applyResult` down the merge path and run a SECOND
+ * `gh pr merge` against an already-merged PR — which fails, and would record this
+ * successful run as `merge failed`. The outer reads this flag BEFORE the verdict
+ * branches and finishes the run without touching the remote.
+ *
+ * NO `reviewedHead`, deliberately: that field exists only to pin a merge with
+ * `--match-head-commit`, and there is no merge left to pin. Recording one here
+ * could only invite the second merge this flag exists to prevent.
+ *
+ * `remainingTasks: 0` so a Ralph run does NOT re-fire the next task: the PR it
+ * would build onto is merged and its branch is gone.
+ */
+function mergedTerminalResult(prNumber, branch, round) {
+  return {
+    ok: true,
+    prNumber: prNumber === undefined ? null : prNumber,
+    branch,
+    verdict: 'APPROVE',
+    round,
+    checkpoint: 'pr-merged',
+    prMerged: true,
+    remainingTasks: 0,
+    blockKind: 'none',
+  }
+}
+
+/**
  * THE CI GATE. A review panel cannot see a red build.
  *
  * WHY THIS EXISTS. Four reviewers read the DIFF. None of them runs the tests, so a
@@ -1673,6 +1792,21 @@ function roundLanded(headBefore, headAfter) {
 
 /** Raw stdout + exit code from one `gh pr checks` call. Nothing interpreted. */
 const CI_PROBE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['raw', 'exit_code'],
+  properties: {
+    raw: { type: 'string', description: 'stdout+stderr of the command, verbatim' },
+    exit_code: { type: 'integer', description: 'the exit status the command printed' },
+  },
+}
+
+/**
+ * The merge probe's report (#563). Identical shape to CI_PROBE_SCHEMA and for the
+ * same reason: the agent runs ONE fixed command and hands back its output + exit
+ * status VERBATIM, and `classifyPrMerged` — not a model — decides what it means.
+ */
+const PR_MERGE_PROBE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['raw', 'exit_code'],
@@ -1996,6 +2130,37 @@ ${cmd}`,
     ),
   )
   return classifyCi(res)
+}
+
+/**
+ * ASK GITHUB WHETHER THIS PR IS MERGED (ISSUES #563). One command, output reported
+ * verbatim, every judgement made in JS by `classifyPrMerged`.
+ *
+ * Same shape and same reasoning as the head and CI probes: the agent is told to run
+ * one thing and transcribe it, never to decide what it means. "Is the PR merged?"
+ * asked of a model is a question it can answer plausibly and wrongly, and a wrong
+ * "yes" ends a live run.
+ *
+ * LOCAL MODE AND A PR-LESS BUILD REPORT 'not-merged' WITHOUT SPENDING AN AGENT.
+ * There is no PR to read, and in local mode the only merge is the outer loop's
+ * `mergeLocal`, which runs strictly AFTER this workflow's terminal result is
+ * harvested — so it cannot race the loop the way a PR merge can.
+ */
+async function probePrMerged(prForProbe, roundTag) {
+  if (!isPr || prForProbe === null || prForProbe === undefined) return 'not-merged'
+  const cmd = `cd ${shSingleQuote(repoPath)} && gh pr view ${String(prForProbe)} --json state,mergedAt 2>&1; echo "___EXIT=$?"`
+  const res = await agent(
+    `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether the PR is merged, do NOT run anything else, do NOT modify any file.
+${cmd}`,
+    withModel({ label: `merge-probe-round-${roundTag}`, phase: 'Build', schema: PR_MERGE_PROBE_SCHEMA }),
+  )
+  const status = classifyPrMerged(res)
+  // PRINT THE FIELDS BEFORE ANYTHING IS KEYED ON THEM — the classification and the
+  // raw line it came from, so a run that terminated (or did not) can be audited
+  // from the log alone rather than from a re-run.
+  const first = (res && typeof res.raw === 'string' ? res.raw : '').trim().split('\n')[0] || '(no output)'
+  log(`trident-v2 merge-probe (${roundTag}): pr=#${String(prForProbe)} status=${status} raw[0]=${first}`)
+  return status
 }
 
 /**
@@ -2515,6 +2680,20 @@ let round = 1
 let pr = prNumber
 
 try {
+  // IDEMPOTENT CRASH-RESUME (ISSUES #563): a prior process already established that
+  // this PR is MERGED. Re-entering the build would be the same waste one process
+  // later — worse, it would re-build onto a branch the merge deleted. Re-write the
+  // terminal result (the prior process may have crashed before the harvest) and
+  // stop. CHECKED FIRST because it is the strongest fact available: a merged PR
+  // cannot become unmerged, so no later phase can change this answer.
+  if (resumeCheckpoint === 'pr-merged') {
+    log(`trident-v2 resume: prior run recorded 'pr-merged' for ${forgeBranch} — the change already shipped; nothing to build, review or merge`)
+    finalVerdict = 'APPROVE'
+    const resumeMerged = mergedTerminalResult(pr, forgeBranch, 0)
+    await writeTerminalResult(resumeMerged)
+    return resumeMerged
+  }
+
   // IDEMPOTENT CRASH-RESUME (C2): a prior run already reached argus-approved —
   // the PR is built + reviewed + approved; skip build+review entirely and let
   // the OUTER loop merge. (Cleanup still runs in finally — idempotent.)
@@ -2616,6 +2795,25 @@ ${task}${reflectionGuidance}`,
 
   // C1 checkpoint — Forge done (PR + branch persisted).
   await checkpoint('forge-done', { pr })
+
+  // ── A MERGE IS TERMINAL (ISSUES #563) ────────────────────────────────────────
+  // ASKED HERE, THE INSTANT THE BUILD RETURNS, because this is the first moment a
+  // merge performed BY this run can exist and the last moment before it starts
+  // spending: everything below — the review panel, the Ralph re-fire, every fix
+  // round — is downstream of this line. That ordering IS the fix. A lane that
+  // merged its PR during forge:build and only noticed at the top of the next round
+  // has already bought the round being removed.
+  //
+  // A merged PR ends the run as a SUCCESS. There is nothing left to review (the
+  // change is on the base branch), nothing left to fix (the head branch is
+  // deleted), and nothing left for the outer loop to merge.
+  if ((await probePrMerged(pr, 'r1')) === 'merged') {
+    log(`trident-v2 MERGED: PR #${String(pr)} is merged — the run is DONE (no review, no fix round, no round increment)`)
+    await checkpoint('pr-merged', { pr })
+    const mergedResult = mergedTerminalResult(pr, forgeBranch, round)
+    await writeTerminalResult(mergedResult)
+    return mergedResult
+  }
 
   // ── RALPH RE-FIRE (#362) — build ONE task per fresh context ──────────────────
   // In Ralph mode with tasks still remaining after this one, the build is NOT
@@ -2759,12 +2957,23 @@ ${task}${reflectionGuidance}`,
       `r${round}`,
     )
     await checkpoint(`fix-round-${round}`, { pr })
-    // DID IT LAND? A fix round runs in a throwaway worktree, so edits that were
-    // never committed+pushed are already gone — and reviewing again would
-    // re-report the previous round's findings against unchanged code. Stop
-    // instead, and say which round lost its work.
+    // DID IT LAND — OR DID THE PR MERGE? A fix round runs in a throwaway worktree,
+    // so edits that were never committed+pushed are already gone, and reviewing
+    // again would re-report the previous round's findings against unchanged code.
+    // But a MERGE deletes the branch, which reads through the same head probe as
+    // exactly that failure — so both facts are gathered and `roundOutcome` orders
+    // them: GitHub is asked whether the PR merged BEFORE any `round-lost` verdict
+    // is written (ISSUES #563), and the round-lost path is otherwise untouched.
     const headAfter = await readBranchHead(round)
-    if (!roundLanded(branchHead, headAfter)) {
+    const outcome = roundOutcome(await probePrMerged(pr, `r${round}`), branchHead, headAfter)
+    if (outcome === 'merged') {
+      log(`trident-v2 MERGED: PR #${String(pr)} is merged — the run is DONE at round ${round} (no re-review, no further round)`)
+      await checkpoint('pr-merged', { pr })
+      const mergedResult = mergedTerminalResult(pr, forgeBranch, round)
+      await writeTerminalResult(mergedResult)
+      return mergedResult
+    }
+    if (outcome === 'round-lost') {
       log(`trident-v2 fix loop: round=${round} DID NOT LAND (head still ${headAfter || 'unreadable'}) — stopping`)
       roundLostItsWork = { round, head: headAfter || branchHead }
       finalVerdict = 'REQUEST_CHANGES'

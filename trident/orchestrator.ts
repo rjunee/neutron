@@ -566,6 +566,41 @@ export function buildTridentOrchestrator(
     fired.delete(run.id)
     redispatched.delete(run.id)
 
+    // A MERGE IS TERMINAL (ISSUES #563) — checked before EVERY other branch,
+    // including the Ralph re-fire, because a merged PR outranks every other reading
+    // of this result: the change has shipped, its head branch is gone, and there is
+    // nothing left to build onto, review, or merge.
+    //
+    // THE RUN IS RECORDED AS A SUCCESS AND NO MERGE IS ATTEMPTED. Both halves
+    // matter. Falling through to the APPROVE path would run `gh pr merge` against
+    // an already-merged PR, which fails and would record this successful run as
+    // `merge failed` — a merged run reported as broken, which is worse than the
+    // waste this fix removes. Falling through to the REQUEST_CHANGES path would
+    // record it as `round-lost`/exhausted for the same reason.
+    //
+    // The provenance gate is not consulted, and does not need to be: it exists to
+    // stop an unreviewed APPROVE from CAUSING a merge, and nothing here merges.
+    if (result.pr_merged) {
+      const mergedRun: TridentRun = {
+        ...run,
+        harvested_at: nowMs(),
+        phase: 'done',
+        pr: result.pr_number ?? run.pr,
+        branch: result.branch ?? run.branch,
+        inner_checkpoint: result.checkpoint ?? 'pr-merged',
+        inner_verdict: 'APPROVE',
+        subagent_status: 'completed',
+        failure_reason: null,
+        last_advanced_at: now(),
+      }
+      return {
+        run: mergedRun,
+        changed: true,
+        waiting: false,
+        note: `PR #${mergedRun.pr ?? '?'} already merged → done (no second merge)`,
+      }
+    }
+
     // RALPH RE-FIRE (#362) — checked FIRST, before the terminal-harvest stamp: an
     // intermediate iteration with tasks still remaining is NOT a merge/fail, so it
     // must not stamp `harvested_at` (the terminal-harvest marker) nor run the merge

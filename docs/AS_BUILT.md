@@ -2,6 +2,65 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — a successful merge is TERMINAL: the run lifecycle ends where the change ships
+
+ISSUES #563. A lane approved its PR and merged it; the merge deleted the head branch;
+the workflow then entered `forge:fix-round-2` and ran ~19 more minutes — a live
+executor, a resumed child, an 18-minute cross-model reviewer — **generating fixes for a
+branch with nowhere to push.** It was caught by looking at a clock, not by an alarm,
+which is the whole shape of the problem: **the failure is silent.** From outside, a lane
+that merged merely looks slow; the PR is green and merged, nothing downstream complains,
+and no counter anywhere says "this run is spending money on a branch that no longer
+exists". Every lane that merged paid it, which made it a tax on every other item in the
+queue.
+
+**The two decisions were made by different components with no channel between them.**
+The loop-continuation decision is the fix loop's `while` condition in
+`trident/inner-workflow.mjs` — verdict, round, blockKind, and not one of them a fact
+about the PR. The merge is performed either by the OUTER driver (`trident/
+orchestrator.ts` `applyResult` → `trident/git-mode.ts` `cleanupAfterMerge` → `trident/
+merge.ts` `mergePr`, which runs only AFTER this workflow's terminal result is harvested)
+or by an agent INSIDE the run, when the task itself is to sign off on a PR. And the
+workflow never re-reads its own run row — `trident/checkpoint.sh` only ever WRITES — so
+a merge that happens mid-run is invisible to every later decision in the loop. There was
+no seam at which the merge could stop it.
+
+**So the merge is now probed at the instant a Forge round returns**, ahead of the review
+panel, ahead of the Ralph re-fire, ahead of the round-1 empty-build refusal and ahead of
+any round increment — everything the wasted round is made of. A check at the top of the
+NEXT round would already have bought most of the round being removed, and an external
+reaper is a safety net rather than a mechanism: a lane has TWO pids — a wrapper whose
+argv carries the slug, and the WORKER `claude -p`, whose argv carries no slug at all —
+so a slug-based enumeration kills the wrapper, reports success, and leaves the worker
+running for another hour. The loop terminates itself.
+
+**A merged run is a SUCCESS, and saying so took two changes rather than one.** The inner
+loop writes a terminal result carrying `prMerged: true`, checkpoint `pr-merged`, verdict
+APPROVE and `blockKind: 'none'`; the outer loop reads that flag BEFORE the verdict
+branches and finishes the run WITHOUT touching the remote. Both halves are load-bearing:
+falling through to the APPROVE path would run a second `gh pr merge` against an
+already-merged PR, which fails — recording a shipped change as `merge failed`, a worse
+defect than the waste being removed.
+
+**The round-lost guard (Open #148) reads a merge as its own failure, and that is the
+trap this had to avoid.** That guard decides by reading the branch head, and a merge
+DELETES the branch, so a run that landed everything and shipped presents to it as an
+unreadable head. One pure function, `roundOutcome`, now orders the two: GitHub is asked
+whether the PR merged BEFORE any `round-lost` verdict is written, and only when the
+answer is not "merged" does the head comparison get to speak. Its behaviour for the case
+it was built for — a fix round that genuinely never pushed — is untouched, and a test
+pins that a head-first order goes red.
+
+**Only GitHub gets to say "merged".** The probe is one fixed command (`gh pr view <n>
+--json state,mergedAt`) reported verbatim, with every judgement made in JS by
+`classifyPrMerged`: a failed or unparseable answer is `unknown`, never "not merged" and
+never "merged", so the run continues exactly as it did before. A CLOSED-without-merge PR
+is not a merge. The decode is equally strict — `p.prMerged === true` and nothing truthy
+— because this flag SKIPS the merge, so an accidental true would strand an unmerged PR
+as "done". The step is routed to the cheap tier (`merge-probe-round-*` → `bookkeeping`)
+for the reason `head-probe` earned that rule: it runs once per round, and a silent
+fallback to the most expensive tier would be a per-round tax on the step that exists to
+remove a per-lane tax.
 ## 2026-08-13 — the Sonnet tier was a generation behind, and the test written to prove it found a second, worse hole (ISSUES #564)
 
 **What the owner saw.** First look at the shipped model-selector pane: *"Minor bug -
@@ -97,6 +156,7 @@ retry. 14 of its 22 tests fail on the pre-fix behaviour; each guard was removed 
 turn and the corresponding tests proven red (the two that passed VACUOUSLY on a
 crashed run — "no fix round was bought", "which seat died is on the record" — were
 tightened until they did not).
+
 ## 2026-08-13 — the usage dashboard, Phase 1: every connected account on one screen, and when capacity comes back
 
 Phase 1 of `docs/plans/usage-quota-dashboard-design-2026-08-13.md` (§9). The gauge in

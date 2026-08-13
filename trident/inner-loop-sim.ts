@@ -39,6 +39,10 @@ export interface SimResult {
    *  records one); set `null` to simulate a workflow that recorded NO head — the
    *  merge must then REFUSE (fail-closed). */
   reviewedHead?: string | null
+  /** #563 — the workflow stopped because the PR was ALREADY merged. Emitted only
+   *  when the test sets it (the field is absent on every other terminal path), so
+   *  `parseInnerResult` decodes the default to `false`. */
+  prMerged?: boolean
 }
 
 /** The stand-in reviewed head OID a simulated workflow records (#545). Real
@@ -58,6 +62,9 @@ export function simResultJson(sim: SimResult): string {
     // Only emit when the test set it (mirrors the .mjs, which omits it for
     // non-Ralph runs); `parseInnerResult` treats an absent field as null.
     ...(sim.remainingTasks !== undefined ? { remainingTasks: sim.remainingTasks } : {}),
+    // #563 — same rule: emitted only when the test asks for it, so the absent-field
+    // default (no merge already performed) is what every other test exercises.
+    ...(sim.prMerged !== undefined ? { prMerged: sim.prMerged } : {}),
     // #545 — production ALWAYS records the reviewed head, so the default models
     // that; an explicit null models the workflow that failed to (and the pr-mode
     // merge must then refuse rather than merge an unpinned head).

@@ -108,7 +108,27 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       round: 2,
       checkpoint: 'argus-approved',
       remaining_tasks: 0,
+      pr_merged: false,
     })
+  })
+  // A MERGE IS TERMINAL (#563). The flag the OUTER loop reads to finish a run
+  // WITHOUT running a second `gh pr merge`, so only the exact boolean counts: every
+  // truthy stand-in below is a field that did not arrive in the shape the workflow
+  // writes, and reading one as a merge would strand an unmerged PR as "done".
+  test('decodes prMerged; absent or any non-boolean → false', () => {
+    expect(
+      parseInnerResult(JSON.stringify({ verdict: 'APPROVE', checkpoint: 'pr-merged', prMerged: true }))
+        ?.pr_merged,
+    ).toBe(true)
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.pr_merged).toBe(false)
+    for (const bogus of ['true', 1, 'yes', {}, [], null]) {
+      expect(
+        parseInnerResult(JSON.stringify({ verdict: 'APPROVE', prMerged: bogus }))?.pr_merged,
+      ).toBe(false)
+    }
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', prMerged: false }))?.pr_merged).toBe(
+      false,
+    )
   })
   test('decodes remainingTasks (the #362 Ralph re-fire signal); absent → null', () => {
     const withRemaining = parseInnerResult(
@@ -136,6 +156,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       round: 0,
       checkpoint: null,
       remaining_tasks: null,
+      pr_merged: false,
     })
   })
 })
