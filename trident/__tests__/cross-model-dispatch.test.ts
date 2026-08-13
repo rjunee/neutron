@@ -73,12 +73,25 @@ async function runWorkflow(
     complexity?: 'mechanical' | 'reasoning'
     /** Round 1 comes back with these instead of a sha + a diff path. */
     buildProduces?: { commitSha?: string; diffFile?: string }
+    /**
+     * What a FIX round reports, when it must differ from round 1's healthy shape.
+     * Round 1 still succeeds, so the run reaches the fix loop and the gates there are
+     * the ones under test.
+     */
+    fixProduces?: { commitSha?: string; diffFile?: string }
     /** The PR number round 1 reports. Default null (the local-mode shape). */
     buildPr?: number
     /** The branch the build reports having committed on. Default the run's own. */
     buildBranch?: string
     /** Ralph's planner says this many tasks remain AFTER the one being built. */
     remainingTasks?: number
+    /**
+     * Make the branch-head probe report a MOVED head, so `roundLanded` passes and the
+     * fix round reaches the gates that come after it. Default (unset) reports no head,
+     * which is byte-identical to the stub's previous fall-through and keeps every
+     * existing case unchanged.
+     */
+    fixLands?: boolean
   } = {},
 ): Promise<{ captured: Captured[]; logs: string[]; result: Record<string, unknown> }> {
   const captured: Captured[] = []
@@ -90,18 +103,26 @@ async function runWorkflow(
     captured.push({ label, prompt, opts: o ?? {} })
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       const empty = opts.buildProduces !== undefined && label === 'forge:build'
+      const isFix = String(label).startsWith('forge:fix-round-')
+      const fixEmpty = opts.fixProduces !== undefined && isFix
       const built = {
         prNumber: opts.buildPr ?? null,
         branch: opts.buildBranch ?? 'trident/a-run',
         // A build that ran and produced NOTHING is the wrapper's honest answer, not a
         // malformed one: it measures with git and emits EMPTY rather than wrong.
-        diffFile: empty ? (opts.buildProduces?.diffFile ?? '') : '/tmp/x.diff',
+        diffFile: empty
+          ? (opts.buildProduces?.diffFile ?? '')
+          : fixEmpty
+            ? (opts.fixProduces?.diffFile ?? '')
+            : '/tmp/x.diff',
         worktreePath: '/wt',
         commitSha: empty
           ? (opts.buildProduces?.commitSha ?? '')
-          : label === 'forge:build'
-            ? 'abc'
-            : 'def',
+          : fixEmpty
+            ? (opts.fixProduces?.commitSha ?? 'def')
+            : label === 'forge:build'
+              ? 'abc'
+              : 'def',
         testsPassed: true,
       }
       // THE BRIDGE'S SHAPE, not a second happy path. A codex build comes back through
@@ -111,6 +132,10 @@ async function runWorkflow(
       return prompt.includes('CODEX BUILD bridge')
         ? { ...built, codexStatus: 'connected' }
         : built
+    }
+    if (String(label).startsWith('head-probe-round-')) {
+      // A head DIFFERENT from round 1's `abc`, so `roundLanded` sees the branch move.
+      return { head: opts.fixLands === true ? 'fed' : '' }
     }
     if (label === 'plan:fable') {
       // Ralph's planner. `complexity` is the field that splits the build dispatch
@@ -526,6 +551,64 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(fix!.prompt).toContain('You are FIXING')
   })
 
+  test('a fix round that LANDED but produced no diff stops instead of opening a panel', async () => {
+    // ROUND 1 REFUSES TO REVIEW AN EMPTY DIFF; every later round used to review one
+    // happily. The codex wrapper DELETES the diff path before each launch so a stale
+    // diff can never be reported as this round's, and regenerates one only when the
+    // build committed — so a fix round whose regeneration produced nothing leaves the
+    // path absent, and the panel was dispatched at it with no gate at all. Five
+    // reviewers reading a missing file and reporting nothing wrong with it is an
+    // APPROVE of a diff no one saw.
+    const { result, captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      requestChangesOnce: true,
+      fixLands: true,
+      fixProduces: { commitSha: 'def', diffFile: '' },
+    })
+    // NOT 'code' — the code was never re-judged, so reporting a code rejection would
+    // be a verdict about a diff nobody read.
+    expect(result['blockKind']).toBe('round-lost')
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    const findings = result['findings'] as Array<{ title: string; evidence: string }>
+    expect(findings).toHaveLength(1)
+    expect(findings[0]!.title).toContain('landed on the branch but produced no diff')
+    // …and it says the work is SAFE, because it is: `roundLanded` just confirmed the
+    // commit is on the branch. Telling the operator to recover a worktree would send
+    // them after something that is not missing.
+    expect(findings[0]!.evidence).toContain('not lost')
+    // THE PANEL WAS NEVER PAID. Round 1's reviewers ran; round 2's did not.
+    expect(captured.filter((c) => c.label === 'argus:synthesis')).toHaveLength(1)
+  })
+
+  test('…and the SAME round WITH a diff proceeds to a second panel', async () => {
+    // The positive control. Without it the assertions above pass for any fix round
+    // that stops for any reason, and the gate could be firing on something else
+    // entirely — the two fixtures differ only in whether `diffFile` is empty.
+    const { result, captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      requestChangesOnce: true,
+      fixLands: true,
+      fixProduces: { commitSha: 'def', diffFile: '/tmp/round-2.diff' },
+    })
+    expect(result['blockKind']).not.toBe('round-lost')
+    expect(result['verdict']).toBe('APPROVE')
+    expect(captured.filter((c) => c.label === 'argus:synthesis')).toHaveLength(2)
+  })
+
+  test('the second panel reads THIS round\'s diff, not round 1\'s', async () => {
+    // The loop captured `diffFile` once and handed the same path to every review
+    // round. That is the other half of the gate above: a round whose diff went to a
+    // different path would have its work reviewed from the previous round's file.
+    const { captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      requestChangesOnce: true,
+      fixLands: true,
+      fixProduces: { commitSha: 'def', diffFile: '/tmp/round-2.diff' },
+    })
+    const panels = captured.filter((c) => c.label === 'argus:claude')
+    expect(panels).toHaveLength(2)
+    expect(panels[0]!.prompt).toContain('/tmp/x.diff')
+    expect(panels[1]!.prompt).toContain('/tmp/round-2.diff')
+    expect(panels[1]!.prompt).not.toContain('/tmp/x.diff')
+  })
+
   test('the downstream contract survives: the measured sha becomes `reviewedHead`', async () => {
     // The merge pins to `reviewedHead` (#545) and refuses when it is empty, so a
     // codex build that could not report a pushed sha the way a Claude build does
@@ -548,6 +631,24 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
     expect(pr).toContain('NEUTRON_CODEX_BUILD_REMOTE_HEAD=')
     expect(pr).toContain("the build's own commit, confirmed pushed")
+  })
+
+  test('the run\'s MERGE MODE is handed to the wrapper as an argument, not re-derived', async () => {
+    // THE WEDGE THIS FIXES. Three of the wrapper's checks are pr-only — the remote
+    // baseline, the push-credential precheck and the `gh pr list` probe — and with no
+    // argument to read it inferred "am I in pr mode" from "does an `origin` exist",
+    // which is a question about the CLONE and not about the RUN. Any local-mode build
+    // in a clone whose origin was unreachable (offline, a stale URL, a non-GitHub
+    // remote) hard-deferred at the baseline before codex launched, every round.
+    const local = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
+    expect(local).toContain("bash '/repo/trident/codex-build.sh' 'trident/a-run' 'main' 'local'")
+
+    const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
+    const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
+    expect(pr).toContain("bash '/repo/trident/codex-build.sh' 'trident/a-run' 'main' 'pr'")
+    // The two really are different commands, so neither assertion is passing on a
+    // constant that happens to contain both.
+    expect(local).not.toContain("'main' 'pr'")
   })
 
   test('the trailer is read from ITS OWN FILE, never from the codex transcript', async () => {

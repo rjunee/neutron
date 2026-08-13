@@ -341,9 +341,17 @@ export function rejectedModel(
  * the reset affordance fall out for free.
  *
  * IT ALSO DROPS AN EFFORT THE NEW TIER CANNOT USE. Moving the build row from `opus` to
- * a codex tier leaves any previously-chosen effort sitting in the map, and sending the
- * pair fails the save. The effort is not a second choice the owner is making here; it
- * is a leftover from the executor they just left.
+ * a codex tier leaves any previously-chosen effort sitting in the map. The effort is
+ * not a second choice the owner is making here; it is a leftover from the executor
+ * they just left.
+ *
+ * SENDING THE PAIR WOULD NOT FAIL THE SAVE — the server drops it too
+ * (`trident/phase-models.ts#parsePhaseModelConfig` deletes the effort and records it in
+ * `rejected` WITHOUT pushing an error, so the PUT returns ok). Dropping it here is
+ * therefore about what the owner SEES, not about avoiding a rejection: leaving the
+ * stale effort in the map would render a control the chosen tier does not have, and the
+ * owner would set a value, save successfully, and find it gone on the next read with
+ * nothing having said so.
  *
  * MUST MATCH `app/lib/phase-models-client.ts#applyRowEdit`.
  */

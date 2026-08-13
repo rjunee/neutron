@@ -95,6 +95,35 @@ interface RunOpts {
    * without one asserts nothing at all.
    */
   origin?: boolean
+  /**
+   * Override the origin's PUSH url, leaving its fetch url as the local bare repo.
+   *
+   * Two things have to be true at once for a push-credential test and they pull in
+   * opposite directions: the remote must be REACHABLE (or the pr-mode baseline probe
+   * defers first and the credential check is never reached), and the push url must be
+   * `https://` (or `push_credential_ok` correctly skips it, since ssh and filesystem
+   * remotes authenticate with a key or not at all and never consult a helper).
+   *
+   * A remote with a separate push url is ordinary git configuration, and it maps
+   * exactly onto the split the wrapper already relies on: the baseline probe asks
+   * `git ls-remote origin` (the FETCH url — the local bare repo, always reachable) and
+   * the credential probe asks `git remote get-url --push origin`. So this isolates the
+   * one variable each test is about.
+   *
+   * Requires `origin: true`.
+   */
+  pushUrl?: string
+  /**
+   * A `git credential fill` that ANSWERS, installed as a `credential.helper` in the
+   * temp repo's own config. The value is not a real secret and never leaves the temp
+   * dir; what is under test is whether the wrapper can tell an answer from a silence.
+   */
+  credentialHelper?: boolean
+  /**
+   * The wrapper's `$3`. Undefined → not passed at all, which is the "a caller that
+   * forgot" case and must behave as `pr`.
+   */
+  mergeMode?: string
   /** Content for the diff file the brief was told to write. `null` → never written. */
   diff?: string | null
   /** Seed the repo with a commit BEFORE the wrapper runs (the base state). Default true. */
@@ -223,6 +252,16 @@ function run(opts: RunOpts = {}): RunResult {
     spawnSync('git', ['init', '-q', '--bare', bare])
     git('remote', 'add', 'origin', bare)
   }
+  if (opts.pushUrl !== undefined) git('remote', 'set-url', '--push', 'origin', opts.pushUrl)
+  if (opts.credentialHelper === true) {
+    // A helper that answers with a fixed, fake pair. `git credential fill` runs it as
+    // a shell snippet, exactly as `github/credential.ts` does for the real one.
+    git(
+      'config',
+      'credential.helper',
+      '!f() { echo username=x-access-token; echo password=not-a-real-token; }; f',
+    )
+  }
 
   const env: Record<string, string> = {
     PATH: path,
@@ -251,7 +290,15 @@ function run(opts: RunOpts = {}): RunResult {
   if (opts.noTrailerFile !== true) env['NEUTRON_CODEX_BUILD_TRAILER_FILE'] = trailerFile
 
   if (opts.base !== undefined) git('branch', opts.base)
-  const argv = opts.base === undefined ? [SCRIPT, branch] : [SCRIPT, branch, opts.base]
+  // `$3` cannot be passed without `$2` occupying its slot, so a merge mode with no base
+  // sends an EMPTY base — which is the wrapper's documented "no last-resort diff", not
+  // a guessed one.
+  const argv =
+    opts.mergeMode !== undefined
+      ? [SCRIPT, branch, opts.base ?? '', opts.mergeMode]
+      : opts.base === undefined
+        ? [SCRIPT, branch]
+        : [SCRIPT, branch, opts.base]
   const res = spawnSync(BASH, argv, {
     cwd: dir,
     encoding: 'utf8',
@@ -309,6 +356,47 @@ const FAKE_NO_COMMIT = `cat >/dev/null; ${NARRATE}; echo edited > built.txt`
 const FAKE_FAIL = `cat >/dev/null; ${NARRATE}; echo "boom" >&2; exit 7`
 
 /**
+ * A `git` shim that COUNTS `ls-remote` calls and can fail or hang chosen attempts.
+ *
+ * At module scope rather than inside one `describe`, because two blocks need it: the
+ * remote-baseline tests ask how many times the probe was retried, and the merge-mode
+ * tests ask whether it was reached at all.
+ */
+function countingLsRemote(
+  dir: string,
+  spec: { fail?: readonly number[]; hang?: readonly number[] } = {},
+): () => number {
+  const counter = join(dir, 'lsremote.count')
+  const shim = join(dir, 'bin', 'git')
+  const clause = (probes: readonly number[], body: string): string =>
+    probes.length === 0 ? '' : `    case "$n" in ${probes.join('|')}) ${body} ;; esac\n`
+  writeFileSync(
+    shim,
+    `#!/bin/sh
+for a in "$@"; do
+if [ "$a" = "ls-remote" ]; then
+  n=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > ${JSON.stringify(counter)}
+${clause(spec.fail ?? [], 'exit 128')}${clause(spec.hang ?? [], 'sleep 120')}  fi
+done
+exec /usr/bin/git "$@"
+`,
+  )
+  chmodSync(shim, 0o755)
+  // NO COUNTER FILE MEANS ZERO PROBES, not a crash. The shim creates it on the first
+  // `ls-remote`, so "the probe was never reached" — which is exactly what the
+  // local-mode tests assert — leaves the path absent.
+  return () => {
+    try {
+      return Number(readFileSync(counter, 'utf8').trim())
+    } catch {
+      return 0
+    }
+  }
+}
+
+/**
  * A fixture with a REAL (bare, local) origin the build can actually push to.
  *
  * Real rather than mocked, because the question under test is what `git ls-remote`
@@ -336,6 +424,8 @@ function rerun(
    * observable outcomes rather than two sides of a threshold.
    */
   spawnTimeoutMs?: number,
+  /** The wrapper's `$3`. Undefined → not passed, which must behave as `pr`. */
+  mergeMode?: string,
 ): {
   trailer: Record<string, string>
   trailerRaw: string
@@ -344,7 +434,13 @@ function rerun(
   stderr: string
 } {
   const trailerFile = join(r.dir, 'build.trailer')
-  const res = spawnSync(BASH, [SCRIPT, 'trident/a-run'], {
+  // An EMPTY `$2` when a mode is given: `$3` cannot be passed without its slot filled,
+  // and an empty base is the wrapper's documented "no last-resort diff".
+  const argv =
+    mergeMode === undefined
+      ? [SCRIPT, 'trident/a-run']
+      : [SCRIPT, 'trident/a-run', '', mergeMode]
+  const res = spawnSync(BASH, argv, {
     cwd: r.dir,
     encoding: 'utf8',
     env: {
@@ -653,29 +749,37 @@ describe('the BRIEF is what codex is asked to build', () => {
     expect(seamed.codexArgv).toBe('')
   })
 
-  test('the child shell KEEPS the credentials it was handed — else the push is anonymous', () => {
-    // THE BUG THIS PINS, end to end. `codex exec` filters the environment it gives the
-    // commands the model runs: `shell_environment_policy` defaults to `inherit="core"`
-    // plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*`. The instance's
-    // GitHub credential reaches a child process through the ENVIRONMENT AND NOWHERE
-    // ELSE by deliberate design (`github/credential.ts` writes no config file and puts
-    // no token in the remote URL) — as `GH_TOKEN` and a github.com-scoped helper in
-    // `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`. `GH_TOKEN` matches
-    // `*TOKEN*`; `GIT_CONFIG_KEY_0` matches `*KEY*`. Under the defaults BOTH are
-    // stripped, the build's `git push` and `gh pr create` run unauthenticated, and the
-    // trailer then measures an empty REMOTE_HEAD — which the workflow reports as
-    // "produced no commitSha — nothing was built" about a build that built everything.
+  test("the owner's Anthropic credential is NEVER handed to the codex shell", () => {
+    // THE REGRESSION THIS PINS. An earlier version of the wrapper passed
+    // `shell_environment_policy.inherit=all` + `ignore_default_excludes=true` to get
+    // `GH_TOKEN` and `GIT_CONFIG_KEY_0` past the CLI's default `*KEY*`/`*SECRET*`/
+    // `*TOKEN*` filter and into the build's `git push`. Both halves of that were wrong:
+    //
+    //  • The credential was not there to inherit. `github/credential.ts` is wired to
+    //    trident's OUTER loop only (`open/composer.ts` `run_host`); the INNER workflow
+    //    that launches this script never receives it — `SPEC.md` records that as
+    //    verified live from `/proc/<pid>/environ`. The push stayed anonymous.
+    //  • Clearing the excludes DID expose something. The REPL this runs under carries
+    //    the owner's `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`
+    //    (`gateway/wiring/build-import-substrate.ts` sets one per spawn), so the grant
+    //    handed the Anthropic quota this whole route exists to conserve to a
+    //    GPT-driven `danger-full-access` shell.
     const { codexArgv } = run({ authed: true, codexLoginExit: 0 })
-    // BOTH, and neither is sufficient alone: `inherit=all` still drops the two by
-    // pattern, and clearing the excludes without it never sees them, because `core`
-    // did not carry them in.
-    expect(codexArgv).toContain('-c\nshell_environment_policy.inherit=all\n')
-    expect(codexArgv).toContain('-c\nshell_environment_policy.ignore_default_excludes=true\n')
-    // …AND `--strict-config`, which is what stops the two above from becoming
+    expect(codexArgv).not.toContain('shell_environment_policy.inherit=all')
+    expect(codexArgv).not.toContain('shell_environment_policy.ignore_default_excludes=true')
+    // …and the deny is POSITIVE, not merely the absence of a grant. The defaults would
+    // already catch these three families, but only by substring coincidence
+    // (`ANTHROPIC_API_KEY` contains `KEY`) — a default list that belongs to another
+    // project and can be re-tuned in any release. Naming them keeps the protection
+    // intentional.
+    expect(codexArgv).toContain(
+      '-c\nshell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]\n',
+    )
+    // …AND `--strict-config`, which is what stops the line above from becoming
     // decoration. Without it the CLI accepts an unrecognised `-c` key and moves on, so
-    // a renamed or dropped field would strip the credential again and the only symptom
-    // would be an anonymous push and a run reporting "nothing was built". With it the
-    // rename is a config error that names the field, before any tokens are spent.
+    // a renamed field would silently stop excluding anything and the leak would return
+    // with no symptom at all. With it the rename is a config error that names the
+    // field, before any tokens are spent.
     expect(codexArgv).toContain('--strict-config\n')
   })
 
@@ -729,11 +833,10 @@ describe('the BRIEF is what codex is asked to build', () => {
       expect(ask('shell_environment_policy.no_such_field_for_this_test=true')).toContain(
         'unknown configuration field',
       )
-      // …and the fields the wrapper actually passes are not refused.
-      const real = ask(
-        'shell_environment_policy.inherit=all',
-        'shell_environment_policy.ignore_default_excludes=true',
-      )
+      // …and the field the wrapper actually passes is not refused. Passed as the same
+      // single `-c` string the wrapper builds, so the LIST SYNTAX is under test too:
+      // a value the CLI cannot parse fails here rather than aborting every build.
+      const real = ask('shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]')
       expect(real).not.toContain('unknown configuration field')
       // It really did get past config loading and stop where we expected, so the
       // assertion above is not green because the CLI failed earlier for some other
@@ -966,30 +1069,6 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
    * the wrapper asked — "it retried" and "it answered first time" are otherwise
    * indistinguishable from the trailer alone.
    */
-  function countingLsRemote(
-    dir: string,
-    spec: { fail?: readonly number[]; hang?: readonly number[] } = {},
-  ): () => number {
-    const counter = join(dir, 'lsremote.count')
-    const shim = join(dir, 'bin', 'git')
-    const clause = (probes: readonly number[], body: string): string =>
-      probes.length === 0 ? '' : `    case "$n" in ${probes.join('|')}) ${body} ;; esac\n`
-    writeFileSync(
-      shim,
-      `#!/bin/sh
-for a in "$@"; do
-  if [ "$a" = "ls-remote" ]; then
-    n=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)
-    n=$((n + 1))
-    echo "$n" > ${JSON.stringify(counter)}
-${clause(spec.fail ?? [], 'exit 128')}${clause(spec.hang ?? [], 'sleep 120')}  fi
-done
-exec /usr/bin/git "$@"
-`,
-    )
-    chmodSync(shim, 0o755)
-    return () => Number(readFileSync(counter, 'utf8').trim())
-  }
 
   test('a TRANSIENT `git ls-remote` failure does not throw away a build that pushed', () => {
     // THE COST OF GETTING THIS WRONG is the whole build. An unanswered probe empties
@@ -1082,6 +1161,203 @@ exec /usr/bin/git "$@"
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
   })
 
+  test('LOCAL mode does not require a remote baseline — an unreachable origin is not its problem', () => {
+    // THE WEDGE THIS FIXES. The baseline was gated on `has_origin`, which is a question
+    // about the CLONE, not about the RUN. So a LOCAL-mode build in any clone that has
+    // an origin it cannot reach — offline, a stale URL, a non-GitHub remote — hit the
+    // refusal above and exited 3 before codex was ever launched. Every round. The run
+    // could never progress, and the reason named a remote it was never going to push
+    // to. Local mode pushes nothing, so the remote cannot be the source of a commit
+    // this build did not make, and there is nothing for the baseline to protect.
+    const r = pushable()
+    const probes = countingLsRemote(r.dir, { fail: [1, 2, 3] })
+    const built = rerun(r, FAKE_BUILD_NO_DIFF, undefined, 'local')
+    expect(built.status).toBe(0)
+    expect(built.stderr).not.toContain('CODEX_BUILD_NO_REMOTE_BASELINE')
+    // THE BUILD REALLY RAN — `FAKE_BUILD` commits, and the trailer measured its sha.
+    expect(built.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
+    expect(
+      spawnSync('git', ['log', '--oneline', '-1', '--format=%s'], {
+        cwd: r.dir,
+        encoding: 'utf8',
+      }).stdout.trim(),
+    ).toBe('the codex build')
+    // …and it never asked the remote at all, rather than asking and tolerating the
+    // failure. The probe is SKIPPED in local mode, which is why a wedged remote cannot
+    // even cost it the 3×10s the pr-mode retry spends.
+    expect(probes()).toBe(0)
+  })
+
+  test('an ABSENT merge-mode argument is treated as `pr`, the strict side', () => {
+    // The control for the test above, and the one that makes the default safe. A caller
+    // that forgets `$3` must get the run that verifies too much, never the one that
+    // verifies too little — so the same fixture that builds under `local` still DEFERS
+    // when the mode is not passed at all.
+    const r = pushable()
+    countingLsRemote(r.dir, { fail: [1, 2, 3] })
+    const deferred = rerun(r, FAKE_BUILD)
+    expect(deferred.status).toBe(3)
+    expect(deferred.stderr).toContain('CODEX_BUILD_NO_REMOTE_BASELINE')
+  })
+
+  test('an UNRECOGNISED merge-mode argument is treated as `pr` too, not as `local`', () => {
+    // A misspelling must not silently buy the permissive behaviour. `local` is the ONLY
+    // value that relaxes anything; everything else lands on `pr`.
+    const r = pushable()
+    countingLsRemote(r.dir, { fail: [1, 2, 3] })
+    const deferred = rerun(r, FAKE_BUILD, undefined, 'Local')
+    expect(deferred.status).toBe(3)
+    expect(deferred.stderr).toContain('CODEX_BUILD_NO_REMOTE_BASELINE')
+  })
+
+  test('LOCAL mode reports NO PR number, even when one exists for the branch', () => {
+    // `gh pr list` used to run unconditionally, so a local-mode build standing on a
+    // branch that happens to have an open PR reported that PR's number as its own —
+    // where the workflow's contract says local mode reports null. Not a merge hazard
+    // (`trident/merge.ts` routes on the run's own `merge_mode`), but every other field
+    // in this trailer is a measurement and this one would have been a coincidence.
+    //
+    // The mock `gh` here ANSWERS with a number, so a wrapper that still asked would
+    // report `4242` and this would be red — the fixture can produce the failure.
+    const local = run({
+      authed: true,
+      codexLoginExit: 0,
+      ghPr: '4242',
+      mergeMode: 'local',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(local.status).toBe(0)
+    expect(local.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
+    // …and the SAME fixture in pr mode does report it, which is what proves the mock
+    // was answering all along and the empty value above is the mode and not a broken
+    // `gh`.
+    const asPr = run({
+      authed: true,
+      codexLoginExit: 0,
+      ghPr: '4242',
+      mergeMode: 'pr',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(asPr.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('4242')
+  })
+})
+
+describe('codex-build.sh — the push credential is checked BEFORE the tokens are spent', () => {
+  // WHY THIS PRECHECK EXISTS. In pr mode the brief orders the build to `git push` and
+  // reuse its PR, and the run is graded on the PUSHED sha. Nothing in the inner
+  // workflow's process tree is guaranteed to hold a credential that can: the GitHub
+  // token is wired to trident's OUTER loop only (`open/composer.ts` `run_host` over
+  // `github/credential.ts`), and `SPEC.md` records the inner workflow's environment as
+  // verified to contain no `GH_TOKEN` and no `GIT_CONFIG_*`.
+  //
+  // Without the precheck that run still fails — it just fails LATE: a full build runs,
+  // commits, cannot push, and `emit_trailer` measures an empty REMOTE_HEAD, which the
+  // workflow reports as "produced no commitSha — nothing was built" about a build that
+  // built the whole thing. Same failed round, one round earlier, a message that names
+  // the actual missing piece, and no tokens.
+
+  test('pr mode with an https origin and NO credential DEFERS before launching codex', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      origin: true,
+      pushUrl: 'https://github.invalid/o/r.git',
+      mergeMode: 'pr',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
+    // AND THE BUILD NEVER RAN — which is the entire value of checking here rather than
+    // discovering it afterwards. `FAKE_BUILD` commits; the repo is where it was.
+    expect(r.head).toBe(r.baseHead)
+  })
+
+  test('…and the SAME fixture with a credential helper builds — the probe reads the answer', () => {
+    // THE POSITIVE CONTROL, and it is what makes the refusal above mean something. The
+    // two fixtures differ in exactly one thing: whether a `credential.helper` answers.
+    // Without this, a probe that could never succeed would produce the same red as a
+    // probe that correctly found nothing.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      origin: true,
+      pushUrl: 'https://github.invalid/o/r.git',
+      credentialHelper: true,
+      mergeMode: 'pr',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
+    expect(r.status).toBe(0)
+    expect(r.head).not.toBe(r.baseHead)
+  })
+
+  test('LOCAL mode never pushes, so a missing credential is not a defect in it', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      origin: true,
+      pushUrl: 'https://github.invalid/o/r.git',
+      mergeMode: 'local',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
+    expect(r.status).toBe(0)
+    expect(r.head).not.toBe(r.baseHead)
+  })
+
+  test('an ssh remote is SKIPPED, not failed — a key authenticates it, not a helper', () => {
+    // Refusing these would break every install that pushes over ssh in order to protect
+    // the ones that push over https. `git credential fill` is never consulted for an
+    // ssh remote, so there is nothing here the probe could measure.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      origin: true,
+      pushUrl: 'git@github.invalid:o/r.git',
+      mergeMode: 'pr',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
+    expect(r.status).toBe(0)
+  })
+
+  test('a filesystem origin is skipped too — the local-bare fixture must keep building', () => {
+    // The `origin: true` fixture every other remote-probe test in this file uses is a
+    // local bare path. A precheck that failed those would turn this whole suite red for
+    // a reason that has nothing to do with credentials.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      origin: true,
+      mergeMode: 'pr',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.stderr).not.toContain('CODEX_BUILD_NO_PUSH_CREDENTIAL')
+    expect(r.status).toBe(0)
+  })
+
+  test('the probe never writes the secret anywhere the run can leak it', () => {
+    // The helper answers with a recognisable value; it must appear in neither the
+    // wrapper's output nor the trailer. `git credential fill` prints the password on
+    // stdout by construction, so the redirect-and-grep discipline is the only thing
+    // keeping it out of a transcript the operator reads.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      origin: true,
+      pushUrl: 'https://github.invalid/o/r.git',
+      credentialHelper: true,
+      mergeMode: 'pr',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.status).toBe(0)
+    expect(r.stdout).not.toContain('not-a-real-token')
+    expect(r.stderr).not.toContain('not-a-real-token')
+    expect(r.trailerRaw).not.toContain('not-a-real-token')
+  })
+})
+
+describe('the trailer MEASURES the repository — the remote probes', () => {
   test('a probe that ANSWERS is not asked again, however unwelcome the answer', () => {
     // The retry is for an UNANSWERED probe only. A tip that came back and is not our
     // sha is a real finding — a stale branch, a failed push, someone else's commit —

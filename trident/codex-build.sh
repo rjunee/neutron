@@ -39,6 +39,12 @@
 #                                       branch diff when a build committed but never
 #                                       wrote one. Optional; omitted means "no
 #                                       last-resort diff", never a guessed base.
+#   arg $3                              the run's MERGE MODE — `pr` or `local`.
+#                                       Defaults to `pr`, which is the strict side of
+#                                       every check that reads it, so a caller that
+#                                       forgets the argument gets the safe behaviour
+#                                       rather than the permissive one. See THE MERGE
+#                                       MODE DECIDES WHAT MUST BE TRUE below.
 #
 #   out  the codex transcript on stdout; the MEASURED trailer in the trailer file.
 #
@@ -164,72 +170,117 @@
 # pinned to the reviewed commit. This grant makes the codex builder EQUAL to the
 # Claude builder, not more privileged than it.
 #
-# ── AND THE SANDBOX GRANT IS NOT ENOUGH: THE CHILD SHELL NEEDS THE ENVIRONMENT ─
-# `--sandbox danger-full-access` says the child shell MAY reach the network. It says
-# nothing about whether the child shell is handed the credential it needs to get past
-# GitHub, and by default it is not.
-#
+# ── THE CHILD SHELL'S ENVIRONMENT: THE DEFAULT FILTER STAYS ON ───────────────
 # `codex exec` filters the environment it gives the commands the model runs
 # (`shell_environment_policy`). The defaults are `inherit = "core"` — HOME, PATH,
 # SHELL, TMPDIR, LOGNAME and a handful more — plus a default EXCLUDE list of
-# `*KEY*`, `*SECRET*`, `*TOKEN*` applied on top. Verified against the CLI shipped here
-# (`codex-cli 0.147.0`): the field names below are accepted by `--strict-config` and an
-# invented one is refused, and the pattern list is in the binary beside the core set.
+# `*KEY*`, `*SECRET*`, `*TOKEN*` applied on top.
 #
-# That is exactly the wrong filter for this build, because of how the instance's
-# GitHub token is handed to a child process. `github/credential.ts` deliberately writes
-# NOTHING to any config file — no `credential.helper` on disk, no token in the remote
-# URL — and passes the credential through the ENVIRONMENT ALONE, as `GH_TOKEN` plus a
-# github.com-scoped helper in `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` /
-# `GIT_CONFIG_VALUE_0`. Under the default policy `GH_TOKEN` matches `*TOKEN*` and
-# `GIT_CONFIG_KEY_0` matches `*KEY*`, so BOTH are stripped: the build's `git push` and
-# `gh pr create` run unauthenticated, `emit_trailer` then measures an empty
-# REMOTE_HEAD, and the run aborts claiming "nothing was built" about a build that
-# built the whole thing and could not post it.
+# AN EARLIER VERSION OF THIS SCRIPT TURNED BOTH OF THOSE OFF
+# (`inherit=all` + `ignore_default_excludes=true`) to deliver `GH_TOKEN` and
+# `GIT_CONFIG_KEY_0` to the build's `git push`. THE PREMISE WAS FALSE and the grant was
+# removed. Two separate things were wrong with it:
 #
-#   -c shell_environment_policy.inherit=all
-#   -c shell_environment_policy.ignore_default_excludes=true
+#   • IT DELIVERED NOTHING. The GitHub credential is wired to the OUTER loop only
+#     (`open/composer.ts` composes `run_host: makeLazyCredentialedHostRunner(…)` over
+#     `githubProcessEnv(…)` from `github/credential.ts`). The INNER workflow — which is
+#     what launches this script, by way of a bridge agent's shell — never receives it.
+#     `SPEC.md` records this as verified live on the fire REPL: `/proc/<pid>/environ`
+#     contains no `GH_TOKEN` and no `GIT_CONFIG_*`. So `inherit=all` widened the filter
+#     over a variable that was not there to inherit, and the push stayed anonymous.
+#   • IT EXPOSED THE ONE CREDENTIAL THIS WHOLE LANE EXISTS TO PROTECT. That REPL's env
+#     is where the owner's Anthropic credential lives: `gateway/wiring/build-import-
+#     substrate.ts` sets `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` per spawn
+#     (`runtime/adapters/claude-code/index.ts` documents the field). Both match the
+#     default `*TOKEN*`/`*KEY*` patterns, so clearing the excludes handed the Anthropic
+#     quota — the thing the owner moved this phase off Anthropic to conserve — to a
+#     GPT-driven `danger-full-access` shell. Paying for a credential leak with a
+#     credential leak, and getting neither.
 #
-# Both are required and neither is sufficient alone: `inherit=all` without the second
-# still drops the two credential variables by pattern, and clearing the excludes
-# without the first never sees them because `core` did not carry them in.
+# So the defaults stay on, and on top of them:
 #
-# AND `--strict-config`, WHICH IS WHAT MAKES THE TWO ABOVE LOAD-BEARING RATHER THAN
+#   -c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]
+#
+# NOT REDUNDANT WITH THE DEFAULTS, and that is the point of writing it out. The default
+# list catches these three families only by SUBSTRING COINCIDENCE — `ANTHROPIC_API_KEY`
+# happens to contain `KEY`, `CLAUDE_CODE_OAUTH_TOKEN` happens to contain `TOKEN`. That
+# list belongs to another project and can be re-tuned in any release, and a variable
+# added tomorrow (`ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`) need not contain either
+# word. Naming the families makes the protection intentional and auditable in one line
+# instead of contingent on someone else's regex. `KIMI_*` is here for the same reason:
+# `trident/kimi-key.ts` puts `KIMI_API_KEY` into this process's environment on purpose,
+# and the review lane's key has no business in the build's shell.
+#
+# AND `--strict-config`, WHICH IS WHAT MAKES THE LINE ABOVE LOAD-BEARING RATHER THAN
 # DECORATIVE. Without it an unrecognised `-c` key is accepted and ignored, so a future
-# CLI that renamed or dropped either field would strip `GH_TOKEN` and `GIT_CONFIG_KEY_0`
-# again and the only symptom would be a build that pushed nothing and a run that said
-# "nothing was built". With it, the same rename is a config error before a token is
-# spent, and it names the field. Measured on the CLI shipped here (`codex-cli 0.147.0`):
-# `codex exec --strict-config -c shell_environment_policy.<invented>=true` refuses with
-# `unknown configuration field`, while `inherit`, `ignore_default_excludes`, `exclude`,
-# `set` and `include_only` are all accepted — the refusal proves the check can fail on
-# this exact input shape, which is what makes the acceptances mean something.
+# CLI that renamed the field would silently stop excluding anything and the leak would
+# come back with no symptom at all. With it, the same rename is a config error before a
+# token is spent, and it names the field. Measured on the CLI shipped here
+# (`codex-cli 0.147.0`): `codex exec --strict-config -c
+# shell_environment_policy.<invented>=true` refuses with `unknown configuration field`,
+# while `exclude`, `inherit`, `ignore_default_excludes`, `set` and `include_only` are
+# all accepted — the refusal proves the check can fail on this exact input shape, which
+# is what makes the acceptance mean something.
 #
-# ── WHAT THIS DOES WIDEN, STATED PLAINLY ─────────────────────────────────────
-# `inherit=all` with the default excludes off is not a narrow grant and this header will
-# not pretend otherwise. The child shell sees EVERY variable the wrapper was given,
-# which on the gateway includes other providers' credentials — the review lane's
-# `KIMI_API_KEY`, for one, which `trident/kimi-key.ts` writes into this process's
-# environment on purpose so it never has to appear in prompt text, and which the default
-# `*KEY*` exclude would otherwise have stripped here.
+# The metered `OPENAI_API_KEY` is handled separately and earlier: it is `unset` from
+# this script's own environment before `codex` is launched at all (see the billing
+# contract above), so it is not in the set being filtered.
 #
-# Two things are true about that and both belong on the record:
+# ── SO HOW DOES THE BUILD PUSH? IT IS ASKED WHETHER IT CAN, FIRST ────────────
+# Removing the grant does not create the push problem; it stops hiding it. In `pr` mode
+# the Forge contract orders the build to `git push` and reuse its PR, and nothing in
+# this process tree is guaranteed to hold a credential that can. `SPEC.md` carries the
+# owner-directed fix for that — the build agent should not hold a credential at all, it
+# should ask the HOST to push — and that is a change to the workflow's shape, not to
+# this wrapper.
 #
-#   • It is NOT a widening relative to the builder it replaces. The Claude builder is a
-#     child of this same process and sees this same environment; a codex build that saw
-#     less would be a different security posture for the same job, not a safer one, and
-#     the difference would show up as builds that fail at their last step.
-#   • It COULD be narrowed. `shell_environment_policy.include_only` is a real field on
-#     this CLI (verified above) and an allowlist of the core set plus the GitHub
-#     variables would express the actual need. It is not used here because an allowlist
-#     fails by OMISSION: every tool a build might reach for — a package manager's
-#     registry token, a proxy variable, a language runtime's home — is broken by being
-#     forgotten, silently and only sometimes. That trade is worth revisiting with a
-#     measured list of what a real build touches; it is not worth guessing at.
+# What this wrapper owes the run in the meantime is HONESTY ABOUT THE OUTCOME BEFORE IT
+# SPENDS THE TOKENS. `push_credential_ok` below asks git itself — `git credential fill`
+# against the push remote's host, which consults exactly the helpers a real `git push`
+# would consult — and when no credential answers, the run is DEFERRED (exit 3) with a
+# message naming the missing piece. The alternative is what used to happen: a full
+# build runs, commits, fails to push, and `emit_trailer` measures an empty REMOTE_HEAD,
+# which the workflow reports as "produced no commitSha — nothing was built" about a
+# build that built the whole thing. Same failed run, one round earlier, a truthful
+# message, and no tokens.
 #
-# The one secret that must not reach the build — the metered `OPENAI_API_KEY` — is
-# `unset` from this script's own environment before `codex` is launched at all (see the
-# billing contract above), so it is not in the set being inherited.
+# THE PROBE MEASURES CAPABILITY, IT DOES NOT ASSUME A MECHANISM. It does not test for
+# `GH_TOKEN`: any configured helper that answers for that host — a store file, an
+# osxkeychain, the env-injected helper if a future change does thread it through — is a
+# credential a push can use, and the probe accepts all of them. An `ssh://`/`git@`
+# remote is skipped rather than failed, because it authenticates with a key and never
+# consults a credential helper at all; failing those would break every install that
+# pushes over ssh to protect the ones that push over https.
+#
+# ── THE MERGE MODE DECIDES WHAT MUST BE TRUE ─────────────────────────────────
+# `pr` and `local` are not the same build with a different ending, and three checks
+# here have to know which one they are in. Before arg $3 existed they all behaved as if
+# every run were a `pr` run, keyed off "does an `origin` exist" — which is a question
+# about the CLONE, not about the RUN:
+#
+#   • THE REMOTE BASELINE (the third pre-existing tip). In `pr` mode it is mandatory:
+#     without it a re-entry can report the previous round's remote-only commit as its
+#     own. In `local` mode nothing is ever pushed, so the remote cannot be the source of
+#     a commit this build did not make, and the baseline is not needed. Keyed on
+#     `has_origin` alone, ANY local-mode clone that has an origin it cannot reach —
+#     offline, a non-GitHub origin, a stale URL — hard-DEFERRED at exit 3 before codex
+#     launched, every round, forever. The run could never make progress and the reason
+#     named a remote it was never going to use.
+#   • THE PUSH-CREDENTIAL PROBE. Same argument: a `local` build never pushes, so a
+#     missing push credential is not a defect in it.
+#   • THE PR NUMBER. `gh pr list` ran unconditionally, so a local-mode build standing on
+#     a branch that happens to have an open PR reported that PR's number — where the
+#     contract (`trident/inner-workflow.mjs`) says local mode reports null. Not a merge
+#     hazard (`trident/merge.ts` routes on the run's own `merge_mode`, not on this), but
+#     it is a fabricated fact in a trailer whose entire purpose is measured ones.
+#   • THE PUSHED-SHA WITNESS. Same again: a local build pushes nothing and the bridge
+#     reads HEAD rather than REMOTE_HEAD, so the probe can only ever confirm "not
+#     pushed" about a commit that was never meant to be — while costing up to 3×10s
+#     against a remote the run does not use, on the failure path too.
+#
+# `pr` is the default for an absent or unrecognised arg $3: it is the strict side of all
+# three, so the failure mode of a caller that forgets is a run that checks too much,
+# never one that checks too little.
 #
 # Usage (from inside the build worktree):
 #   CODEX_HOME=<dir> NEUTRON_CODEX_BUILD_BRIEF_FILE=<file> \
@@ -255,10 +306,12 @@
 #   11  NOT_CONNECTED — codex CLI not on PATH.
 #   3   DEFERRED      — configured but the build could not be STARTED (no perl, auth
 #                       precheck failed, no brief, a brief that did not survive the
-#                       trip intact, nowhere writable to put the trailer, or a remote
-#                       baseline that could not be measured). Every one of these is
-#                       decided BEFORE codex is launched, so a DEFERRED build costs a
-#                       round and no tokens.
+#                       trip intact, nowhere writable to put the trailer, a remote
+#                       baseline that could not be measured, or — in `pr` mode — no
+#                       credential that could authenticate the push the build is about
+#                       to be ordered to make). Every one of these is decided BEFORE
+#                       codex is launched, so a DEFERRED build costs a round and no
+#                       tokens.
 #   5   DEFERRED      — codex ran and exited non-zero.
 # Unlike the REVIEW lane, NOT_CONNECTED is not a graceful degrade here: a build that
 # did not happen is not a reduced panel, it is no build. The bridge reports it and
@@ -271,6 +324,12 @@ set -uo pipefail
 
 BRANCH="${1:-}"
 BASE_BRANCH="${2:-}"
+# `pr` unless the caller explicitly said `local` — see THE MERGE MODE DECIDES WHAT MUST
+# BE TRUE. Anything else, including an empty or misspelled value, lands on `pr`, which
+# is the strict side of all three checks that read it: a caller that forgets this
+# argument gets a run that verifies too much, never one that verifies too little.
+MERGE_MODE='pr'
+[ "${3:-}" = 'local' ] && MERGE_MODE='local'
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
@@ -374,6 +433,83 @@ has_origin() {
   git config --get remote.origin.url >/dev/null 2>&1
 }
 
+# Is this a `pr`-mode run? See THE MERGE MODE DECIDES WHAT MUST BE TRUE in the header:
+# the remote baseline, the push-credential precheck and the PR probe are all `pr`-only,
+# and keying them on `has_origin` instead is what wedged local-mode runs on any clone
+# whose origin was unreachable.
+is_pr_mode() {
+  [ "$MERGE_MODE" = 'pr' ]
+}
+
+# Can a `git push` to origin actually authenticate? Prints nothing; the STATUS is the
+# answer. See SO HOW DOES THE BUILD PUSH in the header for why this is asked at all.
+#
+# Three outcomes, and two of them are "yes, proceed":
+#
+#   0  a credential answered for the push remote's host          → proceed
+#   0  the remote does not use a credential helper (ssh, local)  → proceed, not our call
+#   1  the remote is http(s) and NOTHING answered                → the push will be
+#                                                                  anonymous
+#
+# `git credential fill` is the probe rather than a test for `GH_TOKEN` because it asks
+# THE SAME MACHINERY A REAL PUSH ASKS: whatever helpers are configured, in their
+# configured order, including ones this script has never heard of. A test for a specific
+# variable would answer a question about a mechanism instead of about the capability,
+# and would fail an install that authenticates some other way.
+#
+# `GIT_TERMINAL_PROMPT=0` so a box with no helper fails immediately instead of blocking
+# on a username prompt nobody is there to answer, and `bounded` on top of that because a
+# credential helper can reach the network (a keychain unlock, a token refresh) and this
+# runs before the build gets to spend anything.
+#
+# THE SECRET IS NEVER PRINTED, LOGGED OR STORED. The output goes to a file that is read
+# once with `grep -q` for the PRESENCE of a non-empty `password=` line and deleted in the
+# same breath; no branch here interpolates it, and the caller only ever sees the status.
+push_credential_ok() {
+  local url host proto out req rc
+  url="$(git remote get-url --push origin 2>/dev/null || true)"
+  # No push URL at all is not this function's failure to report — `has_origin` and the
+  # caller's `is_pr_mode` guard decide whether an origin was required.
+  [ -n "$url" ] || return 0
+  case "$url" in
+    https://*)
+      proto='https'
+      host="${url#https://}"
+      ;;
+    http://*)
+      proto='http'
+      host="${url#http://}"
+      ;;
+    # ssh://…, git@host:…, /a/local/path, file://… — a key or the filesystem
+    # authenticates these and no credential helper is ever consulted, so there is
+    # nothing here to measure and refusing them would break every install that pushes
+    # over ssh in order to protect the ones that push over https.
+    *) return 0 ;;
+  esac
+  # Strip any `user@` prefix and everything from the first `/` — what is left is the
+  # host (with its port, if any), which is the granularity git scopes a credential to.
+  host="${host#*@}"
+  host="${host%%/*}"
+  [ -n "$host" ] || return 0
+  out="${TMPDIR:-/tmp}/trident-codex-build-cred.$$"
+  req="${TMPDIR:-/tmp}/trident-codex-build-credreq.$$"
+  printf 'protocol=%s\nhost=%s\n\n' "$proto" "$host" > "$req"
+  # NOT `bounded`, and deliberately: that helper hard-codes `</dev/null` (a network tool
+  # that decides to prompt would otherwise wait on stdin forever), and `git credential
+  # fill` reads its REQUEST from stdin. Passing it /dev/null would ask about no host at
+  # all. Same alarm, same redirect-to-a-file discipline, different stdin — through a
+  # FILE rather than a pipe, for the reason `bounded`'s own comment gives: `$(…)` and a
+  # pipe both return when the fd closes, not when the process exits.
+  perl -e 'my $s = shift; alarm $s; exec @ARGV or exit 1' 10 \
+    env GIT_TERMINAL_PROMPT=0 git credential fill <"$req" >"$out" 2>/dev/null
+  # `password=` followed by at least one character. An empty `password=` line is a
+  # helper that answered without a secret, which authenticates nothing.
+  grep -q '^password=.' "$out" 2>/dev/null
+  rc=$?
+  rm -f "$out" "$req"
+  return "$rc"
+}
+
 # Was this sha already on the branch (or under HEAD) before codex ran?
 # Exact whole-line match against the captured set — a substring test would let an
 # abbreviation match a full sha.
@@ -406,7 +542,11 @@ emit_trailer() {
     head=''
   fi
   remote_head=''
-  if [ -n "$head" ] && [ -n "$BRANCH" ] && has_origin; then
+  # `pr` MODE ONLY, like the baseline and the PR probe. In local mode nothing is ever
+  # pushed and the bridge reads HEAD rather than REMOTE_HEAD, so this probe can only
+  # ever confirm "not pushed" about a commit that was never meant to be — at a cost of
+  # up to 3×10s against a remote the run does not use, on the failure path included.
+  if is_pr_mode && [ -n "$head" ] && [ -n "$BRANCH" ] && has_origin; then
     # THE REMOTE IS A WITNESS, NOT A SOURCE — this answers "was OUR sha pushed?", and
     # any other answer is discarded (header: the `reviewedHead` rule).
     #
@@ -430,7 +570,12 @@ emit_trailer() {
     [ "$(remote_tip "$BRANCH" 3)" = "$head" ] && remote_head="$head"
   fi
   pr_number=''
-  if [ -n "$BRANCH" ] && command -v gh >/dev/null 2>&1; then
+  # `pr` MODE ONLY. A local-mode run never opens a PR, and the workflow's own contract
+  # says it reports null — but this probe used to run unconditionally, so a local build
+  # standing on a branch that happened to have an open PR (a re-run of a branch already
+  # pushed, say) reported that unrelated PR's number as its own. Every other field here
+  # is a measurement; this one would have been a coincidence.
+  if is_pr_mode && [ -n "$BRANCH" ] && command -v gh >/dev/null 2>&1; then
     # BOUNDED, exactly like the `git ls-remote` probes: `gh` talks to the network and
     # to a credential helper, either of which can block forever, and this function runs
     # on the FAILURE path too — an unbounded call here does not merely lose the PR
@@ -604,7 +749,7 @@ for _pre in \
   [ -n "$_pre" ] && PRE_EXISTING_HEADS="${PRE_EXISTING_HEADS}${_pre}
 "
 done
-if [ -n "$BRANCH" ] && has_origin; then
+if is_pr_mode && [ -n "$BRANCH" ] && has_origin; then
   # RETRIED 3× — THE SAME AS THE WITNESS PROBE, and the symmetry is the whole point.
   # This probe used to ask once while the post-build witness asked three times, and a
   # blip long enough to defeat one attempt but not three resolves that asymmetry into
@@ -626,6 +771,21 @@ if [ -n "$BRANCH" ] && has_origin; then
   fi
   [ -n "$_pre" ] && PRE_EXISTING_HEADS="${PRE_EXISTING_HEADS}${_pre}
 "
+fi
+
+# ── DEFERRED: pr mode is about to order a push nothing here can authenticate ───
+# See SO HOW DOES THE BUILD PUSH in the header. In `pr` mode the brief's steps 4 and 5
+# are `git push` and reuse-the-PR, and the build is graded on the PUSHED sha — so a run
+# with no usable credential has already failed, it just does not know it yet. Asking now
+# turns a full build that ends in "produced no commitSha — nothing was built" into a
+# free, named deferral one round earlier.
+#
+# Ordered AFTER the baseline probe and BEFORE the launch, with the rest of the pre-launch
+# refusals: everything above this line costs a round and no tokens, and this belongs on
+# that side of the line.
+if is_pr_mode && has_origin && ! push_credential_ok; then
+  echo "CODEX_BUILD_NO_PUSH_CREDENTIAL: 'git credential fill' found no credential for the push remote's host, so the 'git push' this build is about to be ordered to make would be anonymous and would fail. DEFERRED before any tokens were spent. The GitHub credential is wired to trident's OUTER loop only (open/composer.ts run_host); the inner workflow that launched this build does not receive it. Connect GitHub, configure a credential helper for the push host, or run this build in local merge-mode." >&2
+  exit 3
 fi
 
 # CLEAR THE DIFF FILE BEFORE THE BUILD, never after. `emit_trailer` reports this path
@@ -656,20 +816,21 @@ if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
   exit 5
 fi
 
-# HAND THE CHILD SHELL THE ENVIRONMENT IT WAS GIVEN — see the header. Without both of
-# these, `codex exec`'s default `shell_environment_policy` (inherit=core, then exclude
-# `*KEY*`/`*SECRET*`/`*TOKEN*`) strips `GH_TOKEN` and `GIT_CONFIG_KEY_0`, which is the
-# ONLY channel `github/credential.ts` uses to authenticate a push. The build then
-# commits, fails to push, and the run reports that nothing was built.
+# KEEP `codex exec`'s DEFAULT ENVIRONMENT FILTER (inherit=core, then exclude
+# `*KEY*`/`*SECRET*`/`*TOKEN*`) AND NAME THE FAMILIES THAT MUST NEVER CROSS — see THE
+# CHILD SHELL'S ENVIRONMENT in the header. The owner's Anthropic credential is in this
+# process's environment (`gateway/wiring/build-import-substrate.ts` sets
+# `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` per REPL spawn), and handing it to a
+# GPT-driven `danger-full-access` shell would spend the very quota this route exists to
+# protect. The defaults already catch these three by substring; this line makes it
+# intentional rather than contingent on another project's pattern list.
 #
 # `--strict-config` IS PART OF THE SAME FIX, not a tidy-up beside it. Without it the CLI
-# accepts an unrecognised `-c` key and moves on, so the day either field is renamed the
-# two lines below become decoration: the credential is stripped, the push is anonymous,
-# and the run reports "nothing was built" about a build that built everything. With it a
-# renamed field is a config error that names itself, raised before any tokens are spent.
+# accepts an unrecognised `-c` key and moves on, so the day the field is renamed the line
+# below becomes decoration and the leak returns with no symptom. With it a renamed field
+# is a config error that names itself, raised before any tokens are spent.
 set -- --strict-config \
-  -c shell_environment_policy.inherit=all \
-  -c shell_environment_policy.ignore_default_excludes=true
+  -c 'shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]'
 
 # PIN THE BUILD MODEL, for the same reason the review lane pins its own: unpinned,
 # `codex exec` takes the CLI's own default, which OpenAI moved to the cheapest 5.6
@@ -684,9 +845,12 @@ if [ -n "$BUILD_MODEL" ]; then
 fi
 
 # `--sandbox danger-full-access` — see the header for what each narrower policy
-# cannot do. `--cd .` keeps codex rooted in THIS worktree (the bridge agent's
+# cannot do. `--cd "$WORKTREE"` keeps codex rooted in THIS worktree (the bridge agent's
 # isolated checkout) rather than wherever the CLI would otherwise infer a workspace
-# root, which on a git worktree is not the directory we are standing in.
+# root, which on a git worktree is not the directory we are standing in. The RESOLVED
+# path, captured as `pwd` at the top, not a bare `.`: equivalent today, but it is what
+# the trailer reports as `NEUTRON_CODEX_BUILD_WORKTREE` and pinning the same value in
+# both places is what stops them drifting.
 if <"$BRIEF_FILE" codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
   emit_trailer
   exit 0

@@ -2841,29 +2841,46 @@ generation"), mobile `app/app/codegen.tsx`, both over
   twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
   goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
   that `git push` / `gh pr create` need.
-  - **The child shell also has to KEEP the credentials it was handed.** The sandbox
-    grant says the shell MAY reach the network; it says nothing about whether the shell
-    is given the credential to get past GitHub. `codex exec` filters the environment it
-    hands the model's commands (`shell_environment_policy`), defaulting to
-    `inherit = "core"` plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*` —
-    and the instance's GitHub token travels through the ENVIRONMENT AND NOWHERE ELSE by
-    design (`github/credential.ts` writes no config file and puts no token in a remote
-    URL): `GH_TOKEN`, which matches `*TOKEN*`, plus a github.com-scoped helper in
-    `GIT_CONFIG_KEY_0`, which matches `*KEY*`. Under the defaults both are stripped, the
-    build's push runs unauthenticated, and the run reports "nothing was built" about a
-    build that built everything. So the wrapper passes
-    `-c shell_environment_policy.inherit=all -c
-    shell_environment_policy.ignore_default_excludes=true`; neither is sufficient alone.
-    It also passes `--strict-config`, which is what stops those two from becoming
+  - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
+    MAY reach the network; it says nothing about what environment it is handed.
+    `codex exec` filters that (`shell_environment_policy`), defaulting to
+    `inherit = "core"` plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*`.
+    An earlier version of the wrapper turned both off (`inherit=all` +
+    `ignore_default_excludes=true`) to deliver `GH_TOKEN` and `GIT_CONFIG_KEY_0` to the
+    build's push, and that was wrong twice: the credential is wired to trident's OUTER
+    loop only (`open/composer.ts` `run_host`), so the inner workflow that launches the
+    wrapper never had it to inherit — `SPEC.md` records `/proc/<pid>/environ` as
+    verified free of `GH_TOKEN` and `GIT_CONFIG_*` — while clearing the excludes DID
+    expose the owner's Anthropic credential, which
+    `gateway/wiring/build-import-substrate.ts` puts in that same REPL environment as
+    `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It handed the quota this route
+    exists to conserve to a GPT-driven `danger-full-access` shell, and bought an
+    anonymous push with it. So the defaults stay, plus
+    `-c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]` — not
+    redundant, because the defaults catch those only by substring coincidence in
+    another project's pattern list. `--strict-config` is what stops that line becoming
     decoration: without it an unrecognised `-c` key is accepted and ignored, so a
-    renamed field would strip the credential again and the only symptom would be a run
-    reporting "nothing was built". This is a WIDE grant and the docs say so: the child
-    sees every variable the wrapper was given, including other providers' credentials
-    such as the review lane's `KIMI_API_KEY`. It is not wider than the Claude builder,
-    which is a child of the same process and sees the same environment, and
-    `shell_environment_policy.include_only` would express the narrower need — it is not
-    used yet because an allowlist fails by omission. The metered `OPENAI_API_KEY` is
-    `unset` before `codex` is launched, so it is not in the inherited set.
+    renamed field would silently stop excluding anything. The metered `OPENAI_API_KEY`
+    is `unset` before `codex` is launched, separately and earlier.
+  - **The push credential is checked BEFORE the tokens are spent.** In `pr` mode the
+    contract orders a push, and nothing in the inner workflow's process tree is
+    guaranteed to hold a credential that can make one. `SPEC.md` carries the
+    owner-directed fix (the build agent should not hold a credential at all — it asks
+    the HOST to push), which is a change to the workflow's shape. Until then the
+    wrapper refuses honestly and early: `git credential fill` against the push remote's
+    host — the same helpers a real push consults — and a DEFERRED exit 3 naming the
+    missing piece when nothing answers. The alternative is the same failed run one
+    round later, after a full build, reported as "nothing was built". ssh and
+    filesystem remotes are skipped rather than failed (a key authenticates those, never
+    a helper), and the secret is never printed, logged or stored.
+  - **The merge mode is an ARGUMENT, not an inference.** Four checks are pr-only — the
+    remote baseline, the push-credential probe, the pushed-sha witness and the
+    `gh pr list` probe — and the wrapper is handed the run's mode as `$3`. Keyed
+    instead on "does an `origin` exist", which asks about the CLONE and not the RUN,
+    any local-mode build in a clone with an unreachable origin hard-DEFERRED before
+    codex launched, every round; and a local build standing on a branch that happened
+    to have an open PR reported that unrelated PR's number where the contract says
+    null. An absent or unrecognised `$3` means `pr`, the strict side of all four.
   - **The downstream contract is MEASURED, not narrated.** `codex exec` does accept
     `--output-schema`, but a schema-shaped answer is still the model reporting on
     itself and the failing case is the build that believes it committed. So after it

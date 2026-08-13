@@ -77,6 +77,19 @@ Five things make the measurement honest rather than merely measured:
   `inner-workflow.mjs` compares it and stops the run with that name rather than letting
   an empty sha surface two hundred lines later as an unexplained "produced no
   commitSha".
+- **Every review round is gated on a diff, not just round 1.** Round 1 refuses to open
+  the panel when the build reports no `commitSha` or no `diffFile` — five reviewers paid
+  to APPROVE nothing is the worst outcome available. Fix rounds had no such check, and
+  the two rounds are not symmetric in a way that made that safe: the wrapper DELETES the
+  diff path before every launch so a stale diff can never be reported as this round's,
+  and regenerates one only when the build committed. A fix round whose regeneration
+  produced nothing therefore left the path absent, and the loop — which captured the
+  path once in round 1 — dispatched the panel at it anyway. The fix loop now applies the
+  same refusal, and reviews the round's OWN reported path rather than round 1's, since
+  reusing round 1's is precisely how an absent file goes unnoticed. It is its own
+  finding rather than a reworded "did not land": `roundLanded` has just confirmed the
+  commit IS on the branch, so nothing needs recovering — what is missing is the artefact
+  the panel reads.
 - **Every remote probe is wall-clock bounded THROUGH A FILE — all four of them.**
   `emit_trailer` runs on the FAILURE path too, so an unbounded call there does not
   merely lose a field: it hangs the build phase forever and the DEFERRED report never
@@ -188,52 +201,106 @@ Claude builder, which already has those powers, and the blast radius is bounded 
 same way: an isolated worktree on its own branch, a panel that reads the diff, a merge
 pinned to the reviewed commit.
 
-**…and the sandbox grant alone would still have pushed anonymously.** `--sandbox
-danger-full-access` says the child shell MAY reach the network; it says nothing about
-whether that shell is handed the credential it needs to get past GitHub, and by default
-it is not. `codex exec` filters the environment it gives the commands the model runs
+**…and the environment filter STAYS ON — the grant that used to be here was wrong
+twice over.** `--sandbox danger-full-access` says the child shell MAY reach the network;
+it says nothing about what environment that shell is handed. `codex exec` filters it
 (`shell_environment_policy`), defaulting to `inherit = "core"` plus a default exclude
-list of `*KEY*`, `*SECRET*`, `*TOKEN*`. The instance's GitHub token reaches a child
-process through the ENVIRONMENT AND NOWHERE ELSE, deliberately — `github/credential.ts`
-writes no config file and puts no token in a remote URL, passing `GH_TOKEN` plus a
-github.com-scoped helper in `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`.
-`GH_TOKEN` matches `*TOKEN*`; `GIT_CONFIG_KEY_0` matches `*KEY*`. Under the defaults
-both are stripped, so the build's `git push` and `gh pr create` run unauthenticated,
-the trailer measures an empty `REMOTE_HEAD`, and the run aborts saying "nothing was
-built" about a build that built the whole thing and could not post it. The wrapper
-therefore passes `-c shell_environment_policy.inherit=all -c
-shell_environment_policy.ignore_default_excludes=true`. Both are required and neither
-is sufficient alone: `inherit=all` still drops the two by pattern, and clearing the
-excludes without it never sees them because `core` did not carry them in.
+list of `*KEY*`, `*SECRET*`, `*TOKEN*`. An earlier version of the wrapper turned both
+off — `-c shell_environment_policy.inherit=all -c
+shell_environment_policy.ignore_default_excludes=true` — to deliver `GH_TOKEN` and
+`GIT_CONFIG_KEY_0` to the build's `git push`, since `github/credential.ts` passes the
+GitHub credential through the environment and nowhere else. Both halves of that were
+wrong:
+
+- **It delivered nothing.** That credential is wired to trident's OUTER loop only
+  (`open/composer.ts` composes `run_host: makeLazyCredentialedHostRunner(…)` over
+  `githubProcessEnv(…)`). The INNER workflow — which is what launches the wrapper, by
+  way of a bridge agent's shell — never receives it. `SPEC.md` records this as verified
+  live on the fire REPL: `/proc/<pid>/environ` contains no `GH_TOKEN` and no
+  `GIT_CONFIG_*`. So `inherit=all` widened the filter over a variable that was not there
+  to inherit, and the push stayed anonymous.
+- **It exposed the one credential this route exists to protect.** That REPL's
+  environment is where the owner's Anthropic credential lives:
+  `gateway/wiring/build-import-substrate.ts` sets `CLAUDE_CODE_OAUTH_TOKEN` or
+  `ANTHROPIC_API_KEY` per spawn. Both match the default `*TOKEN*`/`*KEY*` patterns, so
+  clearing the excludes handed the Anthropic quota — the thing the owner moved the build
+  off Anthropic to conserve — to a GPT-driven `danger-full-access` shell.
+
+So the defaults stay on, and the wrapper adds `-c
+shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]` on top. That is
+not redundant with the defaults, and writing it out is the point: the default list
+catches these families only by substring coincidence (`ANTHROPIC_API_KEY` happens to
+contain `KEY`), it belongs to another project, and it can be re-tuned in any release —
+while a variable added tomorrow need not contain either word. Naming the families makes
+the protection intentional and auditable in one line. `KIMI_*` is there for the same
+reason: `trident/kimi-key.ts` puts `KIMI_API_KEY` into the process environment on
+purpose, and the review lane's key has no business in the build's shell. The metered
+`OPENAI_API_KEY` is handled earlier and separately — `unset` from the wrapper's own
+environment before `codex` is launched at all.
 
 It also passes `--strict-config`, and that is part of the same fix rather than a
-tidy-up beside it: without the flag an unrecognised `-c` key is accepted and ignored,
-so the day either field is renamed the two overrides become decoration — the credential
-is stripped again and the only symptom is a run that says "nothing was built". With it,
-a renamed field is a config error that names itself before a token is spent. Measured
-against the CLI in use (`codex-cli 0.147.0`): an invented `shell_environment_policy`
-field is refused with `unknown configuration field`, while `inherit`,
-`ignore_default_excludes`, `exclude`, `set` and `include_only` are all accepted. The
-refusal is the negative control — it proves the check can fail on this input shape,
-which is what makes the acceptances mean anything.
+tidy-up beside it: without the flag an unrecognised `-c` key is accepted and ignored, so
+the day the field is renamed the override becomes decoration — the exclusion silently
+stops applying and the leak returns with no symptom at all. With it, a renamed field is
+a config error that names itself before a token is spent. Measured against the CLI in
+use (`codex-cli 0.147.0`): an invented `shell_environment_policy` field is refused with
+`unknown configuration field`, while `exclude`, `inherit`, `ignore_default_excludes`,
+`set` and `include_only` are all accepted. The refusal is the negative control — it
+proves the check can fail on this input shape, which is what makes the acceptance mean
+anything.
 
-**What that widens, stated plainly.** `inherit=all` with the default excludes off is
-not a narrow grant. The child shell sees every variable the wrapper was given, which on
-the gateway includes other providers' credentials — the review lane's `KIMI_API_KEY`
-among them, which `trident/kimi-key.ts` writes into the process environment on purpose
-so it never has to appear in prompt text, and which the default `*KEY*` exclude would
-otherwise have stripped here. Two things are true about that. It is not a widening
-relative to the builder it replaces: the Claude builder is a child of the same process
-and sees the same environment, so a codex build that saw less would be a different
-posture for the same job rather than a safer one. And it could be narrowed:
-`shell_environment_policy.include_only` is a real field on this CLI (verified above),
-and an allowlist of the core set plus the GitHub variables would express the actual
-need. It is not used yet because an allowlist fails by omission — every tool a build
-might reach for is broken by being forgotten, silently and only sometimes — and that
-trade is worth revisiting with a measured list of what a real build touches rather than
-a guess. The one secret that must not reach the build, the metered `OPENAI_API_KEY`, is
-`unset` from the wrapper's own environment before `codex` is launched, so it is not in
-the inherited set at all.
+**So how does the build push? It is asked whether it can, first.** Removing the grant
+does not create the push problem; it stops hiding it. In `pr` mode the Forge contract
+orders the build to `git push` and reuse its PR, and nothing in the inner workflow's
+process tree is guaranteed to hold a credential that can. `SPEC.md` carries the
+owner-directed fix — a build agent should not hold a credential at all, it should ask
+the HOST to push, which is a change to the workflow's shape rather than to this wrapper.
+
+What the wrapper owes the run in the meantime is honesty about the outcome BEFORE it
+spends the tokens. A pre-launch probe (`push_credential_ok`) asks git itself — `git
+credential fill` against the push remote's host, which consults exactly the helpers a
+real `git push` would consult — and when nothing answers, the run is DEFERRED (exit 3)
+with a message naming the missing piece. Without it that run still fails, just later: a
+full build runs, commits, cannot push, and the trailer measures an empty `REMOTE_HEAD`,
+which the workflow reports as "produced no commitSha — nothing was built" about a build
+that built the whole thing. Same failed round, one round earlier, a truthful message,
+and no tokens.
+
+The probe measures CAPABILITY and does not assume a mechanism. It does not test for
+`GH_TOKEN`: any configured helper that answers for that host — a store file, a keychain,
+the env-injected helper if a later change does thread it through — is a credential a
+push can use, and the probe accepts all of them. An ssh or filesystem remote is skipped
+rather than failed, because a key or the filesystem authenticates those and no
+credential helper is ever consulted; failing them would break every install that pushes
+over ssh in order to protect the ones that push over https. The secret is never printed,
+logged or stored: the probe's output goes to a file that is read once with `grep -q` for
+the presence of a non-empty `password=` line, and deleted in the same breath.
+
+**The merge mode decides what must be true.** `pr` and `local` are not the same build
+with a different ending, and four of the wrapper's checks have to know which one they
+are in. They are handed the run's mode as argument `$3` rather than inferring it; before
+that argument existed they all keyed off "does an `origin` exist", which is a question
+about the CLONE and not about the RUN:
+
+- **The remote baseline** (the third pre-existing tip) is mandatory in `pr` mode —
+  without it a re-entry can report the previous round's remote-only commit as its own.
+  A `local` run pushes nothing, so the remote cannot be the source of a commit it did
+  not make. Keyed on `has_origin` alone, any local-mode clone with an origin it could
+  not reach — offline, a stale URL, a non-GitHub origin — hard-DEFERRED at exit 3 before
+  codex launched, every round, forever.
+- **The push-credential probe**, for the same reason: a local build never pushes.
+- **The pushed-sha witness**, likewise — a local build's `REMOTE_HEAD` is not even read
+  by the bridge, so the probe could only confirm "not pushed" about a commit that was
+  never meant to be, at a cost of up to 3×10s against a remote the run does not use.
+- **The PR number.** `gh pr list` ran unconditionally, so a local-mode build standing on
+  a branch that happened to have an open PR reported that PR's number — where the
+  contract says local mode reports null. Not a merge hazard (`trident/merge.ts` routes
+  on the run's own `merge_mode`), but a fabricated fact in a trailer whose whole purpose
+  is measured ones.
+
+An absent or unrecognised `$3` is treated as `pr`, the strict side of all four, so a
+caller that forgets gets a run that verifies too much rather than one that verifies too
+little.
 
 **The pushed-sha probe retries, because losing it discards the whole build.** The
 witness `git ls-remote` in `emit_trailer` is the most consequential call in the
