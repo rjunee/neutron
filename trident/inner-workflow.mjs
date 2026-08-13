@@ -947,6 +947,80 @@ function classifyBlock(synthesis, deferredPeers) {
   return codeFindings.length === 0 ? 'infra-only' : 'code'
 }
 
+// A SYNTHESIS WE NEVER GOT IS AN INFRA BLOCK — IT MUST NOT RE-FORGE, AND MUST NOT CRASH.
+//
+// `agent()` returns null when its subagent dies on a terminal API error after
+// retries — which is exactly what a session-limit 429 looks like from in here. So
+// `synthesisRaw` in `reviewAndSynthesize` can be null, and on 2026-08-12
+// `adopt-200-r3` and `adopt-201-r4` both died on `null is not an object
+// (evaluating 'synthesis.verdict')`, recorded only as `checkpoint: "inner-error"`
+// with no verdict at all — a completed Forge build and every review already paid
+// for, discarded, with nothing an operator could act on.
+//
+// THE CRASH IS NO LONGER THE FAILURE; A SILENT RE-FORGE IS. Do not read the
+// paragraph above as a description of today's code. `reviewAndSynthesize` has a
+// single `return`, and it is the object literal `{ ...gated, blockKind: … }` —
+// `{ ...null }` is `{}`, so it now returns an OBJECT even when every gate passed
+// null straight through. What a dead synthesis agent produces today, with green CI
+// and a complete panel, is exactly `{ blockKind: 'code' }`: NO verdict, NO
+// findings. `normalizeVerdict(undefined)` is REQUEST_CHANGES, so nothing merges —
+// but `blockKind` is 'code', so the fix loop re-Forges, and the findings it hands
+// the fix agent are `JSON.stringify(undefined)`, i.e. the literal text `undefined`.
+// A dead reviewer therefore buys a full round of Forge plus four more reviews to
+// fix nothing. That is the live cost this closes.
+//
+// SO THE GUARD KEYS ON THE VERDICT, NOT ON THE OBJECT. A null check would be dead
+// code — the value is never null any more, only verdict-less — which is why this
+// reuses `usableStatus`, the one predicate the lane retry and the completeness gate
+// already share for "did this field actually ANSWER?". Anything that is not a
+// non-empty verdict STRING (absent, null, `42`) is not a review.
+//
+// The replacement is the shape the workflow ALREADY has for "we did not get this
+// review", three lines away in `enforceCrossModelGate`: REQUEST_CHANGES, one
+// `LANE_FINDING_KIND` blocker, `blockKind: 'infra-only'`. It must NEVER read as
+// APPROVE (a review we did not get cannot be treated as one), and 'infra-only'
+// makes the loop STOP instead of editing code to "fix" a 429.
+//
+// It does NOT fire when a gate supplied a real verdict over the dead synthesis:
+// red CI (a genuine code blocker to fix) and a deferred peer (already 'infra-only',
+// and its finding names WHICH seat died) both pass through untouched.
+//
+// Shared and frozen on purpose. Every consumer is read-only — the workflow reads
+// `.verdict`, `.blockKind` and `JSON.stringify(.findings)`, and every gate above
+// SPREADS into a new object rather than mutating — so one instance cannot be
+// scribbled on by one round and read by the next. `Object.freeze` is the assertion
+// of that, not an optimisation: if a future consumer does mutate, it throws in
+// strict mode (this file is an ES module) instead of corrupting the next round.
+const SYNTHESIS_UNAVAILABLE = Object.freeze({
+  verdict: 'REQUEST_CHANGES',
+  blockKind: 'infra-only',
+  // `title`/`evidence` are the finding field names the schema requires and every
+  // other producer here emits (`ciBlockerFindings`, `roundDidNotLandFinding`, the
+  // cross-model gate). A finding spelled any other way renders blank everywhere it
+  // is surfaced, which for a lane failure means the operator is told nothing at all.
+  findings: Object.freeze([
+    Object.freeze({
+      severity: 'blocker',
+      kind: LANE_FINDING_KIND,
+      title: 'LANE — the synthesis reviewer returned no verdict',
+      evidence:
+        'The synthesis agent produced no result: it died on a terminal API error, which is ' +
+        'what a session limit looks like from inside the workflow. The code was therefore ' +
+        'NEVER JUDGED — this says nothing about the diff, and there is nothing here for a ' +
+        'fix round to act on. Re-run the lane once the credential has capacity.',
+    }),
+  ]),
+})
+
+/**
+ * A synthesis that did not answer becomes the infra block, never a crash and never
+ * a code finding. Anything carrying a real verdict is returned UNTOUCHED — the same
+ * object, so a genuine verdict cannot be altered on its way to the loop.
+ */
+function synthesisOrInfraBlock(synthesis) {
+  return usableStatus(synthesis, 'verdict') ? synthesis : SYNTHESIS_UNAVAILABLE
+}
+
 /**
  * DID THE FIX ROUND ACTUALLY LAND? (owner-visible defect, 2026-08-09.)
  *
@@ -1939,7 +2013,7 @@ ${task}${reflectionGuidance}`,
   let reviewedHead = branchHead
 
   // First review + synthesis.
-  let synthesis = await reviewAndSynthesize(diffFile, round, pr)
+  let synthesis = synthesisOrInfraBlock(await reviewAndSynthesize(diffFile, round, pr))
   finalVerdict = normalizeVerdict(synthesis.verdict)
   await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
 
@@ -1994,7 +2068,7 @@ ${task}${reflectionGuidance}`,
     // recording that push as `reviewedHead` would pin the merge to code the
     // upcoming review never sees. Empty → fail-closed, same as round 1.
     reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-    synthesis = await reviewAndSynthesize(diffFile, round, pr)
+    synthesis = synthesisOrInfraBlock(await reviewAndSynthesize(diffFile, round, pr))
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
   }

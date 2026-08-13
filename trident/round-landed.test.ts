@@ -140,12 +140,13 @@ describe('the loop honours the gate', () => {
     // the pre-loop review (`let synthesis = await …`), which of course precedes the
     // probe. The one that must come after is the RE-review inside the fix loop, and
     // an `indexOf` here made this assertion fail on correct code.
-    // Matched on the CALL PREFIX, not the full argument list: the CI gate added a
-    // third parameter and this assertion failed on a change that left the ordering
-    // it checks completely intact. Two source-shape assertions broke that way in one
-    // change, which is the argument for pinning the construct rather than its
-    // spelling.
-    const reReviewAt = SRC.lastIndexOf('synthesis = await reviewAndSynthesize(')
+    // Matched on the CALL ITSELF, not on the assignment that wraps it: the CI gate
+    // added a third parameter, and then the null-synthesis guard wrapped the call in
+    // `synthesisOrInfraBlock(…)` — both times this assertion failed on a change that
+    // left the ordering it checks completely intact. Three source-shape assertions
+    // have now broken that way, which is the argument for pinning the construct
+    // rather than its spelling.
+    const reReviewAt = SRC.lastIndexOf('reviewAndSynthesize(diffFile, round, pr)')
     expect(probeAt).toBeGreaterThan(-1)
     expect(reReviewAt).toBeGreaterThan(probeAt)
   })

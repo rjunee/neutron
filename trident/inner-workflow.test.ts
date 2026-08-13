@@ -288,9 +288,15 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
       .map((l) => l.trim())
       .filter((l) => /^(let )?reviewedHead\s*=/.test(l))
 
+  // THE CONSTRUCT, NOT ITS SPELLING. Both offsets below match the bare
+  // `reviewAndSynthesize(` CALL. Pinning the whole assignment (`let synthesis =
+  // await reviewAndSynthesize(`) made these assertions fail the moment the call was
+  // wrapped in `synthesisOrInfraBlock(...)`, a change that left the ORDERING they
+  // check completely intact — the same trap `round-landed.test.ts` records having
+  // been caught by twice already.
   test("round 1 pins to Forge's reported commit sha, fixed BEFORE the review that judges it", () => {
     const decl = SRC.indexOf('let reviewedHead = branchHead')
-    const firstReview = SRC.indexOf('let synthesis = await reviewAndSynthesize(')
+    const firstReview = SRC.indexOf('reviewAndSynthesize(diffFile, round, pr)')
     expect(decl).toBeGreaterThan(-1)
     expect(firstReview).toBeGreaterThan(decl)
   })
@@ -308,7 +314,9 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
 
   test("every fix round re-pins to the sha THAT round's fix agent reported committing", () => {
     const rePin = SRC.indexOf('reviewedHead = typeof fix?.commitSha')
-    const loopReview = SRC.indexOf('synthesis = await reviewAndSynthesize(diffFile, round, pr)\n    finalVerdict')
+    // `lastIndexOf`: the FIRST call is round 1's pre-loop review, which of course
+    // precedes the re-pin. The one that must follow it is the in-loop RE-review.
+    const loopReview = SRC.lastIndexOf('reviewAndSynthesize(diffFile, round, pr)')
     expect(rePin).toBeGreaterThan(-1)
     expect(loopReview).toBeGreaterThan(rePin)
     // The fix agent is asked for that sha under the same schema round 1 uses.
