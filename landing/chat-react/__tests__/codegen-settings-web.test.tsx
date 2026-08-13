@@ -1,24 +1,27 @@
 /**
- * THE WEB HALF of the per-phase build settings — and the guard that keeps it and the
- * phone telling the owner the same thing.
+ * THE WEB HALF of the per-step build settings — driven the way the owner drives it.
  *
- * WHY THIS FILE EXISTS AT ALL. #163 shipped the mobile screen and named the web half
- * as deferred. Deferred work that is only named in a PR body is work that quietly
- * doesn't happen, so this closes it — and the most valuable test here is not about
- * rendering, it is the CROSS-CLIENT one at the bottom.
+ * WHY THE RENDER IS THE POINT NOW. This file used to assert the SettingsTab section
+ * from its SOURCE, on the grounds that mounting the tab meant standing up five other
+ * clients. That was a real cost and it bought a weak test: a source check cannot tell
+ * a rendered-and-wired dropdown from a rendered-and-inert one, and "the table exists"
+ * is not the claim worth making. The tab already has a fetch seam
+ * (`settings-tab-voice-transcription.test.tsx` uses it), so the controls are pressed
+ * here for real and the assertions are on the TEXT THE OWNER READS.
  *
- * THE TWO PURE HELPERS ARE PRODUCT DECISIONS, NOT TRANSPORT. `effectiveRow` and
- * `applyRowEdit` are duplicated across `app/lib/phase-models-client.ts` and
- * `landing/chat-react/phase-models-client.ts`, because each bundle is deliberately
- * free of the other's workspace. Duplicated decisions drift, and a drift would mean
- * the same owner gets two different answers about their own settings depending on
- * which device they opened.
+ * THE FOUR THINGS A READER SHOULD CHECK, in order of how badly each fails silently:
+ *   1. changing a row's model and saving PUTs that choice (a pane whose save nothing
+ *      reads is this repo's most repeated defect);
+ *   2. a tier this install cannot run is VISIBLE and disabled WITH THE REASON, never
+ *      dropped from the list;
+ *   3. a stored value that no longer resolves is shown struck through, naming what is
+ *      running instead;
+ *   4. a step whose effort is the CLI's own says so instead of offering a control that
+ *      changes nothing.
  *
- * THE CROSS-CLIENT PARITY TEST THEREFORE LIVES IN `gateway/__tests__`, not here.
- * `landing` does not depend on `@neutronai/app` and must not start — that
- * independence is the whole reason the helpers are duplicated. `gateway` is the one
- * package declaring both, which is the same home the existing `doc-links` mirror
- * parity test uses for the same reason.
+ * THE CROSS-CLIENT PARITY TEST LIVES IN `gateway/__tests__`, not here: `landing` does
+ * not depend on `@neutronai/app` and must not start — that independence is the whole
+ * reason the two client helpers are duplicated.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
@@ -52,24 +55,86 @@ afterAll(async () => {
   await GlobalRegistrator.unregister()
 })
 
-const { WebPhaseModelsClient, applyRowEdit, effectiveRow } = await import(
-  '../phase-models-client.ts'
-)
+const { WebPhaseModelsClient, applyRowEdit, effectiveRow, rejectedModel, tierChoices } =
+  await import('../phase-models-client.ts')
 
 const BUILD = {
   key: 'build',
   label: 'Build',
   description: 'Writes the code and the tests.',
+  group: 'claude',
+  effort_supported: true,
   default: { model: 'opus', effort: 'high' },
 }
 
-function payload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** The codex row: a different executor, and no effort control of its own. */
+const CODEX = {
+  key: 'review_codex',
+  label: 'Cross-model review (Codex)',
+  description: 'A second opinion from a GPT model, run through the Codex CLI.',
+  group: 'codex',
+  effort_supported: false,
+  default: { model: 'sol', effort: 'high' },
+}
+
+/** Two Claude tiers, two Codex tiers, and one Kimi tier this install cannot run. */
+const TIERS = [
+  {
+    tier: 'opus',
+    provider: 'anthropic',
+    model_id: 'claude-opus-5',
+    group: 'claude',
+    available: true,
+    unavailable_reason: null,
+  },
+  {
+    tier: 'fast',
+    provider: 'anthropic',
+    model_id: 'claude-haiku-4-5',
+    group: 'claude',
+    available: true,
+    unavailable_reason: null,
+  },
+  {
+    tier: 'sol',
+    provider: 'openai',
+    model_id: 'gpt-5.6-sol',
+    group: 'codex',
+    available: true,
+    unavailable_reason: null,
+  },
+  {
+    tier: 'terra',
+    provider: 'openai',
+    model_id: 'gpt-5.6-terra',
+    group: 'codex',
+    available: true,
+    unavailable_reason: null,
+  },
+  {
+    tier: 'k3',
+    provider: 'moonshot',
+    model_id: 'kimi-k3',
+    group: 'kimi',
+    available: false,
+    unavailable_reason: 'needs a Kimi key',
+  },
+]
+
+function payload(
+  overrides: Record<string, unknown> = {},
+  rejected: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
-    phases: [BUILD],
-    model_tiers: ['fable', 'opus', 'sonnet', 'fast'],
+    phases: [BUILD, CODEX],
+    model_tiers: TIERS,
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    defaults: { build: { model: 'opus', effort: 'high' } },
+    defaults: {
+      build: { model: 'opus', effort: 'high' },
+      review_codex: { model: 'sol', effort: 'high' },
+    },
     overrides,
+    rejected,
   }
 }
 
@@ -190,43 +255,238 @@ describe('the display + edit rules', () => {
     const after = applyRowEdit({ synthesis: { model: 'opus' } }, BUILD, { effort: 'low' })
     expect(after).toEqual({ synthesis: { model: 'opus' }, build: { effort: 'low' } })
   })
+
+  it('offers every tier, disabling the ones this row cannot use — with the reason', () => {
+    const choices = tierChoices(CODEX, TIERS)
+    expect(choices).toHaveLength(TIERS.length)
+    expect(choices.find((c) => c.tier === 'terra')!.selectable).toBe(true)
+    expect(choices.find((c) => c.tier === 'opus')!.reason).toBe('Claude steps only')
+    expect(rejectedModel(BUILD, { build: { model: 'gone-tier' } })).toBe('gone-tier')
+  })
 })
 
-describe('the SettingsTab section behaves like the phone on a rejected save', () => {
-  /**
-   * A SOURCE assertion, and it is the weaker of the two kinds — said plainly because
-   * a mutation pass caught this gap rather than a reading of the code did. The mobile
-   * screen has the real behavioural test (press the chip, fail the save, check the
-   * edits survive); rendering `SettingsTab` here would mean standing up five other
-   * clients it constructs on mount, for one branch.
-   *
-   * So this pins the two properties the mutant broke, scoped to the save handler:
-   * the catch must NOT reset the overrides, and it must use the error's own message.
-   * If this file ever grows a full shell render, delete this in favour of a press.
-   */
-  it('the save catch keeps the edits and surfaces the server message', async () => {
-    const src = await Bun.file(new URL('../SettingsTab.tsx', import.meta.url)).text()
-    const code = src
-      .split('\n')
-      .filter((line) => {
-        const t = line.trim()
-        return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+// ── The real thing: the tab, mounted, with its controls pressed ───────────────
+
+const config = {
+  wsUrl: 'wss://t/ws/app/chat',
+  topicId: 'app:owner',
+  userId: 'owner',
+  projectId: 'acme',
+  projects: [{ id: 'acme', label: 'Acme' }],
+  origin: 'https://owner.example.com',
+  deviceId: 'dev-test',
+  token: 'dev:owner',
+}
+
+const tick = (): Promise<unknown> => new Promise((r) => setTimeout(r, 0))
+const json = (body: unknown, status = 200): Response =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+
+/** Mount the whole Settings tab with every OTHER surface answered emptily. */
+async function mountTab(
+  get: Record<string, unknown>,
+  put?: { status: number; body: unknown },
+): Promise<{
+  container: HTMLElement
+  act: typeof import('react').act
+  puts: Array<Record<string, unknown>>
+  unmount: () => Promise<void>
+}> {
+  const { createRoot } = await import('react-dom/client')
+  const { act } = await import('react')
+  const React = await import('react')
+  const { SettingsTab } = await import('../SettingsTab.tsx')
+
+  const puts: Array<Record<string, unknown>> = []
+  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+    const method = init?.method ?? 'GET'
+    if (url.includes('/api/app/trident/phase-models')) {
+      if (method === 'PUT') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { overrides: Record<string, unknown> }
+        puts.push(body.overrides)
+        if (put !== undefined) return json(put.body, put.status)
+        return json({ ...get, overrides: body.overrides })
+      }
+      return json(get)
+    }
+    if (url.endsWith('/api/app/projects/acme/credentials')) return json({ ok: true, project: [], global: [] })
+    if (url.endsWith('/api/app/projects/acme/accounts')) {
+      return json({ ok: true, project_id: 'acme', services: [] })
+    }
+    if (url.endsWith('/api/app/projects/acme/settings')) {
+      return json({ ok: true, project: { name: 'Acme', emoji: '🏢', members: [] } })
+    }
+    return json({ ok: false, code: 'not_stubbed' }, 404)
+  }
+
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const root = createRoot(container)
+  await act(async () => {
+    root.render(
+      <React.StrictMode>
+        <SettingsTab projectId="acme" config={config} fetchImpl={fetchImpl} />
+      </React.StrictMode>,
+    )
+  })
+  await act(async () => {
+    await tick()
+    await tick()
+  })
+  // Unmount inside `act` as well: the tab fires several other settings reads on
+  // mount, and tearing down mid-flight is what produces the "update was not wrapped
+  // in act" noise that hides a real warning.
+  return {
+    container,
+    act,
+    puts,
+    unmount: async (): Promise<void> => {
+      await act(async () => {
+        root.unmount()
+        await tick()
       })
-      .join('\n')
-    // Scoped to the handler, not the file: an unscoped match would pass on any of
-    // the five other `.catch` blocks in this component.
-    const start = code.indexOf('const savePhaseModels =')
-    expect(start).toBeGreaterThan(-1)
-    const handler = code.slice(start, code.indexOf('\n  }, [phaseModelsClient', start))
-    expect(handler.includes('setPhaseOverrides({})')).toBe(false)
-    expect(handler.includes('err instanceof Error ? err.message')).toBe(true)
+      container.remove()
+    },
+  }
+}
+
+const testId = (c: HTMLElement, id: string): HTMLElement | null =>
+  c.querySelector(`[data-testid="${id}"]`)
+
+describe('the TABLE, pressed for real', () => {
+  it('shows one row per step, each still explaining what it does', async () => {
+    const { container, unmount } = await mountTab(payload())
+    try {
+      expect(testId(container, 'phase-build')).not.toBeNull()
+      expect(testId(container, 'phase-review_codex')).not.toBeNull()
+      // The one-line explanation is the only thing telling the owner what the step
+      // is. A table that dropped it would be a grid of nouns.
+      expect(testId(container, 'phase-review_codex')!.textContent).toContain(
+        'A second opinion from a GPT model',
+      )
+    } finally {
+      await unmount()
+    }
   })
 
-  it('the section is actually rendered, with a save control', async () => {
-    // The other half: a handler nothing can reach is the built-but-never-wired shape.
-    const src = await Bun.file(new URL('../SettingsTab.tsx', import.meta.url)).text()
-    expect(src.includes('aria-label="Code generation"')).toBe(true)
-    expect(src.includes('data-testid="phase-models-save"')).toBe(true)
-    expect(src.includes('onClick={savePhaseModels}')).toBe(true)
+  it('names the model each tier resolves to, right there in the control', async () => {
+    const { container, unmount } = await mountTab(payload())
+    try {
+      const select = testId(container, 'phase-build-model') as HTMLSelectElement
+      const selected = select.options[select.selectedIndex]!
+      // The owner picks a TIER; what they need to know is which model that is today.
+      expect(selected.textContent).toContain('opus')
+      expect(selected.textContent).toContain('claude-opus-5')
+      expect(selected.textContent).toContain('(default)')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('CHANGING A ROW AND SAVING sends that choice to the server', async () => {
+    const { container, act, puts, unmount } = await mountTab(payload())
+    try {
+      const select = testId(container, 'phase-review_codex-model') as HTMLSelectElement
+      await act(async () => {
+        select.value = 'terra'
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        await tick()
+      })
+      // The row admits it is no longer on the default.
+      expect(testId(container, 'phase-review_codex-changed')).not.toBeNull()
+      await act(async () => {
+        ;(testId(container, 'phase-models-save') as HTMLButtonElement).click()
+        await tick()
+      })
+      // THE ASSERTION THAT MATTERS: the choice left the browser.
+      expect(puts).toEqual([{ review_codex: { model: 'terra' } }])
+      expect(testId(container, 'phase-models-saved')!.textContent).toContain('Saved')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('shows a tier it cannot run DISABLED, with the reason, never hidden', async () => {
+    const { container, unmount } = await mountTab(payload())
+    try {
+      const option = testId(container, 'phase-review_codex-model-k3') as HTMLOptionElement
+      // Present…
+      expect(option).not.toBeNull()
+      // …unpickable…
+      expect(option.disabled).toBe(true)
+      // …and it SAYS WHY. A greyed row with no explanation is a dead end; this one
+      // tells the owner what to go and fix.
+      expect(option.textContent).toContain('Kimi steps only')
+      const claudeRow = testId(container, 'phase-build-model-k3') as HTMLOptionElement
+      expect(claudeRow.textContent).toContain('Kimi steps only')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('says a CLI step has no effort control instead of offering an inert one', async () => {
+    const { container, unmount } = await mountTab(payload())
+    try {
+      expect(testId(container, 'phase-review_codex-effort')).toBeNull()
+      expect(testId(container, 'phase-review_codex-effort-na')!.textContent).toContain(
+        'set by the CLI',
+      )
+      // The Claude row still has its real control.
+      expect(testId(container, 'phase-build-effort')).not.toBeNull()
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('shows a REFUSED stored value struck through, and what is running instead', async () => {
+    const { container, unmount } = await mountTab(payload({}, { build: { model: 'fable-2' } }))
+    try {
+      const stale = testId(container, 'phase-build-stale')!
+      expect(stale.textContent).toContain('fable-2')
+      expect(stale.textContent).toContain('no longer available')
+      // Named, so "what am I actually running" needs no second screen.
+      expect(stale.textContent).toContain('opus')
+      expect(stale.querySelector('s')?.textContent).toBe('fable-2')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('KEEPS the edit when the server rejects the save, and shows the message', async () => {
+    const { container, act, unmount } = await mountTab(payload(), {
+      status: 400,
+      body: { code: 'invalid_phase_models', message: "phase 'build': 'effort' is not settable" },
+    })
+    try {
+      const select = testId(container, 'phase-build-effort') as HTMLSelectElement
+      await act(async () => {
+        select.value = 'max'
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        await tick()
+      })
+      await act(async () => {
+        ;(testId(container, 'phase-models-save') as HTMLButtonElement).click()
+        await tick()
+      })
+      // Discarding the edit would punish the owner for one bad value; the banner
+      // carries the server's own words so they can fix the right row.
+      expect(testId(container, 'phase-models-error')!.textContent).toContain('not settable')
+      expect((testId(container, 'phase-build-effort') as HTMLSelectElement).value).toBe('max')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('labels the section as install-wide, because the storage has no project', async () => {
+    const { container, unmount } = await mountTab(payload())
+    try {
+      const section = container.querySelector('section[aria-label="Code generation"]')!
+      // The pane sits in project settings while the setting applies everywhere. An
+      // honest label is the fix that does not pretend to a per-project dimension the
+      // storage does not have.
+      expect(section.textContent).toContain('every project on this')
+    } finally {
+      await unmount()
+    }
   })
 })

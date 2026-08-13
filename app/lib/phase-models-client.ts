@@ -29,7 +29,30 @@ export interface PhaseDescriptor {
   key: string;
   label: string;
   description: string;
+  /**
+   * Which executor runs this step (`claude`, `codex`, `kimi`).
+   *
+   * A row can only take a tier from its OWN group: a Claude step cannot run a GPT
+   * model (`agent({model})` resolves against Claude Code's endpoint), and the Codex
+   * wrapper cannot be pointed at Kimi. The server decides the grouping; this file just
+   * compares two strings.
+   */
+  group: string;
+  /** False for a CLI step, whose reasoning effort is the CLI's own. */
+  effort_supported: boolean;
   default: { model: string; effort: string };
+}
+
+/** One selectable tier, resolved by the server as of this request. */
+export interface TierOption {
+  tier: string;
+  provider: string;
+  /** What the tier points at RIGHT NOW — `fast → claude-haiku-4-5-…`. */
+  model_id: string;
+  group: string;
+  /** False when this install has no credential for it. Still shown, never hidden. */
+  available: boolean;
+  unavailable_reason: string | null;
 }
 
 /** An owner's override for one phase. Either field may stand alone. */
@@ -40,10 +63,16 @@ export interface PhaseOverride {
 
 export interface PhaseModelsPayload {
   phases: PhaseDescriptor[];
-  model_tiers: string[];
+  model_tiers: TierOption[];
   efforts: string[];
   defaults: Record<string, { model: string; effort: string }>;
   overrides: Record<string, PhaseOverride>;
+  /**
+   * Stored values the server REFUSED — a tier since retired, an effort on a CLI step.
+   * The row shows them struck through and names the default it fell back to, because
+   * a control that silently reverts a choice is one the owner stops trusting.
+   */
+  rejected: Record<string, PhaseOverride>;
 }
 
 export class PhaseModelsClientError extends Error {
@@ -141,6 +170,68 @@ export function effectiveRow(
   const overridden =
     (o?.model !== undefined && o.model.length > 0) || (o?.effort !== undefined && o.effort.length > 0);
   return { model, effort, overridden };
+}
+
+/**
+ * The tiers a row may offer, each with whether it can be CHOSEN and why not.
+ *
+ * NOTHING IS FILTERED OUT. A tier from another executor, or one this install has no
+ * credential for, comes back `selectable: false` WITH a reason so the row can render
+ * it greyed and say "needs a Codex connection". Hiding it would leave the owner unable
+ * to account for a missing option — which is exactly how a whole capability stayed
+ * invisible for weeks (ISSUES #551). The reason is the product decision here, so it
+ * lives in the shared helper rather than in either component.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#tierChoices`.
+ */
+export function tierChoices(
+  phase: PhaseDescriptor,
+  tiers: TierOption[],
+): Array<{ tier: string; model_id: string; selectable: boolean; reason: string | null }> {
+  return tiers.map((t) => {
+    if (t.group !== phase.group) {
+      const name = t.group.charAt(0).toUpperCase() + t.group.slice(1);
+      return { tier: t.tier, model_id: t.model_id, selectable: false, reason: `${name} steps only` };
+    }
+    if (!t.available) {
+      return {
+        tier: t.tier,
+        model_id: t.model_id,
+        selectable: false,
+        reason: t.unavailable_reason ?? 'not available on this install',
+      };
+    }
+    return { tier: t.tier, model_id: t.model_id, selectable: true, reason: null };
+  });
+}
+
+/**
+ * What a tier resolves to right now, or null when the payload has never heard of it.
+ *
+ * Null is the interesting case: it means a saved override names something the server
+ * cannot resolve, which the row must SAY rather than quietly replace.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#resolvedModel`.
+ */
+export function resolvedModel(tier: string, tiers: TierOption[]): string | null {
+  return tiers.find((t) => t.tier === tier)?.model_id ?? null;
+}
+
+/**
+ * The stored-but-refused model for a row, or null.
+ *
+ * Only the MODEL is surfaced: a refused effort belongs to a CLI row, whose effort cell
+ * is already disabled with the reason, so striking it through as well would explain
+ * the same thing twice.
+ *
+ * MUST MATCH `landing/chat-react/phase-models-client.ts#rejectedModel`.
+ */
+export function rejectedModel(
+  phase: PhaseDescriptor,
+  rejected: Record<string, PhaseOverride>,
+): string | null {
+  const value = rejected[phase.key]?.model;
+  return value !== undefined && value.length > 0 ? value : null;
 }
 
 /**

@@ -2800,6 +2800,58 @@ the machine, which is what the agent recommended when a push failed — see
   not blank a flow that is working, and the `device_code` is not rendered even
   when a response carries one.
 
+### Code-generation model selector — one tier registry, three model families
+
+Which model runs each step of a build is owner-editable, as a TABLE: one row per
+named step — **name · model dropdown · effort dropdown** — plus the step's one-line
+explanation, then Save. Web `landing/chat-react/SettingsTab.tsx` (§ "Code
+generation"), mobile `app/app/codegen.tsx`, both over
+`GET`/`PUT /api/app/trident/phase-models` (`gateway/http/trident-phase-models-surface.ts`).
+
+- **The unit of choice is a TIER, not a model id.** `trident/model-tiers.ts` is the
+  ONE registry: `{tier, provider, model_id, transport, wrapper, env_var, requires}`,
+  where `model_id` is RESOLVED AT CALL TIME (the Claude tiers through
+  `runtime/models.ts`, including the watchdog's adopted `getBestModel()`). Retiring a
+  model is a single edit here. Tiers: `fable`/`opus`/`sonnet`/`fast` (Anthropic),
+  `sol`/`terra`/`luna` (GPT 5.6, via Codex), `k3` (Kimi K3).
+- **A tier carries a TRANSPORT, because that is what makes it reachable.** The
+  workflow cannot reach a non-Anthropic model through `agent({model})` — that
+  resolves against Claude Code's own endpoint (`trident/kimi-review-cli.ts`). So
+  `transport: 'agent'` goes on the spawn, and `transport: 'cli'` is passed to a
+  SUBPROCESS through the wrapper's env knob: `CODEX_REVIEW_MODEL` for
+  `trident/codex-review.sh`, `KIMI_MODEL` for `trident/kimi-review-cli.ts`. The
+  registry is threaded to the workflow as `args.modelTiers` (`trident/inner-loop.ts`
+  `buildWorkflowArgs`), alongside the existing `args.models`, because the `.mjs` has
+  no module resolution.
+- **The cross-model lanes are routed phases now.** `argus:codex` / `argus:kimi` (and
+  their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
+  `review_kimi` phases in `trident/phase-models.ts`, defaulting to `sol` and `k3` —
+  the same models the wrappers pinned themselves, so an install that never opens the
+  pane is unchanged. `trident/__tests__/model-tiers.test.ts` pins the registry
+  against each wrapper's own default (and against the `${VAR-x}` form that lets an
+  explicitly EMPTY `CODEX_REVIEW_MODEL` mean "the CLI default").
+- **A row offers only its own executor's tiers, and says so about the rest.** Every
+  tier is listed; one from another group, or one this install has no credential for,
+  renders DISABLED WITH THE REASON ("needs a Codex connection") rather than
+  disappearing. The surface answers availability from the SAME resolvers the build
+  uses (`open/composer.ts`: `codexCredentialService.resolveActiveCodexHome`, and the
+  shared `kimiConfigured()` that `resolve_kimi_configured` also uses), so the pane
+  and the run cannot disagree.
+- **A refused stored value degrades visibly.** `model` must name a tier (the old
+  literal-id escape hatch is closed: a bare id carries no transport). A retired tier
+  or a legacy literal is rejected at the boundary, the phase falls back to its
+  default, and the payload's `rejected` map lets the row show it struck through with
+  what is running instead. The workflow backstops the same case by logging
+  `trident.phase-override IGNORED … reason=unknown-tier` and keeping the default.
+- **Scope is install-wide and the pane says so.** Storage is
+  `instance_metadata.trident_phase_models` keyed by instance slug — there is no
+  project dimension, so the section is labelled "every project on this computer"
+  rather than pretending to one.
+- **The chain is asserted end to end**, not per layer:
+  `trident/__tests__/cross-model-dispatch.test.ts` runs the REAL `buildWorkflowArgs`
+  output through the REAL `inner-workflow.mjs` and asserts the resolved id lands on
+  the subprocess command line (`CODEX_REVIEW_MODEL='gpt-5.6-terra'`).
+
 ## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 
 A voice note is transcribed at upload-complete time and the transcript is
