@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — a reviewer that DIES is a blocked round, not a dead lane (the recurrence #212 left open)
+
+**What happened.** A lane died at round 7 of 10 after about ten hours, with
+`ok:false`, no verdict, and only `checkpoint: 'inner-error'`: the round-7
+synthesis reviewer died on an API 529 Overloaded. Its PR was open and green the
+whole time — what was lost was the verdict and the seven rounds of review that
+produced it. #212 had merged hours earlier against the same failure class.
+
+**Why the earlier fix did not cover it, precisely.** #212 guards the VALUE the
+review round hands back: `synthesisOrInfraBlock(await reviewAndSynthesize(…))`,
+on the premise that a dead subagent makes `agent()` RETURN null. A seat can die
+the other way — the call REJECTS (a 529, a timeout, a subprocess exit, a reply
+that fails its schema). A rejection is not a return value, so the guard never ran
+at all: an argument is only evaluated on a value that ARRIVED. The rejection
+unwound out of `reviewAndSynthesize`, past the guard, out of the loop's `try`,
+and ended the run. **No line in today's source can produce the message the dead
+lane recorded** (`null is not an object (evaluating 'synthesis.verdict')`): all
+three reads of `synthesis.verdict` are guarded, and `usableStatus` rejects `null`
+and `undefined` alike. That text is #212's own PRE-fix crash, and the run began
+before #212 merged — but the hole it names is real and was still open, one layer
+up from where it was looked for.
+
+**The fix is two chokepoints, not a patch at the site that happened to throw.**
+`seatAttempt(seat, run)` is the ONE way a review seat is dispatched (both core
+reviewers, `argus:codex`, `argus:kimi`, `argus:synthesis`, the CI probe, the
+branch-head probe). Every way a seat can fail — a rejected promise, a synchronous
+throw, a non-Error rejection, a subprocess exit — collapses to `null`, which is
+the value the panel ALREADY handles: `retryDeferredPeers` re-dispatches it (a 529
+is transient, and the synthesis seat is now retried through that same bounded
+retry), and a seat still dead after the retry is declared empty by
+`missingCoreReviewers` / `crossModelPeerStatus`, blocked by
+`enforceCrossModelGate` with a finding naming the seat, and classified
+`infra-only` so the loop stops instead of re-Forging. `reviewRoundOrInfraBlock`
+is the outer half: the round itself may not throw, whatever else inside it does.
+
+**It can never become an APPROVE.** The only value `seatAttempt` invents is
+`null`, which is not a verdict under `usableStatus`, so the failure direction is a
+block; a dead round yields REQUEST_CHANGES + `infra-only` + one `lane` blocker
+that names the seat and the reason. The cross-model rule (`trident/kimi-review.ts`
+— a cross-model review that did not happen may never become an APPROVE, and never
+falls back to a Claude-family model) is preserved by construction.
+
+**Tests:** `trident/__tests__/dying-reviewer-e2e.test.ts` drives the REAL
+`inner-workflow.mjs` with seats that THROW — synthesis, either core seat, both,
+the CI probe — and asserts the run ends with a verdict rather than `inner-error`,
+never APPROVEs, retries the seat, and still merges when a seat recovers on its
+retry. 14 of its 22 tests fail on the pre-fix behaviour; each guard was removed in
+turn and the corresponding tests proven red (the two that passed VACUOUSLY on a
+crashed run — "no fix round was bought", "which seat died is on the record" — were
+tightened until they did not).
+
 ## 2026-08-13 — the code-generation model selector: a table, three model families, and the wiring that makes GPT and Kimi selectable (#560)
 
 The pane could already put a build step on a different Claude tier. It could not

@@ -5271,6 +5271,25 @@ deleted, no dual path):
   The orchestrator `step` HARVESTS that row by `runId` each tick: `parseInnerResult`
   decodes the typed column (non-null = harvest-ready), then it advances the state
   machine deterministically in TS — never an LLM-parsed line.
+- **A REVIEWER THAT DIES IS A BLOCKED ROUND, NEVER A DEAD LANE:** every review seat
+  is dispatched through ONE chokepoint, `seatAttempt` in
+  `trident/inner-workflow.mjs` (both core reviewers, `argus:codex`, `argus:kimi`,
+  `argus:synthesis`, the CI probe, the branch-head probe). Every way a seat can fail
+  to produce a usable verdict — a rejected promise (an API 529, a timeout), a
+  synchronous throw, a subprocess exit, a null/undefined/non-object reply, an object
+  with no `verdict` — collapses to the SAME `null` the panel already handles:
+  `retryDeferredPeers` re-dispatches the seat once (bounded, because a 529 is
+  transient), and a seat still empty after that is declared missing, blocked by
+  `enforceCrossModelGate` with a finding NAMING the seat, and classified
+  `infra-only` so the loop stops instead of re-Forging against nothing.
+  `reviewRoundOrInfraBlock` is the outer half of the same guard: a review round may
+  not throw, whatever else inside it does. The failure direction is always a BLOCK —
+  the only value invented is `null`, which is not a verdict — so a panel that lost a
+  seat can never merge (the cross-model rule in `trident/kimi-review.ts`: a review
+  that did not happen may never become an APPROVE, and never falls back to a
+  Claude-family model). Before this, one dying reviewer ended the whole lane at
+  `checkpoint: 'inner-error'` with no verdict, discarding a finished build and every
+  review already paid for.
 - **SERVER-GATED verdict provenance:** a merge-eligible `APPROVE` is honoured ONLY
   when the Argus phase's OWN recorded `inner_checkpoint = 'argus-approved'` (written
   by the synthesis-phase Bash step) backs it — a self-asserted `APPROVE` in the

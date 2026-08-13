@@ -47,10 +47,17 @@ interface Peer {
   evidence: string
 }
 
-/** Brace-match one function out of the source. */
+/**
+ * Brace-match one function out of the source.
+ *
+ * The `async ` prefix is carried along when there is one: extracting an async body
+ * without it produces a SYNTAX error on the first `await` inside — a test file that
+ * cannot load rather than one that fails honestly.
+ */
 function grabFn(name: string): string {
-  const at = SRC.indexOf(`function ${name}(`)
-  if (at === -1) throw new Error(`${name} is missing from inner-workflow.mjs`)
+  const found = SRC.indexOf(`function ${name}(`)
+  if (found === -1) throw new Error(`${name} is missing from inner-workflow.mjs`)
+  const at = SRC.slice(found - 6, found) === 'async ' ? found - 6 : found
   let depth = 0
   let started = false
   for (let i = at; i < SRC.length; i += 1) {
@@ -87,21 +94,32 @@ function grabConst(name: string): string {
   throw new Error(`could not bracket-match const ${name}`)
 }
 
-const real = new Function(`
+/** Lines the extracted `log` was called with — the record that names the dead seat. */
+const logged: string[] = []
+
+const real = new Function(
+  'log',
+  `
   ${grabConst('NON_BLOCKING_SEVERITIES')}
   ${grabConst('LANE_FINDING_KIND')}
   ${grabConst('usableStatus')}
+  ${grabFn('errText')}
+  ${grabFn('seatAttempt')}
+  ${grabFn('synthesisUnavailable')}
   ${grabConst('SYNTHESIS_UNAVAILABLE')}
   ${grabFn('normalizeVerdict')}
   ${grabFn('enforceSeverityGate')}
   ${grabFn('enforceCrossModelGate')}
   ${grabFn('classifyBlock')}
   ${grabFn('synthesisOrInfraBlock')}
+  ${grabFn('reviewRoundOrInfraBlock')}
   return {
     LANE_FINDING_KIND, SYNTHESIS_UNAVAILABLE, normalizeVerdict, enforceSeverityGate,
-    enforceCrossModelGate, classifyBlock, synthesisOrInfraBlock,
+    enforceCrossModelGate, classifyBlock, synthesisOrInfraBlock, seatAttempt,
+    synthesisUnavailable, reviewRoundOrInfraBlock, errText,
   }
-`)() as {
+`,
+)((line: string) => logged.push(line)) as {
   LANE_FINDING_KIND: string
   SYNTHESIS_UNAVAILABLE: Readonly<Synthesis>
   normalizeVerdict: (v: unknown) => string
@@ -109,6 +127,10 @@ const real = new Function(`
   enforceCrossModelGate: (s: unknown, peers: Peer[]) => Synthesis
   classifyBlock: (s: unknown, peers: Peer[]) => string
   synthesisOrInfraBlock: (s: unknown) => Synthesis
+  seatAttempt: (seat: string, run: () => unknown) => Promise<unknown>
+  synthesisUnavailable: (seat: string, reason: string) => Readonly<Synthesis>
+  reviewRoundOrInfraBlock: (run: () => unknown) => Promise<Synthesis>
+  errText: (err: unknown) => string
 }
 
 /**
@@ -322,14 +344,143 @@ describe('every call site is guarded', () => {
   // loop body is top-level script and cannot be invoked in isolation.
   test('BOTH reads of `synthesis.verdict` are fed by a guarded assignment', () => {
     const reads = SRC.split('\n').filter((l) => l.includes('normalizeVerdict(synthesis.verdict)'))
-    const guarded = SRC.split('\n').filter((l) => l.includes('synthesisOrInfraBlock(await reviewAndSynthesize('))
+    const guarded = SRC.split('\n').filter((l) => l.includes('reviewRoundOrInfraBlock(() => reviewAndSynthesize('))
     expect(reads).toHaveLength(2)
     expect(guarded).toHaveLength(2)
   })
 
   test('NO assignment reaches `synthesis` from an unguarded review', () => {
-    for (const line of SRC.split('\n').filter((l) => /^\s*(let )?synthesis\s*=/.test(l))) {
-      expect(line).toContain('synthesisOrInfraBlock(')
+    const assigns = SRC.split('\n').filter((l) => /^\s*(let )?synthesis\s*=/.test(l))
+    expect(assigns.length).toBeGreaterThan(0) // the filter can find these lines at all
+    for (const line of assigns) {
+      expect(line).toContain('reviewRoundOrInfraBlock(')
+    }
+  })
+
+  // THE HOLE #212 LEFT OPEN. Its guard read the RETURN VALUE, so it never ran when the
+  // review REJECTED — the rejection unwound past it and killed the lane. Every
+  // `reviewAndSynthesize` CALL must therefore be inside the try/catch, i.e. inside a
+  // thunk handed to `reviewRoundOrInfraBlock`, not merely awaited in its argument.
+  test('the only calls to `reviewAndSynthesize` are thunks passed to the guard', () => {
+    const calls = SRC.split('\n').filter(
+      (l) =>
+        l.includes('reviewAndSynthesize(') &&
+        !l.includes('async function reviewAndSynthesize') &&
+        !/^\s*(\/\/|\*)/.test(l), // prose ABOUT the call is not a call
+    )
+    expect(calls.length).toBe(2) // round 1 and the in-loop re-review, and nothing else
+    for (const line of calls) {
+      expect(line).toContain('() => reviewAndSynthesize(')
+    }
+  })
+
+  // The seat chokepoint, pinned the same way: a seat dispatched AROUND `seatAttempt`
+  // can still reject, and that is the whole failure class.
+  test('every reviewer put on the panel is dispatched through `seatAttempt`', () => {
+    const lines = SRC.split('\n')
+    const pushes = lines.map((l, i) => ({ l, i })).filter(({ l }) => l.includes('reviewers.push('))
+    expect(pushes.length).toBe(3) // the core-seat helper, codex, kimi
+    for (const { i } of pushes) {
+      expect(lines.slice(i, i + 3).join('\n')).toContain('seatAttempt(')
+    }
+  })
+
+  test('the synthesis seat and the CI probe are dispatched through it too', () => {
+    expect(SRC).toContain("seatAttempt('argus:synthesis'")
+    expect(SRC).toContain('seatAttempt(`ci-probe-round-')
+  })
+})
+
+/**
+ * THE FAILURE CLASS, NOT THE INSTANCE. #212 closed "the seat RETURNED nothing" and
+ * left "the seat DIED" open, which is the recurrence. These are the ways a seat can
+ * fail to produce a usable verdict; every one of them must end as a block, never as a
+ * throw and never as an APPROVE.
+ */
+describe('a seat that DIES is indistinguishable from a seat that answered nothing', () => {
+  test.each([
+    ['a rejected promise (API 529 Overloaded)', async () => { throw new Error('API error 529 Overloaded') }],
+    ['a synchronous throw', () => { throw new Error('boom') }],
+    ['a rejection that is not an Error', async () => { throw 'exit 1' }],
+    ['a rejection of null', async () => { throw null }],
+  ])('%s becomes null, the shape the panel already handles', async (_label, run) => {
+    const out = await real.seatAttempt('argus:kimi', run as () => unknown)
+    expect(out).toBeNull()
+  })
+
+  test('a seat that ANSWERS is passed through by identity — the wrapper judges nothing', async () => {
+    const verdict = { verdict: 'APPROVE', findings: [] }
+    expect(await real.seatAttempt('argus:claude', () => verdict)).toBe(verdict)
+    expect(await real.seatAttempt('argus:claude', async () => verdict)).toBe(verdict)
+  })
+
+  test('the death is RECORDED with the seat and the reason', async () => {
+    logged.length = 0
+    await real.seatAttempt('argus:kimi', () => {
+      throw new Error('API error 529 Overloaded')
+    })
+    expect(logged.join('\n')).toContain('seat=argus:kimi')
+    expect(logged.join('\n')).toContain('529')
+  })
+
+  test('a dead seat NEVER becomes a verdict — null is not usable, so the gate still blocks', async () => {
+    const dead = await real.seatAttempt('argus:kimi', () => {
+      throw new Error('529')
+    })
+    // The very predicate the completeness gate and the lane retry share.
+    expect(real.normalizeVerdict((dead as { verdict?: string } | null)?.verdict)).toBe('REQUEST_CHANGES')
+  })
+
+  test('errText survives a non-Error, and bounds a flood of stderr', () => {
+    expect(real.errText('plain string')).toBe('plain string')
+    expect(real.errText(null)).toBe('null')
+    expect(real.errText(new Error('a\n  b'))).toBe('a b')
+    expect(real.errText(new Error('x'.repeat(5000))).length).toBeLessThanOrEqual(201)
+  })
+})
+
+describe('a review ROUND that throws ends the round, not the run', () => {
+  test.each([
+    ['a rejected promise', async () => { throw new Error('API error 529 Overloaded') }],
+    ['a synchronous throw', () => { throw new Error('parallel() died') }],
+    ['a non-Error rejection', async () => { throw 'killed' }],
+  ])('%s becomes REQUEST_CHANGES + infra-only, and does NOT propagate', async (_label, run) => {
+    const out = await real.reviewRoundOrInfraBlock(run as () => unknown)
+    expect(real.normalizeVerdict(out.verdict)).toBe('REQUEST_CHANGES')
+    expect(out.blockKind).toBe('infra-only')
+    expect(wouldReForge(out)).toBe(false)
+  })
+
+  test('the injected finding names the seat AND the reason — an unactionable block is not a fix', async () => {
+    const out = await real.reviewRoundOrInfraBlock(async () => {
+      throw new Error('API error 529 Overloaded')
+    })
+    const finding = out.findings?.[0] as Finding
+    expect(finding.kind).toBe(real.LANE_FINDING_KIND)
+    expect(finding.severity).toBe('blocker')
+    expect(finding.evidence).toContain('529')
+    expect(finding.evidence!.toLowerCase()).toContain('never judged')
+  })
+
+  test('the same round that RESOLVES is still guarded by the verdict check, not just the throw', async () => {
+    // A round that returns the dead-agent shape must still infra-block: the outer
+    // try/catch must not have REPLACED the value guard.
+    const out = await real.reviewRoundOrInfraBlock(async () => ({ blockKind: 'code' }))
+    expect(out.blockKind).toBe('infra-only')
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+  })
+
+  test('a REAL verdict still passes through the guard by identity', async () => {
+    const approve = { verdict: 'APPROVE', findings: [], blockKind: 'none' }
+    expect(await real.reviewRoundOrInfraBlock(async () => approve)).toBe(approve)
+  })
+
+  test('a dead round can NEVER be an APPROVE, whatever the error says', async () => {
+    for (const thrown of [new Error('APPROVE'), 'APPROVE', { verdict: 'APPROVE' }]) {
+      const out = await real.reviewRoundOrInfraBlock(() => {
+        throw thrown
+      })
+      expect(real.normalizeVerdict(out.verdict)).toBe('REQUEST_CHANGES')
     }
   })
 })
