@@ -76,6 +76,8 @@ export interface CrossModelConnections {
    * at dispatch, which is worse than a greyed one.
    */
   codex: boolean
+  /** A Kimi key — without it the K3 tier cannot run. */
+  kimi: boolean
 }
 
 export interface TridentPhaseModelsSurfaceOptions {
@@ -120,7 +122,14 @@ export interface TridentPhaseModelsSurface {
  */
 function vocabulary(connections: CrossModelConnections): object {
   return {
-    phases: TRIDENT_PHASES.map((p) => ({
+    // A FOLLOWER PHASE IS NOT A ROW. `build_mechanical` is the build step under the
+    // planner's internal complexity tag and takes `build`'s setting when it has none
+    // of its own (`TridentPhase.follows`, implemented by the workflow's
+    // `phaseOverrideFor`). Rendering it would show its own `sonnet` default beside a
+    // run that dispatched the owner's codex tier — the pane/run disagreement
+    // `trident/phase-models.ts` exists to prevent. Filtered HERE, once, rather than in
+    // each of the two clients, so they cannot disagree about it either.
+    phases: TRIDENT_PHASES.filter((p) => p.follows === undefined).map((p) => ({
       key: p.key,
       label: p.label,
       description: p.description,
@@ -163,7 +172,11 @@ function vocabulary(connections: CrossModelConnections): object {
         // cannot use.
         effort_supported: t.transport === 'agent',
         available,
-        unavailable_reason: available ? null : 'needs a Codex connection',
+        unavailable_reason: available
+          ? null
+          : t.requires === 'codex'
+            ? 'needs a Codex connection'
+            : 'needs a Kimi key',
       }
     }),
     efforts: [...EFFORTS],

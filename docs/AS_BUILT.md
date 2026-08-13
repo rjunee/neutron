@@ -1,45 +1,34 @@
 # AS_BUILT
 
 Running log of what shipped, newest first. One entry per merged change.
+
 ## 2026-08-13 — the BUILD phase runs on codex: a second executor for the most expensive step
 
-The selector could put the build on a different **Claude** tier and nothing else, so
-every trident build spent Anthropic quota no matter what the pane said. The GPT tiers
-were greyed on that row with an honest reason — "Codex is not wired for this step yet
-— it runs on Claude" — and this change is the wiring that makes the reason obsolete.
-Nothing new was built to reach codex: `trident/codex-review.sh` has shelled into
-`codex exec` for the review seat all along, and a codex substrate adapter has been
-registered in `runtime/adapters/select-substrate.ts` for longer than that. What was
-missing was a route from the BUILD step.
+The selector (#560, below) could put the build on a different **Claude** tier and
+nothing else, so every trident build spent Anthropic quota no matter what the pane
+said. The GPT tiers were greyed on that row with an honest reason — "Codex is not
+wired for this step yet — it runs on Claude" (#220) — and this change is the wiring
+that makes the reason obsolete. Nothing new was built to reach codex:
+`trident/codex-review.sh` has shelled into `codex exec` for the review seat all
+along, and a codex substrate adapter has been registered in
+`runtime/adapters/select-substrate.ts` for longer than that. What was missing was a
+route from the BUILD step.
 
-**One registry, and a tier now carries its transport.** `trident/model-tiers.ts` is
-the single place a model lives: `{tier, provider, model_id, transport, wrapper,
-env_var, requires}`, with `model_id` resolved at CALL time (the Claude tiers through
-`runtime/models.ts`, so a watchdog upgrade reaches the pane and the next build). Tiers
-added: `sol` / `terra` / `luna` — GPT 5.6, through the Codex CLI. Retiring a model is
-one edit here rather than a hunt through a component, a router and a shell script, and
-`trident/__tests__/model-tiers.test.ts` pins each cli tier against the wrapper's own
-default AND greps that wrapper for the env knob the tier names, so a knob nobody reads
-cannot ship as a working selector.
+**Kimi is untouched.** The `k3` tier, the `kimi` executor group, the `review_kimi`
+phase and the `argus:kimi` route all shipped in #560 and are exactly as they were.
+This change adds a second executor to one step; it does not re-open which models the
+review panel offers.
 
 **A phase may now have more than one executor.** `TridentPhase.alsoRunsOn`
 (`trident/phase-models.ts`) lists the extra groups a step's dispatch can reach;
 `build` and `build_mechanical` carry `['codex']` and everything else is unchanged.
 `phaseGroups` / `phaseAcceptsTier` replace the old "one phase, one group derived from
-its default tier" rule, and the payload carries `groups` alongside `group` so both
-clients grey by what the dispatch can actually reach. Listing a group here un-greys
-those tiers, so the list is a claim about wiring that
-`trident/__tests__/cross-model-dispatch.test.ts` has to keep honest — the file this
-repository already treats as the answer to "built but never connected".
-
-**The codex REVIEW lane is routed too, and kimi deliberately is not.** `argus:codex`
-and its retry sat in `UNROUTED_LABELS` on the grounds that the reviewing model was the
-CLI's own business — true only while nothing threaded one in. They are now the
-`review_codex` phase, defaulting to the exact model the wrapper pinned itself.
-`argus:kimi` STAYS unrouted with its reason: nothing in this repository threads a model
-into `trident/kimi-review-cli.ts`, so a row for it would save a choice the dispatch
-never reads, and a selectable option that does not dispatch is worse than an absent
-one. A Kimi tier is therefore not in the registry at all.
+its default tier" rule (`tiersAreInterchangeable`, deleted rather than left beside its
+replacement — two answers to one question is how the pane and the run drift), and the
+payload carries `groups` alongside `group` so both clients grey by what the dispatch
+can actually reach. Listing a group here un-greys those tiers, so the list is a claim
+about wiring that `trident/__tests__/cross-model-dispatch.test.ts` has to keep honest —
+the file this repository already treats as the answer to "built but never connected".
 
 **`trident/codex-build.sh`, and the trailer that is the interesting part.** The build
 brief — the SAME `forgeBuildContract` text the Claude builder gets, plus a coda about
@@ -54,7 +43,7 @@ six facts with `git`/`gh` and writes them itself, and each one is EMPTY rather t
 wrong when it cannot be established. `testsPassed` is the only field left as the
 build's own claim.
 
-Four things make the measurement honest rather than merely measured:
+Five things make the measurement honest rather than merely measured:
 
 - **The trailer has its own FILE.** It used to share stdout with the codex transcript,
   and the bridge was shown the last N lines of that stream — so a build narrating
@@ -78,30 +67,49 @@ Four things make the measurement honest rather than merely measured:
   or concurrently-pushed third-party head would be read back, and `--match-head-commit`
   would then pin the merge to it and SUCCEED, certifying as reviewed a commit nobody
   read. The remote is a WITNESS for our own sha — reported only when the tip equals it,
-  empty on every disagreement. The probe is wall-clock bounded like the auth precheck.
-- **The diff path is CLEARED before launch.** It is handed in by the caller and
-  survives between rounds, so a build that committed without rewriting it pointed the
-  review panel at an earlier round's diff — the #545 class of defect one file over. The
-  wrapper deletes the path before codex starts, so the only diff it can report is one
-  this build wrote.
+  empty on every disagreement.
+- **Every remote probe is wall-clock bounded, `gh` included.** `emit_trailer` runs on
+  the FAILURE path too, so an unbounded call there does not merely lose a field — it
+  hangs the build phase forever and the DEFERRED report never reaches the bridge. The
+  `gh pr list` probe now carries the same 10-second alarm as the `git ls-remote` ones
+  beside it, and reads through a FILE rather than a command substitution: `$(…)`
+  returns when the pipe closes, not when the process exits, so a credential helper left
+  holding stdout would keep the substitution blocked long after the alarm fired.
+- **The diff path is CLEARED before launch — and regenerated when a build earns one.**
+  It is handed in by the caller and survives between rounds, so a build that committed
+  without rewriting it pointed the review panel at an earlier round's diff (the #545
+  class of defect one file over). Deleting it fixes that and opens a smaller hole: the
+  workflow captures the path ONCE and hands the same one to every round, so a fix round
+  that committed and forgot to write a diff would send the panel at a path that no
+  longer exists. A branch diff is not a judgement call — it is `git diff <base>..HEAD` —
+  so the wrapper takes it itself when there is a commit and no diff. The base arrives as
+  the wrapper's `$2`; omitted, there is no last-resort diff rather than a guessed base.
 
 **Round 1 has to have landed something, too.** The fix loop already refused to
-re-review a round that left no trace; round 1 had no equivalent, so a codex build that
+re-review a round that left no trace; round 1 had no equivalent, so a build that
 completed and produced NOTHING went straight into the review panel — five reviewers
 reading an empty diff, finding nothing wrong with it, and APPROVING, with only the
 outer merge's empty-`reviewedHead` refusal stopping the ship. `inner-workflow.mjs` now
-refuses to open the panel when the build reports no sha or no diff. Either alone is
-fatal and for different reasons: with no sha the run can never merge, and with no diff
-there is nothing to read.
+refuses to open the panel when the build reports no sha or no diff. The gate sits AFTER
+the PR capture, the `forge-done` checkpoint and the Ralph re-fire, and each placement is
+load-bearing: the error names the PR when one was opened, a resume re-enters a branch
+that exists, and an intermediate Ralph task — which opens no panel — is not a reason to
+abort a multi-task run. The final task still passes through the gate before any reviewer
+is paid.
 
-**One row, both build phases.** `modelForTag` splits the forge dispatch into `build`
-and `build_mechanical` by the planner's `[mechanical]` complexity tag — an internal
-cost optimisation the owner never sees and never sets. Read literally, that second key
-had no override, so every Ralph task tagged `[mechanical]` kept dispatching Sonnet on
-Anthropic after the owner moved the build to codex. `phaseOverrideFor` now reads
-`build`'s setting for `build_mechanical` when that key has none of its own; an explicit
-`build_mechanical` entry still wins, because a config that names the more specific key
-meant it.
+**One step, one row.** `modelForTag` splits the forge dispatch into `build` and
+`build_mechanical` by the planner's `[mechanical]` complexity tag — an internal cost
+optimisation, not a setting. Read literally, that second key had no override, so every
+Ralph task tagged `[mechanical]` kept dispatching Sonnet on Anthropic after the owner
+moved the build to codex. `build_mechanical` now DECLARES that it follows `build`
+(`TridentPhase.follows`): the workflow's `phaseOverrideFor` hands it `build`'s setting
+when it has none of its own, and the settings surface stops rendering it as a row.
+Both halves are required. Inheriting without hiding the row is a pane that shows
+`sonnet` beside a run that dispatched the owner's codex tier — the pane/run
+disagreement `trident/phase-models.ts` exists to prevent — and "which of my two Build
+rows applies" is not a question the owner can answer. The `.mjs` cannot import the
+registry, so `phase-model-coverage.test.ts` asserts the workflow implements exactly the
+`follows` pairs the table declares, and no others.
 
 **The sandbox grant is `danger-full-access`, deliberately.** `read-only` cannot edit a
 file. `workspace-write` writes only inside the workspace, and a build writes outside it
@@ -119,21 +127,10 @@ pinned to the reviewed commit.
 `deferred` throws with the status named. Re-Forging on Opus would spend precisely the
 quota the owner moved the phase to protect and would hide that it had done so — so
 the run stops, and no reviewer is paid to read an unbuilt branch. The phase does not
-reach zero Anthropic tokens and the tests no longer claim it does: a workflow step has
+reach zero Anthropic tokens and the tests do not claim it does: a workflow step has
 no way to reach a shell except through `agent()`, so a thin Claude bridge still runs
 one command and copies six measured values. What moves is the build — the reading, the
 editing, the test loop.
-
-**A tier, and only a tier.** `model` used to accept a literal vendor id as an escape
-hatch. That hatch is closed: a bare id carries no transport, so `gpt-5.6-terra` typed
-into the old field looked like a pin and was really a Claude-endpoint lookup for a
-model only reachable as a subprocess. A retired tier or a legacy literal is now
-rejected at the settings boundary, the step falls back to its default, and the
-payload's new `rejected` map (via `readTridentPhaseModelsWithRejected`,
-`gateway/storage/owner-metadata.ts`) lets the row render it STRUCK THROUGH naming what
-is running instead. The workflow backstops the same case with `reason=unknown-tier` and
-the default. Moving a step across executors is refused the same way, with a message
-naming both.
 
 **The effort control follows the CHOSEN tier, and a leftover is dropped rather than
 refused.** `effort_supported` on a phase answers for its DEFAULT executor, which was
@@ -142,34 +139,34 @@ carries `effort_supported` per TIER as well and both clients disable the cell wh
 either says no. Both reads are `!== false`, never truthiness: the field arrived with
 this change, an older gateway omits it, and `undefined` under a truthiness test would
 have silently removed every effort control on the pane — the same version-skew guard
-`groups` already had. `applyRowEdit` clears an effort the newly-chosen tier cannot use,
-and `parsePhaseModelConfig` — the backstop for any client that does not — DROPS that
-effort and lets the write succeed; the row that comes back renders the same disabled
-"set by the CLI" cell, so nothing is hidden by the drop. Rejecting it 400s the entire
-PUT, discarding every other row's pending edit and making the codex tiers unpickable
-for any owner who had ever touched the build's effort: a selectable option that cannot
-be selected, which is worse than the greyed one this change removed. An effort on a
-phase that never had a control is still a loud error, because there the owner cannot
-see a cell to explain it.
+`groups` has. `applyRowEdit` clears an effort the newly-chosen tier cannot use, and
+`parsePhaseModelConfig` — the backstop for any client that does not — DROPS that effort
+and lets the write succeed; the row that comes back renders the same disabled "set by
+the CLI" cell, so nothing is hidden by the drop. Rejecting it 400s the entire PUT,
+discarding every other row's pending edit and making the codex tiers unpickable for any
+owner who had ever touched the build's effort: a selectable option that cannot be
+selected, which is worse than the greyed one this change removed. An effort on a phase
+that never had a control is still a loud error, because there the owner cannot see a
+cell to explain it.
 
-**The table.** One row per step — name · model dropdown · effort dropdown — keeping
-each row's one-line explanation, replacing the pill grid, on both clients
-(`landing/chat-react/SettingsTab.tsx`, `app/app/codegen.tsx`; React Native has no
-`<select>`, so its dropdown is a tap-to-reveal list). The pills could carry a chosen
-state and nothing else; every option now names the model the tier resolves to right now
-(`fast · claude-haiku-4-5`) and, when it cannot be picked, WHY — which is what a
-per-option reason string needs somewhere to live. A tier from another executor, or one
-this install has no credential for, is DISABLED WITH THE REASON, never hidden; a
-missing option nobody can account for is exactly how ISSUES #551 stayed invisible for
-weeks. A CLI step's effort cell says "set by the CLI" instead of offering a control
-that changes nothing.
+**The refusal message names an EXECUTOR, not a script.** A tier's registered `wrapper`
+is the CROSS-MODEL REVIEW wrapper it was registered with, and the build reaches the same
+codex tiers through a different script — so interpolating it told a BUILD-row owner
+their tier "runs as a `trident/codex-review.sh` subprocess", a true sentence about a
+phase they were not configuring. The message says which executor each side runs on.
 
 **Availability means the executor can actually RUN, not that a credential exists.**
 `trident/codex-build.sh` exits 10 with no credential and 11 with no `codex` on PATH,
 and downstream those are the same thing: a build that never happened. `codexCliOnPath`
-(`trident/codex-credential.ts`) scans PATH in-process for an executable `codex` — a
-directory read rather than a subprocess, because the pane asks this per request — and
-`open/composer.ts` requires both halves before reporting a codex tier available.
+(`trident/codex-credential.ts`) scans PATH in-process for an executable REGULAR FILE
+called `codex` — a directory read rather than a subprocess, because the pane asks this
+per request — and `open/composer.ts` requires both halves before reporting a codex tier
+available. Regular file, not merely executable: `X_OK` on a DIRECTORY means
+"searchable", which every normal directory is, so a PATH entry holding a `codex/`
+subdirectory would otherwise un-grey every codex tier on a box with no CLI at all. The
+PATH scanned is the gateway's, which is the one the `claude` REPL child inherits — the
+substrate layers its `env` option on top of `process.env` and nothing in this repository
+puts `PATH` in that layer.
 
 **Two knobs, not one.** The build wrapper reads `CODEX_BUILD_MODEL`; the review
 wrapper keeps `CODEX_REVIEW_MODEL`. A shared name would let a box that exports one
@@ -179,22 +176,17 @@ build wrapper reads. The test seam is split the same way: the build wrapper read
 `NEUTRON_CODEX_BUILD_EXEC_CMD`, so a value exported to stub the reviewer cannot replace
 the build's entire invocation.
 
-**Scope is labelled honestly, not changed.** Storage is
-`instance_metadata.trident_phase_models`, keyed by instance slug with no project
-dimension, while the pane sits in project settings. The section now reads "every
-project on this computer". Making it genuinely per-project is a separate decision and
-is NOT in this change.
-
 **What the tests assert.** `trident/__tests__/cross-model-dispatch.test.ts` runs the
 production `buildWorkflowArgs` output through the real `inner-workflow.mjs` and asserts
 the RESOLVED id on the dispatch COMMAND STRING — never a hand-built config literal —
-with a positive control beside every absence assertion. `trident/codex-build.test.ts`
-spawns the wrapper against real temporary git repositories (including a real bare
-origin, and a sha256 repo) with a mocked `codex` and `gh`, and drives it into each
-state the trailer has to tell the truth about. Four claims were mutation-checked by
-breaking the code and observing the specific test go red: the local-branch baseline,
-the remote baseline, the pre-launch diff deletion, and the `build_mechanical`
-mirroring.
+with a positive control beside every absence assertion, including that a codex build
+puts NO model on the wrapping agent's opts. `trident/codex-build.test.ts` spawns the
+wrapper against real temporary git repositories (including a real bare origin, and a
+sha256 repo) with a mocked `codex` and `gh`, and drives it into each state the trailer
+has to tell the truth about — a hanging `gh` among them. Four claims were
+mutation-checked by breaking the code and observing the specific test go red: the
+local-branch baseline, the remote baseline, the pre-launch diff deletion, and the
+`build_mechanical` mirroring.
 
 **An observation for the owner, not a change.** Moving the build to codex means a
 codex REVIEWER is no longer reviewing a different family's work. The cross-model gate
@@ -203,6 +195,80 @@ turn a deferred review into an APPROVE, but on a codex build the `review_codex` 
 is same-family and the diversity that seat exists for comes from `argus:claude` /
 `argus:adversarial` / the kimi seat. Deciding what cross-model should MEAN in that
 configuration is the owner's call and is not made here.
+
+## 2026-08-13 — the code-generation model selector: a table, three model families, and the wiring that makes GPT and Kimi selectable (#560)
+
+The pane could already put a build step on a different Claude tier. It could not
+offer a GPT or a Kimi model, because "which model" was only half an answer: the
+workflow cannot reach a non-Anthropic model through `agent({model})` (that resolves
+against Claude Code's own endpoint — `trident/kimi-review-cli.ts`), so those models
+are reachable ONLY as a CLI subprocess. Both wrappers already accepted a model —
+`trident/codex-review.sh` honours `CODEX_REVIEW_MODEL`, `trident/kimi-review-cli.ts`
+honours `KIMI_MODEL` — so this was wiring, not new capability.
+
+**One registry, and a tier now carries its transport.** `trident/model-tiers.ts` is
+the single place a model lives: `{tier, provider, model_id, transport, wrapper,
+env_var, requires}`, with `model_id` resolved at CALL time (the Claude tiers through
+`runtime/models.ts`, so a watchdog upgrade reaches the pane and the next build).
+Tiers added: `sol` / `terra` / `luna` (GPT 5.6, through the Codex CLI) and `k3`
+(Kimi K3). Retiring a model is one edit here rather than a hunt through a component,
+a router and a shell script — and `trident/__tests__/model-tiers.test.ts` pins each
+cli tier against the wrapper's own default AND greps that wrapper for the env knob
+the tier names, so a knob nobody reads cannot ship as a working selector.
+
+**The cross-model lanes are routed.** `argus:codex` / `argus:kimi` and their retry
+lanes sat in `UNROUTED_LABELS` on the grounds that the reviewing model was the CLI's
+own business — true only while nothing threaded one in. They are now the
+`review_codex` / `review_kimi` phases (`trident/phase-models.ts`), defaulting to the
+exact models the wrappers pinned themselves. `UNROUTED_LABELS` stays, empty: its job
+is to force a decision about a NEW lane, which is unchanged. The registry reaches the
+workflow as `args.modelTiers` (`trident/inner-loop.ts`), and
+`trident/inner-workflow.mjs` puts a cli-transport phase's resolved id on the
+subprocess command line instead of on the spawn — `withModel` now refuses to set a
+model at all for a cli route, which is the one failure the transport field exists to
+prevent.
+
+**A tier, and only a tier.** `model` used to accept a literal vendor id as an escape
+hatch. That hatch is closed: a bare id carries no transport, so `gpt-5.6-terra` typed
+into the old field looked like a pin and was really a Claude-endpoint lookup for a
+model only reachable as a subprocess. A retired tier or a legacy literal is now
+rejected at the settings boundary, the step falls back to its default, and the
+payload's new `rejected` map (via `readTridentPhaseModelsWithRejected`,
+`gateway/storage/owner-metadata.ts`) lets the row render it STRUCK THROUGH naming
+what is running instead. The workflow backstops the same case with
+`reason=unknown-tier` and the default. Moving a step across executors is refused the
+same way, with a message naming both.
+
+**The table.** One row per step — name · model dropdown · effort dropdown — keeping
+each row's one-line explanation, replacing the pill grid, on both clients
+(`landing/chat-react/SettingsTab.tsx`, `app/app/codegen.tsx`; React Native has no
+`<select>`, so its dropdown is a tap-to-reveal list). Every option names the model
+the tier resolves to right now (`fast · claude-haiku-4-5`), which is the owner's
+specific request: explicit about the actual model without the pane needing an edit
+when a tier's target moves. A tier from another executor, or one this install has no
+credential for, is DISABLED WITH THE REASON — never hidden; a missing option nobody
+can account for is exactly how ISSUES #551 stayed invisible for weeks. A CLI step's
+effort cell says "set by the CLI" instead of offering a control that changes nothing.
+Availability comes from the same resolvers the build uses (`open/composer.ts` now
+shares one `kimiConfigured()` between the pane and `resolve_kimi_configured`), so the
+greyed state and the panelist that actually runs cannot drift apart.
+
+**Scope is labelled honestly, not changed.** Storage is
+`instance_metadata.trident_phase_models`, keyed by instance slug with no project
+dimension, while the pane sits in project settings. The section now reads "every
+project on this computer". Making it genuinely per-project is a separate decision and
+is NOT in this change.
+
+**What the tests assert.** `trident/__tests__/cross-model-dispatch.test.ts` runs the
+production `buildWorkflowArgs` output through the real `inner-workflow.mjs` and
+asserts the RESOLVED id on the dispatch command — `CODEX_REVIEW_MODEL='gpt-5.6-sol'`
+by default (the byte-for-byte behaviour of an install that never opened the pane) and
+`'gpt-5.6-terra'` when the owner picks `terra` — plus the three degrade paths.
+`landing/chat-react/__tests__/codegen-settings-web.test.tsx` stopped asserting the
+section from its source and now MOUNTS the tab and drives the real controls; the
+mobile screen's presses were already real. Both were mutation-checked: breaking the
+select handler and the env-prefix builder each turned the relevant test red.
+
 ## 2026-08-13 — REVIEW DEVIATION, recorded on purpose: P1 + P1.5 landed on ONE panel seat
 
 The two entries below merged after review by `argus:codex` ALONE — 21 rounds on

@@ -61,12 +61,25 @@ interface RunOpts {
   env?: Record<string, string>
   /** Extra argv for the script (defaults to the branch name). */
   branch?: string
+  /**
+   * Create this branch at the base commit and pass it as the wrapper's `$2`.
+   * Undefined → no base argument, which is the "no last-resort diff" contract.
+   */
+  base?: string
+  /**
+   * Kill the wrapper after this long. A DISCRIMINANT, not a stopwatch: the caller
+   * asserts on `signal`, so "the wrapper finished on its own" and "we had to kill it"
+   * are two different observable outcomes rather than two sides of a threshold.
+   */
+  spawnTimeoutMs?: number
 }
 
 const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n'
 
 interface RunResult {
   status: number | null
+  /** The signal the harness killed the wrapper with, or null if it exited by itself. */
+  signal: NodeJS.Signals | null
   stdout: string
   stderr: string
   /** argv the mock `codex` received ('' if never run). */
@@ -159,7 +172,14 @@ function run(opts: RunOpts = {}): RunResult {
   const trailerFile = join(dir, 'build.trailer')
   if (opts.noTrailerFile !== true) env['NEUTRON_CODEX_BUILD_TRAILER_FILE'] = trailerFile
 
-  const res = spawnSync(BASH, [SCRIPT, branch], { cwd: dir, encoding: 'utf8', env })
+  if (opts.base !== undefined) git('branch', opts.base)
+  const argv = opts.base === undefined ? [SCRIPT, branch] : [SCRIPT, branch, opts.base]
+  const res = spawnSync(BASH, argv, {
+    cwd: dir,
+    encoding: 'utf8',
+    env,
+    ...(opts.spawnTimeoutMs === undefined ? {} : { timeout: opts.spawnTimeoutMs }),
+  })
   const readOr = (name: string): string => {
     try {
       return readFileSync(join(dir, name), 'utf8')
@@ -170,6 +190,8 @@ function run(opts: RunOpts = {}): RunResult {
   const trailerRaw = readOr('build.trailer')
   return {
     status: res.status,
+    /** Non-null when the harness had to KILL the wrapper — i.e. it did not finish. */
+    signal: res.signal ?? null,
     stdout: res.stdout ?? '',
     stderr: res.stderr ?? '',
     codexArgv: readOr('codex-argv.txt'),
@@ -635,6 +657,88 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     expect(fresh.trailer['NEUTRON_CODEX_BUILD_DIFF']).toContain('branch.diff')
     expect(readFileSync(join(fresh.dir, 'branch.diff'), 'utf8')).not.toContain('EARLIER ROUND')
   })
+
+  test('a committing round that wrote NO diff gets one from the base branch', () => {
+    // The gap the deletion above opens. The workflow captures the diff PATH once and
+    // hands the SAME one to every review round, so a fix round that committed and
+    // forgot to re-write the diff would send the panel at a path the wrapper had just
+    // deleted. The diff is not a judgement call — it is `git diff <base>..HEAD` — so
+    // the wrapper takes it rather than reporting nothing.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      base: 'main',
+      diff: 'diff --git a/prior b/prior\n+A DIFF FROM AN EARLIER ROUND\n',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
+    })
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_DIFF']).toContain('branch.diff')
+    const written = readFileSync(join(r.dir, 'branch.diff'), 'utf8')
+    // THIS round's work, not the round the file was left over from.
+    expect(written).toContain('built.txt')
+    expect(written).not.toContain('EARLIER ROUND')
+  })
+
+  test('the last-resort diff needs a COMMIT — an uncommitted round still reports nothing', () => {
+    // With no commit of this build's own there is nothing to diff, and an empty
+    // `NEUTRON_CODEX_BUILD_DIFF=` is exactly the signal the workflow's round-1 gate
+    // reads to keep an unbuilt branch out of the review panel. Regenerating here
+    // would manufacture a diff for a build that produced none.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      base: 'main',
+      diff: null,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_NO_COMMIT },
+    })
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
+  })
+
+  test('NO base argument means no last-resort diff — never a guessed base', () => {
+    // The positive control for the two above: the same committing-but-diffless build,
+    // with the base omitted, reports nothing rather than diffing against whatever
+    // branch happens to be lying around.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      diff: null,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
+    })
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
+  })
+
+  test('a HANGING `gh` costs the run a PR number, never the trailer', () => {
+    // `emit_trailer` runs on the FAILURE path too, so an unbounded `gh` does not
+    // merely lose a field — it hangs the build phase forever and the DEFERRED report
+    // never reaches the bridge. Bounded by the same alarm as the `git ls-remote`
+    // probes beside it.
+    const r = run({
+      authed: true,
+      // Kill it well short of the mock's 120s hang. Which of the two happened is the
+      // assertion below — a signal means the bound did NOT hold.
+      spawnTimeoutMs: 45_000,
+      codexLoginExit: 0,
+      // The build seam REPLACES `gh` on PATH with one that never returns, after it
+      // commits — so the probe runs against a hang the wrapper must give up on.
+      env: {
+        NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD}; cat > "$HOME/bin/gh" <<'GHEOF'
+#!/bin/sh
+sleep 120
+GHEOF
+chmod 755 "$HOME/bin/gh"`,
+      },
+    })
+    // IT FINISHED BY ITSELF. An unbounded probe would still be inside `gh` at 45s and
+    // come back killed; this is the discriminant, not an elapsed-time threshold.
+    expect(r.signal).toBeNull()
+    // The trailer EXISTS and is complete — the whole point.
+    expect(Object.keys(r.trailer)).toHaveLength(6)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
+    // …with the PR number empty, because the probe was cut off rather than answered.
+    expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
+  }, 90_000)
 
   test('the trailer is emitted on the FAILURE path too', () => {
     // A codex run that died after committing still left work on the branch, and the

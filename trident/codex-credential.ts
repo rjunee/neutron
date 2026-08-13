@@ -20,7 +20,7 @@
  * re-write it so the loop's CODEX_HOME is always populated.
  */
 
-import { accessSync, constants } from 'node:fs'
+import { accessSync, constants, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -61,13 +61,19 @@ export function codexCliOnPath(env: Record<string, string | undefined>): boolean
   for (const dir of path.split(delimiter)) {
     if (dir === '') continue
     try {
+      const candidate = join(dir, 'codex')
       // X_OK, not merely "the name exists": a non-executable file called `codex` is
       // not a CLI, and `execvp` would skip it exactly the way this does.
-      accessSync(join(dir, 'codex'), constants.X_OK)
-      return true
+      accessSync(candidate, constants.X_OK)
+      // …AND A REGULAR FILE. `X_OK` on a DIRECTORY means "searchable", which every
+      // normal directory is — so a PATH entry containing a subdirectory named `codex`
+      // (a checkout, a cache) passed the check above and un-greyed every codex tier on
+      // a box with no CLI at all. `execvp` returns EACCES on a directory; `statSync`
+      // follows symlinks, so a symlink to the real binary still counts.
+      if (statSync(candidate).isFile()) return true
     } catch {
-      // Not here, or not executable. Keep looking — an unreadable directory on PATH
-      // must not decide the answer for the ones after it.
+      // Not here, not executable, or not stat-able. Keep looking — an unreadable
+      // directory on PATH must not decide the answer for the ones after it.
     }
   }
   return false

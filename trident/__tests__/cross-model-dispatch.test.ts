@@ -73,6 +73,10 @@ async function runWorkflow(
     complexity?: 'mechanical' | 'reasoning'
     /** Round 1 comes back with these instead of a sha + a diff path. */
     buildProduces?: { commitSha?: string; diffFile?: string }
+    /** The PR number round 1 reports. Default null (the local-mode shape). */
+    buildPr?: number
+    /** Ralph's planner says this many tasks remain AFTER the one being built. */
+    remainingTasks?: number
   } = {},
 ): Promise<{ captured: Captured[]; logs: string[]; result: Record<string, unknown> }> {
   const captured: Captured[] = []
@@ -85,7 +89,7 @@ async function runWorkflow(
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       const empty = opts.buildProduces !== undefined && label === 'forge:build'
       const built = {
-        prNumber: null,
+        prNumber: opts.buildPr ?? null,
         branch: 'trident/a-run',
         // A build that ran and produced NOTHING is the wrapper's honest answer, not a
         // malformed one: it measures with git and emits EMPTY rather than wrong.
@@ -115,7 +119,7 @@ async function runWorkflow(
         topTask: 'the one task',
         executionSpec: 'TARGET FILES: x\nACCEPTANCE CRITERION: y\nTEST PLAN: z',
         complexity: opts.complexity ?? 'reasoning',
-        remainingTasks: 0,
+        remainingTasks: opts.remainingTasks ?? 0,
       }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
@@ -156,7 +160,9 @@ async function runWorkflow(
   // Every healthy run reaches synthesis, so a workflow that silently stopped early
   // cannot pass a test by dispatching nothing. `buildProduces` is the one case that
   // is SUPPOSED to stop before the panel, and it asserts that itself.
-  if (opts.buildProduces === undefined) expect(synthCount).toBeGreaterThan(0)
+  if (opts.buildProduces === undefined && opts.remainingTasks === undefined) {
+    expect(synthCount).toBeGreaterThan(0)
+  }
   return { captured, logs, result }
 }
 
@@ -167,30 +173,43 @@ const promptFor = (captured: Captured[], label: string): string => {
 }
 
 describe('THE DEFAULT PATH — an install that never opened the pane', () => {
-  test('codex still reviews on gpt-5.6-sol', async () => {
+  test('codex still reviews on gpt-5.6-sol, and kimi on kimi-k3', async () => {
     const { captured } = await runWorkflow(productionArgs(null))
     // The wrapper's own pin says `sol` too (`model-tiers.test.ts` holds those two
     // together), so this is the behaviour that shipped before the selector existed —
     // now stated by the dispatch instead of left to the CLI's default.
     expect(promptFor(captured, 'argus:codex')).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
+    expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
   })
 
-  test('the KIMI lane is left exactly as it was — nothing threads a model into it', async () => {
-    // Kimi is out of scope for this change, and "out of scope" has to be visible in
-    // the dispatch and not just in a commit message. The seat still runs; its command
-    // carries no model assignment, because `trident/kimi-review-cli.ts` is not wired
-    // to read one and a variable the subprocess ignores is a setting with no consumer.
-    const { captured } = await runWorkflow(productionArgs(null))
+  test('the KIMI lane is left exactly as it was — the build move did not touch it', async () => {
+    // Kimi is OUT OF SCOPE for this change, and "out of scope" has to be visible in the
+    // dispatch and not just in a commit message: the seat runs, on its own tier, through
+    // its own wrapper, with the model threaded exactly the way it was before the build
+    // moved to codex.
+    const { captured, logs } = await runWorkflow(productionArgs(null))
     const cmd = promptFor(captured, 'argus:kimi')
     expect(cmd).toContain('kimi-review-cli.ts')
-    expect(cmd).not.toContain('KIMI_MODEL=')
+    expect(cmd).toContain("KIMI_MODEL='kimi-k3'")
+    // …and the tally still attributes the seat to Kimi. Losing the route would fall
+    // through to the unknown-label default and log an Anthropic id for a Kimi
+    // subprocess — mis-attributing spend in the ledger this whole lane exists to keep
+    // honest.
+    expect(
+      logs.some(
+        (l) =>
+          l.includes('label=argus:kimi') &&
+          l.includes('model=kimi-k3') &&
+          l.includes('phase=review_kimi'),
+      ),
+    ).toBe(true)
   })
 
   test('the model is set on the SUBPROCESS, never on the wrapping agent', async () => {
     // `agent({model})` resolves against Claude Code's own endpoint; a GPT id there
     // reaches nothing. The thin bridge agent must therefore carry NO model at all.
     const { captured } = await runWorkflow(productionArgs(null))
-    for (const label of ['argus:codex']) {
+    for (const label of ['argus:codex', 'argus:kimi']) {
       const seat = captured.find((c) => c.label === label)!
       expect({ label, model: seat.opts['model'] ?? null }).toEqual({ label, model: null })
     }
@@ -221,6 +240,7 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
       true,
     )
     // The OTHER cross-model lane is untouched — one row's choice is one row's choice.
+    expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
     expect(promptFor(captured, 'argus:kimi')).not.toContain('gpt-5.6-terra')
   })
 
@@ -491,6 +511,57 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // the emptiness above is the guard firing and not a workflow that never reviews.
     const healthy = await runWorkflow(productionArgs(CODEX_BUILD))
     expect(healthy.captured.filter((c) => String(c.label).startsWith('argus:')).length).toBeGreaterThan(0)
+  })
+
+  test('…and the terminal failure NAMES the PR the empty build opened', async () => {
+    // The gate captures the PR number BEFORE it throws. A build that opened a PR and
+    // then reported no sha is exactly the case an operator needs the number for — it
+    // is where the half-finished work is — and a message that could not mention it
+    // sent them looking for a branch by hand.
+    const { result, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      buildProduces: { commitSha: '', diffFile: '' },
+      buildPr: 4242,
+    })
+    expect(result['ok']).toBe(false)
+    // The thrown message is what the run's output shows, and it says which PR.
+    expect(logs.some((l) => l.includes('inner THREW') && l.includes('#4242'))).toBe(true)
+    // …and it is carried as the typed field too, not only in prose.
+    expect(result['prNumber']).toBe(4242)
+
+    // THE CONTROL: with no PR the message says nothing about one rather than
+    // inventing "#null".
+    const noPr = await runWorkflow(productionArgs(CODEX_BUILD), {
+      buildProduces: { commitSha: '', diffFile: '' },
+    })
+    expect(noPr.logs.some((l) => l.includes('inner THREW') && l.includes('nothing was built.'))).toBe(
+      true,
+    )
+  })
+
+  test('a Ralph task that built nothing RE-FIRES the next task instead of aborting', async () => {
+    // THE GATE GUARDS THE REVIEW PANEL, and an intermediate Ralph task opens none. A
+    // single task the planner turned into a no-op must not kill a multi-task run: the
+    // outer loop re-fires the next task, and the FINAL task still passes through the
+    // gate before any reviewer is paid. Placing the check ahead of the re-fire made
+    // one empty task abort everything.
+    const { captured, result } = await runWorkflow(
+      productionArgs(CODEX_BUILD, { ralph: true }),
+      { buildProduces: { commitSha: '', diffFile: '' }, remainingTasks: 2 },
+    )
+    expect(result['ok']).toBe(true)
+    expect(result['checkpoint']).toBe('ralph-task-built')
+    expect(result['remainingTasks']).toBe(2)
+    // No panel was opened for the empty intermediate — the budget is still unspent.
+    expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+
+    // THE CONTROL: the LAST task (nothing remaining) with the same emptiness still
+    // stops the run, so this is the re-fire path and not a hole in the gate.
+    const last = await runWorkflow(productionArgs(CODEX_BUILD, { ralph: true }), {
+      buildProduces: { commitSha: '', diffFile: '' },
+      remainingTasks: 0,
+    })
+    expect(last.result['ok']).toBe(false)
+    expect(last.captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
   })
 
   test('a build lane that never ran STOPS the run instead of falling back to Claude', async () => {

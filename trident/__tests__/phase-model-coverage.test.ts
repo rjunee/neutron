@@ -114,24 +114,19 @@ describe('coverage — no label falls through silently', () => {
     expect({ uncovered }).toEqual({ uncovered: [] })
   })
 
-  it('the CODEX review lane is ROUTED now, retry included — and kimi stays unrouted', () => {
-    // Codex used to be listed as deliberately unconfigurable ("the reviewing model is
+  it('the cross-model lanes are ROUTED now, retries included', () => {
+    // They used to be listed as deliberately unconfigurable ("the reviewing model is
     // the CLI's own configuration"), which held only while nothing threaded a model
-    // IN. `trident/codex-review.sh` reads `CODEX_REVIEW_MODEL`, so the exclusion was
-    // retired — and the RETRY lane matters as much as the first attempt: an owner's
-    // choice that applied to one and not the other would be a review served by two
-    // different models.
+    // IN. Both wrappers read an env knob, so the exclusion was retired — and the
+    // RETRY lanes matter as much as the first attempt: an owner's choice that applied
+    // to one and not the other would be a review served by two different models.
     for (const label of ['argus:codex', 'argus:codex-retry']) {
       expect(phaseForLabel(label)?.key).toBe('review_codex')
       expect(isUnroutedLabel(label)).toBe(false)
     }
-    // KIMI IS DELIBERATELY STILL UNROUTED. Nothing threads a model into
-    // `trident/kimi-review-cli.ts`, so a row for it would save a choice the dispatch
-    // never reads. It is excluded WITH A REASON rather than forgotten — which is the
-    // difference this list exists to record.
     for (const label of ['argus:kimi', 'argus:kimi-retry']) {
-      expect(phaseForLabel(label)).toBeNull()
-      expect(isUnroutedLabel(label)).toBe(true)
+      expect(phaseForLabel(label)?.key).toBe('review_kimi')
+      expect(isUnroutedLabel(label)).toBe(false)
     }
   })
 
@@ -200,6 +195,30 @@ describe('the workflow reads the argument this module produces', () => {
     // it can never be looked up.
     for (const phase of TRIDENT_PHASES) {
       expect(WORKFLOW_SRC.includes(`phaseKey: '${phase.key}'`)).toBe(true)
+    }
+  })
+
+  it('implements every `follows` the table declares, and no other', () => {
+    // THE DRIFT GUARD FOR THE ONE RULE THAT LIVES IN TWO PLACES. `follows` decides two
+    // things that must agree: the surface hides the row, and the workflow's
+    // `phaseOverrideFor` hands it the followed phase's override. The `.mjs` cannot
+    // import this module (the workflow script has no module resolution), so the rule
+    // is necessarily restated there — and a restatement nobody checks is how the pane
+    // and the run start disagreeing.
+    const declared = TRIDENT_PHASES.filter((p) => p.follows !== undefined)
+    // The table must actually declare one, or every assertion below is vacuous.
+    expect(declared.map((p) => `${p.key}<-${p.follows}`)).toEqual(['build_mechanical<-build'])
+    for (const phase of declared) {
+      expect(
+        WORKFLOW_SRC.includes(
+          `phaseKey === '${phase.key}' && threadedPhaseModels['${phase.key}'] === undefined\n    ? threadedPhaseModels['${phase.follows!}']`,
+        ),
+      ).toBe(true)
+    }
+    // And a phase with NO `follows` must not be quietly inheriting anyway.
+    for (const phase of TRIDENT_PHASES) {
+      if (phase.follows !== undefined) continue
+      expect(WORKFLOW_SRC.includes(`phaseKey === '${phase.key}' &&`)).toBe(false)
     }
   })
 })
@@ -301,6 +320,12 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
     // Within one executor it is allowed — that is the whole feature.
     expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
+    // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toHaveLength(1)
+    // …and the build's SECOND executor is codex, not "any CLI": a Kimi tier on the
+    // build row is still refused, because nothing dispatches it there.
+    expect(parsePhaseModelConfig({ build: { model: 'k3' } }).errors).toHaveLength(1)
   })
 
   it('ACCEPTS a codex tier on the build phases — the executor they are now wired to', () => {
@@ -550,6 +575,12 @@ describe('the args actually carry it (the TS half, end to end)', () => {
       transport: 'cli',
       env_var: 'CODEX_REVIEW_MODEL',
       group: 'codex',
+    })
+    expect(tiers['k3']).toEqual({
+      model_id: 'kimi-k3',
+      transport: 'cli',
+      env_var: 'KIMI_MODEL',
+      group: 'kimi',
     })
   })
 })

@@ -3,7 +3,7 @@
  * provides it, and HOW the workflow reaches it.
  *
  * ── Why tiers rather than model ids ─────────────────────────────────────────
- * The owner picks a TIER (`opus`, `sol`), never a vendor id. A tier resolves at
+ * The owner picks a TIER (`opus`, `sol`, `k3`), never a vendor id. A tier resolves at
  * RUNTIME, so the pane survives model turnover: when a vendor retires an id, the
  * registry entry changes and every phase pinned to that tier follows it. A pane full
  * of literal ids would need an edit — and a settings screen nobody edits is a settings
@@ -11,8 +11,8 @@
  *
  * ── Why a tier also carries a TRANSPORT ─────────────────────────────────────
  * The workflow CANNOT reach a non-Anthropic model through `agent({model})` — that
- * resolves against Claude Code's own endpoint. A GPT model is reachable ONLY as a CLI
- * subprocess (`codex exec`). So "which model" is not a
+ * resolves against Claude Code's own endpoint (`trident/kimi-review-cli.ts:4-8`). A
+ * GPT or Kimi model is reachable ONLY as a CLI subprocess. So "which model" is not a
  * complete answer: the transport is the difference between a model the workflow can
  * call and one it must shell out to, and a tier that did not carry it would let the
  * settings pane offer a choice the dispatch cannot honour.
@@ -30,7 +30,7 @@
  * string — a drift between them is a red test, not a surprise in a review.
  *
  * ── Availability is reported, never hidden ──────────────────────────────────
- * A cli tier needs a credential (a Codex connection). An install without
+ * A cli tier needs a credential (a Codex connection, a Kimi key). An install without
  * one still SEES the tier, disabled, with the reason — `requires` is what the surface
  * turns into "needs a Codex connection". An option that silently disappears is how a
  * missing capability stays invisible for weeks (ISSUES #551).
@@ -51,27 +51,28 @@ export const MODEL_TIERS = [
   'sol',
   'terra',
   'luna',
+  'k3',
 ] as const
 export type ModelTier = (typeof MODEL_TIERS)[number]
 
 /** The credential a `cli` tier needs before it can run. `null` → nothing to set up. */
-export type TierRequirement = 'codex'
+export type TierRequirement = 'codex' | 'kimi'
 
 /**
  * The EXECUTOR a tier runs on — the partition that decides what can substitute for
  * what. Transport alone is too coarse: it says a tier is reached by a subprocess, not
- * WHICH subprocess, and a second cli executor would be indistinguishable from this
- * one. So the group is stated once here and every "can this phase take that tier"
+ * WHICH subprocess, and `CODEX_REVIEW_MODEL=kimi-k3` is not a review, it is an error.
+ * So the group is stated once here and every "can this phase take that tier"
  * question — in the validator, in the workflow, in the pane — answers from it.
  */
-export const TIER_GROUPS = ['claude', 'codex'] as const
+export const TIER_GROUPS = ['claude', 'codex', 'kimi'] as const
 export type TierGroup = (typeof TIER_GROUPS)[number]
 
 /** One tier, fully resolved. */
 export interface ModelTierDescriptor {
   tier: ModelTier
   /** Who makes the model. Shown in the pane so a cross-model peer is obviously one. */
-  provider: 'anthropic' | 'openai'
+  provider: 'anthropic' | 'openai' | 'moonshot'
   group: TierGroup
   /** What the tier resolves to RIGHT NOW. Never persisted — always re-resolved. */
   model_id: string
@@ -174,6 +175,18 @@ const RESOLVERS: Readonly<
     wrapper: 'trident/codex-review.sh',
     env_var: 'CODEX_REVIEW_MODEL',
     requires: 'codex',
+  },
+  // Kimi K3 — a reviewer from a DIFFERENT model family than Claude and GPT alike,
+  // which is the entire reason the panel has it. `trident/kimi-review.ts` holds the
+  // same id as its own default for a direct call; the test pins the pair.
+  k3: {
+    provider: 'moonshot',
+    group: 'kimi',
+    resolve: () => 'kimi-k3',
+    transport: 'cli',
+    wrapper: 'trident/kimi-review-cli.ts',
+    env_var: 'KIMI_MODEL',
+    requires: 'kimi',
   },
 })
 

@@ -3241,18 +3241,29 @@ export function buildOpenGraphComposer(
       auth: appOwnerAuth,
       read: (scope) => readTridentPhaseModelsWithRejected(db, scope),
       write: (scope, input) => writeTridentPhaseModels(db, scope, input),
-      // THE SAME RESOLVER THE BUILD USES. A pane that answered "available" from its
-      // own notion of configured would grey the wrong option — or worse, offer a tier
-      // whose build then never happens for a reason the owner cannot see.
+      // THE SAME RESOLVERS THE BUILD USES (`kimiConfigured` below is this exact
+      // function). A pane that answered "available" from its own notion of
+      // configured would grey the wrong option — or worse, offer a tier whose
+      // build then never happens for a reason the owner cannot see.
       //
       // BOTH HALVES OF "CAN CODEX RUN HERE", because the wrapper hard-fails on either:
       // exit 10 with no credential, exit 11 with no `codex` on PATH
       // (`trident/codex-build.sh`). A credential on a box where the CLI was never
       // installed is a selectable tier that dies at dispatch.
+      //
+      // WHOSE PATH IS SCANNED. The wrapper is exec'd by the `claude` REPL child, not
+      // by this process — so the answer is only right if the child's PATH is this
+      // one. It is: the REPL substrate LAYERS its `env` option on top of `process.env`
+      // (`runtime/adapters/claude-code/index.ts:83-94`) and no caller in this repo
+      // puts `PATH` in that layer (`build-gbrain-memory.ts:752` is the only PATH
+      // override, and it is a different subprocess). A future caller that DID override
+      // it would have to update this answer with it — hence the note rather than a
+      // silent assumption.
       connections: () => ({
         codex:
           codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !== null &&
           codexCliOnPath(env),
+        kimi: kimiConfigured(),
       }),
     })
     const voiceTranscriptionSurface = createVoiceTranscriptionSurface({

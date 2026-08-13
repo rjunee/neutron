@@ -30,6 +30,8 @@ import {
 } from '../model-tiers.ts'
 
 const CODEX_WRAPPER = await Bun.file(new URL('../codex-review.sh', import.meta.url)).text()
+const KIMI_REVIEW = await Bun.file(new URL('../kimi-review.ts', import.meta.url)).text()
+const KIMI_CLI = await Bun.file(new URL('../kimi-review-cli.ts', import.meta.url)).text()
 const CODEX_BUILD = await Bun.file(new URL('../codex-build.sh', import.meta.url)).text()
 const WORKFLOW_SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
 
@@ -66,7 +68,7 @@ describe('every tier is complete and resolvable', () => {
         // would know a model id and have nowhere to put it.
         expect(typeof entry.wrapper).toBe('string')
         expect(typeof entry.env_var).toBe('string')
-        expect(entry.requires).toBe('codex')
+        expect(entry.requires === 'codex' || entry.requires === 'kimi').toBe(true)
       }
     }
   })
@@ -97,6 +99,7 @@ describe('the registry and the wrappers cannot drift apart', () => {
     // while the pane insists otherwise.
     const sources: Record<string, string> = {
       'trident/codex-review.sh': CODEX_WRAPPER,
+      'trident/kimi-review-cli.ts': KIMI_CLI,
     }
     for (const entry of modelTierRegistry()) {
       if (entry.transport !== 'cli') continue
@@ -149,6 +152,11 @@ describe('the registry and the wrappers cannot drift apart', () => {
     // …and the WORKFLOW sets exactly that name. Without this the wrapper would read
     // a variable nothing writes and every codex build would take the default.
     expect(WORKFLOW_SRC).toContain("CODEX_BUILD_MODEL_ENV = 'CODEX_BUILD_MODEL'")
+  })
+
+  it('`k3` IS the Kimi reviewer\'s own default model', () => {
+    expect(modelTier('k3')!.model_id).toBe('kimi-k3')
+    expect(KIMI_REVIEW).toContain("KIMI_DEFAULT_MODEL = 'kimi-k3'")
   })
 })
 

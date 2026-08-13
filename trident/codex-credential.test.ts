@@ -8,7 +8,15 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -320,6 +328,29 @@ describe('codexCliOnPath — the OTHER half of "can this install run codex"', ()
     // `execvp` skips it, so reporting the tier available would offer a build that
     // fails at launch — the exact failure this probe exists to pre-empt.
     expect(codexCliOnPath({ PATH: bin('notexec', 0o644) })).toBe(false)
+  })
+
+  test('a DIRECTORY named codex is not a CLI, however searchable it is', () => {
+    // The subtle one. `X_OK` on a directory means "searchable", which every normal
+    // directory is — so a PATH entry holding a `codex/` subdirectory (a checkout, a
+    // cache) passed an access-only check and un-greyed every codex tier on a box with
+    // no CLI at all. `execvp` returns EACCES on a directory; so does this now.
+    const d = join(dir, 'dirnamed')
+    mkdirSync(join(d, 'codex'), { recursive: true })
+    expect(codexCliOnPath({ PATH: d })).toBe(false)
+    // POSITIVE CONTROL on the same PATH shape: the probe must still say yes when a
+    // real binary follows, or the assertion above would pass for the wrong reason.
+    expect(codexCliOnPath({ PATH: `${d}${delimiter}${bin('afterdir', 0o755)}` })).toBe(true)
+  })
+
+  test('a SYMLINK to a real binary still counts', () => {
+    // `statSync` follows links, deliberately: a package manager that installs
+    // `~/.local/bin/codex` as a symlink has installed the CLI.
+    const target = join(bin('linktarget', 0o755), 'codex')
+    const d = join(dir, 'linked')
+    mkdirSync(d, { recursive: true })
+    symlinkSync(target, join(d, 'codex'))
+    expect(codexCliOnPath({ PATH: d })).toBe(true)
   })
 
   test('an absent, empty or unset PATH answers false rather than throwing', () => {

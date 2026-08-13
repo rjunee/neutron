@@ -32,6 +32,10 @@
 #                                       would silently point the reviewer at the
 #                                       build's model (or the reverse).
 #   arg $1                              the branch the build is expected to land on.
+#   arg $2                              the BASE branch, used only to regenerate the
+#                                       branch diff when a build committed but never
+#                                       wrote one. Optional; omitted means "no
+#                                       last-resort diff", never a guessed base.
 #
 #   out  the codex transcript on stdout; the MEASURED trailer in the trailer file.
 #
@@ -141,6 +145,7 @@
 set -uo pipefail
 
 BRANCH="${1:-}"
+BASE_BRANCH="${2:-}"
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
@@ -174,7 +179,7 @@ pre_existing() {
 # A function so the measurement is written once and cannot drift between the
 # success and failure exits. It measures; it never infers.
 emit_trailer() {
-  local head remote_head pr_number diff_path branch_name
+  local head remote_head pr_number diff_path branch_name _pr_out
   branch_name="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   # A detached HEAD has no branch name, and `--abbrev-ref` spells that "HEAD".
   [ "$branch_name" = "HEAD" ] && branch_name=''
@@ -200,12 +205,47 @@ emit_trailer() {
   fi
   pr_number=''
   if [ -n "$BRANCH" ] && command -v gh >/dev/null 2>&1; then
-    pr_number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || true)"
+    # BOUNDED, exactly like the `git ls-remote` probes: `gh` talks to the network and
+    # to a credential helper, either of which can block forever, and this function runs
+    # on the FAILURE path too — an unbounded call here does not merely lose the PR
+    # number, it hangs the build phase and the DEFERRED report never reaches the
+    # bridge. `</dev/null` because `gh` waits on stdin when it wants to prompt.
+    #
+    # THROUGH A FILE, NOT A COMMAND SUBSTITUTION, and that is the part that makes the
+    # bound real. `$(…)` returns when the PIPE closes, not when the command exits — so
+    # a credential helper `gh` left holding stdout keeps the substitution blocked long
+    # after the alarm killed `gh` itself. A redirect makes the shell wait for the
+    # process, which is what was bounded.
+    _pr_out="${TMPDIR:-/tmp}/trident-codex-build-pr.$$"
+    perl -e 'alarm 10; exec @ARGV or exit 1' \
+      gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' \
+      </dev/null >"$_pr_out" 2>/dev/null || true
+    pr_number="$(head -n 1 "$_pr_out" 2>/dev/null || true)"
+    rm -f "$_pr_out"
     # `--jq` prints `null` when the list is empty, and a literal "null" reported as a
     # PR number is worse than none at all.
     case "$pr_number" in
       '' | *[!0-9]*) pr_number='' ;;
     esac
+  fi
+  # THE DIFF OF LAST RESORT. The launch below DELETES this path so a stale diff from an
+  # earlier round can never be reported as this one's (#545). That leaves a real gap on
+  # a FIX round: the workflow captures the diff path ONCE and hands the same one to
+  # every review round, so a round that COMMITTED but forgot to re-write the diff would
+  # send the panel at a path that no longer exists. The diff is not a judgement call —
+  # it is `git diff <base>..HEAD`, which this script can take itself — so when the
+  # build left a commit and no diff, take it. Still a MEASUREMENT of the repository,
+  # not an inference about it.
+  #
+  # Only when `head` is non-empty: with no commit of this build's own there is nothing
+  # to diff, and an empty `NEUTRON_CODEX_BUILD_DIFF=` is exactly the signal the round-1
+  # gate reads to stop an unbuilt branch reaching the panel.
+  if [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && [ ! -s "${NEUTRON_CODEX_BUILD_DIFF_FILE}" ] \
+    && [ -n "$head" ] && [ -n "$BASE_BRANCH" ]; then
+    # `..`, not `...`, to match the diff the brief asks the build for — and because a
+    # shallow clone's grafted base has no merge-base to resolve. Failure leaves the
+    # file empty and the trailer says so.
+    git diff "${BASE_BRANCH}..HEAD" > "${NEUTRON_CODEX_BUILD_DIFF_FILE}" 2>/dev/null || true
   fi
   diff_path=''
   if [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && [ -s "${NEUTRON_CODEX_BUILD_DIFF_FILE}" ]; then
@@ -316,7 +356,9 @@ fi
 # when it is non-empty, and a path left over from an earlier round is non-empty with
 # SOMEONE ELSE'S diff in it — the reviewers would then read a diff this build never
 # wrote (the #545 class: a review of a diff no one built). Removed rather than
-# truncated so a build that never writes it leaves nothing at all behind.
+# truncated so a build that never writes it leaves nothing at all behind — and when
+# that build DID commit, `emit_trailer` regenerates the diff from `$BASE_BRANCH` rather
+# than reporting a path it just deleted.
 [ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && rm -f "${NEUTRON_CODEX_BUILD_DIFF_FILE}"
 
 # A test seam (NEUTRON_CODEX_BUILD_EXEC_CMD) replaces the real invocation so tests

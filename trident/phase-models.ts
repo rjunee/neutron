@@ -59,8 +59,9 @@
  *
  * ── TRANSPORT IS A CAPABILITY, so a phase cannot take just any tier ──────────
  * A phase may only take a tier one of its OWN dispatches can reach. `agent({model})`
- * resolves against Claude Code's own endpoint, so a GPT tier cannot run a step that has
- * only that dispatch. Choosing a tier no dispatch can reach is refused HERE,
+ * resolves against Claude Code's own endpoint, so a GPT/Kimi tier cannot run a step that
+ * has only that dispatch; the codex review wrapper reads `CODEX_REVIEW_MODEL`, so a Kimi
+ * tier cannot run it either. Choosing a tier no dispatch can reach is refused HERE,
  * where the owner is present to read why, rather than being discovered as a run that
  * used the wrong model.
  *
@@ -127,6 +128,23 @@ export interface TridentPhase {
    * the dispatch exists and is tested, not that it would be nice to have.
    */
   alsoRunsOn?: ReadonlyArray<TierGroup>
+  /**
+   * This phase takes another phase's setting when it has none of its own — and is
+   * therefore NOT an owner-facing row.
+   *
+   * A FOLLOWER IS NOT RENDERED. The settings surface omits it (`vocabulary`), because a
+   * row that displays its own default while the dispatch quietly uses another row's
+   * override is the pane/run disagreement this module's header forbids — and the two
+   * rows here are one step split by an internal cost tag, which is not a distinction
+   * the owner has any way to act on.
+   *
+   * The KEY still exists: an explicitly stored entry for it wins (it is the more
+   * specific key, and a config that names it meant it), and it still routes labels for
+   * the coverage test. The workflow's `phaseOverrideFor` implements this, and
+   * `__tests__/phase-model-coverage.test.ts` asserts the pair matches what is declared
+   * here so the two cannot drift.
+   */
+  follows?: string
 }
 
 /**
@@ -171,12 +189,15 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     labels: [{ label: 'forge:build' }, { label: 'forge:fix-round-', dynamic: true }],
     default: { tier: 'sonnet', effort: 'medium' },
     // The SAME dispatch as `build` — same labels, same forge bridge — so it reaches
-    // the codex executor for free. But `alsoRunsOn` only makes the move POSSIBLE for
-    // this key; the owner sets ONE row, and it is `build`. What keeps a `[mechanical]`
-    // task off Claude when the build moves to codex is `phaseOverrideFor` in
-    // `trident/inner-workflow.mjs`, which reads `build`'s setting for this key when
-    // this key has none of its own.
+    // the codex executor for free.
     alsoRunsOn: ['codex'],
+    // …AND IT IS NOT A SEPARATE ROW. The owner moves "Build" to codex; a task the
+    // planner happened to tag `[mechanical]` must not stay on Claude and keep spending
+    // the quota the move existed to protect. So this key follows `build`, and the pane
+    // does not render it — a visible row showing `sonnet` while the run dispatched
+    // `gpt-5.6-terra` is exactly the pane/run disagreement the header forbids, and
+    // "which of my two Build rows applies" is not a question the owner can answer.
+    follows: 'build',
   },
   {
     key: 'review_rubric',
@@ -205,6 +226,14 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     default: { tier: 'sol', effort: 'high' },
   },
   {
+    key: 'review_kimi',
+    label: 'Cross-model review (Kimi)',
+    description:
+      'A second opinion from Kimi K3, run as a CLI subprocess — a third model family, so the panel is not two copies of one set of blind spots.',
+    labels: [{ label: 'argus:kimi' }, { label: 'argus:kimi-retry' }],
+    default: { tier: 'k3', effort: 'high' },
+  },
+  {
     key: 'synthesis',
     label: 'Synthesis / arbitration',
     description: 'Merges every reviewer’s verdict into one, and decides what blocks a merge.',
@@ -230,31 +259,19 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
 /**
  * Agent labels that are deliberately NOT model-configurable, with the reason.
  *
- * The codex lanes came OFF this list: they sat here on the grounds that "the reviewing
- * model is the CLI's own configuration", which held only for as long as nothing
- * threaded a model INTO the CLI. `trident/codex-review.sh` reads `CODEX_REVIEW_MODEL`,
- * so the lane is routed by the `review_codex` phase instead.
+ * CURRENTLY EMPTY, and that is a state to keep rather than a list to delete. The four
+ * cross-model lanes (`argus:codex`, `argus:kimi` and their retries) lived here on the
+ * grounds that "the reviewing model is the CLI's own configuration" — true only for as
+ * long as nothing threaded a model INTO the CLI. Both wrappers already read an env
+ * knob (`CODEX_REVIEW_MODEL`, `KIMI_MODEL`), so the lanes are now routed by the
+ * `review_codex` / `review_kimi` phases and were removed from this list deliberately.
  *
- * The KIMI lanes stay, and the reason is the honest one: nothing in this lane threads a
- * model into `trident/kimi-review-cli.ts`, so a row offering the choice would be a
- * setting the dispatch does not read. A selectable option that does not dispatch is
- * worse than an absent one.
- *
- * The list's JOB: the coverage test requires every workflow label to be either claimed
- * by a phase or listed here WITH A REASON, so a new lane forces a decision instead of
- * silently falling through to the default.
+ * The list itself stays because its JOB is unchanged: the coverage test requires every
+ * workflow label to be either claimed by a phase or listed here WITH A REASON, so a
+ * new lane forces a decision instead of silently falling through to the default.
  */
 export const UNROUTED_LABELS: ReadonlyArray<{ label: string; dynamic?: boolean; why: string }> =
-  Object.freeze([
-    {
-      label: 'argus:kimi',
-      why: 'dispatches the Kimi review CLI in a subprocess; the reviewing model is that CLI’s.',
-    },
-    {
-      label: 'argus:kimi-retry',
-      why: 'the retry of the same subprocess lane.',
-    },
-  ])
+  Object.freeze([])
 
 /** An owner's override for one phase. Either field may be set alone. */
 export interface PhaseModelOverride {
@@ -300,7 +317,7 @@ export function phaseTransport(phase: TridentPhase): Transport {
 }
 
 /**
- * The executor group a phase runs on BY DEFAULT — `claude` or `codex`.
+ * The executor group a phase runs on BY DEFAULT — `claude`, `codex`, `kimi`.
  *
  * Derived from the phase's default tier, so the pane and the run cannot disagree. This
  * is the group a row names when it explains why an option is greyed ("…it runs on

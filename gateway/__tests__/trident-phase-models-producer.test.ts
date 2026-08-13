@@ -29,6 +29,7 @@ import {
   readTridentPhaseModelsWithRejected,
   writeTridentPhaseModels,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
+import { TRIDENT_PHASES } from '@neutronai/trident/phase-models.ts'
 
 const SCOPE = 'owner'
 let tmp: string
@@ -206,7 +207,7 @@ describe('the chain is actually connected — each link asserted separately', ()
 
 describe('the HTTP surface', () => {
   const auth = { resolve: async () => ({ user_id: 'owner', project_slug: SCOPE }) } as never
-  const surfaceFor = async (connections = { codex: true }) => {
+  const surfaceFor = async (connections = { codex: true, kimi: true }) => {
     const { createTridentPhaseModelsSurface } = await import(
       '@neutronai/gateway/http/trident-phase-models-surface.ts'
     )
@@ -235,12 +236,32 @@ describe('the HTTP surface', () => {
     expect(phases.every((p) => p.description.length > 20)).toBe(true)
     expect(json['efforts']).toContain('xhigh')
     expect(json['overrides']).toEqual({})
-    // The codex review lane is a row now, not an invisible part of the pipeline.
+    // Both cross-model review lanes are rows, not invisible parts of the pipeline.
     expect(phases.some((p) => p.key === 'review_codex')).toBe(true)
-    // KIMI IS NOT. Nothing threads a model into `trident/kimi-review-cli.ts`, so a row
-    // for it would save a choice the dispatch never reads — a selectable option that
-    // does not dispatch is worse than an absent one.
-    expect(phases.some((p) => p.key === 'review_kimi')).toBe(false)
+    expect(phases.some((p) => p.key === 'review_kimi')).toBe(true)
+  })
+
+  it('OMITS a follower phase — one step must not be two rows that disagree', async () => {
+    // `build_mechanical` is the build step under the planner's internal `[mechanical]`
+    // tag and takes `build`'s override when it has none of its own
+    // (`TridentPhase.follows`). Rendered, it would show its own `sonnet` default while
+    // the run dispatched the owner's codex tier — and "which of my two Build rows
+    // applies" is not a question the owner has any way to answer.
+    const s = await surfaceFor()
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const phases = json['phases'] as Array<{ key: string }>
+    expect(phases.some((p) => p.key === 'build_mechanical')).toBe(false)
+    // The filter must be the DECLARATION, not a hard-coded key: every phase the
+    // registry does not mark as a follower is still a row.
+    expect(phases.map((p) => p.key).sort()).toEqual(
+      TRIDENT_PHASES.filter((p) => p.follows === undefined)
+        .map((p) => p.key)
+        .sort(),
+    )
+    // …and the key it follows IS one of the rows, or the setting it inherits could
+    // never be made.
+    expect(phases.some((p) => p.key === 'build')).toBe(true)
   })
 
   it('tells each row EVERY executor it can dispatch on, not just its default', async () => {
@@ -254,8 +275,6 @@ describe('the HTTP surface', () => {
     const build = phases.find((p) => p.key === 'build')!
     expect(build.group).toBe('claude')
     expect(build.groups).toEqual(['claude', 'codex'])
-    // Same dispatch, same answer — the mechanical build row is not a separate lane.
-    expect(phases.find((p) => p.key === 'build_mechanical')!.groups).toEqual(['claude', 'codex'])
     // A single-executor row still says exactly one thing, and always includes its
     // own default: a row that omitted it could not offer the model it already runs.
     expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['codex'])
@@ -313,7 +332,7 @@ describe('the HTTP surface', () => {
     // The install that cannot run codex — no credential, or no CLI. Dropping those
     // options would leave the owner unable to account for a missing choice, which is
     // how a whole capability stayed invisible for weeks (ISSUES #551).
-    const s = await surfaceFor({ codex: false })
+    const s = await surfaceFor({ codex: false, kimi: false })
     const res = await s.handler(req('GET'))
     const json = (await res!.json()) as Record<string, unknown>
     const tiers = json['model_tiers'] as Array<Record<string, unknown>>
@@ -323,6 +342,12 @@ describe('the HTTP surface', () => {
         unavailable_reason: 'needs a Codex connection',
       })
     }
+    // …and each credential answers for its OWN tiers: the reason names the thing to
+    // go and set up, so a shared string would send a Kimi owner to connect Codex.
+    expect(tiers.find((t) => t['tier'] === 'k3')).toMatchObject({
+      available: false,
+      unavailable_reason: 'needs a Kimi key',
+    })
     // The Claude tiers need nothing and stay selectable.
     expect(tiers.find((t) => t['tier'] === 'opus')!['available']).toBe(true)
   })
