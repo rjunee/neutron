@@ -441,6 +441,34 @@ Each carries an acceptance criterion; all in `neutron-open`.
       Acceptance: a run whose reviewers repeat a finding stops and escalates instead of iterating; the round
       cap becomes the backstop it was meant to be rather than the primary exit; and the owner can see, on the
       card, that a build stopped because it was blocked rather than because it failed.
+- [ ] **A card's PULSE must be gated on a real heartbeat — BLOCKED ON #534, do not start before it lands**
+      (owner-directed 2026-08-13). This is the deferred half of the Work Board row-state card, split out
+      after run `36b95167` spent ten review rounds failing to build it. The other half — the durable failed
+      colour and the ▶/↻ retry control — is keyed on `status='failed'`, which the terminal reconcile already
+      writes (`work-board/store.ts`), needs no new signal, and ships separately.
+      WHY IT CANNOT BE BUILT YET. A pulse is a claim that something is MOVING. The only durable facts on the
+      surface are the run's `phase` and `last_advanced_at`, and both advance only ON HARVEST — so a run that
+      dies WITHOUT a terminal transition (a deploy SIGTERMing the warm REPL, which is exactly how this card's
+      own attempt `bb3c8c8e` died) leaves `phase = forge-init` forever and the card pulses forever. There is
+      no fact to check. Every fix round of `36b95167` therefore invented a PROXY for liveness — `undefined`
+      run progress read as "running" (`isLinkedRunning`, `rp === undefined || !terminal` — liveness inferred
+      from the ABSENCE of data), then an out-of-spec `!inline_active` suppressor whose own commit comment
+      concedes it creates "a permanent pulse+no-▶ state ... the same unrecoverable-card defect on a narrower
+      path". Reviewers rejected each in turn and were right to. **A proxy for a missing signal is not a
+      smaller version of the signal; it is a new defect wearing the fix's name.**
+      PREREQUISITE: governance tracker **#534** (*"a long build phase reports NOTHING until it ends, so a
+      working run is indistinguishable from a hung one"*, P1, escalated 2026-08-11) — the heartbeat. Its
+      recommended route is a periodic write through `trident/checkpoint.sh`. Nothing here should re-design it.
+      TWO CONSTRAINTS THIS ITEM PLACES ON #534's OUTPUT, from evidence #534 does not have:
+      (i) it must distinguish ALIVE from PROGRESSING. On 2026-08-13 the orchestrator read agent-transcript
+          mtimes, called run `36b95167` "going well", and it was at that moment alive and converging on
+          nothing. A heartbeat proving only "an agent is writing" would ship that mistake into the product.
+      (ii) the 90-minute hang reaper must be re-pointed onto the heartbeat clock rather than the harvest
+          clock. It judges `last_advanced_at` today, which is why `eca83d1f` — this same card's FIRST
+          attempt — was killed for "no progress" with nothing establishing it was hung.
+      Acceptance: a run killed by an instance restart, with no terminal transition written, stops pulsing on
+      the card within one heartbeat interval and offers ↻; and no code path derives liveness from the absence
+      of data. Kill the heartbeat writer and the test must fail.
 
 ### Email Core consolidation — absorb the standalone email system (owner-directed 2026-08-07)
 
