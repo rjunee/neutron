@@ -3961,6 +3961,14 @@ export function buildOpenGraphComposer(
     // rather than after a restart.
     const kimiUsageMonitor = new KimiUsageMonitor({
       key: () => resolveKimiApiKey(kimiKeyLookup),
+      // The base URL is threaded from THIS composition's env rather than read off
+      // the module-load-time constant in `trident/kimi-review.ts`. Same value in
+      // production, and it removes an import-order dependency: whether the poller
+      // honours `KIMI_BASE_URL` should not turn on whether some other module
+      // happened to be imported before the variable was set.
+      ...(typeof env['KIMI_BASE_URL'] === 'string' && env['KIMI_BASE_URL'].length > 0
+        ? { probeDeps: { baseUrl: env['KIMI_BASE_URL'] } }
+        : {}),
       onSample: async (sample): Promise<void> => {
         await usageSamplesStore.record({ pool: 'kimi', ...sample })
         await usageSamplesStore.prune()

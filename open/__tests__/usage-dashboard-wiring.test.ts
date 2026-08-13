@@ -112,8 +112,8 @@ beforeAll(async () => {
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env['NOTIFY_SOCKET']
   // A closed loopback port: the Kimi poller's boot tick refuses instantly instead
-  // of reaching a real host. Set BEFORE the composer is imported, because the base
-  // URL is resolved at module load.
+  // of reaching a real host. The composer threads this value into the probe, so it
+  // holds regardless of module import order.
   process.env['KIMI_BASE_URL'] = 'http://127.0.0.1:9/coding'
 
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
