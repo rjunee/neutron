@@ -166,8 +166,26 @@ describe('dotState', () => {
 
   it('falls back to item.status when there is no run_progress', () => {
     expect(dotState(item({ status: 'done' }))).toEqual({ colorKey: 'merge', pulse: false });
-    expect(dotState(item({ status: 'in_progress' }))).toEqual({ colorKey: 'build', pulse: true });
+    expect(dotState(item({ status: 'in_progress' }))).toEqual({ colorKey: 'build', pulse: false });
     expect(dotState(item({ status: 'upcoming' }))).toEqual({ colorKey: 'upcoming', pulse: false });
+  });
+
+  it('a runless in_progress card renders a STATIC dot — a pulse is a claim a run is live', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: null }))).toEqual({ colorKey: 'build', pulse: false });
+  });
+
+  it('an in_progress card with a live bound run (no progress row yet — e.g. a research dispatch) pulses', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' }))).toEqual({ colorKey: 'build', pulse: true });
+  });
+
+  it('a failed card with NO run progress still paints the durable failed lane (static, never blue/gray)', () => {
+    expect(dotState(item({ status: 'failed', linked_run_id: null }))).toEqual({ colorKey: 'failed', pulse: false });
+  });
+
+  it('a failed card that KEPT its terminal binding (#340 detachRun) is static failed via the run branch', () => {
+    expect(
+      dotState(item({ status: 'failed', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) })),
+    ).toEqual({ colorKey: 'failed', pulse: false });
   });
 });
 
@@ -196,8 +214,26 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
   });
 
   it('in_progress / done items never show play', () => {
-    expect(canPlay(item({ status: 'in_progress' }))).toBe(false);
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: null }))).toBe(true);
     expect(canPlay(item({ status: 'done' }))).toBe(false);
+  });
+
+  it('an in_progress card whose run is DEAD offers ↻ — the card must be recoverable from the UI', () => {
+    const dead = item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) });
+    expect(isLinkedRunning(dead)).toBe(false);
+    expect(canPlay(dead)).toBe(true);
+    expect(isRetry(dead)).toBe(true);
+  });
+
+  it('an in_progress card with a LIVE run never double-offers ▶', () => {
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1' }))).toBe(false);
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({ phase_label: 'building' }) }))).toBe(false);
+  });
+
+  it('a failed card that kept its binding (#340) retries', () => {
+    const failed = item({ status: 'failed', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) });
+    expect(canPlay(failed)).toBe(true);
+    expect(isRetry(failed)).toBe(true);
   });
 });
 

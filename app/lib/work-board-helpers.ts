@@ -212,8 +212,10 @@ export interface DotState {
 /**
  * The leading dot's colour bucket + whether it pulses. A live run's step
  * drives the colour (pulsing while building/reviewing/fixing/merging, solid on
- * done/failed); otherwise it falls back to the item's status (done → green,
- * in_progress → running blue-ish "build", upcoming → faint gray outline).
+ * done/failed); otherwise it falls back to the item's status: done → green,
+ * failed → solid failed (amber/red), in_progress → build blue pulsing ONLY
+ * while a live bound run exists (static otherwise), upcoming → faint gray
+ * outline.
  */
 export function dotState(item: WorkBoardItem): DotState {
   const rp = item.run_progress;
@@ -234,7 +236,18 @@ export function dotState(item: WorkBoardItem): DotState {
     }
   }
   if (item.status === 'done') return { colorKey: 'merge', pulse: false };
-  if (item.status === 'in_progress') return { colorKey: 'build', pulse: true };
+  // The lost failure (owner defect 2026-08-12): a failed card whose run
+  // progress is unavailable (a research/dispatch run is never a trident row;
+  // a build run row can be deleted) still paints the durable failed lane.
+  // `status='failed'` is written only by the terminal reconcile
+  // (`work-board/store.ts` detachRun), so this is positive data — the row is
+  // NOT inferring failure from the absence of run_progress.
+  if (item.status === 'failed') return { colorKey: 'failed', pulse: false };
+  // A pulse is a claim that something is moving (work-board-activity.ts),
+  // so only a LIVE bound run earns one. status is a LANE the owner or the
+  // agent sets; a run is a PROCESS — a runless in_progress card renders a
+  // STATIC dot, never a pulse.
+  if (item.status === 'in_progress') return { colorKey: 'build', pulse: isLinkedRunning(item) };
   return { colorKey: 'upcoming', pulse: false };
 }
 
@@ -257,11 +270,14 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
 }
 
 /**
- * True when the ▶/↻ (start/retry) control should render: the item is NOT
- * in_progress and NOT done and has NO live linked run.
+ * True when the ▶/↻ (start/retry) control should render. Gated on the LIVE
+ * run, not the status lane: an in_progress card whose run is dead must offer
+ * ↻ (owner defect 2026-08-12 — the old `status !== 'in_progress'` clause made
+ * a failed-run in_progress card unrecoverable from the UI). Only `done` and a
+ * live linked run suppress the control.
  */
 export function canPlay(item: WorkBoardItem): boolean {
-  return item.status !== 'in_progress' && item.status !== 'done' && !isLinkedRunning(item);
+  return item.status !== 'done' && !isLinkedRunning(item);
 }
 
 /** ▶ vs ↻ — a card that carries a (now-detached) binding or a failed run RETRIES. */
