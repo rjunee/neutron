@@ -2,6 +2,60 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — the usage dashboard, Phase 1: every connected account on one screen, and when capacity comes back
+
+Phase 1 of `docs/plans/usage-quota-dashboard-design-2026-08-13.md` (§9). The gauge in
+the divider already said how full a window was; "72%" is not a decision until you know
+two more things, and they are opposite questions. **Pace** — consumed ÷ elapsed —
+answers "at this rate, when do I hit the cap". **The countdown** answers "when does
+capacity come back", which is the input to the throughput decision the owner actually
+makes. Both ship, side by side, per account.
+
+**A bare countdown was a defect, and fixing it is the interesting part.** The 5-hour
+and 7-day windows reset independently, so an account whose short window resets in 17
+minutes but whose weekly window is 97% spent has almost nothing coming back — and a
+headline reading "next capacity in 17m" would have been an instruction to push
+concurrency into a wall. So an account's standing is the WORST of its windows, every
+countdown is rendered beside the utilisation of the window it belongs to, and the pool
+line names the binding window plus the other window's figure: `Next capacity in 3d 0h
+(7d window; 5h window 98% used)`, with a "Next up: ‹account›" line naming whose it is.
+
+**Nothing on the wire is a delta.** The payload carries `measured_at`, each window's
+length and reset instant, the pace and projection anchored at the measurement, and
+`stale_after_ms` — a THRESHOLD, not a verdict. The age, the staleness, the "≥" floor
+and the capacity standing are all functions of "now", so all four are computed at
+PAINT by `projectPool` in the two clients; `summariseWindow` takes no `now` at all, so
+the server cannot bake a delta because it cannot see the clock. And the payload is
+REPOLLED on the same 30-second tick that advances the render clock: ageing a held
+payload is right across a dead poller and wrong across a live one, and a screen that
+only advanced its clock would have painted a perfectly healthy install as stale two
+and a half minutes after it opened.
+
+**Per account, both windows, retained.** The owner asked of one account "when it
+resets in 17m, how much WEEKLY capacity is left" and it was unanswerable from stored
+state. Migration 0121 rebuilds `usage_pool_samples` onto `(ts, pool, account_label)`
+and adds `session_window_ms` / `weekly_window_ms`, so each sample is summarised with
+its OWN length — window length is data, not a constant, and a historical series
+straddles a regime change. A non-active account's headroom now renders with its age
+and without a live probe.
+
+**The Kimi poller, against an endpoint nobody has published.**
+`trident/kimi-usage-probe.ts` reads `GET {KIMI_BASE_URL}/v1/usages` on a 10-minute
+supervised loop. The schema is unverified, so the parser is built to be wrong LOUDLY:
+a written-down alias set per field, units checked rather than trusted, a one-sided
+plausibility bound on every reset instant, and `unrecognised` — carrying the key NAMES
+it saw, never values — for anything else. A partial read is a refusal, not a smaller
+answer: one unreadable entry discards the whole response and writes no row, because
+nothing downstream can tell a sample with one window from a provider that only HAS
+one window.
+
+Per provider, in its own unit, never summed, and **no dollar value anywhere** — the
+subscription is flat, so a currency figure would assert a marginal cost the owner does
+not incur. Codex has no writer until Phase 3 and renders "Not connected." rather than
+a row of zeros. Shipped on both clients, no flag and no dual path.
+
+Detail: `docs/as-built/2026-08-13-usage-dashboard-phase-1.md`.
+
 ## 2026-08-13 — the code-generation model selector: a table, three model families, and the wiring that makes GPT and Kimi selectable (#560)
 
 The pane could already put a build step on a different Claude tier. It could not

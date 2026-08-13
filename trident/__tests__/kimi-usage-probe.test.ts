@@ -22,12 +22,15 @@ import {
   parseKimiUsages,
   parseResetInstant,
   probeKimiUsage,
-  RESET_PLAUSIBILITY_MS,
+  RESET_FUTURE_PLAUSIBILITY_MS,
 } from '../kimi-usage-probe.ts'
 
 const NOW = Date.now()
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
+/** The 5-hour window the fixtures use. `parseResetInstant` measures its PAST
+ *  tolerance in windows, so every direct call has to say which window it is for. */
+const SESSION_MS = 300 * MINUTE
 
 /** The shape this parser models, in the units the endpoint is documented to use. */
 function usagesBody(): unknown {
@@ -161,7 +164,7 @@ describe('units — the two slips that render as plausible numbers', () => {
 
   test('a reset in SECONDS lands in this decade', () => {
     const seconds = Math.round((NOW + 17 * MINUTE) / 1000)
-    expect(parseResetInstant({ reset_at: seconds }, NOW)).toBe(seconds * 1000)
+    expect(parseResetInstant({ reset_at: seconds }, NOW, SESSION_MS)).toBe(seconds * 1000)
   })
 
   test('a value already in MILLISECONDS is refused, never double-converted', () => {
@@ -169,23 +172,103 @@ describe('units — the two slips that render as plausible numbers', () => {
     // again it becomes an instant tens of thousands of years away, which renders as
     // a countdown nobody can read — so the plausibility check is what makes it a
     // refusal instead.
-    expect(parseResetInstant({ reset_at: NOW + 17 * MINUTE }, NOW)).toBeNull()
+    expect(parseResetInstant({ reset_at: NOW + 17 * MINUTE }, NOW, SESSION_MS)).toBeNull()
     // Under its explicit alias the same number is believed.
-    expect(parseResetInstant({ reset_at_ms: NOW + 17 * MINUTE }, NOW)).toBe(NOW + 17 * MINUTE)
+    expect(parseResetInstant({ reset_at_ms: NOW + 17 * MINUTE }, NOW, SESSION_MS)).toBe(NOW + 17 * MINUTE)
   })
 
   test('an instant a year out or a year back is refused, not stored', () => {
-    const farFuture = Math.round((NOW + RESET_PLAUSIBILITY_MS + HOUR) / 1000)
-    expect(parseResetInstant({ reset_at: farFuture }, NOW)).toBeNull()
+    const farFuture = Math.round((NOW + RESET_FUTURE_PLAUSIBILITY_MS + HOUR) / 1000)
+    expect(parseResetInstant({ reset_at: farFuture }, NOW, SESSION_MS)).toBeNull()
     // The mirror image: a 1970 instant renders as "available now", which is the
     // failure this whole feature is built to prevent.
-    expect(parseResetInstant({ reset_at: 0 }, NOW)).toBeNull()
+    expect(parseResetInstant({ reset_at: 0 }, NOW, SESSION_MS)).toBeNull()
   })
 
   test('an ISO-8601 instant is read, and an unparseable string is not', () => {
     const iso = new Date(NOW + 2 * HOUR).toISOString()
-    expect(parseResetInstant({ reset_at: iso }, NOW)).toBe(NOW + 2 * HOUR)
-    expect(parseResetInstant({ reset_at: 'soon' }, NOW)).toBeNull()
+    expect(parseResetInstant({ reset_at: iso }, NOW, SESSION_MS)).toBe(NOW + 2 * HOUR)
+    expect(parseResetInstant({ reset_at: 'soon' }, NOW, SESSION_MS)).toBeNull()
+  })
+
+  test('the PAST bound is ONE WINDOW, not a year — a stale instant is refused', () => {
+    // THE MUTANT THIS KILLS: a symmetric `Math.abs(at - now) <= PLAUSIBILITY`
+    // bound, which believes an instant up to 400 days in the PAST. Downstream, a
+    // reset that has already passed means "the window rolled, this account is
+    // free", so a year-old instant on a 99%-spent window renders as capacity — the
+    // optimistic answer that sends the owner to raise concurrency into a wall.
+    const secondsAt = (ms: number): number => Math.round(ms / 1000)
+    // Just inside the window: the window rolled moments ago and the probe read it
+    // just after. Ordinary, true, and believed.
+    expect(parseResetInstant({ reset_at: secondsAt(NOW - MINUTE) }, NOW, SESSION_MS)).toBe(
+      secondsAt(NOW - MINUTE) * 1000,
+    )
+    // One window back and further: at least one whole window has rolled unobserved,
+    // so this cannot be the current window's reset.
+    expect(parseResetInstant({ reset_at: secondsAt(NOW - SESSION_MS - MINUTE) }, NOW, SESSION_MS))
+      .toBeNull()
+    expect(parseResetInstant({ reset_at: secondsAt(NOW - 300 * 24 * HOUR) }, NOW, SESSION_MS))
+      .toBeNull()
+    // AND THE BOUND SCALES WITH THE WINDOW, because window length is not a
+    // constant: the same instant that is implausible for a 5-hour window is
+    // ordinary for a 7-day one.
+    const weekly = 7 * 24 * HOUR
+    expect(parseResetInstant({ reset_at: secondsAt(NOW - SESSION_MS - MINUTE) }, NOW, weekly))
+      .toBe(secondsAt(NOW - SESSION_MS - MINUTE) * 1000)
+  })
+})
+
+describe('a PARTIAL read is a refusal, not a smaller answer', () => {
+  /** The modelled body with one extra entry this parser cannot read. */
+  function bodyWithUnreadable(extra: Record<string, unknown>): unknown {
+    const body = usagesBody() as { usages: unknown[] }
+    return { ...body, usages: [...body.usages, extra] }
+  }
+
+  test('a dropped window makes the WHOLE response unrecognised', () => {
+    // THE MUTANT THIS KILLS: `continue` on an unreadable entry and `ok` with
+    // whatever was understood. Nothing downstream can tell a sample carrying one
+    // window from a provider that only HAS one window — the missing weekly figure
+    // is simply absent from the card and from the pool headline. So an account
+    // whose weekly window is 99% spent would read "Next capacity in 40m (5h
+    // window)". "Could not read it" must not arrive as "there is nothing there".
+    const out = parseKimiUsages({ usages: [{ window_minutes: 300, used_percent: 42 }, { note: 'x' }] }, NOW)
+    expect(out.kind).toBe('unrecognised')
+    if (out.kind !== 'unrecognised') return
+    // And it is LOUD: the keys it could not place travel out so one real response
+    // corrects the alias list.
+    expect(out.observed).toContain('note')
+  })
+
+  test('a non-object entry in the list is a refusal too', () => {
+    expect(parseKimiUsages(bodyWithUnreadable({}), NOW).kind).toBe('unrecognised')
+    const body = usagesBody() as { usages: unknown[] }
+    expect(parseKimiUsages({ ...body, usages: [...body.usages, 'five hours'] }, NOW).kind).toBe(
+      'unrecognised',
+    )
+  })
+
+  test('a SECOND window in an already-filled slot is a refusal, not a silent drop', () => {
+    // Two short windows means the response has a shape this parser does not model.
+    // Overwriting reports whichever came last; dropping reports whichever came
+    // first. Both show one of two real limits with nothing saying the other
+    // existed, so the response is refused and the key names go out instead.
+    const out = parseKimiUsages(
+      {
+        usages: [
+          { window_minutes: 60, used_percent: 10 },
+          { window_minutes: 300, used_percent: 90 },
+        ],
+      },
+      NOW,
+    )
+    expect(out.kind).toBe('unrecognised')
+  })
+
+  test('the modelled body is still ok — the refusal is not a blanket one', () => {
+    // The POSITIVE CONTROL for the three refusals above: without it, a parser that
+    // returned `unrecognised` unconditionally would pass every test in this block.
+    expect(parseKimiUsages(usagesBody(), NOW).kind).toBe('ok')
   })
 })
 

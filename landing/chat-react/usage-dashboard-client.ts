@@ -22,12 +22,20 @@
  *   - what CAPACITY an account has ({@link projectPool}).
  *
  * None of those may ride the wire, and that is the defect this shape exists to
- * make impossible. This client fetches once per mount while its render clock ticks
- * every 30 seconds, so a server-computed age would read "just now" for as long as
- * the tab stayed open — a poller dead for six hours would paint as freshly
- * measured with a live countdown running beside it, which is the exact
- * "confident fresh number" the product forbids. Deltas are cheap; a wrong one is
- * not.
+ * make impossible: a server-computed age would read "just now" for as long as the
+ * tab stayed open — a poller dead for six hours would paint as freshly measured
+ * with a live countdown running beside it, which is the exact "confident fresh
+ * number" the product forbids. Deltas are cheap; a wrong one is not.
+ *
+ * ── AND THE PAYLOAD IS REFETCHED, BECAUSE AGEING ALONE IS NOT THE ANSWER ─────
+ * Computing the deltas at paint fixes the LIE; it does not fix the DATA. A screen
+ * that only advanced its clock would walk a perfectly healthy install into
+ * staleness: `stale_after_ms` for the Anthropic pool is two minutes, so ~2.5
+ * minutes after the screen opened the card would floor its gauges to "≥" and drop
+ * its standing to "unknown" while the poller behind it was writing a fresh row
+ * every 60 seconds. So the screens poll on {@link USAGE_POLL_MS}, which is pinned
+ * BELOW the tightest staleness deadline any pool ships — a healthy install can
+ * then only ever be painted stale by something actually being wrong.
  *
  * ── NULL IS AN ANSWER, NOT A ZERO ────────────────────────────────────────────
  * Each of these is legitimately absent and each means something different:
@@ -116,6 +124,24 @@ export interface UsageDashboardClientOptions {
  * old reading into a confident "just now".
  */
 const FALLBACK_STALE_AFTER_MS = 5 * 60_000
+
+/**
+ * How often a mounted screen REFETCHES the payload.
+ *
+ * NOT A COSMETIC CADENCE — it is a correctness bound. Every gauge on the card
+ * degrades on age: past `stale_after_ms` the fractions become "≥" floors and the
+ * account's standing falls to "unknown". If the screen never refetched, that
+ * degradation would fire on the CLOCK rather than on anything being wrong, and a
+ * healthy install would paint itself broken minutes after the tab opened.
+ *
+ * So this must stay STRICTLY BELOW the tightest `stale_after_ms` any pool ships
+ * (Anthropic's, at two minutes — `persistence/usage-samples-store.ts`), with room
+ * for one dropped request. Thirty seconds gives three attempts inside that window
+ * and matches the render clock, so one interval drives both and they cannot drift.
+ * A parity test pins the relationship rather than the number, because the number
+ * that matters is the store's.
+ */
+export const USAGE_POLL_MS = 30_000
 
 /** Decode one window, or null. A field of the wrong type makes the whole window
  *  null rather than coercing: a bar drawn from a coerced NaN is a lie with a
@@ -357,6 +383,22 @@ const SPENT_HEADROOM_FRACTION = 0.05
  *     or `unknown` when no instant was reported — never "now";
  *   - room → available.
  */
+// THE OVERLOAD IS LOAD-BEARING, not decoration: `null` comes back for exactly one
+// reason — a null window in — so a caller holding a window it has already
+// null-checked gets a `CapacityStanding` and needs no second check. That is what
+// keeps {@link accountCapacity} free of a defensive branch that could never fire.
+export function windowCapacity(
+  win: UsageWindow,
+  window: 'session' | 'weekly',
+  now: number,
+  stale: boolean,
+): CapacityStanding
+export function windowCapacity(
+  win: UsageWindow | null,
+  window: 'session' | 'weekly',
+  now: number,
+  stale: boolean,
+): CapacityStanding | null
 export function windowCapacity(
   win: UsageWindow | null,
   window: 'session' | 'weekly',
@@ -407,16 +449,32 @@ export function accountCapacity(
   now: number,
   stale: boolean,
 ): { binding: 'session' | 'weekly' | null; capacity: CapacityStanding } {
-  const candidates: Array<{ window: 'session' | 'weekly'; standing: CapacityStanding }> = []
-  const s = windowCapacity(session, 'session', now, stale)
-  if (s !== null) candidates.push({ window: 'session', standing: s })
-  const w = windowCapacity(weekly, 'weekly', now, stale)
-  if (w !== null) candidates.push({ window: 'weekly', standing: w })
-  if (candidates.length === 0) return { binding: null, capacity: { state: 'unknown' } }
-  const headroom = (key: 'session' | 'weekly'): number => {
-    const win = key === 'session' ? session : weekly
-    return win === null ? 1 : 1 - win.fraction
+  // Each candidate carries the WINDOW IT CAME FROM, not just its key. An earlier
+  // draft looked the window back up by key and had to defend against a null it
+  // could not receive — `windowCapacity` returns null for a null window, so a
+  // candidate's window is non-null by construction. A defensive branch that cannot
+  // fire is untestable, and untestable code reads as protection that has been
+  // exercised when it never has.
+  const candidates: Array<{
+    window: 'session' | 'weekly'
+    win: UsageWindow
+    standing: CapacityStanding
+  }> = []
+  if (session !== null) {
+    candidates.push({
+      window: 'session',
+      win: session,
+      standing: windowCapacity(session, 'session', now, stale),
+    })
   }
+  if (weekly !== null) {
+    candidates.push({
+      window: 'weekly',
+      win: weekly,
+      standing: windowCapacity(weekly, 'weekly', now, stale),
+    })
+  }
+  if (candidates.length === 0) return { binding: null, capacity: { state: 'unknown' } }
   let worst = candidates[0]!
   for (const c of candidates.slice(1)) {
     const rank = capacityRank(c.standing)
@@ -426,7 +484,7 @@ export function accountCapacity(
     // is closest to constraining this account. Left to declaration order it would
     // name whichever window happened to be checked first, and the headline would
     // then report the roomier window as the constraint.
-    if (rank > worstRank || (rank === worstRank && headroom(c.window) < headroom(worst.window))) {
+    if (rank > worstRank || (rank === worstRank && 1 - c.win.fraction < 1 - worst.win.fraction)) {
       worst = c
     }
   }
@@ -564,7 +622,13 @@ export function formatCountdown(ms: number | null): string {
   // it will — 16m59s rendered as "16m" — and every rounding error in this feature
   // must land on the pessimistic side, because the optimistic one is what puts work
   // into a window that has not reopened yet.
-  const totalMinutes = Math.ceil(ms / 60_000)
+  return formatMinutes(Math.ceil(ms / 60_000))
+}
+
+/** `17` → `"17m"`, `184` → `"3h 04m"`, `2941` → `"2d 1h"`. Layout only; the
+ *  ROUNDING is the caller's decision, because it points opposite ways for a
+ *  countdown and for an age. */
+function formatMinutes(totalMinutes: number): string {
   if (totalMinutes < 60) return `${totalMinutes}m`
   const totalHours = Math.floor(totalMinutes / 60)
   if (totalHours < 24) {
@@ -600,11 +664,20 @@ export function formatProjection(exhausts_at: number | null, now: number): strin
  *
  * Shown on EVERY card, not only stale ones — an age that appears only when
  * something is wrong is an age nobody learns to read.
+ *
+ * FLOORED, WHERE THE COUNTDOWN CEILS, and the two are not the same decision worn
+ * twice. A countdown is a claim about the FUTURE and rounds away from the owner
+ * ("capacity is back in at most 17m"). An age is a claim about the PAST and is
+ * exact: at 61 seconds the reading is one minute old, and an earlier draft of this
+ * reused the countdown's CEIL and printed "2m ago" — a statement that is simply
+ * false, and one that skipped "1m ago" entirely so the chip jumped 0 → 2. Rounding
+ * direction is not a safety property here: staleness is decided from `age_ms`
+ * against the payload's threshold, never from this string.
  */
 export function formatAge(ms: number | null): string {
   if (ms === null) return 'never measured'
   if (ms < 60_000) return 'just now'
-  return `${formatCountdown(ms)} ago`
+  return `${formatMinutes(Math.floor(ms / 60_000))} ago`
 }
 
 /**
@@ -726,6 +799,30 @@ export function capacityLine(pool: ProjectedPool): string | null {
     )})${unknownSuffix}`
   }
   return `Next capacity unknown${unknownSuffix}`
+}
+
+/**
+ * WHICH account the headline is about — the second half of "how hard can I push".
+ *
+ * `capacityLine` says WHEN capacity is there; on a pool with more than one account
+ * the owner still has to know WHOSE, because that is the account he routes to.
+ * This is the render of `next_account_label`, and it is a separate string rather
+ * than a clause inside the headline so the headline stays the one short sentence
+ * that has to be readable without scrolling.
+ *
+ * NULL IN TWO CASES, both of them "this would add no information":
+ *   - a single-account pool, where the headline is already about the only account;
+ *   - an unlabelled winner, where the honest name is "active credential" — naming
+ *     it would read as a second account rather than as the one already on screen.
+ *
+ * It NEVER invents a name; the label is whatever the reading was stamped with, and
+ * an unnamed account stays unnamed.
+ */
+export function nextAccountNote(pool: ProjectedPool): string | null {
+  if (pool.accounts.length < 2) return null
+  const label = pool.capacity.next_account_label
+  if (label === null) return null
+  return `Next up: ${label}`
 }
 
 /**

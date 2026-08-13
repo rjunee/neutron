@@ -21,7 +21,7 @@
  * phone card is coming that must reuse the same RULES.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, it, setSystemTime } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 beforeAll(() => {
@@ -464,6 +464,89 @@ describe('when capacity comes back — the line the owner reads first', () => {
   })
 })
 
+describe('the card REFETCHES, not just re-renders', () => {
+  it('a healthy install stays fresh across the staleness deadline', async () => {
+    // THE DEFECT THIS PINS. Computing every delta at paint is what ages a card
+    // honestly across a DEAD poller — and, on its own, it is a slow lie in the other
+    // direction. This pool goes stale at two minutes, so a tab left open with a
+    // fetch-once mount would floor its gauge to "≥ 75%" and drop capacity to
+    // "unknown" about two and a half minutes in, while the poller behind it wrote a
+    // fresh row every 60 seconds. It would then stay that way for as long as the
+    // owner left the screen up. A screen that paints a working install as broken is
+    // the same defect as one that paints a broken install as working.
+    //
+    // The interval is CAPTURED rather than waited on: waiting thirty real seconds in
+    // a test is how a suite becomes something nobody runs.
+    const { USAGE_POLL_MS } = await import('../usage-dashboard-client.ts')
+    const { act } = await import('react')
+    const ticks: Array<() => void> = []
+    const realSetInterval = globalThis.setInterval
+    let fetches = 0
+    // Stamped with the CURRENT clock on every fetch — which is exactly what a live
+    // poller writing a fresh row every 60 seconds produces.
+    const freshPayload = (): Response => {
+      fetches += 1
+      const at = Date.now()
+      return json({
+        pools: [
+          poolOf({
+            accounts: [
+              account({
+                measured_at: at,
+                weekly: null,
+                session: window_({ reset_at: at + 2 * HOUR, pace: null, exhausts_at: null }),
+              }),
+            ],
+          }),
+        ],
+      })
+    }
+    const startedAt = Date.now()
+    ;(globalThis as unknown as Record<string, unknown>)['setInterval'] = ((
+      fn: () => void,
+      ms: number,
+    ) => {
+      if (ms === USAGE_POLL_MS) ticks.push(fn)
+      return 0
+    }) as unknown as typeof setInterval
+    let mounted: { container: HTMLElement; root: { unmount: () => void } } | null = null
+    try {
+      mounted = await mount(freshPayload)
+      const { container } = mounted
+      expect(
+        container.querySelector('[data-testid="usage-anthropic-acct-0-session-pct"]')?.textContent,
+      ).toBe('75%')
+      // A poll interval was registered AT ALL, at the cadence the client exports —
+      // the positive control for the assertions below, which would otherwise pass
+      // vacuously against a screen that registered no timer.
+      expect(ticks.length).toBeGreaterThan(0)
+
+      // Two and a half minutes pass: past this pool's two-minute deadline.
+      setSystemTime(new Date(startedAt + 150_000))
+      const before = fetches
+      await act(async () => {
+        ticks[ticks.length - 1]!()
+        await tick()
+        await tick()
+      })
+      // THE MUTANT THIS KILLS: a tick that advances the render clock and nothing
+      // else. It leaves `fetches` where it was, and the two assertions below flip to
+      // "≥ 75%" and "2m ago".
+      expect(fetches).toBeGreaterThan(before)
+      expect(
+        container.querySelector('[data-testid="usage-anthropic-acct-0-session-pct"]')?.textContent,
+      ).toBe('75%')
+      expect(
+        container.querySelector('[data-testid="usage-anthropic-acct-0-age"]')?.textContent,
+      ).toBe('just now')
+    } finally {
+      setSystemTime()
+      ;(globalThis as unknown as Record<string, unknown>)['setInterval'] = realSetInterval
+      mounted?.root.unmount()
+    }
+  })
+})
+
 describe('staleness is shown, never hidden', () => {
   it('floors a stale reading with a ≥ and shows its age', async () => {
     // Nothing in this payload says "stale" — the reading is simply three hours old,
@@ -471,11 +554,11 @@ describe('staleness is shown, never hidden', () => {
     // server that said "fresh" three hours ago cannot keep being believed.
     const stale = account({
       account_label: 'owner-a',
-      // Deliberately OFF the minute boundary: ages round UP (the pessimistic
-      // direction, like every other duration here), so a fixture sitting exactly on
-      // a minute would render one way or the other depending on how many
-      // milliseconds the render took.
-      measured_at: NOW - (3 * HOUR + 30_000),
+      // Deliberately OFF the minute boundary: an age FLOORS (it is a claim about
+      // the past, and at 61 seconds the reading is one minute old), so a fixture
+      // sitting exactly on a minute would render one way or the other depending on
+      // how many milliseconds the render took. Ninety seconds past leaves room.
+      measured_at: NOW - (3 * HOUR + 90_000),
       session: window_({
         fraction: 0.43,
         reset_at: NOW + 2 * HOUR,

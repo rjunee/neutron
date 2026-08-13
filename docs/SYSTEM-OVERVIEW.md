@@ -4847,7 +4847,17 @@ throughput decision of whether to raise build concurrency.
   an 85%-spent window as a 1% bar), and every reset instant is
   plausibility-checked against the clock after conversion, so a seconds value read
   as ms (1970) or an ms value converted again (year 57,000) fails loudly instead of
-  rendering.
+  rendering. That plausibility bound is ONE-SIDED: an instant slightly in the past is
+  ordinary (the window rolled and the probe read it just after), but one more than a
+  WINDOW LENGTH back describes a window that has since rolled unobserved, and
+  believing it would make a 99%-spent window render as "available now". The bound is
+  expressed in windows rather than as a constant, because window length is not a
+  constant. A PARTIAL read is refused outright for the same reason: one unreadable
+  entry — an unmodelled shape, a missing length, or a second window landing in an
+  already-filled slot — discards the whole response, because nothing downstream can
+  tell a sample carrying one window from a provider that only HAS one window, and an
+  account whose weekly figure was silently dropped would render as one with no weekly
+  limit at all.
 - **Staleness is shown, never hidden.** Every reading carries its age, on every
   card, not only the stale ones. A reading older than its pool's deadline
   (`POOL_STALE_AFTER_MS` — each polled pool's cadence plus ONE missed probe of
@@ -4911,6 +4921,19 @@ throughput decision of whether to raise build concurrency.
   function of the render clock and therefore lives in the clients: `projectPool` is
   executed on both copies over the same payload at the same instant and the results
   are compared whole.
+- **And both screens REFETCH on `USAGE_POLL_MS` (30s), on the same interval that
+  advances the render clock.** Computing the deltas at paint is what ages a card
+  honestly across a DEAD poller; on its own it is a slow lie in the other direction,
+  because a screen that only advanced its clock would walk a HEALTHY install into
+  staleness — the Anthropic pool's deadline is two minutes, so the card would floor
+  its gauges and drop capacity to "unknown" about two and a half minutes after the
+  screen opened while a live poller wrote a fresh row every 60 seconds. One timer
+  drives both, so the data and the clock it is measured against cannot drift, and the
+  parity test bounds the RELATIONSHIP rather than the number
+  (`USAGE_POLL_MS × 2 < min(POOL_STALE_AFTER_MS)`, importing the store's own
+  deadlines), so a pool cannot get a deadline tighter than the screens can keep up
+  with. Each screen has a mutation-checked test: a tick that advances the clock and
+  does not refetch turns it red.
 
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 

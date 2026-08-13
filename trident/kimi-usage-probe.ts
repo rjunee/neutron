@@ -46,15 +46,42 @@ import { KIMI_BASE_URL } from './kimi-review.ts'
 export const KIMI_USAGE_TIMEOUT_MS = 20_000
 
 /**
- * How far from `now` a reset instant may land and still be believed.
+ * How far into the FUTURE a reset instant may land and still be believed.
  *
- * A rolling quota window resets within days, so anything a year out is a unit
- * slip (a milliseconds value converted as if it were seconds), and anything a
- * year back is the mirror image. Both are refused rather than stored: a reset in
- * 1970 renders as "available now", which is the exact lie this feature exists to
- * prevent.
+ * A rolling quota window resets within days, so anything a year out is a unit slip
+ * — a milliseconds value converted as if it were seconds. Refused rather than
+ * stored, because a year-57000 reset renders as a countdown nobody can read.
+ *
+ * Generous on purpose: erring long here is the PESSIMISTIC direction (capacity
+ * looks further away than it is), and the bound only has to catch unit slips.
  */
-export const RESET_PLAUSIBILITY_MS = 400 * 24 * 60 * 60 * 1000
+export const RESET_FUTURE_PLAUSIBILITY_MS = 400 * 24 * 60 * 60 * 1000
+
+/**
+ * How far into the PAST a reset instant may land and still be believed: ONE
+ * WINDOW LENGTH, and the asymmetry is the whole point.
+ *
+ * A reset instant slightly in the past is ordinary and true — the window rolled
+ * moments ago and the probe read it just after. But an instant more than one
+ * window-length back describes a window that has since rolled AT LEAST once with
+ * nobody measuring it, so it cannot be the current window's reset. It is either a
+ * unit slip (a seconds value read as milliseconds lands in 1970) or a field that
+ * means something other than what its name says.
+ *
+ * A SYMMETRIC BOUND WAS THE BUG. An earlier draft accepted anything within ±400
+ * days of now, so an instant a year in the past passed the check and was stored —
+ * and downstream `windowCapacity` reads a reset that has already passed as "the
+ * window rolled, this account is available". A 99%-spent window would then render
+ * as capacity, which is precisely the optimistic answer that sends the owner to
+ * raise concurrency into a wall. Refusing leaves `reset_at` null, which renders as
+ * "unknown": the honest answer, and the one the acceptance case pins.
+ *
+ * Expressed as a MULTIPLE of the entry's own reported length rather than as a
+ * constant, because window length is not a constant — it differs per provider and
+ * one of them has already changed regime, so a fixed "no more than 5 hours back"
+ * would be wrong the moment a 7-day window came through it.
+ */
+export const RESET_PAST_TOLERANCE_WINDOWS = 1
 
 /** The divider between the two window slots the series keeps. */
 export const SHORT_WINDOW_CEILING_MS = 24 * 60 * 60 * 1000
@@ -140,17 +167,23 @@ function finiteNumber(v: unknown): number | null {
 }
 
 /**
- * Read a reset instant and prove it lands in this decade.
+ * Read a reset instant and prove it could belong to the window in front of us.
  *
  * Returns null — not a guess — for an absent, unparseable or implausible value.
  * The plausibility check is the load-bearing half: it is what turns a
  * double-converted (already-ms) value into a refusal instead of a year-57000
- * instant that renders as a countdown nobody can read, and a seconds value read
- * as ms into a refusal instead of "available now" in 1970.
+ * instant that renders as a countdown nobody can read, and a seconds value read as
+ * ms into a refusal instead of "available now" in 1970.
+ *
+ * THE BOUND IS ONE-SIDED, and asymmetric on purpose — see
+ * {@link RESET_PAST_TOLERANCE_WINDOWS}. The window's own length is required rather
+ * than defaulted, because the past bound is measured in windows and a guessed
+ * length would decide which instants are believable using a number nobody read.
  */
 export function parseResetInstant(
   entry: Record<string, unknown>,
   now: number,
+  window_ms: number,
 ): number | null {
   const candidates: Array<number | null> = []
   for (const key of RESET_MS_KEYS) {
@@ -172,9 +205,10 @@ export function parseResetInstant(
       if (Number.isFinite(parsed)) candidates.push(parsed)
     }
   }
+  const earliest = now - RESET_PAST_TOLERANCE_WINDOWS * window_ms
   for (const at of candidates) {
     if (at === null) continue
-    if (Math.abs(at - now) <= RESET_PLAUSIBILITY_MS) return at
+    if (at >= earliest && at - now <= RESET_FUTURE_PLAUSIBILITY_MS) return at
   }
   return null
 }
@@ -227,15 +261,24 @@ function parseWindowLength(entry: Record<string, unknown>): number | null {
   return null
 }
 
-/** Every key name in the payload, one level deep. Names only — never values. */
+/**
+ * Every key name in the payload, one level deep. Names only — never values.
+ *
+ * EVERY element of an array, not just the first. This list IS the mechanism by
+ * which the alias lists get corrected from a real response, and the entry that
+ * fails to parse is rarely the first one — a draft that sampled `value[0]` reported
+ * the keys of the window it COULD read and stayed silent about the one it could
+ * not, which is the opposite of the job.
+ */
 function observedKeys(body: unknown): string[] {
   if (!isRecord(body)) return [typeof body]
   const keys = new Set<string>(Object.keys(body))
+  const add = (v: unknown): void => {
+    if (isRecord(v)) for (const k of Object.keys(v)) keys.add(k)
+  }
   for (const value of Object.values(body)) {
-    if (isRecord(value)) for (const k of Object.keys(value)) keys.add(k)
-    else if (Array.isArray(value) && isRecord(value[0])) {
-      for (const k of Object.keys(value[0])) keys.add(k)
-    }
+    if (Array.isArray(value)) for (const item of value) add(item)
+    else add(value)
   }
   return [...keys].sort()
 }
@@ -280,6 +323,22 @@ function parseAccountLabel(body: Record<string, unknown>): string | null {
  * PURE and exported so every branch — including every refusal — is testable
  * without a network, which matters more here than anywhere else in this feature:
  * the refusals are the whole safety property.
+ *
+ * ── ALL OR NOTHING, BECAUSE A PARTIAL READ IS INDISTINGUISHABLE FROM A WHOLE ──
+ * If ANY entry in the list cannot be read, this returns `unrecognised` and writes
+ * no sample at all. An earlier draft dropped the unreadable entries and returned
+ * `ok` with whatever it did understand — and that is the confident-zero failure
+ * wearing a different hat. Nothing downstream can tell a sample with one window
+ * from a provider that only HAS one window: an account whose weekly figure was
+ * dropped renders as an account with no weekly limit, so a 99%-spent week becomes
+ * "next capacity in 40m (5h window)" and the owner raises concurrency into a wall.
+ * "Could not read one of these" must not be able to arrive as "there is nothing
+ * there", and the only shape in which that is structurally impossible is refusal.
+ *
+ * The refusal is not silent: `observed` carries the KEY NAMES (never values), so
+ * one real response is enough to correct the alias lists above — the "print a real
+ * value before keying logic on it" step, performed in production instead of
+ * skipped. Until then the card says "no readings yet", which is true.
  */
 export function parseKimiUsages(
   body: unknown,
@@ -290,28 +349,37 @@ export function parseKimiUsages(
   if (list === null) return { kind: 'unrecognised', observed: observedKeys(body) }
   let session: KimiUsageWindow | null = null
   let weekly: KimiUsageWindow | null = null
+  let unreadable = false
   for (const raw of list) {
-    if (!isRecord(raw)) continue
+    if (!isRecord(raw)) {
+      unreadable = true
+      continue
+    }
     const fraction = parseFraction(raw)
     const window_ms = parseWindowLength(raw)
     // BOTH are required, and the length is not optional-with-a-default on
     // purpose: pace divides by it, and the two slots are chosen by it. A window
     // whose length is unknown cannot be summarised or even placed, and guessing
     // one is how a 7-day standing ends up rendered as a 5-hour window.
-    if (fraction === null || window_ms === null) continue
+    if (fraction === null || window_ms === null) {
+      unreadable = true
+      continue
+    }
     const win: KimiUsageWindow = {
       fraction,
-      reset_at: parseResetInstant(raw, now),
+      reset_at: parseResetInstant(raw, now, window_ms),
       window_ms,
     }
     const slot = window_ms <= SHORT_WINDOW_CEILING_MS ? 'session' : 'weekly'
-    // First writer wins per slot: two windows landing in one slot means the
-    // response has a shape this parser does not model, and overwriting would
-    // silently report whichever happened to be last.
+    // Two windows landing in ONE slot means the response has a shape this parser
+    // does not model — say so. Overwriting would silently report whichever came
+    // last, and dropping the second is just as silent; either way the card would
+    // show one of two real limits and nothing would say the other existed.
     if (slot === 'session' && session === null) session = win
     else if (slot === 'weekly' && weekly === null) weekly = win
+    else unreadable = true
   }
-  if (session === null && weekly === null) {
+  if (unreadable || (session === null && weekly === null)) {
     return { kind: 'unrecognised', observed: observedKeys(body) }
   }
   return { kind: 'ok', sample: { account_label: parseAccountLabel(body), session, weekly } }

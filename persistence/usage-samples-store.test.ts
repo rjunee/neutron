@@ -408,6 +408,32 @@ describe('the store', () => {
     expect(store.summarise('anthropic').accounts.map((a) => a.account_label)).toContain(null)
   })
 
+  test('a label that LAPSES leaves the older reading standing, and its age says so', async () => {
+    // THE KNOWN LIMITATION, pinned rather than papered over. The label comes from a
+    // sidecar outside this process; if it stops resolving, the SAME credential starts
+    // writing rows that name no account, and the series then holds two account keys
+    // for one physical credential. Nothing here can tell that from a second account
+    // genuinely appearing, so it does not guess — it reports both, each with its own
+    // `measured_at`, and the card ages the older one in front of the owner.
+    //
+    // THE DIRECTION IS WHAT MAKES THIS SAFE. The lapsed reading grows old, so the
+    // client's projection floors its gauge and falls to `unknown` — it can only ever
+    // subtract confidence from the headline (a "(1 unknown)" suffix), never add
+    // availability that is not there. A recency cut-off was considered and refused:
+    // it would delete exactly the non-active account headroom this store exists to
+    // retain, and "no readings yet" about an account that has readings is a worse
+    // sentence than an honest old one.
+    await store.record({ pool: 'anthropic', ts: NOW, account_label: 'owner-a', session: 0.4 })
+    await store.record({ pool: 'anthropic', ts: NOW + 60_000, session: 0.5 })
+    const out = store.summarise('anthropic')
+    expect(out.accounts.map((a) => a.account_label)).toEqual([null, 'owner-a'])
+    // Each carries its OWN instant, which is the whole mechanism: the ghost is dated,
+    // so it cannot render as a current reading.
+    expect(out.accounts.map((a) => a.measured_at)).toEqual([NOW + 60_000, NOW])
+    // And no verdict rides along — staleness is the client's call against its clock.
+    expect('stale' in out.accounts[1]!).toBe(false)
+  })
+
   test('prune drops samples past retention and keeps the rest', async () => {
     await store.record({
       pool: 'anthropic',

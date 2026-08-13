@@ -38,9 +38,15 @@
  * the measurement, and a staleness THRESHOLD. Every delta — the age chip, the "≥"
  * floors, each account's standing and every countdown — is computed HERE against
  * this device's clock, on every paint (`projectPool`). A duration is wrong the
- * moment it is stored, and this screen holds its payload between refreshes: a
- * server-computed age would read "just now" for as long as the screen stayed open,
- * with a live countdown ticking beside it.
+ * moment it is stored: a server-computed age would read "just now" for as long as
+ * the screen stayed open, with a live countdown ticking beside it.
+ *
+ * AND THE PAYLOAD ITSELF IS REPOLLED on that same tick (`USAGE_POLL_MS`), which is
+ * the other half of the same rule. Ageing a held payload is right across a dead
+ * poller and wrong across a live one: the Anthropic pool goes stale at two minutes,
+ * so a screen that only advanced its clock would paint a perfectly healthy install
+ * as stale two and a half minutes after it opened, and stay that way. The poll is
+ * pinned below that deadline so staleness on this screen only ever means staleness.
  */
 
 import { useRouter } from 'expo-router';
@@ -61,6 +67,7 @@ import { THEME } from '../lib/theme';
 import { clampFraction, usageBand } from '@neutronai/contracts/credential-usage.ts';
 
 import {
+  USAGE_POLL_MS,
   UsageDashboardClient,
   accountCapacityNote,
   accountName,
@@ -71,6 +78,7 @@ import {
   formatProjection,
   formatPace,
   formatWindowFraction,
+  nextAccountNote,
   paceNote,
   poolTitle,
   projectPool,
@@ -196,6 +204,7 @@ function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
   const view = projectPool(pool, now);
   const note = connectionNote(view);
   const line = capacityLine(view);
+  const nextUp = nextAccountNote(view);
   return (
     <View style={styles.pool} testID={`usage-${view.pool}`}>
       <View style={styles.poolHead}>
@@ -214,6 +223,14 @@ function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
       {line !== null ? (
         <Text style={styles.capacity} testID={`usage-${view.pool}-capacity`}>
           {line}
+        </Text>
+      ) : null}
+      {/* WHICH account the line above is about. The headline says WHEN; on a pool
+          with more than one account the owner still has to know WHOSE, because
+          that is the account he routes the next build to. */}
+      {nextUp !== null ? (
+        <Text style={styles.muted} testID={`usage-${view.pool}-nextup`}>
+          {nextUp}
         </Text>
       ) : null}
       {note !== null ? (
@@ -285,24 +302,48 @@ export default function ModelUsageScreen() {
   // THE RENDER CLOCK for every countdown on this screen. The payload carries reset
   // INSTANTS and the delta is computed at paint, so this has to advance on its own
   // — a screen left open would otherwise keep insisting capacity returns in the
-  // same 17 minutes it did an hour ago. Thirty seconds is finer than the whole
-  // minutes the countdowns render in, so nothing is ever visibly wrong.
+  // same 17 minutes it did an hour ago. It is advanced by the poll effect below, on
+  // a tick finer than the whole minutes the countdowns render in, so nothing is
+  // ever visibly wrong.
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  const load = useCallback(
+    async (visible: boolean) => {
+      if (client === null) return;
+      // The button only says "Refreshing…" for a refresh the OWNER asked for. A
+      // background poll that flipped it would make the screen look busy every
+      // thirty seconds forever, and would disable the control he came to press.
+      if (visible) setRefreshing(true);
+      const next = await client.load();
+      setUsage(next);
+      if (visible) setRefreshing(false);
+    },
+    [client],
+  );
+
   useEffect(() => {
-    const handle = setInterval(() => setNowMs(Date.now()), 30_000);
+    void load(true);
+  }, [load]);
+
+  // ONE TICK ADVANCES THE CLOCK **AND** REFETCHES, and the pairing is the fix.
+  //
+  // Advancing the clock alone is what ages a card honestly across a DEAD poller —
+  // but run against a LIVE one it is a slow lie in the other direction. The
+  // Anthropic pool goes stale at two minutes, so a screen left open would floor its
+  // gauges to "≥" and drop capacity to "unknown" about two and a half minutes in
+  // while a healthy poller wrote a fresh row every 60 seconds behind it. A screen
+  // that paints a working install as broken is the same defect as one that paints a
+  // broken install as working; both are the card disagreeing with the truth.
+  //
+  // So the payload is refetched on the SAME interval. One timer, so the data and
+  // the clock it is measured against can never drift apart, and `USAGE_POLL_MS`
+  // stays below the tightest staleness deadline the store ships (pinned by a test).
+  useEffect(() => {
+    const handle = setInterval(() => {
+      setNowMs(Date.now());
+      void load(false);
+    }, USAGE_POLL_MS);
     return () => clearInterval(handle);
-  }, []);
-
-  const load = useCallback(async () => {
-    if (client === null) return;
-    setRefreshing(true);
-    const next = await client.load();
-    setUsage(next);
-    setRefreshing(false);
-  }, [client]);
-
-  useEffect(() => {
-    void load();
   }, [load]);
 
   if (user === null) {
@@ -359,7 +400,7 @@ export default function ModelUsageScreen() {
           accessibilityLabel="Refresh usage"
           testID="usage-refresh"
           disabled={refreshing}
-          onPress={() => void load()}
+          onPress={() => void load(true)}
           style={({ pressed }) => [
             styles.secondaryBtn,
             refreshing && styles.btnDisabled,

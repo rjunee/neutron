@@ -26,14 +26,19 @@ the owner to push concurrency into a wall. So:
 - every window's countdown is rendered beside that window's own utilisation, never
   bare;
 - an ACCOUNT's standing is the WORST of its windows, not the soonest reset
-  (`accountCapacity`, `persistence/usage-samples-store.ts`);
+  (`accountCapacity`, in both clients: `landing/chat-react/usage-dashboard-client.ts`
+  and `app/lib/usage-dashboard-client.ts` — it is a function of the RENDER clock, so
+  it lives with the clock and not in the store; see "Store the instant" below);
 - the pool line names the binding window and the other window's utilisation:
-  `Next capacity in 3d 0h (7d window; 5h window 98% used)`.
+  `Next capacity in 3d 0h (7d window; 5h window 98% used)`;
+- and it names WHICH account it is about (`nextAccountNote`), on a pool with more
+  than one, because "when" without "whose" is not yet a routing decision.
 
-The acceptance case is pinned twice — in the store (one account with an imminent
-5-hour reset and a spent weekly window, one healthy account: the line points at the
-SECOND) and in both screens. A mutant that picks the soonest reset while ignoring
-the other window turns those red.
+The acceptance case is pinned twice — in
+`gateway/__tests__/usage-dashboard-client-parity.test.ts`, which runs it through BOTH
+clients at once (one account with an imminent 5-hour reset and a spent weekly window,
+one healthy account: the line points at the SECOND), and in both screens. A mutant
+that picks the soonest reset while ignoring the other window turns those red.
 
 ## Never optimistic — the rule every refusal follows
 
@@ -52,8 +57,11 @@ something false, so each is a named test:
 - **A window with under 5% headroom counts as spent.** 1% of a weekly window is not
   capacity to push into. Erring this way costs one build routed elsewhere; erring
   the other way costs a wall.
-- **Countdowns round UP.** 16m59s rendered as "16m" reports capacity arriving
-  sooner than it will.
+- **Countdowns round UP; AGES round DOWN.** 16m59s of countdown rendered as "16m"
+  reports capacity arriving sooner than it will. An age is the opposite kind of
+  claim — about the past, and exact — so a 61-second-old reading is "1m ago". An
+  earlier cut had `formatAge` delegate to the countdown formatter, which printed
+  "2m ago" at 61 seconds and skipped "1m ago" entirely.
 - **A cap-out projection that has already passed is OMITTED, not dashed.** It can
   only belong to a stale reading, and the card is already saying that much louder
   (floored figure, age chip, capacity unknown); a "Caps out in —" reads as a failed
@@ -124,6 +132,22 @@ Pace moves the other way for the same reason: it is now computed **as of
 elapsed-since-now reports a calmer and calmer burn the longer a writer has been
 dead, which is exactly backwards.
 
+**And the payload is REFETCHED, which is the other half of the same rule.** Moving
+the deltas to the paint fixes the lie; on its own it does not fix the data. A screen
+that only advanced its clock would walk a perfectly HEALTHY install into staleness:
+the Anthropic pool's deadline is two minutes, so roughly two and a half minutes after
+the screen opened the card would floor its gauges to "≥", drop capacity to "unknown"
+and stay there for as long as the owner left it up — while the poller behind it wrote
+a fresh row every 60 seconds. Ageing a held payload is right across a DEAD poller and
+wrong across a live one, and a screen that paints a working install as broken is the
+same defect as one that paints a broken install as working. Both screens therefore
+poll on `USAGE_POLL_MS` (30s), on the SAME interval that advances the render clock so
+the data and the clock it is measured against cannot drift. The parity test bounds
+the RELATIONSHIP rather than the number — `USAGE_POLL_MS × 2 < min(POOL_STALE_AFTER_MS)`,
+importing the store's own deadlines — so a pool cannot be given a tighter deadline
+than the screens can keep up with. Each screen also has a mutation-checked test: a
+tick that advances the clock and does not refetch turns them red.
+
 ## The window LENGTH is data, not a constant
 
 `summariseWindow` used to divide by a hardcoded 5h/7d. That is true of Anthropic and
@@ -161,6 +185,19 @@ Anthropic credential and renders one Anthropic card. The surface renders N cards
 correctly and N happens to be 1 — no pool is faked, and the single-account path is
 not special-cased.
 
+**A second, smaller one, pinned by a test rather than hidden.** The label is resolved
+by a sidecar outside this process. If it stops resolving, the SAME credential begins
+writing rows that name no account, and the series then holds two account keys for one
+physical credential — a chip for each, until the older one falls out of retention.
+Nothing in the store can tell that from a second account genuinely appearing, so it
+does not guess. What makes it safe rather than merely noisy is the DIRECTION: the
+lapsed reading ages, so the client floors its gauge and drops its standing to
+`unknown`, which can only subtract confidence from the pool headline (a
+"(1 unknown)" suffix) and can never add availability that is not there. A recency
+cut-off was considered and refused — it would delete exactly the non-active-account
+headroom this store exists to retain, and "no readings yet" about an account that
+has readings is a worse sentence than an honest old one.
+
 ## The Kimi poller, against an endpoint nobody has published
 
 `trident/kimi-usage-probe.ts` reads `GET {KIMI_BASE_URL}/v1/usages`;
@@ -183,6 +220,29 @@ rather than clamped, and every reset instant is plausibility-checked against the
 clock AFTER conversion — so a seconds value read as ms (1970, which would render as
 "available now") and an ms value converted again (year 57,000) both fail loudly.
 Window SLOTS are chosen by reported length, never by array position.
+
+**That plausibility bound is ONE-SIDED, and the symmetry was a bug.** The first cut
+accepted any instant within ±400 days of now. Downstream, a reset that has already
+passed means "the window rolled, this account is free", so a year-old instant on a
+99%-spent window rendered as capacity — the optimistic answer the whole feature
+exists to refuse. The past bound is now ONE WINDOW LENGTH (`RESET_PAST_TOLERANCE_WINDOWS`):
+an instant slightly behind is ordinary (the window rolled and the probe read it just
+after), while one more than a window back describes a window that has since rolled
+unobserved and cannot be the current one. It is expressed in windows rather than as a
+constant because window length is not a constant — the same instant that is
+implausible for a 5-hour window is ordinary for a 7-day one, and a test pins both.
+
+**A PARTIAL read is a refusal, not a smaller answer.** An earlier cut dropped the
+entries it could not parse and returned `ok` with whatever it understood — which is
+the confident-zero failure wearing a different hat, because nothing downstream can
+tell a sample carrying one window from a provider that only HAS one window. An
+account whose weekly figure was dropped would render as an account with no weekly
+limit, so a 99%-spent week became "Next capacity in 40m (5h window)". So a single
+unreadable entry — an unmodelled shape, a missing length, or a second window landing
+in an already-filled slot — makes the WHOLE response `unrecognised`, no row is
+written, and the key names go out so one real response corrects the alias list.
+`observedKeys` reports every element of the list rather than the first, because the
+entry that fails to parse is rarely the first one.
 
 Per-key attribution is not offered: the endpoint is account-wide (two keys on one
 subscription return identical numbers), so the card is titled "Kimi (account-wide)"

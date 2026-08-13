@@ -3994,6 +3994,16 @@ export function buildOpenGraphComposer(
      * Anthropic API key is connected and billed per token, so there is no window
      * to read and never will be, and calling that "not connected" would send the
      * owner to reconnect an account that is working.
+     *
+     * REUSING `kimiConfigured` MEANS REUSING ITS SIDE EFFECT, and that trade is
+     * made deliberately. Answering "is a key present" also exports it into the
+     * process environment (`trident/kimi-key.ts`), which is how a key entered in
+     * settings reaches the next subprocess without a restart. The write is
+     * idempotent — it only assigns when the value differs — and the Settings pane
+     * already asks this same question on its own per-request read, so this adds no
+     * new class of behaviour. A private "is it configured" check here would avoid
+     * the write and buy a second notion of configured, which is exactly how a card
+     * ends up telling the owner to fix a key that is already there.
      */
     const usagePoolConnection = (pool: UsagePool): UsagePoolConnection => {
       switch (pool) {

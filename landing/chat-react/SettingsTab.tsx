@@ -54,6 +54,7 @@ import {
   type PhaseOverride,
 } from './phase-models-client.ts'
 import {
+  USAGE_POLL_MS,
   WebUsageDashboardClient,
   accountCapacityNote,
   accountName,
@@ -64,6 +65,7 @@ import {
   formatProjection,
   formatPace,
   formatWindowFraction,
+  nextAccountNote,
   paceNote,
   poolTitle,
   projectPool,
@@ -172,13 +174,10 @@ export function SettingsTab({
   // THE RENDER CLOCK for every countdown on the card. The payload carries reset
   // INSTANTS, and the delta to now is computed at paint — so this has to advance
   // on its own, or a card left open would keep insisting capacity returns in the
-  // same 17 minutes it did an hour ago. Thirty seconds is under the resolution
-  // the card renders (whole minutes), so no countdown is ever visibly wrong.
+  // same 17 minutes it did an hour ago. It is advanced by the poll effect below, on
+  // a tick finer than the whole minutes the card renders in, so no countdown is
+  // ever visibly wrong.
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
-  useEffect(() => {
-    const handle = setInterval(() => setNowMs(Date.now()), 30_000)
-    return () => clearInterval(handle)
-  }, [])
 
   const loadUsage = useCallback((): void => {
     void usageDashboardClient.load().then((next) => {
@@ -186,6 +185,27 @@ export function SettingsTab({
       setUsage(next)
     })
   }, [usageDashboardClient])
+
+  // ONE TICK ADVANCES THE CLOCK **AND** REFETCHES, and the pairing is the fix.
+  //
+  // Advancing the clock alone is what ages a card honestly across a DEAD poller —
+  // but run against a LIVE one it is a slow lie in the other direction. The
+  // Anthropic pool goes stale at two minutes, so a tab left open would floor its
+  // gauges to "≥" and drop capacity to "unknown" about two and a half minutes in
+  // while a healthy poller wrote a fresh row every 60 seconds behind it. A screen
+  // that paints a working install as broken is the same defect as one that paints a
+  // broken install as working; both are the card disagreeing with the truth.
+  //
+  // So the payload is refetched on the SAME interval. One timer, so the data and
+  // the clock it is measured against can never drift apart, and `USAGE_POLL_MS`
+  // stays below the tightest staleness deadline the store ships (pinned by a test).
+  useEffect(() => {
+    const handle = setInterval(() => {
+      setNowMs(Date.now())
+      loadUsage()
+    }, USAGE_POLL_MS)
+    return () => clearInterval(handle)
+  }, [loadUsage])
 
   // ── per-phase build models ──
   const [phaseModels, setPhaseModels] = useState<PhaseModelsPayload | null>(null)
@@ -1652,6 +1672,7 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
   // the freshness it had when the response was built.
   const view = projectPool(pool, now)
   const line = capacityLine(view)
+  const nextUp = nextAccountNote(view)
   const note = connectionNote(view)
   return (
     <div className="cset-usage-pool" data-testid={`usage-${view.pool}`}>
@@ -1673,6 +1694,14 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
       {line !== null ? (
         <p className="cset-usage-capacity" data-testid={`usage-${view.pool}-capacity`}>
           {line}
+        </p>
+      ) : null}
+      {/* WHICH account the line above is about. The headline says WHEN; on a pool
+          with more than one account the owner still has to know WHOSE, because
+          that is the account he routes the next build to. */}
+      {nextUp !== null ? (
+        <p className="cset-sub" data-testid={`usage-${view.pool}-nextup`}>
+          {nextUp}
         </p>
       ) : null}
       {note !== null ? (

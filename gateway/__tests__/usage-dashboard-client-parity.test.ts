@@ -41,6 +41,10 @@
 import { describe, expect, test } from 'bun:test'
 
 import { usageBand as contractBand } from '@neutronai/contracts/credential-usage.ts'
+// The STORE's own deadlines, imported rather than restated: the poll cadence below
+// is bounded by them, and a copy here would let the two drift into a screen that
+// polls slower than the pool it is watching goes stale.
+import { POOL_STALE_AFTER_MS } from '@neutronai/persistence/usage-samples-store.ts'
 import * as mobile from '@neutronai/app/lib/usage-dashboard-client'
 import * as web from '@neutronai/landing/chat-react/usage-dashboard-client.ts'
 
@@ -110,6 +114,13 @@ function project(pool: web.UsagePool, now: number): web.ProjectedPool {
 function line(pool: web.UsagePool, now: number): string | null {
   const w = web.capacityLine(web.projectPool(pool, now))
   expect(mobile.capacityLine(mobile.projectPool(pool, now))).toBe(w)
+  return w
+}
+
+/** Which account the headline is about, on both clients, at one instant. */
+function nextUp(pool: web.UsagePool, now: number): string | null {
+  const w = web.nextAccountNote(web.projectPool(pool, now))
+  expect(mobile.nextAccountNote(mobile.projectPool(pool, now))).toBe(w)
   return w
 }
 
@@ -585,6 +596,90 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
     const pool = poolOf([{ session: win({ fraction: 0.4 }) }], { stale_after_ms: 2 * MINUTE })
     expect(project(pool, NOW + 2 * MINUTE).accounts[0]!.stale).toBe(false)
     expect(project(pool, NOW + 2 * MINUTE + 1).accounts[0]!.stale).toBe(true)
+  })
+})
+
+describe('the poll cadence is bounded by the STORE’s staleness deadline', () => {
+  test('both clients poll on the same interval, and it is strictly under the tightest deadline', () => {
+    // THE BUG THIS PINS: a screen that computes its deltas at paint but never
+    // refetches. Ageing a held payload is right across a DEAD poller and wrong
+    // across a live one — the Anthropic pool goes stale at two minutes, so a screen
+    // left open would floor its gauges to "≥" and drop capacity to "unknown" about
+    // two and a half minutes in while a healthy poller wrote a fresh row every 60
+    // seconds behind it, and would stay that way forever.
+    //
+    // The RELATIONSHIP is pinned, not the number: the number that matters belongs
+    // to the store, so raising a pool's cadence without raising its deadline can
+    // never quietly outrun the screens.
+    expect(mobile.USAGE_POLL_MS).toBe(web.USAGE_POLL_MS)
+    const tightest = Math.min(...Object.values(POOL_STALE_AFTER_MS))
+    expect(tightest).toBeGreaterThan(0)
+    // Room for one dropped request, not merely "under it": a single failed poll at
+    // exactly the deadline would still tip a healthy card into staleness.
+    expect(web.USAGE_POLL_MS * 2).toBeLessThan(tightest)
+  })
+})
+
+describe('the pool headline names WHICH account it is about', () => {
+  test('the acceptance case renders the second account, on both clients', () => {
+    // `next_account_label` is computed and asserted at the data layer; this is the
+    // half that reaches the owner. Account A’s 5-hour window resets in 17 minutes
+    // and its weekly window is nearly spent; account B is healthy. The headline says
+    // WHEN, and this says WHOSE — which is the account he routes the next build to.
+    const pool = poolOf([
+      {
+        account_label: 'owner-a',
+        session: win({ fraction: 0.98, reset_at: NOW + 17 * MINUTE }),
+        weekly: win({ fraction: 0.97, window_ms: WEEKLY_MS, reset_at: NOW + 3 * DAY }),
+      },
+      {
+        account_label: 'owner-b',
+        session: win({ fraction: 0.2, reset_at: NOW + 2 * HOUR }),
+        weekly: win({ fraction: 0.3, window_ms: WEEKLY_MS, reset_at: NOW + 5 * DAY }),
+      },
+    ])
+    expect(nextUp(pool, NOW)).toBe('Next up: owner-b')
+    // A MUTANT THAT PICKS THE SOONEST RESET names owner-a here, so this is the same
+    // acceptance case as the headline’s, asserted where the owner can see it.
+    expect(line(pool, NOW)).toBe('1 available now')
+  })
+
+  test('it adds nothing on a one-account pool, and never invents a name', () => {
+    // A single-account pool: the headline is already about the only account, so a
+    // "next up" line beside it is noise that teaches the eye to skip the row.
+    expect(nextUp(AVAILABLE_POOL, NOW)).toBeNull()
+    // Two accounts, and the winner is unlabelled. The honest name for it is "active
+    // credential", which would read as a THIRD thing rather than as the account
+    // already on screen — so the note is omitted rather than guessed at.
+    const unlabelled = poolOf([
+      { account_label: null, session: win({ fraction: 0.2 }) },
+      { account_label: 'owner-b', session: win({ fraction: 0.99, reset_at: NOW + HOUR }) },
+    ])
+    expect(project(unlabelled, NOW).capacity.next_account_label).toBeNull()
+    expect(nextUp(unlabelled, NOW)).toBeNull()
+  })
+})
+
+describe('an AGE is floored where a COUNTDOWN is ceiled', () => {
+  test('a 61-second-old reading is one minute old, on both clients', () => {
+    // THE MUTANT THIS KILLS: `formatAge` delegating to `formatCountdown`. CEIL is
+    // right for a claim about the future and simply false for one about the past —
+    // it printed "2m ago" at 61 seconds and skipped "1m ago" entirely, so the chip
+    // jumped 0 → 2. Both clients are asserted, because a divergence here is the
+    // failure nobody reports.
+    for (const [ms, expected] of [
+      [61_000, '1m ago'],
+      [150_000, '2m ago'],
+      [59_999, 'just now'],
+      [60_000, '1m ago'],
+      [3_660_000, '1h 01m ago'],
+    ] as Array<[number, string]>) {
+      expect(web.formatAge(ms)).toBe(expected)
+      expect(mobile.formatAge(ms)).toBe(expected)
+    }
+    // The countdown keeps its CEIL — the two rules are opposite on purpose.
+    expect(web.formatCountdown(61_000)).toBe('2m')
+    expect(mobile.formatCountdown(61_000)).toBe('2m')
   })
 })
 
