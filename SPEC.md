@@ -322,6 +322,9 @@ Each carries an acceptance criterion; all in `neutron-open`.
       workflow survives its launcher's restart — and either way the owner is TOLD which happened, never handed
       a bare "child crashed" for an event that was a deploy. (Two crashes — 08-10 23:30, 08-11 06:04 — have no
       checkout near them and are NOT explained by this; a fix must not be credited with closing them.)
+      DISTINCT FROM the governance tracker's #514 (*a CRASHED trident run is never reaped*), which asks what
+      the row does AFTER a child dies and is now served by the `onChildCrash` sink. This asks why the child
+      dies at all, and answers: we killed it. Fixing one does not fix the other.
 - [ ] **A retry must resume from the checkpoint, not merely from the PR.** A re-dispatch creates a NEW run
       row with `inner_checkpoint = null` and `ralph_round = 0`; only the fire-time `detectExistingPr` probe
       (`trident/orchestrator.ts` `launch`) recovers continuity, by setting `pr` and so making the inner
@@ -339,17 +342,28 @@ Each carries an acceptance criterion; all in `neutron-open`.
       and it silently rejoins a worktree whose base may be stale. Acceptance: the re-enter path is
       DETERMINISTIC — the retry either adopts the preserved worktree by design or releases the branch first,
       and a test pins whichever is chosen.
-- [ ] **"Is this build alive?" must be answerable from the board, not from file mtimes**
-      (owner question, 2026-08-13: *"How can we tell if it's working? I want to minimize waste."*). Today it
-      is not. Run `36b95167` sat at `phase = forge-init`, `last_advanced_at = 04:10:08` while it was healthy —
-      its planner had finished, Forge had committed `4eb50c4` at 04:19:38, and its agent transcript was being
-      written seconds earlier. Every durable surface only moves on HARVEST, so a working build and a dead one
-      look identical for the whole span of a task. The only true liveness signal is off-board: the mtime of
-      `<session>/subagents/workflows/<wf_id>/agent-*.jsonl`. This is why the 90-minute hang reaper is
-      dangerous — it measures `last_advanced_at`, the harvest clock, NOT whether an agent is working, so it
-      can kill a healthy run (a live candidate for what happened to `eca83d1f`). Acceptance: a heartbeat
-      derived from real agent activity reaches the run row and the card; the reaper judges on that clock; and
-      the owner can tell working from dead without opening a terminal.
+- [ ] **"Is this build alive?" — NOT A NEW ITEM. Corroborating evidence for the governance tracker's open
+      #534** (*"a long build phase reports NOTHING until it ends, so a working run is indistinguishable from a
+      hung one"*, P1, already ESCALATED 2026-08-11 with three fix routes analysed and the
+      `trident/checkpoint.sh`-on-a-timer heartbeat recommended). **#534 owns this; do not re-plan it here.**
+      Recorded only because a second independent instance changes its priority, not its diagnosis.
+      2026-08-13, run `36b95167`: `phase = forge-init`, `last_advanced_at = 04:10:08` — while the planner had
+      finished, Forge had committed `4eb50c4` at 04:19:38, and an agent transcript was being written seconds
+      earlier. The owner had to ask *"How can we tell if it's working? I want to minimize waste"* and the only
+      truthful answer was off-board: the mtime of `<session>/subagents/workflows/<wf_id>/agent-*.jsonl`.
+      Two things this instance adds to #534:
+      (i) the FALSE-KILL half is now witnessed, not just predicted — `eca83d1f` was reaped at 90 minutes for
+          "no progress" on exactly the `last_advanced_at` clock #534 identifies as stale by construction, and
+          nothing establishes it was actually hung;
+      (ii) the ORCHESTRATOR is fooled too, not only the client — on 2026-08-13 this agent reported a run as
+          "going well" from transcript liveness while it was making no progress toward APPROVE. Movement is
+          not health, and a heartbeat that proves only "an agent is writing" would reproduce that error in the
+          product. Whatever #534 builds must distinguish ALIVE from PROGRESSING.
+      Related but DELIBERATELY SEPARATE: the counter/surface-disagreement half (`codegen_status` reporting
+      `forge-init` into a healthy run; the two nested round numbers) is its own backlog entry, landing via
+      the `<ralph_round>.<round>` item. That is a DISPLAY defect over a signal we already have; this is a
+      MISSING SIGNAL. They must not be collapsed into one job — fixing the display would make a run that
+      reports nothing merely report nothing more precisely.
 - [ ] **A build agent must never HOLD a credential — it asks the host to push** (owner-directed 2026-08-13,
       from observed behaviour, not theory). `github/credential.ts` argues at length against every way of
       giving git a token except an env-injected, `github.com`-scoped helper, because "a credential on disk
