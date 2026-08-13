@@ -67,15 +67,16 @@
 
 import {
   MODEL_TIERS,
+  NO_MODEL,
   type ModelTier,
   type TierGroup,
   type Transport,
   isModelTier,
   modelTier,
-  tiersAreInterchangeable,
+  tierRunsOn,
 } from './model-tiers.ts'
 
-export { MODEL_TIERS, isModelTier }
+export { MODEL_TIERS, NO_MODEL, isModelTier }
 export type { ModelTier }
 
 /**
@@ -104,6 +105,31 @@ export interface TridentPhase {
   labels: ReadonlyArray<{ label: string; dynamic?: boolean }>
   /** The tier + effort used when the owner has set no override. */
   default: { tier: ModelTier; effort: Effort }
+  /**
+   * THE EXECUTOR GROUPS THIS STEP'S DISPATCH CAN ACTUALLY REACH — the list is a claim
+   * about wiring that exists, not about wiring that would be nice.
+   *
+   * This replaces deriving the answer from `default.tier`'s group, which was the bug:
+   * it locked every row to one executor forever, so a build could never be moved to
+   * Codex even after the route was built (ISSUES #565). It is also the reason this is a
+   * LIST rather than a second tier field — `build` genuinely dispatches two ways now,
+   * and a settings row has to be able to say so.
+   *
+   * THE RULE FOR EDITING IT: add a group here ONLY once a test asserts the production
+   * composer routes this step's label to that executor. A selectable option that does
+   * not dispatch is worse than a greyed one, because the owner believes the run used
+   * the model they picked.
+   */
+  executors: ReadonlyArray<TierGroup>
+  /**
+   * True for the cross-model REVIEW SLOTS, which accept `none` as well as a tier.
+   *
+   * Only these rows may be emptied. Emptying `build` would mean a run with no builder;
+   * emptying a Claude reviewer would silently shrink the merge gate. Emptying a
+   * cross-model slot is a knowing opt-out of a second model family, and the pane says
+   * so rather than implying a diverse panel (ISSUES #566).
+   */
+  cross_model_slot?: boolean
 }
 
 /**
@@ -120,6 +146,11 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Reads the task and the spec, then breaks the work into ordered steps.',
     labels: [{ label: 'plan:fable' }],
     default: { tier: 'fable', effort: 'max' },
+    // Claude-only, and honestly so: the planner returns PLAN_SCHEMA (a regenerated plan
+    // body, one top task, an execution spec, a complexity tag) through the workflow's
+    // own structured-output contract. The codex build wrapper returns a transcript, not
+    // a schema, so there is no route to assert against yet.
+    executors: ['claude'],
   },
   {
     key: 'build',
@@ -127,6 +158,11 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Writes the code and the tests, and re-writes them against review findings.',
     labels: [{ label: 'forge:build' }, { label: 'forge:fix-round-', dynamic: true }],
     default: { tier: 'opus', effort: 'high' },
+    // WIRED, NOT ASPIRATIONAL. `trident/inner-workflow.mjs` routes `forge:build` and
+    // every `forge:fix-round-*` through `trident/codex-build.sh` when this phase
+    // resolves to a codex tier, and `__tests__/codex-build-dispatch.test.ts` runs the
+    // shipped workflow body and asserts the bridge command it actually emits.
+    executors: ['claude', 'codex'],
   },
   {
     key: 'build_mechanical',
@@ -138,6 +174,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     // why `phaseForLabel` returns `build` for both and the tag decides.
     labels: [{ label: 'forge:build' }, { label: 'forge:fix-round-', dynamic: true }],
     default: { tier: 'sonnet', effort: 'medium' },
+    executors: ['claude', 'codex'],
   },
   {
     key: 'review_rubric',
@@ -145,6 +182,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Reviews the diff against the fixed criteria — correctness, security, test quality.',
     labels: [{ label: 'argus:claude' }],
     default: { tier: 'opus', effort: 'high' },
+    executors: ['claude'],
   },
   {
     key: 'review_adversarial',
@@ -152,33 +190,46 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Independently tries to REFUTE the change rather than to approve it.',
     labels: [{ label: 'argus:adversarial' }],
     default: { tier: 'opus', effort: 'high' },
+    executors: ['claude'],
   },
   {
-    key: 'review_codex',
-    label: 'Cross-model review (Codex)',
+    // ── THE TWO CROSS-MODEL SEATS ARE SLOTS, NOT VENDORS ──────────────────────
+    // They were `review_codex` and `review_kimi`, which named the occupant in the
+    // settings key, the label and the description — so "point this seat at a different
+    // model" had no expressible form and the owner asked, reasonably, how he was
+    // supposed to change it (ISSUES #566). The seat is now a POSITION on the panel;
+    // which model sits in it is the setting. The stable keys below are the ones a
+    // migration maps the old two onto — see `migratePhaseModelConfig`.
+    key: 'review_cross_1',
+    label: 'Cross-model review ONE',
     description:
-      'A second opinion from a GPT model, run as a Codex CLI subprocess — a different model family than the rest of the panel.',
-    labels: [{ label: 'argus:codex' }, { label: 'argus:codex-retry' }],
-    // `sol` is the flagship GPT 5.6 tier and matches the wrapper's own standing pin,
-    // so an install that never opens the pane dispatches exactly what it dispatched
-    // before this phase existed. The effort below is INERT — a CLI chooses its own
-    // reasoning effort, and no dispatch reads this value (see `phaseSupportsEffort`).
+      'A second opinion from OUTSIDE the Claude family, so the panel is not one model marking its own homework. Any non-Claude tier, or NONE to turn this seat off.',
+    labels: [{ label: 'argus:cross-1' }, { label: 'argus:cross-1-retry' }],
+    // `sol` is the flagship GPT 5.6 tier and matches the codex wrapper's own standing
+    // pin, so an install that never opens the pane dispatches exactly what it
+    // dispatched when this seat was called "Codex". The effort below is INERT — a CLI
+    // chooses its own reasoning effort, and no dispatch reads it (`phaseSupportsEffort`).
     default: { tier: 'sol', effort: 'high' },
+    executors: ['codex', 'kimi'],
+    cross_model_slot: true,
   },
   {
-    key: 'review_kimi',
-    label: 'Cross-model review (Kimi)',
+    key: 'review_cross_2',
+    label: 'Cross-model review TWO',
     description:
-      'A second opinion from Kimi K3, run as a CLI subprocess — a third model family, so the panel is not two copies of one set of blind spots.',
-    labels: [{ label: 'argus:kimi' }, { label: 'argus:kimi-retry' }],
+      'A THIRD model family alongside the first slot — its disagreements are the signal, because it does not share the others\u2019 blind spots. Any non-Claude tier, or NONE.',
+    labels: [{ label: 'argus:cross-2' }, { label: 'argus:cross-2-retry' }],
     default: { tier: 'k3', effort: 'high' },
+    executors: ['codex', 'kimi'],
+    cross_model_slot: true,
   },
   {
     key: 'synthesis',
     label: 'Synthesis / arbitration',
-    description: 'Merges every reviewer’s verdict into one, and decides what blocks a merge.',
+    description: 'Merges every reviewer\u2019s verdict into one, and decides what blocks a merge.',
     labels: [{ label: 'argus:synthesis' }],
     default: { tier: 'fable', effort: 'high' },
+    executors: ['claude'],
   },
   {
     key: 'bookkeeping',
@@ -193,6 +244,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'ci-probe-round-', dynamic: true },
     ],
     default: { tier: 'fast', effort: 'low' },
+    executors: ['claude'],
   },
 ])
 
@@ -257,14 +309,65 @@ export function phaseTransport(phase: TridentPhase): Transport {
 }
 
 /**
- * The EXECUTOR GROUP a phase dispatches on — `claude`, `codex`, `kimi`.
+ * The EXECUTOR GROUPS a phase can dispatch on.
  *
- * The one question a settings row needs answered: a row may offer exactly the tiers in
- * its own group, because those are the only ones its dispatch can reach. Derived from
- * the phase's default tier, so the pane and the run cannot disagree.
+ * The one question a settings row needs answered: which tiers may this row offer,
+ * because those are the only ones its dispatch can reach. It used to be DERIVED from
+ * the phase's default tier — one group, forever — which is why the build row could
+ * never be moved off Claude even after the codex route existed. It is now DECLARED on
+ * the phase, next to a comment stating the test that proves each entry.
+ *
+ * A phase declaring nothing falls back to its default tier's group, so a new phase that
+ * forgets the field is locked down rather than opened up.
  */
-export function phaseGroup(phase: TridentPhase): TierGroup {
-  return modelTier(phase.default.tier)?.group ?? 'claude'
+export function phaseExecutors(phase: TridentPhase): ReadonlyArray<TierGroup> {
+  if (phase.executors.length > 0) return phase.executors
+  return [modelTier(phase.default.tier)?.group ?? 'claude']
+}
+
+/**
+ * Can this phase run this tier — capability, credential aside?
+ *
+ * A BUILD ROW ALSO NEEDS THE EXECUTOR TO HAVE A BUILD WRAPPER. Being in the right
+ * group is necessary and not sufficient: `k3` is a non-Claude tier and the cross-model
+ * slots take it, but nothing in the repo can hand Kimi a worktree, so a build row must
+ * refuse it. Reading `build_wrapper` off the registry is what keeps that answer true
+ * without a second list to forget to update.
+ */
+export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean {
+  if (!tierRunsOn(phaseExecutors(phase), tier)) return false
+  const descriptor = modelTier(tier)
+  if (descriptor === null) return false
+  if (descriptor.transport !== 'cli') return true
+  // A cli tier on a cross-model REVIEW slot uses `wrapper`; on any other phase the
+  // dispatch is a build, which needs `build_wrapper`.
+  return phase.cross_model_slot === true
+    ? descriptor.wrapper !== null
+    : descriptor.build_wrapper !== null
+}
+
+/**
+ * Why `tier` is refused on `phase`, or null when it is accepted.
+ *
+ * ONE SENTENCE, AND IT HAS TO BE TRUE. The string the owner reads is the whole product
+ * here: `Codex steps only` named a category he had never heard of and explained
+ * nothing, and `Codex is not wired for this step yet` becomes a LIE the moment the step
+ * is wired. So the reason is computed from the same registry facts the dispatch reads,
+ * and it disappears by construction for a combination that now works.
+ */
+export function tierRefusalReason(phase: TridentPhase, tier: ModelTier): string | null {
+  if (phaseAcceptsTier(phase, tier)) return null
+  const descriptor = modelTier(tier)
+  if (descriptor === null) return `'${tier}' is not a model tier`
+  const executors = phaseExecutors(phase)
+  if (!executors.includes(descriptor.group)) {
+    // NAMES THE TIER, not just the executors. The same sentence is both the greyed
+    // option's tooltip (where the tier is already on screen) and the rejected-save
+    // error (where it is the only clue which of eight rows was wrong), and the error
+    // is the one that has to stand alone.
+    return `'${tier}' (${descriptor.model_id}) runs on ${descriptor.group}, and ${phase.label} runs on ${executors.join(' or ')} — it cannot dispatch a ${descriptor.group} model`
+  }
+  return `'${tier}' runs on ${descriptor.group}, which has no build wrapper in this repo — it can review, but it cannot run ${phase.label}`
 }
 
 /**
@@ -399,6 +502,22 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           errors.push(`phase '${key}': 'model' contains control characters`)
           continue
         }
+        if (model === NO_MODEL) {
+          // NONE IS A VALUE, NOT AN ABSENCE, and only a cross-model slot may hold it.
+          // Storing it (rather than omitting the key) is the whole point: the run has
+          // to be able to tell "the owner turned this seat off" from "this seat was
+          // never touched, so it runs its default". Collapsing those is how a knowing
+          // opt-out becomes an invisible one.
+          if (phase.cross_model_slot !== true) {
+            errors.push(
+              `phase '${key}': 'none' is only settable on a cross-model review slot — ${phase.label} must have a model`,
+            )
+            reject(key, { model })
+            continue
+          }
+          entry.model = NO_MODEL
+          continue
+        }
         if (!isModelTier(model)) {
           // A retired tier and an older build's literal id land here together, and
           // both mean the same thing to a dispatch: a value nothing can resolve.
@@ -410,13 +529,12 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           reject(key, { model })
           continue
         }
-        if (!tiersAreInterchangeable(phase.default.tier, model)) {
-          // Not a preference — a capability. See `tiersAreInterchangeable`.
-          const want = modelTier(phase.default.tier)
-          const got = modelTier(model)
-          errors.push(
-            `phase '${key}': '${model}' runs ${got?.transport === 'cli' ? `as a ${got.wrapper ?? 'CLI'} subprocess` : 'as a Claude agent'}, which cannot run this step — ${key} dispatches ${want?.transport === 'cli' ? `through ${want.wrapper ?? 'a CLI'}` : 'a Claude agent'}`,
-          )
+        if (!phaseAcceptsTier(phase, model)) {
+          // Not a preference — a capability. See `tierRefusalReason`, which is the SAME
+          // sentence the settings pane greys the option out with, so the message an
+          // owner reads before saving and the message they read after a rejected save
+          // cannot drift apart.
+          errors.push(`phase '${key}': ${tierRefusalReason(phase, model)}`)
           reject(key, { model })
           continue
         }
@@ -463,4 +581,72 @@ export function phaseModelDefaults(): Readonly<Record<string, { model: ModelTier
     out[phase.key] = { model: phase.default.tier, effort: phase.default.effort }
   }
   return out
+}
+
+/**
+ * THE OLD VENDOR-NAMED SEAT KEYS → THE NEW SLOT KEYS.
+ *
+ * `review_codex` and `review_kimi` are persisted in owner configuration on every
+ * install that opened the pane before ISSUES #566. Renaming a settings key without a
+ * migration is indistinguishable, from the owner's side, from the product forgetting
+ * what they chose — the row reverts to its default and nothing says why. So the read
+ * path runs this first, and a stored `review_codex: { model: 'terra' }` arrives at the
+ * new pane as `review_cross_1: { model: 'terra' }`.
+ *
+ * DIRECTIONAL, AND DELIBERATELY NOT SYMMETRIC. Slot ONE takes the codex seat and slot
+ * TWO the kimi seat, matching both the old panel order and the new defaults, so an
+ * install that never touched the pane keeps dispatching the same two models in the same
+ * two positions.
+ */
+export const LEGACY_PHASE_KEYS: Readonly<Record<string, string>> = Object.freeze({
+  review_codex: 'review_cross_1',
+  review_kimi: 'review_cross_2',
+})
+
+/**
+ * Rewrite a stored config's legacy keys onto the current ones.
+ *
+ * A NEW KEY ALREADY PRESENT WINS. Both keys can coexist only on a config written by a
+ * build straddling the rename; in that case the value the owner set most recently is
+ * the one under the NEW key, and silently overwriting it with the legacy value would
+ * undo a choice they can see in the pane.
+ *
+ * Total and pure: a non-object, a null, an array — anything that is not a config — is
+ * returned untouched for {@link parsePhaseModelConfig} to reject with its own message.
+ */
+export function migratePhaseModelConfig(raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw
+  const source = raw as Record<string, unknown>
+  let changed = false
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(source)) {
+    const renamed = LEGACY_PHASE_KEYS[key]
+    if (renamed === undefined) {
+      out[key] = value
+      continue
+    }
+    changed = true
+    if (!Object.prototype.hasOwnProperty.call(source, renamed)) out[renamed] = value
+  }
+  return changed ? out : raw
+}
+
+/**
+ * The tiers a phase may be set to, each with whether it is selectable and why not.
+ *
+ * SERVER-SIDE, SO BOTH CLIENTS RENDER THE SAME ANSWER. The two settings screens used to
+ * compare group strings themselves, which meant the rule "which options does this row
+ * offer" lived in three places (validator, mobile, web) and could disagree — and the
+ * disagreement is invisible until an owner saves a value one of them offered and the
+ * server refuses it. The reason string is a product decision, so it is computed once
+ * here, next to the validator that enforces it.
+ */
+export function phaseTierOptions(
+  phase: TridentPhase,
+): ReadonlyArray<{ tier: ModelTier; selectable: boolean; reason: string | null }> {
+  return MODEL_TIERS.map((tier) => ({
+    tier,
+    selectable: phaseAcceptsTier(phase, tier),
+    reason: tierRefusalReason(phase, tier),
+  }))
 }

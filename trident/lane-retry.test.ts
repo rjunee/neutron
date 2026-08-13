@@ -128,31 +128,31 @@ const enforceCrossModelGate = load<GateFn>('enforceCrossModelGate')
 const hasUsableVerdict = load<(v: unknown) => boolean>('hasUsableVerdict')
 
 const SLOTS = [
-  { name: 'codex', slot: 0, statusKey: 'codexStatus' },
-  { name: 'kimi', slot: 1, statusKey: 'kimiStatus' },
+  { name: 'codex', slot: 0, statusKey: 'crossStatus' },
+  { name: 'kimi', slot: 1, statusKey: 'crossStatus' },
 ]
 
 describe('retryDeferredPeers — retry the lane, not the round', () => {
   test('a DEFERRED lane is retried and its verdict replaced on success', async () => {
     const calls: string[] = []
     const out = await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'deferred' }, { kimiStatus: 'connected' }],
+      verdicts: [{ crossStatus: 'deferred' }, { crossStatus: 'connected' }],
       slots: SLOTS,
       invoke: async (n) => {
         calls.push(n)
-        return { codexStatus: 'connected', verdict: 'APPROVE' }
+        return { crossStatus: 'connected', verdict: 'APPROVE' }
       },
     })
     expect(calls).toEqual(['codex'])
-    expect(out[0]?.['codexStatus']).toBe('connected')
+    expect(out[0]?.['crossStatus']).toBe('connected')
     // The healthy lane is untouched — not re-read, not replaced.
-    expect(out[1]?.['kimiStatus']).toBe('connected')
+    expect(out[1]?.['crossStatus']).toBe('connected')
   })
 
   test('a CONNECTED lane is never retried — that would spend a call to learn a known answer', async () => {
     const calls: string[] = []
     await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'connected' }, { kimiStatus: 'connected' }],
+      verdicts: [{ crossStatus: 'connected' }, { crossStatus: 'connected' }],
       slots: SLOTS,
       invoke: async (n) => {
         calls.push(n)
@@ -166,7 +166,7 @@ describe('retryDeferredPeers — retry the lane, not the round', () => {
     // Retrying this would turn "you never configured codex" into repeated failures.
     const calls: string[] = []
     await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'not_connected' }, { kimiStatus: 'not_connected' }],
+      verdicts: [{ crossStatus: 'not_connected' }, { crossStatus: 'not_connected' }],
       slots: SLOTS,
       invoke: async (n) => {
         calls.push(n)
@@ -178,38 +178,38 @@ describe('retryDeferredPeers — retry the lane, not the round', () => {
 
   test('a lane still deferred after its retries KEEPS the original verdict, so the gate still blocks', async () => {
     const out = await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'deferred', marker: 'first-failure' }],
+      verdicts: [{ crossStatus: 'deferred', marker: 'first-failure' }],
       slots: [SLOTS[0]!],
-      invoke: async () => ({ codexStatus: 'deferred', marker: 'second-failure' }),
+      invoke: async () => ({ crossStatus: 'deferred', marker: 'second-failure' }),
     })
     // Still deferred ⇒ the gate refuses APPROVE. That is the point: retrying must
     // not become a way to launder a dead lane into a pass.
-    expect(out[0]?.['codexStatus']).toBe('deferred')
+    expect(out[0]?.['crossStatus']).toBe('deferred')
   })
 
   test('an agent that THROWS does not crash the round, and the original is kept', async () => {
     const out = await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'deferred', marker: 'original' }],
+      verdicts: [{ crossStatus: 'deferred', marker: 'original' }],
       slots: [SLOTS[0]!],
       invoke: async () => {
         throw new Error('agent died')
       },
     })
     expect(out[0]?.['marker']).toBe('original')
-    expect(out[0]?.['codexStatus']).toBe('deferred')
+    expect(out[0]?.['crossStatus']).toBe('deferred')
   })
 
   test('a retry returning null or a status-less object is discarded, not written through', async () => {
     // A dead agent resolves to null in this workflow's `parallel`; writing that in
     // would erase the evidence naming the first failure.
     const nulled = await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'deferred', marker: 'original' }],
+      verdicts: [{ crossStatus: 'deferred', marker: 'original' }],
       slots: [SLOTS[0]!],
       invoke: async () => null,
     })
     expect(nulled[0]?.['marker']).toBe('original')
     const shapeless = await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'deferred', marker: 'original' }],
+      verdicts: [{ crossStatus: 'deferred', marker: 'original' }],
       slots: [SLOTS[0]!],
       invoke: async () => ({ verdict: 'APPROVE' }),
     })
@@ -219,12 +219,12 @@ describe('retryDeferredPeers — retry the lane, not the round', () => {
   test('attempts is BOUNDED — a permanently dead lane fails fast rather than stalling the round', async () => {
     let n = 0
     await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'deferred' }],
+      verdicts: [{ crossStatus: 'deferred' }],
       slots: [SLOTS[0]!],
       attempts: 2,
       invoke: async () => {
         n += 1
-        return { codexStatus: 'deferred' }
+        return { crossStatus: 'deferred' }
       },
     })
     expect(n).toBe(2)
@@ -233,8 +233,8 @@ describe('retryDeferredPeers — retry the lane, not the round', () => {
   test('a null slot (peer not configured this run) is skipped without a call', async () => {
     const calls: string[] = []
     await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'deferred' }],
-      slots: [{ name: 'kimi', slot: null, statusKey: 'kimiStatus' }],
+      verdicts: [{ crossStatus: 'deferred' }],
+      slots: [{ name: 'kimi', slot: null, statusKey: 'crossStatus' }],
       invoke: async (n) => {
         calls.push(n)
         return null
@@ -366,21 +366,21 @@ describe('retryDeferredPeers — a DEAD lane (null verdict on a configured slot)
   test('a null verdict on a configured slot IS retried, and a good retry replaces it', async () => {
     const calls: string[] = []
     const out = await retryDeferredPeers({
-      verdicts: [null as unknown as Verdict, { kimiStatus: 'connected' }],
+      verdicts: [null as unknown as Verdict, { crossStatus: 'connected' }],
       slots: SLOTS,
       invoke: async (n) => {
         calls.push(n)
-        return { codexStatus: 'connected', verdict: 'APPROVE' }
+        return { crossStatus: 'connected', verdict: 'APPROVE' }
       },
     })
     expect(calls).toEqual(['codex'])
-    expect(out[0]?.['codexStatus']).toBe('connected')
+    expect(out[0]?.['crossStatus']).toBe('connected')
   })
 
   test('an UNDEFINED verdict (the slot never got written) is retried too', async () => {
     const calls: string[] = []
     await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'connected' }],
+      verdicts: [{ crossStatus: 'connected' }],
       slots: SLOTS,
       invoke: async (n) => {
         calls.push(n)
@@ -393,7 +393,7 @@ describe('retryDeferredPeers — a DEAD lane (null verdict on a configured slot)
   test('a verdict object MISSING its status field is retried — a malformed reply is not an answer', async () => {
     const calls: string[] = []
     await retryDeferredPeers({
-      verdicts: [{ verdict: 'APPROVE', findings: [] }, { kimiStatus: 'connected' }],
+      verdicts: [{ verdict: 'APPROVE', findings: [] }, { crossStatus: 'connected' }],
       slots: SLOTS,
       invoke: async (n) => {
         calls.push(n)
@@ -432,8 +432,8 @@ describe('retryDeferredPeers — a DEAD lane (null verdict on a configured slot)
   test('an ABSENT peer (no slot) is still never retried — the reduced panel costs nothing', async () => {
     const calls: string[] = []
     await retryDeferredPeers({
-      verdicts: [{ codexStatus: 'connected' }],
-      slots: [{ name: 'kimi', slot: null, statusKey: 'kimiStatus' }],
+      verdicts: [{ crossStatus: 'connected' }],
+      slots: [{ name: 'kimi', slot: null, statusKey: 'crossStatus' }],
       invoke: async (n) => {
         calls.push(n)
         return null
@@ -566,6 +566,10 @@ describe('retryDeferredPeers — a dead CORE seat is retried, not written off', 
     expect(at).toBeGreaterThan(-1)
     const slots = SRC.slice(at, at + 400)
     expect(slots).toContain('...coreSeats,')
-    expect(slots).toContain("{ name: 'codex', slot: codexSlot, statusKey: 'codexStatus' }")
+    // The cross-model seats are spread from the SAME `crossSeats` the panel dispatched
+    // and the gate reads — never a second literal list, which is how a seat gets added
+    // to the panel and silently left out of the retry.
+    expect(slots).toContain('...crossSeats.map(')
+    expect(slots).toContain('statusKey: seat.statusKey')
   })
 })

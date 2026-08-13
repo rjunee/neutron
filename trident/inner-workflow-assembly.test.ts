@@ -17,6 +17,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { buildReflectionGuidance } from './reflection-guidance.ts'
+import { resolveCrossModelSlots } from './cross-model-slots.ts'
+import { TRIDENT_PHASES, phaseExecutors } from './phase-models.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -65,7 +67,7 @@ async function runWorkflow(
     const label = o?.label
     captured.push({ label, prompt })
     // A DEAD SEAT: dispatched, returned nothing. Checked FIRST so it can kill any
-    // label, including a retry lane ('argus:codex-retry').
+    // label, including a retry lane ('argus:cross-1-retry').
     if (dead.has(String(label))) return null
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
       return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed: true }
@@ -84,14 +86,14 @@ async function runWorkflow(
         remainingTasks: 0,
       }
     }
-    if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
-      return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
+    if (label === 'argus:cross-2' || label === 'argus:cross-2-retry') {
+      return { verdict: 'APPROVE', findings: [], crossStatus: 'connected' }
     }
-    if (label === 'argus:codex' || label === 'argus:codex-retry') {
-      // `codexTruncated` included because CODEX_VERDICT_SCHEMA REQUIRES it — a mock
+    if (label === 'argus:cross-1' || label === 'argus:cross-1-retry') {
+      // `crossTruncated` included because CROSS_MODEL_VERDICT_SCHEMA REQUIRES it — a mock
       // that omits it is a bridge that dropped it, which is a different case (and
       // deliberately reads as PARTIAL, SCOPE UNKNOWN).
-      return { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
+      return { verdict: 'APPROVE', findings: [], crossStatus: 'connected', crossTruncated: false }
     }
     if (label === 'argus:synthesis') {
       synthCount += 1
@@ -122,8 +124,14 @@ async function runWorkflow(
     dbPath: null, // → checkpoint()/writeTerminalResult() no-op (no bash agent steps)
     runId: null,
     resumeCheckpoint: null,
-    codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
-    kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured
+    codexHome: '/codex', // → the codex credential exists, so a codex seat can be `configured`
+    kimiConfigured: true, // → the kimi credential exists too, so both seats can run
+    // THE SEATS COME FROM THE PRODUCTION RESOLVER, never a literal written here. A
+    // hand-built slot array would let this harness assert a panel shape the launcher
+    // never produces — the exact "exists is not wired" trap. `resolveCrossModelSlots`
+    // is the same function `buildWorkflowArgs` calls.
+    crossModelSlots: resolveCrossModelSlots({}, { codex: true, kimi: true }),
+    phaseExecutors: Object.fromEntries(TRIDENT_PHASES.map((p) => [p.key, [...phaseExecutors(p)]])),
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance,
@@ -141,7 +149,7 @@ async function runWorkflow(
 }
 
 const FORGE_LABELS = ['forge:build', 'forge:fix-round-2']
-const REVIEWER_LABELS = ['argus:claude', 'argus:adversarial', 'argus:synthesis', 'argus:codex']
+const REVIEWER_LABELS = ['argus:claude', 'argus:adversarial', 'argus:synthesis', 'argus:cross-1']
 
 describe('inner-workflow.mjs — AS-BUILT reflection boundary (executed prompt capture)', () => {
   let captured: Captured[]
@@ -261,14 +269,18 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
     // lane is killed too, or the round would silently heal.
     const { captured, result } = await runWorkflow(GUIDANCE, {
       approveAll: true,
-      dead: ['argus:codex', 'argus:codex-retry'],
+      dead: ['argus:cross-1', 'argus:cross-1-retry'],
     })
     expect(result['verdict']).toBe('REQUEST_CHANGES')
     expect(result['blockKind']).toBe('infra-only')
     const synth = captured.find((c) => c.label === 'argus:synthesis')
-    expect(synth?.prompt).toContain('Verdict C (codex cross-model): DEFERRED')
-    // NOT the graceful never-set-up path, which does not block.
-    expect(synth?.prompt).not.toContain('Verdict C (codex cross-model): NOT CONNECTED')
+    expect(synth?.prompt).toContain('Cross-model review ONE): DEFERRED')
+    // NOT the graceful never-set-up path, which does not block…
+    expect(synth?.prompt).not.toContain('Cross-model review ONE): NOT CONNECTED')
+    // …and NOT the deliberate opt-out either. #566's whole risk is that a seat the
+    // owner turned off and a seat that died become one state; a configured seat that
+    // produced nothing must never be described as an empty one.
+    expect(synth?.prompt).not.toContain('Cross-model review ONE): DELIBERATELY EMPTY')
     // The core seats answered, so only codex is hedged.
     expect(synth?.prompt).not.toContain('DID NOT COMPLETE')
   })
@@ -306,8 +318,8 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
     'forge:fix-round-2',
     'argus:claude',
     'argus:adversarial',
-    'argus:codex',
-    'argus:kimi',
+    'argus:cross-1',
+    'argus:cross-2',
   ]
 
   let captured: Captured[]

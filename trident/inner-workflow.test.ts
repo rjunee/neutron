@@ -442,53 +442,68 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
   })
 })
 
-describe('inner-workflow.mjs — codex cross-model review panelist', () => {
+describe('inner-workflow.mjs — the cross-model review seats', () => {
   test('destructures codexHome from args (per-project CODEX_HOME) + gates on codexConfigured', () => {
     expect(SRC).toContain('codexHome = null')
     expect(SRC).toContain('const codexConfigured =')
     expect(SRC).toContain("typeof codexHome === 'string' && codexHome.length > 0")
   })
 
-  test('a CODEX_VERDICT_SCHEMA carries codexStatus connected/not_connected/deferred', () => {
-    expect(SRC).toContain('const CODEX_VERDICT_SCHEMA =')
-    expect(SRC).toContain('codexStatus')
-    expect(SRC).toContain("enum: ['connected', 'not_connected', 'deferred']")
+  test('a CROSS_MODEL_VERDICT_SCHEMA carries all FOUR seat statuses', () => {
+    expect(SRC).toContain('const CROSS_MODEL_VERDICT_SCHEMA =')
+    expect(SRC).toContain('crossStatus')
+    // `exhausted` is the fourth (#567), and it must be its OWN enum member rather than
+    // folded into `deferred`: the whole point is that the run can stop paying to
+    // rediscover a quota wall that will not clear on its own.
+    expect(SRC).toContain("enum: ['connected', 'not_connected', 'deferred', 'exhausted']")
   })
 
   test('the codex reviewer runs trident/codex-review.sh SYNCHRONOUSLY with per-project CODEX_HOME (never backgrounded)', () => {
-    expect(SRC).toContain('function codexReviewerPrompt(diffFile)')
-    expect(SRC).toContain('/trident/codex-review.sh')
+    expect(SRC).toContain('function crossModelReviewerPrompt(index, diffFile)')
+    expect(SRC).toContain("'trident/codex-review.sh'")
     expect(SRC).toContain('CODEX_HOME=')
     expect(SRC).toContain('do NOT background it')
     // Codex reviews the SAME diff FILE Forge wrote — NOT `git diff` in repoPath
     // (which is still on the base branch) — via NEUTRON_CODEX_DIFF_FILE (Codex [P2]).
     expect(SRC).toContain('NEUTRON_CODEX_DIFF_FILE=')
-    expect(SRC).toContain('codexReviewerPrompt(diffFile)')
+    expect(SRC).toContain('crossModelReviewerPrompt(seat.index, diffFile)')
     // Codex [P2]: the wrapper path is shell-quoted (repoPath may contain spaces),
     // and the /tmp output files are keyed on runId (globally unique) not slug
     // (unique only within a project → concurrent same-slug runs would collide).
-    expect(SRC).toContain('bash ${shSingleQuote(script)}')
+    expect(SRC).toContain('bash ${shSingleQuote(wrapper)}')
     expect(SRC).toContain('const uniq = runId || slug')
-    expect(SRC).toContain('/tmp/trident-codex-${uniq}.out')
-    // Wired into the review panel only when a codex credential is configured.
-    expect(SRC).toContain('if (codexConfigured)')
-    expect(SRC).toContain("label: 'argus:codex'")
-    expect(SRC).toContain('schema: CODEX_VERDICT_SCHEMA')
+    expect(SRC).toContain('/tmp/trident-cross${index + 1}-${uniq}.out')
+    // Dispatched only for a seat the resolver marked `configured` — a seat the owner
+    // set to NONE, or one this install has no credential for, costs no agent.
+    expect(SRC).toContain("if (seat.disposition !== 'configured')")
+    expect(SRC).toContain("label: 'argus:cross-1'")
+    expect(SRC).toContain('schema: CROSS_MODEL_VERDICT_SCHEMA')
   })
 
-  test('exit codes map to codexStatus: 0→connected, 10/11→not_connected, 3/5→deferred', () => {
-    expect(SRC).toContain("codexStatus='connected'")
-    expect(SRC).toContain("codexStatus='not_connected'")
-    expect(SRC).toContain("codexStatus='deferred'")
+  test('exit codes map to crossStatus: 0→connected, 10/11→not_connected, 3/5→deferred', () => {
+    expect(SRC).toContain("crossStatus='connected'")
+    expect(SRC).toContain("crossStatus='not_connected'")
+    expect(SRC).toContain("crossStatus='deferred'")
     // The graceful path invents no findings; the deferred path never APPROVEs.
     expect(SRC).toContain('do NOT invent findings')
-    expect(SRC).toContain('NEVER report APPROVE for a deferred codex')
+    expect(SRC).toContain('NEVER report APPROVE for a deferred reviewer')
+    // EXIT 4 IS ITS OWN INSTRUCTION (#567): do not retry, and do not review the diff
+    // yourself. A bridge that substituted its own Claude review would report a
+    // cross-model review that did not happen — the single worst outcome available.
+    expect(SRC).toContain("EXIT 4 → crossStatus='exhausted'")
+    expect(SRC).toContain('Do NOT retry and do NOT review the diff yourself')
   })
 
-  test('synthesis folds in the codex verdict as a third panelist / notes not-connected / gates deferred', () => {
-    expect(SRC).toContain('Verdict C (codex cross-model')
-    expect(SRC).toContain('codex not connected')
-    expect(SRC).toContain('full third panelist')
+  test('synthesis is told each seat is a full panelist / not connected / empty / gated', () => {
+    expect(SRC).toContain('function crossPanelLine(')
+    expect(SRC).toContain('Treat it as a full panelist')
+    expect(SRC).toContain('NOT CONNECTED')
+    // ISSUES #566 — a seat the owner emptied is described as a CHOICE, in words that
+    // cannot be read as "this reviewer looked and found nothing".
+    expect(SRC).toContain('DELIBERATELY EMPTY')
+    expect(SRC).toContain('This is a CHOICE, not a failure')
+    // …and #567 — an exhausted seat is not a code finding.
+    expect(SRC).toContain('PROVIDER OUT OF QUOTA')
   })
 
   test('the bridge READS BACK the truncation marker — the wrapper tells the model, the grep tells the workflow', () => {
@@ -496,11 +511,11 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     // without this grep a review of the first 3000 lines of an 11k-line diff came
     // back as a clean whole-change APPROVE, and nothing downstream could tell.
     expect(SRC).toContain('grep -q CODEX_REVIEW_DIFF_TRUNCATED')
-    expect(SRC).toContain('CODEX_TRUNCATED=1')
-    expect(SRC).toContain('CODEX_TRUNCATED=0')
+    expect(SRC).toContain('CROSS_TRUNCATED=1')
+    expect(SRC).toContain('CROSS_TRUNCATED=0')
     // …and it is a REQUIRED schema field, copied from that line rather than judged.
-    expect(SRC).toContain("required: ['verdict', 'findings', 'codexStatus', 'codexTruncated']")
-    expect(SRC).toContain('copy the CODEX_TRUNCATED line VERBATIM')
+    expect(SRC).toContain("required: ['verdict', 'findings', 'crossStatus', 'crossTruncated']")
+    expect(SRC).toContain('copy the CROSS_TRUNCATED line VERBATIM')
   })
 
   /**
@@ -511,7 +526,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
    * on presented to the synthesis as a full-coverage panelist. A guard whose only
    * coverage survives its own inversion is documentation.
    *
-   * So these run the REAL fragment — generated by the shipped `codexReviewerPrompt`,
+   * So these run the REAL fragment — generated by the shipped `crossModelReviewerPrompt`,
    * not retyped here — against a fixture stderr file, and assert on its OUTPUT.
    */
   const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
@@ -525,25 +540,50 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'runId',
       'codexHome',
       'baseBranch',
+      'task',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
       'NO_PATTERN_KILL_RULE',
+      // The RESOLVED SEAT the prompt is built from. A codex-wrapper seat, because the
+      // truncation readback is a codex-wrapper behaviour — the kimi CLI has no
+      // truncation marker and the shipped builder branches on `requires`.
+      'slotAt',
+      'slotTitle',
       // The owner's chosen review model, resolved once per run and spliced onto the
       // command as an env assignment. A REALISTIC value rather than '': the
       // truncation readback is a tail of that same command line, so a prefix that
       // shifted or broke its quoting has to be able to fail this.
-      'CODEX_ENV_PREFIX',
-      [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
-    ) as (...args: string[]) => (diffFile: string) => string
-    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '', "CODEX_REVIEW_MODEL='gpt-5.6-sol' ")(
-      '/tmp/some-diff.diff',
-    )
+      'CROSS_ENV_PREFIX',
+      [grabFunction('shSingleQuote'), grabFunction('crossModelReviewerPrompt'), 'return crossModelReviewerPrompt'].join('\n'),
+    ) as (...args: unknown[]) => (index: number, diffFile: string) => string
+    return factory(
+      '/repo',
+      'the-slug',
+      runId,
+      '/codex-home',
+      'main',
+      'the task',
+      '',
+      '',
+      '',
+      () => ({
+        key: 'review_cross_1',
+        title: 'Cross-model review ONE',
+        model_id: 'gpt-5.6-sol',
+        wrapper: 'trident/codex-review.sh',
+        env_var: 'CODEX_REVIEW_MODEL',
+        requires: 'codex',
+        disposition: 'configured',
+      }),
+      () => 'Cross-model review ONE',
+      ["CODEX_REVIEW_MODEL='gpt-5.6-sol' ", ''],
+    )(0, '/tmp/some-diff.diff')
   }
 
   /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */
   const runReadback = (errContent: string | null): string => {
     const runId = `truncation-readback-${process.pid}`
-    const errFile = `/tmp/trident-codex-${runId}.err`
+    const errFile = `/tmp/trident-cross1-${runId}.err`
     rmSync(errFile, { force: true })
     if (errContent !== null) writeFileSync(errFile, errContent)
     const command = codexBridgeCommand(runId)
@@ -558,25 +598,25 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     return out
   }
 
-  test('BEHAVIOR: wrapper stderr carrying the marker makes the bridge report CODEX_TRUNCATED=1', () => {
+  test('BEHAVIOR: wrapper stderr carrying the marker makes the bridge report CROSS_TRUNCATED=1', () => {
     const out = runReadback(
       'CODEX_REVIEW_DIFF_TRUNCATED: showing the first 3000 of 11241 diff lines to codex.\n',
     )
-    expect(out).toBe('CODEX_TRUNCATED=1')
+    expect(out).toBe('CROSS_TRUNCATED=1')
   })
 
-  test('BEHAVIOR: stderr WITHOUT the marker reports CODEX_TRUNCATED=0 — the flag is not always-on', () => {
+  test('BEHAVIOR: stderr WITHOUT the marker reports CROSS_TRUNCATED=0 — the flag is not always-on', () => {
     // The other half of the inversion: a full-diff review must not be hedged into a
     // partial one, or the PARTIAL framing becomes noise everyone learns to skip.
     const out = runReadback('reading prompt from stdin\nmodel: gpt-5.6-sol\n')
-    expect(out).toBe('CODEX_TRUNCATED=0')
+    expect(out).toBe('CROSS_TRUNCATED=0')
   })
 
   test('BEHAVIOR: a MISSING stderr file reports 0 — that case is caught by the exit code, not here', () => {
     // grep exits 2 on an unreadable file, so this says "not truncated". Safe only
     // because a wrapper that never wrote stderr did not exit 0 either, and a non-zero
     // exit maps to deferred/not_connected — which the panel gates on independently.
-    expect(runReadback(null)).toBe('CODEX_TRUNCATED=0')
+    expect(runReadback(null)).toBe('CROSS_TRUNCATED=0')
   })
 
   test('a deterministic never-silent-downgrade guard forces REQUEST_CHANGES on deferred+APPROVE', () => {
@@ -593,7 +633,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     // `synthesisRaw`. Twice now this assertion has failed on a change that left the
     // composition intact — so it asserts the composition and nothing about the
     // spelling of the arguments.
-    expect(SRC).toMatch(/deferredCrossModelPeers\(\{ codex:/)
+    expect(SRC).toMatch(/deferredCrossModelPeers\(crossSeats\)/)
     expect(SRC).toMatch(/enforceCrossModelGate\(\w+, \w+\)/)
   })
 })
@@ -623,12 +663,17 @@ function loadRealGate(): {
     findings: Array<{ kind?: string; title?: string; severity?: string; evidence?: string }>
   } | null
   deferredCrossModelPeers: (statuses: unknown) => Peer[]
-  crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
+  crossModelPeerStatus: (
+    slot: number | null,
+    verdicts: unknown[],
+    statusKey: string,
+    disposition: string,
+  ) => string
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
   coreSeats: Array<{ slot: number; name: string; letter: string; panelLabel: string }>
   classifyBlock: (s: unknown, peers: unknown[]) => string
   corePanelLine: (letter: string, label: string, verdict: unknown) => string
-  codexPanelLine: (status: string, review: unknown) => string
+  crossPanelLine: (letter: string, title: string, status: string, review: unknown) => string
 } {
   const grab = grabFunction
   // The consts the functions close over come along, lifted from the SAME source so
@@ -681,9 +726,9 @@ function loadRealGate(): {
       grab('hasUsableVerdict'),
       grab('missingCoreReviewers'),
       grab('corePanelLine'),
-      grab('codexPanelLine'),
+      grab('crossPanelLine'),
       grab('classifyBlock'),
-      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, classifyBlock, corePanelLine, codexPanelLine }',
+      'return { enforceCrossModelGate, deferredCrossModelPeers, crossModelPeerStatus, missingCoreReviewers, classifyBlock, corePanelLine, crossPanelLine }',
     ].join('\n'),
   ) as () => Omit<ReturnType<typeof loadRealGate>, 'coreSeats'>
   return { ...factory(), coreSeats: grabCoreSeats() }
@@ -701,22 +746,22 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const g = gate()
     expect(typeof g.enforceCrossModelGate).toBe('function')
     expect(typeof g.deferredCrossModelPeers).toBe('function')
-    expect(typeof g.codexPanelLine).toBe('function')
+    expect(typeof g.crossPanelLine).toBe('function')
   })
 
   test('a TRUNCATED codex APPROVE is handed to the synthesis as PARTIAL, not as a whole-change approval', () => {
     // The defect: codex read the first N lines of the diff, said APPROVE about them,
     // and the panel line presented it as "a full third panelist" — a cross-model
     // approval of code codex never saw.
-    const { codexPanelLine } = gate()
-    const line = codexPanelLine('connected', {
+    const { crossPanelLine } = gate()
+    const line = crossPanelLine('C', 'Cross-model review ONE', 'connected', {
       verdict: 'APPROVE',
       findings: [],
-      codexStatus: 'connected',
-      codexTruncated: true,
+      crossStatus: 'connected',
+      crossTruncated: true,
     })
     expect(line).toContain('PARTIAL')
-    expect(line).toContain('CODEX_REVIEW_DIFF_TRUNCATED')
+    expect(line).toContain('TRUNCATED the diff at its line cap')
     expect(line).toContain('do NOT record it as a whole-change cross-model approval')
     expect(line).not.toContain('full third panelist')
     // Its BLOCKERS are not softened — only its approval is re-scoped.
@@ -724,25 +769,25 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
   })
 
   test('an UNtruncated connected codex is still the full third panelist (the re-scoping is not blanket)', () => {
-    const { codexPanelLine } = gate()
-    const line = codexPanelLine('connected', {
+    const { crossPanelLine } = gate()
+    const line = crossPanelLine('C', 'Cross-model review ONE', 'connected', {
       verdict: 'APPROVE',
       findings: [],
-      codexStatus: 'connected',
-      codexTruncated: false,
+      crossStatus: 'connected',
+      crossTruncated: false,
     })
-    expect(line).toContain('full third panelist')
+    expect(line).toContain('Treat it as a full panelist')
     expect(line).not.toContain('PARTIAL')
   })
 
-  test('a MISSING codexTruncated is PARTIAL, not full coverage — the flag fails SAFE', () => {
+  test('a MISSING crossTruncated is PARTIAL, not full coverage — the flag fails SAFE', () => {
     // The old test only ever passed the field, so the DEFAULT was untested and it
     // pointed the wrong way: `=== true` meant a bridge that dropped the field earned
     // the "full third panelist" framing — the permissive answer for the one case where
     // nothing is known about coverage. Same direction as crossModelPeerStatus, where a
     // configured seat with no status defaults to 'deferred'.
-    const { codexPanelLine } = gate()
-    const line = codexPanelLine('connected', { verdict: 'APPROVE', findings: [], codexStatus: 'connected' })
+    const { crossPanelLine } = gate()
+    const line = crossPanelLine('C', 'Cross-model review ONE', 'connected', { verdict: 'APPROVE', findings: [], crossStatus: 'connected' })
     expect(line).toContain('PARTIAL')
     expect(line).toContain('SCOPE UNKNOWN')
     expect(line).not.toContain('full third panelist')
@@ -750,47 +795,53 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     expect(line).toContain('VETO')
   })
 
-  test('a NON-BOOLEAN codexTruncated is PARTIAL — a stringified flag is not a reported one', () => {
+  test('a NON-BOOLEAN crossTruncated is PARTIAL — a stringified flag is not a reported one', () => {
     // A schema-violating 'true'/'false' string used to sail into the full-panelist
     // branch; 'false' as a string is truthy, so the truncated case did too.
-    const { codexPanelLine } = gate()
+    const { crossPanelLine } = gate()
     for (const bad of ['true', 'false', 1, 0, null, undefined]) {
-      const line = codexPanelLine('connected', {
+      const line = crossPanelLine('C', 'Cross-model review ONE', 'connected', {
         verdict: 'APPROVE',
         findings: [],
-        codexStatus: 'connected',
-        codexTruncated: bad,
+        crossStatus: 'connected',
+        crossTruncated: bad,
       })
       expect(line).toContain('PARTIAL')
       expect(line).not.toContain('full third panelist')
     }
     // …and a review object that is missing entirely is not a full panelist either.
-    expect(codexPanelLine('connected', null)).not.toContain('full third panelist')
+    expect(crossPanelLine('C', 'Cross-model review ONE', 'connected', null)).not.toContain('full third panelist')
   })
 
   test('deferred/not_connected panel lines are unchanged by the truncation flag', () => {
-    const { codexPanelLine } = gate()
-    const deferredLine = codexPanelLine('deferred', { codexTruncated: true })
+    const { crossPanelLine } = gate()
+    const deferredLine = crossPanelLine('C', 'Cross-model review ONE', 'deferred', { crossTruncated: true })
     expect(deferredLine).toContain('DEFERRED')
     expect(deferredLine).toContain('do NOT return APPROVE')
     // The deferral no longer claims the CALL failed — an empty diff is the other way in.
     expect(deferredLine).toContain('EMPTY')
-    expect(codexPanelLine('not_connected', { codexTruncated: true })).toContain('NOT CONNECTED')
+    expect(crossPanelLine('C', 'Cross-model review ONE', 'not_connected', { crossTruncated: true })).toContain('NOT CONNECTED')
   })
 
   test('the deferred-codex blocker text names the EMPTY-DIFF cause, not just auth', () => {
     // An operator whose diff file failed to write was told to re-run "once codex auth
     // is restored" — a correct-looking instruction that fixes nothing.
     const { deferredCrossModelPeers } = gate()
-    const [codexPeer] = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
+    const [codexPeer] = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'deferred' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'connected' },
+    ])
     expect(codexPeer?.evidence).toContain('EMPTY')
-    expect(codexPeer?.evidence).toContain('CODEX_REVIEW_EMPTY_DIFF')
+    expect(codexPeer?.evidence).toContain('the diff was EMPTY so there was nothing to review')
     expect(codexPeer?.evidence).not.toContain('Re-run once codex auth is restored')
   })
 
   test('deferred codex + APPROVE synthesis → forced REQUEST_CHANGES with a blocker prepended', () => {
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
-    const deferredCodex = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
+    const deferredCodex = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'deferred' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'connected' },
+    ])
     const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, deferredCodex)
     expect(out?.verdict).toBe('REQUEST_CHANGES')
     expect(out?.findings.length).toBe(1)
@@ -805,14 +856,17 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
   // re-Forged a full round against a panel that was still down a seat.
   test('deferred codex + REQUEST_CHANGES synthesis → the lane blocker is STILL injected', () => {
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
-    const deferredCodex = deferredCrossModelPeers({ codex: 'deferred', kimi: 'connected' })
+    const deferredCodex = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'deferred' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'connected' },
+    ])
     const s = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major', title: 'real code bug' }] }
     const out = enforceCrossModelGate(s, deferredCodex)
     expect(out?.verdict).toBe('REQUEST_CHANGES')
     // Prepended, and STAMPED — the model's finding still rides along behind it.
     expect(out?.findings).toHaveLength(2)
     expect(out?.findings[0]?.kind).toBe('lane')
-    expect(out?.findings[0]?.title).toContain('Codex')
+    expect(out?.findings[0]?.title).toContain('Cross-model review ONE')
     expect(out?.findings[1]?.title).toBe('real code bug')
   })
 
@@ -843,7 +897,10 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
 
   test('connected peers + APPROVE → NOT downgraded (both ran fine)', () => {
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
-    const noneDeferred = deferredCrossModelPeers({ codex: 'connected', kimi: 'connected' })
+    const noneDeferred = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'connected' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'connected' },
+    ])
     const s = { verdict: 'APPROVE', findings: [] }
     expect(enforceCrossModelGate(s, noneDeferred)).toBe(s)
   })
@@ -852,7 +909,10 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
     const s = { verdict: 'APPROVE', findings: [] }
     expect(
-      enforceCrossModelGate(s, deferredCrossModelPeers({ codex: 'not_connected', kimi: 'not_connected' })),
+      enforceCrossModelGate(s, deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'not_connected' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'not_connected' },
+    ])),
     ).toBe(s)
   })
 
@@ -860,16 +920,22 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     // The point of generalising one gate instead of adding a second: a new peer
     // is enforced by construction, not by remembering to write a parallel guard.
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
-    const peers = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' })
+    const peers = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'connected' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'deferred' },
+    ])
     expect(peers).toHaveLength(1)
     const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
     expect(out?.verdict).toBe('REQUEST_CHANGES')
-    expect(JSON.stringify(out?.findings)).toContain('Kimi K3')
+    expect(JSON.stringify(out?.findings)).toContain('Cross-model review TWO')
   })
 
   test('BOTH peers deferred → both blockers surface, so the operator knows which is down', () => {
     const { enforceCrossModelGate, deferredCrossModelPeers } = gate()
-    const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' })
+    const peers = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'deferred' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'deferred' },
+    ])
     const out = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
     expect(out?.verdict).toBe('REQUEST_CHANGES')
     expect(out?.findings.length).toBe(2)
@@ -882,23 +948,98 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
   // (Only missingCoreReviewers' title was behaviourally asserted; the others were
   // covered by a whole-file substring grep, which any producer's title satisfies for
   // all of them.) The title is the line a human reads first when a lane is down.
-  test('the codex + kimi blockers each carry their OWN non-empty, self-identifying title', () => {
+  test('each seat blocker carries its OWN non-empty, self-identifying title', () => {
     const { deferredCrossModelPeers, enforceCrossModelGate } = gate()
-    const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' })
+    const peers = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'deferred' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'deferred' },
+    ])
     const byName = (n: string): Peer => peers.find((p) => p.name === n) as Peer
-    expect(byName('Codex').title).toBe('Codex cross-model review DEFERRED — refusing to silently APPROVE')
-    expect(byName('Kimi K3').title).toBe('Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE')
-    // …and they survive the gate as distinct titles, so the PR names WHICH lane died.
+    // THE TITLE NAMES THE SEAT, NOT THE VENDOR (#566). It used to be `Codex cross-model
+    // review DEFERRED`, which was the same conflation the settings key had: the owner
+    // cannot re-point a seat whose failure message insists on the occupant's name.
+    expect(byName('Cross-model review ONE').title).toBe(
+      'Cross-model review ONE DEFERRED — refusing to silently APPROVE',
+    )
+    expect(byName('Cross-model review TWO').title).toBe(
+      'Cross-model review TWO DEFERRED — refusing to silently APPROVE',
+    )
+    // The MODEL still appears, in the evidence, so the operator knows what was down.
+    expect(byName('Cross-model review ONE').evidence).toContain('gpt-5.6-sol')
+    expect(byName('Cross-model review TWO').evidence).toContain('kimi-k3')
+    // …and they survive the gate as distinct titles, so the PR names WHICH seat died.
     const titles = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)?.findings.map((f) => f.title)
-    expect(titles).toEqual([byName('Codex').title, byName('Kimi K3').title])
+    expect(titles).toEqual([
+      byName('Cross-model review ONE').title,
+      byName('Cross-model review TWO').title,
+    ])
     for (const t of titles ?? []) expect(typeof t).toBe('string')
+  })
+
+  test('an EXHAUSTED seat blocks too, and its blocker names the remedies (#567)', () => {
+    // THE STATE THAT DID NOT EXIST. A maxed-out provider used to report `deferred`,
+    // which reads as a blip: the run retried it, paid for the rest of the panel, and
+    // still could not merge — every time, because quota does not clear on its own.
+    const { deferredCrossModelPeers, enforceCrossModelGate, classifyBlock } = gate()
+    const peers = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'exhausted' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'connected' },
+    ])
+    expect(peers).toHaveLength(1)
+    expect(peers[0]!.title).toContain('PROVIDER OUT OF QUOTA')
+    // The three remedies are the OWNER'S, and all three are named — a blocked merge
+    // with no stated way out is how an operator learns to ignore the blocker.
+    expect(peers[0]!.evidence).toContain('add capacity')
+    expect(peers[0]!.evidence).toContain('re-point this slot')
+    expect(peers[0]!.evidence).toContain('set the slot to NONE')
+    // Still no Claude fallback, for the same reason as a deferral.
+    expect(peers[0]!.evidence).toContain('NO fallback to a Claude-family')
+    // It BLOCKS an APPROVE exactly as a deferral does…
+    const gated = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
+    expect(gated?.verdict).toBe('REQUEST_CHANGES')
+    // …and it is INFRA, not code: re-Forging the diff cannot buy quota, and a round of
+    // reviewers spent to "fix" a billing state is the waste this classification exists
+    // to prevent.
+    expect(classifyBlock(gated, peers)).toBe('infra-only')
+  })
+
+  test('a seat the owner turned OFF never blocks — `none` is not a failure (#566)', () => {
+    // THE INVARIANT THAT CAN SILENTLY DESTROY THE FEATURE, asserted from both sides.
+    // A deliberately empty seat and a dead one both produce no verdict; if the gate
+    // told them apart by emptiness, either NONE would block every merge or a dead
+    // reviewer would stop blocking. The DISPOSITION is what separates them, and it is
+    // a field rather than an inference.
+    const { deferredCrossModelPeers, crossModelPeerStatus, enforceCrossModelGate } = gate()
+    // A slot with no seat and disposition `none` reports `none`, never `deferred`.
+    expect(crossModelPeerStatus(null, [], 'crossStatus', 'none')).toBe('none')
+    // Even with a DEAD verdict sitting in the array, `none` wins — the owner's choice
+    // is not overridden by whatever debris a prior round left behind.
+    expect(crossModelPeerStatus(2, [{}, {}, null], 'crossStatus', 'none')).toBe('none')
+    const peers = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: null, status: 'none' },
+      { title: 'Cross-model review TWO', model_id: null, status: 'none' },
+    ])
+    expect(peers).toEqual([])
+    const approve = { verdict: 'APPROVE', findings: [] }
+    expect(enforceCrossModelGate(approve, peers)).toBe(approve)
+    // THE POSITIVE CONTROL, in the same test: the SAME seat, CONFIGURED and dead, does
+    // block. Without this the assertions above would pass on a gate that had simply
+    // stopped working.
+    expect(crossModelPeerStatus(2, [{}, {}, null], 'crossStatus', 'configured')).toBe('deferred')
+    const dead = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'deferred' },
+    ])
+    expect(enforceCrossModelGate(approve, dead)?.verdict).toBe('REQUEST_CHANGES')
   })
 
   test("the kimi blocker states there is NO Claude-family fallback", () => {
     // A fallback would restore the single-family panel while still reporting that
     // a cross-model review happened, so the refusal is part of the contract.
     const { deferredCrossModelPeers } = gate()
-    const peers = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' })
+    const peers = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'connected' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'deferred' },
+    ])
     expect(peers[0]!.evidence).toContain('NO fallback to a Claude-family')
   })
 })
@@ -912,7 +1053,7 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
  * unreviewed code.
  *
  *   1. A CROSS-MODEL PEER THAT DIED READ AS "NEVER CONFIGURED". The caller's fallback
- *      was `{ verdict: 'COMMENT', findings: [], codexStatus: 'not_connected' }` for both
+ *      was `{ verdict: 'COMMENT', findings: [], crossStatus: 'not_connected' }` for both
  *      "no slot" and "slot but null verdict", and only the exact string 'deferred'
  *      blocks. So a configured reviewer whose agent crashed was indistinguishable from
  *      a self-hoster who never set one up — and the second of those is DELIBERATELY a
@@ -942,34 +1083,34 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
   describe('crossModelPeerStatus — the slot is the authority on "was this configured"', () => {
     test('NO SLOT → not_connected (never configured: the reduced panel that must still merge)', () => {
       const { crossModelPeerStatus } = gate()
-      expect(crossModelPeerStatus(null, [], 'kimiStatus')).toBe('not_connected')
-      expect(crossModelPeerStatus(undefined as unknown as null, [], 'kimiStatus')).toBe('not_connected')
+      expect(crossModelPeerStatus(null, [], 'crossStatus', 'not_configured')).toBe('not_connected')
+      expect(crossModelPeerStatus(undefined as unknown as null, [], 'crossStatus', 'not_configured')).toBe('not_connected')
     })
 
     test('SLOT + null verdict → deferred, NOT not_connected — this is the #535 fix', () => {
       // The agent was dispatched and died. Before the fix this returned
       // 'not_connected', which no gate blocks on.
       const { crossModelPeerStatus } = gate()
-      expect(crossModelPeerStatus(2, [{}, {}, null], 'codexStatus')).toBe('deferred')
-      expect(crossModelPeerStatus(2, [{}, {}], 'codexStatus')).toBe('deferred')
+      expect(crossModelPeerStatus(2, [{}, {}, null], 'crossStatus', 'configured')).toBe('deferred')
+      expect(crossModelPeerStatus(2, [{}, {}], 'crossStatus', 'configured')).toBe('deferred')
     })
 
     test('SLOT + a verdict object MISSING its status field → deferred', () => {
       // A malformed reply is a review we did not get. The old code read the absent
       // field, applied `|| 'not_connected'`, and merged.
       const { crossModelPeerStatus } = gate()
-      expect(crossModelPeerStatus(2, [{}, {}, { verdict: 'APPROVE' }], 'codexStatus')).toBe('deferred')
-      expect(crossModelPeerStatus(2, [{}, {}, { codexStatus: '' }], 'codexStatus')).toBe('deferred')
+      expect(crossModelPeerStatus(2, [{}, {}, { verdict: 'APPROVE' }], 'crossStatus', 'configured')).toBe('deferred')
+      expect(crossModelPeerStatus(2, [{}, {}, { crossStatus: '' }], 'crossStatus', 'configured')).toBe('deferred')
     })
 
     test('SLOT + a real status → that status, verbatim (including the graceful exit-10 path)', () => {
       const { crossModelPeerStatus } = gate()
-      const v = [{}, {}, { codexStatus: 'connected' }, { kimiStatus: 'not_connected' }]
-      expect(crossModelPeerStatus(2, v, 'codexStatus')).toBe('connected')
+      const v = [{}, {}, { crossStatus: 'connected' }, { crossStatus: 'not_connected' }]
+      expect(crossModelPeerStatus(2, v, 'crossStatus', 'configured')).toBe('connected')
       // An EXPLICIT not_connected from the reviewer itself still means "no credential"
       // and still yields a legitimate reduced panel. Only the DEFAULT changed.
-      expect(crossModelPeerStatus(3, v, 'kimiStatus')).toBe('not_connected')
-      expect(crossModelPeerStatus(2, [{}, {}, { codexStatus: 'deferred' }], 'codexStatus')).toBe('deferred')
+      expect(crossModelPeerStatus(3, v, 'crossStatus', 'not_configured')).toBe('not_connected')
+      expect(crossModelPeerStatus(2, [{}, {}, { crossStatus: 'deferred' }], 'crossStatus', 'configured')).toBe('deferred')
     })
 
     test('end to end: a DEAD configured peer now blocks an APPROVE; an ABSENT one does not', () => {
@@ -978,12 +1119,18 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
       const { crossModelPeerStatus, deferredCrossModelPeers, enforceCrossModelGate } = gate()
       const approve = { verdict: 'APPROVE', findings: [] }
 
-      const died = crossModelPeerStatus(2, [{}, {}, null], 'kimiStatus')
-      const blocked = enforceCrossModelGate(approve, deferredCrossModelPeers({ codex: 'connected', kimi: died }))
+      const died = crossModelPeerStatus(2, [{}, {}, null], 'crossStatus', 'configured')
+      const blocked = enforceCrossModelGate(approve, deferredCrossModelPeers([
+        { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'connected' },
+        { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: died },
+      ]))
       expect(blocked?.verdict).toBe('REQUEST_CHANGES')
 
-      const absent = crossModelPeerStatus(null, [{}, {}], 'kimiStatus')
-      expect(enforceCrossModelGate(approve, deferredCrossModelPeers({ codex: 'connected', kimi: absent }))).toBe(
+      const absent = crossModelPeerStatus(null, [{}, {}], 'crossStatus', 'not_configured')
+      expect(enforceCrossModelGate(approve, deferredCrossModelPeers([
+        { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'connected' },
+        { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: absent },
+      ]))).toBe(
         approve,
       )
     })
@@ -1064,7 +1211,10 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
 
     test('a deferred cross-model peer composes through the same path to infra-only', () => {
       const { deferredCrossModelPeers, enforceCrossModelGate, classifyBlock } = gate()
-      const peers = deferredCrossModelPeers({ codex: 'deferred', kimi: 'deferred' })
+      const peers = deferredCrossModelPeers([
+      { title: 'Cross-model review ONE', model_id: 'gpt-5.6-sol', status: 'deferred' },
+      { title: 'Cross-model review TWO', model_id: 'kimi-k3', status: 'deferred' },
+    ])
       const gated = enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, peers)
       expect(classifyBlock(gated, peers)).toBe('infra-only')
     })
@@ -1169,10 +1319,11 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
       const code = SRC.split('\n')
         .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
         .join('\n')
-      expect(code).not.toContain("codexStatus: 'not_connected' }")
-      expect(code).not.toContain("kimiStatus: 'not_connected' }")
-      expect(SRC).toContain("crossModelPeerStatus(codexSlot, verdicts, 'codexStatus')")
-      expect(SRC).toContain("crossModelPeerStatus(kimiSlot, verdicts, 'kimiStatus')")
+      expect(code).not.toContain("crossStatus: 'not_connected' }")
+      expect(code).not.toContain("crossStatus: 'not_connected' }")
+      expect(SRC).toContain(
+        'crossModelPeerStatus(seat.slot, verdicts, seat.statusKey, seat.disposition)',
+      )
     })
 
     test('missingCore reaches the gate on BOTH the CI-pending and CI-settled branches', () => {
@@ -1459,9 +1610,9 @@ describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordinati
     expect(SRC).not.toContain('reflectionGuidance}Synthesise these INDEPENDENT review verdicts')
   })
 
-  test('argus:codex external-peer launcher EXCLUDES reflection', () => {
-    expect(SRC).toContain('agent(codexReviewerPrompt(diffFile), {')
-    expect(SRC).not.toContain('reflectionGuidance}${codexReviewerPrompt')
+  test('argus:cross-1 external-peer launcher EXCLUDES reflection', () => {
+    expect(SRC).toContain('agent(crossModelReviewerPrompt(seat.index, diffFile), {')
+    expect(SRC).not.toContain('reflectionGuidance}${crossModelReviewerPrompt')
   })
 
   test('the ONLY prompt-assembly uses of reflectionGuidance are the two Forge builder sites', () => {

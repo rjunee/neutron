@@ -55,6 +55,22 @@ export const MODEL_TIERS = [
 ] as const
 export type ModelTier = (typeof MODEL_TIERS)[number]
 
+/**
+ * THE DELIBERATE EMPTY SEAT — not a tier, and deliberately not in {@link MODEL_TIERS}.
+ *
+ * A cross-model review slot set to `none` is an owner saying "run no second-family
+ * reviewer here". That is a CHOICE, and it must stay distinguishable from "a reviewer
+ * was configured and failed" all the way to the merge gate — the two look identical if
+ * you only ask whether a verdict arrived, and collapsing them would let a run report
+ * that a cross-model review happened when the panel was single-family (ISSUES #566).
+ *
+ * It lives here rather than as a ninth `MODEL_TIERS` entry because everything that
+ * consumes a tier — `modelTier()`, the pricing lookup, the dispatch — would then have
+ * to special-case a member that resolves to no model, no provider and no transport.
+ * A separate sentinel makes "is this a model?" a total question again.
+ */
+export const NO_MODEL = 'none'
+
 /** The credential a `cli` tier needs before it can run. `null` → nothing to set up. */
 export type TierRequirement = 'codex' | 'kimi'
 
@@ -77,10 +93,26 @@ export interface ModelTierDescriptor {
   /** What the tier resolves to RIGHT NOW. Never persisted — always re-resolved. */
   model_id: string
   transport: Transport
-  /** `cli` only: the wrapper the workflow shells into, repo-relative. */
+  /** `cli` only: the REVIEW wrapper the workflow shells into, repo-relative. */
   wrapper: string | null
-  /** `cli` only: the env knob that wrapper reads to pick its model. */
+  /** `cli` only: the env knob that review wrapper reads to pick its model. */
   env_var: string | null
+  /**
+   * `cli` only: the BUILD wrapper a build/plan/fix step shells into, or null when this
+   * executor has none — which is the honest answer for Kimi (ISSUES #565).
+   *
+   * A SECOND WRAPPER, NOT A SECOND TIER. Reviewing and building are different jobs for
+   * the same subprocess executor: the review wrapper streams a diff in and a verdict
+   * out, while the build wrapper hands the agent a worktree and expects a commit. The
+   * MODEL is the same either way, so it stays one registry entry, and the role-specific
+   * facts hang off it. A `build_wrapper` of null is what a settings row turns into
+   * "this executor cannot run a build yet" — and, critically, what stops the row
+   * offering the tier at all, because an option that cannot dispatch is worse than a
+   * greyed one.
+   */
+  build_wrapper: string | null
+  /** `cli` only: the env knob the BUILD wrapper reads to pick its model. */
+  build_env_var: string | null
   /** `cli` only: the credential this tier needs. */
   requires: TierRequirement | null
 }
@@ -104,6 +136,8 @@ const RESOLVERS: Readonly<
     transport: 'agent',
     wrapper: null,
     env_var: null,
+    build_wrapper: null,
+    build_env_var: null,
     requires: null,
   },
   opus: {
@@ -113,6 +147,8 @@ const RESOLVERS: Readonly<
     transport: 'agent',
     wrapper: null,
     env_var: null,
+    build_wrapper: null,
+    build_env_var: null,
     requires: null,
   },
   sonnet: {
@@ -122,6 +158,8 @@ const RESOLVERS: Readonly<
     transport: 'agent',
     wrapper: null,
     env_var: null,
+    build_wrapper: null,
+    build_env_var: null,
     requires: null,
   },
   fast: {
@@ -131,6 +169,8 @@ const RESOLVERS: Readonly<
     transport: 'agent',
     wrapper: null,
     env_var: null,
+    build_wrapper: null,
+    build_env_var: null,
     requires: null,
   },
   // ── The GPT 5.6 family, reached through the Codex CLI ─────────────────────
@@ -146,6 +186,8 @@ const RESOLVERS: Readonly<
     transport: 'cli',
     wrapper: 'trident/codex-review.sh',
     env_var: 'CODEX_REVIEW_MODEL',
+    build_wrapper: 'trident/codex-build.sh',
+    build_env_var: 'CODEX_BUILD_MODEL',
     requires: 'codex',
   },
   terra: {
@@ -155,6 +197,8 @@ const RESOLVERS: Readonly<
     transport: 'cli',
     wrapper: 'trident/codex-review.sh',
     env_var: 'CODEX_REVIEW_MODEL',
+    build_wrapper: 'trident/codex-build.sh',
+    build_env_var: 'CODEX_BUILD_MODEL',
     requires: 'codex',
   },
   luna: {
@@ -164,6 +208,8 @@ const RESOLVERS: Readonly<
     transport: 'cli',
     wrapper: 'trident/codex-review.sh',
     env_var: 'CODEX_REVIEW_MODEL',
+    build_wrapper: 'trident/codex-build.sh',
+    build_env_var: 'CODEX_BUILD_MODEL',
     requires: 'codex',
   },
   // Kimi K3 — a reviewer from a DIFFERENT model family than Claude and GPT alike,
@@ -176,6 +222,15 @@ const RESOLVERS: Readonly<
     transport: 'cli',
     wrapper: 'trident/kimi-review-cli.ts',
     env_var: 'KIMI_MODEL',
+    // NO BUILD WRAPPER, AND THAT IS THE VERIFIED ANSWER RATHER THAN A TODO.
+    // `grep -ril 'kimi\|moonshot' runtime/adapters/` returns nothing while the same
+    // grep for `codex` returns the whole `runtime/adapters/codex-cli/` tree, so there
+    // is no Kimi substrate to route a build through and no Kimi CLI that takes a
+    // worktree. `trident/kimi-review-cli.ts` is a REVIEW client: it POSTs a diff to
+    // Moonshot's messages endpoint and prints the answer. Shipping a selectable Kimi
+    // build option on top of that would be a control with no dispatch behind it.
+    build_wrapper: null,
+    build_env_var: null,
     requires: 'kimi',
   },
 })
@@ -197,6 +252,8 @@ export function modelTier(tier: string): ModelTierDescriptor | null {
     transport: entry.transport,
     wrapper: entry.wrapper,
     env_var: entry.env_var,
+    build_wrapper: entry.build_wrapper,
+    build_env_var: entry.build_env_var,
     requires: entry.requires,
   }
 }
@@ -207,19 +264,34 @@ export function modelTierRegistry(): ReadonlyArray<ModelTierDescriptor> {
 }
 
 /**
- * Can a phase running on `phaseTier` be moved to `candidate`?
+ * Can a step whose dispatch reaches `executors` run `candidate`?
  *
- * Only within one {@link TierGroup}, because the executor is a capability and not a
- * preference: pointing the Claude build agent at `sol` would hand a GPT id to
- * `agent({model})`, which resolves against Claude Code's endpoint and cannot reach it;
- * pointing the Codex wrapper at `k3` would set `CODEX_REVIEW_MODEL=kimi-k3`. Both are
- * dispatches that CANNOT work, so they are refused at the settings boundary where the
- * owner is present to be told, rather than discovered as a build that ran on the wrong
- * model.
+ * IT USED TO TAKE THE PHASE'S DEFAULT TIER AND COMPARE GROUPS, which hard-wired every
+ * row to exactly one executor — the defect the owner hit first ("The whole point is I
+ * want to be able to switch build to sol"). A step's reachable executors are a property
+ * of the DISPATCH that was actually built for it, not of whichever tier its default
+ * happens to name, so the caller passes the set and this answers membership.
+ *
+ * The check is still a capability and not a preference. Handing `sol` to
+ * `agent({model})` asks Claude Code's endpoint for a GPT id, and pointing the codex
+ * wrapper at `k3` sets `CODEX_BUILD_MODEL=kimi-k3`; both are dispatches that CANNOT
+ * work, so they are refused at the settings boundary where the owner is present to be
+ * told rather than discovered as a build that ran on the wrong model.
  */
-export function tiersAreInterchangeable(phaseTier: ModelTier, candidate: ModelTier): boolean {
-  const a = modelTier(phaseTier)
-  const b = modelTier(candidate)
-  if (a === null || b === null) return false
-  return a.group === b.group
+export function tierRunsOn(executors: ReadonlyArray<TierGroup>, candidate: ModelTier): boolean {
+  const t = modelTier(candidate)
+  if (t === null) return false
+  return executors.includes(t.group)
+}
+
+/**
+ * Every tier that is NOT Claude-family, in pane order.
+ *
+ * The cross-model review slots exist to break the panel's single-family blind spot
+ * (`trident/kimi-review.ts`), so "which tiers may a cross-model slot take" is exactly
+ * "which tiers are not Claude". Derived rather than listed, so adding a provider to the
+ * registry offers it in both slots without a second edit.
+ */
+export function crossModelTiers(): ReadonlyArray<ModelTierDescriptor> {
+  return modelTierRegistry().filter((t) => t.group !== 'claude')
 }

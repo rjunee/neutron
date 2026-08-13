@@ -32,7 +32,9 @@ import {
   PhaseModelsClient,
   applyRowEdit,
   effectiveRow,
+  panelIsSingleFamily,
   rejectedModel,
+  slotIsOff,
   tierChoices,
   type PhaseModelsPayload,
   type PhaseOverride,
@@ -176,8 +178,21 @@ export default function CodeGenSettingsScreen() {
             {/* ONE ROW PER STEP: name · model · effort. The two controls are
                 dropdowns — closed, a row reads as one line the owner can scan; open,
                 it lists every tier with the model it resolves to today. */}
+            {/* ISSUES #566 — BOTH CROSS-MODEL SEATS OFF IS A KNOWING OPT-OUT, AND THE
+                PANE SAYS SO. It is a legitimate configuration, so this is a note and
+                not an error — but a panel of Claude reviewers only is a panel with one
+                set of blind spots, and a pane that stayed silent would let the owner go
+                on believing a second model family is checking the work. */}
+            {panelIsSingleFamily(payload.phases, overrides, payload.none_value) ? (
+              <Text style={styles.stale} testID="codegen-single-family">
+                Both cross-model reviews are off — every reviewer on the panel is a
+                Claude model, so their agreement is weaker evidence than the seat count
+                suggests.
+              </Text>
+            ) : null}
             {payload.phases.map((phase) => {
               const row = effectiveRow(phase, overrides);
+              const off = slotIsOff(phase, overrides, payload.none_value);
               const choices = tierChoices(phase, payload.model_tiers);
               const dead = rejectedModel(phase, payload.rejected);
               const chosen = choices.find((c) => c.tier === row.model);
@@ -220,8 +235,8 @@ export default function CodeGenSettingsScreen() {
                         {/* Closed, the control already answers "which model is that" —
                             the tier AND what it resolves to right now. */}
                         <Text style={styles.dropdownText}>
-                          {row.model}
-                          {chosen !== undefined ? ` · ${chosen.model_id}` : ''}
+                          {off ? 'none — this review is off' : row.model}
+                          {!off && chosen !== undefined ? ` · ${chosen.model_id}` : ''}
                         </Text>
                       </Pressable>
                     </View>
@@ -253,6 +268,30 @@ export default function CodeGenSettingsScreen() {
 
                   {openMenu === `${phase.key}:model` ? (
                     <View style={styles.menu} testID={`phase-${phase.key}-model-menu`}>
+                      {/* NONE, and ONLY on a cross-model review slot. Turning a build
+                          step off would be a run with no builder; turning a Claude
+                          reviewer off would silently shrink the merge gate. Turning a
+                          cross-model seat off is a choice the owner is allowed to make,
+                          and the label says what it costs rather than reading as a
+                          neutral "unset". */}
+                      {phase.allows_none ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: off }}
+                          accessibilityLabel={`${phase.label} model none`}
+                          testID={`phase-${phase.key}-model-none`}
+                          onPress={() => edit(phase.key, { model: payload.none_value })}
+                          style={({ pressed }) => [
+                            styles.menuItem,
+                            off && styles.menuItemOn,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Text style={styles.menuText}>
+                            none — run no reviewer in this seat
+                          </Text>
+                        </Pressable>
+                      ) : null}
                       {choices.map((c) => (
                         // NEVER HIDDEN, only disabled with the reason: an option the
                         // owner cannot see is one they cannot ask about.
@@ -269,7 +308,7 @@ export default function CodeGenSettingsScreen() {
                           onPress={() => edit(phase.key, { model: c.tier })}
                           style={({ pressed }) => [
                             styles.menuItem,
-                            row.model === c.tier && styles.menuItemOn,
+                            !off && row.model === c.tier && styles.menuItemOn,
                             pressed && styles.pressed,
                           ]}
                         >

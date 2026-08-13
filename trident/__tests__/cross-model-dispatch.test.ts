@@ -87,11 +87,11 @@ async function runWorkflow(
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: 'APPROVE', findings: [] }
     }
-    if (label === 'argus:codex' || label === 'argus:codex-retry') {
-      return { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
+    if (label === 'argus:cross-1' || label === 'argus:cross-1-retry') {
+      return { verdict: 'APPROVE', findings: [], crossStatus: 'connected', crossTruncated: false }
     }
-    if (label === 'argus:kimi' || label === 'argus:kimi-retry') {
-      return { verdict: 'APPROVE', findings: [], kimiStatus: 'connected' }
+    if (label === 'argus:cross-2' || label === 'argus:cross-2-retry') {
+      return { verdict: 'APPROVE', findings: [], crossStatus: 'connected' }
     }
     if (label === 'argus:synthesis') {
       synthCount += 1
@@ -129,15 +129,15 @@ describe('THE DEFAULT PATH — an install that never opened the pane', () => {
     // The wrapper's own pin says `sol` too (`model-tiers.test.ts` holds those two
     // together), so this is the behaviour that shipped before the selector existed —
     // now stated by the dispatch instead of left to the CLI's default.
-    expect(promptFor(captured, 'argus:codex')).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
-    expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
+    expect(promptFor(captured, 'argus:cross-1')).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
+    expect(promptFor(captured, 'argus:cross-2')).toContain("KIMI_MODEL='kimi-k3'")
   })
 
   test('the model is set on the SUBPROCESS, never on the wrapping agent', async () => {
     // `agent({model})` resolves against Claude Code's own endpoint; a GPT id there
     // reaches nothing. The thin bridge agent must therefore carry NO model at all.
     const { captured } = await runWorkflow(productionArgs(null))
-    for (const label of ['argus:codex', 'argus:kimi']) {
+    for (const label of ['argus:cross-1', 'argus:cross-2']) {
       const seat = captured.find((c) => c.label === label)!
       expect({ label, model: seat.opts['model'] ?? null }).toEqual({ label, model: null })
     }
@@ -150,25 +150,25 @@ describe('THE DEFAULT PATH — an install that never opened the pane', () => {
 
 describe('AN OVERRIDE REACHES THE DISPATCH', () => {
   test('choosing the `terra` tier puts gpt-5.6-terra on the codex command line', async () => {
-    const stored = { review_codex: { model: 'terra' } }
+    const stored = { review_cross_1: { model: 'terra' } }
     // Through the production launcher: if `buildWorkflowArgs` dropped it, or the
     // workflow ignored it, this is the assertion that goes red.
     const args = productionArgs(stored)
-    expect(args['phaseModels']).toEqual({ review_codex: { model: 'terra' } })
+    expect(args['phaseModels']).toEqual({ review_cross_1: { model: 'terra' } })
     const { captured, logs } = await runWorkflow(args)
-    const cmd = promptFor(captured, 'argus:codex')
+    const cmd = promptFor(captured, 'argus:cross-1')
     expect(cmd).toContain("CODEX_REVIEW_MODEL='gpt-5.6-terra'")
     expect(cmd).not.toContain('gpt-5.6-sol')
     // And the run says so, because "did my setting take effect?" must be answerable
     // from the output of a build the owner did not watch.
-    expect(logs.some((l) => l.includes('label=argus:codex') && l.includes('gpt-5.6-terra'))).toBe(
+    expect(logs.some((l) => l.includes('label=argus:cross-1') && l.includes('gpt-5.6-terra'))).toBe(
       true,
     )
-    expect(logs.some((l) => l.includes('label=argus:codex') && l.includes('override=owner'))).toBe(
+    expect(logs.some((l) => l.includes('label=argus:cross-1') && l.includes('override=owner'))).toBe(
       true,
     )
     // The OTHER cross-model lane is untouched — one row's choice is one row's choice.
-    expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
+    expect(promptFor(captured, 'argus:cross-2')).toContain("KIMI_MODEL='kimi-k3'")
   })
 
   test('a Claude phase override still lands on the agent opts', async () => {
@@ -199,13 +199,13 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
   })
 
   test('a RETIRED tier keeps the phase default and names itself in the log', async () => {
-    expect(productionArgs({ review_codex: { model: 'gpt-5.7-nova' } })['phaseModels']).toBeUndefined()
+    expect(productionArgs({ review_cross_1: { model: 'gpt-5.7-nova' } })['phaseModels']).toBeUndefined()
 
-    const { captured, logs } = await runWorkflow(past({ review_codex: { model: 'gpt-5.7-nova' } }))
+    const { captured, logs } = await runWorkflow(past({ review_cross_1: { model: 'gpt-5.7-nova' } }))
     // FALLS BACK, never dispatches the unknown id: a value the registry cannot place
     // carries no transport, so "send it anyway" means handing it to whichever
     // executor happens to be wired.
-    const cmd = promptFor(captured, 'argus:codex')
+    const cmd = promptFor(captured, 'argus:cross-1')
     expect(cmd).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
     expect(cmd).not.toContain('gpt-5.7-nova')
     expect(
@@ -213,21 +213,29 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
     ).toBe(true)
   })
 
-  test('a tier from the WRONG transport is refused, not handed to agent()', async () => {
-    expect(productionArgs({ build: { model: 'sol' } })['phaseModels']).toBeUndefined()
+  test('a tier the phase cannot REACH is refused, not handed to agent()', async () => {
+    // THIS ASSERTION MOVED RATHER THAN WEAKENED. It used to prove `build: sol` was
+    // refused, and that was right while nothing routed a build to codex — the
+    // alternative was `agent({model: 'gpt-5.6-sol'})`, a spawn against an endpoint that
+    // has never heard of the id. The codex build route exists now, so `sol` on the
+    // build row is a legitimate choice and is proven to dispatch in
+    // `codex-build-dispatch.test.ts`. What must STILL be refused is a tier whose
+    // executor the phase genuinely cannot reach — here a codex tier on the Claude-only
+    // synthesis step.
+    expect(productionArgs({ synthesis: { model: 'sol' } })['phaseModels']).toBeUndefined()
 
-    const { captured, logs } = await runWorkflow(past({ build: { model: 'sol' } }))
-    const build = captured.find((c) => c.label === 'forge:build')!
-    // The build stays on its Claude default. The alternative — `agent({model:
-    // 'gpt-5.6-sol'})` — is a spawn against an endpoint that has never heard of it.
-    expect(build.opts['model']).not.toBe('gpt-5.6-sol')
-    expect(logs.some((l) => l.includes('IGNORED') && l.includes('transport-mismatch'))).toBe(true)
+    const { captured, logs } = await runWorkflow(past({ synthesis: { model: 'sol' } }))
+    const synth = captured.find((c) => c.label === 'argus:synthesis')!
+    expect(synth.opts['model']).not.toBe('gpt-5.6-sol')
+    expect(
+      logs.some((l) => l.includes('IGNORED') && l.includes('executor-not-reachable')),
+    ).toBe(true)
   })
 
   test('an effort on a CLI lane is refused rather than stored into a dispatch nothing reads', async () => {
-    expect(productionArgs({ review_codex: { effort: 'max' } })['phaseModels']).toBeUndefined()
+    expect(productionArgs({ review_cross_1: { effort: 'max' } })['phaseModels']).toBeUndefined()
 
-    const { logs } = await runWorkflow(past({ review_codex: { effort: 'max' } }))
+    const { logs } = await runWorkflow(past({ review_cross_1: { effort: 'max' } }))
     expect(logs.some((l) => l.includes('IGNORED') && l.includes('effort-not-settable'))).toBe(true)
   })
 })

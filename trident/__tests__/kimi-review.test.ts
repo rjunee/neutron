@@ -107,12 +107,38 @@ describe('reviewWithKimi — the panel-degrading failures', () => {
     expect(r.reason).toContain('401')
   })
 
-  it('a 429 (no credit) is DEFERRED', async () => {
+  it('a 429 whose BODY names a quota is EXHAUSTED, not merely deferred (#567)', async () => {
+    // THE ASSERTION THAT SPLIT. This used to expect `deferred`, and that conflation is
+    // the incident: a maxed-out account reported as a transient blip, so the workflow
+    // retried it, paid for the rest of the panel, and still could not merge — every
+    // run, because quota does not clear between two calls. `exhausted` is a distinct
+    // status precisely so the run stops paying to rediscover it and surfaces the
+    // remedy, which is the owner's to choose.
     const r = await reviewWithKimi({
       diff: DIFF,
       task: TASK,
       apiKey: KEY,
       fetchImpl: fetchReturning({ error: 'insufficient quota' }, { ok: false, status: 429 }),
+    })
+    expect(r.status).toBe('exhausted')
+    expect(r.reason).toContain('429')
+    // The message names all three ways out rather than leaving a blocked merge with no
+    // stated remedy.
+    expect(r.reason).toContain('add capacity')
+    expect(r.reason).toContain('NONE')
+  })
+
+  it('a 429 with NO quota in the body stays DEFERRED — the status alone is ambiguous', async () => {
+    // THE NECESSARY CONTROL. This provider returns 429 for a per-minute rate limit as
+    // well as for an empty account, so keying on the code alone would declare every
+    // traffic burst an exhausted account and block merges on a blip. Splitting on the
+    // BODY is the whole reason `classifyProviderResponse` exists; without this case the
+    // test above would pass on a rule that simply mapped 429 → exhausted.
+    const r = await reviewWithKimi({
+      diff: DIFF,
+      task: TASK,
+      apiKey: KEY,
+      fetchImpl: fetchReturning({ error: 'rate limit exceeded, retry in 20s' }, { ok: false, status: 429 }),
     })
     expect(r.status).toBe('deferred')
     expect(r.reason).toContain('429')

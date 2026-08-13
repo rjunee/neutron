@@ -235,8 +235,8 @@ describe('the HTTP surface', () => {
     expect(json['efforts']).toContain('xhigh')
     expect(json['overrides']).toEqual({})
     // The cross-model lanes are rows now, not an invisible part of the pipeline.
-    expect(phases.some((p) => p.key === 'review_codex')).toBe(true)
-    expect(phases.some((p) => p.key === 'review_kimi')).toBe(true)
+    expect(phases.some((p) => p.key === 'review_cross_1')).toBe(true)
+    expect(phases.some((p) => p.key === 'review_cross_2')).toBe(true)
   })
 
   it('RESOLVES every tier, so a row can name the model it will actually use', async () => {

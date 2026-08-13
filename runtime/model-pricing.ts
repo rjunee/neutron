@@ -60,6 +60,12 @@ const PRICING_VERIFIED_AT = '2026-05-17'
 const OPUS_5_PRICING_SOURCE_URL = 'https://www.anthropic.com/news/claude-opus-5'
 const OPUS_5_PRICING_VERIFIED_AT = '2026-08-03'
 
+const SONNET_5_PRICING_SOURCE_URL = 'https://platform.claude.com/docs/en/about-claude/models/overview'
+const SONNET_5_PRICING_VERIFIED_AT = '2026-08-13'
+
+const FABLE_5_PRICING_SOURCE_URL = 'https://platform.claude.com/docs/en/about-claude/models/overview'
+const FABLE_5_PRICING_VERIFIED_AT = '2026-08-13'
+
 /**
  * The pricing registry. Keys are canonical Anthropic model ids. The
  * date-suffixed snapshot id (e.g. `claude-haiku-4-5-20251001`) is registered
@@ -114,6 +120,47 @@ export const MODEL_PRICING_TABLE: Readonly<
     verified_at: PRICING_VERIFIED_AT,
     source_url: PRICING_SOURCE_URL,
   }),
+  // ── A PRE-EXISTING GAP, FOUND BY THE #564 CHECK RATHER THAN BY A DISPATCH ──
+  // `runtime/models.ts:FABLE_MODEL` has been the orchestrator tier since 2026-07-02
+  // (it routes `plan:fable` and `argus:synthesis` on every trident run) and it has
+  // never had a row here. `resolveModelPricing` THROWS on an unregistered id rather
+  // than defaulting — which is the right behaviour and why this was not a silent
+  // mis-bill — but it means every attempt to price a Fable completion has been an
+  // exception at the call site. The new tier-default walk
+  // (`runtime/__tests__/tier-default-staleness.test.ts`) asserts that every tier
+  // constant can be priced, which is what surfaced it; the fix is one row.
+  //
+  // Fable-tier pricing EXCEEDS Opus-tier and is not derivable from it, so it is read
+  // from the models overview rather than patterned off the neighbouring rows.
+  'claude-fable-5': Object.freeze({
+    input_usd_per_m: 10,
+    output_usd_per_m: 50,
+    verified_at: FABLE_5_PRICING_VERIFIED_AT,
+    source_url: FABLE_5_PRICING_SOURCE_URL,
+  }),
+  // The current `runtime/models.ts:SONNET_MODEL` default (ISSUES #564). LIST price,
+  // read from the models-overview table rather than inferred from the 4.6 row it
+  // replaces — the pattern would have given the right answer here and the wrong one
+  // across a generation boundary, and a guess in a field named `verified_at` is worse
+  // than a missing row (see `resolveModelPricing`, which throws rather than defaulting).
+  //
+  // ⚠️ AN INTRODUCTORY DISCOUNT IS IN EFFECT AND IS DELIBERATELY NOT ENCODED HERE.
+  // Sonnet 5 is $2/$10 per MTok through 2026-08-31, reverting to the $3/$15 below. This
+  // table has no notion of a time-varying rate, and inventing one for a two-week window
+  // would put a date comparison in the billing path of every model. The consequence is
+  // stated rather than hidden: until 2026-08-31 this row OVER-estimates Sonnet 5 spend
+  // by a third. Over-estimating is the safe direction for a spend dashboard — it cannot
+  // talk an owner into a call he could not afford — and the row becomes exactly correct
+  // when the window closes. If a time-varying rate is ever wanted, it belongs in the
+  // entry shape, not in a second table.
+  'claude-sonnet-5': Object.freeze({
+    input_usd_per_m: 3,
+    output_usd_per_m: 15,
+    verified_at: SONNET_5_PRICING_VERIFIED_AT,
+    source_url: SONNET_5_PRICING_SOURCE_URL,
+  }),
+  // Retained: the SONNET_MODEL default before the 2026-08-13 Sonnet 5 bump, and still
+  // the id on any install pinning `NEUTRON_SONNET_MODEL`.
   'claude-sonnet-4-6': Object.freeze({
     input_usd_per_m: 3,
     output_usd_per_m: 15,

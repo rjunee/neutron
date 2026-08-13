@@ -21,6 +21,12 @@
 #                          be PERFORMED: `codex login status` failed after retries
 #                          (auth expired/unreachable), or there was NOTHING to
 #                          review (empty diff — see CODEX_REVIEW_EMPTY_DIFF below).
+#   exit 4   EXHAUSTED   — configured + authed, but the account has NO REMAINING
+#                          QUOTA (#567). A DISTINCT code from 3/5 on purpose: quota
+#                          never clears on its own, so the caller must surface the
+#                          remedy rather than retry, and must NOT substitute another
+#                          model — that would turn a spending decision the owner has
+#                          to make into an invisible one.
 #   exit 5   DEFERRED    — configured + authed, but the review call itself failed.
 #
 # DEFERRED (3/5) means "configured, but NO REVIEW HAPPENED" — the call failed, or
@@ -204,8 +210,23 @@ if [ -n "$REVIEW_MODEL" ]; then
 else
   set --
 fi
-if printf '%s' "$PROMPT" | codex exec "$@" -; then
+CODEX_ERR="$(mktemp -t trident-codex-review.XXXXXX)"
+trap 'rm -f "$CODEX_ERR"' EXIT
+if printf '%s' "$PROMPT" | codex exec "$@" - 2> >(tee "$CODEX_ERR" >&2); then
   exit 0
+fi
+# ── EXHAUSTED vs DEFERRED (ISSUES #567) ──────────────────────────────────────
+# A maxed-out account used to come back as a plain DEFERRED, which reads as a
+# transient blip: the workflow retried the lane, paid for the rest of the panel,
+# and still could not merge — every run, because quota does not clear on its own.
+# Exit 4 is a DISTINCT code so the caller can surface the remedy (buy capacity,
+# re-point the slot, or set it to NONE) instead of retrying into a wall. The
+# markers here mirror `trident/provider-health.ts`'s EXHAUSTED set, kept narrow
+# deliberately: a false EXHAUSTED blocks a merge and pages the owner about a bill
+# they do not owe, while a false DEFERRED costs one retry.
+if grep -Eqi 'insufficient[_ ]quota|quota exceeded|usage limit reached|out of credit|no credits remaining|plan limit reached|billing_hard_limit_reached|insufficient balance' "$CODEX_ERR" 2>/dev/null; then
+  echo "CODEX_REVIEW_EXHAUSTED: the codex account reports no remaining quota. This will NOT clear on its own and is NOT being retried — add capacity, re-point this cross-model slot, or set it to NONE." >&2
+  exit 4
 fi
 echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — do NOT treat as an approval." >&2
 exit 5

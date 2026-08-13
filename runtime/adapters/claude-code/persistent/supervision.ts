@@ -4,7 +4,13 @@
 
 import { existsSync, statSync } from 'node:fs'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
-import { getBestModel, getKnownFallbackModels, setBestModelOverride } from '../../../models.ts'
+import {
+  getBestModel,
+  getKnownFallbackModels,
+  setBestModelOverride,
+  tierDefaults,
+} from '../../../models.ts'
+import { MODEL_PRICING_TABLE } from '../../../model-pricing.ts'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type CwdDriftSupervisedEntry, type CwdDriftTickResult, type CwdProbe, runCwdDriftTick } from './cwd-drift-watchdog.ts'
 import { type HeartbeatWatchdog, startHeartbeatWatchdog } from './heartbeat-watchdog.ts'
@@ -806,6 +812,12 @@ export function startModelUpdateWatchdogForInstance(
     getConfiguredModel: getBestModel,
     adoptModel: (m) => setBestModelOverride(m),
     knownFallbacks: getKnownFallbackModels,
+    // ISSUES #564 — the tier-default staleness check. The pricing table's keys are the
+    // ids this build actually knows about, and `resolveModelPricing` throws on anything
+    // absent, so a model cannot be dispatched without a row here first. That makes the
+    // key set a sound registry to rank the tier constants against, with no probe.
+    tierDefaults,
+    knownModelIds: () => Object.keys(MODEL_PRICING_TABLE),
     postNotice: (notice) => {
       if (options.onModelUpdate !== undefined) {
         options.onModelUpdate(notice)

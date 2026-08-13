@@ -39,6 +39,9 @@ import {
   phaseByKey,
   phaseForLabel,
   phaseModelDefaults,
+  migratePhaseModelConfig,
+  phaseAcceptsTier,
+  tierRefusalReason,
 } from '../phase-models.ts'
 
 const WORKFLOW_SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
@@ -119,12 +122,12 @@ describe('coverage — no label falls through silently', () => {
     // IN. Both wrappers read an env knob, so the exclusion was retired — and the
     // RETRY lanes matter as much as the first attempt: an owner's choice that applied
     // to one and not the other would be a review served by two different models.
-    for (const label of ['argus:codex', 'argus:codex-retry']) {
-      expect(phaseForLabel(label)?.key).toBe('review_codex')
+    for (const label of ['argus:cross-1', 'argus:cross-1-retry']) {
+      expect(phaseForLabel(label)?.key).toBe('review_cross_1')
       expect(isUnroutedLabel(label)).toBe(false)
     }
-    for (const label of ['argus:kimi', 'argus:kimi-retry']) {
-      expect(phaseForLabel(label)?.key).toBe('review_kimi')
+    for (const label of ['argus:cross-2', 'argus:cross-2-retry']) {
+      expect(phaseForLabel(label)?.key).toBe('review_cross_2')
       expect(isUnroutedLabel(label)).toBe(false)
     }
   })
@@ -269,28 +272,92 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(rejected['build']).toEqual({ model: 'gpt-5.6-sol' })
   })
 
-  it('REJECTS a tier the phase cannot dispatch, and says which executor each is', () => {
-    // Transport is a capability, not a preference. `sol` runs as a Codex subprocess;
-    // the build step is a Claude agent, and `agent({model})` resolves against Claude
-    // Code's own endpoint — it cannot reach a GPT model at all.
+  it('ACCEPTS a codex tier on the build row — the executor is wired now (#565)', () => {
+    // THE ASSERTION THAT INVERTED. This used to prove `build: { model: 'sol' }` was
+    // refused, and that was correct while nothing routed a build to codex. The route
+    // exists now (`trident/codex-build.sh`, dispatched from `inner-workflow.mjs`), so
+    // refusing it here would be the settings boundary lying about a capability the
+    // dispatch has. The dispatch itself is proven separately, over the shipped workflow
+    // body, in `__tests__/codex-build-dispatch.test.ts`.
     const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'sol' } })
+    expect(errors).toEqual([])
+    expect(rejected).toEqual({})
+    expect(config).toEqual({ build: { model: 'sol' } })
+  })
+
+  it('REJECTS a tier the phase cannot dispatch, and says which executor each is', () => {
+    // The executor is a capability, not a preference — and the two remaining ways to
+    // fail it are different failures with different remedies. `k3` on the build row is
+    // the RIGHT family and the WRONG ROLE: Kimi is a legitimate cross-model reviewer,
+    // but nothing in this repo hands it a worktree, so the message must say "no build
+    // wrapper" rather than something the owner could try to fix by connecting an
+    // account. `sol` on a Claude-only step is the plain executor mismatch.
+    const kimiOnBuild = parsePhaseModelConfig({ build: { model: 'k3' } })
+    expect(kimiOnBuild.config).toEqual({})
+    expect(kimiOnBuild.errors).toHaveLength(1)
+    // NAMES BOTH SIDES. `Codex steps only` was the string the owner read first and its
+    // whole content was a category he had never heard of; this says what the step runs
+    // on and what the option is, so the sentence is actionable without the codebase.
+    expect(kimiOnBuild.errors[0]).toContain("'k3' (kimi-k3) runs on kimi")
+    expect(kimiOnBuild.errors[0]).toContain('Build runs on claude or codex')
+    expect(kimiOnBuild.errors[0]).toContain('cannot dispatch a kimi model')
+    expect(kimiOnBuild.rejected).toEqual({ build: { model: 'k3' } })
+
+    const { config, errors, rejected } = parsePhaseModelConfig({ synthesis: { model: 'sol' } })
     expect(config).toEqual({})
     expect(errors[0]).toContain('sol')
-    expect(errors[0]).toContain('Claude agent')
-    expect(rejected['build']).toEqual({ model: 'sol' })
-    // And the mirror: the codex lane cannot be pointed at a Claude tier either.
-    expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
+    expect(errors[0]).toContain('cannot dispatch')
+    expect(rejected['synthesis']).toEqual({ model: 'sol' })
+    // And the mirror: a cross-model slot cannot be pointed at a Claude tier either —
+    // the seats exist precisely so the panel is not one family.
+    expect(parsePhaseModelConfig({ review_cross_1: { model: 'opus' } }).errors).toHaveLength(1)
     // Within one transport it is allowed — that is the whole feature.
-    expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
-    expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
-    // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
-    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toHaveLength(1)
+    expect(parsePhaseModelConfig({ review_cross_1: { model: 'terra' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_cross_2: { model: 'k3' } }).errors).toEqual([])
+    // BOTH SLOTS TAKE BOTH EXECUTORS (#566). This used to be rejected — the seat was
+    // named `review_codex` and could only ever hold a codex tier, which is precisely
+    // the defect: "how can I then change them to a different model?". A slot is a
+    // POSITION on the panel; the model in it is the setting.
+    expect(parsePhaseModelConfig({ review_cross_1: { model: 'k3' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_cross_2: { model: 'sol' } }).errors).toEqual([])
+    // …and NONE is settable on a slot, and only on a slot.
+    expect(parsePhaseModelConfig({ review_cross_1: { model: 'none' } })).toEqual({
+      config: { review_cross_1: { model: 'none' } },
+      errors: [],
+      rejected: {},
+    })
+    const noneOnBuild = parsePhaseModelConfig({ build: { model: 'none' } })
+    expect(noneOnBuild.config).toEqual({})
+    expect(noneOnBuild.errors[0]).toContain('only settable on a cross-model review slot')
+  })
+
+  it('a phase that DECLARES an executor with no build wrapper still refuses it', () => {
+    // THE SECOND GUARD, TESTED DIRECTLY. No shipped phase can reach it today — `build`
+    // does not list `kimi`, so the executor check fires first — and an untested guard
+    // is one that quietly stops working. This is the case it exists for: someone adds
+    // `'kimi'` to a build row's executors, believing the seat's presence on the review
+    // panel means Kimi can build. It cannot; `build_wrapper` is null, and the refusal
+    // says so instead of routing to a null command.
+    const synthetic = {
+      key: 'hypothetical_build',
+      label: 'Hypothetical build',
+      description: 'a build row that wrongly claims kimi',
+      labels: [{ label: 'forge:build' }],
+      default: { tier: 'opus' as const, effort: 'high' as const },
+      executors: ['claude', 'kimi'] as const,
+    }
+    expect(phaseAcceptsTier(synthetic, 'k3')).toBe(false)
+    expect(tierRefusalReason(synthetic, 'k3')).toContain('no build wrapper')
+    // …and the SAME phase accepts a Claude tier, so the refusal is about the wrapper
+    // and not about the phase being rejected wholesale.
+    expect(phaseAcceptsTier(synthetic, 'opus')).toBe(true)
+    expect(tierRefusalReason(synthetic, 'opus')).toBeNull()
   })
 
   it('REJECTS an effort on a phase whose executor has no effort control', () => {
     // A stored setting that no dispatch reads is the exact defect this module exists
     // to prevent — the owner sets it, nothing changes, the feature looks broken.
-    const { config, errors } = parsePhaseModelConfig({ review_codex: { effort: 'max' } })
+    const { config, errors } = parsePhaseModelConfig({ review_cross_1: { effort: 'max' } })
     expect(config).toEqual({})
     expect(errors).toHaveLength(1)
     expect(errors[0]).toContain('not settable')
@@ -443,7 +510,14 @@ describe('the args actually carry it (the TS half, end to end)', () => {
     const args = await makeInput(null)
     const tiers = args['modelTiers'] as Record<
       string,
-      { model_id: string; transport: string; env_var: string | null }
+      {
+        model_id: string
+        transport: string
+        env_var: string | null
+        group: string
+        build_wrapper: string | null
+        build_env_var: string | null
+      }
     >
     // EVERY tier, or a tier the pane offers is one the dispatch cannot resolve.
     for (const tier of MODEL_TIERS) {
@@ -456,16 +530,96 @@ describe('the args actually carry it (the TS half, end to end)', () => {
       model_id: tiers['opus']!.model_id,
       transport: 'agent',
       env_var: null,
+      group: 'claude',
+      build_wrapper: null,
+      build_env_var: null,
     })
+    // THE BUILD WRAPPER TRAVELS TOO (#565). Without it the workflow could resolve a
+    // codex model for a build and then have no command to run it with — the settings
+    // pane would offer an option the dispatch could not honour.
     expect(tiers['sol']).toEqual({
       model_id: 'gpt-5.6-sol',
       transport: 'cli',
       env_var: 'CODEX_REVIEW_MODEL',
+      group: 'codex',
+      build_wrapper: 'trident/codex-build.sh',
+      build_env_var: 'CODEX_BUILD_MODEL',
     })
+    // …and Kimi's is NULL, which is the verified answer rather than an omission:
+    // `grep -ril 'kimi|moonshot' runtime/adapters/` finds nothing while the same grep
+    // for `codex` finds the whole codex-cli adapter tree.
     expect(tiers['k3']).toEqual({
       model_id: 'kimi-k3',
       transport: 'cli',
       env_var: 'KIMI_MODEL',
+      group: 'kimi',
+      build_wrapper: null,
+      build_env_var: null,
     })
+  })
+})
+
+/**
+ * ISSUES #566 — THE OWNER'S EXISTING CONFIGURATION SURVIVES THE RENAME.
+ *
+ * `review_codex` and `review_kimi` are persisted in owner config on every install that
+ * opened the pane before the seats became slots. Renaming a settings key with no
+ * migration is, from the owner's side, indistinguishable from the product forgetting
+ * what they chose: the row reverts to its default and nothing says why. Worse here than
+ * usual, because the value being forgotten is which model reviews their code.
+ */
+describe('the legacy vendor-named seat keys migrate onto the slots', () => {
+  it('maps codex → slot ONE and kimi → slot TWO, preserving the value', () => {
+    expect(migratePhaseModelConfig({ review_codex: { model: 'terra' } })).toEqual({
+      review_cross_1: { model: 'terra' },
+    })
+    expect(migratePhaseModelConfig({ review_kimi: { model: 'k3' } })).toEqual({
+      review_cross_2: { model: 'k3' },
+    })
+    // Directional and NOT symmetric: slot one takes the codex seat, matching both the
+    // old panel order and the new defaults, so an install that never touched the pane
+    // keeps dispatching the same two models in the same two positions.
+    expect(
+      migratePhaseModelConfig({ review_codex: { model: 'sol' }, review_kimi: { model: 'k3' } }),
+    ).toEqual({ review_cross_1: { model: 'sol' }, review_cross_2: { model: 'k3' } })
+  })
+
+  it('a migrated config then VALIDATES — the two halves actually compose', () => {
+    // The migration is worthless if the renamed entry is then rejected. Run the pair in
+    // the order the launcher runs them.
+    const { config, errors } = parsePhaseModelConfig(
+      migratePhaseModelConfig({ review_codex: { model: 'terra' } }),
+    )
+    expect(errors).toEqual([])
+    expect(config).toEqual({ review_cross_1: { model: 'terra' } })
+  })
+
+  it('a value already under the NEW key WINS over a stale legacy one', () => {
+    // Both keys coexist only on a config written by a build straddling the rename. The
+    // value the owner set most recently is the one under the new key, and overwriting
+    // it with the legacy value would undo a choice they can see in the pane right now.
+    expect(
+      migratePhaseModelConfig({ review_codex: { model: 'sol' }, review_cross_1: { model: 'luna' } }),
+    ).toEqual({ review_cross_1: { model: 'luna' } })
+  })
+
+  it('leaves everything else EXACTLY alone, including the object identity', () => {
+    // A migration that rewrote untouched configs would churn every stored payload and
+    // make a real diff impossible to spot.
+    const untouched = { build: { model: 'sonnet' }, synthesis: { effort: 'max' } }
+    expect(migratePhaseModelConfig(untouched)).toBe(untouched)
+    // Total on garbage, so `parsePhaseModelConfig` still owns the error message.
+    expect(migratePhaseModelConfig(null)).toBeNull()
+    expect(migratePhaseModelConfig('nope')).toBe('nope')
+    expect(migratePhaseModelConfig([1, 2])).toEqual([1, 2])
+  })
+
+  it('an EMPTIED legacy seat migrates as an emptied slot, not as a default one', () => {
+    // The state that must not be lost in transit: an owner who had already turned a
+    // cross-model seat off should not find it switched back on by an upgrade.
+    const { config } = parsePhaseModelConfig(
+      migratePhaseModelConfig({ review_kimi: { model: 'none' } }),
+    )
+    expect(config).toEqual({ review_cross_2: { model: 'none' } })
   })
 })

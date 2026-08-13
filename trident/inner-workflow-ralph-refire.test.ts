@@ -89,7 +89,7 @@ async function runRalph(remainingTasks: number): Promise<RalphRun> {
     dbPath: null, // → checkpoint()/writeTerminalResult() no-op; the RETURN carries the result
     runId: null,
     resumeCheckpoint: null,
-    codexHome: null, // → argus:codex not run (simpler panel)
+    codexHome: null, // → argus:cross-1 not run (simpler panel)
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance: '',
