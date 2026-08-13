@@ -2241,8 +2241,10 @@ export function buildOpenGraphComposer(
           const run = boardRunStore.get(runId)
           if (run === null) continue
           if (isTerminalPhase(run.phase)) {
-            // A still-bound terminal run: `failed` on a not-done item = attention
-            // (the brief pre-reconcile window; a `done` run just completes it).
+            // A still-bound terminal run: `failed` on a not-done item = attention.
+            // detachRun (#340) KEEPS the binding after reconcile and sets
+            // status='failed' on the item — this is the PRIMARY durable failure
+            // path, not a transient window (a `done` run just completes it).
             if (run.phase === 'failed' && item.status !== 'done') hasFailedNotDone = true
             continue
           }
@@ -2250,12 +2252,15 @@ export function buildOpenGraphComposer(
           liveRunCount++
           if (deriveRunProgress(run, nowMs).stalled) hasStalledLiveRun = true
         }
-        // Durable failure signal — a failed build is detached from its item on
-        // terminal reconcile, so the bound-item check above only catches the brief
-        // pre-reconcile window. The run ROW persists: if this scope's MOST RECENT
-        // run is `failed` (not yet superseded by a fresh live/done run) AND the
-        // project still has an actionable (not-done) item, keep surfacing
-        // `attention` (Codex review [P2]).
+        // Secondary failure net — since #340 the terminal reconcile KEEPS the
+        // failed run bound to its item (`work-board/store.ts` detachRun sets
+        // status='failed' and preserves linked_run_id), so the bound-item check
+        // above is the primary, durable failure signal — not just a
+        // pre-reconcile window. This latest-run check covers what the item
+        // can't: a deleted item, a re-bound retry, or a run-row read miss. If
+        // this scope's MOST RECENT run is `failed` (not superseded by a fresh
+        // live/done run) AND the project still has an actionable (not-done)
+        // item, keep surfacing `attention` (Codex review [P2]).
         if (!hasFailedNotDone) {
           const latest = boardRunStore.latestByProjectScope(scopeKey)
           if (latest !== null && latest.phase === 'failed') {

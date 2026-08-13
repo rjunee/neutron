@@ -355,12 +355,14 @@ export class TridentRunStore {
 
   /**
    * The MOST-RECENTLY-advanced run for a project scope, or null when the scope
-   * has never run a build. M1 UX REDESIGN: the rail's durable failure signal — a
-   * failed build is auto-detached from its board item on terminal reconcile
-   * (`board-reconcile.ts`), so the item alone can't keep surfacing `attention`
-   * (Codex review [P2]). The run ROW persists, so "the project's latest run is
-   * `failed`" is the durable "this build failed and hasn't been superseded"
-   * signal — a fresh live/done run for the same scope replaces it.
+   * has never run a build. M1 UX REDESIGN: the rail's SECONDARY failure net.
+   * Since #340 the terminal reconcile (`work-board/store.ts` detachRun) KEEPS
+   * `linked_run_id` on failure and sets the item's durable `status='failed'`,
+   * so the bound item is the PRIMARY "this build failed" signal. This
+   * latest-run check backs it up for the cases the item can't cover — the
+   * item was deleted, or a retry re-bound it and only the run row survived.
+   * "The project's latest run is `failed`" stays true until a fresh live/done
+   * run for the same scope supersedes it (Codex review [P2]).
    */
   latestByProjectScope(project_slug: string): TridentRun | null {
     const row = this.db

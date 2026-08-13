@@ -23,6 +23,7 @@ import {
   statusLabel,
   stepTag,
 } from '../lib/work-board-helpers';
+import { railDotKind } from '../lib/project-rail-view';
 import type { RunProgress, WorkBoardItem } from '../lib/work-board-client';
 
 function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
@@ -213,7 +214,7 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
     expect(isRetry(it1)).toBe(true);
   });
 
-  it('in_progress / done items never show play', () => {
+  it('a runless in_progress card CAN play; only done suppresses the control outright', () => {
     expect(canPlay(item({ status: 'in_progress', linked_run_id: null }))).toBe(true);
     expect(canPlay(item({ status: 'done' }))).toBe(false);
   });
@@ -295,5 +296,30 @@ describe('dragReorderTarget (drag-drop reorder persistence)', () => {
   it('is null when either id is not in the active lane', () => {
     expect(dragReorderTarget(active, 'missing', 'b')).toBeNull();
     expect(dragReorderTarget(active, 'a', 'missing')).toBeNull();
+  });
+});
+
+describe('row/rail lockstep — the row dot and the project rail dot must agree (defect 2026-08-12)', () => {
+  it('failed-and-runless: the row paints a STATIC failed dot while the rail paints attention', () => {
+    // Same durable signal on both sides: `status='failed'` is written only by the
+    // terminal reconcile (work-board/store.ts detachRun, #340), and server-side the
+    // failed-not-done item makes readProjectRailExtras (open/composer.ts) derive the
+    // `attention` activity. Kill the failed branch in `dotState` or the attention row
+    // in `railDotKind` and this pair breaks.
+    expect(dotState(item({ status: 'failed', linked_run_id: null }))).toEqual({
+      colorKey: 'failed',
+      pulse: false,
+    });
+    expect(railDotKind('attention', false)).toBe('attention');
+  });
+
+  it('live bound run: the row pulses and the rail shows work — movement is claimed together', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' })).pulse).toBe(true);
+    expect(railDotKind('working', false)).toBe('work');
+  });
+
+  it('runless in_progress: NEITHER side claims movement — static row dot, idle rail', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: null })).pulse).toBe(false);
+    expect(railDotKind('idle', false)).toBe('idle');
   });
 });
