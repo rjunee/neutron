@@ -1002,24 +1002,62 @@ HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from
 const CODEX_BRIEF_CHUNK_BYTES = 3072
 
 /**
- * Split text that ALREADY ENDS IN A NEWLINE into chunks that concatenate back to it
- * exactly, splitting only ON LINE BOUNDARIES.
+ * Split text that ALREADY ENDS IN A NEWLINE into segments that concatenate back to it
+ * EXACTLY, each within `maxBytes` — including when a single line is longer than the
+ * limit.
  *
- * The line boundary is not a nicety. A quoted heredoc emits each line it contains plus
- * the newline that ended it, so a chunk cut mid-line could not be reassembled by
- * appending — the join would gain a newline the original never had, and the receipt
- * would refuse the result. Splitting between lines makes `chunks.join('') === text` an
- * identity rather than a hope, which is what `codex-brief-chunking.test.ts` asserts.
+ * Returns `{ text, mode }`. Two modes, because a heredoc cannot express a partial line:
  *
- * A SINGLE LINE LONGER THAN THE LIMIT IS LEFT WHOLE. Breaking it is not available (see
- * above), so the chunk simply exceeds the limit and says nothing about it. That is the
- * honest behaviour: the alternative is corrupting the brief to satisfy a size rule.
+ *   'heredoc' — whole lines, text ends in '\n'. A quoted heredoc emits each line plus
+ *               its terminating newline, so this reassembles by appending, with no
+ *               escaping anywhere (the brief is full of backticks and apostrophes).
+ *   'raw'     — an arbitrary byte run with NO newline implied. Written with
+ *               `printf '%s'`, which adds nothing, so a line can cross segments.
+ *
+ * WHY 'raw' EXISTS AT ALL — codex review, round 1 of this change. The first cut split
+ * only on line boundaries and left an oversized line WHOLE, documenting the overshoot
+ * as honest. It is not: the brief carries the owner's free-form task text, and one
+ * minified JSON blob, base64 payload or generated source line recreates exactly the
+ * deterministic 26 KB truncation this function exists to prevent. A limit a caller can
+ * exceed by supplying ordinary input is not a limit. So an oversized line is split by
+ * BYTES and carried raw, and its terminating newline is emitted as its own tiny raw
+ * segment rather than being implied by anything.
+ *
+ * SPLITTING IS ON CODE POINTS, never UTF-16 units: cutting between a surrogate pair
+ * would hand `printf` half a character and change the bytes. `briefIntegrity` replaces
+ * a lone surrogate with U+FFFD, so a mid-pair cut would ALSO make the receipt disagree
+ * with the file in a way that reads as corruption rather than as a bug here.
+ *
+ * `segments.map(s => s.text).join('') === text` is the property everything rests on —
+ * asserted in `codex-brief-chunking.test.ts` at limit-1, limit and limit+1, over
+ * multi-byte text, and above the 24,524/26,183-byte boundary that was observed failing.
  */
 function chunkTextOnLines(text, maxBytes) {
   const enc = (s) => briefIntegrity(s).split(':')[0] | 0
-  const chunks = []
+  const segs = []
   let cur = ''
   let curBytes = 0
+  const flush = () => {
+    if (cur !== '') segs.push({ text: cur, mode: 'heredoc' })
+    cur = ''
+    curBytes = 0
+  }
+  /** Byte-bounded pieces of one long line, cut only between code points. */
+  const pushRaw = (s) => {
+    let piece = ''
+    let pieceBytes = 0
+    for (const cp of s) {
+      const b = enc(cp)
+      if (piece !== '' && pieceBytes + b > maxBytes) {
+        segs.push({ text: piece, mode: 'raw' })
+        piece = ''
+        pieceBytes = 0
+      }
+      piece += cp
+      pieceBytes += b
+    }
+    if (piece !== '') segs.push({ text: piece, mode: 'raw' })
+  }
   // `split('\n')` on newline-terminated text leaves a trailing '' — dropped, since each
   // piece below re-attaches the '\n' that terminated it.
   const lines = text.split('\n')
@@ -1027,16 +1065,20 @@ function chunkTextOnLines(text, maxBytes) {
   for (const line of lines) {
     const piece = `${line}\n`
     const pieceBytes = enc(piece)
-    if (cur !== '' && curBytes + pieceBytes > maxBytes) {
-      chunks.push(cur)
-      cur = ''
-      curBytes = 0
+    if (pieceBytes > maxBytes) {
+      // Too big for any heredoc segment: close the current one and carry this line
+      // raw, newline included as its own segment so nothing has to imply it.
+      flush()
+      pushRaw(line)
+      segs.push({ text: '\n', mode: 'raw' })
+      continue
     }
+    if (cur !== '' && curBytes + pieceBytes > maxBytes) flush()
     cur += piece
     curBytes += pieceBytes
   }
-  if (cur !== '') chunks.push(cur)
-  return chunks.length > 0 ? chunks : ['']
+  flush()
+  return segs.length > 0 ? segs : [{ text: '', mode: 'heredoc' }]
 }
 
 function codexBuildPrompt(slot, brief, route) {
@@ -1076,12 +1118,20 @@ function codexBuildPrompt(slot, brief, route) {
   // next one.
   const briefChunks = chunkTextOnLines(`${brief}\n`, CODEX_BRIEF_CHUNK_BYTES)
   const chunkBlocks = briefChunks
-    .map((chunk, i) => {
-      // Per-chunk marker, still grown until it provably does not occur in THIS chunk.
-      let m = `${marker}_P${i + 1}`
-      while (chunk.includes(m)) m += '_X'
+    .map((seg, i) => {
       const redirect = i === 0 ? '>' : '>>'
-      return `CALL ${i + 1} of ${briefChunks.length}:\ncat ${redirect} ${shSingleQuote(briefFile)} <<'${m}'\n${chunk}${m}`
+      const head = `CALL ${i + 1} of ${briefChunks.length}:`
+      if (seg.mode === 'raw') {
+        // A fragment of an over-long line. `printf '%s'` appends the bytes and NOTHING
+        // else — no newline, no interpretation of backslashes (which `echo` would
+        // mangle). Single-quoted, so the one character needing care is `'` itself and
+        // `shSingleQuote` already handles it.
+        return `${head}\nprintf '%s' ${shSingleQuote(seg.text)} ${redirect} ${shSingleQuote(briefFile)}`
+      }
+      // Per-segment marker, still grown until it provably does not occur in THIS segment.
+      let m = `${marker}_P${i + 1}`
+      while (seg.text.includes(m)) m += '_X'
+      return `${head}\ncat ${redirect} ${shSingleQuote(briefFile)} <<'${m}'\n${seg.text}${m}`
     })
     .join('\n\n')
   const diffFile = codexBuildDiffFile()

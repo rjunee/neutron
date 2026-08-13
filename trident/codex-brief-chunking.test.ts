@@ -46,7 +46,12 @@ const sandbox = new Function(
   briefIntegrity: (s: string) => string
   chunkTextOnLines: (s: string, max: number) => string[]
 }
-const { briefIntegrity, chunkTextOnLines } = sandbox()
+const { briefIntegrity, chunkTextOnLines: rawChunk } = sandbox()
+
+/** The segments, and the reassembly the receipt is taken over. */
+const chunk = (s: string, max: number): Array<{ text: string; mode: string }> =>
+  rawChunk(s, max) as unknown as Array<{ text: string; mode: string }>
+const rejoin = (segs: Array<{ text: string }>): string => segs.map((x) => x.text).join('')
 
 /** Bytes as the receipt counts them, so the assertions speak the receipt's units. */
 const bytes = (s: string): number => Number(briefIntegrity(s).split(':')[0])
@@ -62,47 +67,87 @@ describe('codex build brief — chunked transport', () => {
 
   test('chunks reassemble to EXACTLY the input — the property the receipt rests on', () => {
     const brief = `${Array.from({ length: 900 }, (_, i) => `line ${i} — some contract text`).join('\n')}\n`
-    const chunks = chunkTextOnLines(brief, CHUNK_BYTES)
-    expect(chunks.length).toBeGreaterThan(1)
-    expect(chunks.join('')).toBe(brief)
+    const segs = chunk(brief, CHUNK_BYTES)
+    expect(segs.length).toBeGreaterThan(1)
+    expect(rejoin(segs)).toBe(brief)
     // And the receipt over the reassembly is the receipt over the original, which is
     // literally what the wrapper compares.
-    expect(briefIntegrity(chunks.join(''))).toBe(briefIntegrity(brief))
+    expect(briefIntegrity(rejoin(segs))).toBe(briefIntegrity(brief))
   })
 
   test('every chunk that CAN respect the limit does', () => {
     const brief = `${Array.from({ length: 600 }, (_, i) => `line ${i}`).join('\n')}\n`
-    for (const c of chunkTextOnLines(brief, CHUNK_BYTES)) {
-      expect(bytes(c)).toBeLessThanOrEqual(CHUNK_BYTES)
+    for (const c of chunk(brief, CHUNK_BYTES)) {
+      expect(bytes(c.text)).toBeLessThanOrEqual(CHUNK_BYTES)
     }
   })
 
-  test('a single line longer than the limit is left WHOLE, not broken', () => {
-    // Breaking mid-line is not available: a heredoc emits each line plus its newline,
-    // so a mid-line cut would gain a newline on reassembly and fail the receipt.
-    // Overshooting the limit is the honest answer; corrupting the brief is not.
+  // CODEX REVIEW, ROUND 1 — BLOCKER. The first cut of this function left an oversized
+  // line whole and called the overshoot honest. It is not: the brief carries the
+  // owner's free-form task text, so one minified JSON blob, base64 payload or generated
+  // source line recreates exactly the deterministic truncation this change exists to
+  // prevent. A limit ordinary input can exceed is not a limit. These are the boundary
+  // cases the reviewer asked for by name.
+  test('an over-long line is split by BYTES and still reassembles exactly', () => {
     const long = 'x'.repeat(CHUNK_BYTES * 3)
     const brief = `short\n${long}\nshort again\n`
-    const chunks = chunkTextOnLines(brief, CHUNK_BYTES)
-    expect(chunks.join('')).toBe(brief)
-    expect(chunks.some((c) => bytes(c) > CHUNK_BYTES)).toBe(true)
+    const segs = chunk(brief, CHUNK_BYTES)
+    expect(rejoin(segs)).toBe(brief)
+    for (const s of segs) expect(bytes(s.text)).toBeLessThanOrEqual(CHUNK_BYTES)
+    // It could only be carried by the raw (printf) mode — a heredoc cannot express a
+    // partial line without inventing a newline.
+    expect(segs.some((s) => s.mode === 'raw')).toBe(true)
+  })
+
+  test('limit-1, limit, limit+1 — no segment exceeds the bound at any boundary', () => {
+    for (const len of [CHUNK_BYTES - 1, CHUNK_BYTES, CHUNK_BYTES + 1]) {
+      const brief = `${'y'.repeat(len)}\n`
+      const segs = chunk(brief, CHUNK_BYTES)
+      expect(rejoin(segs)).toBe(brief)
+      for (const s of segs) expect(bytes(s.text)).toBeLessThanOrEqual(CHUNK_BYTES)
+    }
+  })
+
+  test('a SINGLE line past the observed 26 KB failure size is carried in bounded pieces', () => {
+    // The exact shape that broke the pipeline, as one unbreakable-looking line.
+    const brief = `${'z'.repeat(26_183)}\n`
+    const segs = chunk(brief, CHUNK_BYTES)
+    expect(rejoin(segs)).toBe(brief)
+    expect(briefIntegrity(rejoin(segs))).toBe(briefIntegrity(brief))
+    for (const s of segs) expect(bytes(s.text)).toBeLessThanOrEqual(CHUNK_BYTES)
+  })
+
+  test('an over-long line of MULTI-BYTE text never splits mid-character', () => {
+    // Cutting between surrogates would hand printf half a character, and
+    // `briefIntegrity` maps a lone surrogate to U+FFFD — so the receipt would disagree
+    // with the file and read as corruption rather than as a bug here.
+    const brief = `${'🙂'.repeat(4000)}\n`
+    const segs = chunk(brief, CHUNK_BYTES)
+    expect(rejoin(segs)).toBe(brief)
+    expect(briefIntegrity(rejoin(segs))).toBe(briefIntegrity(brief))
+    for (const s of segs) {
+      expect(bytes(s.text)).toBeLessThanOrEqual(CHUNK_BYTES)
+      // WELL-FORMED, not surrogate-free: an emoji IS a surrogate PAIR, so the thing to
+      // rule out is a LONE one — a segment cut through the middle of a character.
+      expect(s.text.isWellFormed()).toBe(true)
+    }
   })
 
   test('multi-byte characters survive the split', () => {
     // The brief carries the owner's own words. A split that counted UTF-16 units
     // would cut a line budget wrong and, worse, could land mid-character.
     const brief = `${Array.from({ length: 400 }, (_, i) => `строка ${i} — 日本語 — emoji 🙂`).join('\n')}\n`
-    const chunks = chunkTextOnLines(brief, CHUNK_BYTES)
-    expect(chunks.join('')).toBe(brief)
-    expect(briefIntegrity(chunks.join(''))).toBe(briefIntegrity(brief))
+    const segs = chunk(brief, CHUNK_BYTES)
+    expect(rejoin(segs)).toBe(brief)
+    expect(briefIntegrity(rejoin(segs))).toBe(briefIntegrity(brief))
   })
 
   test('degenerate inputs do not produce a file that is not the brief', () => {
-    expect(chunkTextOnLines('', CHUNK_BYTES).join('')).toBe('')
-    expect(chunkTextOnLines('one\n', CHUNK_BYTES).join('')).toBe('one\n')
+    expect(rejoin(chunk('', CHUNK_BYTES))).toBe('')
+    expect(rejoin(chunk('one\n', CHUNK_BYTES))).toBe('one\n')
     // Blank lines are content: dropping one changes the bytes and fails the receipt.
     const blanks = 'a\n\n\n\nb\n'
-    expect(chunkTextOnLines(blanks, CHUNK_BYTES).join('')).toBe(blanks)
+    expect(rejoin(chunk(blanks, CHUNK_BYTES))).toBe(blanks)
   })
 
   test('a REAL-SIZED brief splits into a workable number of calls', () => {
@@ -110,8 +155,8 @@ describe('codex build brief — chunked transport', () => {
     // does not explode into a call count nobody would follow.
     const brief = `${'a contract line with some words in it\n'.repeat(700)}`
     expect(bytes(brief)).toBeGreaterThan(25_000)
-    const chunks = chunkTextOnLines(brief, CHUNK_BYTES)
-    expect(chunks.join('')).toBe(brief)
-    expect(chunks.length).toBeLessThanOrEqual(16)
+    const segs = chunk(brief, CHUNK_BYTES)
+    expect(rejoin(segs)).toBe(brief)
+    expect(segs.length).toBeLessThanOrEqual(16)
   })
 })
