@@ -4287,6 +4287,76 @@ ritual content in chat.
     globbing `rituals/*.md` but not whether they ran; and live session transcripts
     are SQLite-only, so it reasons from the corrections log and diary instead.
 
+## Owner-approved host deploy — request → approve → execute (`open/host-deploy.ts`)
+
+**The instance holds no deploy capability. It holds the ability to ASK.** A request
+crosses the privilege boundary; a capability never does. Nothing here grants the
+instance deploy rights, host filesystem access, or a privileged credential — the
+only thing that changes is that a deploy can be put in front of the owner, with
+the actual commit list attached, and performed by his explicit act.
+
+The problem it closes: work merged into Open did not reach the box the owner
+actually uses, and **nothing on that box deploys on its own** — its only timers are
+a lane sweeper, a credential rotator, a CLI update doctor and a backup. A deploy
+happens when a human runs one. From the inside that total absence is
+indistinguishable from "deploys land on their own and just lag".
+
+**The flow, in three steps.**
+
+1. **REQUEST** — the agent calls `host_deploy_request` (`gateway/wiring/host-deploy-tool.ts`,
+   registered into the same `neutron` tools registry the tools-bridge advertises, so
+   the REPL sees `mcp__neutron__host_deploy_request`). The service
+   (`open/host-deploy.ts`) resolves, READ-ONLY, what would be deployed: the sha the
+   host runs now (`HEAD`), the target sha for the named ref, and the commits between
+   them (`open/host-deploy-runtime.ts`, over the shared `gateway/git/git-exec.ts`
+   wrapper — no fetch, no checkout, no write). It then mints a `prompt-user`
+   `tool_approvals` row (`tools/approval.ts`, migration 0004) and emits a
+   CODE-rendered Approve/Deny prompt through the SAME durable `deliver` seam ritual
+   approvals ride. It returns `pending_approval`. **Nothing is dispatched.**
+2. **APPROVE** — the owner taps. The tap is captured deterministically at turn start
+   by the live-turn approval seam (`gateway/wiring/build-live-agent-turn.ts`), which
+   the composer chains across the ritual handler and this one; each returns null for
+   a token that is not its own (`rap:` vs `hdp:`). Eligibility is an EXACT opaque
+   token that was a real offered button on a recent prompt, from the owner's user id.
+   Silence, a timeout, "yes", a paraphrase and any non-owner speaker — the agent
+   included — can never flip the row, so **an agent can never approve its own
+   request**.
+3. **EXECUTE** — the target ref is RE-RESOLVED. If it moved, the approval is STALE:
+   it is killed, nothing deploys, and the owner is told the new sha and asked again.
+   Otherwise the decision is recorded and ONE authenticated call goes to the
+   configured control-plane endpoint. The outcome — landed, or refused, or
+   unreachable — posts back to the same chat.
+
+**The approval renders the commit list, and that is the security.** The owner is the
+only gate, so the thing he is gating has to be legible in the message he taps: the
+current pin, the target sha, and every commit between them (capped at 40 rendered,
+with the true remainder counted — never silently truncated). An approval whose
+content the approver cannot see is a rubber stamp with extra steps. Commit subjects
+are stripped of bidi / zero-width / C0 characters and wrapped in a backtick fence
+longer than any run inside them, because a commit subject is chosen by whoever
+lands the commit and the button body is Markdown-rendered.
+
+**The approval binds to ONE sha.** Without the re-resolve, "approve" would quietly
+mean "deploy whatever is newest when this executes" — a different and unbounded
+permission.
+
+**No control plane configured → VISIBLE and DISABLED, with the reason.** A
+self-hoster has no endpoint to call. Both tools still register and still answer:
+`host_deploy_status` reports `enabled:false` and names `NEUTRON_HOST_DEPLOY_URL` /
+`NEUTRON_HOST_DEPLOY_TOKEN` as what would enable it. No default endpoint is ever
+fabricated. An option that silently disappears is how a missing capability stays
+invisible for weeks — the rule the model-tier pane follows.
+
+**The endpoint and credential are instance configuration resolved at CALL time**,
+never captured at composition time (a credential read at composition time is a
+credential that is never there — Decisions Log 2026-08-07). Neither ever enters a
+prompt, a log line or a chat message: the credential rides an `Authorization`
+header and nothing else, and everything the control plane says is run through
+`scrubHostDeploySecrets` before it is shown or logged.
+
+**A refused contract gate is a NORMAL outcome.** The host saying "the deploy window
+is closed" reads as one sentence in chat, not as a crash.
+
 ## Proactive messaging — idle-nudge sweep (`gateway/proactive/`)
 
 The owner-facing proactive layer (the legacy harness parity). It was built + tested

@@ -178,6 +178,11 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
       'the ritual surface — unset, a ritual row composes as an ordinary nudge and its approved prompt is never read',
   },
   {
+    field: 'host_deploy',
+    provides:
+      'the owner-approved host-deploy request path — unset, the agent has no way to ASK for a deploy of the host this instance runs on, and work merged into Open never reaches the box the owner uses',
+  },
+  {
     field: 'skill_forge',
     provides: 'the skill-forge agent tool + its `/skill` command backend',
   },

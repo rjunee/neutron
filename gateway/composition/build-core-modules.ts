@@ -35,6 +35,7 @@ import { registerWorkBoardToolSurface } from '@neutronai/work-board/agent-tool.t
 import { registerTridentBuildToolSurface } from '@neutronai/trident/work-board-build-tool.ts'
 import { registerCodexCredentialToolSurface } from '@neutronai/trident/codex-credential-tool.ts'
 import { registerCreateProjectToolSurface } from '../wiring/create-project-tool.ts'
+import { registerHostDeployToolSurface } from '../wiring/host-deploy-tool.ts'
 import { registerMessageSearchToolSurface } from '@neutronai/message-search/tool.ts'
 import { registerDispatchToolSurface } from '@neutronai/agent-dispatch/tool.ts'
 import { registerSkillForgeToolSurface } from '@neutronai/skill-forge/tool.ts'
@@ -254,6 +255,16 @@ export function buildCoreModules(
       if (input.create_project !== undefined) {
         registerCreateProjectToolSurface(reg, input.create_project.service)
       }
+      // Owner-approved host deploy — register `host_deploy_request` +
+      // `host_deploy_status` so the agent can ASK for a deploy of the host this
+      // instance runs on. Registered unconditionally of any control-plane
+      // configuration: with no endpoint the tools answer `enabled:false` WITH
+      // the reason, because an option that silently disappears is how a missing
+      // capability stays invisible for weeks. The service getter is late-bound
+      // (see `install` below) — the graph's ApprovalManager does not exist yet.
+      if (input.host_deploy !== undefined) {
+        registerHostDeployToolSurface(reg, input.host_deploy.service)
+      }
       return reg
     },
   }
@@ -283,7 +294,15 @@ export function buildCoreModules(
   const approvalModule: GatewayModule<ApprovalManager> = {
     name: 'approval',
     deps: ['tools'],
-    init: () => new ApprovalManager(input.db, input.approval_notifier),
+    init: () => {
+      const manager = new ApprovalManager(input.db, input.approval_notifier)
+      // Host deploy — hand the service THIS manager instance (the one whose
+      // `tool_approvals` rows the owner's in-chat tap resolves). Installed here
+      // rather than passed as a value because the `tools` module, which
+      // registers the agent tools, initializes first.
+      input.host_deploy?.install({ approvals: manager })
+      return manager
+    },
   }
 
   const channelsModule: GatewayModule<ChannelRouter> = {

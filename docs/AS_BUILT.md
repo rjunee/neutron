@@ -10396,6 +10396,86 @@ Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE l
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
 
+
+## 2026-08-13 — the instance can ASK for a host deploy; it still cannot perform one
+
+Work merged into Open did not reach the box it was for, and the reason was not a lag: **there
+is no automatic deploy**. The host's only timers are a lane sweeper, a credential rotator, a
+CLI update doctor and a backup. A deploy happens when a human runs one. From inside the
+instance that total absence is indistinguishable from "deploys land on their own and just lag",
+which is exactly what the agent on that box believed.
+
+The fix is a request that crosses the privilege boundary while the capability never does.
+`open/host-deploy.ts` gains one thing: the ability to ASK. No deploy rights, no host
+filesystem access, no privileged credential. `host_deploy_request`
+(`gateway/wiring/host-deploy-tool.ts`, registered into the same tools registry
+`create_project` uses at `gateway/composition/build-core-modules.ts:255-266`) resolves what
+WOULD be deployed and raises an approval. It dispatches nothing. Only the owner's tap makes
+the one authenticated call, and only if the sha has not moved.
+
+**This is a second caller, not a new approval mechanism.** It rides `ApprovalManager`
+(`tools/approval.ts`, migration 0004) and the CODE-rendered Approve/Deny prompt shape
+`reminders/ritual-registration.ts:768-806` established, including the opaque-token codec —
+imported, not re-derived, because a strict-inverse token decoder is a bad thing to have two
+copies of. The owner's tap arrives through the SAME live-turn capture seam
+(`gateway/wiring/build-live-agent-turn.ts:1209`); the composer now chains the ritual handler
+and this one, and each returns null for a token that is not its own (`rap:` vs `hdp:`), so no
+new capture path was added either.
+
+**The approval renders the actual commit list, and that is the whole security.** The owner is
+the only gate, so the thing he is gating has to be legible in the message he taps: the sha the
+host runs now, the sha it would run, and every commit between them. An approval whose content
+the approver cannot see is a rubber stamp with extra steps. Rendering is capped at 40 commits
+with the TRUE remainder counted — `rev-list --count` is a second git invocation precisely so
+"40 commits would land" can never be said when 300 would. Commit subjects are stripped of
+bidi/zero-width/C0 characters and fenced with a backtick run longer than any inside them,
+because a commit subject is chosen by whoever lands the commit and the button body is
+Markdown-rendered (`channels/button-primitive.ts:194`). Stripped rather than refused: refusing
+would let one commit subject make the host undeployable.
+
+**The approval binds to ONE sha.** The target is re-resolved at approve time and a moved ref
+is refused as stale, naming the new sha, with the grant killed so it cannot be replayed.
+Without that, "approve" quietly means "deploy whatever is newest when this executes" — a
+different and unbounded permission that reads identically in the transcript.
+
+**No control plane configured → visible and disabled, with the reason.** A self-hoster has no
+endpoint to call. Both tools still register and still answer, naming `NEUTRON_HOST_DEPLOY_URL`
+and `NEUTRON_HOST_DEPLOY_TOKEN` as what would enable it. No default endpoint is fabricated —
+inventing one would point a self-hoster's deploy at somebody else's control plane. The
+endpoint and credential are resolved at CALL time, never captured at composition (a credential
+read at composition time is a credential that is never there — 2026-08-07). The credential
+rides an `Authorization` header and nothing else, and everything the control plane says is
+scrubbed of both the token and the URL before it reaches chat or a log line.
+
+**Mutants run, all 16 killed.** stale-sha gate removed; owner-only (no-self-approval) gate
+removed; prior-option eligibility removed; pending-status gate removed (kills the timeout and
+the replay tests); unconfigured early-return removed; secret scrub neutered; commit list
+dropped from the body; ref charset guard removed; emit-failure rollback removed;
+bidi/zero-width strip removed; tools hidden when nothing is configured; `request()` made to
+dispatch before asking; config captured once at composition instead of per call; credential
+moved into the request body; true commit total replaced by the rendered count; `rev-parse`
+stripped of `--verify --quiet` and `^{commit}`. Each was applied to the shipped source and
+each turned a named test RED.
+
+The secret-absence assertions are constructed so they can fail in BOTH directions: the control
+plane's error body is `boom: upstream <url> rejected Bearer <token>`, and the test asserts the
+owner IS still shown `boom` and `upstream` while the token and URL are gone. An absent scrub
+fails the negative half; an over-eager one fails the positive half.
+
+The production seams are tested through their real wiring, not only through stubs:
+`open/__tests__/host-deploy-runtime.test.ts` builds a real git repo and asserts where the
+resolver looks and what it returns, including a positive control on the same instance that
+returned the null — so "unknown ref → null" is a real answer rather than a resolver that
+always fails.
+
+Known limitation, stated rather than papered over: the current pin is the HEAD of the checkout
+the instance can read (`NEUTRON_REPO_ROOT`). On a box where the running code and that checkout
+are the same tree — which is what a self-hoster and a single-box install both have — that is
+the sha the host runs. Nothing here verifies that claim against the control plane, and a
+deploy whose plumbing lands the code elsewhere would show a pin that is locally true and
+globally wrong.
+
+Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
 ## 2026-08-13 — adversarial review can dispatch on Codex
 
 `review_adversarial` now declares `alsoRunsOn: ['codex']` in

@@ -376,6 +376,13 @@ import {
   type ProjectScaffoldDeps,
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
+import type { ApprovalManager } from '@neutronai/tools/approval.ts'
+import {
+  createHostDeployService,
+  resolveHostDeployConfig,
+  type HostDeployService,
+} from './host-deploy.ts'
+import { createHostDeployDispatch, createHostDeployGit } from './host-deploy-runtime.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
 import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
@@ -2546,6 +2553,52 @@ export function buildOpenGraphComposer(
     // from the first seed on it is OWNER data (the ritual CONTENT stays user data),
     // and the content-hash approval check re-verifies the LIVE bytes every fire, so
     // a later owner edit drops approval by design.
+    // ── Owner-approved host deploy ────────────────────────────────────────────
+    // The agent can ASK for a deploy of the host this instance runs on; it can
+    // never perform one. `host_deploy_request` resolves the current pin, the
+    // target sha and the commits between them, and posts THAT as an Approve/Deny
+    // prompt through the SAME durable `deliver` seam ritual approvals ride. Only
+    // the owner's tap — captured deterministically at turn start below — makes
+    // the one authenticated control-plane call, and only if the target sha has
+    // not moved since he was asked.
+    //
+    // LATE-BOUND for the same reason `ritualRegistration` is: the service needs
+    // the graph's ApprovalManager, which does not exist here. `install` is
+    // called from the approval module's init. NOT gated on `llmPool` — the tools
+    // register either way, and an LLM-less box simply has nothing to call them.
+    let hostDeployService: HostDeployService | null = null
+    const hostDeployInstall = ({ approvals }: { approvals: ApprovalManager }): void => {
+      hostDeployService = createHostDeployService({
+        approvals,
+        git: createHostDeployGit({ repo_dir: env['NEUTRON_REPO_ROOT'] ?? process.cwd() }),
+        // CALL TIME, every time. Reading the endpoint + credential once here
+        // would bake in whatever the environment looked like at boot — the
+        // failure the Decisions Log records on 2026-08-07.
+        resolveConfig: () => resolveHostDeployConfig(env),
+        dispatch: createHostDeployDispatch(),
+        project_slug,
+        owner_user_id: OWNER_USER_ID,
+        approval_topic_id: resolveAppWsReminderTopic(null),
+        emit: async (p) => {
+          const result = await deliver(resolveAppWsReminderTopic(null), {
+            body: p.body,
+            durability: 'reply',
+            options: p.options,
+            idempotency_key: p.idempotency_key,
+            metadata: p.metadata,
+          })
+          // A 'reply' deliver SWALLOWS a durable-persist failure. An approval
+          // prompt the owner cannot tap is worse than no prompt: the grant sits
+          // pending and the deploy silently never happens. Surface it so
+          // `request()` cancels the grant and reports "ask again".
+          if (!result.persisted) {
+            throw new Error('host deploy approval prompt failed to persist a durable row')
+          }
+        },
+        log: (m) => log.info('host_deploy', { detail: m }),
+      })
+    }
+
     const init_ritual_planner: CompositionInput['init_ritual_planner'] =
       llmPool !== null
         ? ({ approvals }) => {
@@ -4838,8 +4891,19 @@ export function buildOpenGraphComposer(
             // token resolves the approval + schedules on approve, and the LLM turn is
             // NEVER dispatched for that act. `null` ⇒ no-op (LLM-less box), returning
             // null so the normal turn runs.
-            ritualApprovalCapture: async (i) =>
-              ritualRegistration === null ? null : ritualRegistration.handleOwnerButtonAnswer(i),
+            // HOST DEPLOY rides this SAME seam (it is the generic opaque-token
+            // capture, not a ritual-only one). Both handlers return null for a
+            // token that is not theirs — `rap:` vs `hdp:` — so chaining them is
+            // total: an approval act NEVER reaches the LLM turn, and an ordinary
+            // reply ("yes", "sure, ship it", silence) NEVER reaches an approval
+            // row. Rituals first only because they are the older caller; the two
+            // token namespaces cannot collide.
+            ritualApprovalCapture: async (i) => {
+              const ritual =
+                ritualRegistration === null ? null : await ritualRegistration.handleOwnerButtonAnswer(i)
+              if (ritual !== null) return ritual
+              return hostDeployService === null ? null : await hostDeployService.handleOwnerButtonAnswer(i)
+            },
             // Work Board (Phase 1a) — re-ground EVERY turn on the board (the
             // orchestrator's external memory). Returns the already-formatted,
             // escaped `<work_board>` DATA block for the active+next items, scoped
@@ -5706,6 +5770,12 @@ export function buildOpenGraphComposer(
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).
       create_project: { service: createProjectToolService },
+      // Owner-approved host deploy (host_deploy_request / host_deploy_status) —
+      // the agent can ASK for a deploy of the host this instance runs on; the
+      // owner's in-chat tap is the only thing that performs one. No flag: the
+      // tools register on every box, and one with no control-plane endpoint
+      // configured answers `enabled:false` WITH the reason.
+      host_deploy: { service: () => hostDeployService, install: hostDeployInstall },
       // Message-search agent tool (message_search) — chat-history twin of
       // doc_search. Backed by this owner's ButtonStore turn history so the
       // live agent can recall what was said earlier in the conversation.
