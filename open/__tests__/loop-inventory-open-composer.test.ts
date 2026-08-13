@@ -11,7 +11,7 @@
  * stub — and pins the complete set:
  *
  *   chunked-upload-sweeper, cron, credential-usage,
- *   dispatch-lifecycle-watchdog, reminders, trident, watchdog
+ *   dispatch-lifecycle-watchdog, kimi-usage, reminders, trident, watchdog
  *
  * A loop that silently stops starting (a wiring regression) OR a silently-added
  * new loop breaks this. MUTATION-VERIFIED: deleting any `loopRegistry.register`
@@ -46,6 +46,10 @@ const EXPECTED_RUNNING_LOOPS = [
   'credential-usage',
   'cron',
   'dispatch-lifecycle-watchdog',
+  // The Kimi gauge, armed on the SAME unconditional terms as the credential
+  // probe: a tick with no key stored does one cheap store read and no network
+  // call, so a key entered in Settings starts being metered without a restart.
+  'kimi-usage',
   // Memory consolidation is ON by default (managed SPEC Decisions Log 2026-07-20,
   // P0-4), so the reflect-consolidation loop always arms.
   'reflect-consolidation',
@@ -189,9 +193,9 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all eight running loops + the dormant set', () => {
+test('the ONE boot line names all nine running loops + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('8 loop(s) running')
+  expect(line).toContain('9 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

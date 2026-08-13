@@ -55,11 +55,18 @@ import {
 } from './phase-models-client.ts'
 import {
   WebUsageDashboardClient,
+  accountCapacityNote,
   accountName,
-  formatDuration,
+  capacityLine,
+  connectionNote,
+  formatAge,
+  formatCountdown,
+  formatProjection,
   formatPace,
-  formatPercent,
+  formatWindowFraction,
   paceNote,
+  poolTitle,
+  windowName,
   type UsageDashboard,
   type UsageWindow,
 } from './usage-dashboard-client.ts'
@@ -159,6 +166,17 @@ export function SettingsTab({
   // state here: an unreachable server is one of its two ANSWERS, and giving it a
   // third representation would put the same branch in two places.
   const [usage, setUsage] = useState<UsageDashboard | null>(null)
+
+  // THE RENDER CLOCK for every countdown on the card. The payload carries reset
+  // INSTANTS, and the delta to now is computed at paint — so this has to advance
+  // on its own, or a card left open would keep insisting capacity returns in the
+  // same 17 minutes it did an hour ago. Thirty seconds is under the resolution
+  // the card renders (whole minutes), so no countdown is ever visibly wrong.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now())
+  useEffect(() => {
+    const handle = setInterval(() => setNowMs(Date.now()), 30_000)
+    return () => clearInterval(handle)
+  }, [])
 
   const loadUsage = useCallback((): void => {
     void usageDashboardClient.load().then((next) => {
@@ -1013,27 +1031,77 @@ export function SettingsTab({
         ) : (
           usage.pools.map((pool) => (
             <div className="cset-usage-pool" key={pool.pool} data-testid={`usage-${pool.pool}`}>
-              {/* NEVER a guessed account name. The credential is swapped by a
-                  process outside this box, so nothing here can know which account
-                  a reading belongs to unless something upstream labels it. */}
-              <p className="cset-label" data-testid={`usage-${pool.pool}-account`}>
-                {accountName(pool.account_label)}
-              </p>
-              {pool.measured_at === null ? (
-                <div className="cset-empty">No readings yet.</div>
+              <div className="cset-usage-poolhead">
+                <p className="cset-label" data-testid={`usage-${pool.pool}-title`}>
+                  {poolTitle(pool.pool)}
+                </p>
+                {/* THE AGE IS ALWAYS SHOWN, not only when something is wrong: an
+                    age that appears only on failure is an age nobody learns to
+                    read, and staleness here is a value rather than an error. */}
+                <span className="cset-usage-age" data-testid={`usage-${pool.pool}-age`}>
+                  {formatAge(pool.age_ms)}
+                </span>
+              </div>
+              {/* THE LINE THE OWNER ASKED FOR, first in the card and above every
+                  bar: "how hard can I push this provider right now". It names the
+                  BINDING window, because a countdown to a 5-hour reset says
+                  nothing about capacity while the 7-day window is spent. */}
+              {capacityLine(pool, nowMs) !== null ? (
+                <p className="cset-usage-capacity" data-testid={`usage-${pool.pool}-capacity`}>
+                  {capacityLine(pool, nowMs)}
+                </p>
+              ) : null}
+              {connectionNote(pool) !== null ? (
+                // Three different fixes hide behind an empty card — connect an
+                // account, wait for a reading, or nothing at all — so the card says
+                // which, instead of drawing zeros.
+                <div className="cset-empty" data-testid={`usage-${pool.pool}-empty`}>
+                  {connectionNote(pool)}
+                </div>
               ) : (
-                <>
-                  <UsageWindowRow
-                    label="5-hour window"
-                    testid={`usage-${pool.pool}-session`}
-                    win={pool.session}
-                  />
-                  <UsageWindowRow
-                    label="7-day window"
-                    testid={`usage-${pool.pool}-weekly`}
-                    win={pool.weekly}
-                  />
-                </>
+                pool.accounts.map((account, i) => (
+                  <div
+                    className="cset-usage-account"
+                    key={account.account_label ?? `unlabelled-${i}`}
+                    data-testid={`usage-${pool.pool}-acct-${i}`}
+                  >
+                    <div className="cset-usage-accounthead">
+                      {/* NEVER a guessed account name. The credential is swapped by
+                          a process outside this box, so nothing here can know which
+                          account a reading belongs to unless something labels it. */}
+                      <span
+                        className="cset-label"
+                        data-testid={`usage-${pool.pool}-acct-${i}-name`}
+                      >
+                        {accountName(account.account_label)}
+                      </span>
+                      <span
+                        className="cset-usage-chip"
+                        data-testid={`usage-${pool.pool}-acct-${i}-capacity`}
+                      >
+                        {accountCapacityNote(account, nowMs)}
+                      </span>
+                      <span
+                        className="cset-usage-age"
+                        data-testid={`usage-${pool.pool}-acct-${i}-age`}
+                      >
+                        {formatAge(account.age_ms)}
+                      </span>
+                    </div>
+                    <UsageWindowRow
+                      windowKey="session"
+                      testid={`usage-${pool.pool}-acct-${i}-session`}
+                      win={account.session}
+                      now={nowMs}
+                    />
+                    <UsageWindowRow
+                      windowKey="weekly"
+                      testid={`usage-${pool.pool}-acct-${i}-weekly`}
+                      win={account.weekly}
+                      now={nowMs}
+                    />
+                  </div>
+                ))
               )}
             </div>
           ))
@@ -1650,14 +1718,21 @@ function CredentialRow({
  * track is the specific, possibly false claim "0% used".
  */
 function UsageWindowRow({
-  label,
+  windowKey,
   testid,
   win,
+  now,
 }: {
-  label: string
+  windowKey: 'session' | 'weekly'
   testid: string
   win: UsageWindow | null
+  now: number
 }): React.JSX.Element {
+  // The label comes from the LENGTH the provider reported, not from a fixed
+  // "5-hour window": lengths differ per provider and one of them has already
+  // changed regime, so a hardcoded label eventually names the wrong thing with
+  // complete confidence.
+  const label = windowName(windowKey, win?.window_ms ?? null)
   if (win === null) {
     return (
       <div className="cset-usage-row" data-testid={testid}>
@@ -1675,8 +1750,11 @@ function UsageWindowRow({
     <div className="cset-usage-row" data-testid={testid}>
       <div className="cset-usage-head">
         <span className="cset-label">{label}</span>
+        {/* Floored with a "≥" when the reading is stale and its window is still
+            running — the last known value, marked as a lower bound, rather than a
+            blank or a fresh-looking number. */}
         <span className="cset-usage-pct" data-testid={`${testid}-pct`}>
-          {formatPercent(win.fraction)}
+          {formatWindowFraction(win)}
         </span>
       </div>
       <div
@@ -1697,8 +1775,15 @@ function UsageWindowRow({
       </div>
       <dl className="cset-usage-facts">
         <div>
+          {/* THE COUNTDOWN, computed HERE from the absolute instant the server
+              sent. A duration computed server-side is already wrong when it
+              paints, and a payload held for an hour would still say "17m".
+              "unknown" and "available now" are different answers and neither may
+              collapse into the other. */}
           <dt>Resets in</dt>
-          <dd data-testid={`${testid}-resets`}>{formatDuration(win.resets_in_ms)}</dd>
+          <dd data-testid={`${testid}-resets`}>
+            {formatCountdown(win.reset_at === null ? null : win.reset_at - now)}
+          </dd>
         </div>
         <div>
           <dt>Pace</dt>
@@ -1714,11 +1799,11 @@ function UsageWindowRow({
             — the window refills faster than it drains — and an always-present row
             reading "—" would train the eye to look for a warning that is normally
             absent. */}
-        {win.exhausts_at !== null ? (
+        {formatProjection(win.exhausts_at, now) !== null ? (
           <div>
             <dt>Caps out in</dt>
             <dd data-testid={`${testid}-exhausts`}>
-              {formatDuration(win.exhausts_at - Date.now())}
+              {formatProjection(win.exhausts_at, now)}
             </dd>
           </div>
         ) : null}

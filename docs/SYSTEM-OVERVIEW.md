@@ -4739,10 +4739,13 @@ the left, the whole fill green under 85%, amber to 95%, red past it. It is the
 divider, not a widget beside one — so it costs no layout and no attention until
 the colour changes.
 
-**Exactly ONE credential is described.** The reading is always the credential the
-box is dispatching with right now. There is no pooling, no averaging, and no
-multi-account concept anywhere in this path — a deployment that swaps credentials
-underneath simply gets the new one measured on the next tick.
+**Exactly ONE credential is described HERE.** The meter's reading is always the
+credential the box is dispatching with right now. There is no pooling, no
+averaging, and no multi-account concept in this path — a deployment that swaps
+credentials underneath simply gets the new one measured on the next tick. The
+readings the probe produces are also persisted, and the surface that reads that
+history is multi-pool and multi-account: see **Usage dashboard** below. The two
+are deliberately different scopes of the same measurement, not two sources of it.
 
 - **Where the numbers come from — `auth/credential-usage-probe.ts`.** Anthropic
   reports utilization on the response headers of an authenticated API call
@@ -4797,6 +4800,96 @@ underneath simply gets the new one measured on the next tick.
   before the meter existed. The clients never coerce a missing number to zero: an
   empty coloured track would assert "0% used", which is a claim, and the whole
   purpose of the unavailable state is that there is none to make.
+
+## Usage dashboard — every connected account, and when capacity comes back
+
+The meter says how full ONE window on ONE credential is. The dashboard answers the
+two questions a single reading cannot, for every provider this instance can see:
+**"is this going to run out before it resets"** (pace, and the cap-out projected
+off it) and **"when does capacity COME BACK"** (a countdown to each window's
+reset). They are opposite questions and both ship — pace says when the wall
+arrives, the countdown says when it moves, and the second one is the input to the
+throughput decision of whether to raise build concurrency.
+
+- **The series — `migrations/0121_usage_pool_samples_account_grain.sql`,
+  `persistence/usage-samples-store.ts`.** One row per (instant, pool, account),
+  30-day retention, pruned by the writers' own ticks. The key carries the account
+  because the dashboard answers a per-account question: two accounts of one pool
+  measured in the same millisecond must be two rows, not one overwrite that serves
+  the second account's numbers under the first one's name. `account_label` is
+  `NOT NULL` with an empty-string sentinel for "nothing can name this account" —
+  a nullable column in a primary key is not a key, since SQLite compares NULL to
+  NULL as unequal — and the store maps that sentinel back to `null` at the
+  boundary, so no surface can mistake it for a name. `session_window_ms` /
+  `weekly_window_ms` carry the window LENGTH the provider reported: pace divides
+  by it, lengths are not a constant across providers, and Codex has already
+  changed regime once, so a series that straddles the change is summarised
+  per-sample rather than with one global constant.
+- **Pools — `UsagePool = 'anthropic' | 'codex' | 'kimi'`.** Every pool is served
+  every time, in `USAGE_POOLS` order, so a provider can vanish from the screen
+  only by being deleted from that list. Codex has no writer yet (its gauge is
+  harvested from real `codex` runs and lands with the lane writers), and renders
+  "not connected / no samples yet" rather than a row of zeros.
+- **The second gauge — `open/kimi-usage-monitor.ts` + `trident/kimi-usage-probe.ts`.**
+  Kimi publishes no rate-limit headers, so its standing is read from
+  `GET {KIMI_BASE_URL}/v1/usages` on a 10-minute `SupervisedLoop`, armed
+  unconditionally beside the credential probe; the key is read PER TICK from the
+  credential store the Settings pane writes, so a key entered now is metered
+  without a restart. The endpoint is **account-wide** — two keys on one
+  subscription return the same numbers — so per-key attribution is never
+  fabricated and the card is titled accordingly. The response schema is not
+  published: the parser accepts a written-down alias set and answers
+  `unrecognised` (logging the KEY NAMES it saw, never values) for anything else,
+  which writes NO row and leaves the card ageing. Units are checked, not trusted:
+  a percent above 100 and a fraction above 1 are refused rather than clamped, and
+  every reset instant is plausibility-checked against the clock after conversion,
+  so a seconds value read as ms (1970) or an ms value converted again (year
+  57,000) fails loudly instead of rendering.
+- **Staleness is shown, never hidden.** Every reading carries its age, on every
+  card, not only the stale ones. A reading older than its pool's cadence
+  (`POOL_CADENCE_MS`, pinned against the pollers' own intervals by
+  `open/__tests__/usage-dashboard-wiring.test.ts`) renders FLOORED — "≥ 43%" plus
+  its age — while its window is still running, and unfloored once the window has
+  rolled, because "at least this much" stops being true after a reset. Pace is
+  computed **as of the measurement**, never as of the render clock: dividing a
+  stale fraction by an elapsed-since-now would report a calmer and calmer burn the
+  longer a writer has been dead.
+- **Capacity is the WORST window, never the soonest reset.** A FRESH reading is
+  believed — rolled (the instant has passed) → available; spent (≤5% headroom) →
+  returns at its reset; spent with no instant → unknown; room → available. A STALE
+  reading proves only that its window was AT LEAST this spent, and only while that
+  same window is still running, so it yields a countdown when it says spent and
+  `unknown` otherwise — including when its window has since rolled, where
+  consumption restarted and nobody measured what followed. An account's standing is the worst of
+  its two, so a 5-hour window resetting in 17 minutes is not reported as capacity
+  while the 7-day window is spent for another three days. The pool line —
+  "1 available now", or "Next capacity in 3d 0h (7d window; 5h window 98% used)",
+  or "Next capacity unknown" — names the binding window and the other window's
+  utilisation, and an account nobody can vouch for is counted out loud rather than
+  quietly excluded.
+- **Store the instant, render the delta.** Reset times are persisted and served as
+  absolute epoch-MS instants; every countdown is subtracted at paint time against
+  the client's own clock, which ticks on a 30-second interval so a screen left
+  open cannot keep insisting on the same 17 minutes. `CapacityStanding` is a
+  TAGGED union (`available` / `returns` / `unknown`) rather than a nullable
+  number, so a client cannot render "unknown" as "now" by writing `if (!ms)`.
+- **Serving — `gateway/http/app-usage-surface.ts`, `GET /api/app/usage/dashboard`,
+  composed in `open/composer.ts`.** Owner-gated, always 200. Each pool carries a
+  `connection` of `connected` / `not_connected` / `no_meter`, resolved from the
+  SAME functions the rest of the product uses (`kimiConfigured`,
+  `resolveActiveCodexHome`, `resolveActiveCredential`) — a per-token API key is
+  `no_meter`, not "not connected", because telling the owner to reconnect a
+  working account sends them to fix the wrong thing.
+- **Both clients — `landing/chat-react/SettingsTab.tsx` (Model usage) and
+  `app/app/usage.tsx`,** over the twin clients `landing/chat-react/usage-dashboard-client.ts`
+  and `app/lib/usage-dashboard-client.ts`. One card per provider, side by side,
+  each in its own unit and never summed: the three providers meter different
+  things, so a combined headline would be a number about nothing. No dollar figure
+  appears anywhere — the subscription is flat, so a currency value would assert a
+  marginal cost the owner does not incur. The formatters are executed side by side
+  by `gateway/__tests__/usage-dashboard-client-parity.test.ts`, because a
+  divergence there is the failure nobody reports: each screen stays
+  self-consistent and the owner gets two different answers about one quota.
 
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 

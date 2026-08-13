@@ -19,6 +19,8 @@
  *   - a null projection must OMIT its row (null is the common GOOD case; a permanent
  *     "—" trains the eye to hunt for a warning that is normally absent)
  *   - a null account label must read "active credential" and never guess
+ *   - an ABSENT reset instant must read "unknown", never "available now" — the one
+ *     that decides whether the owner raises concurrency or waits
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
@@ -44,24 +46,66 @@ const OWNER = {
   token: 'harness-token',
 };
 
+// Time-RELATIVE, because a countdown asserted against a hardcoded epoch is a test
+// that passes today and lies later.
+const NOW = Date.now();
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
 const HOT_SESSION = {
   fraction: 0.75,
-  reset_at: 1_700_009_000_000,
-  resets_in_ms: 9_000_000,
+  window_ms: 5 * HOUR,
+  reset_at: NOW + 2.5 * HOUR,
+  resets_in_ms: 2.5 * HOUR,
   pace: 1.5,
-  exhausts_at: Date.now() + 3_000_000,
+  exhausts_at: NOW + 50 * MINUTE,
+  floor: false,
 };
+
+type Json = Record<string, unknown>;
+
+function account(over: Json = {}): Json {
+  return {
+    account_label: null,
+    measured_at: NOW,
+    age_ms: 0,
+    stale: false,
+    session: HOT_SESSION,
+    weekly: null,
+    binding: 'session',
+    capacity: { state: 'available' },
+    ...over,
+  };
+}
+
+function poolOf(over: Json = {}): Json {
+  const accounts = (over['accounts'] as Json[] | undefined) ?? [account()];
+  return {
+    pool: 'anthropic',
+    connection: 'connected',
+    measured_at: NOW,
+    age_ms: 0,
+    capacity: {
+      available_now: accounts.length,
+      returning: 0,
+      unknown: 0,
+      next_account_label: (accounts[0]?.['account_label'] as string | null) ?? null,
+      next: { state: 'available' },
+      next_other_window: null,
+      next_other_fraction: null,
+    },
+    ...over,
+    accounts,
+  };
+}
 
 function pools(
   session: unknown,
   weekly: unknown,
   account_label: string | null = null,
 ): Record<string, unknown> {
-  return {
-    pools: [
-      { pool: 'anthropic', measured_at: 1_700_000_000_000, account_label, session, weekly },
-    ],
-  };
+  return { pools: [poolOf({ accounts: [account({ session, weekly, account_label })] })] };
 }
 
 let response: { status: number; body: unknown } = { status: 200, body: pools(HOT_SESSION, null) };
@@ -128,10 +172,12 @@ describe('the screen reads the series and shows the standing', () => {
 
   it('shows the percent, the pace and its reading', async () => {
     await mountUsage();
-    expect(textOf('usage-anthropic-session-pct')).toBe('75%');
-    expect(textOf('usage-anthropic-session-pace')).toContain('1.5×');
-    expect(textOf('usage-anthropic-session-resets')).toBe('2h 30m');
-    expect(byTestId('usage-anthropic-session')?.textContent ?? '').toContain('faster');
+    expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('75%');
+    expect(textOf('usage-anthropic-acct-0-session-pace')).toContain('1.5×');
+    // The countdown is computed HERE from the absolute instant, so it reads in the
+    // owner's units rather than in whatever the server computed a request ago.
+    expect(textOf('usage-anthropic-acct-0-session-resets')).toBe('2h 30m');
+    expect(byTestId('usage-anthropic-acct-0-session')?.textContent ?? '').toContain('faster');
   });
 
   it('bands the fill by the shared thresholds', async () => {
@@ -140,7 +186,7 @@ describe('the screen reads the series and shows the standing', () => {
     // a 6px bar.
     response = { status: 200, body: pools({ ...HOT_SESSION, fraction: 0.9 }, null) };
     await mountUsage();
-    const fill = byTestId('usage-anthropic-session-fill');
+    const fill = byTestId('usage-anthropic-acct-0-session-fill');
     expect(fill?.getAttribute('aria-label') ?? fill?.getAttribute('accessibilityLabel') ?? '').toContain(
       'warning',
     );
@@ -161,7 +207,7 @@ describe('what the screen refuses to say', () => {
     await mountUsage();
     expect(byTestId('usage-unreachable')).not.toBeNull();
     expect(byTestId('usage-anthropic')).toBeNull();
-    expect(byTestId('usage-anthropic-session-fill')).toBeNull();
+    expect(byTestId('usage-anthropic-acct-0-session-fill')).toBeNull();
   });
 
   it('draws NO bar when the request throws', async () => {
@@ -170,7 +216,7 @@ describe('what the screen refuses to say', () => {
     };
     await mountUsage();
     expect(byTestId('usage-unreachable')).not.toBeNull();
-    expect(byTestId('usage-anthropic-session-fill')).toBeNull();
+    expect(byTestId('usage-anthropic-acct-0-session-fill')).toBeNull();
   });
 
   it('renders a null pace as a dash with no reading beside it', async () => {
@@ -182,9 +228,9 @@ describe('what the screen refuses to say', () => {
       ),
     };
     await mountUsage();
-    expect(textOf('usage-anthropic-session-pace').trim()).toBe('—');
+    expect(textOf('usage-anthropic-acct-0-session-pace').trim()).toBe('—');
     // And no note: "unknown pace" would draw the eye to an absence the owner cannot fix.
-    const row = byTestId('usage-anthropic-session')?.textContent ?? '';
+    const row = byTestId('usage-anthropic-acct-0-session')?.textContent ?? '';
     expect(row).not.toContain('faster');
     expect(row).not.toContain('within');
   });
@@ -195,27 +241,27 @@ describe('what the screen refuses to say', () => {
       body: pools({ ...HOT_SESSION, pace: 0.4, exhausts_at: null }, null),
     };
     await mountUsage();
-    expect(byTestId('usage-anthropic-session-exhausts')).toBeNull();
+    expect(byTestId('usage-anthropic-acct-0-session-exhausts')).toBeNull();
     expect(document.body.textContent ?? '').not.toContain('Caps out in');
   });
 
   it('SHOWS the projection row when the window is on track to run out', async () => {
     await mountUsage();
-    expect(byTestId('usage-anthropic-session-exhausts')).not.toBeNull();
+    expect(byTestId('usage-anthropic-acct-0-session-exhausts')).not.toBeNull();
   });
 
   it('says a window was not reported rather than drawing an empty track', async () => {
     await mountUsage();
-    expect(textOf('usage-anthropic-weekly-none')).toBe('not reported');
-    expect(byTestId('usage-anthropic-weekly-fill')).toBeNull();
+    expect(textOf('usage-anthropic-acct-0-weekly-none')).toBe('not reported');
+    expect(byTestId('usage-anthropic-acct-0-weekly-fill')).toBeNull();
   });
 
   it('never guesses the account, and uses a real label when given one', async () => {
     await mountUsage();
-    expect(textOf('usage-anthropic-account')).toBe('active credential');
+    expect(textOf('usage-anthropic-acct-0-name')).toBe('active credential');
     response = { status: 200, body: pools(HOT_SESSION, null, 'acct-2') };
     await press('usage-refresh');
-    expect(textOf('usage-anthropic-account')).toBe('acct-2');
+    expect(textOf('usage-anthropic-acct-0-name')).toBe('acct-2');
   });
 
   it('distinguishes "answered with nothing" from "could not ask"', async () => {
@@ -223,5 +269,182 @@ describe('what the screen refuses to say', () => {
     await mountUsage();
     expect(byTestId('usage-empty')).not.toBeNull();
     expect(byTestId('usage-unreachable')).toBeNull();
+  });
+});
+
+describe('when capacity comes back — the number the owner acts on', () => {
+  it('says how many accounts are free right now, above the fold', async () => {
+    await mountUsage();
+    expect(textOf('usage-anthropic-capacity')).toBe('1 available now');
+  });
+
+  it('counts down to the BINDING window and names what still constrains it', async () => {
+    // A 5-hour window resetting in 17 minutes buys nothing while the 7-day window is
+    // 97% spent. A line that said "next capacity in 17m" would be an instruction to
+    // raise concurrency into a wall.
+    const cooling = account({
+      account_label: 'owner-a',
+      session: { ...HOT_SESSION, fraction: 0.98, reset_at: NOW + 17 * MINUTE },
+      weekly: {
+        ...HOT_SESSION,
+        window_ms: 7 * DAY,
+        fraction: 0.97,
+        reset_at: NOW + 3 * DAY,
+        exhausts_at: null,
+        pace: null,
+      },
+      binding: 'weekly',
+      capacity: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
+    });
+    response = {
+      status: 200,
+      body: {
+        pools: [
+          poolOf({
+            accounts: [cooling],
+            capacity: {
+              available_now: 0,
+              returning: 1,
+              unknown: 0,
+              next_account_label: 'owner-a',
+              next: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
+              next_other_window: 'session',
+              next_other_fraction: 0.98,
+            },
+          }),
+        ],
+      },
+    };
+    await mountUsage();
+    const line = textOf('usage-anthropic-capacity');
+    expect(line).toContain('Next capacity in');
+    expect(line).toContain('7d window');
+    expect(line).toContain('5h window 98% used');
+    expect(line).not.toContain('17m');
+    // The per-window countdown is still there, paired with that window's own
+    // utilisation — the 17 minutes are a fact about the 5-hour window, and the card
+    // shows it as one.
+    expect(textOf('usage-anthropic-acct-0-session-resets')).toBe('17m');
+    expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('98%');
+  });
+
+  it('renders an ABSENT reset instant as "unknown" — never "available now"', async () => {
+    // THE MUTATION TEST: turning a missing instant into availability is the failure
+    // this whole line exists to prevent.
+    response = {
+      status: 200,
+      body: {
+        pools: [
+          poolOf({
+            accounts: [
+              account({
+                account_label: 'owner-a',
+                session: {
+                  ...HOT_SESSION,
+                  fraction: 0.99,
+                  reset_at: null,
+                  resets_in_ms: null,
+                  pace: null,
+                  exhausts_at: null,
+                },
+                capacity: { state: 'unknown' },
+              }),
+            ],
+            capacity: {
+              available_now: 0,
+              returning: 0,
+              unknown: 1,
+              next_account_label: 'owner-a',
+              next: { state: 'unknown' },
+              next_other_window: null,
+              next_other_fraction: null,
+            },
+          }),
+        ],
+      },
+    };
+    await mountUsage();
+    expect(textOf('usage-anthropic-acct-0-session-resets')).toBe('unknown');
+    expect(textOf('usage-anthropic-acct-0-capacity')).toBe('capacity unknown');
+    expect(textOf('usage-anthropic-capacity')).toContain('unknown');
+    expect(document.body.textContent ?? '').not.toContain('available now');
+  });
+});
+
+describe('staleness is shown, never hidden', () => {
+  it('floors a stale reading with a ≥ and shows its age', async () => {
+    response = {
+      status: 200,
+      body: {
+        pools: [
+          poolOf({
+            accounts: [
+              account({
+                age_ms: 3 * HOUR,
+                stale: true,
+                session: {
+                  ...HOT_SESSION,
+                  fraction: 0.43,
+                  floor: true,
+                  pace: null,
+                  exhausts_at: null,
+                },
+                capacity: { state: 'unknown' },
+              }),
+            ],
+          }),
+        ],
+      },
+    };
+    await mountUsage();
+    // The last known value, marked as a lower bound. Never blanked, never a zero.
+    expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('≥ 43%');
+    expect(textOf('usage-anthropic-acct-0-age')).toBe('3h 00m ago');
+  });
+
+  it('a pool with no samples says WHY, and draws nothing', async () => {
+    // Codex until its harvest lands: "not connected", never a row of zeros, which
+    // would read as a connected account that has used nothing.
+    response = {
+      status: 200,
+      body: {
+        pools: [
+          {
+            pool: 'codex',
+            connection: 'not_connected',
+            measured_at: null,
+            age_ms: null,
+            accounts: [],
+            capacity: {
+              available_now: 0,
+              returning: 0,
+              unknown: 0,
+              next_account_label: null,
+              next: { state: 'unknown' },
+              next_other_window: null,
+              next_other_fraction: null,
+            },
+          },
+        ],
+      },
+    };
+    await mountUsage();
+    expect(textOf('usage-codex-empty')).toBe('Not connected.');
+    expect(byTestId('usage-codex-acct-0-session-fill')).toBeNull();
+    // And no capacity line: nothing measured means no standing to report.
+    expect(byTestId('usage-codex-capacity')).toBeNull();
+    expect(textOf('usage-codex-age')).toBe('never measured');
+  });
+
+  it('renders EVERY pool as its own card, in its own units', async () => {
+    response = {
+      status: 200,
+      body: { pools: [poolOf(), poolOf({ pool: 'kimi' })] },
+    };
+    await mountUsage();
+    expect(textOf('usage-anthropic-title')).toBe('Anthropic');
+    // Kimi's endpoint is account-wide, and the title says so rather than implying a
+    // per-key reading the provider does not offer.
+    expect(textOf('usage-kimi-title')).toBe('Kimi (account-wide)');
   });
 });

@@ -162,6 +162,7 @@ import {
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import {
   ensureKimiKeyExported,
+  resolveKimiApiKey,
   KIMI_CREDENTIAL_SERVICE,
 } from '@neutronai/trident/kimi-key.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
@@ -170,7 +171,12 @@ import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interv
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
-import { UsageSamplesStore } from '@neutronai/persistence/usage-samples-store.ts'
+import {
+  USAGE_POOLS,
+  UsageSamplesStore,
+  type UsagePool,
+  type UsagePoolConnection,
+} from '@neutronai/persistence/usage-samples-store.ts'
 import {
   readTridentPhaseModels,
   readTridentPhaseModelsWithRejected,
@@ -424,6 +430,8 @@ import { createActivitySurface } from '@neutronai/gateway/http/activity-surface.
 import { createAppUsageSurface } from '@neutronai/gateway/http/app-usage-surface.ts'
 import { createSystemNoticeSurface } from '@neutronai/gateway/http/system-notice-surface.ts'
 import { CredentialUsageMonitor } from './credential-usage-monitor.ts'
+import { KimiUsageMonitor } from './kimi-usage-monitor.ts'
+import { resolveActiveCredential } from './active-credential.ts'
 import { createCredentialLapseNotifier } from './credential-lapse-notice.ts'
 import {
   ActivityInspector,
@@ -3223,17 +3231,19 @@ export function buildOpenGraphComposer(
     // (which decides whether the panelist runs at all) — see the long note at
     // `resolve_kimi_configured` for why the export side effect is load-bearing.
     // One function, so the pane can never claim a capability the build lacks.
-    const kimiConfigured = (): boolean =>
-      ensureKimiKeyExported(env, () => {
-        // Global scope: a Kimi subscription is one account for the whole install,
-        // not a per-project token.
-        const found = projectCredentialStore.resolve(
-          asOwnerHandle(owner_handle),
-          undefined,
-          KIMI_CREDENTIAL_SERVICE,
-        )
-        return found?.plaintext ?? null
-      })
+    // Global scope: a Kimi subscription is one account for the whole install, not
+    // a per-project token. Named once and shared by the two readers below, so the
+    // reviewer and the usage gauge cannot end up asking different questions about
+    // the same key.
+    const kimiKeyLookup = (): string | null => {
+      const found = projectCredentialStore.resolve(
+        asOwnerHandle(owner_handle),
+        undefined,
+        KIMI_CREDENTIAL_SERVICE,
+      )
+      return found?.plaintext ?? null
+    }
+    const kimiConfigured = (): boolean => ensureKimiKeyExported(env, kimiKeyLookup)
     // The read/write pair for the per-phase build models. Read PER REQUEST, like
     // the transcription choice beside it: the setting is a live control, so a
     // change must reach the next build with no restart and no cache to go stale.
@@ -3944,15 +3954,75 @@ export function buildOpenGraphComposer(
         // best-effort shutdown cleanup — stop() never rejects
       }
     })
+    // The SECOND gauge, into the SAME series. Kimi publishes no rate-limit
+    // headers, so its standing has to be asked for at its own endpoint — see
+    // `kimi-usage-monitor.ts`. The key is read per tick from the store the
+    // Settings pane writes, so a key entered now is metered ten minutes from now
+    // rather than after a restart.
+    const kimiUsageMonitor = new KimiUsageMonitor({
+      key: () => resolveKimiApiKey(kimiKeyLookup),
+      onSample: async (sample): Promise<void> => {
+        await usageSamplesStore.record({ pool: 'kimi', ...sample })
+        await usageSamplesStore.prune()
+      },
+    })
+    realmodeCleanups.push(async () => {
+      try {
+        await kimiUsageMonitor.loop.stop()
+      } catch {
+        // best-effort shutdown cleanup — stop() never rejects
+      }
+    })
+    /**
+     * Is this pool's credential present at all?
+     *
+     * Read PER REQUEST from the SAME resolvers the rest of the product uses —
+     * `kimiConfigured` is the function the Settings pane and the review panel ask,
+     * and the Codex home is the one a launch resolves. A card that answered from
+     * its own notion of "configured" would tell the owner to fix a key that is
+     * already there, or hide one that is missing.
+     *
+     * `no_meter` is a real third answer, not a rounding of the other two: a BYO
+     * Anthropic API key is connected and billed per token, so there is no window
+     * to read and never will be, and calling that "not connected" would send the
+     * owner to reconnect an account that is working.
+     */
+    const usagePoolConnection = (pool: UsagePool): UsagePoolConnection => {
+      switch (pool) {
+        case 'anthropic': {
+          const credential = resolveActiveCredential(env)
+          if (credential.kind === 'measurable') return 'connected'
+          return credential.reason === 'unsupported_credential' ? 'no_meter' : 'not_connected'
+        }
+        case 'kimi':
+          return kimiConfigured() ? 'connected' : 'not_connected'
+        case 'codex':
+          // The gauge itself lands with the Codex lane writer; until then this
+          // reports the credential honestly and the card says "no samples yet"
+          // rather than drawing zeros for an account nobody has measured.
+          return codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !==
+            null
+            ? 'connected'
+            : 'not_connected'
+      }
+    }
     const appUsageSurface = createAppUsageSurface({
       auth: appOwnerAuth,
       snapshot: () => credentialUsageMonitor.snapshot(),
-      // The SAME store the monitor writes into, read back as a summary. The
+      // The SAME store both monitors write into, read back as a summary. The
       // dashboard is the only reason the series is kept at all — a persisted
-      // reading nothing reads is just disk — so these two are deliberately
+      // reading nothing reads is just disk — so these are deliberately
       // constructed next to each other, and a change that unwires one should be
       // impossible to make without seeing the other.
-      dashboard: () => [usageSamplesStore.summarise('anthropic')],
+      //
+      // EVERY pool, every time, in the store's own order: a pool is omitted from
+      // this payload only by being deleted from `USAGE_POOLS`, so a provider
+      // cannot silently vanish from the screen by having no samples.
+      dashboard: () =>
+        USAGE_POOLS.map((pool) => ({
+          ...usageSamplesStore.summarise(pool),
+          connection: usagePoolConnection(pool),
+        })),
     })
 
     // `POST /api/app/system-notice` — the seam an out-of-process caller uses to
@@ -5286,6 +5356,19 @@ export function buildOpenGraphComposer(
       credentialUsageMonitor.loop.start()
     } catch (err) {
       await credentialUsageMonitor.loop.stop()
+      throw err
+    }
+
+    // The Kimi gauge, armed the same way and UNCONDITIONALLY — like the
+    // credential probe, a tick without a key does a cheap store read and no
+    // network call, so a key entered in Settings starts being metered without a
+    // restart. Arming it only when a key exists at boot is the shape that makes a
+    // newly-connected account look broken.
+    loopRegistry.register(kimiUsageMonitor.loop.describe())
+    try {
+      kimiUsageMonitor.loop.start()
+    } catch (err) {
+      await kimiUsageMonitor.loop.stop()
       throw err
     }
 

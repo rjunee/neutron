@@ -1435,15 +1435,20 @@ CREATE TABLE upload_sessions (
 ) STRICT
 
 [table] usage_pool_samples (tbl=usage_pool_samples)
-CREATE TABLE usage_pool_samples (
-    ts               INTEGER NOT NULL,
-    pool             TEXT    NOT NULL,
-    account_label    TEXT,
-    session          REAL,
-    weekly           REAL,
-    session_reset_at INTEGER,
-    weekly_reset_at  INTEGER,
-    PRIMARY KEY (ts, pool)
+CREATE TABLE "usage_pool_samples" (
+    ts                INTEGER NOT NULL,
+    pool              TEXT    NOT NULL,
+    -- '' means "nothing can name the account", never a name. See the note above.
+    account_label     TEXT    NOT NULL DEFAULT '',
+    session           REAL,
+    weekly            REAL,
+    session_reset_at  INTEGER,
+    weekly_reset_at   INTEGER,
+    -- The length of the window each fraction describes, as the provider reported
+    -- it. NULL = not reported; the reader falls back to the pool's default.
+    session_window_ms INTEGER,
+    weekly_window_ms  INTEGER,
+    PRIMARY KEY (ts, pool, account_label)
 ) STRICT
 
 [table] watchdog_alerts (tbl=watchdog_alerts)

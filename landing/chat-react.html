@@ -1656,7 +1656,30 @@
      the pace beside the bar. The band colours are the SAME three tokens the
      divider uses, so the card and the hairline above it can never disagree about
      where amber starts. */
-  .cset-usage-pool { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .cset-usage-pool {
+    display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px;
+    padding: 10px 12px; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--border);
+  }
+  .cset-usage-poolhead { display: flex; align-items: baseline; gap: 8px; }
+  /* The age rides on every card, not only the stale ones: an age that appears
+     only when something is wrong is an age nobody learns to read. */
+  .cset-usage-age {
+    margin-left: auto; font-size: 0.7333rem; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  /* "How hard can I push this provider" — first line of the card, above every
+     bar, because it is the one line read at a glance. */
+  .cset-usage-capacity {
+    margin: 0; font-size: 0.9333rem; font-weight: 600; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .cset-usage-account { display: flex; flex-direction: column; gap: 8px; }
+  .cset-usage-accounthead { display: flex; align-items: baseline; gap: 8px; }
+  .cset-usage-chip {
+    font-size: 0.7333rem; color: var(--muted); padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--border); white-space: nowrap;
+  }
   .cset-usage-row { display: flex; flex-direction: column; gap: 5px; }
   .cset-usage-head { display: flex; align-items: baseline; gap: 8px; }
   .cset-usage-pct {

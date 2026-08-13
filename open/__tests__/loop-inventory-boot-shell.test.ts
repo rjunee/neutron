@@ -42,7 +42,7 @@ import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
-/** COMPLETE set through the boot shell — 7 composer/graph loops + gateway-liveness. */
+/** COMPLETE set through the boot shell — 8 composer/graph loops + gateway-liveness. */
 const EXPECTED_RUNNING_LOOPS = [
   'chunked-upload-sweeper',
   // The usage meter's 60 s credential probe. It arms UNCONDITIONALLY — an
@@ -52,6 +52,9 @@ const EXPECTED_RUNNING_LOOPS = [
   'cron',
   'dispatch-lifecycle-watchdog',
   'gateway-liveness',
+  // The Kimi gauge — the second pool's poller, armed on the same unconditional
+  // terms as the credential probe above.
+  'kimi-usage',
   'reflect-consolidation',
   'reminders',
   'trident',
@@ -161,7 +164,7 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   const inventoryLines = lines.filter((l) => l.includes('[loop-registry]'))
   expect(inventoryLines).toHaveLength(1) // exactly one, emitted by the boot shell
   const line = inventoryLines[0]!
-  expect(line).toContain('9 loop(s) running')
+  expect(line).toContain('10 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
 }, 60_000)

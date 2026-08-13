@@ -128,8 +128,13 @@
         "Added to the map on creation rather than retrofitted: the table has exactly",
         "ONE writer and enrolling it now is what keeps that true. A usage series with",
         "several writers would make a gap in the data impossible to attribute.",
-        "The monitor does not write directly \u2014 it calls an injected sink, so the",
-        "60-second tick and the storage stay separable and the tick stays fail-soft."
+        "The monitors do not write directly \u2014 they call an injected sink, so each",
+        "tick and the storage stay separable and the ticks stay fail-soft. TWO pollers",
+        "feed it now (the Anthropic credential probe and the Kimi usages read) and both",
+        "go through this one module, which is what keeps the single-writer property",
+        "true as pools are added.",
+        "Keyed by (ts, pool, account_label) since 0121, so two accounts of one pool",
+        "measured in the same millisecond are two rows rather than one overwrite."
       ]
     }
   }

@@ -9,6 +9,9 @@
  *   - a null pace must read as an em dash, never as `0.0×` ("using nothing")
  *   - a null projection must OMIT its row, because null is the common good case
  *     and a permanent "—" trains the eye to hunt for a warning that is not there
+ *   - an ABSENT reset instant must read "unknown", never "available now". That one
+ *     is not cosmetic: it is the difference between waiting and raising concurrency
+ *     into a wall, so it gets its own mutation-shaped test.
  *
  * Every one of those is a case where the wrong choice still renders, still looks
  * plausible, and quietly tells the owner something false about their own quota —
@@ -52,7 +55,7 @@ afterAll(async () => {
 const {
   decodeDashboard,
   accountName,
-  formatDuration,
+  formatProjection,
   formatPace,
   formatPercent,
   paceNote,
@@ -86,16 +89,16 @@ describe('formatting refuses to invent a number', () => {
     expect(paceNote(1)).toContain('within')
   })
 
-  it('renders an unknown or already-past duration as a dash, not a negative', () => {
-    expect(formatDuration(null)).toBe('—')
-    expect(formatDuration(-60_000)).toBe('—')
-    expect(formatDuration(0)).toBe('—')
+  it('OMITS a projection that is absent or already past, rather than dashing it', () => {
+    const now = Date.now()
+    expect(formatProjection(null, now)).toBeNull()
+    expect(formatProjection(now - 60_000, now)).toBeNull()
   })
 
-  it('renders durations the way a person reads a clock', () => {
-    expect(formatDuration(9_000_000)).toBe('2h 30m')
-    expect(formatDuration(7_200_000)).toBe('2h')
-    expect(formatDuration(300_000)).toBe('5m')
+  it('renders a live projection the way a person reads a clock', () => {
+    const now = Date.now()
+    expect(formatProjection(now + 9_000_000, now)).toBe('2h 30m')
+    expect(formatProjection(now + 300_000, now)).toBe('5m')
   })
 
   it('clamps a percent into what a bar can draw', () => {
@@ -127,14 +130,27 @@ describe('decoding keeps "answered with nothing" apart from "could not ask"', ()
 
   it('nulls a window whose fraction is not a number, rather than coercing it', () => {
     const out = decodeDashboard({
-      pools: [{ pool: 'anthropic', measured_at: 1, session: { fraction: 'lots' }, weekly: null }],
-    })
-    expect(out).toEqual({
-      reachable: true,
       pools: [
-        { pool: 'anthropic', measured_at: 1, account_label: null, session: null, weekly: null },
+        {
+          pool: 'anthropic',
+          measured_at: 1,
+          accounts: [{ measured_at: 1, session: { fraction: 'lots' }, weekly: null }],
+        },
       ],
     })
+    expect(out.reachable).toBe(true)
+    if (!out.reachable) return
+    expect(out.pools[0]?.accounts[0]?.session).toBeNull()
+  })
+
+  it('decodes an unmodelled capacity state as UNKNOWN, never as available', () => {
+    // A payload this client cannot read must not become "push more work at it".
+    const out = decodeDashboard({
+      pools: [{ pool: 'kimi', accounts: [{ measured_at: 1, capacity: { state: 'soon' } }] }],
+    })
+    expect(out.reachable).toBe(true)
+    if (!out.reachable) return
+    expect(out.pools[0]?.accounts[0]?.capacity).toEqual({ state: 'unknown' })
   })
 })
 
@@ -196,32 +212,94 @@ async function mount(dashboard: () => Response): Promise<{
   return { container, root: root as unknown as { unmount: () => void } }
 }
 
-function pool(session: unknown, weekly: unknown, account_label: string | null = null): Response {
-  return json({
-    pools: [{ pool: 'anthropic', measured_at: 1_700_000_000_000, account_label, session, weekly }],
-  })
+
+// ── the payload builders ─────────────────────────────────────────────────────
+// Time-relative, because a countdown rendered against a hardcoded epoch is a test
+// that passes today and lies later.
+
+const NOW = Date.now()
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
+type Json = Record<string, unknown>
+
+function window_(over: Json = {}): Json {
+  return {
+    fraction: 0.75,
+    window_ms: 5 * HOUR,
+    reset_at: NOW + 2.5 * HOUR,
+    resets_in_ms: 2.5 * HOUR,
+    pace: 1.5,
+    exhausts_at: NOW + 50 * MINUTE,
+    floor: false,
+    ...over,
+  }
 }
 
-const SESSION_HOT = {
-  fraction: 0.75,
-  reset_at: 1_700_009_000_000,
-  resets_in_ms: 9_000_000,
-  pace: 1.5,
-  exhausts_at: Date.now() + 3_000_000,
+function account(over: Json = {}): Json {
+  return {
+    account_label: null,
+    measured_at: NOW,
+    age_ms: 0,
+    stale: false,
+    session: window_(),
+    weekly: window_({ window_ms: 7 * DAY, fraction: 0.5, pace: 1, exhausts_at: null }),
+    binding: 'session',
+    capacity: { state: 'available' },
+    ...over,
+  }
 }
+
+function poolOf(over: Json = {}): Json {
+  const accounts = (over['accounts'] as Json[] | undefined) ?? [account()]
+  return {
+    pool: 'anthropic',
+    connection: 'connected',
+    measured_at: NOW,
+    age_ms: 0,
+    capacity: {
+      available_now: accounts.length,
+      returning: 0,
+      unknown: 0,
+      next_account_label: (accounts[0]?.['account_label'] as string | null) ?? null,
+      next: { state: 'available' },
+      next_other_window: null,
+      next_other_fraction: null,
+    },
+    ...over,
+    accounts,
+  }
+}
+
+/** One pool, one account, with the session window overridden. */
+function pool(session: unknown, weekly: unknown, account_label: string | null = null): Response {
+  return json({ pools: [poolOf({ accounts: [account({ session, weekly, account_label })] })] })
+}
+
+const SESSION_HOT = window_()
 
 describe('the rendered usage card', () => {
   it('shows the percent, the pace and its reading for a measured window', async () => {
     const { container, root } = await mount(() => pool(SESSION_HOT, null))
-    expect(container.querySelector('[data-testid="usage-anthropic-session-pct"]')?.textContent).toBe(
-      '75%',
-    )
-    const paceCell = container.querySelector('[data-testid="usage-anthropic-session-pace"]')
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session-pct"]')?.textContent,
+    ).toBe('75%')
+    const paceCell = container.querySelector('[data-testid="usage-anthropic-acct-0-session-pace"]')
     expect(paceCell?.textContent).toContain('1.5×')
     expect(paceCell?.textContent).toContain('faster')
+    root.unmount()
+  })
+
+  it('labels the window from the LENGTH the provider reported', async () => {
+    // Not a hardcoded "5-hour window": Codex has already changed regime once, and a
+    // fixed label would name the wrong window with complete confidence.
+    const { container, root } = await mount(() =>
+      pool(window_({ window_ms: 10_080 * MINUTE }), null),
+    )
     expect(
-      container.querySelector('[data-testid="usage-anthropic-session-resets"]')?.textContent,
-    ).toBe('2h 30m')
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session"]')?.textContent,
+    ).toContain('7d window')
     root.unmount()
   })
 
@@ -229,11 +307,11 @@ describe('the rendered usage card', () => {
     // 0.75 is nominal, 0.9 is warning, 0.97 is critical — the same boundaries the
     // 2px divider meter uses, so the card and the hairline cannot disagree.
     const { container, root } = await mount(() =>
-      pool({ ...SESSION_HOT, fraction: 0.9, exhausts_at: null }, null),
+      pool(window_({ fraction: 0.9, exhausts_at: null }), null),
     )
     expect(
       container
-        .querySelector('[data-testid="usage-anthropic-session-fill"]')
+        .querySelector('[data-testid="usage-anthropic-acct-0-session-fill"]')
         ?.getAttribute('data-band'),
     ).toBe('warning')
     root.unmount()
@@ -243,26 +321,30 @@ describe('the rendered usage card', () => {
     // The common, good case. A permanently-present "Caps out in —" would read as a
     // failed computation and train the owner to ignore the row that matters.
     const { container, root } = await mount(() =>
-      pool({ ...SESSION_HOT, pace: 0.4, exhausts_at: null }, null),
+      pool(window_({ pace: 0.4, exhausts_at: null }), null),
     )
-    expect(container.querySelector('[data-testid="usage-anthropic-session-exhausts"]')).toBeNull()
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session-exhausts"]'),
+    ).toBeNull()
     expect(container.textContent).not.toContain('Caps out in')
     root.unmount()
   })
 
   it('SHOWS the projection row when the window is on track to run out', async () => {
+    // Pace and the countdown BOTH ship: this row answers "when do I hit the cap",
+    // the row above it answers "when does capacity come back".
     const { container, root } = await mount(() => pool(SESSION_HOT, null))
     expect(
-      container.querySelector('[data-testid="usage-anthropic-session-exhausts"]'),
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session-exhausts"]'),
     ).not.toBeNull()
     root.unmount()
   })
 
   it('renders a null pace as a dash with no reading beside it', async () => {
     const { container, root } = await mount(() =>
-      pool({ fraction: 0.2, reset_at: null, resets_in_ms: null, pace: null, exhausts_at: null }, null),
+      pool(window_({ pace: null, exhausts_at: null }), null),
     )
-    const paceCell = container.querySelector('[data-testid="usage-anthropic-session-pace"]')
+    const paceCell = container.querySelector('[data-testid="usage-anthropic-acct-0-session-pace"]')
     expect(paceCell?.textContent?.trim()).toBe('—')
     root.unmount()
   })
@@ -270,11 +352,13 @@ describe('the rendered usage card', () => {
   it('says a window was not reported rather than drawing an empty track', async () => {
     const { container, root } = await mount(() => pool(SESSION_HOT, null))
     expect(
-      container.querySelector('[data-testid="usage-anthropic-weekly-none"]')?.textContent,
+      container.querySelector('[data-testid="usage-anthropic-acct-0-weekly-none"]')?.textContent,
     ).toBe('not reported')
     // No bar at all for that window — an empty coloured track is the specific claim
     // "0% used", which nothing measured.
-    expect(container.querySelector('[data-testid="usage-anthropic-weekly-fill"]')).toBeNull()
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-weekly-fill"]'),
+    ).toBeNull()
     root.unmount()
   })
 
@@ -290,15 +374,196 @@ describe('the rendered usage card', () => {
   it('names the credential without guessing, and uses a real label when given one', async () => {
     const anon = await mount(() => pool(SESSION_HOT, null, null))
     expect(
-      anon.container.querySelector('[data-testid="usage-anthropic-account"]')?.textContent,
+      anon.container.querySelector('[data-testid="usage-anthropic-acct-0-name"]')?.textContent,
     ).toBe('active credential')
     anon.root.unmount()
 
     const named = await mount(() => pool(SESSION_HOT, null, 'acct-2'))
     expect(
-      named.container.querySelector('[data-testid="usage-anthropic-account"]')?.textContent,
+      named.container.querySelector('[data-testid="usage-anthropic-acct-0-name"]')?.textContent,
     ).toBe('acct-2')
     named.root.unmount()
+  })
+})
+
+describe('when capacity comes back — the line the owner reads first', () => {
+  it('says how many accounts are free right now', async () => {
+    const { container, root } = await mount(() => json({ pools: [poolOf()] }))
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-capacity"]')?.textContent,
+    ).toBe('1 available now')
+    root.unmount()
+  })
+
+  it('counts down to the BINDING window, and names what still constrains it', async () => {
+    // The defect in a bare countdown: the 5-hour window resets in 17 minutes, but
+    // the 7-day window is 97% spent, so almost nothing comes back at that reset. A
+    // line that said "next capacity in 17m" would be an instruction to push
+    // concurrency into a wall.
+    const cooling = account({
+      account_label: 'owner-a',
+      session: window_({ fraction: 0.98, reset_at: NOW + 17 * MINUTE }),
+      weekly: window_({ window_ms: 7 * DAY, fraction: 0.97, reset_at: NOW + 3 * DAY }),
+      binding: 'weekly',
+      capacity: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
+    })
+    const { container, root } = await mount(() =>
+      json({
+        pools: [
+          poolOf({
+            accounts: [cooling],
+            capacity: {
+              available_now: 0,
+              returning: 1,
+              unknown: 0,
+              next_account_label: 'owner-a',
+              next: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
+              next_other_window: 'session',
+              next_other_fraction: 0.98,
+            },
+          }),
+        ],
+      }),
+    )
+    const line = container.querySelector('[data-testid="usage-anthropic-capacity"]')?.textContent
+    expect(line).toContain('Next capacity in')
+    expect(line).toContain('7d window')
+    expect(line).toContain('5h window 98% used')
+    // And NOT the soonest reset, which is the mutant.
+    expect(line).not.toContain('17m')
+    root.unmount()
+  })
+
+  it('renders an ABSENT reset instant as "unknown" — never "now", never blank', async () => {
+    // THE MUTATION TEST. Turning a missing instant into availability is the failure
+    // that sends the owner to raise concurrency into a wall.
+    const unknown = account({
+      account_label: 'owner-a',
+      session: window_({ fraction: 0.99, reset_at: null, resets_in_ms: null, pace: null, exhausts_at: null }),
+      weekly: null,
+      binding: 'session',
+      capacity: { state: 'unknown' },
+    })
+    const { container, root } = await mount(() =>
+      json({
+        pools: [
+          poolOf({
+            accounts: [unknown],
+            capacity: {
+              available_now: 0,
+              returning: 0,
+              unknown: 1,
+              next_account_label: 'owner-a',
+              next: { state: 'unknown' },
+              next_other_window: null,
+              next_other_fraction: null,
+            },
+          }),
+        ],
+      }),
+    )
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session-resets"]')?.textContent,
+    ).toBe('unknown')
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-capacity"]')?.textContent,
+    ).toBe('capacity unknown')
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-capacity"]')?.textContent,
+    ).toContain('unknown')
+    expect(container.textContent).not.toContain('available now')
+    root.unmount()
+  })
+
+  it('an already-passed reset reads "available now" — the one case where now is true', async () => {
+    const { container, root } = await mount(() =>
+      pool(window_({ reset_at: NOW - MINUTE, exhausts_at: null, pace: null }), null),
+    )
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session-resets"]')?.textContent,
+    ).toBe('available now')
+    root.unmount()
+  })
+})
+
+describe('staleness is shown, never hidden', () => {
+  it('floors a stale reading with a ≥ and shows its age', async () => {
+    const stale = account({
+      account_label: 'owner-a',
+      age_ms: 3 * HOUR,
+      stale: true,
+      session: window_({ fraction: 0.43, floor: true, pace: null, exhausts_at: null }),
+      weekly: null,
+      capacity: { state: 'unknown' },
+    })
+    const { container, root } = await mount(() => json({ pools: [poolOf({ accounts: [stale] })] }))
+    // The last known value, marked as a lower bound — never blanked, never
+    // extrapolated, and never a zero.
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session-pct"]')?.textContent,
+    ).toBe('≥ 43%')
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-age"]')?.textContent,
+    ).toBe('3h 00m ago')
+    root.unmount()
+  })
+
+  it('a pool with no samples says WHY, and draws nothing', async () => {
+    // Codex until its harvest lands: "not connected" rather than a row of zeros,
+    // which would read as a connected account that has used nothing.
+    const { container, root } = await mount(() =>
+      json({
+        pools: [
+          {
+            pool: 'codex',
+            connection: 'not_connected',
+            measured_at: null,
+            age_ms: null,
+            accounts: [],
+            capacity: {
+              available_now: 0,
+              returning: 0,
+              unknown: 0,
+              next_account_label: null,
+              next: { state: 'unknown' },
+              next_other_window: null,
+              next_other_fraction: null,
+            },
+          },
+        ],
+      }),
+    )
+    expect(container.querySelector('[data-testid="usage-codex-empty"]')?.textContent).toBe(
+      'Not connected.',
+    )
+    expect(container.querySelector('[data-testid="usage-codex-acct-0-session-fill"]')).toBeNull()
+    // And no capacity line: there is no standing to report, so the card does not
+    // print one beside the sentence that explains the absence.
+    expect(container.querySelector('[data-testid="usage-codex-capacity"]')).toBeNull()
+    expect(container.querySelector('[data-testid="usage-codex-age"]')?.textContent).toBe(
+      'never measured',
+    )
+    root.unmount()
+  })
+
+  it('renders EVERY pool, each in its own card', async () => {
+    const { container, root } = await mount(() =>
+      json({
+        pools: [
+          poolOf(),
+          poolOf({ pool: 'kimi', accounts: [account({ account_label: null })] }),
+        ],
+      }),
+    )
+    expect(container.querySelector('[data-testid="usage-anthropic-title"]')?.textContent).toBe(
+      'Anthropic',
+    )
+    // The Kimi endpoint is account-wide, and the title says so rather than
+    // implying a per-key reading the provider does not offer.
+    expect(container.querySelector('[data-testid="usage-kimi-title"]')?.textContent).toBe(
+      'Kimi (account-wide)',
+    )
+    root.unmount()
   })
 })
 
@@ -309,9 +574,7 @@ describe('every class the card emits is actually styled', () => {
     // stylesheet the page actually serves.
     const css = await Bun.file(new URL('../../chat-react.html', import.meta.url)).text()
     const tsx = await Bun.file(new URL('../SettingsTab.tsx', import.meta.url)).text()
-    const emitted = new Set(
-      [...tsx.matchAll(/cset-usage-[a-z-]+/g)].map((m) => m[0]),
-    )
+    const emitted = new Set([...tsx.matchAll(/cset-usage-[a-z-]+/g)].map((m) => m[0]))
     // A positive control: if the scrape found nothing, the assertion below would
     // pass vacuously and prove the tool broken rather than the CSS present.
     expect(emitted.size).toBeGreaterThan(4)
