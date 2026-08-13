@@ -166,6 +166,51 @@ const framesOfType = (frames: Array<Record<string, unknown>>, type: string): Arr
   frames.filter((f) => f['type'] === type)
 
 describe('Open app-ws durable chat-log + typing (real instance)', () => {
+  test('connect-time typing is targeted, non-durable, and leaves the next turn usable', async () => {
+    harness = await startHarness()
+    const projectQuery = 'token=dev:owner&platform=web&device_id=devA&project_id=typing-project'
+    const first = await openSocket(harness.base, projectQuery)
+    await waitFor(() => framesOfType(first.frames, 'session_ready').length > 0)
+    // Negative case: a quiet topic does not manufacture typing on connect.
+    expect(framesOfType(first.frames, 'agent_typing')).toEqual([])
+
+    first.ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'long turn', client_msg_id: 'catchup-1' }))
+    await waitFor(() => framesOfType(first.frames, 'agent_typing').some((f) => f['state'] === 'start'))
+
+    const second = await openSocket(
+      harness.base,
+      'token=dev:owner&platform=web&device_id=devB&project_id=typing-project',
+    )
+    await waitFor(() => framesOfType(second.frames, 'agent_typing').some((f) => f['state'] === 'start'))
+    await waitFor(() => framesOfType(second.frames, 'agent_typing').some((f) => f['state'] === 'end'))
+
+    // Catch-up is not a refcount transition: after the real end, another real
+    // turn must still produce a new visible start on this same socket.
+    const startsBefore = framesOfType(second.frames, 'agent_typing').filter((f) => f['state'] === 'start').length
+    first.ws.send(JSON.stringify({ v: 1, type: 'user_message', body: 'next turn', client_msg_id: 'catchup-2' }))
+    await waitFor(
+      () => framesOfType(second.frames, 'agent_typing').filter((f) => f['state'] === 'start').length > startsBefore,
+    )
+    await waitFor(() => framesOfType(second.frames, 'agent_typing').filter((f) => f['state'] === 'end').length >= 2)
+
+    // Construct a positive replay, then prove the ephemeral frame is absent.
+    const replay = await openSocket(
+      harness.base,
+      'token=dev:owner&platform=web&device_id=devC&project_id=typing-project',
+    )
+    await waitFor(() => framesOfType(replay.frames, 'session_ready').length > 0)
+    replay.ws.send(JSON.stringify({ v: 1, type: 'resume', after_seq: 0 }))
+    await waitFor(() => framesOfType(replay.frames, 'agent_message').length > 0)
+    expect(framesOfType(replay.frames, 'agent_typing')).toEqual([])
+    const durableTyping = harness.db.raw()
+      .query("SELECT count(*) c FROM app_chat_messages WHERE topic_id = 'app:owner:typing-project' AND body LIKE '%agent_typing%'")
+      .get() as { c: number }
+    expect(durableTyping.c).toBe(0)
+
+    first.close(); second.close(); replay.close()
+    await sleep(50)
+  }, 30_000)
+
   test('#1/#4/#6 a real turn persists with seq, fans receipts + typing', async () => {
     harness = await startHarness()
     const sock = await openSocket(harness.base)

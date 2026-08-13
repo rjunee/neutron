@@ -99,6 +99,7 @@ import type { ProjectSettings } from '../../../lib/projects-client';
 import { useAuthSession } from '../../../lib/session';
 import { TabsClient, type TabDescriptor } from '../../../lib/tabs-client';
 import { useTranscriptWarming } from '../../../lib/chat-core/use-transcript-warming';
+import { ActivityInspectorOpenProvider } from '../../../lib/activity-inspector-opener';
 
 /**
  * How many rail projects get their tab set fetched ahead of the tap.
@@ -696,6 +697,12 @@ function ProjectShell({ project_id }: { project_id: string }) {
   );
 
   return (
+    <ActivityInspectorOpenProvider
+      onOpen={(scope) => {
+        setActivityScope(activityScopeKey(scope));
+        setActivityOpen(true);
+      }}
+    >
     <View style={styles.container}>
       <ProjectHeader
         name={scopeName}
@@ -789,6 +796,7 @@ function ProjectShell({ project_id }: { project_id: string }) {
         }}
       />
     </View>
+    </ActivityInspectorOpenProvider>
   );
 }
 

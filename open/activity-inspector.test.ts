@@ -19,6 +19,7 @@ import {
   ActivityInspector,
   activityRowFromSubstrateEvent,
   activityRowFromToolTap,
+  commandLabelForShellTool,
   BODY_MAX,
   humanizeToolName,
   DEAD_AFTER_MS,
@@ -384,6 +385,30 @@ describe('humanizeToolName — never render a transport id as the label', () => 
 })
 
 describe('activityRowFromToolTap — the Pre/PostToolUse hook rows', () => {
+  it('names the meaningful shell command, table-driven over real prefixes', () => {
+    const cases: Array<[string, string]> = [
+      ['FOO=bar BAZ=qux grep -R needle .', 'grep'],
+      ['cd /work/tree && bun test --watch=false', 'bun test'],
+      ['set -euo pipefail; git --no-pager rebase main', 'git rebase'],
+      ['grep --color=never needle file | head -20', 'grep'],
+      ['for f in *.ts; do rg --files "$f"; done', 'rg'],
+      ['while true; do npm run build --silent; done', 'npm run build'],
+      ['if bun test --coverage; then echo ok; fi', 'bun test'],
+      ['bash scripts/release/build.sh --fast', 'build.sh'],
+      ['git --no-pager rebase --onto main old', 'git rebase'],
+    ]
+    for (const [command, expected] of cases) {
+      expect(commandLabelForShellTool('Bash', command)).toBe(expected)
+      expect(commandLabelForShellTool('Bash', command)).not.toContain('--')
+    }
+  })
+
+  it('falls back to the shell tool when reduction would be a guess', () => {
+    expect(commandLabelForShellTool('Bash', 'case "$x" in a) run-a ;; b) run-b ;; esac')).toBeNull()
+    expect(
+      activityRowFromToolTap({ phase: 'pre', tool_name: 'Bash', detail: 'conditional', args: 'case "$x" in a) run-a ;; esac' })?.label,
+    ).toBe('Bash')
+  })
   it('maps pre → tool_start and post → tool_end', () => {
     // Both phases matter: a `pre` with no matching `post` for minutes IS the hang
     // signal, and neither the event stream nor a liveness pulse can express it.
