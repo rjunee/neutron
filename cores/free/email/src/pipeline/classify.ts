@@ -76,8 +76,15 @@ export const BODY_EXCERPT_LIMIT = 2000
  * there is no angle-bracket form.
  */
 export function bareAddress(from: string): string {
-  const match = /<([^>]*)>/.exec(from)
-  const raw = match?.[1] ?? from
+  // SCANNED, NOT MATCHED. The obvious `/<([^>]*)>/` is quadratic on input an
+  // attacker chooses: with no closing bracket the engine retries `[^>]*` from
+  // every `<` in the string, and a `From:` header is a stranger's text arriving
+  // on the poll path. Two index scans are linear and mean exactly the same
+  // thing — the first `<`, then the first `>` after it — including the fallback
+  // to the whole string when either is missing.
+  const open = from.indexOf('<')
+  const close = open === -1 ? -1 : from.indexOf('>', open + 1)
+  const raw = open !== -1 && close !== -1 ? from.slice(open + 1, close) : from
   return raw.trim().toLowerCase()
 }
 

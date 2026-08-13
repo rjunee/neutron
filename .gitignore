@@ -35,7 +35,6 @@ leak-gate-pii-denylist*
 .route-slot-inventory-main.*.ts
 
 # Runtime state for a locally-running instance (REPL registry, heartbeat,
-# restart markers). Machine-local and tenant-scoped — a committed
-# repl-registry.json carries the absolute tenant path, which the leak gate
-# correctly refuses.
+# restart markers). Machine-local: a committed repl-registry.json carries this
+# install's absolute data path, which the leak gate correctly refuses.
 .neutron/

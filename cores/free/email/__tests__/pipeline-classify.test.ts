@@ -59,6 +59,35 @@ describe('bareAddress', () => {
     )
     expect(bareAddress('person@sender.example.com')).toBe('person@sender.example.com')
   })
+
+  test('an unclosed bracket falls back to the whole string', () => {
+    expect(bareAddress('"Broken <person@sender.example.com')).toBe(
+      '"broken <person@sender.example.com',
+    )
+  })
+
+  test('a nested bracket keeps the first-open-to-first-close reading', () => {
+    // Pinned because the implementation moved off a regex: two index scans must
+    // mean exactly what `/<([^>]*)>/` meant, including this shape.
+    expect(bareAddress('a<b<c@example.com>')).toBe('b<c@example.com')
+  })
+
+  test('a hostile From header cannot make this quadratic', () => {
+    // The header is a STRANGER'S TEXT on the poll path. The regex form retried
+    // from every `<` when no closing bracket followed, so this input — 200k
+    // opening brackets and no close — took quadratic time; the scan form is
+    // linear. Bounded generously (a second) so the arm fails on the algorithm
+    // rather than on a slow CI box.
+    const hostile = `${'<='.repeat(200_000)}`
+    const started = Bun.nanoseconds()
+    expect(bareAddress(hostile)).toBe(hostile.toLowerCase())
+    // WALL-CLOCK-BOUND-OK: the defect IS the running time — a quadratic scan and
+    // a linear one return the identical string, so no logical clock, ordering or
+    // call-count can distinguish them. The bound is deliberately two orders of
+    // magnitude above the linear cost (microseconds) so it fails on the
+    // algorithm rather than on a loaded CI runner.
+    expect((Bun.nanoseconds() - started) / 1e9).toBeLessThan(1)
+  })
 })
 
 describe('classifyEmail — deterministic importance patterns', () => {
