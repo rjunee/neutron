@@ -68,6 +68,7 @@ import {
   poolTitle,
   windowName,
   type UsageDashboard,
+  type UsagePool,
   type UsageWindow,
 } from './usage-dashboard-client.ts'
 import {
@@ -1030,80 +1031,7 @@ export function SettingsTab({
           </div>
         ) : (
           usage.pools.map((pool) => (
-            <div className="cset-usage-pool" key={pool.pool} data-testid={`usage-${pool.pool}`}>
-              <div className="cset-usage-poolhead">
-                <p className="cset-label" data-testid={`usage-${pool.pool}-title`}>
-                  {poolTitle(pool.pool)}
-                </p>
-                {/* THE AGE IS ALWAYS SHOWN, not only when something is wrong: an
-                    age that appears only on failure is an age nobody learns to
-                    read, and staleness here is a value rather than an error. */}
-                <span className="cset-usage-age" data-testid={`usage-${pool.pool}-age`}>
-                  {formatAge(pool.age_ms)}
-                </span>
-              </div>
-              {/* THE LINE THE OWNER ASKED FOR, first in the card and above every
-                  bar: "how hard can I push this provider right now". It names the
-                  BINDING window, because a countdown to a 5-hour reset says
-                  nothing about capacity while the 7-day window is spent. */}
-              {capacityLine(pool, nowMs) !== null ? (
-                <p className="cset-usage-capacity" data-testid={`usage-${pool.pool}-capacity`}>
-                  {capacityLine(pool, nowMs)}
-                </p>
-              ) : null}
-              {connectionNote(pool) !== null ? (
-                // Three different fixes hide behind an empty card — connect an
-                // account, wait for a reading, or nothing at all — so the card says
-                // which, instead of drawing zeros.
-                <div className="cset-empty" data-testid={`usage-${pool.pool}-empty`}>
-                  {connectionNote(pool)}
-                </div>
-              ) : (
-                pool.accounts.map((account, i) => (
-                  <div
-                    className="cset-usage-account"
-                    key={account.account_label ?? `unlabelled-${i}`}
-                    data-testid={`usage-${pool.pool}-acct-${i}`}
-                  >
-                    <div className="cset-usage-accounthead">
-                      {/* NEVER a guessed account name. The credential is swapped by
-                          a process outside this box, so nothing here can know which
-                          account a reading belongs to unless something labels it. */}
-                      <span
-                        className="cset-label"
-                        data-testid={`usage-${pool.pool}-acct-${i}-name`}
-                      >
-                        {accountName(account.account_label)}
-                      </span>
-                      <span
-                        className="cset-usage-chip"
-                        data-testid={`usage-${pool.pool}-acct-${i}-capacity`}
-                      >
-                        {accountCapacityNote(account, nowMs)}
-                      </span>
-                      <span
-                        className="cset-usage-age"
-                        data-testid={`usage-${pool.pool}-acct-${i}-age`}
-                      >
-                        {formatAge(account.age_ms)}
-                      </span>
-                    </div>
-                    <UsageWindowRow
-                      windowKey="session"
-                      testid={`usage-${pool.pool}-acct-${i}-session`}
-                      win={account.session}
-                      now={nowMs}
-                    />
-                    <UsageWindowRow
-                      windowKey="weekly"
-                      testid={`usage-${pool.pool}-acct-${i}-weekly`}
-                      win={account.weekly}
-                      now={nowMs}
-                    />
-                  </div>
-                ))
-              )}
-            </div>
+            <UsagePoolCard key={pool.pool} pool={pool} now={nowMs} />
           ))
         )}
       </section>
@@ -1702,6 +1630,88 @@ function CredentialRow({
         </button>
       )}
     </li>
+  )
+}
+
+/**
+ * One provider's card: the capacity line first, then a chip per account.
+ *
+ * PER PROVIDER, IN ITS OWN UNIT, NEVER SUMMED. The providers meter different
+ * things, so a combined headline would be a number about nothing. The cards sit
+ * adjacently and each answers for itself.
+ */
+function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.JSX.Element {
+  const line = capacityLine(pool, now)
+  const note = connectionNote(pool)
+  return (
+    <div className="cset-usage-pool" data-testid={`usage-${pool.pool}`}>
+      <div className="cset-usage-poolhead">
+        <p className="cset-label" data-testid={`usage-${pool.pool}-title`}>
+          {poolTitle(pool.pool)}
+        </p>
+        {/* THE AGE IS ALWAYS SHOWN, not only when something is wrong: an age that
+            appears only on failure is an age nobody learns to read, and staleness
+            here is a value rather than an error state. */}
+        <span className="cset-usage-age" data-testid={`usage-${pool.pool}-age`}>
+          {formatAge(pool.age_ms)}
+        </span>
+      </div>
+      {/* THE LINE THE OWNER ASKED FOR, first in the card and above every bar: "how
+          hard can I push this provider right now". It names the BINDING window,
+          because a countdown to a 5-hour reset says nothing about capacity while
+          the 7-day window is spent. */}
+      {line !== null ? (
+        <p className="cset-usage-capacity" data-testid={`usage-${pool.pool}-capacity`}>
+          {line}
+        </p>
+      ) : null}
+      {note !== null ? (
+        // Three different fixes hide behind an empty card — connect an account,
+        // wait for a reading, or nothing at all — so the card says which, instead
+        // of drawing zeros.
+        <div className="cset-empty" data-testid={`usage-${pool.pool}-empty`}>
+          {note}
+        </div>
+      ) : (
+        pool.accounts.map((account, i) => (
+          <div
+            className="cset-usage-account"
+            key={account.account_label ?? `unlabelled-${i}`}
+            data-testid={`usage-${pool.pool}-acct-${i}`}
+          >
+            <div className="cset-usage-accounthead">
+              {/* NEVER a guessed account name. The credential is swapped by a
+                  process outside this box, so nothing here can know which account
+                  a reading belongs to unless something labels it. */}
+              <span className="cset-label" data-testid={`usage-${pool.pool}-acct-${i}-name`}>
+                {accountName(account.account_label)}
+              </span>
+              <span
+                className="cset-usage-chip"
+                data-testid={`usage-${pool.pool}-acct-${i}-capacity`}
+              >
+                {accountCapacityNote(account, now)}
+              </span>
+              <span className="cset-usage-age" data-testid={`usage-${pool.pool}-acct-${i}-age`}>
+                {formatAge(account.age_ms)}
+              </span>
+            </div>
+            <UsageWindowRow
+              windowKey="session"
+              testid={`usage-${pool.pool}-acct-${i}-session`}
+              win={account.session}
+              now={now}
+            />
+            <UsageWindowRow
+              windowKey="weekly"
+              testid={`usage-${pool.pool}-acct-${i}-weekly`}
+              win={account.weekly}
+              now={now}
+            />
+          </div>
+        ))
+      )}
+    </div>
   )
 }
 
