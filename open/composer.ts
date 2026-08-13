@@ -5846,17 +5846,35 @@ export function buildOpenGraphComposer(
                 fanWorkBoardChanged(run.project_slug)
                 emitProjectsChangedIfChanged(OWNER_USER_ID)
               },
-              // The CODEX_HOME the trident loop threads into the inner workflow's
-              // optional codex reviewer. Resolved PER RUN through the credential
-              // service (`resolveActiveCodexHome`: project override → global →
-              // unset, self-healing) so a connect made AFTER boot + any project
-              // override are honored via the #149 store resolver. Trident runs are
-              // instance-scoped by `project_slug` (no per-project id), so a run
-              // resolves the GLOBAL default; the resolver still prefers an override
-              // for any project id it is given. `codex_home` (static global dir)
-              // stays as the dev/legacy fallback (see build-core-modules).
+              // The CODEX_HOME the trident loop threads into the inner workflow —
+              // now the BUILD as well as the optional codex reviewer. Resolved PER
+              // RUN through the credential service (`resolveActiveCodexHome`:
+              // project override → global → unset, self-healing) so a connect made
+              // AFTER boot + any project override are honored via the #149 store
+              // resolver. `codex_home` (static global dir) is the fallback when the
+              // resolver has no per-run answer (see build-core-modules).
+              //
+              // THE TWO ARGUMENTS ARE NOT THE SAME THING, and conflating them took
+              // every build on the instance down (2026-08-13, run `03242fe5`). The
+              // credential is stored against the INSTANCE OWNER
+              // (`project_credentials.owner_slug`, `juno`-style, the boot-frozen
+              // handle aliased to `owner_handle` above); a `TridentRun`'s
+              // `project_slug` is the PROJECT the run belongs to (`neutron-open`).
+              // Passing the run's slug as the owner handle looked right — the name
+              // matches — and resolved a row that does not exist, so a connected,
+              // materialized credential returned null and the inner workflow got
+              // `CODEX_HOME=''`. `trident/codex-build.sh` then exits 10
+              // NOT_CONNECTED before writing a line of code. It went unnoticed
+              // because codex used to be review-only, where exit 10 degrades
+              // gracefully to a Claude-only panel; routing the BUILD through the
+              // same credential (#222) turned that silent degrade into a hard stop.
+              // So: owner handle FIRST, project id SECOND — which is also what
+              // makes a per-project override reachable at all.
               resolve_codex_home: (run) =>
-                codexCredentialService.resolveActiveCodexHome(asOwnerHandle(run.project_slug)),
+                codexCredentialService.resolveActiveCodexHome(
+                  asOwnerHandle(owner_handle),
+                  run.project_slug,
+                ),
               codex_home: codexHome,
               // KIMI K3 — the cross-model panelist from a DIFFERENT model family.
               // Read from the environment PER LAUNCH, not captured here: a key added

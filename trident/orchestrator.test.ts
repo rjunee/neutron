@@ -706,7 +706,15 @@ describe('orchestrator — CODEX_HOME resolution', () => {
     expect(h.inputs[0]?.codex_home).toBe('/static/global')
   })
 
-  test('a resolver returning null → codex not connected (null threaded)', async () => {
+  // WAS: "a resolver returning null → codex not connected (null threaded)", which
+  // asserted that a null from the resolver SHADOWED a configured static dir. That
+  // is the behaviour that took every build on an instance down on 2026-08-13 — a
+  // resolver miswired with the wrong lookup key returned null for a connected,
+  // materialized credential, and the correct static dir beside it was never
+  // consulted. The inner workflow got `CODEX_HOME=''` and `codex-build.sh` exited
+  // 10 NOT_CONNECTED before writing a line. The assertion is inverted on purpose:
+  // null from the resolver means "no per-run answer", not "no credential".
+  test('a resolver returning null falls back to the static codex_home', async () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
       codex_home: '/static/global',
@@ -714,7 +722,44 @@ describe('orchestrator — CODEX_HOME resolution', () => {
     })
     const run = await createRun({ project_slug: 't1' })
     await runToTerminal(h, run.id)
+    expect(h.inputs[0]?.codex_home).toBe('/static/global')
+  })
+
+  test('a null resolver AND no static dir → codex not connected (null threaded)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+      resolve_codex_home: () => null,
+    })
+    const run = await createRun({ project_slug: 't1' })
+    await runToTerminal(h, run.id)
+    // Genuinely unset — the graceful path stays graceful. Claude-only review, and
+    // a build routed to codex stops and says why rather than guessing a dir.
     expect(h.inputs[0]?.codex_home).toBeNull()
+  })
+
+  // THE DEFECT ITSELF (2026-08-13, run `03242fe5`). The credential is stored
+  // against the INSTANCE OWNER; a run's `project_slug` is the PROJECT it belongs
+  // to. Every prior test in this describe used `t1` for both, so the two were
+  // indistinguishable and the miswiring was invisible. Here they differ, which is
+  // the whole point: the resolver must be asked by OWNER handle, with the run's
+  // project as the override key.
+  test('the run project slug is NOT the owner handle — both reach the resolver, in order', async () => {
+    const OWNER = 'owner-handle'
+    const calls: Array<{ owner: string; project: string | undefined }> = []
+    // Stands in for `CodexCredentialService.resolveActiveCodexHome`: a global
+    // credential under OWNER, no per-project override.
+    const resolveActiveCodexHome = (owner: string, project?: string): string | null => {
+      calls.push({ owner, project })
+      return owner === OWNER ? '/materialized/global' : null
+    }
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 9, branch: 'feat-x' } }),
+      resolve_codex_home: (run) => resolveActiveCodexHome(OWNER, run.project_slug),
+    })
+    const run = await createRun({ project_slug: 'some-project' })
+    await runToTerminal(h, run.id)
+    expect(calls[0]).toEqual({ owner: OWNER, project: 'some-project' })
+    expect(h.inputs[0]?.codex_home).toBe('/materialized/global')
   })
 })
 

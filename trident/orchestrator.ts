@@ -97,20 +97,35 @@ export interface BuildTridentOrchestratorOptions {
   now?: () => string
   /** Override base-branch resolution (else detected/`main`). */
   base_branch?: string
-  /** Static Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
-   *  review, threaded into the inner workflow. Resolved from NEUTRON_CODEX_HOME
-   *  env / per-project config at wiring time. Undefined/null → codex "not
-   *  connected" → the review is Claude-only (never a merge blocker). Ignored when
-   *  `resolve_codex_home` is supplied. */
+  /** Static Codex credential dir (CODEX_HOME) threaded into the inner workflow —
+   *  the BUILD phase as well as the cross-model review. Resolved from
+   *  NEUTRON_CODEX_HOME env / per-project config at wiring time. Undefined/null →
+   *  codex "not connected". Used as the FALLBACK when `resolve_codex_home` is
+   *  supplied but returns null — see that field. */
   codex_home?: string | null
   /** Per-run CODEX_HOME resolver (preferred over `codex_home`). Called on every
-   *  tick with the launching run so the review resolves the credential through
-   *  the #149 store resolver (`CodexCredentialService.resolveActiveCodexHome`:
-   *  project override → global → unset) with self-healing materialization —
-   *  never a raw static path. Trident runs are instance-scoped by `project_slug`
-   *  (no per-project id), so a run resolves the GLOBAL default; the resolver
-   *  honors a project override wherever a real project id is supplied. Returns
-   *  null → codex not connected → Claude-only review. */
+   *  tick with the launching run so the credential resolves through the #149
+   *  store resolver (`CodexCredentialService.resolveActiveCodexHome`: project
+   *  override → global → unset) with self-healing materialization — never a raw
+   *  static path.
+   *
+   *  A NULL RESULT MEANS "NO PER-RUN ANSWER", NOT "NO CREDENTIAL EXISTS", so it
+   *  falls back to `codex_home` rather than shadowing it. It used to win
+   *  outright, and that cost the instance every build it tried to run on
+   *  2026-08-13: a resolver miswired with the wrong lookup key returned null for
+   *  a connected, materialized credential, and the correct static dir sitting
+   *  beside it was never consulted. The inner workflow got `CODEX_HOME=''` and
+   *  `trident/codex-build.sh` exited 10 NOT_CONNECTED before a line was written.
+   *  Two independent sources of the same answer are only worth having if the
+   *  second one is allowed to speak.
+   *
+   *  The fallback CANNOT resurrect a revoked credential:
+   *  `CodexCredentialService.disconnect` deletes the store row AND removes the
+   *  materialized `auth.json`, so after a disconnect the static dir has no
+   *  credential and the wrapper still exits 10 — correctly.
+   *
+   *  Both null → codex not connected → the review is Claude-only (never a merge
+   *  blocker), and a build routed to codex stops and says so. */
   resolve_codex_home?: (run: TridentRun) => string | null
   /**
    * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
@@ -400,11 +415,15 @@ export function buildTridentOrchestrator(
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
-      // Prefer the per-run resolver (store-backed, self-healing) over any static
-      // dir; either resolves the CODEX_HOME the inner review threads.
-      codex_home: opts.resolve_codex_home
-        ? opts.resolve_codex_home(launchRun)
-        : (opts.codex_home ?? null),
+      // Prefer the per-run resolver (store-backed, self-healing), and FALL BACK to
+      // the static dir when it has no answer — null from the resolver is "nothing
+      // per-run", not "nothing anywhere". See `resolve_codex_home` for what
+      // shadowing cost on 2026-08-13 and why the fallback cannot resurrect a
+      // revoked credential.
+      codex_home:
+        (opts.resolve_codex_home ? opts.resolve_codex_home(launchRun) : null) ??
+        opts.codex_home ??
+        null,
       // Whether the KIMI K3 cross-model panelist runs this launch. Resolved PER
       // LAUNCH (not captured at composition) for the same reason the codex home
       // is: a key added after boot must take effect on the next run, not the next
