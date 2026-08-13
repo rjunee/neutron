@@ -53,6 +53,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
+import { parsePhaseModelConfig } from './phase-models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { fileURLToPath } from 'node:url'
@@ -88,6 +89,22 @@ export interface InnerLoopInput {
    *  it into Forge ONLY, never argus:* (trust boundary — verified in `inner-workflow-assembly.test.ts`).
    *  Null/empty → a clean no-op (no block spliced), so a fresh instance is unchanged. */
   reflection_context?: string | null
+  /**
+   * OWNER PER-PHASE MODEL OVERRIDES — phase key → `{model?, effort?}`, as validated
+   * by `parsePhaseModelConfig` (`trident/phase-models.ts`). Threaded to the workflow
+   * so the owner can put a phase on a different model or raise its reasoning effort
+   * without a code change; the workflow's own table supplies every default.
+   *
+   * VALIDATED HERE TOO, not just at the write path. This is the last typed layer
+   * before the value becomes JSON in a launcher prompt, and a config that was written
+   * by an older/looser version of the settings surface must not reach the workflow —
+   * the workflow can only log-and-ignore, which the owner never sees. Invalid entries
+   * are dropped and the reason is returned by `buildWorkflowArgs`'s caller path.
+   *
+   * Absent/empty → omitted from the args entirely, so a run is byte-identical to one
+   * from before this existed.
+   */
+  phase_models?: Record<string, { model?: string; effort?: string }> | null
 }
 
 /**
@@ -121,6 +138,8 @@ export interface FireOutcome {
   status: 'fired' | 'failed'
   /** Non-null iff `failed`: a short audit reason. */
   error: string | null
+  /** Exact persistent-pool child which owns the detached workflow. */
+  launcher_session_key?: string
 }
 
 /** Input to one fire-and-settle launcher turn. */
@@ -172,6 +191,17 @@ export const DEFAULT_INNER_WORKFLOW_PATH = fileURLToPath(new URL('./inner-workfl
  *  retry under lock. Threaded via args (the workflow script has no module
  *  resolution and the TARGET repo need not contain trident/). */
 export const CHECKPOINT_SCRIPT_PATH = fileURLToPath(new URL('./checkpoint.sh', import.meta.url))
+
+/** The abs path of the sibling worktree-cleanup script (ISSUES #541). The
+ *  workflow's `finally{}` invokes it instead of asking a cheap-model agent to
+ *  `git worktree remove --force` + `git branch -D`: it PRESERVES a dirty
+ *  worktree (including untracked files) and exits 3 rather than destroying work
+ *  that exists nowhere else. Threaded via args for the same reason as
+ *  CHECKPOINT_SCRIPT_PATH (no module resolution; the TARGET repo need not
+ *  contain trident/). */
+export const WORKTREE_CLEANUP_SCRIPT_PATH = fileURLToPath(
+  new URL('./worktree-cleanup.sh', import.meta.url),
+)
 
 /**
  * The `--tools` surface the WARM fire substrate needs. Includes `Workflow` (the
@@ -227,6 +257,10 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // The checked-in checkpoint-writer the workflow's Bash steps invoke for
     // every code_trident_runs checkpoint/terminal-result UPDATE (P10).
     checkpointScript: CHECKPOINT_SCRIPT_PATH,
+    // The checked-in deterministic worktree cleanup the workflow's `finally{}`
+    // runs on every path — dirty worktrees are preserved, never force-removed
+    // (#541).
+    worktreeCleanupScript: WORKTREE_CLEANUP_SCRIPT_PATH,
     resumeCheckpoint: input.resume_checkpoint ?? null,
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
@@ -267,7 +301,29 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
       sonnet: SONNET_MODEL,
       fast: FAST_MODEL,
     },
+    // Per-phase overrides, re-validated at this boundary (see `phase_models`).
+    // OMITTED rather than sent as `{}` when there is nothing to override, so a run
+    // on an instance that has never touched the setting produces the same args it
+    // always did — a `phaseModels: {}` in the payload would be a diff with no
+    // behaviour, which is exactly the kind of noise that makes a payload hard to
+    // trust when something does go wrong.
+    ...phaseModelArgs(input.phase_models),
   }
+}
+
+/**
+ * Validate + shape the per-phase overrides for the workflow args.
+ *
+ * Returns `{}` (no key at all) when there is nothing valid to send. Rejected entries
+ * are dropped here rather than forwarded: the workflow can only log-and-continue, and
+ * a log line in a background run is not a channel the owner reads.
+ */
+function phaseModelArgs(
+  raw: Record<string, { model?: string; effort?: string }> | null | undefined,
+): { phaseModels?: Record<string, { model?: string; effort?: string }> } {
+  if (raw === null || raw === undefined) return {}
+  const { config } = parsePhaseModelConfig(raw)
+  return Object.keys(config).length > 0 ? { phaseModels: config } : {}
 }
 
 /**
@@ -439,7 +495,13 @@ export function buildSubstrateWorkflowFire(
         if (ev.kind === 'completion') {
           // The launching turn settled (Workflow fired + replied). The workflow
           // is now detached in the background; harvest its result from the DB.
-          return { status: 'fired', error: null }
+          return {
+            status: 'fired',
+            error: null,
+            ...(ev.launcher_session_key !== undefined
+              ? { launcher_session_key: ev.launcher_session_key }
+              : {}),
+          }
         }
         if (ev.kind === 'error') {
           fireAndForget('inner-loop.cancel', handle.cancel())

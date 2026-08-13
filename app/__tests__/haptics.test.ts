@@ -9,10 +9,18 @@
  * wrapper is fire-and-forget and swallows both rejections and synchronous throws.
  *
  * The KIND of feedback is also asserted, because it is a decision rather than a
- * detail: a rail tap gets the platform's "selection changed" tick (the lightest
- * thing either OS offers, and what the owner asked for — "very subtle"), while a
- * recording boundary gets a Light impact, since a selection tick is too faint to
+ * detail: a rail tap gets a sharp CLICK (owner, after feeling the first version:
+ * "more like a click than a buzz … our project switcher is a little more fuxxy"),
+ * while a recording boundary gets a Light impact, since a click is too faint to
  * confirm "the mic is live" without looking.
+ *
+ * ⚠️ NOTE ON WHY THIS FILE GREW A PLATFORM AXIS. The original project-switch test
+ * asserted `selectionAsync`. When the click landed it KEPT PASSING — because the
+ * stub module carried no `AndroidHaptics` and no `ImpactFeedbackStyle.Rigid`, so the
+ * new code fell through its degradation chain to `selectionAsync`, which is the
+ * FALLBACK and not the behaviour. A test passing via the fallback path covers
+ * nothing. So the stub is now per-platform and FULL, and the fallback keeps its own
+ * test, honestly labelled.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
@@ -26,6 +34,27 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 const selectionAsync = mock(async () => undefined);
 const impactAsync = mock(async (_style?: unknown) => undefined);
+const performAndroidHapticsAsync = mock(async (_effect?: unknown) => undefined);
+
+/**
+ * The platform is read through `require('react-native')` at CALL time, and in THIS
+ * file that specifier does not resolve at all (no device harness) — so it is steered
+ * through the module's own seam rather than by mutating a module that isn't there.
+ */
+function setPlatform(os: 'ios' | 'android' | 'web'): void {
+  __setPlatformForTests(os);
+}
+
+/** A module with EVERYTHING the click path needs — the real-device shape. */
+function fullModule() {
+  return {
+    selectionAsync,
+    impactAsync,
+    performAndroidHapticsAsync,
+    ImpactFeedbackStyle: { Light: 'light', Rigid: 'rigid' },
+    AndroidHaptics: { Context_Click: 'context-click' },
+  };
+}
 
 // NOT `mock.module`: bun's module mocks are process-wide and persist, and this
 // module is imported by the rail and the recorder — mocking the specifier leaked
@@ -33,6 +62,7 @@ const impactAsync = mock(async (_style?: unknown) => undefined);
 // isolation. The explicit seam is scoped to this file.
 import {
   __setHapticsModuleForTests,
+  __setPlatformForTests,
   hapticProjectSwitch,
   hapticRecordingStarted,
   hapticRecordingStopped,
@@ -41,26 +71,56 @@ import {
 beforeEach(() => {
   selectionAsync.mockClear();
   impactAsync.mockClear();
-  __setHapticsModuleForTests({
-    selectionAsync,
-    impactAsync,
-    ImpactFeedbackStyle: { Light: 'light' },
-  });
+  performAndroidHapticsAsync.mockClear();
+  __setHapticsModuleForTests(fullModule());
 });
 
 afterEach(() => {
-  // Restore the real module so nothing downstream inherits the stub.
+  // Restore the real module + real platform so nothing downstream inherits either.
   __setHapticsModuleForTests(undefined);
+  __setPlatformForTests(undefined);
 });
 
 describe('the haptic vocabulary', () => {
-  it('a project switch uses the SELECTION tick, not an impact', () => {
-    selectionAsync.mockClear();
-    impactAsync.mockClear();
+  it('on ANDROID a project switch is the platform CONTEXT_CLICK, not a vibration', async () => {
+    setPlatform('android');
     hapticProjectSwitch();
-    expect(selectionAsync).toHaveBeenCalledTimes(1);
-    // An impact here would be too much for something done dozens of times an hour.
+    await Promise.resolve();
+    expect(performAndroidHapticsAsync).toHaveBeenCalledTimes(1);
+    expect(performAndroidHapticsAsync.mock.calls[0]?.[0]).toBe('context-click');
+    // THE REGRESSION THIS NAMES: `selectionAsync` on Android is a short vibration —
+    // an attack and a decay, i.e. a buzz however short — which is exactly what the
+    // owner said felt fuzzy. Reaching it here would mean the click never landed.
+    expect(selectionAsync).not.toHaveBeenCalled();
     expect(impactAsync).not.toHaveBeenCalled();
+  });
+
+  it('on iOS a project switch is a RIGID impact — the crisp end of the scale', async () => {
+    setPlatform('ios');
+    hapticProjectSwitch();
+    await Promise.resolve();
+    expect(impactAsync).toHaveBeenCalledTimes(1);
+    // Light/Soft are deliberately cushioned; Rigid is the sharp one. Asserting the
+    // VALUE, because "an impact happened" is true of the fuzzy styles too.
+    expect(impactAsync.mock.calls[0]?.[0]).toBe('rigid');
+    expect(performAndroidHapticsAsync).not.toHaveBeenCalled();
+    expect(selectionAsync).not.toHaveBeenCalled();
+  });
+
+  it('DEGRADES to the selection tick on a module that has neither', async () => {
+    // An older expo-haptics, or a device whose HAL lacks the constant. A slightly
+    // different buzz beats no buzz — but this is the FALLBACK, and it is labelled as
+    // one so it can never again be mistaken for the intended behaviour.
+    setPlatform('android');
+    __setHapticsModuleForTests({
+      selectionAsync,
+      impactAsync,
+      ImpactFeedbackStyle: { Light: 'light' },
+    });
+    hapticProjectSwitch();
+    await Promise.resolve();
+    expect(selectionAsync).toHaveBeenCalledTimes(1);
+    expect(performAndroidHapticsAsync).not.toHaveBeenCalled();
   });
 
   it('recording start and stop use a LIGHT impact, not the selection tick', () => {

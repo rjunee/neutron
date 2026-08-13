@@ -17,6 +17,9 @@
 import { readPatternFromPrompts } from './boot-chat-command-filters.ts'
 import type { CoreBackendFactoryMap } from './cores/install-bundled.ts'
 import type { CoresBackendFactoriesOptions } from './boot-cores-factories-types.ts'
+import { routeCodegenCancel } from './codegen-cancel-router.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 
 // Re-export the Cores-factory type contracts through this module so
 // existing importers of `TasksCoreOwnerRegistry` / `CoresBackendFactoriesOptions`
@@ -29,6 +32,34 @@ export type {
 import { createLogger } from '@neutronai/logger'
 
 const moduleLog = createLogger('cores-factories')
+
+/**
+ * The terminator `codegen_cancel` routes a Trident run through.
+ *
+ * When a composer threaded one, use it — it carries the production observer chain
+ * (board reconcile, skill-forge, and the `projects_changed` fan) and is the whole
+ * point of the thread. When nothing threaded one, a bare terminator is the honest
+ * fallback: the phase still flips, which is better than a cancel that does
+ * nothing. But it is fabricated HERE and LOGGED, never conjured by a default
+ * parameter inside the router, because an observer-less terminator returns
+ * `cancelled: true` with half the effects missing and looks exactly like success.
+ * The `codegen_orchestrator_not_wired` warning below is the same idea and the same
+ * precedent.
+ */
+function codegenCancelTerminator(
+  projectDb: CoresBackendFactoriesOptions['projectDb'],
+  threaded: TridentTerminator | undefined,
+): TridentTerminator {
+  if (threaded !== undefined) return threaded
+  moduleLog.warn('codegen_cancel_terminator_unwired', {
+    detail:
+      'note: no composer threaded a `tridentTerminator`, so `codegen_cancel` will ' +
+      'flip a Trident run to `stopped` WITHOUT running the terminal observers — no ' +
+      'board reconcile, no skill-forge hook, no projects_changed fan. Expected in ' +
+      'tests and legacy boots; NOT expected in the Open composition.',
+  })
+  return buildTridentTerminator({ store: new TridentRunStore(projectDb) })
+}
 
 export async function buildCoresBackendFactories(
   opts: CoresBackendFactoriesOptions,
@@ -44,6 +75,7 @@ export async function buildCoresBackendFactories(
     pickNextLlmClient,
     researchProjectBackend,
     codegenOrchestrator: codegenOrchestratorFromOpts,
+    tridentTerminator,
     credentialResolver,
   } = opts
   const googleOAuthAccessToken = opts.googleOAuthAccessToken ?? null
@@ -298,7 +330,7 @@ export async function buildCoresBackendFactories(
         }),
       }
     },
-    codegen_core: async () => {
+    codegen_core: async ({ project_slug }) => {
       // S2 (2026-05-22) — when the production composer threads its
       // wiring-built orchestrator, reuse it so the Core's MCP tools
       // share the SAME runner + per-project sidecar resolver as the
@@ -306,7 +338,14 @@ export async function buildCoresBackendFactories(
       // fall back to a skeleton-runner orchestrator that fails
       // dispatches loudly + actionably — install_ok stays TRUE.
       if (codegenOrchestratorFromOpts !== undefined) {
-        return { orchestrator: codegenOrchestratorFromOpts }
+        return {
+          orchestrator: routeCodegenCancel(
+            codegenOrchestratorFromOpts,
+            new TridentRunStore(projectDb),
+            project_slug,
+            codegenCancelTerminator(projectDb, tridentTerminator),
+          ),
+        }
       }
       // Trident-port close-out (2026-06-24) — the codegen_core module now ONLY
       // backs the four legacy `codegen_*` MCP tools; `/code <task>` no longer
@@ -332,7 +371,14 @@ export async function buildCoresBackendFactories(
       })
       const mod = await import('@neutronai/codegen-core')
       const runner = mod.buildSkeletonCodegenRunner()
-      return { orchestrator: new mod.CodegenOrchestrator({ runner }) }
+      return {
+        orchestrator: routeCodegenCancel(
+          new mod.CodegenOrchestrator({ runner }),
+          new TridentRunStore(projectDb),
+          project_slug,
+          codegenCancelTerminator(projectDb, tridentTerminator),
+        ),
+      }
     },
     agent_settings: async () => {
       // Settings Core (2026-06-03) — the six "tweak later" tools.

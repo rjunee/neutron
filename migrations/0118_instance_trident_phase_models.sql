@@ -1,0 +1,36 @@
+-- 0118_instance_trident_phase_models.sql
+--
+-- The per-phase model/effort overrides get somewhere to live.
+--
+-- BACKGROUND. `trident/phase-models.ts` defines the owner-facing phase vocabulary
+-- and its validation, `trident/inner-loop.ts` accepts a `phase_models` input and
+-- threads it to the workflow, and the workflow applies it over its own routing
+-- table. Every part of that chain works — and **nothing ever supplies a value**:
+-- the orchestrator does not pass `phase_models` when it fires a workflow, and no
+-- surface writes one. A complete seam with no producer, which is the same
+-- built-but-never-connected shape this repo keeps hitting, caught here by an
+-- independent design review rather than by a test.
+--
+-- WHY `instance_metadata` AND NOT A NEW TABLE. That table is the documented home
+-- for instance-level settings, explicitly designed for exactly this — its own
+-- docblock says "future instance-level fields land as additive columns on the
+-- same row", and `transcription_backend` (migration 0111) is the precedent. The
+-- config is INSTANCE-level rather than per-project: which model runs a build is a
+-- property of the owner's quota and subscriptions, not of the thing being built.
+--
+-- WHY A JSON COLUMN AND NOT A ROW PER PHASE. The value is read whole, written
+-- whole, and validated whole — `parsePhaseModelConfig` rejects the entire write
+-- when any entry is bad, deliberately, so a partially-applied model config can
+-- never leave the owner believing a phase is pinned when it is not. A table would
+-- invite per-row writes and lose that property. Nothing queries INTO the config.
+--
+-- THE COLUMN IS NOT AUTHORITATIVE ON READ. Whatever is stored here is re-validated
+-- through `parsePhaseModelConfig` on the way out, so a row written by an older or
+-- looser build cannot reach the workflow — where the only available response is to
+-- log and continue, which is a channel nobody reads.
+--
+-- NULL / absent ⇒ every phase keeps its default and the workflow argument is
+-- omitted entirely, so an instance that never touches the setting produces
+-- byte-identical runs.
+
+ALTER TABLE instance_metadata ADD COLUMN trident_phase_models TEXT;

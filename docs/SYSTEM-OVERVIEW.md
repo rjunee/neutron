@@ -2751,6 +2751,55 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
 
+### Connect GitHub — the device flow, and the control that finally starts it (#551)
+
+A build pushes a branch and opens a pull request with the OWNER's GitHub token.
+The whole chain for obtaining one has been merged and composed for months —
+`github/device-flow.ts` (protocol), `github/connect.ts` (order),
+`github/credential.ts` (storage), `trident/git-mode.ts` (hands it to every host
+command), and `gateway/http/github-connect-surface.ts` behind route slot
+`app_github_connect_surface` → `/api/app/github-auth`. **No client on any surface
+called it.** The backend tests passed, the route resolved, and a
+composition-coverage test asserted the slot was mounted; none of them asked
+whether a human could start the flow. So the only path to a token was a shell on
+the machine, which is what the agent recommended when a push failed — see
+`MISSING_CREDENTIAL_DOCTRINE` above, the other half of the same fix.
+
+- **The surface (unchanged).** `GET` reports `connected` |
+  `awaiting_owner` (with `user_code`, `verification_uri`, `expires_in_seconds`) |
+  `not_connected`. `POST` starts a flow and answers IMMEDIATELY with the code,
+  polling GitHub in the background — a device flow cannot complete inside a
+  request. It is idempotent: a second `POST` while one is live returns the SAME
+  code rather than minting a rival the server has stopped polling. The
+  `device_code` never leaves that module (it is the bearer half of the exchange),
+  and neither does the token.
+- **Why the UI is NOT the Google rows.** Those drive an OAuth REDIRECT. This is a
+  DEVICE flow, so the screen is built around the CODE: Connect POSTs to start,
+  the `user_code` is displayed large and monospaced, Copy puts it on the
+  clipboard in one press, the `verification_uri` is a real link, and the client
+  POLLS the status route (5s, GitHub's own floor) until it answers `connected`
+  and re-renders. Typing that code into another device IS the interaction. The
+  poll runs ONLY while a code is on screen — `not_connected` never spins one — it
+  is torn down the moment the flow settles, and a poll that fails to reach the
+  server leaves the code where it is rather than reporting a disconnection the
+  owner did not experience.
+- **Both surfaces.** Web `landing/chat-react/IntegrationsTab.tsx` § GitHub over
+  `landing/chat-react/github-connect-client.ts`, rendered OUTSIDE the
+  `/api/cores/integrations` load so a blocked owner's control never waits on an
+  unrelated round trip. Mobile `app/app/integrations.tsx` § GitHub over
+  `app/lib/github-connect-client.ts`, which additionally re-reads status when the
+  app returns to the foreground (the owner taps "Open GitHub", approves, comes
+  back). No feature flag; single code path, on by default.
+- **How it is gated.** Two seams, deliberately. The web reachability gate carries
+  a `github-connect` affordance probed at EVERY layout after walking the real
+  path to Admin (header menu → Admin), so the control cannot silently leave one
+  width. Alongside it, `landing/chat-react/__tests__/github-connect-reachable.test.tsx`
+  and `app/__tests__/github-connect-reachable.test.tsx` PRESS the control and
+  assert the wire: the POST leaves, the code renders, Copy reaches the clipboard,
+  the link opens, the poll flips to connected and then stops, a dropped poll does
+  not blank a flow that is working, and the `device_code` is not rendered even
+  when a response carries one.
+
 ## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 
 A voice note is transcribed at upload-complete time and the transcript is
@@ -5199,12 +5248,45 @@ deleted, no dual path):
   the dedicated warm `cc-trident-fire-*` substrate (one warm pool entry per repo
   cwd, since the persistent pool keys on instance not cwd, and the workflow's
   `isolation:'worktree'` forks from the fire turn's git cwd).
-- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` scans `git
-  worktree list` for the deterministic `trident/<slug>` branch and removes it on
-  every path (independent of Forge's return value — the harness only auto-cleans
-  an UNCHANGED worktree, and a Forge build always commits). `merge.ts` adds the
-  OUTER backstop (best-effort `git worktree remove --force` + `prune` after a
-  landed merge), flipping the old "NO `git worktree remove`" lock.
+- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` runs the
+  checked-in `trident/worktree-cleanup.sh` against the deterministic
+  `trident/<slug>` branch on every path (independent of Forge's return value —
+  the harness only auto-cleans an UNCHANGED worktree, and a Forge build always
+  commits). `merge.ts` adds the OUTER backstop (best-effort `git worktree remove`
+  + `prune` after a landed merge), flipping the old "NO `git worktree remove`"
+  lock.
+- **…but cleanup is NEVER destructive (ISSUES #541):** that `finally{}` also
+  fires on THROW and ABORT — exactly when Forge died mid-edit — and it used to be
+  a cheap-model agent told to "ignore individual command failures" while running
+  `git worktree remove --force` + `git branch -D`. On PR #171 it destroyed 197
+  insertions across 7 files. The decision is now deterministic shell with no LLM
+  judgement in it: a worktree that is DIRTY (uncommitted changes **including
+  untracked files**) or unverifiable is PRESERVED, its paths printed, exit 3; a
+  clean one is removed with a plain `git worktree remove` (no `--force`, so git's
+  own dirty check is a second gate); the pr-mode `git branch -D` runs only once
+  `git ls-remote` proves origin holds the same sha (local mode never deletes it).
+  `merge.ts` applies the same gate to every worktree removal it does, and fails
+  the merge with "trident PRESERVED uncommitted work at `<path>`" rather than
+  letting git's raw "already checked out at `<path>`" be the operator's notice.
+  Preserve-by-default only works if it never cries wolf, so: git's stderr is kept
+  out of both probes (a warning on a clean tree is not a dirty path), the SHARED
+  CHECKOUT is skipped entirely (git refuses to remove a main working tree, and
+  `merge.ts` legitimately parks it on a feature branch — a branch it still holds
+  is reported `KEPT … reason=checked-out` at exit 0), the dirt probe requires
+  `rev-parse --show-toplevel` to name the path itself **in both copies** (else a
+  registered path that has stopped being a worktree root reports the enclosing
+  repo's dirt as its own; the shell says `SKIPPED … reason=not-a-worktree-root`),
+  and **only exit 3** means preserved work — 2 is a usage error, 127 a bad script
+  path, and the caller reports those as a cleanup FAILURE that inspected nothing.
+  The gate also cannot break itself: the script's output is capped (a 20k-line
+  dirty tree would push the `RESULT` line out of the transcribing agent's window
+  and invert the alarm), the exit code is read from two sources so a string `"3"`
+  or a dropped field still counts, and the lone network call (`ls-remote`) runs
+  with `GIT_TERMINAL_PROMPT=0` plus a `timeout` deadline so a black-holed origin
+  cannot hang a `finally{}` nobody is watching. A preserved DIRTY merge worktree
+  does wedge every retry — the path is run-keyed and stable — which is the
+  deliberate trade: a wedged merge is recoverable, a force-removed conflict
+  resolution is not, and the error names the path and the way out.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
@@ -5286,7 +5368,7 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   (`trident/state-machine.ts`): the phase graph
   `forge-init → {argus | ralph-plan} → ralph-task → … → argus ⇄ forge-fix
   → done` with terminal `done | failed | stopped`, the Argus round cap
-  (`max_rounds`, default 8) and the Ralph plan↔task round cap
+  (`max_rounds`, default 10) and the Ralph plan↔task round cap
   (`max_ralph_rounds`, default 20). The pure `computeTransition` owns the
   control flow; `deps.classify` reads the sub-agent outcome. PR-2 shipped
   `stubAdvanceDeps` (always "running"); PR-3 supersedes it with a real
@@ -5325,8 +5407,12 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   atlas/sentinel SYSTEM personas (`prompts/{atlas,sentinel}.md` via
   `@neutronai/prompts` `loadPrompt`, `trident/agent-prompts.ts` → `dispatchAgent`).
   `trident/merge.ts` fills the
-  `'pr'` (`gh pr merge --squash`) and `'local'` (`git merge --no-ff`) merge
-  bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
+  `'pr'` (`gh pr merge --squash --match-head-commit <reviewed OID>` — #545: the
+  merge is PINNED to the commit the reviewed diff was generated from — the
+  building agent's reported `commitSha`, never a fresh head probe — carried in
+  `inner_result.reviewedHead`, so a head that moved after the APPROVE fails
+  LOUDLY instead of shipping unreviewed code) and
+  `'local'` (`git merge --no-ff`) merge bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
   tested the legacy harness fixes are mapped (see `trident/legacy-fixes.test.ts`): no
   phantom-id poll, no silent exit, loud fail on a missing Ralph
   `REMAINING_TASKS`, the `max_rounds`/`max_ralph_rounds` caps, the
@@ -6463,6 +6549,19 @@ the user text). Layer order, top to bottom:
    craft, lighter reframes). It is a FLOOR, not a ceiling — the fragment defers to
    any sharper rule the owner's SOUL states. Spliced into both the assembled path
    and the degraded fallback, so the floor never depends on `assembleSystemPrompt`.
+   Two named rules ride alongside the numbered principles:
+   `BUILD_ROUTING_DOCTRINE` (self-route simple↔inline / complex↔trident) and
+   **`MISSING_CREDENTIAL_DOCTRINE` (#552)** — when a capability is blocked by a
+   missing credential, NAME the in-product surface the owner can reach to supply
+   it (the Integrations surface), and never answer with a shell command as the
+   remedy, because the owner cannot be assumed to have a terminal on the machine
+   the agent runs on. It names GitHub concretely, because the failure that
+   produced the rule was a `git push` / PR creation dying for want of a token
+   while the agent recommended `gh auth login`. Phrased UNCONDITIONALLY — there
+   is no branch on deployment shape, since naming the surface is the right answer
+   either way and a branch is only something for the model to get wrong. Asserted
+   against the COMPOSED prompt (`build-live-agent-turn.test.ts`), not only against
+   the module: a rule nothing splices in is the same defect one layer up.
 3. `<project_persona>` — WAVE 2 Track A: a project topic's own `projects.persona`
    voice, refining the register for that project (never for General).
 4. `<live_agent_context>` — the this-turn scope block + a `<recent_conversation>`
@@ -6937,7 +7036,15 @@ and proves each one against the real thing, in the owner's language.
   with the real controller, chat session, tab resolver and usage client; fake
   socket, injected fetch, no model) at **every layout the product ships** (narrow
   390px, wide 1440px) and probes each affordance: compose, send, send-becomes-
-  usable-once-typed, attach, project rail, tabs, usage meter, theme control.
+  usable-once-typed, attach, project rail, tabs, usage meter, theme control,
+  Connect GitHub. The last one added a third probe PHASE (`inAdmin`): the things
+  you ADJUST live behind the header menu rather than in the tab band
+  (`ProjectShell`'s `MENU_TARGETS`), so the probe walks the owner's real path —
+  open the menu, choose Admin — before looking, and those two steps are part of
+  what is being asserted. It joined because #551 was the purest example of the
+  class this gate exists for: a complete, tested, mounted GitHub device-flow
+  backend that no client called, so the owner could not start it and the agent
+  told him to use a terminal he does not have.
 - **`open/__tests__/reachability-inventory.ts` + `reachability.test.ts`** — boots
   the REAL Open composition over a live `Bun.serve`, opens the unified
   `/ws/app/chat` socket and TYPES each declared command with a mocked substrate.
@@ -7014,6 +7121,16 @@ and proves each one against the real thing, in the owner's language.
   ship the way `onVoiceTap` did. (2) Every width branch in the app must be
   `Platform.OS === 'web'`-gated, or recorded with a reason; see the parity note
   below for why that matters.
+
+- **The press-the-control files, for surfaces outside the two shells.** The
+  inventories probe the CHAT shells; a screen reached by its own route gets a
+  dedicated file that presses instead — `app/__tests__/model-providers-reachable.test.tsx`
+  (Codex, Kimi) and, for GitHub, the pair
+  `landing/chat-react/__tests__/github-connect-reachable.test.tsx` +
+  `app/__tests__/github-connect-reachable.test.tsx`. Same rule as the mobile
+  inventory: find the control, press it, and demand an effect a missing handler
+  cannot fake — a POST on the wire, a code on screen, a clipboard write, a URL
+  handed to `Linking`, a poll that flips the screen to connected and then stops.
 
 **Two design rules it is built on.**
 

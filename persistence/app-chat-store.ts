@@ -40,6 +40,15 @@ export interface AppChatRow {
    * messages.
    */
   meta: Readonly<Record<string, unknown>> | null
+  /**
+   * Auto-transcript of an audio attachment on this message, or null.
+   *
+   * Persisted so it survives the DEVICE. A voice note's body is deliberately empty
+   * (the bubble renders a player), so without this column `replayAfter` would hand a
+   * fresh device the audio and none of the words — searchable on whichever phone did
+   * the upload and nowhere else. Never rendered in place of the body.
+   */
+  transcript: string | null
   created_at: number
 }
 
@@ -54,6 +63,8 @@ export interface AppChatAppendInput {
   attachments?: ReadonlyArray<string> | null
   /** W3a — structured agent-message metadata; see {@link AppChatRow.meta}. */
   meta?: Readonly<Record<string, unknown>> | null
+  /** Auto-transcript of an audio attachment; see {@link AppChatRow.transcript}. */
+  transcript?: string | null
   created_at: number
 }
 
@@ -145,11 +156,12 @@ interface MessageRow {
   project_id: string | null
   attachments_json: string | null
   meta_json: string | null
+  transcript: string | null
   created_at: number
 }
 
 const MESSAGE_COLUMNS = `topic_id, seq, message_id, role, body, client_msg_id, project_id,
-                    attachments_json, meta_json, created_at`
+                    attachments_json, meta_json, transcript, created_at`
 
 export interface AppChatStoreOptions {
   db: ProjectDb
@@ -178,6 +190,11 @@ export class AppChatStore implements AppChatMessageLog {
     const meta = input.meta ?? null
     const meta_json =
       meta !== null && Object.keys(meta).length > 0 ? JSON.stringify(meta) : null
+    // Whitespace-only counts as ABSENT. An empty transcript stored as '' would be
+    // indistinguishable from "transcribed to nothing" downstream, and the ASR does
+    // return an empty result for silence.
+    const rawTranscript = typeof input.transcript === 'string' ? input.transcript.trim() : ''
+    const transcript = rawTranscript.length > 0 ? rawTranscript : null
 
     return this.core.transaction<AppChatAppendResult>((tx) => {
       // Idempotency: a re-sent user message (offline-queue flush, double-tap,
@@ -194,8 +211,8 @@ export class AppChatStore implements AppChatMessageLog {
       tx.runSync(
         `INSERT INTO app_chat_messages
            (topic_id, seq, message_id, role, body, client_msg_id, project_id,
-            attachments_json, meta_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            attachments_json, meta_json, created_at, transcript)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.topic_id,
           seq,
@@ -207,6 +224,7 @@ export class AppChatStore implements AppChatMessageLog {
           attachments_json,
           meta_json,
           input.created_at,
+          transcript,
         ],
       )
 
@@ -220,6 +238,7 @@ export class AppChatStore implements AppChatMessageLog {
         project_id,
         attachments: input.attachments !== undefined ? (input.attachments ?? null) : null,
         meta: meta_json !== null ? meta : null,
+        transcript,
         created_at: input.created_at,
       }
       return { row, was_new: true }
@@ -326,6 +345,7 @@ function rowFrom(r: MessageRow): AppChatRow {
     project_id: r.project_id,
     attachments,
     meta,
+    transcript: r.transcript,
     created_at: r.created_at,
   }
 }

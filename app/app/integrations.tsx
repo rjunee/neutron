@@ -9,6 +9,12 @@
  *     in webviews); Disconnect revokes + deletes the tokens.
  *   - Standalone API keys — per-Core `byo_api_key` slots (e.g. Research
  *     Core's Tavily). Paste a key to store it; Clear removes it.
+ *   - GitHub (#551) — the credential a build needs to push a branch and open a
+ *     pull request. A DEVICE flow, not a redirect and not a paste box: Connect
+ *     asks the gateway for a short code, the code is shown here to be read and
+ *     typed at GitHub on whatever device has a keyboard, and the screen polls
+ *     until the token lands. The whole backend shipped with no client calling
+ *     it on any surface, so this flow could not be started by a human at all.
  *   - Shared credentials — the free-form credential store's GLOBAL defaults:
  *     services the owner names themselves, available to every project. This is
  *     the ONE place they are authored (ISSUES #486). A project's Settings tab
@@ -31,6 +37,7 @@ import {
   AppState,
   type AppStateStatus,
   Linking,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -41,7 +48,22 @@ import {
 
 import { appStateBecameActive } from '../lib/app-state-refetch';
 import { shouldRedirectToLogin } from '../lib/auth-helpers';
+import { CodexCredentialClient, type CodexStatus } from '../lib/codex-credential-client';
+
+/**
+ * The credential-store service id the trident review lane looks a Kimi key up
+ * under. It MUST match `trident/kimi-key.ts`'s `KIMI_CREDENTIAL_SERVICE`, and the
+ * literal is repeated rather than imported because the app bundle is deliberately
+ * free of workspace dependencies (the same convention every client here follows).
+ * A mismatch would store the key where nothing reads it — the row would look like
+ * it worked and the reviewer would stay silent, which is the worst outcome a
+ * settings control can have.
+ */
+const KIMI_SERVICE = 'kimi';
+
+import { copyToClipboard } from '../lib/clipboard';
 import { loadAppConfig } from '../lib/config';
+import { GitHubConnectClient, type GitHubConnectState } from '../lib/github-connect-client';
 import { useAuthSession } from '../lib/session';
 import { THEME } from '../lib/theme';
 import {
@@ -58,6 +80,13 @@ import {
   type IntegrationRow,
 } from '../lib/integrations-view';
 
+/**
+ * How often the screen re-reads the GitHub device-flow status while a code is on
+ * screen. GitHub's own device-flow guidance treats 5s as the floor; polling
+ * faster earns a `slow_down`.
+ */
+const GITHUB_POLL_MS = 5_000;
+
 export default function IntegrationsScreen() {
   const router = useRouter();
   const { user, status } = useAuthSession();
@@ -73,6 +102,16 @@ export default function IntegrationsScreen() {
     return new ProjectCredentialsClient({ base_url: config.base_url, token: user.token });
   }, [user, config.base_url]);
 
+  const codexClient = useMemo(() => {
+    if (user === null) return null;
+    return new CodexCredentialClient({ base_url: config.base_url, token: user.token });
+  }, [user, config.base_url]);
+
+  const githubClient = useMemo(() => {
+    if (user === null) return null;
+    return new GitHubConnectClient({ base_url: config.base_url, token: user.token });
+  }, [user, config.base_url]);
+
   const [data, setData] = useState<IntegrationsResponse | null>(null);
   // ── Shared (global-scope) credentials ──
   const [sharedCreds, setSharedCreds] = useState<ProjectCredentialRecord[]>([]);
@@ -82,6 +121,17 @@ export default function IntegrationsScreen() {
   const [credBusy, setCredBusy] = useState(false);
   const [credError, setCredError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // ── Model providers (Codex subscription + Kimi K3 key) ──
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [codexAuth, setCodexAuth] = useState('');
+  const [codexBusy, setCodexBusy] = useState(false);
+  const [codexError, setCodexError] = useState<string | null>(null);
+  const [kimiKey, setKimiKey] = useState('');
+  // ── GitHub (device flow — code here, typed wherever there is a keyboard) ──
+  const [github, setGithub] = useState<GitHubConnectState | null>(null);
+  const [githubBusy, setGithubBusy] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
+  const [githubCopied, setGithubCopied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,10 +171,173 @@ export default function IntegrationsScreen() {
     }
   }, [credsClient]);
 
+  // ── Codex: the cross-model reviewer's ChatGPT subscription ──
+  const fetchCodex = useCallback(async () => {
+    if (codexClient === null) return;
+    try {
+      setCodexStatus(await codexClient.status());
+    } catch {
+      // A failed status read is "not connected" for display purposes. It is NOT
+      // written anywhere and nothing is disconnected — an unreachable server must
+      // never look like a credential the owner has to re-enter.
+      setCodexStatus({ status: 'not_connected' });
+    }
+  }, [codexClient]);
+
+  // ── GitHub: the token a build pushes and opens pull requests with ──
+  const fetchGitHub = useCallback(async () => {
+    if (githubClient === null) return;
+    try {
+      setGithub(await githubClient.status());
+    } catch {
+      // Same rule as Codex: an unreachable server reads as "not connected" and
+      // writes nothing. It must never look like a credential to supply again.
+      //
+      // EXCEPT while a code is on screen. A dropped POLL is not a failed flow:
+      // the owner is mid-flow at GitHub on another device, and blanking the
+      // state on one flaky read would take the code away AND tear down the very
+      // poll that was about to see the approval. So `awaiting_owner` survives a
+      // failed read and only a successful one can leave it — the same rule the
+      // web sibling follows in `IntegrationsTab.tsx`.
+      setGithub((prev) =>
+        prev !== null && prev.status === 'awaiting_owner' ? prev : { status: 'not_connected' },
+      );
+    }
+  }, [githubClient]);
+
   useEffect(() => {
     void fetchAll();
     void fetchSharedCreds();
-  }, [fetchAll, fetchSharedCreds]);
+    void fetchCodex();
+    void fetchGitHub();
+  }, [fetchAll, fetchSharedCreds, fetchCodex, fetchGitHub]);
+
+  /**
+   * Poll while a code is on screen — the half that makes this a flow rather than
+   * a wall of instructions. The owner approves at GitHub, usually on another
+   * device, and nothing tells this screen; without the poll the connected state
+   * would arrive only on a manual reload, which reads as "I did what you said
+   * and nothing happened".
+   *
+   * Keyed on the STATUS, not the state object: every poll returns a fresh
+   * `awaiting_owner` (its `expires_in_seconds` ticks down), and depending on the
+   * object would tear the timer down and re-arm it on every tick.
+   */
+  const githubStatus = github?.status ?? null;
+  useEffect(() => {
+    if (githubStatus !== 'awaiting_owner') return;
+    const id = setInterval(() => {
+      void fetchGitHub();
+    }, GITHUB_POLL_MS);
+    return () => clearInterval(id);
+  }, [githubStatus, fetchGitHub]);
+
+  const handleConnectGitHub = useCallback(async () => {
+    if (githubClient === null || githubBusy) return;
+    setGithubBusy(true);
+    setGithubError(null);
+    setGithubCopied(false);
+    try {
+      setGithub(await githubClient.start());
+    } catch (err) {
+      // Shown verbatim: "no client id is configured" and "GitHub refused the
+      // request" need different things from the owner.
+      setGithubError(formatErr(err));
+    } finally {
+      setGithubBusy(false);
+    }
+  }, [githubClient, githubBusy]);
+
+  const handleCopyGitHubCode = useCallback(async (code: string) => {
+    // Best-effort by design (`lib/clipboard.ts`): where there is no programmatic
+    // clipboard the code is still selectable text, so long-press → copy works.
+    const ok = await copyToClipboard(code);
+    setGithubCopied(ok);
+  }, []);
+
+  const handleOpenGitHub = useCallback(async (uri: string) => {
+    try {
+      await Linking.openURL(uri);
+    } catch (err) {
+      setGithubError(formatErr(err));
+    }
+  }, []);
+
+  const handleConnectCodex = useCallback(async () => {
+    if (codexClient === null) return;
+    const auth = codexAuth.trim();
+    if (auth.length === 0 || codexBusy) return;
+    setCodexBusy(true);
+    setCodexError(null);
+    try {
+      const next = await codexClient.connect(auth);
+      setCodexStatus(next);
+      // Cleared on SUCCESS only. Keeping the paste on failure means the owner can
+      // read the error and retry without going back to their terminal for the file.
+      setCodexAuth('');
+    } catch (err) {
+      // The gateway's message is shown verbatim because it is the actionable part:
+      // pasting a metered API key instead of a subscription bundle is the common
+      // mistake, and the reply says exactly that.
+      setCodexError(formatErr(err));
+    } finally {
+      setCodexBusy(false);
+    }
+  }, [codexClient, codexAuth, codexBusy]);
+
+  const handleDisconnectCodex = useCallback(() => {
+    if (codexClient === null) return;
+    Alert.alert('Disconnect Codex?', 'Cross-model review will stop until you reconnect.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Disconnect',
+        style: 'destructive',
+        onPress: () => {
+          setCodexBusy(true);
+          setCodexError(null);
+          void codexClient
+            .disconnect()
+            .then(() => fetchCodex())
+            .catch((err: unknown) => setCodexError(formatErr(err)))
+            .finally(() => setCodexBusy(false));
+        },
+      },
+    ]);
+  }, [codexClient, fetchCodex]);
+
+  // ── Kimi K3: a plain API key, stored under the service id the review lane reads ──
+  //
+  // Goes through the SAME global-credential store the free-text form below writes
+  // to, on purpose. A named row that used its own storage path would mean a key
+  // entered here and a key entered there behaved differently, which is exactly the
+  // kind of split that makes a settings screen untrustworthy. This row is a
+  // labelled affordance over one code path, not a second one.
+  const handleSaveKimi = useCallback(async () => {
+    if (credsClient === null) return;
+    const secret = kimiKey.trim();
+    if (secret.length === 0 || credBusy) return;
+    setCredBusy(true);
+    setCredError(null);
+    try {
+      await credsClient.setGlobal({ service: KIMI_SERVICE, token: secret, label: 'Kimi K3' });
+      setKimiKey('');
+      await fetchSharedCreds();
+    } catch (err) {
+      setCredError(formatErr(err));
+    } finally {
+      setCredBusy(false);
+    }
+  }, [credsClient, kimiKey, credBusy, fetchSharedCreds]);
+
+  /**
+   * Is a Kimi key stored?
+   *
+   * DERIVED from the same shared-credential list the free-text form renders, not
+   * tracked separately: a key added through either control lights up this row, and
+   * removing it through either clears it. Two sources of truth for one fact is how
+   * a settings screen starts lying about its own state.
+   */
+  const kimiConnected = sharedCreds.some((r) => r.service === KIMI_SERVICE);
 
   const handleAddSharedCred = useCallback(async () => {
     if (credsClient === null) return;
@@ -181,14 +394,22 @@ export default function IntegrationsScreen() {
   // pre-grant status ("Not connected") even though the connect succeeded. A
   // foreground refetch reconciles it. (The web sibling tab has a manual Refresh
   // button for the same reason.)
+  //
+  // The GitHub device flow lands here for the SAME reason and one better: the
+  // owner taps "Open GitHub", approves in the browser, and comes straight back —
+  // the poll would eventually catch it, but a status read on return makes the
+  // screen correct the instant the owner is looking at it.
   const appState = useRef(AppState.currentState);
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
-      if (appStateBecameActive(appState.current, next)) void fetchAll({ silent: true });
+      if (appStateBecameActive(appState.current, next)) {
+        void fetchAll({ silent: true });
+        void fetchGitHub();
+      }
       appState.current = next;
     });
     return () => sub.remove();
-  }, [fetchAll]);
+  }, [fetchAll, fetchGitHub]);
 
   const view = useMemo(
     () => (data !== null ? summarizeIntegrations(data) : null),
@@ -433,6 +654,232 @@ export default function IntegrationsScreen() {
           ))}
         </View>
 
+        {/* GITHUB (#551) — a DEVICE flow, so the screen is built around the CODE
+            rather than around the button. The owner reads it here and types it
+            wherever there is a keyboard, which is the whole interaction; Copy and
+            the link exist to make that one step cheap, and the poll means they
+            never have to come back and reload to find out whether it worked. */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>GitHub</Text>
+          <Text style={styles.muted}>
+            Lets a build push a branch and open a pull request as you. Without it, code
+            generation runs and then has nowhere to put the result.
+          </Text>
+
+          {githubError !== null ? (
+            <Text style={styles.bannerError} testID="github-error">
+              {githubError}
+            </Text>
+          ) : null}
+
+          <View style={styles.row}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>GitHub account</Text>
+              <Text style={styles.rowStatus} testID="github-status">
+                {github === null
+                  ? 'Checking…'
+                  : github.status === 'connected'
+                    ? 'Connected — builds can push and open pull requests'
+                    : github.status === 'awaiting_owner'
+                      ? 'Waiting for you to enter the code at GitHub'
+                      : 'Not connected — builds cannot push or open pull requests'}
+              </Text>
+            </View>
+            {github !== null && github.status === 'not_connected' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Connect GitHub"
+                testID="github-connect"
+                disabled={githubBusy}
+                onPress={() => void handleConnectGitHub()}
+                style={({ pressed }) => [
+                  styles.primaryBtn,
+                  githubBusy && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.primaryBtnText}>{githubBusy ? 'Starting…' : 'Connect'}</Text>
+              </Pressable>
+            ) : null}
+          </View>
+
+          {github !== null && github.status === 'awaiting_owner' ? (
+            <View style={styles.keyBlock}>
+              {/* `selectable` is not decoration: where there is no programmatic
+                  clipboard the long-press → copy gesture is the fallback the Copy
+                  button degrades to (`lib/clipboard.ts` returns false there). */}
+              <Text style={styles.deviceCode} selectable testID="github-user-code">
+                {github.user_code}
+              </Text>
+              <View style={styles.keyControls}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Copy code"
+                  testID="github-copy-code"
+                  onPress={() => void handleCopyGitHubCode(github.user_code)}
+                  style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+                >
+                  <Text style={styles.primaryBtnText}>
+                    {githubCopied ? 'Copied' : 'Copy code'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Open GitHub"
+                  testID="github-open"
+                  onPress={() => void handleOpenGitHub(github.verification_uri)}
+                  style={({ pressed }) => [styles.secondaryBtn, pressed && styles.pressed]}
+                >
+                  <Text style={styles.secondaryBtnText}>Open GitHub</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.rowDetail} selectable testID="github-verification-uri">
+                Enter the code at {github.verification_uri} — on this phone or any other
+                device. This screen finishes on its own once you approve.
+              </Text>
+            </View>
+          ) : null}
+        </View>
+
+        {/* MODEL PROVIDERS — named rows for the two credentials the build and review
+            lanes actually read. They sit ABOVE "Shared credentials" so the
+            free-text form below reads as the escape hatch it is: before this, the
+            only way to connect either was to know the exact service id and type it
+            into that box, and Codex could not be connected from a phone at all. */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Model providers</Text>
+          <Text style={styles.muted}>
+            Accounts the coding agent uses to build and review. Both are account-wide.
+          </Text>
+
+          <View style={styles.row}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>Codex (ChatGPT subscription)</Text>
+              <Text style={styles.rowStatus} testID="codex-status">
+                {codexStatus === null
+                  ? 'Checking…'
+                  : codexStatus.status === 'connected'
+                    ? 'Connected — cross-model review is on'
+                    : codexStatus.status === 'expired'
+                      ? 'Expired — paste a fresh auth.json to reconnect'
+                      : 'Not connected — reviews run without a second model family'}
+              </Text>
+            </View>
+            {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Disconnect Codex"
+                testID="codex-disconnect"
+                disabled={codexBusy}
+                onPress={handleDisconnectCodex}
+                style={({ pressed }) => [
+                  styles.dangerBtn,
+                  codexBusy && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.dangerBtnText}>Disconnect</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          {codexError !== null ? (
+            <Text style={styles.bannerError} testID="codex-error">
+              {codexError}
+            </Text>
+          ) : null}
+          {codexStatus?.status !== 'connected' ? (
+            <View style={styles.keyBlock}>
+              <Text style={styles.muted}>
+                Run <Text style={styles.mono}>codex login</Text> on any machine, then paste that
+                account&apos;s <Text style={styles.mono}>~/.codex/auth.json</Text> here. A metered
+                API key will be rejected — this needs the subscription bundle.
+              </Text>
+              <TextInput
+                style={styles.keyInput}
+                testID="codex-auth-input"
+                placeholder="Paste ~/.codex/auth.json"
+                placeholderTextColor={THEME.text_muted}
+                secureTextEntry
+                multiline
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!codexBusy}
+                value={codexAuth}
+                onChangeText={setCodexAuth}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Connect Codex"
+                testID="codex-connect"
+                disabled={codexBusy || codexAuth.trim().length === 0}
+                onPress={() => void handleConnectCodex()}
+                style={({ pressed }) => [
+                  styles.primaryBtn,
+                  (codexBusy || codexAuth.trim().length === 0) && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.primaryBtnText}>{codexBusy ? 'Connecting…' : 'Connect'}</Text>
+              </Pressable>
+            </View>
+          ) : null}
+
+          <View style={styles.row}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>Kimi K3</Text>
+              <Text style={styles.rowStatus} testID="kimi-status">
+                {kimiConnected
+                  ? 'Key saved — K3 joins the review panel'
+                  : 'No key — the review panel stays one model family'}
+              </Text>
+            </View>
+            {kimiConnected ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Remove Kimi key"
+                testID="kimi-remove"
+                disabled={credBusy}
+                onPress={() => handleRemoveSharedCred(KIMI_SERVICE)}
+                style={({ pressed }) => [
+                  styles.dangerBtn,
+                  credBusy && styles.btnDisabled,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.dangerBtnText}>Remove</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          <View style={styles.keyControls}>
+            <TextInput
+              style={styles.keyInput}
+              testID="kimi-key-input"
+              placeholder={kimiConnected ? 'Paste a new key to replace it' : 'Paste your Kimi API key'}
+              placeholderTextColor={THEME.text_muted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!credBusy}
+              value={kimiKey}
+              onChangeText={setKimiKey}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Save Kimi key"
+              testID="kimi-save"
+              disabled={credBusy || kimiKey.trim().length === 0}
+              onPress={() => void handleSaveKimi()}
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                (credBusy || kimiKey.trim().length === 0) && styles.btnDisabled,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.primaryBtnText}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Shared credentials</Text>
           <Text style={styles.muted}>
@@ -590,6 +1037,21 @@ const styles = StyleSheet.create({
   rowTitle: { color: THEME.text_primary, fontSize: 14, fontWeight: '600' },
   rowStatus: { color: THEME.text_secondary, fontSize: 12 },
   rowDetail: { color: THEME.text_muted, fontSize: 11, lineHeight: 15 },
+  // Monospace for the two inline shell/path references in the Codex guidance. A
+  // pasted path is easier to read as code, and `THEME` carries no mono token.
+  mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  // The GitHub device code. Big, monospaced and wide-tracked because it is read
+  // off this screen and typed into another one — a 12px status line would make
+  // the single most important step of the flow the hardest part of it.
+  deviceCode: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: THEME.text_primary,
+    fontSize: 28,
+    fontWeight: '700',
+    letterSpacing: 4,
+    textAlign: 'center',
+    paddingVertical: 8,
+  },
   requiredTag: { color: THEME.warning, fontSize: 11, fontWeight: '600' },
   keyBlock: { gap: 10 },
   keyControls: { flexDirection: 'row', alignItems: 'center', gap: 8 },

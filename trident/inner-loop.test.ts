@@ -201,6 +201,20 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(threaded.startsWith('/')).toBe(true)
   })
 
+  test('args thread the checked-in worktreeCleanupScript abs path (#541 — no LLM in the destructive path)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    // Same threading contract as checkpointScript: resolved beside inner-loop.ts,
+    // decoded (a `%20` would break `bash <path>` on a checkout dir with a space).
+    const m = calls[0]!.prompt.match(
+      /"worktreeCleanupScript":"([^"]*\/trident\/worktree-cleanup\.sh)"/,
+    )
+    expect(m).not.toBeNull()
+    expect(m![1]!).not.toContain('%')
+    expect(m![1]!.startsWith('/')).toBe(true)
+  })
+
   test('args thread codexHome when a per-project CODEX_HOME is configured (cross-model review)', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })

@@ -156,6 +156,8 @@ export interface CoresBackendFactoriesOptions {
    * live `/code` chat command is served by foundational Trident, not this.
    */
   codegenOrchestrator?: import('@neutronai/codegen-core').CodegenOrchestrator
+  /** Production terminal chokepoint for foundational Trident cancellations. */
+  tridentTerminator?: import('@neutronai/trident/terminate.ts').TridentTerminator
   /**
    * Settings Core (2026-06-03) — agent profile read/write seam
    * for `update_personality` / `update_agent_name`. The per-instance

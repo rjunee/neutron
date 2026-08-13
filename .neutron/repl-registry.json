@@ -1,0 +1,23 @@
+{
+  "cc-trident-fire-juno-1992j4k\u0000owner\u0000default\u0000anthropic:ambient_keychain": {
+    "sessionKey": "cc-trident-fire-juno-1992j4k\u0000owner\u0000default\u0000anthropic:ambient_keychain",
+    "sessionId": "77fa6d70-f71f-44ef-9ead-ef9a2d16bbcf",
+    "cwd": "/var/lib/neutron/tenants/n7eb7cca79ce58139/Projects/neutron-open/code",
+    "channelName": "neutron-6e85eea0f08438f608425f86c04fc571",
+    "has_session": true,
+    "model": "opus",
+    "pid": 2713439,
+    "first_ready_at": 1786563496063,
+    "devchannel_port": 37437,
+    "last_respawn_at": 1786563493721,
+    "recent_respawns": [
+      1786144769578,
+      1786171216516,
+      1786404640668,
+      1786428282380,
+      1786479422853,
+      1786563493721
+    ],
+    "child_generation": "53e58e3e-6d6c-4c60-9667-1736b523d8f1"
+  }
+}

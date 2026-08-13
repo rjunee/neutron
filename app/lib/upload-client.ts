@@ -106,6 +106,36 @@ export interface UploadAttachmentInput {
 export interface UploadResult {
   url: string;
   kind: UploadKind;
+  /**
+   * The server's auto-transcript for an AUDIO upload, when it produced one.
+   *
+   * WHY IT COMES BACK ON THE UPLOAD RESPONSE. A user's own message is never
+   * persisted server-side (only agent messages get a durable row) — the client owns
+   * it. So the upload response is the only point at which the client can learn the
+   * transcript without a second round trip or a new frame, and the client stamps it
+   * on the message it is about to send so its local search index contains the spoken
+   * words. Absent for images, and absent on a box with no transcription configured.
+   */
+  transcript?: string;
+}
+
+/**
+ * Pull an optional string field off a parsed upload response.
+ *
+ * Shared by the XHR and `fetch` transports deliberately: they are two independent
+ * parsers of the SAME response, and a field added to one is the classic way the two
+ * drift — a voice note would then be searchable on whichever platform happened to
+ * take the XHR path. One reader, two callers.
+ */
+function optionalStringField(
+  parsed: Record<string, unknown> | null,
+  key: string,
+): string | undefined {
+  if (parsed === null) return undefined;
+  const value = parsed[key];
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** Magic-byte view at the start of a blob. Used only for the heuristic
@@ -396,7 +426,12 @@ function uploadWithXhr(input: UploadWithXhrInput): Promise<UploadResult | null> 
         url: url_val,
         ...(input.bytes_total !== undefined ? { bytes_total: input.bytes_total } : {}),
       });
-      finish({ url: url_val, kind: input.kind });
+      const transcript = optionalStringField(parsed, 'transcript');
+      finish({
+        url: url_val,
+        kind: input.kind,
+        ...(transcript !== undefined ? { transcript } : {}),
+      });
     };
     xhr.send(input.body);
   });
@@ -453,7 +488,12 @@ async function uploadWithFetch(input: UploadWithFetchInput): Promise<UploadResul
       return null;
     }
     input.notify({ phase: 'complete', url: url_val });
-    return { url: url_val, kind: input.kind };
+    const transcript = optionalStringField(json, 'transcript');
+    return {
+      url: url_val,
+      kind: input.kind,
+      ...(transcript !== undefined ? { transcript } : {}),
+    };
   } catch (err) {
     const is_abort =
       err instanceof Error && (err.name === 'AbortError' || err.message.includes('aborted'));

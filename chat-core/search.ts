@@ -202,7 +202,12 @@ export function searchMessagesInMemory(
   }
   const scored: Scored[] = []
   for (const msg of messages) {
-    const tokens = bodyTerms(msg.body)
+    // SEARCHABLE TEXT = body + transcript. A voice note's body is the attachment
+    // placeholder, so before this the spoken words were unfindable even though the
+    // audio had been transcribed and the text was durable on disk. The transcript is
+    // concatenated for MATCHING only; the snippet below is still built from the body
+    // where there is one, so a hit renders as the message the owner recognises.
+    const tokens = bodyTerms(searchableText(msg))
     if (tokens.length === 0) continue
     const freq = new Map<string, number>()
     for (const tok of tokens) freq.set(tok, (freq.get(tok) ?? 0) + 1)
@@ -244,7 +249,41 @@ export function searchMessagesInMemory(
   return blended
     .sort((a, b) => b.score - a.score || b.msg.created_at - a.msg.created_at)
     .slice(0, limit)
-    .map(({ msg, score }) => toHit(msg, score, buildSnippet(msg.body, terms)))
+    .map(({ msg, score }) =>
+      // SNIPPET SOURCE: the body when it has one, else the transcript. A voice note's
+      // body is a placeholder with none of the query terms in it, so snippeting the
+      // body would render an unhighlighted stub for a hit the owner cannot then
+      // recognise — the search would technically work and practically not.
+      toHit(msg, score, buildSnippet(snippetSource(msg), terms)),
+    )
+}
+
+/**
+ * The text a message is MATCHED against: its body plus its transcript.
+ *
+ * Kept as one function with two callers (this module and the SQL mirror's column
+ * list) so "what is searchable" has a single definition. Two independent answers to
+ * that question is how a field gets indexed in one search path and not the other.
+ */
+export function searchableText(msg: Pick<ChatMessage, 'body' | 'transcript'>): string {
+  const transcript = typeof msg.transcript === 'string' ? msg.transcript.trim() : ''
+  if (transcript.length === 0) return msg.body
+  if (msg.body.length === 0) return transcript
+  return `${msg.body}\n${transcript}`
+}
+
+/**
+ * The text a HIT is rendered from. Body when there is one, transcript otherwise.
+ *
+ * Deliberately NOT `searchableText`: for an ordinary message the two are the same,
+ * but for a voice note the body is a placeholder containing none of the query terms,
+ * so a concatenated snippet would lead with meaningless text and bury the match.
+ */
+export function snippetSource(msg: Pick<ChatMessage, 'body' | 'transcript'>): string {
+  const body = msg.body.trim()
+  if (body.length > 0) return msg.body
+  const transcript = typeof msg.transcript === 'string' ? msg.transcript.trim() : ''
+  return transcript.length > 0 ? transcript : msg.body
 }
 
 /** How much relevance dominates recency in the blended JS score. */

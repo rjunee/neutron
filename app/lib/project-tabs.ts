@@ -310,6 +310,43 @@ const WORK_TAB_LABEL = 'Work';
  * that already carries a `workboard` tab is returned unchanged). This is where
  * the current project's `live_runs` badge lands (PR-1 #180).
  */
+/**
+ * The tab keys the GENERAL (no-project) scope can actually serve.
+ *
+ * General is not a project row, so the tab set has to be narrowed to the
+ * surfaces that exist without one. All three do:
+ *   - `chat` — General has its own real warm session,
+ *   - `work_board` — its board is the owner-slug scope key, which is also where
+ *     every pre-scoping legacy row and every agent `work_board_*` write lands,
+ *   - `documents` — rooted at `Projects/general/docs` server-side.
+ *
+ * Everything else in the registry set is project-only and would render a raw
+ * validator string or an empty pane: `settings` reads a project row that does
+ * not exist (the layout already synthesises `GENERAL_SCOPE_PROJECT` for the
+ * chrome precisely because there is nothing to fetch), `launcher` lists a
+ * project's installed Cores, and a Core `project_tab` is project-scoped by
+ * definition.
+ *
+ * Registry ORDER is preserved, so the three arrive as Chat (0) / Work (5) /
+ * Documents (10) — the owner-specified Chat · Work · Docs, with Docs third in
+ * General exactly as it is in a named project.
+ *
+ * This is a KEY allow-list, not a route/label one: keys are the registry's
+ * stable identity, and matching on labels or route leaves is what produced
+ * ISSUES #404 (a registry key compared against a route leaf, injecting a
+ * duplicate tab).
+ */
+const GENERAL_TAB_KEYS: ReadonlySet<string> = new Set(['chat', WORK_TAB_KEY, 'documents']);
+
+/**
+ * Narrow a resolved tab set to what the General scope can serve, preserving
+ * order. A named project's set passes through untouched — callers gate on the
+ * rail sentinel, so this is only ever applied to General.
+ */
+export function generalScopeTabs(tabs: readonly ResolvedTab[]): ResolvedTab[] {
+  return tabs.filter((t) => GENERAL_TAB_KEYS.has(t.key));
+}
+
 export function ensureWorkTab(tabs: readonly ResolvedTab[], project_id: string): ResolvedTab[] {
   if (tabs.some((t) => t.key === WORK_TAB_KEY)) return [...tabs];
   const workTab: ResolvedTab = {

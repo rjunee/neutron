@@ -34,6 +34,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { clampFraction, usageBand } from '@neutronai/contracts/credential-usage.ts'
+
 import type { BootstrapConfig } from './config.ts'
 import {
   WebProjectCredentialsClient,
@@ -42,6 +44,23 @@ import {
 } from './project-credentials-client.ts'
 import { oauthServiceTitle } from './integrations-oauth-view.ts'
 import { WebCodexCredentialClient, type CodexStatus } from './codex-credential-client.ts'
+import {
+  WebPhaseModelsClient,
+  applyRowEdit,
+  effectiveRow,
+  type PhaseModelsPayload,
+  type PhaseOverride,
+} from './phase-models-client.ts'
+import {
+  WebUsageDashboardClient,
+  accountName,
+  formatDuration,
+  formatPace,
+  formatPercent,
+  paceNote,
+  type UsageDashboard,
+  type UsageWindow,
+} from './usage-dashboard-client.ts'
 import {
   WebVoiceTranscriptionClient,
   describeJob,
@@ -115,6 +134,98 @@ export function SettingsTab({
     () => new WebCodexCredentialClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
     [config.origin, config.token, withSignal],
   )
+
+  // Per-phase build models — which model + reasoning effort runs each phase.
+  const phaseModelsClient = useMemo(
+    () => new WebPhaseModelsClient({ base_url: config.origin, token: config.token, fetchImpl: withSignal }),
+    [config.origin, config.token, withSignal],
+  )
+
+  // Model usage — read off the persisted sample series, not the live snapshot.
+  const usageDashboardClient = useMemo(
+    () =>
+      new WebUsageDashboardClient({
+        base_url: config.origin,
+        token: config.token,
+        fetchImpl: withSignal,
+      }),
+    [config.origin, config.token, withSignal],
+  )
+
+  // ── model usage ──
+  // `null` is "not asked yet". The client never rejects, so there is no error
+  // state here: an unreachable server is one of its two ANSWERS, and giving it a
+  // third representation would put the same branch in two places.
+  const [usage, setUsage] = useState<UsageDashboard | null>(null)
+
+  const loadUsage = useCallback((): void => {
+    void usageDashboardClient.load().then((next) => {
+      if (!mountedRef.current) return
+      setUsage(next)
+    })
+  }, [usageDashboardClient])
+
+  // ── per-phase build models ──
+  const [phaseModels, setPhaseModels] = useState<PhaseModelsPayload | null>(null)
+  const [phaseOverrides, setPhaseOverrides] = useState<Record<string, PhaseOverride>>({})
+  const [phaseBusy, setPhaseBusy] = useState(false)
+  const [phaseError, setPhaseError] = useState<string | null>(null)
+  const [phaseSaved, setPhaseSaved] = useState(false)
+
+  const loadPhaseModels = useCallback((): void => {
+    void phaseModelsClient
+      .load()
+      .then((next) => {
+        if (!mountedRef.current) return
+        setPhaseModels(next)
+        setPhaseOverrides(next.overrides)
+        setPhaseError(null)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        // A failed LOAD is reported, not rendered as an empty pipeline: zero phases
+        // would read as "this build has no phases", which the owner cannot act on.
+        setPhaseModels(null)
+        setPhaseError(err instanceof Error ? err.message : 'could not load the build settings')
+      })
+  }, [phaseModelsClient])
+
+  const editPhase = useCallback(
+    (phaseKey: string, patch: { model?: string; effort?: string }): void => {
+      setPhaseModels((current) => {
+        if (current === null) return current
+        const phase = current.phases.find((p) => p.key === phaseKey)
+        if (phase !== undefined) setPhaseOverrides((prev) => applyRowEdit(prev, phase, patch))
+        return current
+      })
+      // A pending edit invalidates the confirmation — leaving it up would say the
+      // newest change is already stored.
+      setPhaseSaved(false)
+    },
+    [],
+  )
+
+  const savePhaseModels = useCallback((): void => {
+    if (phaseBusy) return
+    setPhaseBusy(true)
+    setPhaseError(null)
+    void phaseModelsClient
+      .save(phaseOverrides)
+      .then((next) => {
+        if (!mountedRef.current) return
+        setPhaseModels(next)
+        setPhaseOverrides(next.overrides)
+        setPhaseSaved(true)
+        setPhaseBusy(false)
+      })
+      .catch((err: unknown) => {
+        if (!mountedRef.current) return
+        // The local edits are KEPT so a rejected value can be corrected in place;
+        // discarding them would punish a typo by throwing away the rest of the work.
+        setPhaseError(err instanceof Error ? err.message : 'could not save the build settings')
+        setPhaseBusy(false)
+      })
+  }, [phaseModelsClient, phaseOverrides, phaseBusy])
 
   // ── credentials ──
   const [projectCreds, setProjectCreds] = useState<Rec[]>([])
@@ -477,8 +588,19 @@ export function SettingsTab({
     loadAccounts()
     loadSettings()
     loadCodex()
+    loadPhaseModels()
     loadAsr()
-  }, [loadCreds, loadAccounts, loadSettings, loadCodex, loadAsr, projectId])
+    loadUsage()
+  }, [
+    loadCreds,
+    loadAccounts,
+    loadSettings,
+    loadCodex,
+    loadPhaseModels,
+    loadAsr,
+    loadUsage,
+    projectId,
+  ])
 
   const addCredential = useCallback((): void => {
     const svc = service.trim()
@@ -668,7 +790,7 @@ export function SettingsTab({
             <input
               id="cset-service"
               className="cset-input"
-              placeholder="e.g. openai, github"
+              placeholder="e.g. openai, github, kimi"
               value={service}
               onChange={(e) => setService(e.target.value)}
             />
@@ -856,6 +978,159 @@ export function SettingsTab({
             </button>
           </div>
         </form>
+      </section>
+
+      {/* ── Model usage ──────────────────────────────────────────────────────
+          Deliberately placed IMMEDIATELY ABOVE Code generation: the only reason to
+          look at quota in a settings pane is to decide where to spend it, and the
+          controls that spend it are the next section down.
+
+          It reports PACE, not just fullness — the meter in the divider already
+          says how full the window is, and "72%" is not a decision until you know
+          whether it is climbing. Everything here is server-computed off the
+          persisted series; this markup does no arithmetic on quota. */}
+      <section className="cset-section" aria-label="Model usage">
+        <h2 className="cset-h">Model usage</h2>
+        <p className="cset-sub">
+          How much of each window this box has consumed, and whether it is on track to
+          run out before the window resets. Measured once a minute and kept for 30 days.
+        </p>
+
+        {usage === null ? (
+          <div className="cset-empty">Loading…</div>
+        ) : !usage.reachable ? (
+          // NOT "0% used". An older server does not mount the route at all, and
+          // drawing an empty bar here would invent a measurement.
+          <div className="cset-empty" data-testid="usage-unreachable">
+            Usage history isn’t available from this server.
+          </div>
+        ) : usage.pools.length === 0 ? (
+          <div className="cset-empty" data-testid="usage-empty">
+            No readings yet.
+          </div>
+        ) : (
+          usage.pools.map((pool) => (
+            <div className="cset-usage-pool" key={pool.pool} data-testid={`usage-${pool.pool}`}>
+              {/* NEVER a guessed account name. The credential is swapped by a
+                  process outside this box, so nothing here can know which account
+                  a reading belongs to unless something upstream labels it. */}
+              <p className="cset-label" data-testid={`usage-${pool.pool}-account`}>
+                {accountName(pool.account_label)}
+              </p>
+              {pool.measured_at === null ? (
+                <div className="cset-empty">No readings yet.</div>
+              ) : (
+                <>
+                  <UsageWindowRow
+                    label="5-hour window"
+                    testid={`usage-${pool.pool}-session`}
+                    win={pool.session}
+                  />
+                  <UsageWindowRow
+                    label="7-day window"
+                    testid={`usage-${pool.pool}-weekly`}
+                    win={pool.weekly}
+                  />
+                </>
+              )}
+            </div>
+          ))
+        )}
+      </section>
+
+      {/* ── Code generation: which model runs each build phase ───────────────
+          Machine-scoped, like the voice setting below: which model runs a build is
+          a property of the owner's subscriptions and quota, not of the project
+          being built. The phase list is SERVER-SUPPLIED — labels, descriptions,
+          defaults and legal values all arrive in the payload — so a phase added to
+          the engine appears here with no client change, and the phone and the web
+          cannot disagree about what the phases are. */}
+      <section className="cset-section" aria-label="Code generation">
+        <h2 className="cset-h">Code generation</h2>
+        <p className="cset-sub">
+          Which model runs each part of a build, and how hard it thinks. Changes apply to
+          the next build — nothing restarts. A dot marks the default; choosing it clears
+          the override, so the phase keeps following the default if that ever changes.
+        </p>
+
+        {phaseError !== null ? (
+          <p className="cset-error" data-testid="phase-models-error">
+            {phaseError}
+          </p>
+        ) : null}
+        {phaseSaved && phaseError === null ? (
+          <p className="cset-saved" data-testid="phase-models-saved">
+            Saved
+          </p>
+        ) : null}
+
+        {phaseModels === null ? (
+          <div className="cset-empty">
+            {phaseError === null ? 'Loading…' : 'Build settings unavailable.'}
+          </div>
+        ) : (
+          <>
+            {phaseModels.phases.map((phase) => {
+              const row = effectiveRow(phase, phaseOverrides)
+              return (
+                <fieldset
+                  className="cset-field"
+                  key={phase.key}
+                  data-testid={`phase-${phase.key}`}
+                >
+                  <legend className="cset-label">
+                    {phase.label}
+                    {row.overridden ? (
+                      <em data-testid={`phase-${phase.key}-changed`}> — changed</em>
+                    ) : null}
+                  </legend>
+                  <p className="cset-sub">{phase.description}</p>
+                  <div className="cset-chiprow">
+                    <span className="cset-label">Model</span>
+                    {phaseModels.model_tiers.map((tier) => (
+                      <button
+                        key={tier}
+                        type="button"
+                        className={`cset-chip${row.model === tier ? ' cset-chip-on' : ''}`}
+                        aria-pressed={row.model === tier}
+                        data-testid={`phase-${phase.key}-model-${tier}`}
+                        onClick={() => editPhase(phase.key, { model: tier })}
+                      >
+                        {tier}
+                        {phase.default.model === tier ? ' ·' : ''}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="cset-chiprow">
+                    <span className="cset-label">Effort</span>
+                    {phaseModels.efforts.map((eff) => (
+                      <button
+                        key={eff}
+                        type="button"
+                        className={`cset-chip${row.effort === eff ? ' cset-chip-on' : ''}`}
+                        aria-pressed={row.effort === eff}
+                        data-testid={`phase-${phase.key}-effort-${eff}`}
+                        onClick={() => editPhase(phase.key, { effort: eff })}
+                      >
+                        {eff}
+                        {phase.default.effort === eff ? ' ·' : ''}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+              )
+            })}
+            <button
+              type="button"
+              className="cset-btn"
+              disabled={phaseBusy}
+              data-testid="phase-models-save"
+              onClick={savePhaseModels}
+            >
+              {phaseBusy ? 'Saving…' : 'Save'}
+            </button>
+          </>
+        )}
       </section>
 
       {/* ── Voice transcription ──────────────────────────────────────────────
@@ -1319,5 +1594,95 @@ function CredentialRow({
         </button>
       )}
     </li>
+  )
+}
+
+/**
+ * One window's row: a bar, the percent, when it resets, and the pace.
+ *
+ * WHY THE BAND COMES FROM `@neutronai/contracts`. The same three thresholds
+ * colour the 2px meter in the divider, this bar, and the phone's. A local
+ * constant here would let the card call something amber that the divider above it
+ * still draws green — two different answers about one reading, on one screen.
+ *
+ * A NULL WINDOW IS NOT A ZERO WINDOW. When upstream reported nothing for this
+ * window, the row says so in words and draws no track at all: an empty coloured
+ * track is the specific, possibly false claim "0% used".
+ */
+function UsageWindowRow({
+  label,
+  testid,
+  win,
+}: {
+  label: string
+  testid: string
+  win: UsageWindow | null
+}): React.JSX.Element {
+  if (win === null) {
+    return (
+      <div className="cset-usage-row" data-testid={testid}>
+        <span className="cset-label">{label}</span>
+        <span className="cset-sub" data-testid={`${testid}-none`}>
+          not reported
+        </span>
+      </div>
+    )
+  }
+  const band = usageBand(win.fraction)
+  const pct = Math.round(clampFraction(win.fraction) * 100)
+  const note = paceNote(win.pace)
+  return (
+    <div className="cset-usage-row" data-testid={testid}>
+      <div className="cset-usage-head">
+        <span className="cset-label">{label}</span>
+        <span className="cset-usage-pct" data-testid={`${testid}-pct`}>
+          {formatPercent(win.fraction)}
+        </span>
+      </div>
+      <div
+        className="cset-usage-track"
+        role="progressbar"
+        aria-label={`${label} used`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+        aria-valuetext={`${pct}% used`}
+      >
+        <div
+          className={`cset-usage-fill cset-usage-${band}`}
+          data-testid={`${testid}-fill`}
+          data-band={band}
+          style={{ width: `${(clampFraction(win.fraction) * 100).toFixed(2)}%` }}
+        />
+      </div>
+      <dl className="cset-usage-facts">
+        <div>
+          <dt>Resets in</dt>
+          <dd data-testid={`${testid}-resets`}>{formatDuration(win.resets_in_ms)}</dd>
+        </div>
+        <div>
+          <dt>Pace</dt>
+          {/* An em dash, never "0.0×". Null pace means the server declined to
+              answer — a barely-started window or an unknown reset — and a zero
+              would read as "you are using nothing". */}
+          <dd data-testid={`${testid}-pace`}>
+            {formatPace(win.pace)}
+            {note !== null ? <span className="cset-sub"> {note}</span> : null}
+          </dd>
+        </div>
+        {/* Rendered ONLY when there is a projection. Null is the common, good case
+            — the window refills faster than it drains — and an always-present row
+            reading "—" would train the eye to look for a warning that is normally
+            absent. */}
+        {win.exhausts_at !== null ? (
+          <div>
+            <dt>Caps out in</dt>
+            <dd data-testid={`${testid}-exhausts`}>
+              {formatDuration(win.exhausts_at - Date.now())}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+    </div>
   )
 }

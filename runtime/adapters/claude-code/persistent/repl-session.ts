@@ -200,6 +200,7 @@ export class ReplSession {
 
   constructor(
     readonly sessionKey: string,
+    readonly childGeneration: string,
     readonly sessionId: string,
     readonly channelName: string,
     /** The child's working directory (`options.cwd ?? process.cwd()` at spawn).
@@ -285,6 +286,7 @@ export class ReplSession {
       usage: ZERO_USAGE,
       session: { id: t.sessionId, last_active_at: Date.now() },
       substrate_instance_id: t.substrateInstanceId,
+      launcher_session_key: this.childGeneration,
     })
     t.channel.close()
     t.settle()
@@ -548,4 +550,3 @@ export async function httpHealth(port: number, opts: HttpHealthOptions = {}): Pr
     return false
   }
 }
-

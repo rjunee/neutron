@@ -29,8 +29,28 @@ name: ci
 # `pull_request` (no `branches`/`types` filter) fires the `test` job for EVERY
 # PR — opened, synchronize, reopened — to any base, so a PR to main can never
 # merge without a `test` signal regardless of head-branch name shape (#321).
+#
+# `merge_group` is REQUIRED for the merge queue, and its absence is why a queue
+# could not be enabled before: GitHub runs required checks against the queue's
+# speculative merge branch, and a workflow that does not listen for the event
+# never reports — so every queued PR would sit forever waiting for a `test` that
+# never ran.
+#
+# WHY A QUEUE AT ALL (owner-requested 2026-08-11: "It is absolutely a fundamental
+# requirement that we can run many many builds in parallel on the same repo, in
+# worktrees, and we cant have wasted inefficient multiple review cycles").
+# `main` requires branches to be up to date before merging, so without a queue
+# every merge invalidates every other open PR: N parallel builds cost O(N^2) CI
+# runs as each one updates and re-runs. The queue tests each PR once against the
+# projected main instead.
+#
+# And the part that matters for trident specifically: the queue tests a TEMPORARY
+# branch and never touches the PR's own head. A trident verdict is bound to the
+# head it reviewed, so queueing does not invalidate a review the way an
+# author-side update does. That is the "no wasted review cycles" half.
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 

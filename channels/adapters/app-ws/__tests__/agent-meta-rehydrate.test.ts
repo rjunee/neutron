@@ -24,6 +24,7 @@ function agentRow(meta: Record<string, unknown> | null): AppChatRow {
     client_msg_id: null,
     project_id: 'proj-1',
     attachments: null,
+    transcript: null,
     meta,
     created_at: 1000,
   }

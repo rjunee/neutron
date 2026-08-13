@@ -466,23 +466,41 @@ describe('ProjectShell render (happy-dom)', () => {
     })
 
     // General now surfaces a Work tab (parity with named projects): the shell
-    // injects the `work_board` descriptor into the global set, so at narrow width
-    // (default in these tests) General renders Chat + Work + Admin. The desktop
+    // injects the `work_board` descriptor into the global set. ADMIN LEFT THE BAND on
+    // 2026-08-07: settings-shaped views moved into the top-right ☰ so web and mobile
+    // agree about what settings IS (owner ask). This lock-test caught the move and
+    // is updated to assert the DESTINATION as well as the absence — dropping
+    // 'Admin' alone would also pass if Admin had vanished entirely. The desktop
     // ≥1024px case turns Work into the slide-out pane (dedicated test below). The
     // per-project resolver is never hit, and the persistent rail renders.
+    //
+    // DOCS JOINED THE BAND on 2026-08-09, and this test caught that move too — it
+    // is INVERTED rather than deleted so the change stays legible in history. The
+    // reason it had to join: General's tab set had no `docs` tab, so the doc-link
+    // resolver (`pendingDoc`) waited for one that never arrived and a work card's
+    // plan link was a dead click. General's documents were reachable over HTTP the
+    // whole time. Ordering is asserted, not just membership — the owner asked for
+    // chat → work → docs, which is what named projects already read as.
     const tabButtons = () =>
       Array.from(container.querySelectorAll('button[role="tab"]')).map((b) => b.textContent ?? '')
-    expect(tabButtons()).toEqual(['Chat', 'Work', 'Admin'])
+    expect(tabButtons()).toEqual(['Chat', 'Work', 'Docs'])
+    // …and it is IN THE MENU. This is the half that makes the line above a move.
+    expect(
+      container.querySelector('[data-testid="header-menu-button"]'),
+    ).not.toBeNull()
     expect(projectResolverHits).toBe(0)
     expect(container.querySelector('.car-rail')).not.toBeNull()
     expect(container.textContent).toContain('Send')
 
-    // Admin tab switches to the integrations surface (Chat panel hidden).
-    const adminBtn = Array.from(container.querySelectorAll('button[role="tab"]')).find(
-      (b) => b.textContent === 'Admin',
-    ) as HTMLButtonElement
+    // Admin still switches to the integrations surface (Chat panel hidden) — now
+    // reached through the menu. The PANEL behaviour is unchanged, which is the point:
+    // only the affordance moved, so no descriptor or renderer changed.
     await act(async () => {
-      adminBtn.click()
+      (container.querySelector('[data-testid="header-menu-button"]') as HTMLButtonElement).click()
+      await tick()
+    })
+    await act(async () => {
+      (container.querySelector('[data-testid="header-menu-item-admin"]') as HTMLButtonElement).click()
       await tick()
     })
     expect((container.querySelector('.car-tabpanel') as HTMLElement).hasAttribute('hidden')).toBe(true)
@@ -855,12 +873,20 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
       await tick()
     })
 
-    // Desktop General: Work becomes the slide-out pane, so the tab bar keeps only
-    // Chat + Admin (Work stripped), and the pane + its edge-handle mount.
+    // Desktop General: Work becomes the slide-out pane, so the tab bar drops Work
+    // (Admin moved to the ☰ menu on 2026-08-07) and the pane + its edge-handle
+    // mount instead.
+    //
+    // DOCS STAYS IN THE BAND HERE, and that asymmetry with Work is deliberate
+    // rather than an oversight: Work has a desktop home (the pane), Documents does
+    // not, so stripping it would leave the owner's General docs with no entry point
+    // at all on a desktop — the exact dead end this change was made to fix. This
+    // test is INVERTED rather than deleted so the move stays legible in history.
     const tabButtons = Array.from(container.querySelectorAll('button[role="tab"]')).map(
       (b) => b.textContent ?? '',
     )
-    expect(tabButtons).toEqual(['Chat', 'Admin'])
+    expect(tabButtons).toEqual(['Chat', 'Docs'])
+    expect(container.querySelector('[data-testid="header-menu-button"]')).not.toBeNull()
     expect(container.querySelector('.car-plans')).not.toBeNull()
     const handle = container.querySelector('.car-plans-handle') as HTMLButtonElement
     expect(handle).not.toBeNull()
@@ -872,13 +898,22 @@ describe('ProjectShell desktop Work slide-out (≥1024px)', () => {
     expect(boardUrls[0]).toBe('https://sam.neutron.test/api/app/projects/general/work-board')
     expect(boardUrls.every((u) => !u.includes('//work-board'))).toBe(true)
 
-    // General has no Documents tab, so a Work card's spec-doc ref renders as a
-    // STATIC label — NOT a clickable button that would no-op (Codex P2). The label
-    // text shows, but there is no `<button class="cwb-doc-link">`.
-    const staticDoc = container.querySelector('.cwb-doc-link-static')
-    expect(staticDoc).not.toBeNull()
-    expect(staticDoc!.textContent).toContain('general-thing')
-    expect(container.querySelector('button.cwb-doc-link')).toBeNull()
+    // INVERTED 2026-08-09, and this is the assertion that pinned the reported bug.
+    //
+    // It used to require the OPPOSITE: General had no Documents tab, so a Work
+    // card's spec-doc ref rendered as a STATIC label rather than a button that
+    // would no-op (Codex P2). That was right for the tab set of the day — and it is
+    // exactly what the owner hit, reporting the plan link as doing nothing. General
+    // now has a Documents tab, so the ref is a real, live button and the static
+    // fallback must be GONE.
+    //
+    // Both halves are asserted. Checking only for the button would still pass if
+    // the static label were also rendered somewhere alongside it, which would be a
+    // duplicate affordance rather than a fix.
+    const docButton = container.querySelector('button.cwb-doc-link')
+    expect(docButton).not.toBeNull()
+    expect(docButton!.textContent).toContain('general-thing')
+    expect(container.querySelector('.cwb-doc-link-static')).toBeNull()
 
     await act(async () => {
       root.unmount()

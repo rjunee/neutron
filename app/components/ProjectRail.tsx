@@ -40,6 +40,7 @@ import {
 // Defined in the PURE view module so unit tests can assert it (ISSUES #403);
 // re-exported here so existing importers are unaffected.
 import { GENERAL_PROJECT_ID } from '../lib/project-rail-view';
+import { orderRailProjects, railBadgeLabel } from '../lib/rail-order';
 export { GENERAL_PROJECT_ID };
 
 /** The live rail overlay for one project — `activity` drives the dot. */
@@ -147,7 +148,8 @@ function RailItem({
 }) {
   const isGeneral = project.id === GENERAL_PROJECT_ID;
   const dot = railDotKind(overlay?.activity, isGeneral);
-  const hasUnread = project.unread_count > 0;
+  const badge = railBadgeLabel(project.unread_count);
+  const hasUnread = badge !== null;
   return (
     <Pressable
       accessibilityRole="button"
@@ -177,6 +179,20 @@ function RailItem({
         <Text style={styles.emoji} numberOfLines={1}>
           {project.emoji}
         </Text>
+        {/* THE UNREAD COUNT. Owner: "have some kind of notification dot with unread
+            message count (or at least an indicator if no count)" — the count exists
+            on the view already, so the weaker fallback is not needed. Deliberately
+            the TRAILING-TOP corner, diagonally opposite the activity dot: they are
+            different facts (something to READ vs something RUNNING) and stacking
+            them in one corner would make two unrelated signals look like one
+            compound state. */}
+        {badge !== null ? (
+          <View style={styles.badge} testID={`rail-unread-${project.id}`}>
+            <Text style={styles.badgeText} numberOfLines={1}>
+              {badge}
+            </Text>
+          </View>
+        ) : null}
         {/* CLICKABLE ACTIVITY DOT — the Activity Inspector's entry point (SPEC §
             WAVE 3.5; Ryan-locked: no new icon, the EXISTING dot becomes the
             affordance) — but ONLY on the row the owner is already standing in.
@@ -208,9 +224,26 @@ function RailItem({
           </View>
         )}
       </View>
+      {/* TWO LINES, NOT ONE. Owner, on device: "Make project names in the rail wrap
+          instead of truncate. They are not readable when they truncate." The rail is
+          72pt wide, so at caption size a single line held roughly eight characters —
+          enough to render most real project names as an ellipsis and a guess.
+          
+          BOUNDED AT TWO rather than unbounded: the rail is the app's primary
+          navigation and its rows are ~44pt tap targets, so a five-line name would
+          push everything below it off the fold and move targets the owner has learned
+          the position of. Two lines roughly doubles the readable length, which covers
+          the overwhelming majority of names, and anything longer still truncates —
+          just far later.
+          
+          `ellipsizeMode="tail"` stays for that residual case: the truncation moves to
+          the end of the SECOND line rather than being removed, because a name that
+          genuinely does not fit has to end somewhere and the front of it is the part
+          that identifies the project. */}
       <Text
         style={[styles.name, isActive && styles.nameActive, hasUnread && styles.nameUnread]}
-        numberOfLines={1}
+        numberOfLines={2}
+        ellipsizeMode="tail"
       >
         {project.name}
       </Text>
@@ -306,7 +339,7 @@ export function ProjectRail({
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.railContent}
       >
-        {projects.map((project) => (
+        {orderRailProjects(projects, activeProjectId).map((project) => (
           <RailItem
             key={`${project.origin_instance}:${project.id}`}
             project={project}
@@ -368,7 +401,10 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   itemActive: {
-    backgroundColor: THEME.surface_raised,
+    // Fill ONLY. A border was tried and rejected by the owner — see the note on
+    // THEME.rail_selected. Nothing here changes the row's box, so selecting a row
+    // cannot shift the column.
+    backgroundColor: THEME.rail_selected,
   },
   pressed: { opacity: 0.7 },
   glyphWrap: {
@@ -431,6 +467,15 @@ const styles = StyleSheet.create({
     color: THEME.text_muted,
     textAlign: 'center',
     maxWidth: RAIL_WIDTH - SPACING.xs,
+    /**
+     * BOTH LINES' HEIGHT IS RESERVED ON EVERY ROW, whether the name uses one line
+     * or two. Without it the rail becomes a ragged column whose row heights depend
+     * on name length — and worse, a row would CHANGE HEIGHT when a project is
+     * renamed, moving every target beneath it. The rail's own glyph box is already
+     * a fixed 44pt grid; this keeps the label on the same footing, at the cost of
+     * one blank line under short names.
+     */
+    minHeight: TYPOGRAPHY.caption.lineHeight * 2,
   },
   nameActive: {
     color: THEME.text_primary,
@@ -438,6 +483,29 @@ const styles = StyleSheet.create({
   nameUnread: {
     fontWeight: '700',
     color: THEME.text_secondary,
+  },
+  /**
+   * The unread pill. `minWidth` with symmetric padding so "1" is a circle and "99+"
+   * grows sideways into a lozenge rather than being clipped — the badge must never
+   * truncate the very number it exists to show.
+   */
+  badge: {
+    position: 'absolute',
+    top: -2,
+    right: -4,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: THEME.user_bubble,
+  },
+  badgeText: {
+    color: THEME.user_ink,
+    fontSize: 10,
+    lineHeight: 16,
+    fontWeight: '700',
   },
   /**
    * The rule that ends the project list. Short of the rail's full width so it

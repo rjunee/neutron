@@ -134,6 +134,19 @@ export interface BuildTridentOrchestratorOptions {
    * the graceful (never-blocking) path.
    */
   resolve_kimi_configured?: () => boolean
+  /**
+   * The owner's per-phase model/effort overrides for THIS launch.
+   *
+   * Resolved PER LAUNCH, for the same reason as the two resolvers above: a setting
+   * changed after boot must take effect on the next run, not the next restart.
+   *
+   * THIS RESOLVER IS WHY THE FEATURE WORKS AT ALL. `phase-models.ts`, the workflow
+   * argument and the router were all built and correct, and nothing ever produced a
+   * value — the orchestrator simply did not pass one, so every run used the defaults
+   * no matter what was configured. Absent → the workflow argument is omitted and the
+   * defaults apply, which is the pre-existing behaviour exactly.
+   */
+  resolve_phase_models?: () => Record<string, { model?: string; effort?: string }> | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
   /**
@@ -404,6 +417,12 @@ export function buildTridentOrchestrator(
       // resolver / nothing learned / a
       // read failed.
       reflection_context,
+      // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
+      // and OMITS the argument when nothing valid is configured, so an untouched
+      // instance produces byte-identical workflow args.
+      ...(opts.resolve_phase_models
+        ? { phase_models: opts.resolve_phase_models() }
+        : {}),
     })
     const tracked = firePromise.then(
       () => undefined,
@@ -437,7 +456,9 @@ export function buildTridentOrchestrator(
       ...launchRun,
       subagent_run_id: id,
       subagent_status: 'running',
-      workflow_run_id: launchRun.workflow_run_id ?? id,
+      // The exact pooled launcher generation is the crash-ownership token. A
+      // legacy/test fire seam without one retains the old observability id.
+      workflow_run_id: outcome.launcher_session_key ?? launchRun.workflow_run_id ?? id,
       last_advanced_at: now(),
     }
     return {
@@ -664,7 +685,22 @@ export function buildTridentOrchestrator(
     // (1) HARVEST FIRST — a written terminal result wins over orphan recovery, so
     //     a run whose workflow finished before a restart harvests (never re-fires
     //     → never double-merges). Deterministic TS read of the typed DB column.
-    if (run.subagent_run_id !== null) {
+    // `subagent_status === 'crashed'` WIDENS this gate, and that widening is the
+    // whole fix for the unbounded re-fire.
+    //
+    // A crash that lands BEFORE the launch save leaves the row with a NULL
+    // `subagent_run_id`: `saveIfActive` is vetoed by the crash tombstone, so the
+    // dispatch id it was carrying is never written. Every branch below was gated on
+    // `subagent_run_id !== null`, so nothing observed the `crashed` status — and
+    // (3) then hit `if (run.subagent_run_id === null) return launch(run)` and fired
+    // a fresh detached build. Every tick. Forever. Measured on this branch by a
+    // reviewer's live probe: `fires=1..6`, `subagent_run_id` still null at the end.
+    //
+    // A crashed launcher is a DEAD RUN whether or not we ever learned its subagent
+    // id, so it belongs on this side of the gate. Ordering is deliberately
+    // unchanged: the harvest still runs FIRST, so a workflow that wrote its terminal
+    // result and only then lost its launcher still harvests rather than being reaped.
+    if (run.subagent_run_id !== null || run.subagent_status === 'crashed') {
       const result = parseInnerResult(run.inner_result)
       if (result !== null) {
         return applyResult(run, result)
@@ -680,7 +716,7 @@ export function buildTridentOrchestrator(
       //     sticks at `forge-init` forever. Treat a terminal `subagent_status`
       //     with no harvestable result as a TERMINAL FAILURE now (never merge —
       //     there is no verified result to merge on).
-      if (run.subagent_status === 'completed' || run.subagent_status === 'failed') {
+      if (run.subagent_status === 'completed' || run.subagent_status === 'failed' || run.subagent_status === 'crashed') {
         fired.delete(run.id)
         redispatched.delete(run.id)
         const reaped = failedRun(
@@ -689,6 +725,11 @@ export function buildTridentOrchestrator(
             'but wrote no parseable inner_result)',
           false,
         )
+        if (run.subagent_status === 'crashed') {
+          reaped.subagent_status = 'crashed'
+          reaped.subagent_run_id = run.subagent_run_id
+          reaped.failure_reason = run.failure_reason ?? 'inner workflow child crashed'
+        }
         return {
           run: reaped,
           changed: true,

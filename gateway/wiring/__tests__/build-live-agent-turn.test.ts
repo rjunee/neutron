@@ -19,7 +19,10 @@ import type { ChatOutbound } from '@neutronai/landing/server.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
-import { buildLiveAgentTurn } from '../build-live-agent-turn.ts'
+
+import { LIVE_AGENT_TOOL_NAMES } from '../build-live-agent-turn.ts'
+import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
+import { MISSING_CREDENTIAL_DOCTRINE } from '../operating-doctrine.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
 let tmp: string
@@ -83,6 +86,8 @@ function makeRunner(over: {
   projectPersonaResolver?: (
     project_id: string,
   ) => Promise<string | null> | string | null
+  injectActiveTurn?: (turn: LiveAgentTurnRequest, text: string) => Promise<boolean>
+  resolveAttachment?: (url: string) => { path: string; content_type: string } | null
 }) {
   const personaLoader = {
     async load(): Promise<string> {
@@ -101,6 +106,8 @@ function makeRunner(over: {
       : undefined
   return buildLiveAgentTurn({
     substrate: over.substrate,
+    ...(over.injectActiveTurn !== undefined ? { injectActiveTurn: over.injectActiveTurn } : {}),
+    ...(over.resolveAttachment !== undefined ? { resolveAttachment: over.resolveAttachment } : {}),
     personaLoader,
     ...(over.projectPersonaResolver !== undefined
       ? { projectPersonaResolver: over.projectPersonaResolver }
@@ -128,6 +135,152 @@ function makeTurn(over: Partial<LiveAgentTurnRequest> & { sent: ChatOutbound[] }
 }
 
 describe('build-live-agent-turn — reply path', () => {
+  test('kills queue-after, Retry-replay, timestamp-inversion, and empty attachment-history mutations', async () => {
+    let release!: () => void
+    const firstCanComplete = new Promise<void>((resolve) => { release = resolve })
+    const prompts: string[] = []
+    const substrate: Substrate = {
+      start(spec): SessionHandle {
+        prompts.push(spec.prompt)
+        return {
+          events: (async function* () {
+            await firstCanComplete
+            yield { kind: 'token', text: 'done' } as Event
+            yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 } } as Event
+          })(),
+          tool_resolution: 'internal',
+          async respondToTool() { throw new Error('not used') },
+          async cancel() {},
+        }
+      },
+    }
+    const wire: string[] = []
+    const transcriptEntries: Array<Record<string, unknown>> = []
+    const run = makeRunner({
+      substrate,
+      transcriptEntries,
+      injectActiveTurn: async (_turn, text) => { wire.push(text); return true },
+      resolveAttachment: () => ({ path: '/project/upload.pdf', content_type: 'application/pdf' }),
+    })
+    const first = run(makeTurn({ sent: [], user_text: 'first' }))
+    await Bun.sleep(0)
+    const injectedObservedAt = now - 100
+    const second = await run(makeTurn({
+      sent: [], user_text: 'add this now', observed_at: injectedObservedAt,
+    }))
+
+    expect(wire).toEqual(['add this now'])
+    expect(second).toEqual({ outcome: 'replied', reply_prompt_id: null })
+    const history = await store.listHistoryByTopic({
+      topic_id: 'web:u-1', before: now + 1, before_prompt_id: null, limit: 10, now,
+    })
+    const injectedHistory = history.turns.find((turn) => turn.resolution_text === 'add this now')
+    expect(injectedHistory).toBeDefined()
+    const injectedRow = db.raw().prepare(
+      'SELECT resolved_at FROM button_prompts WHERE resolution_freeform_text = ?',
+    ).get('add this now') as { resolved_at: number }
+    expect(injectedRow.resolved_at).toBe(injectedObservedAt)
+    expect(transcriptEntries).toContainEqual({ role: 'user', body: 'add this now', phase: 'completed' })
+    await run(makeTurn({ sent: [], user_text: '', attachments: ['/uploads/doc'] }))
+    const attachmentHistory = await store.listHistoryByTopic({
+      topic_id: 'web:u-1', before: now + 1, before_prompt_id: null, limit: 10, now,
+    })
+    expect(attachmentHistory.turns.some((turn) =>
+      turn.resolution_text === '[Attachment: /uploads/doc]',
+    )).toBe(true)
+    let firstSettled = false
+    void first.then(() => { firstSettled = true })
+    await Bun.sleep(0)
+    expect(firstSettled).toBe(false)
+    release()
+    await first
+    await run(makeTurn({ sent: [], user_text: RETRY_TURN_VALUE }))
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]).toContain('first')
+    expect(prompts[1]).not.toContain('add this now')
+    expect(prompts[1]).not.toContain('/project/upload.pdf')
+  })
+
+  test('kills queued-leapfrog and button-prompt-injection mutations', async () => {
+    let release!: () => void
+    const firstCanComplete = new Promise<void>((resolve) => { release = resolve })
+    const prompts: string[] = []
+    const substrate: Substrate = {
+      start(spec): SessionHandle {
+        prompts.push(spec.prompt)
+        return {
+          events: (async function* () {
+            await firstCanComplete
+            yield { kind: 'token', text: 'done' } as Event
+            yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 } } as Event
+          })(),
+          tool_resolution: 'internal',
+          async respondToTool() { throw new Error('not used') },
+          async cancel() {},
+        }
+      },
+    }
+    const wire: string[] = []
+    const run = makeRunner({
+      substrate,
+      injectActiveTurn: async (_turn, text) => { wire.push(text); return true },
+    })
+    const first = run(makeTurn({ sent: [], user_text: 'first' }))
+    await Bun.sleep(0)
+    const queued = run(makeTurn({ sent: [], user_text: RETRY_TURN_VALUE }))
+    const behindQueue = run(makeTurn({ sent: [], user_text: 'must stay third' }))
+    const promptTap = run(makeTurn({ sent: [], user_text: 'choice', button_prompt_id: 'prompt-1' }))
+    expect(wire).toEqual([])
+    release()
+    await Promise.all([first, queued, behindQueue, promptTap])
+    expect(prompts).toHaveLength(4)
+    expect(prompts[2]).toContain('must stay third')
+    expect(prompts[3]).toContain('choice')
+  })
+
+  test('kills Retry-as-injection-target mutation: a send queues behind an active Retry turn', async () => {
+    const releases: Array<() => void> = []
+    const prompts: string[] = []
+    const substrate: Substrate = {
+      start(spec): SessionHandle {
+        prompts.push(spec.prompt)
+        let release!: () => void
+        const canComplete = new Promise<void>((resolve) => { release = resolve })
+        releases.push(release)
+        return {
+          events: (async function* () {
+            await canComplete
+            yield { kind: 'token', text: 'done' } as Event
+            yield { kind: 'completion', usage: { input_tokens: 1, output_tokens: 1 } } as Event
+          })(),
+          tool_resolution: 'internal',
+          async respondToTool() { throw new Error('not used') },
+          async cancel() {},
+        }
+      },
+    }
+    const wire: string[] = []
+    const run = makeRunner({
+      substrate,
+      injectActiveTurn: async (_turn, text) => { wire.push(text); return true },
+    })
+    const first = run(makeTurn({ sent: [], user_text: 'first' }))
+    for (let i = 0; i < 100 && releases.length < 1; i += 1) await Bun.sleep(5)
+    releases[0]!()
+    await first
+    const retry = run(makeTurn({ sent: [], user_text: RETRY_TURN_VALUE }))
+    for (let i = 0; i < 100 && releases.length < 2; i += 1) await Bun.sleep(5)
+    const afterRetry = run(makeTurn({ sent: [], user_text: 'after retry' }))
+    expect(wire).toEqual([])
+    releases[1]!()
+    await retry
+    for (let i = 0; i < 100 && releases.length < 3; i += 1) await Bun.sleep(5)
+    releases[2]!()
+    await afterRetry
+    expect(prompts).toHaveLength(3)
+    expect(prompts[2]).toContain('after retry')
+  })
+
   test('dispatches the substrate, sends ONE agent_message, persists the reply row', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
@@ -243,20 +396,19 @@ describe('build-live-agent-turn — reply path', () => {
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
     await run(makeTurn({ sent }))
-    // P1-5: the live agent surface now includes `Skill` (native skill discovery +
-    // invocation) plus the file/exec tools the bundled skills need to run.
-    // Work Board Phase 2a adds `Workflow` (fire background tridents + stay
-    // responsive) — a constant-surface addition.
-    expect(specs[0]!.tools.map((t) => t.name)).toEqual([
-      'Read',
-      'Glob',
-      'Grep',
-      'Write',
-      'Edit',
-      'Bash',
-      'Skill',
-      'Workflow',
-    ])
+    // Pinned to the CONSTANT, not to a literal copy of it. The literal broke on the
+    // WebSearch/WebFetch grant — a change to the surface that this test has no
+    // opinion about — which is the failure mode of asserting a full list: it reds on
+    // every legitimate edit while proving nothing the constant does not already say.
+    //
+    // What is load-bearing here is that the surface REACHES THE SPEC AT ALL, in
+    // order, on EVERY turn. The persistent substrate's reuse guard refuses a turn
+    // whose surface differs from the warm REPL's, so a spec that silently dropped or
+    // reordered the surface would thrash the pool rather than fail visibly.
+    expect(specs[0]!.tools.map((t) => t.name)).toEqual([...LIVE_AGENT_TOOL_NAMES])
+    // And the surface is non-trivial — a positive control, so an accidentally-emptied
+    // constant could not make the assertion above pass against `tools: []`.
+    expect(specs[0]!.tools.length).toBeGreaterThan(4)
   })
 })
 
@@ -292,6 +444,22 @@ describe('build-live-agent-turn — operating-doctrine layer (gap-audit item 10)
     // Same core principles, regardless of surface.
     expect(prompt.toLowerCase()).toContain('truth first')
     expect(prompt.toLowerCase()).toContain('no sycophancy')
+  })
+
+  test('the missing-credential remedy (#552) reaches the COMPOSED prompt, not just the module', async () => {
+    // The point of asserting HERE rather than only in the doctrine unit test: a
+    // module that exports a rule nothing splices in is the same defect one layer
+    // up from the one #551 fixed — real, tested, and never reaching the owner.
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
+    await run(makeTurn({ sent }))
+    const prompt = specs[0]!.prompt
+    expect(prompt).toContain(MISSING_CREDENTIAL_DOCTRINE)
+    // Named concretely enough to act on, and pinned to the failure the owner hit.
+    expect(prompt).toContain('Connect GitHub')
+    expect(prompt).toContain('Integrations')
+    expect(prompt.toLowerCase()).toContain('git push')
   })
 
   test('the doctrine is FIRST-turn-only (warm later turns send only user text)', async () => {

@@ -193,15 +193,20 @@ describe('work_board_add spec-doc routing (M1)', () => {
 
   test('when a specDoc service is wired, add routes through it (spec persisted)', async () => {
     const reg = new ToolRegistry()
-    const seen: Array<{ title: string; spec?: string }> = []
+    const seen: Array<{ title: string; docsProjectId: string; spec?: string }> = []
     // Minimal structural stand-in for WorkBoardSpecDocService.
     const specDoc = {
       createCardWithOptionalSpec: async (
-        slug: string,
+        scope: string,
+        docsProjectId: string,
         input: { title: string; spec?: string; status?: 'upcoming' | 'in_progress' | 'done'; design_doc_ref?: string | null },
       ) => {
-        seen.push({ title: input.title, ...(input.spec !== undefined ? { spec: input.spec } : {}) })
-        return store.create(slug, { title: input.title, design_doc_ref: 'neutron-docs:plans/x.md' })
+        seen.push({
+          title: input.title,
+          docsProjectId,
+          ...(input.spec !== undefined ? { spec: input.spec } : {}),
+        })
+        return store.create(scope, { title: input.title, design_doc_ref: 'neutron-docs:plans/x.md' })
       },
       resolveTaskForItem: async () => 'unused',
     }
@@ -213,7 +218,16 @@ describe('work_board_add spec-doc routing (M1)', () => {
       ctx('owner'),
     )) as { ok: boolean; item?: { design_doc_ref: string | null } }
     expect(out.ok).toBe(true)
-    expect(seen).toEqual([{ title: 'Wire it', spec: 'a\nb\nc' }])
+    // THIS IS THE DEFECT, pinned. The context here has `project_id: null` — the
+    // General scope — and the board scope key for General collapses to the OWNER
+    // SLUG. Passing that same value to `writeDoc` is what created
+    // `Projects/<owner-slug>/docs/plans/`, a phantom project directory the owner's
+    // Documents tab (which reads `Projects/general/docs`) could never show.
+    //
+    // So the docs id must be `general`, not the owner slug, even though the board
+    // row is still scoped the old way. Board scope and docs root are allowed to
+    // differ; what is not allowed is one argument pretending to be both.
+    expect(seen).toEqual([{ title: 'Wire it', docsProjectId: 'general', spec: 'a\nb\nc' }])
     expect(out.item?.design_doc_ref).toBe('neutron-docs:plans/x.md')
   })
 })
@@ -249,8 +263,8 @@ describe('work_board chat-ack seam (#429 task 4)', () => {
     const reg = new ToolRegistry()
     const { posts, ack } = spyAck()
     const specDoc = {
-      createCardWithOptionalSpec: async (slug: string, input: { title: string }) =>
-        store.create(slug, { title: input.title }),
+      createCardWithOptionalSpec: async (scope: string, _docsProjectId: string, input: { title: string }) =>
+        store.create(scope, { title: input.title }),
       resolveTaskForItem: async () => 'unused',
     }
     registerWorkBoardToolSurface(reg, store, {

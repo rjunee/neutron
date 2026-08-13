@@ -24,8 +24,8 @@ import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } 
 import { clearRespawnInFlight, gateFor, getOrSpawnSession } from './spawn.ts'
 import { drainPendingRespawns } from './pending-respawn.ts'
 import { poolKeyFor } from './pool.ts'
-import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const log = createLogger('repl-watchdog')
 
@@ -471,6 +471,26 @@ export async function runReplWatchdogTick(
     })
 
     let respawned = false
+    const keyOptions = supervisedBySessionKey.get(sessionKey)
+    const crashSink = keyOptions?.onChildCrash ?? options.onChildCrash
+    if (
+      action.kind !== 'ignore' &&
+      verdict.wedged &&
+      record?.child_crash_notified_at === undefined &&
+      record?.child_generation !== undefined &&
+      crashSink !== undefined
+    ) {
+      try {
+        await crashSink({ sessionKey, generationKey: record.child_generation, detail: verdict.detail })
+        patchRecord(registryPath, sessionKey, { child_crash_notified_at: now })
+      } catch (err) {
+        log.error('child_crash_sink_error', { sessionKey, error: String(err) })
+        // Do not repoint the registry at a new PID until the durable sink has
+        // committed. The same dead-PID edge is retried on the next tick.
+        results.push({ sessionKey, action: 'crash-sink-retry', respawned: false })
+        continue
+      }
+    }
     if (action.kind === 'respawn-and-alert') {
       // Respawn with the OWNING substrate's options (env / instance-id / spawn
       // opts), resolved by pool key — one registry is shared by substrates that
@@ -479,7 +499,6 @@ export async function runReplWatchdogTick(
       // own options — that would resume it under the wrong env/identity. It is
       // recovered when its owner re-registers (resume-is-always-resume on its next
       // turn, or the next tick once registered). Surface as a skip.
-      const keyOptions = supervisedBySessionKey.get(sessionKey)
       if (keyOptions === undefined) {
         results.push({ sessionKey, action: 'unregistered-skip', respawned: false })
         continue

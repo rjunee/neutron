@@ -105,7 +105,24 @@ export class WorkBoardSpecDocService {
    * transient FS error never blocks adding work to the board.
    */
   async createCardWithOptionalSpec(
-    project_slug: string,
+    /** The BOARD scope key. For General this collapses to the owner slug. */
+    scope: string,
+    /**
+     * The PROJECT id the spec doc belongs to — `general` for the General scope.
+     *
+     * SEPARATE FROM `scope` ON PURPOSE, and this is the whole defect. The two used
+     * to be one argument, so the board's scope key was handed to `writeDoc` as a
+     * `project_id` and General's plans landed in `Projects/<owner-slug>/docs` — a
+     * phantom project directory named after the instance, which the owner then
+     * could not find because General's Documents tab reads `Projects/general/docs`.
+     * A second phantom exists beside it, named after the internal instance id, from
+     * the same conflation.
+     *
+     * `project_slug` = which INSTANCE. `project_id` = which PROJECT. The board may
+     * legitimately collapse General onto the owner slug (its legacy rows live
+     * there); the filesystem must not.
+     */
+    docs_project_id: string,
     input: CreateCardWithSpecInput,
   ): Promise<WorkBoardItem> {
     const explicit =
@@ -113,7 +130,7 @@ export class WorkBoardSpecDocService {
         ? input.design_doc_ref.trim()
         : null
 
-    const item = await this.board.create(project_slug, {
+    const item = await this.board.create(scope, {
       title: input.title,
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.task_type !== undefined ? { task_type: input.task_type } : {}),
@@ -127,9 +144,9 @@ export class WorkBoardSpecDocService {
     const spec = (input.spec ?? '').trim()
     const relPath = specDocRelPath(specDocSlug(item.title, item.id.slice(-6)))
     try {
-      if (this.ensureDocsDir !== null) await this.ensureDocsDir(project_slug)
+      if (this.ensureDocsDir !== null) await this.ensureDocsDir(docs_project_id)
       await this.docs.writeDoc({
-        project_id: project_slug,
+        project_id: docs_project_id,
         path: relPath,
         content: buildSpecDocMarkdown({
           title: item.title,
@@ -139,13 +156,13 @@ export class WorkBoardSpecDocService {
       })
     } catch (err) {
       this.log.warn(
-        `[work-board] event=spec_doc_write_failed project=${project_slug} item=${item.id} err=${errText(err)}`,
+        `[work-board] event=spec_doc_write_failed project=${docs_project_id} scope=${scope} item=${item.id} err=${errText(err)}`,
       )
       return item
     }
 
     try {
-      const updated = await this.board.update(project_slug, item.id, {
+      const updated = await this.board.update(scope, item.id, {
         design_doc_ref: designDocRefForPath(relPath),
       })
       return updated ?? item
@@ -153,7 +170,7 @@ export class WorkBoardSpecDocService {
       // Doc is on disk but the ref didn't land — the card is usable (title) and
       // the doc is visible in Documents; log so the drift is observable.
       this.log.warn(
-        `[work-board] event=spec_doc_ref_update_failed project=${project_slug} item=${item.id} err=${errText(err)}`,
+        `[work-board] event=spec_doc_ref_update_failed scope=${scope} item=${item.id} err=${errText(err)}`,
       )
       return item
     }
@@ -174,7 +191,15 @@ export class WorkBoardSpecDocService {
     if (path !== null) {
       try {
         const doc = await this.docs.readDoc(project_slug, path)
-        const content = doc.content.trim()
+        // THE BODY, NOT THE FRONTMATTER. `writeSpecDoc` prepends a YAML block
+        // (`type` / `title` / `created`), and returning the raw content made that
+        // block the builder's FIRST INSTRUCTION. Observed live 2026-08-10 on two
+        // separate email-core runs, whose branches came out
+        // `trident/type-plan-title-p1-email-pipeline-s` — the slug is derived from
+        // the task text, so the metadata leaking in was visible in the branch NAME
+        // while the real damage was invisible: the builder opened its brief on
+        // `type: plan` instead of the scope.
+        const content = stripFrontmatter(doc.content).trim()
         if (content.length > 0) return content
       } catch (err) {
         this.log.warn(
@@ -184,6 +209,41 @@ export class WorkBoardSpecDocService {
     }
     return item.title
   }
+}
+
+/**
+ * Drop a leading YAML frontmatter block, leaving the document body.
+ *
+ * EXPORTED so the behaviour is testable directly rather than only through a doc
+ * round-trip, and because the rules below are easy to get subtly wrong:
+ *
+ *   * The block must OPEN ON LINE 1. A `---` further down a document is a
+ *     horizontal rule or a section divider, and this repo's plan docs use those
+ *     heavily — treating one as a frontmatter fence would silently truncate the
+ *     brief from the top, which is strictly worse than leaving the header on.
+ *   * The fence is a line that is EXACTLY `---` after trimming, not a line that
+ *     merely starts with it (`----` under a heading is setext-ish noise, and
+ *     `--- foo` is prose).
+ *   * An UNCLOSED opener is not frontmatter. A doc starting `---` with no second
+ *     fence is returned untouched; guessing where it ends would discard content.
+ *   * Returns the input unchanged when there is no block, so a doc written by
+ *     hand (or by an older path) is unaffected.
+ *
+ * The caller falls back to the card title when the result is empty, so a doc that
+ * is ONLY frontmatter degrades to the title rather than dispatching a blank brief.
+ */
+export function stripFrontmatter(raw: string): string {
+  const lines = raw.split('\n')
+  // Leading blank lines before the fence are tolerated; anything else means the
+  // document does not open with frontmatter.
+  let start = 0
+  while (start < lines.length && lines[start]?.trim() === '') start += 1
+  if (lines[start]?.trim() !== '---') return raw
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (lines[i]?.trim() === '---') return lines.slice(i + 1).join('\n')
+  }
+  // Opener with no closer: not frontmatter. Leave it alone.
+  return raw
 }
 
 function errText(err: unknown): string {

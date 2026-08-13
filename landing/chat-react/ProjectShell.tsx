@@ -52,6 +52,7 @@ import { PaneErrorBoundary } from './PaneErrorBoundary.tsx'
 import { WorkBoardTab } from './WorkBoardTab.tsx'
 import { IntegrationsTab } from './IntegrationsTab.tsx'
 import { SettingsTab } from './SettingsTab.tsx'
+import { HeaderMenu } from './HeaderMenu.tsx'
 import { useTabOverflow, OverflowMenu } from './tab-overflow.tsx'
 import { useWorkActivity, JobStartDrawer } from './work-activity.tsx'
 import { ThemeToggle } from './ThemeToggle.tsx'
@@ -67,6 +68,7 @@ import type { BootstrapConfig } from './config.ts'
 import type { AttachmentDraft } from './useAttachmentDraft.ts'
 import {
   CHAT_TAB,
+  GENERAL_DOCS_TAB,
   GENERAL_WORK_TAB,
   WebTabsClient,
   appRouteView,
@@ -472,7 +474,18 @@ export function ProjectShell({
           // The engine's global set is Admin-only, so General had no `workboard`
           // descriptor and thus no Work view (the gap this closes). Mirrors the
           // mobile shell's `ensureWorkTab` injection — one code path, no branch.
-          setTabs([CHAT_TAB, GENERAL_WORK_TAB, ...globalTabs.filter(canRenderTab)])
+          // chat → work → docs, then whatever the engine's global set adds (Admin).
+          // The DOCS tab is injected for the same reason as Work: the engine's
+          // global set is Admin-only, so General never received a `documents`
+          // descriptor even though its docs are backend-reachable — and without
+          // one, `pendingDoc` below waits forever and a Work card's plan link is
+          // a dead click.
+          setTabs([
+            CHAT_TAB,
+            GENERAL_WORK_TAB,
+            GENERAL_DOCS_TAB,
+            ...globalTabs.filter(canRenderTab),
+          ])
           setTabsScope('')
         })
         .catch(() => {
@@ -536,6 +549,34 @@ export function ProjectShell({
     if (key !== undefined) setActiveKey(key)
   }, [config.initialTabKey, tabsScope])
 
+  // REVEAL THE WORK TAB WHEN THE BOARD GAINS ITEMS.
+  //
+  // Owner-asked 2026-08-11: "i need the workboard to POP open immediate as soon
+  // as items are added". A plan materialising behind a tab he is not looking at
+  // is invisible work, and he had just spent minutes staring at Chat while five
+  // items were written.
+  //
+  // Keyed on the controller's monotonic growth nonce, NOT on an item count: a
+  // count would re-fire on every unrelated re-render, and the controller already
+  // refuses to bump on a board's FIRST frame (a fresh subscription delivers the
+  // whole board at once, and yanking him off Chat for that would be wrong).
+  //
+  // The nonce is skipped on mount via the ref seed, so entering a project never
+  // steals focus — only growth observed while he is here does.
+  const lastBoardGrew = useRef<number | null>(null)
+  useEffect(() => {
+    const n = vm.workBoardGrewNonce
+    if (lastBoardGrew.current === null) {
+      lastBoardGrew.current = n // seed: mount is not growth
+      return
+    }
+    if (n === lastBoardGrew.current) return
+    lastBoardGrew.current = n
+    const workTab = tabs.find((t) => t.mount.kind === 'builtin' && t.mount.target === 'workboard')
+    if (workTab === undefined) return
+    setActiveKey(workTab.key)
+  }, [vm.workBoardGrewNonce, tabs])
+
   // P-A — resolve a pending doc-link tap: once the shell is scoped to the
   // link's project AND that project's tabs have RESOLVED (not the previous
   // project's stale set) AND its Documents tab exists, activate that tab and
@@ -595,6 +636,23 @@ export function ProjectShell({
   // to the OUTGOING scope, so clamp the active tab to the always-in-scope Chat
   // until the new set resolves — belt-and-braces with the disabled non-Chat
   // buttons so no wrong-scope `TabContent` can mount mid-switch (Codex P2).
+  /**
+   * THE THINGS YOU ADJUST LEAVE THE BAND (owner ask — settings must live in ONE
+   * place across web and mobile). Settings and Admin move into the top-right menu;
+   * the band keeps the places you WORK. They stay in `visibleTabs`, so choosing one
+   * from the menu still resolves and still renders its panel — only the affordance
+   * moved, which is why no descriptor, registry or renderer changes.
+   *
+   * Filtering on `mount.target` and not on the descriptor's label: a Core could
+   * legitimately ship a tab whose title contains "settings", and it belongs in the
+   * band with the other work surfaces.
+   */
+  const MENU_TARGETS: ReadonlySet<string> = new Set(['settings', 'admin'])
+  const bandTabs = visibleTabs.filter((t) => !MENU_TARGETS.has(t.mount.target))
+  const menuItems = visibleTabs
+    .filter((t) => MENU_TARGETS.has(t.mount.target))
+    .map((t) => ({ key: t.key, label: t.label }))
+
   const resolving = tabsScope === null
   const hasActive = visibleTabs.some((t) => t.key === activeKey)
   const resolvedActiveKey = resolving || !hasActive ? CHAT_KEY : activeKey
@@ -622,13 +680,25 @@ export function ProjectShell({
   // scroll state survive — only its visibility toggles.
   const chatHidden = resolvedActiveKey !== CHAT_KEY
 
-  // A Work card's ▸ spec-doc link opens the doc in the Documents tab. General's
-  // tab set is Chat + Work + Admin — it has NO Documents tab, so `onOpenDocLink`
-  // would set a pending doc the resolver can never satisfy (it waits for a `docs`
-  // tab), leaving a dead button (Codex P2). So we DON'T wire `onOpenDoc` into
-  // General's Work surface: `WorkBoardTab` then renders the spec-doc ref as a
-  // STATIC label instead of a clickable no-op. Named projects keep the live link.
-  const workOpenDoc = isGeneral ? undefined : onOpenDocLink
+  // A Work card's ▸ spec-doc link opens the doc in the Documents tab — in EVERY
+  // scope, General included.
+  //
+  // This used to read `isGeneral ? undefined : onOpenDocLink`. The reason was
+  // sound when written: General's tab set was Chat + Work + Admin with no
+  // Documents tab, so a doc link would set a pending doc the resolver could never
+  // satisfy — a dead button (Codex P2). Suppressing it was the right call for
+  // that tab set.
+  //
+  // General now HAS a Documents tab (`generalScopeTabs`, chat → work → docs), so
+  // the precondition is gone and the guard had inverted into the bug it was
+  // written to prevent: the owner's General work card rendered its plan link as a
+  // static label and clicking it did nothing.
+  //
+  // The lesson worth keeping: this guard encoded a fact about ANOTHER module's
+  // tab set with no mechanical link back to it, so changing that tab set could
+  // not fail here. The doc link now depends only on the resolver, which is a
+  // property of the scope's own tabs rather than a hardcoded name.
+  const workOpenDoc = onOpenDocLink
 
   // Workspace-identity seat (left of the tabs): the active scope's emoji + name.
   // General → 💬 General; a project → its emoji (server, else generic) + label.
@@ -716,7 +786,7 @@ export function ProjectShell({
         <div className="car-topbar">
           <WorkspaceSeat emoji={seatEmoji} name={seatName} />
           <TabBar
-            tabs={visibleTabs}
+            tabs={bandTabs}
             activeKey={resolvedActiveKey}
             onSelect={setActiveKey}
             resolving={resolving}
@@ -724,6 +794,7 @@ export function ProjectShell({
             mobile={!isDesktop}
           />
           {isDesktop ? <ThemeToggle /> : null}
+          <HeaderMenu items={menuItems} onSelect={setActiveKey} />
         </div>
         {/* The seam between the band and the stage. It is the usage meter — two
             1px lines, session over weekly — or, when there is nothing measured,

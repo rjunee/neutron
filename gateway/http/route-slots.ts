@@ -461,6 +461,16 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_voice_transcription_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
+  // 0e4. Per-phase build models — `/api/app/trident/phase-models`. Which model and
+  //      reasoning effort run each phase of a build.
+  slot({
+    key: 'appTridentPhaseModels',
+    rung: 'app-trident-phase-models',
+    composition: 'app_trident_phase_models_surface',
+    gated: true,
+    promote: (c) => pluckHandler(c.app_trident_phase_models_surface),
+    dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
+  }),
   // 0f. Project launcher — P5.3. `/api/app/projects/<id>/launcher[*]`.
   slot({
     key: 'appLauncher',
@@ -518,8 +528,10 @@ export const ROUTE_SLOTS = [
     promote: (c) => pluckHandler(c.app_activity_surface),
     dispatch: (v: SurfaceHandler, ctx) => v.handler(ctx.req),
   }),
-  // 0h1b3. Active-credential usage meter — `GET /api/app/usage`. The two clients
-  //        draw the tab-bar divider from this; unknown is a 200, not a 404.
+  // 0h1b3. Active-credential usage — `GET /api/app/usage` (the snapshot the two
+  //        clients draw the tab-bar divider from; unknown is a 200, not a 404) and
+  //        `GET /api/app/usage/dashboard` (the same windows off the persisted
+  //        series, with pace). ONE slot for both: same owner gate, same subject.
   slot({
     key: 'appUsage',
     rung: 'app-usage',

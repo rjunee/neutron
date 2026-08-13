@@ -26,6 +26,11 @@ import {
   GatewayHttpClient,
   type GatewayHttpClientOptions,
 } from '@neutronai/client-core';
+import {
+  GENERAL_HTTP_ID,
+  httpProjectSegment,
+  httpProjectSegmentEncoded,
+} from './general-scope';
 
 export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed';
 
@@ -115,48 +120,24 @@ export interface ReorderTarget {
  * General Work tab has content to show; it just has to ask for it by the name the
  * server can spell.
  */
-export const GENERAL_WORK_BOARD_PROJECT_ID = 'general';
-
-/**
- * The mobile RAIL id for General (`lib/project-rail-view.ts` `GENERAL_PROJECT_ID`).
- * Duplicated rather than imported so this module — and its unit test — stay off
- * the rail-view import chain, exactly as `activity-client.ts` duplicates it; the
- * parity test in `work-board-general-scope.test.ts` pins the two together.
- */
-const RAIL_GENERAL_ID = '~general';
+export const GENERAL_WORK_BOARD_PROJECT_ID = GENERAL_HTTP_ID;
 
 /**
  * Map a client-side scope id to its Work Board HTTP PATH SEGMENT.
  *
- * This is the ONE boundary where General changes spelling, and it exists because
- * the three spellings are genuinely different alphabets:
- *
- *   - the mobile rail id / route segment is `'~general'` — `~` is deliberately
- *     OUTSIDE the gateway's `[A-Za-z0-9_.-]` project-id alphabet so the sentinel
- *     can never collide with a real project, and deliberately untouched by
- *     `encodeURIComponent` so it survives being a route segment,
- *   - the shared client scope is `''` (`railIdToScope`), which the live
- *     `work_board_changed` filter and the app-ws URL both require,
- *   - the HTTP surface wants `'general'`, and 400s on anything else:
- *     `sanitizeProjectId('~general')` → null → `invalid_project_id`, and an empty
- *     segment produces a `//work-board` double slash that matches no route.
- *
- * Sending the raw sentinel is what put a raw validator string where the General
- * board should be. Mirror of the web twin's `workBoardPathSegment`
- * (`landing/chat-react/work-board-client.ts`), widened by one case because mobile
- * has a rail spelling web does not. Named ids — INCLUDING a project that merely
- * starts with the sentinel — pass through untouched.
+ * Kept as a named export (callers and the web twin both use this name) but the
+ * mapping itself now lives in `general-scope.ts` — the ONE boundary where the
+ * General scope changes spelling, shared with the docs / tabs / activity clients
+ * that each hit the same 400. Named ids — INCLUDING a project that merely starts
+ * with the sentinel — pass through untouched.
  */
 export function workBoardPathSegment(project_id: string): string {
-  if (project_id.length === 0 || project_id === RAIL_GENERAL_ID) {
-    return GENERAL_WORK_BOARD_PROJECT_ID;
-  }
-  return project_id;
+  return httpProjectSegment(project_id);
 }
 
 /** The path segment, percent-encoded for interpolation into a URL. */
 function seg(project_id: string): string {
-  return encodeURIComponent(workBoardPathSegment(project_id));
+  return httpProjectSegmentEncoded(project_id);
 }
 
 export type WorkBoardClientOptions = GatewayHttpClientOptions;

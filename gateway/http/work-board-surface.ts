@@ -38,8 +38,7 @@ import {
   type WorkBoardItem,
   type WorkBoardStatus,
   type WorkBoardStore,
-  type WorkBoardTaskType,
-} from '@neutronai/work-board/store.ts'
+  type WorkBoardTaskType, WorkBoardRunStillLiveError } from '@neutronai/work-board/store.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
@@ -89,7 +88,10 @@ export type WorkBoardStartResult =
  * falls back to a plain `store.create` (a supplied `spec` is then ignored).
  */
 export type WorkBoardCreateCardFn = (
-  project_slug: string,
+  /** The BOARD scope key (General collapses to the owner slug). */
+  scope: string,
+  /** The PROJECT id the spec doc belongs to — `general` for General. */
+  docs_project_id: string,
   input: {
     title: string
     status?: WorkBoardStatus
@@ -267,7 +269,10 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
 async function handleCreate(
   req: Request,
   store: WorkBoardStore,
-  project_slug: string,
+  // The BOARD SCOPE KEY, not a slug: `workBoardScopeKey(owner, project_id)`. It
+  // was named `project_slug`, which is how it ended up being passed to `writeDoc`
+  // as a project id and writing General's plans into a phantom project directory.
+  scope: string,
   project_id: string,
   createCard: WorkBoardCreateCardFn | undefined,
   classifyTaskType: ((title: string) => Promise<WorkBoardTaskType>) | undefined,
@@ -315,14 +320,14 @@ async function handleCreate(
     // else fall back to a plain title-only (+ optional ref) create.
     const item =
       createCard !== undefined
-        ? await createCard(project_slug, {
+        ? await createCard(scope, project_id, {
             title,
             ...(status !== null ? { status } : {}),
             ...(task_type !== null ? { task_type } : {}),
             ...(design_doc_ref !== null ? { design_doc_ref } : {}),
             ...(spec !== null ? { spec } : {}),
           })
-        : await store.create(project_slug, {
+        : await store.create(scope, {
             title,
             ...(status !== null ? { status } : {}),
             ...(task_type !== null ? { task_type } : {}),
@@ -449,8 +454,20 @@ async function handleComplete(
 ): Promise<Response> {
   const owned = store.get(project_slug, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
-  const item = await store.complete(project_slug, item_id)
-  return jsonOk({ item, project_id })
+  // 409, not 500: the store REFUSES to complete an item whose build is still
+  // live, and that is a legitimate answer about state rather than a fault. This is
+  // the path the board row's pulsing dot takes — its click advances status, so on
+  // an in-progress item it lands here and used to assert a running build had
+  // finished (2026-08-11). The client shows the message.
+  try {
+    const item = await store.complete(project_slug, item_id)
+    return jsonOk({ item, project_id })
+  } catch (err) {
+    if (err instanceof WorkBoardRunStillLiveError) {
+      return jsonError(409, 'run_still_live', err.message)
+    }
+    throw err
+  }
 }
 
 async function handleReorder(
@@ -525,6 +542,12 @@ async function handleDelete(
           const { won } = await trident_runs.terminate(runId, 'stopped')
           if (won) cancelled_run = runId
         } else {
+          // Bare `update` does NOT retract a stale `subagent_status='running'` the
+          // way `terminalTransition` does, so a run cancelled on a board-less boot
+          // can still read as in-flight. Accepted: unreachable in a normal boot
+          // (`open/composer.ts` binds the terminator unconditionally), and passing
+          // `subagent_status: null` here would trip `update()`'s crash veto and
+          // refuse the phase write outright on an already-crashed row.
           await trident_runs.update(runId, { phase: 'stopped' })
           cancelled_run = runId
         }

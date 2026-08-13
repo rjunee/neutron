@@ -27,7 +27,7 @@ export type VoiceSendFailure =
   | 'upload_failed';
 
 export type VoiceSendOutcome =
-  | { ok: true; url: string; mime_type: string; duration_ms: number }
+  | { ok: true; url: string; mime_type: string; duration_ms: number; transcript?: string }
   | { ok: false; reason: VoiceSendFailure; message: string };
 
 export interface SendVoiceNoteInput {
@@ -93,5 +93,15 @@ export async function sendVoiceNote(input: SendVoiceNoteInput): Promise<VoiceSen
       message: 'Could not send the voice message.',
     };
   }
-  return { ok: true, url: result.url, mime_type, duration_ms: input.duration_ms };
+  // The transcript rides back on the upload response (see `UploadResult.transcript`)
+  // and is passed to the host so it lands on the message row and therefore in the
+  // local search index. Omitted when the server produced none, so a box without
+  // transcription configured behaves exactly as before.
+  return {
+    ok: true,
+    url: result.url,
+    mime_type,
+    duration_ms: input.duration_ms,
+    ...(result.transcript !== undefined ? { transcript: result.transcript } : {}),
+  };
 }

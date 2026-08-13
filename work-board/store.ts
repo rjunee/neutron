@@ -104,6 +104,25 @@ export interface WorkBoardStoreOptions {
    *  composer can list + tag the RIGHT project's snapshot. Best-effort: a
    *  throwing hook is swallowed so it can never roll back a committed write. */
   onChange?: (project_key: string) => void
+  /**
+   * Is the run bound to an item still LIVE (non-terminal)? Supplied by the
+   * composer, which owns the trident run store.
+   *
+   * THIS IS A SAFETY INVARIANT, NOT A CONVENIENCE. On 2026-08-11 the owner's
+   * board recorded P1 as `done` while its run was still in `forge-init` and the
+   * branch was 0 commits ahead of main — nothing had been committed, let alone
+   * merged. TWO paths can do that and neither checked anything: the
+   * `work_board_complete` AGENT TOOL, and the board row's pulsing dot, whose
+   * click handler advances status and for an in-progress item calls `complete()`.
+   * So both a model narrating its own progress and a stray click could assert
+   * that a running build had finished.
+   *
+   * The guard lives HERE, in the store, rather than at either call site,
+   * precisely because there were two call sites and a third would inherit the
+   * bug. Absent ⇒ unguarded, which keeps every test and board-less boot working
+   * exactly as before.
+   */
+  isRunLive?: (run_id: string) => boolean
 }
 
 /**
@@ -290,17 +309,38 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
   }
 }
 
+/**
+ * Thrown when something tries to mark an item done while its bound run is still
+ * live. Carries both ids so the caller can say WHICH item and WHICH run rather
+ * than a bare failure.
+ */
+export class WorkBoardRunStillLiveError extends Error {
+  readonly item_id: string
+  readonly run_id: string
+  constructor(item_id: string, run_id: string) {
+    super(
+      `refusing to complete item ${item_id}: its build (run ${run_id}) is still running. ` +
+        'Completion is reconciled from the run reaching a terminal phase — it cannot be asserted by hand or by an agent while the build is live.',
+    )
+    this.name = 'WorkBoardRunStillLiveError'
+    this.item_id = item_id
+    this.run_id = run_id
+  }
+}
+
 export class WorkBoardStore {
   private readonly db: ProjectDb
   private readonly now: () => string
   private readonly ulid: () => string
   private readonly onChange: ((project_key: string) => void) | undefined
+  private readonly isRunLive: ((run_id: string) => boolean) | undefined
 
   constructor(db: ProjectDb, opts: WorkBoardStoreOptions = {}) {
     this.db = db
     this.now = opts.now ?? (() => new Date().toISOString())
     this.ulid = opts.ulid ?? defaultUlid
     this.onChange = opts.onChange
+    this.isRunLive = opts.isRunLive
   }
 
   /** Fire the change hook for the mutated board key; never let a hook throw
@@ -541,6 +581,20 @@ export class WorkBoardStore {
    * refresh `completed_at` (it routes through the same transition logic).
    */
   async complete(project_slug: string, id: string): Promise<WorkBoardItem | null> {
+    // REFUSE while the bound run is still live. "Done" is a claim about the world
+    // — that work shipped — and nothing may assert it on behalf of a build that
+    // is still running. See `isRunLive` in the options for the incident.
+    //
+    // It throws rather than returning null because null already means "no such
+    // item", and a refusal that looks like a miss would be silently swallowed by
+    // both callers. The owner's own words on this class of bug: better it refuse
+    // loudly than lie quietly.
+    const existing = this.get(project_slug, id)
+    if (existing !== null && existing.linked_run_id !== null && this.isRunLive !== undefined) {
+      if (this.isRunLive(existing.linked_run_id)) {
+        throw new WorkBoardRunStillLiveError(id, existing.linked_run_id)
+      }
+    }
     return this.update(project_slug, id, { status: 'done' })
   }
 

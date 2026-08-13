@@ -407,6 +407,7 @@ export class ButtonStore {
     text: string
     speaker_user_id: string
     channel_kind: string
+    observed_at?: number
   }): Promise<{ prompt_id: string }> {
     if (typeof input.topic_id !== 'string' || input.topic_id.length === 0) {
       throw new ButtonStoreError('invalid_prompt', `persistInertUserTurn requires a non-empty topic_id`)
@@ -426,7 +427,7 @@ export class ButtonStore {
       )
     }
     const prompt_id = randomUUID()
-    const now = this.now()
+    const now = input.observed_at ?? this.now()
     await this.db.run(
       `INSERT INTO button_prompts
          (prompt_id, topic_id, body, options_json, allow_freeform,

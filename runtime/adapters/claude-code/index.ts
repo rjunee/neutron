@@ -41,6 +41,7 @@ import type { SettingsPermissions } from './persistent/build-settings.ts'
 
 export type { RecoveredReply } from './persistent/persistent-repl-substrate.ts'
 export type { RateLimitBannerNotice } from './persistent/persistent-repl-substrate.ts'
+export { injectPersistentReplActiveTurn } from './persistent/persistent-repl-substrate.ts'
 // O6 — re-export the remaining notice-family types so a gateway consumer wiring
 // the `onDeadTurnNotice` / `onSizeAlert` sinks imports them from THIS adapter
 // boundary (never a deep `persistent/*` path).
@@ -110,6 +111,19 @@ export interface ClaudeCodeSubstrateOptions {
    */
   claude_config_dir?: string
   /**
+   * Per-substrate INACTIVITY window (ms) → `PersistentReplSubstrateOptions.
+   * turnTimeoutMs`. Absent ⇒ the pool's `DEFAULT_TURN_INACTIVITY_MS` (90s).
+   *
+   * Exists for a substrate that HOSTS DETACHED WORK, where the default's liveness
+   * signal — PTY bytes from the child — is the wrong measure: a reasoning-heavy
+   * sidechain is working hard and emitting nothing, and on a trip the pool
+   * POISONS AND RESPAWNS the warm session, killing the work it hosts. See
+   * `PROFILE_WARM_FIRE` in `gateway/wiring/substrate-profiles.ts` for the two
+   * builds that died this way. The ABSOLUTE ceiling still bounds the turn, so
+   * this can slow a kill but never prevent one.
+   */
+  turn_inactivity_ms?: number
+  /**
    * S3 §2 — conversational warm-pool namespace. The persistent substrate folds
    * these into its pool key so distinct (user, project) sessions never collapse
    * into one warm REPL and a credential rotation re-keys (#104). `user_id` is the
@@ -141,6 +155,7 @@ export interface ClaudeCodeSubstrateOptions {
    *   - `onRateLimitBanner` (row #10) — a rate-limit / overload BANNER appeared;
    *     surface a notify-only alert (no keystroke, no auto-retry). */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
+  onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Notice-family DI seam (row #16) — fired ONCE (edge) when the model-update
@@ -255,6 +270,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // Thread the per-instance config dir so the interactive-Max-login child can
   // self-refresh its own OAuth token from its `.credentials.json` (Codex r2 P1).
   if (options.claude_config_dir !== undefined) p.claudeConfigDir = options.claude_config_dir
+  if (options.turn_inactivity_ms !== undefined) p.turnTimeoutMs = options.turn_inactivity_ms
   // S3 §2 — thread the conversational identity + selected credential into the
   // pool key (closes #104; makes the substrate instance-isolation-SAFE).
   if (options.user_id !== undefined) p.user_id = options.user_id
@@ -267,6 +283,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // Notice-family DI seams (rows #10/#11/#13) — forward so the gateway path can
   // wire user-facing delivery instead of the stderr-only fallback (Codex PR #67).
   if (options.onDeadTurnNotice !== undefined) p.onDeadTurnNotice = options.onDeadTurnNotice
+  if (options.onChildCrash !== undefined) p.onChildCrash = options.onChildCrash
   if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
   if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
   if (options.onModelUpdate !== undefined) p.onModelUpdate = options.onModelUpdate

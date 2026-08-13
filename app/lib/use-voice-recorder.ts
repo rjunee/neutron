@@ -66,7 +66,17 @@ export interface UseVoiceRecorderInput {
    * Called once the clip is uploaded. The host turns this into a chat message
    * exactly the way it does for an image: `await send('', [url])`.
    */
-  onSend: (url: string, mime_type: string, duration_ms: number) => Promise<void>;
+  onSend: (
+    url: string,
+    mime_type: string,
+    duration_ms: number,
+    /**
+     * The server's auto-transcript, when the upload produced one. The host puts it on
+     * the message so the spoken words reach the local search index — the message body
+     * stays empty, because the bubble renders the player, not the words.
+     */
+    transcript?: string,
+  ) => Promise<void>;
   /**
    * Called when the owner has permanently denied microphone access (the OS
    * will not prompt again). The host should offer a jump to system settings —
@@ -336,7 +346,12 @@ export function useVoiceRecorder(input: UseVoiceRecorderInput): VoiceRecorderVal
         return;
       }
       try {
-        await latest.current.onSend(outcome.url, outcome.mime_type, outcome.duration_ms);
+        await latest.current.onSend(
+          outcome.url,
+          outcome.mime_type,
+          outcome.duration_ms,
+          outcome.transcript,
+        );
       } catch (err) {
         console.warn('[voice] onSend threw:', err);
       }

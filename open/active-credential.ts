@@ -40,15 +40,33 @@ import { join } from 'node:path'
 
 import type { UsageUnavailableReason } from '@neutronai/contracts/credential-usage.ts'
 
+import { readCredentialLabel } from './credential-label.ts'
+
 export type ActiveCredential =
   /** A subscription token we hold and can therefore measure. */
-  | { kind: 'measurable'; token: string }
+  | {
+      kind: 'measurable'
+      token: string
+      /**
+       * Which account this token belongs to, when a sidecar names it and its
+       * fingerprint matches. Resolved HERE, in the same call as the token, so a
+       * reading can never be stamped with a different credential's label than the
+       * one it measured — see `credential-label.ts`.
+       */
+      account_label: string | null
+    }
   /** Something is configured, or nothing is, but either way there is no bar. */
   | { kind: 'unmeasurable'; reason: UsageUnavailableReason }
 
 export interface ActiveCredentialDeps {
   /** Injected so tests never depend on the runner's real home directory. */
   readFile?: (path: string) => string
+  /**
+   * Reads the account-label sidecar. Injected as a whole function rather than as
+   * another `readFile`, because the two files are read from different paths and a
+   * test that stubs one must not silently answer for the other.
+   */
+  readLabel?: (token: string) => string | null
 }
 
 /**
@@ -106,9 +124,15 @@ export function resolveActiveCredential(
   env: NodeJS.ProcessEnv,
   deps: ActiveCredentialDeps = {},
 ): ActiveCredential {
+  const credentialsPath = claudeCredentialsPath(env)
+  // Deliberately does NOT inherit `deps.readFile`: the two files live at different
+  // paths, and a stub that answered for both would let a test "pass" by feeding the
+  // credentials blob to the label parser. A test that wants a label injects
+  // `readLabel`; one that does not gets the real reader, which finds no sidecar.
+  const label = deps.readLabel ?? ((t): string | null => readCredentialLabel(credentialsPath, t))
   const envToken = env['CLAUDE_CODE_OAUTH_TOKEN']
   if (typeof envToken === 'string' && envToken.length > 0) {
-    return { kind: 'measurable', token: envToken }
+    return { kind: 'measurable', token: envToken, account_label: label(envToken) }
   }
   const apiKey = env['ANTHROPIC_API_KEY']
   if (typeof apiKey === 'string' && apiKey.length > 0) {
@@ -116,7 +140,7 @@ export function resolveActiveCredential(
   }
   const fileToken = readClaudeCredentialsToken(env, deps)
   if (fileToken !== undefined) {
-    return { kind: 'measurable', token: fileToken }
+    return { kind: 'measurable', token: fileToken, account_label: label(fileToken) }
   }
   return { kind: 'unmeasurable', reason: 'no_credential' }
 }

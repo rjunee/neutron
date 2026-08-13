@@ -264,17 +264,50 @@ export function resolveApiKeyEnvTier(input: {
 }
 
 /**
- * Tier 5 — ambient / Keychain `claude` login (Open single-owner ONLY; Managed
- * never allows it). Anthropic-only: ambient auth is a Claude-Code concept (the
- * macOS "Claude Code-credentials" Keychain item) and the substrate's ambient
- * path scrubs only the Anthropic/Claude env vars, so a non-anthropic provider
- * has no ambient credential to mint — return `null` (matches
- * `resolveEnvOAuthTier`'s anthropic-only guard). When `allowAmbient` and the
- * injected `probeAmbientAuth()` reports a Keychain-authed `claude`, mint an
- * `ambient`-kind pool. The pool threads NO secret (empty string): the substrate
- * passes nothing and the spawned `claude` child authenticates via its OWN macOS
- * Keychain item. The probe is injected so this module never imports the
- * Open-only probe (no gateway→open edge).
+ * Tier 5 — ambient `claude` login. Anthropic-only: ambient auth is a Claude-Code
+ * concept and the substrate's ambient path scrubs only the Anthropic/Claude env
+ * vars, so a non-anthropic provider has no ambient credential to mint — return
+ * `null` (matches `resolveEnvOAuthTier`'s anthropic-only guard). When
+ * `allowAmbient` and the injected `probeAmbientAuth()` reports an authed
+ * `claude`, mint an `ambient`-kind pool threading NO secret (empty string): the
+ * spawned child authenticates from its own ambient credential. The probe is
+ * injected so this module never imports the Open-only probe (no gateway→open
+ * edge).
+ *
+ * WHAT "AMBIENT" ACTUALLY MEANS — corrected 2026-08-09, because the previous
+ * wording here cost a whole investigation (ISSUES #517). It said "the macOS
+ * Keychain item" and "Managed never allows it". Both mislead:
+ *
+ *   - the probe (`open/ambient-claude-auth.ts`) branches on PLATFORM. macOS reads
+ *     the Keychain; **every other platform reads `$HOME/.claude/.credentials.json`**.
+ *     On a Linux deployment that file is how credentials arrive, so "Keychain" is
+ *     the wrong noun for the case that actually runs in production.
+ *   - "Managed never allows it" is true only of THIS function. The Open composer
+ *     enables the tier itself (`allowAmbient: true`), and a hosted install boots
+ *     that composer — so ambient is not only reachable there, it can be the ONLY
+ *     tier that resolves when tiers 2 and 4 are unset. That was measured on a live
+ *     hosted install, and it is why "disable ambient" is NOT a safe remedy: it would leave
+ *     such a deployment with no credential at all.
+ *
+ * THE SINGLE CREDENTIAL-LESS ENTRY IS THE MECHANISM, NOT A LIMITATION. An ambient
+ * pool holds one entry with an empty secret because the child does not authenticate
+ * from the pool at all — it authenticates from the credential file, and rotation
+ * happens by SWAPPING THAT FILE underneath it. So an empty secret here means
+ * "someone else owns this credential", which is exactly true.
+ *
+ * A PREVIOUS VERSION OF THIS DOCBLOCK CALLED IT A "KNOWN LIMITATION — NO FAILOVER",
+ * AND THAT WAS WRONG. The reasoning was: one credential-less entry, therefore
+ * nothing to fall back to when the account behind the file hits its limit. The step
+ * it skipped was checking whether anything ABOVE this layer handles that — and
+ * something does, reactively and continuously, with its own success/exhaustion
+ * counters. The claim was retracted the same day the owner read it.
+ *
+ * Worth keeping because the failure mode generalises past credentials: a component
+ * that legitimately holds no state can look broken when you reason about it alone,
+ * and the fix is to find the layer that owns the state before writing down a
+ * limitation. A docblock asserting a limitation is read as design documentation, so
+ * it needs the same evidence bar as a claim about behaviour — arguably a higher one,
+ * since nothing executes it and no test can red.
  */
 export function resolveAmbientTier(input: {
   provider: ApiKeyProvider
@@ -287,6 +320,13 @@ export function resolveAmbientTier(input: {
   return newCredentialPool({
     strategy: 'fill_first',
     credentials: [
+      // `ambient_keychain` IS A MISLEADING NAME on any non-macOS host, and it is
+      // kept deliberately: this id becomes `credential_identity`, which is folded
+      // into `poolKeyFor()` (`runtime/adapters/claude-code/persistent/pool.ts`).
+      // Renaming it therefore RE-KEYS every warm REPL — the same
+      // stranded-pool-key hazard #143's review reproduced — so it is a migration,
+      // not a rename. My own SPEC note called it "safe and separable"; that was
+      // wrong about the safe half. The docblock above carries the truth instead.
       { id: `${input.provider}:ambient_keychain`, kind: 'ambient', secret: '' },
     ],
   })

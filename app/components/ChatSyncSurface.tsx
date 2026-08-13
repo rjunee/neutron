@@ -246,8 +246,12 @@ export function ChatSyncSurface({
   const voice = useVoiceRecorder({
     base_url: config.base_url,
     token: user?.token ?? null,
-    onSend: async (url: string) => {
-      await send('', [url]);
+    onSend: async (url: string, _mime_type: string, _duration_ms: number, transcript?: string) => {
+      // The BODY stays empty — the bubble renders the player, not the words. The
+      // transcript rides alongside so the local search index contains the spoken
+      // words; before this it existed on the server, reached memory, and was
+      // unfindable from the one surface built for finding things.
+      await send('', [url], transcript);
     },
     onPermissionBlocked: () => {
       // Permanently denied — the OS will not ask again, so the only route back

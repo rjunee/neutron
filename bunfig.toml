@@ -7,3 +7,12 @@
 # rationale.
 [test]
 preload = ["./tests/support/scrub-substrate-env.ts"]
+
+# Image assets. Metro turns `require('…/icon.png')` into an asset reference; bun's
+# test runner otherwise tries to PARSE the PNG as JavaScript and dies on the first
+# byte ("Unexpected \ufffd"). `file` hands back the path, which is the same shape the
+# `<Image source>` prop accepts, so a component that renders a bundled image is
+# testable at all. Added when the header gained the Neutron mark — the app's first
+# bundled image import, which is why nothing needed this before.
+[loader]
+".png" = "file"
