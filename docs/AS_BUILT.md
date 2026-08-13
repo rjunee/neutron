@@ -2,6 +2,36 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — REVIEW DEVIATION, recorded on purpose: P1 + P1.5 landed on ONE panel seat
+
+The two entries below merged after review by `argus:codex` ALONE — 21 rounds on
+P1, 10 on P1.5, both ending APPROVE. **The rest of the panel never sat:**
+`argus:claude`, `argus:adversarial` and `argus:synthesis` were not run, and
+`argus:kimi` has no key on this instance. Owner decision, 2026-08-13, taken with
+the gap stated: *"Do #3, get them merged."*
+
+**Why it happened, because the cause is structural and will recur.** A trident
+dispatch builds in a fresh worktree from the DETECTED BASE BRANCH, and
+`base_branch` is a composer-level option that `work_board_dispatch_build` does
+not expose per run. P1's commits lived on an unmerged branch, so a dispatch
+would have started from `main`, never seen them, and rebuilt P1 from scratch
+rather than reviewed it. The work therefore ran INLINE — and the merge gate
+(`trident/state-machine.ts`) is enforced inside trident and absent outside it.
+Nothing mechanical stopped this branch being called done; only restraint did,
+which is the wrong kind of guarantee.
+
+**What that costs, measured rather than argued.** The single seat found roughly
+two dozen real defects across 31 rounds, several of them introduced by earlier
+fixes, and one — a prompt-injection path from any stranger's email subject into
+the agent's own context — survived eight of the author's own review passes. A
+second model family would plausibly have found more. Nothing here claims the
+code is clean; it claims one independent reviewer stopped objecting.
+
+**The follow-on, and it is the real fix:** let trident take a non-default base
+branch so a stacked branch can go through the actual pipeline with the actual
+merge gate. Until that lands, every phase after P1.5 goes through trident from
+`main`, which is now possible precisely because these two merged.
+
 ## 2026-08-12 — the email pipeline reads only the mailboxes the owner switched on, and defaults to none
 
 Branch `trident/email-pipeline-p1-implement-the-esc` (P1.5, on top of P1 below).
