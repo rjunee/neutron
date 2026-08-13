@@ -22,6 +22,7 @@ import {
   parseKimiUsages,
   parseResetInstant,
   probeKimiUsage,
+  provenPercentScaleKeys,
   RESET_FUTURE_PLAUSIBILITY_MS,
 } from '../kimi-usage-probe.ts'
 
@@ -179,13 +180,82 @@ describe('units — the two slips that render as plausible numbers', () => {
     expect(parseFraction({ used_percent: 42 })).toBe(0.42)
   })
 
+  test('a percent above 100 refuses the ENTRY, it does not fall through to another alias', () => {
+    // The sibling policy, stated in `parseWindowLength`'s docstring and now shared:
+    // the field this parser named is the field the response used, so answering 0.5
+    // from `utilization` while `used_percent` is visibly broken would report one
+    // key's number under another key's meaning.
+    expect(parseFraction({ used_percent: 150, utilization: 0.5 })).toBeNull()
+    expect(parseFraction({ used_percent: -1, utilization: 0.5 })).toBeNull()
+    // And the same policy on the fraction-named side.
+    expect(parseFraction({ utilization: 64, fraction: 0.5 })).toBeNull()
+    // An ABSENT alias is not a broken one — the search moves on as it always did.
+    expect(parseFraction({ utilization: 0.5 })).toBe(0.5)
+  })
+
+  test('a sibling window above 1% proves the percent scale, and the sub-1% window is read', () => {
+    // THE REPORTED CASE, and the mutant this kills is refusing the whole payload
+    // because one window happened to sit at or below 1%. A 5-hour window at 1%
+    // beside a 7-day window at 64% is a HEALTHY install: 64 cannot be a fraction,
+    // so this response demonstrably writes percents, so the 1 means 1% — and
+    // discarding both windows over it renders a fault banner on a working gauge.
+    const out = parseKimiUsages(
+      {
+        usages: [
+          { window_minutes: 300, used_percent: 1, reset_at: Math.round((NOW + 17 * MINUTE) / 1000) },
+          {
+            window_minutes: 10_080,
+            used_percent: 64.0,
+            reset_at: Math.round((NOW + 3 * 24 * HOUR) / 1000),
+          },
+        ],
+      },
+      NOW,
+    )
+    expect(out.kind).toBe('ok')
+    if (out.kind !== 'ok') return
+    expect(out.sample.session.fraction).toBe(0.01)
+    expect(out.sample.weekly.fraction).toBe(0.64)
+  })
+
+  test('with NO sibling above 1% the band stays ambiguous, and the payload is refused', () => {
+    // The proof runs one way only. A payload whose every percent-named reading sits
+    // in (0, 1] carries no evidence of its own scale — 0.4 is either 0.4% or 40% —
+    // so it is refused rather than read optimistically. `unrecognised` writes no
+    // sample, which is the honest empty card, never a confident 0.4%.
+    const out = parseKimiUsages(
+      {
+        usages: [
+          { window_minutes: 300, used_percent: 0.4 },
+          { window_minutes: 10_080, used_percent: 0.9 },
+        ],
+      },
+      NOW,
+    )
+    expect(out.kind).toBe('unrecognised')
+  })
+
+  test('the scale proof is per key name and per payload, and 142 proves nothing', () => {
+    // Per key name: `used_percent: 64` says nothing about what `percentage` means.
+    expect([...provenPercentScaleKeys([{ used_percent: 64 }])]).toEqual(['used_percent'])
+    expect(parseFraction({ percentage: 0.4 }, provenPercentScaleKeys([{ used_percent: 64 }]))).toBeNull()
+    // Out of range on both readings is a broken field, not evidence about the scale.
+    expect([...provenPercentScaleKeys([{ used_percent: 142 }])]).toEqual([])
+    // Exactly 1 is inside the ambiguous band, so it cannot be its own proof.
+    expect([...provenPercentScaleKeys([{ used_percent: 1 }])]).toEqual([])
+    // A fraction-named field is never evidence about a percent-named one.
+    expect([...provenPercentScaleKeys([{ utilization: 0.64 }])]).toEqual([])
+  })
+
   test('a percent-named field INSIDE 0..1 is refused — the reading is ambiguous', () => {
     // THE MUTANT THIS KILLS: dividing anything in [0, 100] by 100. `used_percent:
     // 0.85` is either 0.85% or 85%, a factor of 100 apart, and the divide-anyway
     // reading is the OPTIMISTIC one — an 85%-spent window rendered as a 1% bar
     // labelled "available", which is the confident-wrong number that sends the
     // owner to raise concurrency into a wall. Refusing writes no sample at all, and
-    // "no readings yet" is the honest card.
+    // "no readings yet" is the honest card. These calls pass NO sibling evidence,
+    // which is the only condition under which the band stays unreadable — see the
+    // proven-scale cases above.
     expect(parseFraction({ used_percent: 0.85 })).toBeNull()
     expect(parseFraction({ used_percent: 1 })).toBeNull()
     // Exactly zero is unambiguous — 0% and 0.0 are the same number.

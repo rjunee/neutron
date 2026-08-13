@@ -94,6 +94,23 @@ is not in the binary; `not_connected` is wrong too on a box that HAS Codex crede
 Either way no zeros are drawn. The state disappears by deletion when the Codex gauge
 lands. Shipped on both clients, no flag and no dual path.
 
+**A refusal has to be TRUE, or it is the same lie in the other direction.** Two
+boundary reads were refusing readings they could actually resolve, and one was
+accepting a number that was not a reading at all. Kimi's percent-named fields inside
+`(0, 1]` are genuinely ambiguous read alone — 0.85 is either 0.85% or 85% — but a
+field carrying fractions can never exceed 1, so a sibling window at 64% in the SAME
+response is positive proof that this response writes percents. Without that proof step,
+a healthy install whose 5-hour window sat at 1% beside a readable 64% weekly window
+discarded BOTH windows and painted "check the key, then the logs" over a gauge that was
+answering correctly — flapping in and out of the fault state as the short window crossed
+1%. The inference runs one way only (nothing can wrongly prove "percent") and is scoped
+per payload and per key name; where the payload proves nothing, the refusal stands. In
+the other direction, a utilisation outside `[0, 1]` is now refused at the sample store,
+the boundary every writer crosses: `Number.isFinite` alone let a negative through, and a
+negative fraction divided by elapsed renders as a negative pace — "−0.2×", which paints
+as comfortably within the refill rate. Kimi refused negatives at its own edge; the
+Anthropic header path did not, so one writer's guard was never the property.
+
 Detail: `docs/as-built/2026-08-13-usage-dashboard-phase-1.md`.
 
 ## 2026-08-13 — the code-generation model selector: a table, three model families, and the wiring that makes GPT and Kimi selectable (#560)

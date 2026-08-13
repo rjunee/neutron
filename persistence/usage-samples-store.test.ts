@@ -190,6 +190,26 @@ describe('summariseWindow — pace, and the cases where it refuses to answer', (
     expect(fresh({ fraction: Number.NaN, reset_at: NOW })).toBeNull()
     expect(fresh({ fraction: Number.POSITIVE_INFINITY, reset_at: NOW })).toBeNull()
   })
+
+  test('a NEGATIVE fraction is no window either — a finite number is not a reading', () => {
+    // THE MUTANT THIS KILLS: guarding with `Number.isFinite` alone. −0.02 is finite,
+    // so it reached the pace divide and rendered as "−0.2×", which the client paints
+    // as comfortably within the refill rate. The Anthropic header path is the live
+    // route in: `numberHeader` (auth/credential-usage-probe.ts) returns any finite
+    // parse, so an upstream `-1` sentinel arrives intact.
+    const negative = fresh({ fraction: -0.02, reset_at: NOW + 2.5 * HOUR })
+    expect(negative).toBeNull()
+    // And the same reading positive still works, so this is a bound and not a break.
+    expect(fresh({ fraction: 0.02, reset_at: NOW + 2.5 * HOUR })).not.toBeNull()
+  })
+
+  test('a fraction ABOVE 1 is refused, never clamped to a full window', () => {
+    // 64 where a fraction was expected is a percent under a fraction's name. Clamping
+    // it to 1.0 would render an unreadable field as a confident "fully spent"; the
+    // refusal renders as a window that could not be read.
+    expect(fresh({ fraction: 64, reset_at: NOW + 2.5 * HOUR })).toBeNull()
+    expect(fresh({ fraction: 1, reset_at: NOW + 2.5 * HOUR })).not.toBeNull()
+  })
 })
 
 describe('pace-as-of-measurement — the sample anchors the maths, and there is no second clock', () => {
@@ -373,6 +393,19 @@ describe('the store', () => {
     // derived number downstream.
     await store.record({ pool: 'anthropic', ts: NOW, session: Number.NaN, weekly: 0.3 })
     expect(store.latest('anthropic')!.session).toBeNull()
+  })
+
+  test('a fraction outside [0, 1] never enters the series either', async () => {
+    // The write side of the same boundary. A negative or 100×-off reading is dropped
+    // to null rather than stored, so anything reading the rows directly sees a gap —
+    // the honest shape — instead of a number that renders as a reassuring pace.
+    await store.record({ pool: 'anthropic', ts: NOW, session: -0.02, weekly: 0.3 })
+    expect(store.latest('anthropic')!.session).toBeNull()
+    expect(store.latest('anthropic')!.weekly).toBe(0.3)
+    // And a row whose ONLY readings are out of range is not a row at all.
+    expect(
+      await store.record({ pool: 'anthropic', ts: NOW + 1, session: -0.02, weekly: 64 }),
+    ).toBe(false)
   })
 
   test('a double write in the same millisecond UPDATES rather than duplicating', async () => {

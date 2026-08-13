@@ -70,11 +70,38 @@ something false, so each is a named test:
 - **A failed gauge read writes NO row and logs loudly.** Asserted by count with a
   control write proving the counter can move, so "zero rows" cannot be a test that
   never wired the sink.
-- **A percent-named field inside `(0, 1]` is refused as ambiguous.**
-  `used_percent: 0.85` is either 0.85% or 85%, a factor of 100 apart, and dividing
-  by 100 anyway is the optimistic reading — an 85%-spent window painted as a 1% bar
-  labelled "available". Refusing writes no sample, and "no readings yet" is the
-  honest card.
+- **A percent-named field inside `(0, 1]` is resolved from the SAME payload, and
+  refused only when that payload proves nothing.** `used_percent: 0.85` read alone is
+  either 0.85% or 85%, a factor of 100 apart, and dividing by 100 anyway is the
+  optimistic reading — an 85%-spent window painted as a 1% bar labelled "available".
+  But a field carrying fractions can never exceed 1, so a sibling entry in the same
+  response reading `used_percent: 64` is positive proof that this response writes
+  percents, and the 0.85 beside it means 0.85%. The inference runs one way only and
+  cannot misfire; it is scoped per payload and per key name, because evidence about
+  `used_percent` says nothing about `percentage` and evidence from last week says
+  nothing about a schema that changed since. Refusing the whole payload for a healthy
+  5-hour window sitting at 1% next to a readable 64% weekly window was a false fault
+  banner on a working install — the card said "check the key, then the logs" about a
+  gauge that was answering correctly, and flapped in and out of it as the short window
+  crossed 1%. Where nothing proves the scale (every percent reading in `(0, 1]`) the
+  payload is still refused outright, and "no readings yet" is the honest card.
+- **A named field that is present and unreadable refuses the entry — it never falls
+  through to another alias.** `{used_percent: 150, utilization: 0.5}` answering 0.5
+  reports one key's number under another key's meaning. The window-length parser
+  already stated this policy in its docstring; the utilisation parser now applies it
+  too, on both the percent-named and the fraction-named side. An ABSENT alias is not a
+  broken one, so the search still moves on past a key the response simply omitted.
+- **A utilisation outside `[0, 1]` is refused at the store boundary, for every
+  writer.** `Number.isFinite` is not the check it looks like: a negative fraction is
+  finite, and it survives to the paint as a negative pace rendered as "−0.2× — within
+  the refill rate", which is confident, reassuring and meaningless. The Kimi parser
+  refuses negatives at its own edge, but the Anthropic header path passes any finite
+  parse straight through, so an upstream `-1` sentinel arrived intact. The bound now
+  sits in `persistence/usage-samples-store.ts` where every writer crosses, on the write
+  side AND on the read side (rows written by an earlier build are already on disk).
+  Above 1 is refused rather than clamped for the same reason: 64 where a fraction was
+  expected is a percent under a fraction's name, and clamping it to 1.0 renders an
+  unreadable field as a confident "fully spent".
 - **A sub-hour window is named in minutes.** Rounding one to hours prints
   "0h window" — a fabricated zero, in a feature whose doctrine is that a fabricated
   zero must be structurally impossible. Kimi's endpoint can report a length in

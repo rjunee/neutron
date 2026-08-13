@@ -4833,7 +4833,16 @@ throughput decision of whether to raise build concurrency.
   `weekly_window_ms` carry the window LENGTH the provider reported: pace divides
   by it, lengths are not a constant across providers, and Codex has already
   changed regime once, so a series that straddles the change is summarised
-  per-sample rather than with one global constant.
+  per-sample rather than with one global constant. A utilisation outside `[0, 1]` is
+  not a reading and is refused HERE, on the write side and again on the read side,
+  because this is the boundary every writer crosses: `Number.isFinite` alone lets a
+  negative through, and a negative fraction divided by elapsed renders as a NEGATIVE
+  pace — "−0.2×", which the card paints as comfortably within the refill rate. The
+  Kimi parser refuses negatives at its own edge; the Anthropic header path does not
+  (`numberHeader` returns any finite parse), so one writer's guard was never the
+  property. Above 1 is refused rather than clamped, because a percent under a
+  fraction's name clamped to 1.0 is an unreadable field rendered as a confident
+  "fully spent".
 - **Pools — `UsagePool = 'anthropic' | 'codex' | 'kimi'`.** Every pool is served
   every time, in `USAGE_POOLS` order, so a provider can vanish from the screen
   only by being deleted from that list. Codex has no writer yet (its gauge is
@@ -4856,10 +4865,21 @@ throughput decision of whether to raise build concurrency.
   published: the parser accepts a written-down alias set and answers
   `unrecognised` (logging the KEY NAMES it saw, never values) for anything else,
   which writes NO row and leaves the card ageing. Units are checked, not trusted:
-  a percent above 100 and a fraction above 1 are refused rather than clamped, a
-  percent-named value INSIDE `(0, 1]` is refused as ambiguous (`used_percent: 0.85`
-  is either 0.85% or 85%, and dividing anyway is the optimistic reading that paints
-  an 85%-spent window as a 1% bar), and every reset instant is
+  a percent above 100 and a fraction above 1 are refused rather than clamped — and
+  refusing a PRESENT field never falls through to another alias, so
+  `{used_percent: 150, utilization: 0.5}` refuses the entry instead of answering 0.5
+  under the broken field's meaning. A percent-named value INSIDE `(0, 1]` is
+  ambiguous (`used_percent: 0.85` is either 0.85% or 85%, and dividing anyway is the
+  optimistic reading that paints an 85%-spent window as a 1% bar), so it is resolved
+  from the SAME payload where that payload proves the scale and refused where it does
+  not: a field carrying fractions can never exceed 1, so a sibling window reading
+  `used_percent: 64` is positive proof that this response writes percents. The
+  inference is one-directional — no fraction payload can produce the evidence — and is
+  scoped per payload and per key name. Without it, a healthy 5-hour window sitting at
+  1% beside a readable 64% weekly window discarded BOTH windows and painted the
+  permanent-fault banner ("check the key, then the logs") on a gauge that was answering
+  correctly, flapping in and out of it as the short window crossed 1%. Every reset
+  instant is
   plausibility-checked against the clock after conversion, so a seconds value read
   as ms (1970) or an ms value converted again (year 57,000) fails loudly instead of
   rendering. That plausibility bound is ASYMMETRIC, and each side is measured in the

@@ -277,8 +277,12 @@ export const CLIENT_POLL_BUDGET_MS = 30_000
 export const POOL_STALE_AFTER_MS: Record<UsagePool, number> = {
   anthropic: 60_000 * STALE_GRACE_MULTIPLE + CLIENT_POLL_BUDGET_MS,
   kimi: 10 * 60_000 * STALE_GRACE_MULTIPLE + CLIENT_POLL_BUDGET_MS,
-  // Half of the shortest window anyone meters. A harvested reading older than this
-  // describes a window that has plausibly moved on without anybody watching.
+  // Thirty minutes: the interval within which a busy `codex` session can move a
+  // window materially, and sixty times the client's own poll hold. NOT derived from
+  // any window LENGTH — an earlier comment here claimed "half the shortest window
+  // anyone meters", which computes to 150 minutes against the 5-hour session window
+  // above and would invite a future reader to loosen this five-fold. It is a
+  // harvest-freshness bound, and the test pins the constant, not the derivation.
   codex: 30 * 60_000,
 }
 
@@ -294,6 +298,33 @@ const MIN_ELAPSED_FRACTION = 0.05
 
 /** Keep a month. Pruned by the writers' own ticks — see the migration. */
 export const USAGE_SAMPLE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
+ * A utilisation reading in this repo's units, or null. THE UNIT INTERVAL IS THE
+ * WHOLE CONTRACT, and it is checked HERE because this is the boundary every writer
+ * crosses.
+ *
+ * `Number.isFinite` alone is not the check it looks like. A NEGATIVE fraction is
+ * finite, and it survives all the way to the paint: pace is `fraction / elapsed`,
+ * so −0.02 over a tenth of a window renders as "−0.2× — within the refill rate", a
+ * sentence that is simultaneously confident, reassuring and meaningless. The Kimi
+ * parser already refuses negatives at its own edge (`trident/kimi-usage-probe.ts`),
+ * but the Anthropic header path does not: `numberHeader` in
+ * `auth/credential-usage-probe.ts` returns any finite parse, so a header carrying
+ * `-1` (an upstream sentinel for "unknown" is exactly the shape that produces one)
+ * arrives here intact. One writer's guard is not the property; a boundary check is.
+ *
+ * ABOVE 1 IS REFUSED FOR THE SAME REASON AND NOT CLAMPED. A reading of 64 where a
+ * fraction was expected is a percent under a fraction's name — a 100× unit error —
+ * and clamping it to 1.0 turns an unreadable field into a confident "fully spent".
+ * Refusing leaves the window unsummarised, which the card renders as a window it
+ * could not read rather than as a number nobody measured.
+ */
+export function utilisationOrNull(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  if (v < 0 || v > 1) return null
+  return v
+}
 
 /**
  * Summarise one window from a reading plus the clock.
@@ -318,8 +349,12 @@ export function summariseWindow(input: {
   /** When the fraction was measured. */
   measured_at: number
 }): WindowSummary | null {
-  const { fraction, reset_at, window_ms, measured_at } = input
-  if (fraction === null || !Number.isFinite(fraction)) return null
+  const { reset_at, window_ms, measured_at } = input
+  // Re-checked on the READ side too, not only on the write: rows written by an
+  // earlier build are already on disk, and this function is what every card renders
+  // from. See {@link utilisationOrNull}.
+  const fraction = utilisationOrNull(input.fraction)
+  if (fraction === null) return null
   let pace: number | null = null
   if (reset_at !== null && window_ms !== null && window_ms > 0) {
     // The window STARTED one window-length before it resets, so elapsed is measured
@@ -393,8 +428,11 @@ export class UsageSamplesStore {
     session_window_ms?: number | null
     weekly_window_ms?: number | null
   }): Promise<boolean> {
-    const session = numberOrNull(input.session)
-    const weekly = numberOrNull(input.weekly)
+    // A utilisation outside [0, 1] is not a reading, so it is not stored. Dropping
+    // it here keeps the series clean for anything that reads the rows directly;
+    // `summariseWindow` refuses the same values again for rows already on disk.
+    const session = utilisationOrNull(input.session)
+    const weekly = utilisationOrNull(input.weekly)
     if (session === null && weekly === null) return false
     const ts = input.ts ?? this.now()
     // '' is the "nothing can name this account" key, never a name. See the 0121

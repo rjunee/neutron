@@ -35,10 +35,11 @@
  * and a seconds instant read as milliseconds lands every reset in 1970. So:
  * `*_percent` is divided by 100 and refused above 100; a fraction-named field is
  * refused above 1; a percent-named field whose value is AMBIGUOUS between the two
- * readings is refused outright ({@link parseFraction}); and every reset instant is
- * plausibility-checked against the caller's clock AFTER conversion
- * ({@link parseResetInstant}), which is what makes a double-converted value fail
- * loudly instead of quietly.
+ * readings is resolved from the REST OF THE SAME PAYLOAD where that payload proves
+ * the scale, and refused where it does not ({@link provenPercentScaleKeys},
+ * {@link parseFraction}); and every reset instant is plausibility-checked against
+ * the caller's clock AFTER conversion ({@link parseResetInstant}), which is what
+ * makes a double-converted value fail loudly instead of quietly.
  */
 
 import { KIMI_BASE_URL } from './kimi-review.ts'
@@ -273,9 +274,49 @@ export function parseResetInstant(
 }
 
 /**
+ * Which percent-named aliases THIS payload has proved are on the 0..100 scale.
+ *
+ * ── THE PAYLOAD DISAMBIGUATES ITSELF, AND THE PROOF ONLY RUNS ONE WAY ───────
+ * `used_percent: 0.85` read alone has two readings, 0.85% and 85%, a factor of 100
+ * apart ({@link parseFraction}). But a field that carries FRACTIONS can never
+ * exceed 1 — that is what "fraction" means — so a single sibling entry reading
+ * `used_percent: 64` in the same response is positive proof that this response
+ * writes this field on the percent scale, and that its 0.85 therefore means 0.85%.
+ * The inference is one-directional and cannot misfire: no fraction payload can
+ * produce the evidence, so nothing can wrongly prove "percent".
+ *
+ * WHY IT IS PER PAYLOAD AND PER KEY NAME. Per payload, because one response is one
+ * writer at one version — evidence from a response last week says nothing about a
+ * schema that changed since. Per key name, because `used_percent` proving itself
+ * says nothing about `percentage`, and a proof borrowed across two field names is
+ * the same "a field's name is not a contract" mistake one level up.
+ *
+ * The list is scanned WHOLE, not to the first hit: the entry that carries the
+ * ambiguous value is usually not the one that carries the proof — the reported case
+ * was a 5-hour window at 1% beside a 7-day window at 64%.
+ */
+export function provenPercentScaleKeys(list: readonly unknown[]): ReadonlySet<string> {
+  const proven = new Set<string>()
+  for (const raw of list) {
+    if (!isRecord(raw)) continue
+    for (const key of PERCENT_KEYS) {
+      const n = finiteNumber(raw[key])
+      // Strictly above 1 and inside the percent range. A value above 100 proves
+      // nothing — it is out of range on BOTH readings, so it is a broken field
+      // rather than evidence about which scale the good fields use.
+      if (n !== null && n > 1 && n <= 100) proven.add(key)
+    }
+  }
+  return proven
+}
+
+/** No sibling evidence — every ambiguous percent reading is refused. */
+const NO_PROVEN_PERCENT_KEYS: ReadonlySet<string> = new Set<string>()
+
+/**
  * The 0..1 utilisation of one entry, or null when no alias carried a usable one.
  *
- * ── THE AMBIGUOUS BAND IS REFUSED, NOT GUESSED ──────────────────────────────
+ * ── THE AMBIGUOUS BAND IS RESOLVED FROM EVIDENCE, OR REFUSED — NEVER GUESSED ─
  * `used_percent: 0.85` has two readings — 0.85% and 85% — and they are a factor of
  * 100 apart. The name says percent, but the name is not a contract: this schema is
  * unverified (see the header), and dividing by 100 anyway is the OPTIMISTIC
@@ -283,31 +324,43 @@ export function parseResetInstant(
  * That is precisely the confident-wrong number this feature exists to prevent, and
  * it is invisible because both answers look plausible.
  *
- * So (0, 1] on a percent-named field is refused, and the entry falls through to
- * the fraction aliases or to `unrecognised` — which writes NO sample, leaving the
- * card to say "no readings yet" instead of inventing one. The cost is refusing a
- * genuine 0.5%-used window, which is a window with nothing to report anyway; the
- * cost of the other choice is a wall. Exactly 0 is unambiguous (0% is 0.0) and is
- * accepted.
+ * So the band is decided by `provenPercent` — the key names the SAME payload has
+ * shown carry percents ({@link provenPercentScaleKeys}) — and by nothing else. With
+ * the proof, 0.85 is 0.85% because this response demonstrably writes percents.
+ * Without it, the entry is refused, which makes the payload `unrecognised` and
+ * writes NO sample, leaving the card to say "no readings yet" instead of inventing
+ * one. Exactly 0 is unambiguous (0% is 0.0) and is accepted with or without proof.
+ *
+ * REFUSING A NAMED FIELD DOES NOT FALL THROUGH TO ANOTHER ONE, the same policy its
+ * sibling {@link parseWindowLength} states: the field this parser named is the field
+ * the response used, so answering from a different alias would report some other
+ * key's number under this one's meaning — `{used_percent: 150, utilization: 0.5}`
+ * would answer 0.5 while the percent-named field is visibly broken. A present
+ * percent-named field that cannot be read is a refusal for the whole entry.
  */
-export function parseFraction(entry: Record<string, unknown>): number | null {
+export function parseFraction(
+  entry: Record<string, unknown>,
+  provenPercent: ReadonlySet<string> = NO_PROVEN_PERCENT_KEYS,
+): number | null {
   for (const key of PERCENT_KEYS) {
     const n = finiteNumber(entry[key])
     if (n === null) continue
-    // Above 100 is not a percentage of anything; refusing beats clamping, which
-    // would render a broken field as a full window.
-    if (n < 0 || n > 100) continue
+    // Above 100 (or below 0) is not a percentage of anything; refusing beats
+    // clamping, which would render a broken field as a full window.
+    if (n < 0 || n > 100) return null
     // The ambiguous band: could be a percent, could be a fraction under a
-    // percent's name. Refuse rather than pick the optimistic reading.
-    if (n > 0 && n <= 1) continue
+    // percent's name. Answer only where this payload proved the scale.
+    if (n > 0 && n <= 1 && !provenPercent.has(key)) return null
     return n / 100
   }
   for (const key of FRACTION_KEYS) {
     const n = finiteNumber(entry[key])
+    if (n === null) continue
     // Above 1 on a fraction-named field means the field is really a percentage
     // under a misleading name — exactly the "a field's name is not a contract"
     // case. Refuse it; a 100× error renders as a completely plausible bar.
-    if (n !== null && n >= 0 && n <= 1) return n
+    if (n < 0 || n > 1) return null
+    return n
   }
   return null
 }
@@ -427,12 +480,16 @@ export function parseKimiUsages(
   let session: KimiUsageWindow | null = null
   let weekly: KimiUsageWindow | null = null
   let unreadable = false
+  // Read the whole list BEFORE reading any single entry: a sibling window above 1%
+  // is what proves this payload's percent-named fields are on the percent scale, and
+  // the entry needing that proof is rarely the one that carries it.
+  const provenPercent = provenPercentScaleKeys(list)
   for (const raw of list) {
     if (!isRecord(raw)) {
       unreadable = true
       continue
     }
-    const fraction = parseFraction(raw)
+    const fraction = parseFraction(raw, provenPercent)
     const window_ms = parseWindowLength(raw)
     // BOTH are required, and the length is not optional-with-a-default on
     // purpose: pace divides by it, and the two slots are chosen by it. A window
