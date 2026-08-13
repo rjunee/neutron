@@ -1476,3 +1476,45 @@ describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordinati
     expect(spliceSites).toHaveLength(2)
   })
 })
+
+describe('#568 — the head-probe seat is wrapped, and this test EXISTS because the first version was vacuous', () => {
+  // The review panel's own finding on this PR: "the new head-probe seatAttempt guard
+  // is mutation-unproven — removing it left 70 pass → 70 pass". A guard no test can
+  // kill is indistinguishable from no guard, so these assertions are written to FAIL
+  // if the wrapper is removed.
+  //
+  // SOURCE-SCOPED, and labelled honestly. `seatAttempt` is not exported from the
+  // .mjs, so it cannot be driven behaviourally from here; every assertion below is
+  // about the SHAPE of the source, which is the same technique the rest of this file
+  // uses. It proves the wiring is present, NOT that a rejecting probe is handled at
+  // runtime — that stronger claim needs the seam to be exported, which is deliberately
+  // out of scope for a fix landing under time pressure.
+  test('the head-probe dispatch goes THROUGH seatAttempt (mutant: unwrap it)', () => {
+    // Anchor on the COMPOSITION, not on the label alone. Writing this the obvious way
+    // — indexOf('head-probe-round-') — finds the routing table in `routeModel` first,
+    // which mentions the same label and knows nothing about dispatch. That is the very
+    // trap this PR's other fix is about, and it caught the author of this test too.
+    expect(SRC).toContain('seatAttempt(`head-probe-round-')
+  })
+
+  test('seatAttempt SWALLOWS the rejection rather than rethrowing (mutant: re-throw)', () => {
+    const at = SRC.indexOf('async function seatAttempt(')
+    expect(at).toBeGreaterThan(-1)
+    const body = SRC.slice(at, at + 500)
+    expect(body).toContain('catch')
+    expect(body).toContain('return null')
+    // The whole point of the guard: a dead seat must not propagate. If someone
+    // "improves" this by rethrowing, the lane dies again exactly as it did at round 7.
+    expect(body).not.toContain('throw err')
+  })
+
+  test('a dead seat is NAMED on the transcript (mutant: drop the seat from the log)', () => {
+    const at = SRC.indexOf('async function seatAttempt(')
+    const body = SRC.slice(at, at + 500)
+    // "an infra block that does not say WHICH seat died and WHY leaves the operator
+    // with nothing to act on" — so the log line must carry both.
+    expect(body).toContain('trident.seat-died')
+    expect(body).toContain('seat=')
+    expect(body).toContain('reason=')
+  })
+})

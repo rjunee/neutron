@@ -1277,6 +1277,58 @@ const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
 // re-deriving a string.
 const usableStatus = (v, key) => (v && typeof v[key] === 'string' && v[key].length > 0 ? v[key] : '')
 
+/** One short, printable line for anything a `catch` can be handed — including a
+ *  rejection that is not an Error at all (a string, `null`, an object). Bounded so a
+ *  megabyte of subagent stderr cannot become a finding nobody can read. */
+function errText(err) {
+  const raw = err && typeof err === 'object' && typeof err.message === 'string' ? err.message : String(err)
+  const one = raw.replace(/\s+/g, ' ').trim()
+  return one.length > 200 ? `${one.slice(0, 200)}…` : one
+}
+
+// A SEAT THAT DIES MUST BE INDISTINGUISHABLE, TO THE ROUND, FROM A SEAT THAT
+// ANSWERED NOTHING. This is the ONE chokepoint for dispatching a review seat.
+//
+// WHY IT EXISTS (the recurrence #212 did not close). #212 guarded the VALUE
+// `reviewAndSynthesize` hands back, on the premise that a dead subagent makes
+// `agent()` RETURN null. That is only one of the two ways it dies: the call can also
+// REJECT — an API 529 Overloaded, a timeout, a subprocess that exits non-zero, a
+// reply that fails its schema. A rejection is not a return value, so NOTHING
+// downstream of the await ever runs: it unwinds straight out of `reviewAndSynthesize`,
+// past `synthesisOrInfraBlock` (an argument is only evaluated on a value that
+// arrived), out of the loop's `try`, and terminates the whole lane at checkpoint
+// `inner-error` with no verdict — a finished Forge build and every review already
+// paid for, discarded. That is a REVIEWER'S failure ending the RUN, which is exactly
+// what the infra-block shape exists to prevent. `retryDeferredPeers` already assumes
+// this ("an agent that dies must not crash the round") and catches around its own
+// `invoke`; every OTHER dispatch site was unguarded.
+//
+// SO EVERY FAILURE MODE COLLAPSES TO ONE VALUE: `null`. Not because null is tidy, but
+// because null is the shape the rest of the panel ALREADY handles correctly and is
+// tested against — `usableStatus` rejects it, so `retryDeferredPeers` re-dispatches
+// the seat (a 529 is transient; the retry is the cheapest possible remedy), and if it
+// stays dead `missingCoreReviewers`/`crossModelPeerStatus` declare the seat empty,
+// `enforceCrossModelGate` refuses to APPROVE and names WHICH seat, and
+// `classifyBlock` returns 'infra-only' so the loop stops instead of re-Forging.
+// Adding a second, parallel "the seat threw" path is how one of the two quietly stops
+// being enforced; there is one path, and death joins it.
+//
+// IT CANNOT MANUFACTURE AN APPROVE. The only value it ever invents is `null`, which
+// is not a verdict under `usableStatus`, so the failure direction is a BLOCK. The
+// cross-model rule (`trident/kimi-review.ts`) — a cross-model review that did not
+// happen may never become an APPROVE, and never falls back to a Claude-family model —
+// is preserved by construction rather than by a second gate.
+async function seatAttempt(seat, run) {
+  try {
+    return await run()
+  } catch (err) {
+    // The seat and the reason, on the run's transcript: an infra block that does not
+    // say WHICH seat died and WHY leaves the operator with nothing to act on.
+    log(`trident.seat-died seat=${seat} reason=${errText(err)}`)
+    return null
+  }
+}
+
 function enforceSeverityGate(synthesis) {
   if (!synthesis || synthesis.verdict !== 'REQUEST_CHANGES') return synthesis
   const findings = Array.isArray(synthesis.findings) ? synthesis.findings : []
@@ -1468,6 +1520,14 @@ function classifyBlock(synthesis, deferredPeers) {
 // already share for "did this field actually ANSWER?". Anything that is not a
 // non-empty verdict STRING (absent, null, `42`) is not a review.
 //
+// AND THE CRASH WAS STILL A FAILURE, one layer up (2026-08-13, `dashboard-p1`, round
+// 7 of 10, ~10h). READ THE HEADING ABOVE NARROWLY: everything here is about the VALUE
+// the round RETURNS. A seat that dies by REJECTING never returns one, so none of this
+// ran — the rejection unwound past the whole guard and ended the lane at
+// `inner-error` exactly as before. That half is closed by `seatAttempt` and
+// `reviewRoundOrInfraBlock` above, not here. A guard on a return value cannot see a
+// throw; both halves are needed and neither substitutes for the other.
+//
 // The replacement is the shape the workflow ALREADY has for "we did not get this
 // review", three lines away in `enforceCrossModelGate`: REQUEST_CHANGES, one
 // `LANE_FINDING_KIND` blocker, `blockKind: 'infra-only'`. It must NEVER read as
@@ -1484,26 +1544,37 @@ function classifyBlock(synthesis, deferredPeers) {
 // scribbled on by one round and read by the next. `Object.freeze` is the assertion
 // of that, not an optimisation: if a future consumer does mutate, it throws in
 // strict mode (this file is an ES module) instead of corrupting the next round.
-const SYNTHESIS_UNAVAILABLE = Object.freeze({
-  verdict: 'REQUEST_CHANGES',
-  blockKind: 'infra-only',
-  // `title`/`evidence` are the finding field names the schema requires and every
-  // other producer here emits (`ciBlockerFindings`, `roundDidNotLandFinding`, the
-  // cross-model gate). A finding spelled any other way renders blank everywhere it
-  // is surfaced, which for a lane failure means the operator is told nothing at all.
-  findings: Object.freeze([
-    Object.freeze({
-      severity: 'blocker',
-      kind: LANE_FINDING_KIND,
-      title: 'LANE — the synthesis reviewer returned no verdict',
-      evidence:
-        'The synthesis agent produced no result: it died on a terminal API error, which is ' +
-        'what a session limit looks like from inside the workflow. The code was therefore ' +
-        'NEVER JUDGED — this says nothing about the diff, and there is nothing here for a ' +
-        'fix round to act on. Re-run the lane once the credential has capacity.',
-    }),
-  ]),
-})
+//
+// PARAMETERISED BY THE SEAT AND THE REASON, because "the code was never judged" is
+// only half of what an operator needs — the other half is which seat died and why, and
+// a lane block that omits it is unactionable. The zero-reason case is the shared
+// frozen constant below, so the two rounds of a run still get one instance.
+function synthesisUnavailable(seat, reason) {
+  return Object.freeze({
+    verdict: 'REQUEST_CHANGES',
+    blockKind: 'infra-only',
+    // `title`/`evidence` are the finding field names the schema requires and every
+    // other producer here emits (`ciBlockerFindings`, `roundDidNotLandFinding`, the
+    // cross-model gate). A finding spelled any other way renders blank everywhere it
+    // is surfaced, which for a lane failure means the operator is told nothing at all.
+    findings: Object.freeze([
+      Object.freeze({
+        severity: 'blocker',
+        kind: LANE_FINDING_KIND,
+        title: `LANE — ${seat} returned no verdict`,
+        evidence:
+          `${seat} produced no result` +
+          (reason ? `: ${reason}` : '') +
+          '. That is what a terminal API error (a 529 Overloaded, a session limit, a timeout) ' +
+          'looks like from inside the workflow. The code was therefore NEVER JUDGED — this says ' +
+          'nothing about the diff, and there is nothing here for a fix round to act on. Re-run ' +
+          'the lane once the seat has capacity.',
+      }),
+    ]),
+  })
+}
+
+const SYNTHESIS_UNAVAILABLE = synthesisUnavailable('The synthesis reviewer (argus:synthesis)', '')
 
 /**
  * A synthesis that did not answer becomes the infra block, never a crash and never
@@ -1512,6 +1583,38 @@ const SYNTHESIS_UNAVAILABLE = Object.freeze({
  */
 function synthesisOrInfraBlock(synthesis) {
   return usableStatus(synthesis, 'verdict') ? synthesis : SYNTHESIS_UNAVAILABLE
+}
+
+/**
+ * ONE ROUND OF REVIEW, WHICH MAY NOT THROW — the outer half of the same chokepoint
+ * `seatAttempt` is the inner half of.
+ *
+ * `seatAttempt` stops every DISPATCH from rejecting; this stops the round itself from
+ * rejecting for any other reason (the injected `parallel`, a checkpoint step, a
+ * serialisation of a reply we did not expect). Both call sites go through here, so
+ * `synthesis` is a usable object on EVERY path and the two `synthesis.verdict` reads
+ * cannot be reached with anything else.
+ *
+ * A round that died is the same infra block a synthesis that did not answer produces —
+ * REQUEST_CHANGES, `infra-only`, one `lane` blocker naming the failure — so it can
+ * never become an APPROVE and never buys a fix round against nothing. It takes a THUNK
+ * rather than the arguments so the reviewAndSynthesize CALL
+ * (deliberately NOT written with its argument list here: `inner-workflow.test.ts`
+ * locates that call with a bare `SRC.indexOf`, so any prose repeating the exact
+ * literal is found FIRST and silently becomes the anchor, breaking an ordering
+ * assertion about code this comment only describes)
+ * stays at its own call site, where the ordering assertions in `round-landed.test.ts`
+ * and `inner-workflow.test.ts` pin it (repinning those has broken correct code three
+ * times already).
+ */
+async function reviewRoundOrInfraBlock(runRound) {
+  try {
+    return synthesisOrInfraBlock(await runRound())
+  } catch (err) {
+    const reason = errText(err)
+    log(`trident.review-round-died reason=${reason}`)
+    return synthesisUnavailable('The review round (argus)', reason)
+  }
 }
 
 /**
@@ -1854,10 +1957,18 @@ async function readBranchHead(round) {
   const cmd = isPr
     ? `cd ${shSingleQuote(repoPath)} && git ls-remote origin ${shSingleQuote(`refs/heads/${forgeBranch}`)} | awk '{print $1}'`
     : `cd ${shSingleQuote(repoPath)} && git rev-parse ${shSingleQuote(forgeBranch)}`
-  const res = await agent(
-    `Run EXACTLY this single Bash command and report the sha it prints via the schema. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.
+  // Through `seatAttempt` for the same reason the review seats are: a probe agent that
+  // DIES must not end the lane. This probe's own contract already says what an error
+  // means — "report head='' if it prints nothing or errors" — and a `null` reads as
+  // exactly that '' below, so the round stops as one that did not land (fail-closed,
+  // and the operator is told which round to recover) instead of crashing with no
+  // verdict at all.
+  const res = await seatAttempt(`head-probe-round-${round}`, () =>
+    agent(
+      `Run EXACTLY this single Bash command and report the sha it prints via the schema. Report head='' if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any file.
 ${cmd}`,
-    withModel({ label: `head-probe-round-${round}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
+      withModel({ label: `head-probe-round-${round}`, phase: 'Build', schema: BRANCH_HEAD_SCHEMA }),
+    ),
   )
   return (res && typeof res.head === 'string' ? res.head : '').trim()
 }
@@ -1872,10 +1983,17 @@ ${cmd}`,
 async function probeCi(prForCi, round) {
   if (!isPr || prForCi === null || prForCi === undefined) return { status: 'none', failing: [] }
   const cmd = `cd ${shSingleQuote(repoPath)} && gh pr checks ${String(prForCi)} --json name,state,link 2>&1; echo "___EXIT=$?"`
-  const res = await agent(
-    `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether CI passed, do NOT run anything else, do NOT modify any file.
+  // THE PROBE IS A SEAT TOO — its agent can die exactly as a reviewer's can, and an
+  // unguarded rejection here ended the whole lane. Through `seatAttempt` it becomes
+  // `null`, which `classifyCi` already reads as 'unknown': a deferred CI peer, so the
+  // round blocks and reports "we could not tell" instead of crashing (and never
+  // merges on a build nobody read).
+  const res = await seatAttempt(`ci-probe-round-${round}`, () =>
+    agent(
+      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether CI passed, do NOT run anything else, do NOT modify any file.
 ${cmd}`,
-    withModel({ label: `ci-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+      withModel({ label: `ci-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+    ),
   )
   return classifyCi(res)
 }
@@ -2156,9 +2274,13 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
   // seat carries everything the three readers need: the gate's blocker `name`, the
   // synthesis prompt's `letter`/`label`, and the `statusKey` the lane retry reads.
   const coreSeats = []
+  // EVERY seat is dispatched through `seatAttempt`, at the ONE place seats are
+  // registered — so a seat added later cannot forget it, and a dying seat arrives as
+  // the `null` the retry and the completeness gate already handle. `retryDeferredPeers`
+  // re-invokes this very thunk, so the retry is guarded by the same wrapper.
   const pushCoreReviewer = (seat, run) => {
     coreSeats.push({ ...seat, slot: reviewers.length, statusKey: CORE_SEAT_STATUS_KEY })
-    reviewers.push(run)
+    reviewers.push(() => seatAttempt(seat.name, run))
   }
   pushCoreReviewer(
     { name: 'Argus rubric (core reviewer)', letter: 'A', panelLabel: 'Claude rubric' },
@@ -2196,11 +2318,13 @@ TASK: ${task}`,
     logCrossModelSpawn('argus:codex', 'codex-runtime')
     codexSlot = reviewers.length
     reviewers.push(() =>
-      agent(codexReviewerPrompt(diffFile), {
-        label: 'argus:codex',
-        phase: 'Review',
-        schema: CODEX_VERDICT_SCHEMA,
-      }),
+      seatAttempt('argus:codex', () =>
+        agent(codexReviewerPrompt(diffFile), {
+          label: 'argus:codex',
+          phase: 'Review',
+          schema: CODEX_VERDICT_SCHEMA,
+        }),
+      ),
     )
   }
   // argus:kimi runs on the KIMI K3 runtime — a DIFFERENT MODEL FAMILY, which is
@@ -2216,11 +2340,13 @@ TASK: ${task}`,
     logCrossModelSpawn('argus:kimi', 'kimi-runtime')
     kimiSlot = reviewers.length
     reviewers.push(() =>
-      agent(kimiReviewerPrompt(diffFile), {
-        label: 'argus:kimi',
-        phase: 'Review',
-        schema: KIMI_VERDICT_SCHEMA,
-      }),
+      seatAttempt('argus:kimi', () =>
+        agent(kimiReviewerPrompt(diffFile), {
+          label: 'argus:kimi',
+          phase: 'Review',
+          schema: KIMI_VERDICT_SCHEMA,
+        }),
+      ),
     )
   }
   let verdicts = await parallel(reviewers)
@@ -2311,8 +2437,9 @@ TASK: ${task}`,
   const corePanelLines = coreSeats
     .map((seat) => corePanelLine(seat.letter, seat.panelLabel, verdicts[seat.slot]))
     .join('\n')
-  const synthesisRaw = await agent(
-    `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
+  const runSynthesis = () =>
+    agent(
+      `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
@@ -2320,8 +2447,24 @@ TASK: ${task}`,
 ${corePanelLines}
 ${codexPanel}
 ${kimiPanelLine}`,
-    withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
-  )
+      withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
+    )
+  // THE SYNTHESIS SEAT IS RETRIED LIKE ANY OTHER, through the SAME bounded retry —
+  // it is the one seat whose loss costs the whole round, and a 529 is transient. It is
+  // dispatched as a one-slot panel whose `statusKey` is `verdict` itself (exactly as a
+  // core seat's is), so a real verdict is never re-run and only a seat that produced
+  // nothing is. An exhausted retry still yields no verdict, and `synthesisOrInfraBlock`
+  // at the call site turns that into the infra block — a retry never turns into an
+  // APPROVE, and never into a throw.
+  const synthesisRaw = (
+    await retryDeferredPeers({
+      verdicts: [await seatAttempt('argus:synthesis', runSynthesis)],
+      slots: [{ name: 'argus:synthesis', slot: 0, statusKey: 'verdict' }],
+      attempts: LANE_RETRY_ATTEMPTS,
+      log,
+      invoke: runSynthesis,
+    })
+  )[0]
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
   // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
   // A NIT MAY NOT COST A ROUND — applied FIRST, so both gates below can re-block
@@ -2581,7 +2724,7 @@ ${task}${reflectionGuidance}`,
   let reviewedHead = branchHead
 
   // First review + synthesis.
-  let synthesis = synthesisOrInfraBlock(await reviewAndSynthesize(diffFile, round, pr))
+  let synthesis = await reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, pr))
   finalVerdict = normalizeVerdict(synthesis.verdict)
   await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
 
@@ -2658,7 +2801,7 @@ ${task}${reflectionGuidance}`,
     // recording that push as `reviewedHead` would pin the merge to code the
     // upcoming review never sees. Empty → fail-closed, same as round 1.
     reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-    synthesis = synthesisOrInfraBlock(await reviewAndSynthesize(diffFile, round, pr))
+    synthesis = await reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, pr))
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
   }
