@@ -457,4 +457,16 @@ describe('trident/codex-review.sh — the review MODEL is pinned', () => {
     const { codexArgv } = run({ authed: true, codexLoginExit: 0, diffFileContent: 'diff --git a b\n' })
     expect(codexArgv.trim().split('\n')).toEqual(['exec', '--model', 'gpt-5.6-sol', '-'])
   })
+
+  test('an explicit adversarial rubric replaces the generic second-opinion rubric', () => {
+    const rubric = 'Independently try to REFUTE this change. ADVERSARIAL_SENTINEL.'
+    const { codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_REVIEW_RUBRIC: rubric },
+    })
+    expect(codexStdin).toContain(rubric)
+    expect(codexStdin).not.toContain('giving an INDEPENDENT second opinion')
+    expect(codexStdin).toContain(DEFAULT_DIFF.trim())
+  })
 })

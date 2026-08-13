@@ -164,8 +164,10 @@ SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ: say in your findings that you ${SC
 "
 fi
 
-PROMPT="You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
-Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.
+REVIEW_RUBRIC="${NEUTRON_CODEX_REVIEW_RUBRIC:-You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
+Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.}"
+
+PROMPT="${REVIEW_RUBRIC}
 Respond with your findings, then END with a SINGLE final line, exactly one of:
   VERDICT: APPROVE
   VERDICT: REQUEST_CHANGES

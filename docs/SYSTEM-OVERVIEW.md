@@ -3017,6 +3017,17 @@ generation"), mobile `app/app/codegen.tsx`, both over
   assertion. `trident/codex-build.test.ts` spawns the wrapper against real temporary
   git repositories — including a real bare origin and a sha256 repo — and drives it
   into each state the trailer must tell the truth about.
+- **Review executor topology.** `review_adversarial` joins `build` and
+  `build_mechanical` in declaring `alsoRunsOn: ['codex']`; that declaration makes GPT
+  tiers selectable and is mirrored by the route in `trident/inner-workflow.mjs`.
+  Selecting one changes the adversarial seat from an Anthropic `agent({model})` call
+  to a thin command bridge that runs `trident/codex-review.sh`. The bridge exports
+  both `CODEX_REVIEW_MODEL` and the adversarial rubric, so the subprocess still tries
+  to refute the change rather than silently becoming the generic cross-model seat.
+  `review_rubric` remains Claude-only by default and by capability. CLI tiers expose
+  no effort control; the clients derive that from the selected tier's transport.
+  A deferred or dead codex-backed adversarial seat remains a missing core seat and
+  is forced to `REQUEST_CHANGES` by `enforceCrossModelGate`.
 
 ## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 

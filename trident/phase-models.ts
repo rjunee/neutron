@@ -217,6 +217,9 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Independently tries to REFUTE the change rather than to approve it.',
     labels: [{ label: 'argus:adversarial' }],
     default: { tier: 'opus', effort: 'high' },
+    // The adversarial contract is passed explicitly to `trident/codex-review.sh`;
+    // selecting this executor changes the model family, not the review's purpose.
+    alsoRunsOn: ['codex'],
   },
   {
     key: 'review_codex',

@@ -237,7 +237,11 @@ describe('the workflow reads the argument this module produces', () => {
     // nowhere — a settable option that does nothing, which is worse than a greyed one.
     const declared = TRIDENT_PHASES.filter((p) => (p.alsoRunsOn?.length ?? 0) > 0)
     // Not vacuous: the table declares these today.
-    expect(declared.map((p) => p.key).sort()).toEqual(['build', 'build_mechanical'])
+    expect(declared.map((p) => p.key).sort()).toEqual([
+      'build',
+      'build_mechanical',
+      'review_adversarial',
+    ])
     for (const phase of declared) {
       // The route carrying this phase key must list the same groups.
       const route = new RegExp(
@@ -383,6 +387,14 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     // The Claude tiers still work on the same row — a second executor ADDS a choice,
     // it does not replace the default one.
     expect(parsePhaseModelConfig({ build: { model: 'sonnet' } }).errors).toEqual([])
+  })
+
+  it('ACCEPTS a codex tier on adversarial review but keeps rubric review on Claude', () => {
+    expect(parsePhaseModelConfig({ review_adversarial: { model: 'terra' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_rubric: { model: 'terra' } }).errors).toHaveLength(1)
+    expect(
+      parsePhaseModelConfig({ review_adversarial: { model: 'terra', effort: 'max' } }).config,
+    ).toEqual({ review_adversarial: { model: 'terra' } })
   })
 
   it('REFUSES a follower phase outright, and DROPS one that was already stored', () => {

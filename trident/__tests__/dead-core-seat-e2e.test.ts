@@ -152,8 +152,8 @@ describe('a CORE reviewer whose agent died, end to end', () => {
       synthesis: () => ({ verdict: 'REQUEST_CHANGES', findings: [] }),
     })
     const prompt = promptFor(out, 'argus:synthesis')
-    expect(prompt).toContain('Verdict B (Claude adversarial): DID NOT COMPLETE')
-    expect(prompt).not.toContain('Verdict B (Claude adversarial): null')
+    expect(prompt).toContain('Verdict B (Argus adversarial): DID NOT COMPLETE')
+    expect(prompt).not.toContain('Verdict B (Argus adversarial): null')
     // …and the seat that DID answer is still passed through verbatim.
     expect(prompt).toContain('Verdict A (Claude rubric): {"verdict":"REQUEST_CHANGES"')
   })

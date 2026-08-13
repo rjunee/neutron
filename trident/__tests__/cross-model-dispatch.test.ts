@@ -92,6 +92,8 @@ async function runWorkflow(
      * existing case unchanged.
      */
     fixLands?: boolean
+    /** Make the codex-backed adversarial core seat fail closed. */
+    deferredAdversarial?: boolean
   } = {},
 ): Promise<{ captured: Captured[]; logs: string[]; result: Record<string, unknown> }> {
   const captured: Captured[] = []
@@ -148,6 +150,11 @@ async function runWorkflow(
         complexity: opts.complexity ?? 'reasoning',
         remainingTasks: opts.remainingTasks ?? 0,
       }
+    }
+    if (label === 'argus:adversarial' && prompt.includes('CODEX ADVERSARIAL REVIEW bridge')) {
+      return opts.deferredAdversarial === true
+        ? { verdict: 'REQUEST_CHANGES', findings: [], codexStatus: 'deferred', codexTruncated: false }
+        : { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: 'APPROVE', findings: [] }
@@ -286,6 +293,48 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
       model: SONNET_MODEL,
       effort: 'max',
     })
+  })
+})
+
+describe('THE ADVERSARIAL SEAT RUNS ON CODEX WITHOUT LOSING ITS CONTRACT', () => {
+  const TARGET = {
+    build: { model: 'sol' },
+    review_adversarial: { model: 'terra' },
+    review_rubric: { model: 'opus' },
+    decomposition: { model: 'fable' },
+    synthesis: { model: 'fable' },
+  }
+
+  test('the subprocess receives the adversarial rubric and no Anthropic model is requested', async () => {
+    const { captured } = await runWorkflow(productionArgs(TARGET, { ralph: true }))
+    const seat = captured.find((c) => c.label === 'argus:adversarial')!
+    expect(seat.prompt).toContain("CODEX_REVIEW_MODEL='gpt-5.6-terra'")
+    expect(seat.prompt).toContain('NEUTRON_CODEX_REVIEW_RUBRIC=')
+    expect(seat.prompt).toContain('Independently try to REFUTE the change')
+    expect(seat.prompt).toContain('Do not substitute the generic second-opinion rubric')
+    expect({ model: seat.opts['model'] ?? null, effort: seat.opts['effort'] ?? null }).toEqual({
+      model: null,
+      effort: null,
+    })
+
+    const anthropicLabels = captured
+      .filter((c) => c.opts['model'] !== undefined && c.opts['model'] !== null)
+      .map((c) => c.label)
+      .filter((label): label is string => label !== undefined)
+    expect(anthropicLabels).toEqual([
+      'plan:fable',
+      'argus:claude',
+      'argus:synthesis',
+      'cleanup:worktree',
+    ])
+  })
+
+  test('a deferred codex adversarial core seat cannot yield APPROVE', async () => {
+    const { result } = await runWorkflow(productionArgs(TARGET, { ralph: true }), {
+      deferredAdversarial: true,
+    })
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(result['blockKind']).toBe('infra-only')
   })
 })
 
