@@ -114,6 +114,15 @@
 # succeed. Comparing against all three pre-existing tips makes the empty answer the
 # one that survives, which is the invariant above.
 #
+# THE THIRD TIP IS THE FRAGILE ONE, because it is the only one that needs the network,
+# and a baseline that is merely MISSING reads downstream exactly like a baseline that
+# said "no such commit". So the remote probe is retried three times — the same as the
+# post-build witness, because an asymmetry between them is itself the bug: a blip that
+# defeats one attempt but not three would drop the tip from the baseline and then
+# confirm it as pushed. And when all three attempts fail, the run is DEFERRED rather
+# than started: this happens before codex is launched, so an unmeasurable baseline
+# costs a round and not a build.
+#
 # `REMOTE_HEAD` is that measured local sha CONFIRMED PUSHED — it is emitted only when
 # the remote branch tip EQUALS it, and is otherwise empty. It is deliberately not "the
 # current tip of the remote branch": that is a fresh probe of a shared ref, and
@@ -164,7 +173,7 @@
 # (`shell_environment_policy`). The defaults are `inherit = "core"` — HOME, PATH,
 # SHELL, TMPDIR, LOGNAME and a handful more — plus a default EXCLUDE list of
 # `*KEY*`, `*SECRET*`, `*TOKEN*` applied on top. Verified against the CLI shipped here
-# (`codex-cli 0.147.0`): both field names are accepted by `--strict-config` and an
+# (`codex-cli 0.147.0`): the field names below are accepted by `--strict-config` and an
 # invented one is refused, and the pattern list is in the binary beside the core set.
 #
 # That is exactly the wrong filter for this build, because of how the instance's
@@ -185,13 +194,42 @@
 # still drops the two credential variables by pattern, and clearing the excludes
 # without the first never sees them because `core` did not carry them in.
 #
-# WHAT THIS DOES *NOT* WIDEN. The one secret that must not reach the build — the
-# metered `OPENAI_API_KEY` — is `unset` from THIS script's own environment before
-# `codex` is launched at all (see the billing contract above), so it is not in the set
-# being inherited. Everything else the child now sees is what the wrapper itself was
-# given by the phase that started it. The child shell already has
-# `danger-full-access`; withholding the environment from it does not contain it, it
-# only makes it fail at the last step.
+# AND `--strict-config`, WHICH IS WHAT MAKES THE TWO ABOVE LOAD-BEARING RATHER THAN
+# DECORATIVE. Without it an unrecognised `-c` key is accepted and ignored, so a future
+# CLI that renamed or dropped either field would strip `GH_TOKEN` and `GIT_CONFIG_KEY_0`
+# again and the only symptom would be a build that pushed nothing and a run that said
+# "nothing was built". With it, the same rename is a config error before a token is
+# spent, and it names the field. Measured on the CLI shipped here (`codex-cli 0.147.0`):
+# `codex exec --strict-config -c shell_environment_policy.<invented>=true` refuses with
+# `unknown configuration field`, while `inherit`, `ignore_default_excludes`, `exclude`,
+# `set` and `include_only` are all accepted — the refusal proves the check can fail on
+# this exact input shape, which is what makes the acceptances mean something.
+#
+# ── WHAT THIS DOES WIDEN, STATED PLAINLY ─────────────────────────────────────
+# `inherit=all` with the default excludes off is not a narrow grant and this header will
+# not pretend otherwise. The child shell sees EVERY variable the wrapper was given,
+# which on the gateway includes other providers' credentials — the review lane's
+# `KIMI_API_KEY`, for one, which `trident/kimi-key.ts` writes into this process's
+# environment on purpose so it never has to appear in prompt text, and which the default
+# `*KEY*` exclude would otherwise have stripped here.
+#
+# Two things are true about that and both belong on the record:
+#
+#   • It is NOT a widening relative to the builder it replaces. The Claude builder is a
+#     child of this same process and sees this same environment; a codex build that saw
+#     less would be a different security posture for the same job, not a safer one, and
+#     the difference would show up as builds that fail at their last step.
+#   • It COULD be narrowed. `shell_environment_policy.include_only` is a real field on
+#     this CLI (verified above) and an allowlist of the core set plus the GitHub
+#     variables would express the actual need. It is not used here because an allowlist
+#     fails by OMISSION: every tool a build might reach for — a package manager's
+#     registry token, a proxy variable, a language runtime's home — is broken by being
+#     forgotten, silently and only sometimes. That trade is worth revisiting with a
+#     measured list of what a real build touches; it is not worth guessing at.
+#
+# The one secret that must not reach the build — the metered `OPENAI_API_KEY` — is
+# `unset` from this script's own environment before `codex` is launched at all (see the
+# billing contract above), so it is not in the set being inherited.
 #
 # Usage (from inside the build worktree):
 #   CODEX_HOME=<dir> NEUTRON_CODEX_BUILD_BRIEF_FILE=<file> \
@@ -216,8 +254,11 @@
 #   10  NOT_CONNECTED — no CODEX_HOME / no auth.json.
 #   11  NOT_CONNECTED — codex CLI not on PATH.
 #   3   DEFERRED      — configured but the build could not be STARTED (no perl, auth
-#                       precheck failed, no brief, or a brief that did not survive
-#                       the trip intact).
+#                       precheck failed, no brief, a brief that did not survive the
+#                       trip intact, nowhere writable to put the trailer, or a remote
+#                       baseline that could not be measured). Every one of these is
+#                       decided BEFORE codex is launched, so a DEFERRED build costs a
+#                       round and no tokens.
 #   5   DEFERRED      — codex ran and exited non-zero.
 # Unlike the REVIEW lane, NOT_CONNECTED is not a graceful degrade here: a build that
 # did not happen is not a reduced panel, it is no build. The bridge reports it and
@@ -277,32 +318,60 @@ bounded() {
 #
 #   remote_tip <branch> [attempts]
 #
-# `attempts` (default 1) is how many times to ASK WHEN THE PROBE FAILS — a non-zero
-# `git ls-remote`, or the alarm cutting it off. A probe that COMPLETED ends the loop
-# whatever it found, including finding nothing: "the branch is not on the remote" is a
-# real answer, and re-asking it would be waiting for the remote to change its mind
-# (and, in the witness case below, is the one way a true "not pushed" could become a
-# false "pushed" if something else landed mid-loop). Only the failure — which is the
-# outcome that cannot be told apart from a blip — is retried.
+# Prints exactly one of three things, and the THIRD is the point:
+#
+#   <sha>                the remote answered and the branch is at this commit
+#   '' (empty)           the remote ANSWERED and the branch is not there
+#   'unknown' (UNKNOWN)  every attempt failed — the remote never answered at all
+#
+# "Not there" and "never answered" are the same non-answer to a caller that only sees
+# an empty string, and they mean opposite things: the first is a fact to act on, the
+# second is a hole where a fact should be. The baseline caller below now REFUSES on
+# UNKNOWN rather than treating it as "the branch is not on the remote", which is the
+# misreading that let a pre-existing remote-only commit be reported as this build's.
+#
+# `attempts` (default 3, which is the safe value — a caller that forgets the argument
+# gets the resilient probe, not the brittle one) is how many times to ASK WHEN THE
+# PROBE FAILS: a non-zero `git ls-remote`, or the alarm cutting it off. A probe that
+# COMPLETED ends the loop whatever it found, including finding nothing: "the branch is
+# not on the remote" is a real answer, and re-asking it would be waiting for the remote
+# to change its mind (and, in the witness case below, is the one way a true "not
+# pushed" could become a false "pushed" if something else landed mid-loop). Only the
+# failure — which is the outcome that cannot be told apart from a blip — is retried.
 #
 # THE RETRY LIVES IN HERE, not in the caller, because the caller reads this through
 # `$(…)`: a subshell, whose variables never reach the parent, so a caller could not see
 # whether the probe failed or merely came back empty.
 remote_tip() {
-  local out tip attempts n
-  attempts="${2:-1}"
+  local out tip attempts n answered
+  attempts="${2:-3}"
   out="${TMPDIR:-/tmp}/trident-codex-build-ls.$$"
   tip=''
+  answered=0
   n=1
   while [ "$n" -le "$attempts" ]; do
     if bounded "$out" 10 env GIT_TERMINAL_PROMPT=0 git ls-remote origin "refs/heads/$1"; then
       tip="$(awk 'NR==1 {print $1}' "$out" 2>/dev/null || true)"
+      answered=1
       break
     fi
     n=$((n + 1))
   done
   rm -f "$out"
+  if [ "$answered" -ne 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
   sha_or_empty "$tip"
+}
+
+# Is there an `origin` to ask at all? A LOCAL config read, so it costs nothing and
+# cannot hang. Without it `git ls-remote origin` fails instantly and identically to a
+# wedged network, and the two must not be confused: a repo with no remote cannot have a
+# remote-only branch, so its remote baseline is complete by being empty, while a repo
+# whose remote will not answer has a baseline nobody measured.
+has_origin() {
+  git config --get remote.origin.url >/dev/null 2>&1
 }
 
 # Was this sha already on the branch (or under HEAD) before codex ran?
@@ -337,7 +406,7 @@ emit_trailer() {
     head=''
   fi
   remote_head=''
-  if [ -n "$head" ] && [ -n "$BRANCH" ]; then
+  if [ -n "$head" ] && [ -n "$BRANCH" ] && has_origin; then
     # THE REMOTE IS A WITNESS, NOT A SOURCE — this answers "was OUR sha pushed?", and
     # any other answer is discarded (header: the `reviewedHead` rule).
     #
@@ -354,6 +423,10 @@ emit_trailer() {
     # remote must not be the last word — the auth precheck above already retries three
     # times for a far cheaper mistake. See `remote_tip` for why an ANSWER, even an
     # unwelcome one, ends the loop.
+    #
+    # `remote_tip` prints the literal `unknown` when it never got an answer, which is
+    # not a sha and so can never equal `$head`: an unanswerable remote leaves
+    # REMOTE_HEAD empty, which is the fail-closed direction.
     [ "$(remote_tip "$BRANCH" 3)" = "$head" ] && remote_head="$head"
   fi
   pr_number=''
@@ -484,6 +557,17 @@ if [ -z "$TRAILER_FILE" ]; then
   echo "CODEX_BUILD_NO_TRAILER_FILE: NEUTRON_CODEX_BUILD_TRAILER_FILE is unset — there is nowhere to write the measured trailer, so a completed build could not be reported. DEFERRED." >&2
   exit 3
 fi
+# SET IS NOT WRITABLE, and it is the second of those this check is for. A path
+# under a directory that does not exist passes the emptiness test above and then fails
+# at the single `> "$TRAILER_FILE"` in `emit_trailer` — which, with no `set -e`, is a
+# line of stderr and nothing else: the script exits 0, the bridge finds no trailer,
+# and the workflow reports "produced no commitSha — nothing was built" about a build
+# that spent every token and built the whole thing. So the write is PROVED here, by
+# doing it, while the only cost of being wrong is a round.
+if ! : > "$TRAILER_FILE" 2>/dev/null; then
+  echo "CODEX_BUILD_TRAILER_UNWRITABLE: cannot write NEUTRON_CODEX_BUILD_TRAILER_FILE=$TRAILER_FILE (missing directory, or no permission) — a completed build would report nothing and the tokens would be spent. DEFERRED." >&2
+  exit 3
+fi
 
 # ── DEFERRED precheck: auth must be live. 3× retry, 6s per-attempt wall cap ────
 # Ported from the review wrapper: a genuine expiry fails every attempt; a transient
@@ -520,12 +604,26 @@ for _pre in \
   [ -n "$_pre" ] && PRE_EXISTING_HEADS="${PRE_EXISTING_HEADS}${_pre}
 "
 done
-if [ -n "$BRANCH" ]; then
-  # Bounded like every other remote probe here: a remote that hangs must cost the run
-  # a baseline, not the build. Missing it only ever costs PRECISION in one direction —
-  # a re-entry whose previous round exists only on the remote — and the local tips
-  # above already cover the common case.
-  _pre="$(remote_tip "$BRANCH")"
+if [ -n "$BRANCH" ] && has_origin; then
+  # RETRIED 3× — THE SAME AS THE WITNESS PROBE, and the symmetry is the whole point.
+  # This probe used to ask once while the post-build witness asked three times, and a
+  # blip long enough to defeat one attempt but not three resolves that asymmetry into
+  # FABRICATED PROVENANCE: on a re-entry whose previous round exists only on the remote
+  # (a crash-resume, or a fix round in a fresh worktree — the case the local pair above
+  # cannot see), the missed baseline lets `pre_existing` pass a commit this build never
+  # made, the branch-name gate passes too, and the retried witness then confirms it as
+  # "pushed". The run would hand the panel a sha and a diff for someone else's round.
+  #
+  # AND AN UNANSWERED PROBE IS REFUSED, not treated as "the branch is not there". The
+  # baseline is the only thing standing between a switched-onto commit and a reported
+  # one, so a baseline nobody measured is not a baseline. Refusing costs a round; it
+  # costs NO TOKENS, because this runs before codex is launched — which is why the
+  # answer here is DEFERRED and not "build anyway and hope".
+  _pre="$(remote_tip "$BRANCH" 3)"
+  if [ "$_pre" = 'unknown' ]; then
+    echo "CODEX_BUILD_NO_REMOTE_BASELINE: 'git ls-remote origin refs/heads/${BRANCH}' never answered in 3 attempts, so this run cannot tell a commit it makes from one that was already on the branch. DEFERRED before any tokens were spent — retry when the remote answers." >&2
+    exit 3
+  fi
   [ -n "$_pre" ] && PRE_EXISTING_HEADS="${PRE_EXISTING_HEADS}${_pre}
 "
 fi
@@ -563,7 +661,14 @@ fi
 # `*KEY*`/`*SECRET*`/`*TOKEN*`) strips `GH_TOKEN` and `GIT_CONFIG_KEY_0`, which is the
 # ONLY channel `github/credential.ts` uses to authenticate a push. The build then
 # commits, fails to push, and the run reports that nothing was built.
-set -- -c shell_environment_policy.inherit=all \
+#
+# `--strict-config` IS PART OF THE SAME FIX, not a tidy-up beside it. Without it the CLI
+# accepts an unrecognised `-c` key and moves on, so the day either field is renamed the
+# two lines below become decoration: the credential is stripped, the push is anonymous,
+# and the run reports "nothing was built" about a build that built everything. With it a
+# renamed field is a config error that names itself, raised before any tokens are spent.
+set -- --strict-config \
+  -c shell_environment_policy.inherit=all \
   -c shell_environment_policy.ignore_default_excludes=true
 
 # PIN THE BUILD MODEL, for the same reason the review lane pins its own: unpinned,

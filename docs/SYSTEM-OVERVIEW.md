@@ -2854,8 +2854,16 @@ generation"), mobile `app/app/codegen.tsx`, both over
     build that built everything. So the wrapper passes
     `-c shell_environment_policy.inherit=all -c
     shell_environment_policy.ignore_default_excludes=true`; neither is sufficient alone.
-    The metered `OPENAI_API_KEY` is `unset` before `codex` is launched, so it is not in
-    the inherited set.
+    It also passes `--strict-config`, which is what stops those two from becoming
+    decoration: without it an unrecognised `-c` key is accepted and ignored, so a
+    renamed field would strip the credential again and the only symptom would be a run
+    reporting "nothing was built". This is a WIDE grant and the docs say so: the child
+    sees every variable the wrapper was given, including other providers' credentials
+    such as the review lane's `KIMI_API_KEY`. It is not wider than the Claude builder,
+    which is a child of the same process and sees the same environment, and
+    `shell_environment_policy.include_only` would express the narrower need — it is not
+    used yet because an allowlist fails by omission. The metered `OPENAI_API_KEY` is
+    `unset` before `codex` is launched, so it is not in the inherited set.
   - **The downstream contract is MEASURED, not narrated.** `codex exec` does accept
     `--output-schema`, but a schema-shaped answer is still the model reporting on
     itself and the failing case is the build that believes it committed. So after it
@@ -2894,7 +2902,22 @@ generation"), mobile `app/app/codegen.tsx`, both over
     probe is asked up to three times, and only when it FAILED: an unanswered one costs
     the run the whole build ("produced no commitSha — nothing was built" about a build
     that pushed), while a probe that completed has given a real answer and re-asking it
-    is the one way a true "not pushed" could become a false "pushed".
+    is the one way a true "not pushed" could become a false "pushed". The PRE-LAUNCH
+    baseline probe asks the same three times, because asking once while the witness
+    asked three was itself the bug: a blip that defeats one attempt but not three drops
+    the remote-only tip from the baseline and the witness then confirms it as pushed, so
+    a re-entry that committed nothing reports the previous round's sha as its own. When
+    all three baseline attempts fail the run exits 3 (DEFERRED) instead of building — a
+    baseline nobody measured is not a baseline, and refusing before launch costs a round
+    and no tokens. `remote_tip` distinguishes "the branch is not there" (empty) from
+    "no attempt was answered" (the literal `unknown`); a repo with no `origin` skips the
+    probe without deferring, since it cannot have a remote-only branch.
+  - **Nowhere to write the trailer is refused BEFORE the tokens are spent.** The
+    trailer-file precheck proves the path by writing it (`: > "$TRAILER_FILE"`), not by
+    testing that the variable is set: the single `>` in `emit_trailer` fails silently
+    under `set -uo pipefail`, so an unwritable path let a completed build exit 0 having
+    reported nothing, and the workflow then said "produced no commitSha" about a build
+    that built everything.
   - **The brief carries a receipt.** The workflow reaches a shell only through a bridge
     agent that must reproduce the whole brief in a heredoc, so the command ships
     `<bytes>:<fnv32>` for exactly those bytes and the wrapper recomputes both before

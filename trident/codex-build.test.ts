@@ -87,6 +87,14 @@ interface RunOpts {
   bareBin?: boolean
   /** Put a `git` on PATH that never returns for `ls-remote`, and delegates otherwise. */
   hangingLsRemote?: boolean
+  /**
+   * Give the repo a real (bare, local) `origin` BEFORE the wrapper runs.
+   *
+   * Load-bearing for every remote-probe test: the wrapper skips both `ls-remote`
+   * probes when the repo has no `origin`, so a hanging- or failing-remote fixture
+   * without one asserts nothing at all.
+   */
+  origin?: boolean
   /** Content for the diff file the brief was told to write. `null` → never written. */
   diff?: string | null
   /** Seed the repo with a commit BEFORE the wrapper runs (the base state). Default true. */
@@ -95,6 +103,11 @@ interface RunOpts {
   objectFormat?: 'sha256'
   /** Don't set NEUTRON_CODEX_BUILD_TRAILER_FILE at all. */
   noTrailerFile?: boolean
+  /**
+   * Point NEUTRON_CODEX_BUILD_TRAILER_FILE somewhere else — a path RELATIVE to the temp
+   * repo, so a fixture can hand the wrapper one it cannot write to.
+   */
+  trailerFile?: string
   /** What the mock `gh pr list` prints for the PR number. */
   ghPr?: string
   env?: Record<string, string>
@@ -205,6 +218,11 @@ function run(opts: RunOpts = {}): RunResult {
     git('commit', '-q', '-m', 'the base the build starts from')
     baseHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).stdout.trim()
   }
+  if (opts.origin === true) {
+    const bare = join(dir, 'origin.git')
+    spawnSync('git', ['init', '-q', '--bare', bare])
+    git('remote', 'add', 'origin', bare)
+  }
 
   const env: Record<string, string> = {
     PATH: path,
@@ -229,7 +247,7 @@ function run(opts: RunOpts = {}): RunResult {
   const diffFile = join(dir, 'branch.diff')
   if (diff !== null) writeFileSync(diffFile, diff)
   env['NEUTRON_CODEX_BUILD_DIFF_FILE'] = diffFile
-  const trailerFile = join(dir, 'build.trailer')
+  const trailerFile = join(dir, opts.trailerFile ?? 'build.trailer')
   if (opts.noTrailerFile !== true) env['NEUTRON_CODEX_BUILD_TRAILER_FILE'] = trailerFile
 
   if (opts.base !== undefined) git('branch', opts.base)
@@ -312,9 +330,21 @@ function pushable(): RunResult {
 function rerun(
   r: RunResult,
   execCmd: string,
-): { trailer: Record<string, string>; trailerRaw: string } {
+  /**
+   * Kill the wrapper after this long. A DISCRIMINANT, not a stopwatch — the caller
+   * asserts on `signal`, so "it finished by itself" and "we had to kill it" are two
+   * observable outcomes rather than two sides of a threshold.
+   */
+  spawnTimeoutMs?: number,
+): {
+  trailer: Record<string, string>
+  trailerRaw: string
+  status: number | null
+  signal: NodeJS.Signals | null
+  stderr: string
+} {
   const trailerFile = join(r.dir, 'build.trailer')
-  spawnSync(BASH, [SCRIPT, 'trident/a-run'], {
+  const res = spawnSync(BASH, [SCRIPT, 'trident/a-run'], {
     cwd: r.dir,
     encoding: 'utf8',
     env: {
@@ -329,9 +359,21 @@ function rerun(
       NEUTRON_CODEX_BUILD_TRAILER_FILE: trailerFile,
       NEUTRON_CODEX_BUILD_EXEC_CMD: execCmd,
     },
+    ...(spawnTimeoutMs === undefined ? {} : { timeout: spawnTimeoutMs }),
   })
-  const trailerRaw = readFileSync(trailerFile, 'utf8')
-  return { trailer: parseTrailer(trailerRaw), trailerRaw }
+  let trailerRaw = ''
+  try {
+    trailerRaw = readFileSync(trailerFile, 'utf8')
+  } catch {
+    trailerRaw = ''
+  }
+  return {
+    trailer: parseTrailer(trailerRaw),
+    trailerRaw,
+    status: res.status,
+    signal: res.signal ?? null,
+    stderr: res.stderr ?? '',
+  }
 }
 
 describe('trident/codex-build.sh — exit-code contract', () => {
@@ -472,6 +514,27 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     expect(codexStdin).toBe('')
   })
 
+  test('an UNWRITABLE trailer path → exit 3 BEFORE codex is launched, not a silent exit 0', () => {
+    // SET IS NOT WRITABLE, and the precheck used to test only the first. The single
+    // `> "$TRAILER_FILE"` in `emit_trailer` fails silently under `set -uo pipefail`
+    // with no `set -e`: the wrapper printed "No such file or directory", exited 0, and
+    // wrote no trailer — so the bridge reported empty values and the workflow threw
+    // "produced no commitSha — nothing was built" about a build that built everything
+    // and spent every token for it. The check now PROVES the path by writing it.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      // A directory that was never created — the shape a caller composing the path
+       // from a run id gets when the parent has not been made yet.
+      trailerFile: 'no-such-dir/build.trailer',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_TRAILER_UNWRITABLE')
+    // Refused UP FRONT: the seam commits, and the repo is still on the base commit.
+    expect(r.head).toBe(r.baseHead)
+  })
+
   test('configured + authed + build runs → exit 0', () => {
     const { status, stdout } = run({
       authed: true,
@@ -608,7 +671,77 @@ describe('the BRIEF is what codex is asked to build', () => {
     // did not carry them in.
     expect(codexArgv).toContain('-c\nshell_environment_policy.inherit=all\n')
     expect(codexArgv).toContain('-c\nshell_environment_policy.ignore_default_excludes=true\n')
+    // …AND `--strict-config`, which is what stops the two above from becoming
+    // decoration. Without it the CLI accepts an unrecognised `-c` key and moves on, so
+    // a renamed or dropped field would strip the credential again and the only symptom
+    // would be an anonymous push and a run reporting "nothing was built". With it the
+    // rename is a config error that names the field, before any tokens are spent.
+    expect(codexArgv).toContain('--strict-config\n')
   })
+
+  /**
+   * THE ARGV ASSERTIONS ABOVE PIN STRINGS; THIS ONE ASKS THE REAL CLI.
+   *
+   * An argv test cannot tell a real config field from an invented one, which is
+   * precisely the failure `--strict-config` exists to catch. So when a real `codex` is
+   * on PATH, put the wrapper's own overrides in front of it and check that it does not
+   * call them unknown.
+   *
+   * OFFLINE AND FAST: config is loaded before any provider is resolved, so pointing
+   * `model_provider` at a name that does not exist makes the CLI stop immediately
+   * without a network call. And the FIRST assertion is the negative control — an
+   * invented `shell_environment_policy` field MUST be refused on the same input shape.
+   * Without it a CLI that silently ignored `--strict-config` would make the second
+   * assertion pass for the wrong reason, which is the exact class of "a grep that
+   * cannot read the format returns a negative that reads like an answer".
+   */
+  const realCodex = spawnSync('sh', ['-c', 'command -v codex'], { encoding: 'utf8' })
+  const haveRealCodex = realCodex.status === 0 && (realCodex.stdout ?? '').trim() !== ''
+  test.skipIf(!haveRealCodex)(
+    'the `shell_environment_policy` fields are REAL on the installed CLI, not plausible strings',
+    () => {
+      const home = mkdtempSync(join(tmpdir(), 'trident-codex-strict-'))
+      const ask = (...cfg: string[]): string => {
+        const res = spawnSync(
+          'codex',
+          [
+            'exec',
+            '--strict-config',
+            ...cfg.flatMap((c) => ['-c', c]),
+            // A provider that does not exist: the CLI resolves config first, so this
+            // stops it before it can reach the network.
+            '-c',
+            'model_provider=no-such-provider-for-this-test',
+            '--sandbox',
+            'read-only',
+            'unused',
+          ],
+          {
+            encoding: 'utf8',
+            input: '',
+            timeout: 30_000,
+            env: { PATH: process.env['PATH'] ?? '', HOME: home, CODEX_HOME: home },
+          },
+        )
+        return `${res.stdout ?? ''}${res.stderr ?? ''}`
+      }
+      // NEGATIVE CONTROL FIRST.
+      expect(ask('shell_environment_policy.no_such_field_for_this_test=true')).toContain(
+        'unknown configuration field',
+      )
+      // …and the fields the wrapper actually passes are not refused.
+      const real = ask(
+        'shell_environment_policy.inherit=all',
+        'shell_environment_policy.ignore_default_excludes=true',
+      )
+      expect(real).not.toContain('unknown configuration field')
+      // It really did get past config loading and stop where we expected, so the
+      // assertion above is not green because the CLI failed earlier for some other
+      // reason and printed nothing.
+      expect(real).toContain('no-such-provider-for-this-test')
+    },
+    60_000,
+  )
 
   test('a metered API key is scrubbed before the build runs — subscription OAuth only', () => {
     // A build is far more tokens than a review, so an accidental metered key is
@@ -820,16 +953,27 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
   })
 
   /**
-   * Replace `git` on the fixture's PATH with one that COUNTS every `ls-remote`, fails
-   * the first `failFirst` of them, and delegates everything else to the real binary.
+   * Replace `git` on the fixture's PATH with one that NUMBERS every `ls-remote` the
+   * wrapper makes, fails or hangs the ones named by index, and delegates everything
+   * else to the real binary.
+   *
+   * BY INDEX rather than "the first N", because the wrapper now makes two independent
+   * bounded probes — the pre-launch baseline and the post-build witness — and the
+   * interesting cases are about WHICH of them was blocked. "Fail the first three" can
+   * no longer say whether it defeated the baseline or the witness.
    *
    * Counted as well as failed, because the assertions below are about HOW MANY TIMES
    * the wrapper asked — "it retried" and "it answered first time" are otherwise
    * indistinguishable from the trailer alone.
    */
-  function countingLsRemote(dir: string, failFirst: number): () => number {
+  function countingLsRemote(
+    dir: string,
+    spec: { fail?: readonly number[]; hang?: readonly number[] } = {},
+  ): () => number {
     const counter = join(dir, 'lsremote.count')
     const shim = join(dir, 'bin', 'git')
+    const clause = (probes: readonly number[], body: string): string =>
+      probes.length === 0 ? '' : `    case "$n" in ${probes.join('|')}) ${body} ;; esac\n`
     writeFileSync(
       shim,
       `#!/bin/sh
@@ -838,8 +982,7 @@ for a in "$@"; do
     n=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)
     n=$((n + 1))
     echo "$n" > ${JSON.stringify(counter)}
-    [ "$n" -le ${failFirst} ] && exit 128
-  fi
+${clause(spec.fail ?? [], 'exit 128')}${clause(spec.hang ?? [], 'sleep 120')}  fi
 done
 exec /usr/bin/git "$@"
 `,
@@ -855,8 +998,9 @@ exec /usr/bin/git "$@"
     // pushed, and opened a PR. One blip on a shared remote must not be the last word
     // — the auth precheck retries three times for a far cheaper mistake.
     const r = pushable()
-    // Fails the baseline probe AND the first two witness attempts; the third answers.
-    const probes = countingLsRemote(r.dir, 3)
+    // Probe 1 is the pre-launch BASELINE and is left to answer; probes 2 and 3 are the
+    // first two WITNESS attempts and fail; the third witness attempt answers.
+    const probes = countingLsRemote(r.dir, { fail: [2, 3] })
     const pushed = rerun(r, `${FAKE_BUILD}; git push -q origin trident/a-run`)
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(pushed.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
@@ -867,13 +1011,84 @@ exec /usr/bin/git "$@"
     expect(probes()).toBe(4)
   })
 
+  test('a TRANSIENT failure of the BASELINE probe cannot fabricate a sha for a build that committed nothing', () => {
+    // THE ASYMMETRY THAT WAS THE BUG. The baseline probe asked ONCE while the witness
+    // asked three times, so a blip long enough to defeat one attempt but not three
+    // produced the worst possible pair of answers: the previous round's remote-only tip
+    // missing from the baseline, and the same tip confirmed as "pushed" moments later.
+    //
+    // The chain that makes it fabricated provenance: this branch exists only on the
+    // remote (a crash-resume, or a fix round in a fresh worktree — the case the local
+    // tips cannot see); the build fetches it, switches onto it and decides it has
+    // nothing to do; `pre_existing` no longer recognises the head, the branch-name gate
+    // passes because it IS the right branch, and the trailer hands the panel a sha and
+    // a diff for a round this invocation did not produce.
+    const r = pushable()
+    rerun(r, `${FAKE_BUILD_NO_DIFF}; git push -q origin trident/a-run`)
+    const roundOne = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    // Erase every LOCAL trace, so only the remote can say the commit already existed.
+    spawnSync('git', ['switch', '--detach', r.baseHead], { cwd: r.dir })
+    spawnSync('git', ['branch', '-q', '-D', 'trident/a-run'], { cwd: r.dir })
+
+    // Blip on the first two baseline attempts; the third answers.
+    const probes = countingLsRemote(r.dir, { fail: [1, 2] })
+    const second = rerun(
+      r,
+      `cat >/dev/null; git fetch -q origin trident/a-run; git switch -q -c trident/a-run FETCH_HEAD`,
+    )
+    // The build really did end up standing on the previous round's commit…
+    expect(
+      spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim(),
+    ).toBe(roundOne)
+    // …and the trailer says it produced nothing, which is the truth.
+    expect(second.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
+    expect(second.trailerRaw).not.toContain(roundOne)
+    // It took three asks to establish the baseline, and the witness was never reached
+    // (there is no head of our own to witness) — so this is the baseline's retry being
+    // measured, not the witness's.
+    expect(probes()).toBe(3)
+  })
+
+  test('a baseline probe that NEVER answers DEFERS the build instead of starting it blind', () => {
+    // A baseline nobody measured is not a baseline: without it the wrapper cannot tell
+    // a commit it makes from one that was already on the branch, and the failure mode
+    // is reporting someone else's round as this one's. Refusing here costs a round and
+    // NO TOKENS, because it happens before codex is launched — which is the only reason
+    // refusing is the right answer rather than building and discarding the result.
+    const r = pushable()
+    const probes = countingLsRemote(r.dir, { fail: [1, 2, 3] })
+    const deferred = rerun(r, FAKE_BUILD)
+    expect(deferred.status).toBe(3)
+    expect(deferred.stderr).toContain('CODEX_BUILD_NO_REMOTE_BASELINE')
+    // Three asks, then it stopped — it neither gave up early nor looped.
+    expect(probes()).toBe(3)
+    // AND THE BUILD NEVER RAN. `FAKE_BUILD` commits; the repo is where it was.
+    expect(
+      spawnSync('git', ['log', '--oneline', '-1', '--format=%s'], {
+        cwd: r.dir,
+        encoding: 'utf8',
+      }).stdout.trim(),
+    ).not.toBe('the codex build')
+  })
+
+  test('a repo with NO origin skips the remote probes rather than deferring on them', () => {
+    // The control for the refusal above. `git ls-remote origin` on a repo with no
+    // remote fails exactly like a wedged network, and treating the two the same would
+    // defer every local-mode build forever. A repo with no remote cannot have a
+    // remote-only branch, so its remote baseline is complete by being empty.
+    const r = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    expect(r.status).toBe(0)
+    expect(r.stderr).not.toContain('CODEX_BUILD_NO_REMOTE_BASELINE')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
+  })
+
   test('a probe that ANSWERS is not asked again, however unwelcome the answer', () => {
     // The retry is for an UNANSWERED probe only. A tip that came back and is not our
     // sha is a real finding — a stale branch, a failed push, someone else's commit —
     // and re-asking would be waiting for the remote to change its mind, which is the
     // one way a true "not pushed" could turn into a false "pushed".
     const r = pushable()
-    const probes = countingLsRemote(r.dir, 0)
+    const probes = countingLsRemote(r.dir, {})
     const ours = rerun(r, FAKE_BUILD) // commits, never pushes
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(ours.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
@@ -1043,32 +1258,59 @@ chmod 755 "$HOME/bin/gh"`,
     expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
   }, 90_000)
 
-  test('a HANGING `git ls-remote` costs the run a fact, never the build phase', () => {
-    // THE SAME BOUND AS `gh`, on the two probes that were still inside a command
+  test('a HANGING `git ls-remote` STOPS the phase cleanly instead of wedging it', () => {
+    // THE SAME BOUND AS `gh`, on the probes that were still inside a command
     // substitution. `$(…)` returns when the PIPE closes, not when the process exits,
     // so an alarm that killed the process did nothing while a child still held stdout
-    // — the wrapper waited on the remote forever and the build phase with it. Both
-    // probes run here: one before the launch (the re-entry baseline) and one after
-    // (the pushed-sha witness), against a git that answers everything except
-    // `ls-remote`.
+    // — the wrapper waited on the remote forever and the build phase with it.
+    //
+    // A REAL `origin` IS LOAD-BEARING HERE: the wrapper skips both `ls-remote` probes
+    // when the repo has no remote to ask, so the same fixture without one would never
+    // reach the hanging shim and this test would be green against a wrapper with no
+    // bound at all.
+    //
+    // The unanswerable remote is hit by the PRE-LAUNCH baseline first, so the outcome
+    // is DEFERRED before a token is spent rather than a build whose provenance nobody
+    // could check. What is under test is that it ENDED — three 10s alarms and an exit
+    // code, not a wedged phase.
     const r = run({
       authed: true,
       codexLoginExit: 0,
+      origin: true,
       hangingLsRemote: true,
       // Well short of the mock's 120s-per-call hang, and comfortably ABOVE the
-      // wrapper's own worst case — one baseline probe plus three retried witness
-      // attempts, each capped at 10s, so ~40s of alarms. WHICH of the two happened is
-      // the assertion — a signal means a bound did not hold — not how long it took.
+      // wrapper's own worst case here — three baseline attempts capped at 10s each.
+      // WHICH of the two happened is the assertion — a signal means a bound did not
+      // hold — not how long it took.
       spawnTimeoutMs: 90_000,
       env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
     })
     expect(r.signal).toBeNull()
-    expect(r.status).toBe(0)
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_NO_REMOTE_BASELINE')
+  }, 180_000)
+
+  test('a WITNESS probe that hangs costs the run a fact, never the build phase', () => {
+    // The other half of the bound, now that the baseline refuses rather than shrugs.
+    // Here the baseline ANSWERS and the post-build witness is the one that wedges: the
+    // build has already happened and its tokens are spent, so an unanswerable remote
+    // must cost a field and nothing more. `emit_trailer` also runs on the failure path,
+    // where a hang would eat the DEFERRED report the bridge is waiting for.
+    const r = pushable()
+    // Probe 1 (baseline) answers; probes 2-4 (the three witness attempts) hang.
+    countingLsRemote(r.dir, { hang: [2, 3, 4] })
+    // Well short of the shim's 120s-per-call hang, and above the wrapper's own worst
+    // case here — three witness attempts capped at 10s each.
+    const built = rerun(r, `${FAKE_BUILD}; git push -q origin trident/a-run`, 90_000)
+    expect(built.signal).toBeNull()
+    expect(built.status).toBe(0)
     // The local measurement is unaffected: the build's own commit is still reported.
-    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
-    // …and the one fact the remote owed us is empty rather than guessed.
-    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
-    expect(Object.keys(r.trailer)).toHaveLength(6)
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(built.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
+    // …and the one fact the remote owed us is empty rather than guessed — even though
+    // the commit really IS on the remote, because an unanswered probe is not a witness.
+    expect(built.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    expect(Object.keys(built.trailer)).toHaveLength(6)
   }, 180_000)
 
   test('the trailer is emitted on the FAILURE path too', () => {

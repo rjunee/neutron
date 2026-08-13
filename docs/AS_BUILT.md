@@ -204,14 +204,36 @@ built" about a build that built the whole thing and could not post it. The wrapp
 therefore passes `-c shell_environment_policy.inherit=all -c
 shell_environment_policy.ignore_default_excludes=true`. Both are required and neither
 is sufficient alone: `inherit=all` still drops the two by pattern, and clearing the
-excludes without it never sees them because `core` did not carry them in. Both field
-names were checked against the CLI in use (`codex-cli 0.147.0`) with `--strict-config`,
-against an invented field as the negative control. This widens nothing that matters:
-the one secret that must not reach the build — the metered `OPENAI_API_KEY` — is
+excludes without it never sees them because `core` did not carry them in.
+
+It also passes `--strict-config`, and that is part of the same fix rather than a
+tidy-up beside it: without the flag an unrecognised `-c` key is accepted and ignored,
+so the day either field is renamed the two overrides become decoration — the credential
+is stripped again and the only symptom is a run that says "nothing was built". With it,
+a renamed field is a config error that names itself before a token is spent. Measured
+against the CLI in use (`codex-cli 0.147.0`): an invented `shell_environment_policy`
+field is refused with `unknown configuration field`, while `inherit`,
+`ignore_default_excludes`, `exclude`, `set` and `include_only` are all accepted. The
+refusal is the negative control — it proves the check can fail on this input shape,
+which is what makes the acceptances mean anything.
+
+**What that widens, stated plainly.** `inherit=all` with the default excludes off is
+not a narrow grant. The child shell sees every variable the wrapper was given, which on
+the gateway includes other providers' credentials — the review lane's `KIMI_API_KEY`
+among them, which `trident/kimi-key.ts` writes into the process environment on purpose
+so it never has to appear in prompt text, and which the default `*KEY*` exclude would
+otherwise have stripped here. Two things are true about that. It is not a widening
+relative to the builder it replaces: the Claude builder is a child of the same process
+and sees the same environment, so a codex build that saw less would be a different
+posture for the same job rather than a safer one. And it could be narrowed:
+`shell_environment_policy.include_only` is a real field on this CLI (verified above),
+and an allowlist of the core set plus the GitHub variables would express the actual
+need. It is not used yet because an allowlist fails by omission — every tool a build
+might reach for is broken by being forgotten, silently and only sometimes — and that
+trade is worth revisiting with a measured list of what a real build touches rather than
+a guess. The one secret that must not reach the build, the metered `OPENAI_API_KEY`, is
 `unset` from the wrapper's own environment before `codex` is launched, so it is not in
-the inherited set, and everything else the child now sees is what the wrapper itself
-was given. A shell that already has `danger-full-access` is not contained by
-withholding its environment; it is only made to fail at the last step.
+the inherited set at all.
 
 **The pushed-sha probe retries, because losing it discards the whole build.** The
 witness `git ls-remote` in `emit_trailer` is the most consequential call in the
@@ -224,6 +246,35 @@ probe that completed ends the loop whatever it found, including finding nothing,
 true "not pushed" could become a false "pushed". The retry lives inside `remote_tip`
 rather than in the caller: callers read it through `$(…)`, a subshell, and so cannot
 see whether the probe failed or merely came back empty.
+
+**The BASELINE probe retries the same three times, and refuses when it cannot answer.**
+The witness above is only half of the pair. The pre-launch baseline — "which shas
+already existed?" — asks the same remote the same question, and it used to ask once. A
+blip long enough to defeat one attempt but not three turns that asymmetry into
+fabricated provenance: on a re-entry whose previous round exists only on the remote (a
+crash-resume, or a fix round in a fresh worktree, which is exactly what the local
+branch tips cannot see), the missed baseline lets a commit this build never made pass
+the pre-existing check, the branch-name gate passes too, and the retried witness then
+confirms it as pushed. The run would hand the panel a sha and a diff for someone else's
+round. So the baseline asks three times as well, and when all three fail it exits 3
+(DEFERRED) rather than starting: a baseline nobody measured is not a baseline, and
+refusing here costs a round and no tokens because it happens before `codex` is
+launched. `remote_tip` reports the three outcomes as three distinct values — a sha, the
+empty string for "the remote answered and the branch is not there", and the literal
+`unknown` for "no attempt was answered" — because the first two are facts to act on and
+the third is a hole where a fact should be. The probe is skipped entirely, without
+deferring, when the repository has no `origin`: a repo with no remote cannot have a
+remote-only branch, so its remote baseline is complete by being empty.
+
+**Nowhere to write the trailer is proved, not assumed.** The precheck used to test only
+that `NEUTRON_CODEX_BUILD_TRAILER_FILE` was SET, under a comment about refusing before
+codex is launched so a completed build does not report nothing with the tokens spent —
+which is precisely what a set-but-unwritable path did. The single `> "$TRAILER_FILE"`
+in `emit_trailer` fails silently under `set -uo pipefail` with no `set -e`: the script
+exits 0, the bridge finds no trailer, and `inner-workflow.mjs` throws "produced no
+commitSha — nothing was built" about a build that built everything. The precheck now
+writes the path (`: > "$TRAILER_FILE"`) and exits 3 when it cannot, which costs a round
+and no tokens.
 
 **No silent fallback to Claude, ever.** A build lane that reports `not_connected` or
 `deferred` throws with the status named. Re-Forging on Opus would spend precisely the

@@ -442,7 +442,9 @@ const MODEL_ID_MAX = 128
  *
  * ONE THING IS DROPPED RATHER THAN REJECTED: an effort paired with a CLI tier on a
  * phase that DOES have an effort control (the build moved to codex). It lands in
- * `rejected` and the write succeeds — see the comment at the end of the loop.
+ * {@link ParsedPhaseModelConfig.rejected} and the write succeeds. Note that the WRITE
+ * path's caller never sees that field — see the comment at the end of the loop for
+ * where it is read and why the drop is still visible to the owner.
  */
 export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
   const errors: string[] = []
@@ -597,12 +599,20 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
     // codex tiers unpickable for any owner who had ever touched the effort control,
     // which is a settable option that cannot be set.
     //
-    // NOTHING IS HIDDEN BY THE DROP. A current pane never sends this pair at all (the
-    // effort cell is answered by the chosen tier, and `applyRowEdit` clears what that
-    // tier cannot use); a client that does send it renders the same disabled cell —
-    // "set by the CLI" — the moment the response comes back. It is reported in
-    // `rejected` for the caller in this pass, which is how the read path already
-    // describes a stored value it could not use.
+    // NOTHING IS HIDDEN BY THE DROP, and the reason is the pane, NOT a field on the
+    // response. A current pane never sends this pair at all (the effort cell is
+    // answered by the chosen tier, and `applyRowEdit` clears what that tier cannot
+    // use); a client that does send it renders the same disabled cell — "set by the
+    // CLI" — the moment the response comes back, because the response is a fresh read
+    // and the chosen tier is what decides that cell.
+    //
+    // BE PRECISE ABOUT WHAT THE CALLER IS TOLD: `rejected` is populated here and it is
+    // NOT threaded to the PUT's caller. `writeTridentPhaseModels`
+    // (`gateway/storage/owner-metadata.ts`) returns `{ok, errors}` and discards it, and
+    // the surface's response body is a re-read of storage — whose re-parse finds
+    // nothing to reject, because the pair is already gone. `rejected` earns its keep on
+    // the READ path (`rejectedModel(phase, rejected)`), where it explains a STORED value
+    // the dispatch could not use. Here it is a local record of what this pass dropped.
     if (entry.effort !== undefined && entry.model !== undefined) {
       const chosen = modelTier(entry.model)
       if (chosen?.transport === 'cli') {
