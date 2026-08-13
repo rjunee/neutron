@@ -809,7 +809,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
-  it('inline_active card: static cwb-dot-build dot (pulse) + NO play control (C)', async () => {
+  it('inline_active card: pulsing cwb-dot-build dot + NO play control (C)', async () => {
     // Fixture (C): status='in_progress', no binding, inline_active=true.
     // Agent is working inline — the ▶ must be hidden to prevent a competing build.
     // dotState: in_progress + inline_active → cwb-dot-build, pulse=true (rail also pulses).

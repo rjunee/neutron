@@ -24,6 +24,10 @@ import {
   stepTag,
 } from '../lib/work-board-helpers';
 import { railDotKind } from '../lib/project-rail-view';
+import {
+  deriveProjectActivity,
+  scanItemsForRailSignals,
+} from '../../open/project-rail.ts';
 import type { RunProgress, WorkBoardItem } from '../lib/work-board-client';
 
 function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
@@ -314,31 +318,103 @@ describe('dragReorderTarget (drag-drop reorder persistence)', () => {
 });
 
 describe('row/rail lockstep — the row dot and the project rail dot must agree (defect 2026-08-12)', () => {
-  it('failed-and-runless: the row paints a STATIC failed dot while the rail paints attention', () => {
-    // Same durable signal on both sides: `status='failed'` is written only by the
-    // terminal reconcile (work-board/store.ts detachRun, #340), and server-side the
-    // failed-not-done item makes readProjectRailExtras (open/composer.ts) derive the
-    // `attention` activity. Kill the failed branch in `dotState` or the attention row
-    // in `railDotKind` and this pair breaks.
+  // Shared no-op run resolver for runless tests.
+  const noRuns = (_runId: string) => false;
+
+  it('failed-and-runless: item.status=failed → hasFailedNotDone → attention → row paints static failed dot', () => {
+    // SERVER SIDE: scanItemsForRailSignals derives hasFailedNotDone=true from
+    // status='failed' (written only by detachRun/#340) even when linked_run_id
+    // is null. Killing the `item.status === 'failed'` branch in
+    // scanItemsForRailSignals drops hasFailedNotDone to false → activity
+    // becomes 'idle' → this test fails.
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'failed', linked_run_id: null, inline_active: false }],
+      noRuns,
+    );
+    expect(hasFailedNotDone).toBe(true);
+    expect(hasInlineActive).toBe(false);
+
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 0,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('attention');
+
+    // CLIENT SIDE: row dot is static failed, rail dot is attention.
     expect(dotState(item({ status: 'failed', linked_run_id: null }))).toEqual({
       colorKey: 'failed',
       pulse: false,
     });
-    expect(railDotKind('attention', false)).toBe('attention');
+    expect(railDotKind(activity, false)).toBe('attention');
+  });
+
+  it('still-bound terminal-failed run: hasFailedNotDone via isRunTerminalFailed callback', () => {
+    // The run is still linked (pre-reconcile window or kept binding).
+    // Callback returns true → hasFailedNotDone = true.
+    const { hasFailedNotDone } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: 'r-failed', inline_active: false }],
+      (runId) => runId === 'r-failed',
+    );
+    expect(hasFailedNotDone).toBe(true);
   });
 
   it('live bound run: the row pulses and the rail shows work — movement is claimed together', () => {
+    // Callback says run is NOT terminal-failed → hasFailedNotDone stays false.
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: 'r1', inline_active: false }],
+      () => false,
+    );
+    expect(hasFailedNotDone).toBe(false);
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 1,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('working');
+
     expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' })).pulse).toBe(true);
-    expect(railDotKind('working', false)).toBe('work');
+    expect(railDotKind(activity, false)).toBe('work');
   });
 
   it('runless, non-inline in_progress: NEITHER side claims movement — static row dot, idle rail', () => {
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: null, inline_active: false }],
+      noRuns,
+    );
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 0,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('idle');
+
     expect(dotState(item({ status: 'in_progress', linked_run_id: null })).pulse).toBe(false);
-    expect(railDotKind('idle', false)).toBe('idle');
+    expect(railDotKind(activity, false)).toBe('idle');
   });
 
   it('inline_active: row pulses (working) and rail shows work — movement claimed together', () => {
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: null, inline_active: true }],
+      noRuns,
+    );
+    expect(hasInlineActive).toBe(true);
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 0,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('working');
+
     expect(dotState(item({ status: 'in_progress', inline_active: true, linked_run_id: null })).pulse).toBe(true);
-    expect(railDotKind('working', false)).toBe('work');
+    expect(railDotKind(activity, false)).toBe('work');
   });
 });

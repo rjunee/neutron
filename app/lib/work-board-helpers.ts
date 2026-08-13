@@ -273,9 +273,16 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
  * True when the ▶/↻ (start/retry) control should render. Gated on the LIVE
  * run, not the status lane: an in_progress card whose run is dead must offer
  * ↻ (owner defect 2026-08-12 — the old `status !== 'in_progress'` clause made
- * a failed-run in_progress card unrecoverable from the UI). `done`, a live
- * linked run, and `inline_active` (agent working inline — no competing build)
- * all suppress the control.
+ * a failed-run in_progress card unrecoverable from the UI). `done` and a live
+ * linked run suppress the control per spec.
+ *
+ * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): the spec's
+ * two-clause form (`!isLinkedRunning && status !== 'done'`) does not mention
+ * inline_active. This extension prevents launching a competing Trident build
+ * while an inline agent action is already executing. STALENESS CAVEAT: if the
+ * agent dies mid-inline-work without clearing the flag, the card enters a
+ * permanent pulse+no-▶ state — the same unrecoverable-card defect on a
+ * narrower path. Acceptable until an inline-action heartbeat/reconciler lands.
  */
 export function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;

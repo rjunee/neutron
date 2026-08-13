@@ -109,6 +109,12 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
  * in_progress card whose run is dead must offer ↻ (owner defect 2026-08-12;
  * the old `status !== 'in_progress'` clause made a failed-run in_progress card
  * unrecoverable from the UI).
+ *
+ * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): prevents a
+ * competing Trident build while an inline agent action is executing. STALENESS
+ * CAVEAT: if the agent dies mid-inline-work without clearing the flag, the card
+ * enters a permanent pulse+no-▶ state. Acceptable until an inline heartbeat
+ * reconciler lands (mirrors app/lib/work-board-helpers.ts canPlay).
  */
 function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active

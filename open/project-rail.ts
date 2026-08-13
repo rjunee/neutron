@@ -82,6 +82,64 @@ export function stripMarkdownForPreview(raw: string): string {
 }
 
 /**
+ * A minimal view of a Work-Board item for rail-signal derivation. Kept
+ * deliberately broad (string `status`) so this pure module has no dependency
+ * on the work-board store's concrete types.
+ */
+export interface RailScanItem {
+  /** WorkBoardStatus string; 'failed' is written only by terminal reconcile. */
+  status: string
+  /** True when an inline agent action is running for this item. */
+  inline_active: boolean
+  /** Bound run id, or null when no run is attached. */
+  linked_run_id: string | null
+}
+
+/**
+ * Scan Work-Board items to produce the board-level `hasFailedNotDone` and
+ * `hasInlineActive` signals for `ProjectActivitySignals`. Extracted as a PURE
+ * function (no I/O) so the derivation logic is unit-testable in isolation;
+ * the composer's `readProjectRailExtras` closure uses this and supplies the DB
+ * look-up via `isRunTerminalFailed`.
+ *
+ * `isRunTerminalFailed(runId)` → true when the run exists AND its phase is
+ * terminal-failed (e.g. 'failed'); false when not found, not terminal, or
+ * terminal-but-not-failed (e.g. 'merged', 'cancelled').
+ *
+ * CONTRACT (defect 2026-08-12):
+ *   - `status='failed'` is written ONLY by terminal reconcile (detachRun,
+ *     work-board/store.ts #340). It is durable — not a brief window. A runless
+ *     item with `status='failed'` (e.g. research/dispatch with cleared link) is
+ *     caught HERE, before the linked-run check, so it is never missed.
+ *   - A still-bound terminal-failed run on a not-done item is caught by the
+ *     `isRunTerminalFailed` callback (brief pre-reconcile window or kept
+ *     binding from #340 where the link is preserved after failure).
+ */
+export function scanItemsForRailSignals(
+  items: readonly RailScanItem[],
+  isRunTerminalFailed: (runId: string) => boolean,
+): { hasFailedNotDone: boolean; hasInlineActive: boolean } {
+  let hasFailedNotDone = false
+  let hasInlineActive = false
+  for (const item of items) {
+    if (item.inline_active) hasInlineActive = true
+    // Durable failure: status='failed' is written only by terminal reconcile.
+    // Catches runless-but-failed items (cleared link, research/dispatch runs).
+    if (item.status === 'failed') {
+      hasFailedNotDone = true
+      continue
+    }
+    const runId = item.linked_run_id
+    if (runId === null || runId.length === 0) continue
+    // Still-bound terminal-failed run on a not-done item → attention.
+    if (isRunTerminalFailed(runId) && item.status !== 'done') {
+      hasFailedNotDone = true
+    }
+  }
+  return { hasFailedNotDone, hasInlineActive }
+}
+
+/**
  * Build the rail preview string from a raw message body: markdown-stripped and
  * truncated to `max` chars with a trailing ellipsis. Returns null for an
  * empty/whitespace body (the rail then shows no second line).
