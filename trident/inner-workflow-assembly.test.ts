@@ -231,7 +231,7 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
     // "this reviewer raised nothing".
     expect(synth?.prompt).not.toContain('Verdict A (Claude rubric): null')
     // The SURVIVING seat is still reported normally — the hedge is per-seat.
-    expect(synth?.prompt).toContain('Verdict B (Claude adversarial): {')
+    expect(synth?.prompt).toContain('Verdict B (Argus adversarial): {')
   })
 
   test('argus:adversarial DIED → the run REFUSES to APPROVE, and slot 1 really is that seat', async () => {
@@ -239,8 +239,8 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
     expect(result['verdict']).toBe('REQUEST_CHANGES')
     expect(result['blockKind']).toBe('infra-only')
     const synth = captured.find((c) => c.label === 'argus:synthesis')
-    expect(synth?.prompt).toContain('Verdict B (Claude adversarial): DID NOT COMPLETE')
-    expect(synth?.prompt).not.toContain('Verdict B (Claude adversarial): null')
+    expect(synth?.prompt).toContain('Verdict B (Argus adversarial): DID NOT COMPLETE')
+    expect(synth?.prompt).not.toContain('Verdict B (Argus adversarial): null')
     expect(synth?.prompt).toContain('Verdict A (Claude rubric): {')
   })
 
@@ -252,7 +252,7 @@ describe('inner-workflow.mjs — AS-BUILT: a dead seat is REFUSED an APPROVE thr
     expect(result['verdict']).toBe('REQUEST_CHANGES')
     const synth = captured.find((c) => c.label === 'argus:synthesis')
     expect(synth?.prompt).toContain('Verdict A (Claude rubric): DID NOT COMPLETE')
-    expect(synth?.prompt).toContain('Verdict B (Claude adversarial): DID NOT COMPLETE')
+    expect(synth?.prompt).toContain('Verdict B (Argus adversarial): DID NOT COMPLETE')
   })
 
   test('a CONFIGURED codex that DIED (and whose retry died) is refused, not read as never-configured', async () => {

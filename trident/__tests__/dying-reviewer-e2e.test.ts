@@ -258,7 +258,7 @@ describe('a PANEL seat dies outright', () => {
 
   test('the synthesis model is TOLD that seat is empty, never handed a crash', async () => {
     const out = await runWorkflow({ adversarial: overloaded })
-    expect(promptFor(out, 'argus:synthesis')).toContain('Verdict B (Claude adversarial): DID NOT COMPLETE')
+    expect(promptFor(out, 'argus:synthesis')).toContain('Verdict B (Argus adversarial): DID NOT COMPLETE')
   })
 
   test('one flake costs no build: a seat that dies once and answers on retry still merges', async () => {

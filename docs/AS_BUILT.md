@@ -10195,3 +10195,20 @@ Detail: `docs/as-built/2026-08-09-credential-account-label.md`.
 Landed via PR #170 — trident verdict APPROVE at round 2. The panel was THREE lanes
 (adversarial + rubric + an independent codex lane). The kimi lane was ABSENT BY DESIGN, not
 failed, so this is not a four-lane APPROVE and should not be read as one.
+
+## 2026-08-13 — adversarial review can dispatch on Codex
+
+`review_adversarial` now declares `alsoRunsOn: ['codex']` in
+`trident/phase-models.ts:215`, matching its executable route in
+`trident/inner-workflow.mjs:378`. A GPT tier therefore selects CLI transport: the
+thin bridge invokes `trident/codex-review.sh`, carries the resolved model through
+`CODEX_REVIEW_MODEL`, and carries the adversarial instructions separately through
+`NEUTRON_CODEX_REVIEW_RUBRIC`. The wrapper uses that rubric as the beginning of the
+actual stdin prompt, so this seat keeps trying to refute the change instead of
+quietly duplicating the generic second-opinion seat.
+
+The rubric reviewer remains on Anthropic. A Codex selection disables effort because
+the CLI transport does not consume that setting. Core-seat completeness also treats
+a deferred, unavailable, or dead Codex adversarial run as incomplete, so
+`enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
+the panel gate.

@@ -343,6 +343,15 @@ const codexBuildRoute = (route, modelId) => ({
   envVar: CODEX_BUILD_MODEL_ENV,
 })
 
+const codexReviewRoute = (route, modelId) => ({
+  ...route,
+  model: modelId,
+  effort: null,
+  transport: 'cli',
+  group: 'codex',
+  envVar: 'CODEX_REVIEW_MODEL',
+})
+
 // forge:* routes BY the planner's complexity tag: '[mechanical]' (boilerplate,
 // tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
 // ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
@@ -375,7 +384,7 @@ const modelForTag = (tag) =>
 const ROLE_MODEL = {
   'plan:fable': { model: MODELS.fable, effort: 'max', phaseKey: 'decomposition' },
   'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric' },
-  'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial' },
+  'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial', group: 'claude', alsoRunsOn: ['codex'], codexWrapper: 'review' },
   'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis' },
   // THE TWO CROSS-MODEL LANES ARE ROUTED NOW. They used to be listed as deliberately
   // unconfigurable ("the reviewing model is the CLI's own configuration"), which was
@@ -475,7 +484,9 @@ function applyPhaseOverride(route, phaseKey) {
           `trident.phase-override IGNORED phase=${phaseKey} reason=effort-not-settable-on-cli-transport`,
         )
       }
-      return codexBuildRoute(route, tier.model_id)
+      return route.codexWrapper === 'review'
+        ? codexReviewRoute(route, tier.model_id)
+        : codexBuildRoute(route, tier.model_id)
     } else if (tier.group !== group) {
       // The executor is a capability, not a preference: a GPT tier cannot run a
       // Claude agent step that has no codex dispatch, and the codex review wrapper
@@ -605,6 +616,7 @@ function logCrossModelSpawn(label, fallback) {
 // truncation-readback test proves the SHIPPED command, rather than a retyped copy of
 // it (`inner-workflow.test.ts`). A closure value it can pass in keeps that possible.
 const CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:codex')
+const ADVERSARIAL_CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:adversarial')
 const KIMI_ENV_PREFIX = crossModelEnvPrefix('argus:kimi')
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
@@ -2087,7 +2099,11 @@ function hasUsableVerdict(v) {
 function missingCoreReviewers(verdicts, seats) {
   const out = []
   for (const seat of seats) {
-    if (hasUsableVerdict(verdicts[seat.slot])) continue
+    const verdict = verdicts[seat.slot]
+    const completed = seat.statusKey === 'codexStatus'
+      ? verdict && verdict.codexStatus === 'connected' && hasUsableVerdict(verdict)
+      : hasUsableVerdict(verdict)
+    if (completed) continue
     out.push({
       name: seat.name,
       title: `${seat.name} produced NO verdict — refusing to silently APPROVE`,
@@ -2194,15 +2210,24 @@ function codexPanelLine(status, review) {
 // with the per-project CODEX_HOME, then maps the wrapper's EXIT CODE to a
 // CODEX_VERDICT_SCHEMA result. Only built when a codex credential is configured.
 function codexReviewerPrompt(diffFile) {
+  const opts = arguments[1] || {}
   // GLOBALLY-UNIQUE temp files: trident runs detached workflows concurrently and
   // slugs are only unique WITHIN a project, so two same-slug runs in different
   // projects would collide on /tmp and cross-read each other's verdict. Key on
   // runId (uuid) — matching writeTerminalResult's /tmp/trident-terminal-${runId}
   // — falling back to slug only for a dry source check with no runId (Codex [P2]).
   const uniq = runId || slug
-  const outFile = `/tmp/trident-codex-${uniq}.out`
-  const errFile = `/tmp/trident-codex-${uniq}.err`
+  const lane = opts.adversarial === true ? 'adversarial' : 'cross-model'
+  const outFile = opts.adversarial === true
+    ? `/tmp/trident-codex-${lane}-${uniq}.out`
+    : `/tmp/trident-codex-${uniq}.out`
+  const errFile = opts.adversarial === true
+    ? `/tmp/trident-codex-${lane}-${uniq}.err`
+    : `/tmp/trident-codex-${uniq}.err`
   const script = `${repoPath}/trident/codex-review.sh`
+  const envPrefix = opts.adversarial === true
+    ? `${ADVERSARIAL_CODEX_ENV_PREFIX}NEUTRON_CODEX_REVIEW_RUBRIC=${shSingleQuote(`You are ARGUS-ADVERSARIAL (independent, read-only). Independently try to REFUTE the change: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do not substitute the generic second-opinion rubric.`)} `
+    : CODEX_ENV_PREFIX
   // Codex reviews the SAME diff FILE Forge wrote (as the other reviewers do), NOT
   // `git diff` in repoPath — repoPath is still on the base branch (Forge builds in
   // an isolated worktree), so a git-diff there would be empty/stale and codex
@@ -2215,13 +2240,13 @@ function codexReviewerPrompt(diffFile) {
   // an 11k-line diff came back as a clean whole-change APPROVE. The grep is what
   // makes it a FACT the synthesis is handed (see codexPanelLine), not a hope about
   // how GPT-5 worded its answer.
-  return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+  return `You are the CODEX ${opts.adversarial === true ? 'ADVERSARIAL' : 'CROSS-MODEL'} REVIEW bridge for trident (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${CODEX_ENV_PREFIX}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
+  ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
-- EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings; the synthesis notes "codex not connected" and proceeds Claude-only.
+- EXIT 10 or 11 → codexStatus='not_connected' (no credential / CLI). ${opts.adversarial === true ? "Return verdict='REQUEST_CHANGES' with one infrastructure finding: this configured core seat did not review." : "Return verdict='COMMENT', findings=[]. This is the GRACEFUL optional-peer path."}
 - EXIT 3 or 5  → codexStatus='deferred' (codex was configured but the review could not be performed — auth precheck failed, an EMPTY diff left nothing to review, or the call FAILED/timed out). Return verdict='REQUEST_CHANGES' with ONE finding {severity:'major', title:'Codex review deferred', evidence:<tail of ${errFile}>}. NEVER report APPROVE for a deferred codex.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred' with the reason.`
 }
@@ -2254,7 +2279,7 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
   log(
     `trident-v2 review: round=${round} diff=${diffFile} codex=${codexConfigured ? 'configured' : 'not-connected'}`,
   )
-  // The review PANEL: Claude rubric + Claude adversarial ALWAYS run; the codex
+  // The review PANEL: rubric + adversarial ALWAYS run; the codex
   // cross-model reviewer joins ONLY when a per-project credential is configured
   // (no wasted agent otherwise). All run in parallel.
   //
@@ -2280,6 +2305,7 @@ async function reviewAndSynthesize(diffFile, round, prForCi) {
   // re-invokes this very thunk, so the retry is guarded by the same wrapper.
   const pushCoreReviewer = (seat, run) => {
     coreSeats.push({ ...seat, slot: reviewers.length, statusKey: CORE_SEAT_STATUS_KEY })
+    if (seat.statusKey) coreSeats[coreSeats.length - 1].statusKey = seat.statusKey
     reviewers.push(() => seatAttempt(seat.name, run))
   }
   pushCoreReviewer(
@@ -2292,15 +2318,30 @@ TASK: ${task}`,
         withModel({ label: 'argus:claude', phase: 'Review', schema: VERDICT_SCHEMA }),
       ),
   )
+  const adversarialRoute = routeModel('argus:adversarial')
   pushCoreReviewer(
-    { name: 'Argus adversarial (core reviewer)', letter: 'B', panelLabel: 'Claude adversarial' },
-    () =>
-      agent(
+    {
+      name: 'Argus adversarial (core reviewer)',
+      letter: 'B',
+      panelLabel: 'Argus adversarial',
+      statusKey: adversarialRoute.transport === 'cli' ? 'codexStatus' : CORE_SEAT_STATUS_KEY,
+    },
+    () => {
+      if (adversarialRoute.transport === 'cli') {
+        logCrossModelSpawn('argus:adversarial', 'codex-runtime')
+        return agent(codexReviewerPrompt(diffFile, { adversarial: true }), {
+          label: 'argus:adversarial',
+          phase: 'Review',
+          schema: CODEX_VERDICT_SCHEMA,
+        })
+      }
+      return agent(
         `You are ARGUS-ADVERSARIAL (independent, read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Independently try to REFUTE the change at ${diffFile}: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do NOT modify files. NEVER exit silently — if you cannot verify part of it, say so.
 TASK: ${task}`,
         withModel({ label: 'argus:adversarial', phase: 'Review', schema: VERDICT_SCHEMA }),
-      ),
+      )
+    },
   )
   let codexSlot = null
   let kimiSlot = null
