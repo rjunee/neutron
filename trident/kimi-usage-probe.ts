@@ -21,10 +21,11 @@
  * built to fail LOUDLY and EMPTY rather than plausibly:
  *
  *   - it accepts a small, written-down set of aliases per field;
- *   - anything it does not recognise yields `unrecognised` WITH THE KEY NAMES IT
- *     SAW (names only — never values), so one real response is enough to correct
- *     the alias list, and the log line is the "print it before keying logic on
- *     it" step performed in production instead of skipped;
+ *   - a response with ANY entry it cannot read yields `unrecognised` WITH THE KEY
+ *     NAMES IT SAW (names only — never values), so one real response is enough to
+ *     correct the alias list, and the log line is the "print it before keying
+ *     logic on it" step performed in production instead of skipped. All or
+ *     nothing, because a half-read sample is indistinguishable from a whole one;
  *   - `unrecognised` writes NO sample. A missing reading must stay
  *     distinguishable from a measured zero, because a confident 0% is the one
  *     render that would tell the owner to push concurrency into a wall.
