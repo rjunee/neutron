@@ -239,7 +239,7 @@ export interface MountedOpenCores {
  * the Email Core's triage/summarize agents consume. Each call is an isolated
  * dispatch on the substrate; the reply text is returned verbatim.
  */
-function buildOneShotSubstrateLlm(
+export function buildOneShotSubstrateLlm(
   substrate: Substrate,
 ): (prompt: string) => Promise<string> {
   return async (prompt: string): Promise<string> => {

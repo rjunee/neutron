@@ -67,7 +67,22 @@ function fakeAccountClient(rows: GmailMessageMeta[]): GmailClient {
       }
     },
     ensureProjectLabel: notImplemented,
+    async ensureLabel(input) {
+      return {
+        label_id: `label-on-${rows[0]?.id ?? 'empty'}`,
+        label_name: input.name,
+        created: true,
+      }
+    },
     modifyThread: notImplemented,
+    async modifyMessage(input) {
+      const found = rows.find((r) => r.id === input.message_id)
+      if (found === undefined) throw new MessageNotFoundError(input.message_id)
+      return {
+        message_id: `modified-on-${rows[0]?.id ?? 'empty'}`,
+        label_ids: [...input.add_label_ids],
+      }
+    },
   }
 }
 
@@ -160,4 +175,116 @@ test('a page cursor is withheld once several accounts are connected, and passed 
   // Two per-account cursors cannot be merged into one meaningful cursor, so
   // none is returned rather than one that would silently page a single account.
   expect((await pair.listMessages({ label: 'INBOX' })).next_page_token).toBeUndefined()
+})
+
+test('modifyMessage with account_id routes to THAT account, not the primary', async () => {
+  // A merged inbox stamps every row with the account it came from. Routing the
+  // write to the primary instead would label the wrong mailbox — or nothing.
+  const client = build([
+    { id: 'work', email: WORK, client: fakeAccountClient([meta('w1', '2026-08-11T09:00:00.000Z')]) },
+    { id: 'home', email: HOME, client: fakeAccountClient([meta('h1', '2026-08-11T09:00:00.000Z')]) },
+  ])
+  const result = await client.modifyMessage({
+    message_id: 'h1',
+    add_label_ids: ['Label_processed'],
+    remove_label_ids: ['INBOX'],
+    account_id: 'home',
+  })
+  expect(result.message_id).toBe('modified-on-h1')
+})
+
+test('modifyMessage WITHOUT account_id falls back to the by-id probe across accounts', async () => {
+  const client = build([
+    { id: 'work', email: WORK, client: fakeAccountClient([meta('w1', '2026-08-11T09:00:00.000Z')]) },
+    { id: 'home', email: HOME, client: fakeAccountClient([meta('h1', '2026-08-11T09:00:00.000Z')]) },
+  ])
+  const result = await client.modifyMessage({
+    message_id: 'h1',
+    add_label_ids: ['Label_processed'],
+  })
+  expect(result.message_id).toBe('modified-on-h1')
+})
+
+test('ensureLabel routes by account_id — a label id is per-account', async () => {
+  const client = build([
+    { id: 'work', email: WORK, client: fakeAccountClient([meta('w1', '2026-08-11T09:00:00.000Z')]) },
+    { id: 'home', email: HOME, client: fakeAccountClient([meta('h1', '2026-08-11T09:00:00.000Z')]) },
+  ])
+  const targeted = await client.ensureLabel({ name: 'Neutron/processed', account_id: 'home' })
+  expect(targeted.label_id).toBe('label-on-h1')
+  const fallback = await client.ensureLabel({ name: 'Neutron/processed' })
+  expect(fallback.label_id).toBe('label-on-w1')
+})
+
+/**
+ * THE PRODUCTION BOUNDARY, not a fake.
+ *
+ * Unqualified writes are routed by PROBING: the router walks accounts and
+ * advances only on the typed not-found errors, because retrying a 500 elsewhere
+ * would turn one account's outage into a misleading "not found". Every arm
+ * above hands it a fake that throws exactly the typed error, so they prove the
+ * ROUTER honours the contract while proving nothing about whether the real
+ * Google wrapper ever produces it.
+ *
+ * It did not. `modifyMessage` issued its POST without the not-found mapping, so
+ * a primary-account 404 surfaced as a generic GoogleGmailApiError, the probe
+ * aborted on the first account, and a message living in ANY non-primary mailbox
+ * could never be labelled or archived — the pipeline's mutation step silently
+ * unreachable for every account but the first. These two arms wire the real
+ * wrapper to the real router and assert the second account is actually written.
+ */
+function twoRealAccounts(status_of_first: number): {
+  client: GmailClient
+  calls: { token: string; url: string }[]
+} {
+  const calls: { token: string; url: string }[] = []
+  const client = buildMultiAccountGmailClient({
+    accounts: async () => [
+      { account_id: 'work', account_email: WORK, accessToken: async () => 'work-token' },
+      { account_id: 'home', account_email: HOME, accessToken: async () => 'home-token' },
+    ],
+    baseUrl: 'https://gmail.example/v1/users/me',
+    fetchImpl: async (input, init): Promise<Response> => {
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      const token = headers['Authorization'] ?? ''
+      calls.push({ token, url: String(input) })
+      if (token.includes('work-token')) {
+        return new Response('{"error":{"code":404}}', { status: status_of_first })
+      }
+      return new Response(JSON.stringify({ id: 'h1', labelIds: ['Label_p'] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    },
+  })
+  return { client, calls }
+}
+
+test('an unqualified modifyMessage reaches a NON-PRIMARY mailbox through the real wrapper', async () => {
+  const { client, calls } = twoRealAccounts(404)
+
+  const result = await client.modifyMessage({
+    message_id: 'h1',
+    add_label_ids: ['Label_p'],
+    remove_label_ids: ['INBOX'],
+  })
+
+  // The write LANDED, and it landed on the second account.
+  expect(result.label_ids).toContain('Label_p')
+  expect(calls).toHaveLength(2)
+  expect(calls[0]?.token).toContain('work-token')
+  expect(calls[1]?.token).toContain('home-token')
+  expect(calls[1]?.url).toContain('/messages/h1/modify')
+})
+
+test('a non-404 on the first account still ABORTS the probe — an outage is not a not-found', async () => {
+  // The other half of the same contract, and the reason the mapping is narrow:
+  // a 500 must be the caller's answer rather than sending the same mutation to
+  // a different mailbox.
+  const { client, calls } = twoRealAccounts(500)
+
+  await expect(
+    client.modifyMessage({ message_id: 'h1', add_label_ids: ['Label_p'] }),
+  ).rejects.toThrow()
+  expect(calls).toHaveLength(1)
 })

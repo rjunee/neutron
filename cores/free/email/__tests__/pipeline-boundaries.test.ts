@@ -1,0 +1,834 @@
+/**
+ * Email pipeline — the failure BOUNDARIES between steps.
+ *
+ * Every arm here is a regression of a defect found by cross-model review, and
+ * they share a shape: a step succeeded, the step after it failed, and the
+ * system then drew the wrong conclusion about what had happened.
+ *
+ *   - a poll page full of already-handled mail concluded "no new mail"
+ *   - a durable chat post whose local acknowledgement failed concluded
+ *     "not delivered", and said it again
+ *   - a write aimed at a disconnected account concluded "try another mailbox"
+ *
+ * Every fixture address is `*.example.com`.
+ */
+
+import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import type {
+  GmailClient,
+  GmailListInput,
+  GmailListResult,
+  GmailMessageMeta,
+} from '../src/contract.ts'
+import { buildMultiAccountGmailClient } from '../src/multi-account.ts'
+import { escalateEmail } from '../src/pipeline/escalate.ts'
+import {
+  backlogCutoffKey,
+  backlogDoneKey,
+  CHECKPOINT_BACKLOG_DONE,
+  runEmailPipelineTick,
+} from '../src/pipeline/poller.ts'
+import { openEmailPipelineStore, type EmailPipelineStore } from '../src/pipeline/store.ts'
+
+const NOW = Date.parse('2026-08-12T09:00:00.000Z')
+
+function meta(id: string, subject = 'Action required: payment failed'): GmailMessageMeta {
+  return {
+    id,
+    thread_id: `thread-${id}`,
+    subject,
+    from: 'Vendor Billing <billing@vendor.example.com>',
+    snippet: 'please look',
+    internal_date: new Date(NOW).toISOString(),
+    label_ids: ['INBOX'],
+  } as GmailMessageMeta
+}
+
+function withStore(run: (store: EmailPipelineStore) => Promise<void>): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), 'email-boundary-'))
+  const store = openEmailPipelineStore({ owner_home: home, now: () => NOW })
+  // The pipeline is opt-in per account; `''` is the single-account sentinel.
+  store.setAccountEnabled('', true, null, NOW)
+  // These exercise the STEADY state, past the one-time backlog sweep. A
+  // finished sweep leaves BOTH marks — the completion flag AND the boundary it
+  // drew — and the fixture has to leave both: a completion with no recorded
+  // boundary is the shape of a mailbox that was turned off and on again, which
+  // correctly re-opens the sweep.
+  store.setCheckpoint(CHECKPOINT_BACKLOG_DONE, '1')
+  store.setCheckpoint(backlogDoneKey(null), '1')
+  store.setCheckpoint(backlogCutoffKey(null), String(NOW))
+  return run(store).finally(() => {
+    store.close()
+    rmSync(home, { recursive: true, force: true })
+  })
+}
+
+describe('steady-state polling does not starve behind handled mail', () => {
+  test('an entire first page of already-handled mail does NOT end the poll', async () => {
+    await withStore(async (store) => {
+      // An escalated message KEEPS INBOX by design, so the top of the inbox
+      // fills with mail this pipeline has already dealt with. Here a full page
+      // of them sits in front of one unhandled message.
+      const handled = Array.from({ length: 3 }, (_, i) => meta(`handled-${i}`))
+      for (const m of handled) {
+        store.insertEmail({
+          id: m.id,
+          thread_id: m.thread_id,
+          account_id: null,
+          sender: m.from,
+          subject: m.subject,
+          snippet: m.snippet,
+          body_text: 'x',
+          received_at: NOW,
+          processed_at: NOW,
+          category: 'billing action',
+          handling: 'escalate',
+        })
+        store.markEscalated(m.id, NOW, null)
+      }
+
+      const pages: GmailListResult[] = [
+        { results: handled, next_page_token: 'page-2' },
+        { results: [meta('brand-new')], next_page_tokens: {} },
+      ]
+      let call = 0
+      const asked: GmailListInput[] = []
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          asked.push(input)
+          return pages[Math.min(call++, pages.length - 1)] as GmailListResult
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const r = await runEmailPipelineTick({
+        gmail,
+        store,
+        classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+        escalate: {
+          deliver: async (_t, e): Promise<unknown> => {
+            delivered.push(e.body)
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
+          },
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+        },
+        now: () => NOW,
+        max_results: 3,
+      })
+
+      // THE REGRESSION: one page, all handled, used to end the tick reporting
+      // nothing to do — and the message behind it was never reached, on this
+      // tick or any future one.
+      expect(asked.length).toBeGreaterThanOrEqual(2)
+      expect(r.scanned).toBe(1)
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]).toContain('billing@vendor.example.com')
+    })
+  })
+})
+
+describe('a delivered escalation is never re-posted', () => {
+  test('deliver SUCCEEDS but the acknowledgement write throws — no second post', async () => {
+    await withStore(async (store) => {
+      store.insertEmail({
+        id: 'msg-1',
+        thread_id: 't-1',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+
+      const posts: Array<{ body: string; idempotency_key?: string }> = []
+      // Delegate to the REAL store and override one method. A spread of a class
+      // instance copies own fields but not prototype methods, so `{...store}`
+      // is a store that has forgotten how to do anything.
+      const broken = Object.create(store) as EmailPipelineStore
+      Object.defineProperty(broken, 'markEscalated', {
+        value: (): void => {
+          throw new Error('disk full')
+        },
+      })
+
+      const out = await escalateEmail(
+        {
+          id: 'msg-1',
+          sender: 'Vendor Billing <billing@vendor.example.com>',
+          subject: 'Action required: payment failed',
+          reason: 'billing action',
+        },
+        {
+          deliver: async (_t, e): Promise<unknown> => {
+            posts.push({ body: e.body, ...(e.idempotency_key !== undefined ? { idempotency_key: e.idempotency_key } : {}) })
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
+          },
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+          store: broken,
+          now: () => NOW,
+        },
+      )
+
+      // The owner WAS told. The local write failing must not be reported as a
+      // delivery failure — that is what left the row eligible and posted twice.
+      expect(out.delivered).toBe(true)
+      expect(posts).toHaveLength(1)
+      // And the post carries a deterministic key, so a retry collapses at the
+      // seam instead of writing a second durable chat row.
+      expect(posts[0]?.idempotency_key).toBe('email-escalation::msg-1')
+
+      // The attempt is counted (it was made, and counting it before the call is
+      // what makes an interrupted attempt recoverable) — but crucially NO
+      // failure was recorded against it, because the delivery did not fail.
+      expect(store.getEmail('msg-1')?.escalation_attempts).toBe(1)
+      expect(store.getEmail('msg-1')?.last_error).toBeNull()
+    })
+  })
+})
+
+describe('a resolved deliver call is not automatically a delivered escalation', () => {
+  test('persisted:false is a FAILURE — not marked escalated, and retried', async () => {
+    await withStore(async (store) => {
+      store.insertEmail({
+        id: 'msg-2',
+        thread_id: 't-2',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+
+      // The real seam does NOT throw when the durable write fails: it resolves
+      // with persisted:false. Trusting the absence of an exception marked the
+      // owner told when nothing was written anywhere, and suppressed the retry
+      // forever.
+      const out = await escalateEmail(
+        {
+          id: 'msg-2',
+          sender: 'Vendor Billing <billing@vendor.example.com>',
+          subject: 'Action required: payment failed',
+          reason: 'billing action',
+        },
+        {
+          deliver: async (): Promise<unknown> => ({ persisted: false, delivered_live: false }),
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+          store,
+          now: () => NOW,
+        },
+      )
+
+      expect(out.delivered).toBe(false)
+      const row = store.getEmail('msg-2')
+      expect(row?.escalated_at).toBeNull()
+      // Counted as an attempt, so the resume pass picks it up next tick.
+      expect(row?.escalation_attempts).toBe(1)
+      expect(store.listPendingEscalations(5).map((r) => r.id)).toContain('msg-2')
+    })
+  })
+})
+
+describe('a write for a disconnected account fails closed', () => {
+  /** Only `acct-b` is still connected; `acct-a` was disconnected. */
+  function twoAccountsOneGone(): {
+    client: GmailClient
+    touchedB: Array<{ message_id: string; remove: string[] }>
+  } {
+    const touchedB: Array<{ message_id: string; remove: string[] }> = []
+    const clientB = {
+      async getMessage(input: { message_id: string }): Promise<unknown> {
+        // acct-b HAPPENS to hold the same id — Gmail ids are account-local.
+        if (input.message_id === 'shared-id') {
+          return {
+            id: 'shared-id',
+            thread_id: 't-b',
+            subject: "acct-b's unrelated message",
+            from: 'Someone <someone@other.example.com>',
+            snippet: '',
+            internal_date: new Date(NOW).toISOString(),
+            label_ids: ['INBOX'],
+            body_text: 'this belongs to the OTHER mailbox',
+          }
+        }
+        throw new Error('not found')
+      },
+      async modifyMessage(input: { message_id: string; remove_label_ids?: string[] }): Promise<unknown> {
+        touchedB.push({ message_id: input.message_id, remove: [...(input.remove_label_ids ?? [])] })
+        return { message_id: input.message_id, label_ids: [] }
+      },
+      async ensureLabel(): Promise<unknown> {
+        return { label_id: 'Label_b', label_name: 'Neutron/processed', created: false }
+      },
+      async listMessages(): Promise<GmailListResult> {
+        return { results: [] }
+      },
+    } as unknown as GmailClient
+
+    const client = buildMultiAccountGmailClient({
+      accounts: async () => [
+        { account_id: 'acct-b', account_email: 'b@example.com', accessToken: async () => 'tok' },
+      ],
+      buildClient: () => clientB,
+    })
+    return { client, touchedB }
+  }
+
+  test('modifyMessage for a gone account NEVER archives another mailbox', async () => {
+    const { client, touchedB } = twoAccountsOneGone()
+    // A mutation persisted for (acct-a, shared-id) is retried after acct-a is
+    // disconnected. Probing would strip INBOX from acct-b's unrelated message
+    // and then mark acct-a's row complete.
+    await expect(
+      client.modifyMessage({
+        message_id: 'shared-id',
+        account_id: 'acct-a',
+        add_label_ids: ['Label_p'],
+        remove_label_ids: ['INBOX'],
+      }),
+    ).rejects.toThrow()
+    expect(touchedB).toEqual([])
+  })
+
+  test('getMessage for a gone account NEVER returns another mailbox’s body', async () => {
+    const { client } = twoAccountsOneGone()
+    await expect(
+      client.getMessage({ message_id: 'shared-id', account_id: 'acct-a' }),
+    ).rejects.toThrow()
+  })
+
+  test('ensureLabel for a gone account does not mint the label in the primary', async () => {
+    const { client } = twoAccountsOneGone()
+    await expect(
+      client.ensureLabel({ name: 'Neutron/processed', account_id: 'acct-a' }),
+    ).rejects.toThrow()
+  })
+})
+
+describe('the page budget pauses the walk, it does not end it', () => {
+  test('mail behind MORE than budget×page_size pages is still reached', async () => {
+    await withStore(async (store) => {
+      // Three pages of already-handled mail, a budget of 2, and the unhandled
+      // message on page 3. Tick one runs out of budget; tick two must RESUME
+      // rather than re-walk pages 1-2 and give up in the same place forever.
+      const handled = (n: number): GmailMessageMeta[] => [meta(`handled-${n}`)]
+      for (const n of [1, 2]) {
+        const m = handled(n)[0] as GmailMessageMeta
+        store.insertEmail({
+          id: m.id,
+          thread_id: m.thread_id,
+          account_id: null,
+          sender: m.from,
+          subject: m.subject,
+          snippet: m.snippet,
+          body_text: 'x',
+          received_at: NOW,
+          processed_at: NOW,
+          category: 'billing action',
+          handling: 'escalate',
+        })
+        store.markEscalated(m.id, NOW, null)
+      }
+
+      const byCursor: Record<string, GmailListResult> = {
+        START: { results: handled(1), next_page_token: 'p2' },
+        p2: { results: handled(2), next_page_token: 'p3' },
+        p3: { results: [meta('deep-new')], next_page_tokens: {} },
+      }
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          return byCursor[input.page_token ?? 'START'] as GmailListResult
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const run = (): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (_t, e): Promise<unknown> => {
+              delivered.push(e.body)
+              return { prompt_id: 'p1', persisted: true, delivered_live: true }
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'instance',
+          },
+          now: () => NOW,
+          max_results: 1,
+          max_poll_pages: 2,
+        })
+
+      const first = await run()
+      expect(first.scanned).toBe(0)
+
+      // THE REGRESSION: without a continuation cursor this tick re-walks pages
+      // 1-2 and stops again — the message on page 3 is never reached, on any
+      // tick, forever.
+      const second = await run()
+      expect(second.scanned).toBe(1)
+      expect(delivered).toHaveLength(1)
+      expect(store.getEmail('deep-new')).not.toBeNull()
+    })
+  })
+
+  test('mail arriving at the TOP is seen while a continuation is still open', async () => {
+    // The cost of the fix above, if it is left alone. A tick that resumes
+    // mid-inbox never looks at page one — and page one is where new mail lands.
+    // With a budget of one page and enough retained history to keep the walk
+    // going, an important email arriving now waits for the whole walk, which
+    // breaks the one-poll-interval acceptance the Core exists for.
+    await withStore(async (store) => {
+      const handled = (n: number): GmailMessageMeta[] => [meta(`old-${n}`)]
+      for (const n of [1, 2]) {
+        const m = handled(n)[0] as GmailMessageMeta
+        store.insertEmail({
+          id: m.id,
+          thread_id: m.thread_id,
+          account_id: null,
+          sender: m.from,
+          subject: m.subject,
+          snippet: m.snippet,
+          body_text: 'x',
+          received_at: NOW,
+          processed_at: NOW,
+          category: 'billing action',
+          handling: 'escalate',
+        })
+        store.markEscalated(m.id, NOW, null)
+      }
+
+      // Page one is mutable: the second tick finds a NEW message sitting on top
+      // of it, exactly as a real inbox would.
+      let top: GmailMessageMeta[] = handled(1)
+      const byCursor = (): Record<string, GmailListResult> => ({
+        START: { results: top, next_page_token: 'p2' },
+        p2: { results: handled(2), next_page_token: 'p3' },
+        p3: { results: [meta('deep-old')], next_page_tokens: {} },
+      })
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          return byCursor()[input.page_token ?? 'START'] as GmailListResult
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const run = (): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (_t, e): Promise<unknown> => {
+              delivered.push(e.body)
+              return { prompt_id: 'p1', persisted: true, delivered_live: true }
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'instance',
+          },
+          now: () => NOW,
+          max_results: 2,
+          // ONE page per tick: the walk is now parked at p2 and will stay
+          // parked for another tick.
+          max_poll_pages: 1,
+        })
+
+      const first = await run()
+      expect(first.scanned).toBe(0)
+
+      // The message the owner actually cares about arrives at the top NOW.
+      top = [meta('urgent-now'), ...handled(1)]
+
+      // THE REGRESSION: the tick resumes at p2, never reads page one, and this
+      // message waits for the walk to reach the end of a large mailbox — many
+      // intervals, not one.
+      const second = await run()
+      expect(second.scanned).toBe(1)
+      expect(store.getEmail('urgent-now')?.escalated_at).toBe(NOW)
+      expect(delivered).toHaveLength(1)
+
+      // …and the deep walk still ADVANCED on the same tick. The probe is extra,
+      // not a replacement for the walk's page — charging it to a one-page
+      // budget would restore the starvation the cursor fixed.
+      const third = await run()
+      expect(store.getEmail('deep-old')).not.toBeNull()
+      void third
+    })
+  })
+})
+
+describe('a retried escalation does not buzz the phone again', () => {
+  test('chat keeps failing; the push goes out ONCE, not once per attempt', async () => {
+    await withStore(async (store) => {
+      store.insertEmail({
+        id: 'msg-push',
+        thread_id: 't-push',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+
+      const pushes: string[] = []
+      const deps = {
+        // Chat never persists — so the row stays eligible and is retried.
+        deliver: async (): Promise<unknown> => ({ persisted: false, delivered_live: false }),
+        topic_id: 'app:owner',
+        push: {
+          async pushAll(_slug: string, m: { body: string }): Promise<unknown> {
+            pushes.push(m.body)
+            return { sent: 1 }
+          },
+        },
+        project_slug: 'instance',
+        store,
+        now: () => NOW,
+      }
+
+      const first = await escalateEmail(
+        {
+          id: 'msg-push',
+          sender: 'Vendor Billing <billing@vendor.example.com>',
+          subject: 'Action required: payment failed',
+          reason: 'billing action',
+        },
+        deps,
+      )
+      expect(first.delivered).toBe(false)
+      expect(pushes).toHaveLength(1)
+      expect(store.getEmail('msg-push')?.pushed_at).toBe(NOW)
+
+      // The resume pass picks the row up again, carrying its push mark.
+      const pending = store.listPendingEscalations(5)[0]
+      expect(pending?.id).toBe('msg-push')
+      await escalateEmail(
+        {
+          id: 'msg-push',
+          sender: 'Vendor Billing <billing@vendor.example.com>',
+          subject: 'Action required: payment failed',
+          reason: 'billing action',
+          pushed_at: pending?.pushed_at ?? null,
+        },
+        deps,
+      )
+
+      // THE REGRESSION: the push used to fire on every attempt — five buzzes
+      // for one email, while the chat post the owner relies on never landed.
+      expect(pushes).toHaveLength(1)
+    })
+  })
+
+  test('the send succeeds and the MARK fails: still once, because the guard is written first', async () => {
+    // The hole in send-then-note. `pushAll` resolves, `markPushed` throws, and
+    // `pushed_at` is left null — so the guard reads "never pushed" about a
+    // message the owner has already been buzzed for, and every resume pass
+    // buzzes again. The chat path can survive this ordering because its retry
+    // carries an idempotency key; push has none, so the durable fact has to be
+    // written BEFORE the send, not after it.
+    await withStore(async (store) => {
+      store.insertEmail({
+        id: 'msg-mark-fails',
+        thread_id: 't-mark',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+
+      const pushes: string[] = []
+      // Poison the acknowledgement write ONLY — the send itself is healthy, so
+      // any push that goes out really did reach the owner's phone.
+      let poisoned = true
+      const markPushed = store.markPushed.bind(store)
+      const poisonedStore = new Proxy(store, {
+        get(target, prop, receiver) {
+          if (prop === 'markPushed' && poisoned) {
+            return () => {
+              throw new Error('disk full')
+            }
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      })
+      void markPushed
+
+      const deps = {
+        // Chat never persists, so the row stays eligible and IS retried — which
+        // is the only way this bug ever reaches the owner.
+        deliver: async (): Promise<unknown> => ({ persisted: false, delivered_live: false }),
+        topic_id: 'app:owner',
+        push: {
+          async pushAll(_slug: string, m: { body: string }): Promise<unknown> {
+            pushes.push(m.body)
+            return { sent: 1 }
+          },
+        },
+        project_slug: 'instance',
+        store: poisonedStore,
+        now: () => NOW,
+      }
+      const email = {
+        id: 'msg-mark-fails',
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        reason: 'billing action',
+      }
+
+      await escalateEmail(email, deps)
+      // NOT SENT. The reservation failed, so there is no guard; sending anyway
+      // would buzz on this attempt and on every retry after it. One dropped
+      // buzz on a broken store beats an unbounded repeat, and chat is still the
+      // guaranteed surface.
+      expect(pushes).toHaveLength(0)
+      expect(store.getEmail('msg-mark-fails')?.pushed_at).toBeNull()
+
+      // The store recovers; the next attempt reserves and sends exactly once.
+      poisoned = false
+      const second = store.listPendingEscalations(5)[0]
+      await escalateEmail({ ...email, pushed_at: second?.pushed_at ?? null }, deps)
+      expect(pushes).toHaveLength(1)
+      expect(store.getEmail('msg-mark-fails')?.pushed_at).toBe(NOW)
+
+      // …and a third attempt, still failing in chat, does not buzz again.
+      const third = store.listPendingEscalations(5)[0]
+      await escalateEmail({ ...email, pushed_at: third?.pushed_at ?? null }, deps)
+      expect(pushes).toHaveLength(1)
+    })
+  })
+})
+
+describe('a crash between the insert and the delivery is recoverable', () => {
+  test('a row persisted but never delivered IS escalated by the next tick, once', async () => {
+    await withStore(async (store) => {
+      // Exactly the crash window: the poller inserts the row, then the process
+      // dies before `deliver` is ever called. `escalated_at` is NULL and
+      // `escalation_attempts` is 0 — the poll path skips it because hasEmail is
+      // true, and the resume query used to skip it because attempts was 0. The
+      // message was important, existed, and could never be delivered.
+      store.insertEmail({
+        id: 'msg-crash',
+        thread_id: 't-crash',
+        account_id: null,
+        sender: 'Vendor Billing <billing@vendor.example.com>',
+        subject: 'Action required: payment failed',
+        snippet: 's',
+        body_text: 'b',
+        received_at: NOW,
+        processed_at: NOW,
+        category: 'billing action',
+        handling: 'escalate',
+      })
+      expect(store.getEmail('msg-crash')?.escalation_attempts).toBe(0)
+
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(): Promise<GmailListResult> {
+          // The message is still in INBOX (escalated mail keeps it), so the
+          // poll sees it and skips it via hasEmail — recovery cannot come from
+          // the poll path.
+          return { results: [meta('msg-crash')], next_page_tokens: {} }
+        },
+        async getMessage(): Promise<unknown> {
+          return { body_text: 'x', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'msg-crash', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const run = (): ReturnType<typeof runEmailPipelineTick> =>
+        runEmailPipelineTick({
+          gmail,
+          store,
+          classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+          escalate: {
+            deliver: async (_t, e): Promise<unknown> => {
+              delivered.push(e.body)
+              return { prompt_id: 'p1', persisted: true, delivered_live: true }
+            },
+            topic_id: 'app:owner',
+            push: null,
+            project_slug: 'instance',
+          },
+          now: () => NOW,
+        })
+
+      const first = await run()
+      expect(first.resumed).toBe(1)
+      expect(delivered).toHaveLength(1)
+      expect(store.getEmail('msg-crash')?.escalated_at).toBe(NOW)
+
+      // EXACTLY once — the next tick says nothing more.
+      await run()
+      expect(delivered).toHaveLength(1)
+    })
+  })
+})
+
+describe('one unreadable message is not a wall across the mailbox', () => {
+  test('a permanently failing message on page 1 does not hide page 2 forever', async () => {
+    await withStore(async (store) => {
+      // `poison` can never be read. It sits alone on page 1; an important
+      // message sits on page 2. Counting ATTEMPTS as progress ended the walk
+      // here on every tick, so page 2 was never reached — not late, never.
+      const delivered: string[] = []
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          return input.page_token === 'p2'
+            ? { results: [meta('important-2')], next_page_tokens: {} }
+            : { results: [meta('poison')], next_page_token: 'p2' }
+        },
+        async getMessage(input: { message_id: string }): Promise<unknown> {
+          if (input.message_id === 'poison') throw new Error('gmail 500')
+          return { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const r = await runEmailPipelineTick({
+        gmail,
+        store,
+        classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+        escalate: {
+          deliver: async (_t, e): Promise<unknown> => {
+            delivered.push(e.body)
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
+          },
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+        },
+        now: () => NOW,
+      })
+
+      expect(r.errors).toBe(1)
+      expect(r.escalated).toBe(1)
+      expect(delivered).toHaveLength(1)
+    })
+  })
+})
+
+describe('a busy first page does not hide a later one', () => {
+  test('page 1 keeps receiving mail; the important message on page 2 is still reached', async () => {
+    await withStore(async (store) => {
+      // The starvation this replaced was subtle: stopping as soon as a page had
+      // real work is reasonable-sounding, and wrong. If page 1 keeps receiving
+      // mail — a busy inbox — every tick handles page 1 and stops, and the
+      // important message behind it is never reached on any tick.
+      const delivered: string[] = []
+      let arrival = 0
+      const gmail = {
+        async listMessages(input: GmailListInput): Promise<GmailListResult> {
+          if (input.page_token === 'p2') {
+            return { results: [meta('important-deep')], next_page_tokens: {} }
+          }
+          // A different new message on page 1 every single tick.
+          arrival++
+          return {
+            results: [meta(`chatter-${arrival}`, 'This week at the shop')],
+            next_page_token: 'p2',
+          }
+        },
+        async getMessage(input: { message_id: string }): Promise<unknown> {
+          return input.message_id === 'important-deep'
+            ? { body_text: 'Your card was declined.', label_ids: ['INBOX'] }
+            : { body_text: 'Lots of news. Unsubscribe any time.', label_ids: ['INBOX'] }
+        },
+        async ensureLabel(): Promise<unknown> {
+          return { label_id: 'Label_p', label_name: 'Neutron/processed', created: false }
+        },
+        async modifyMessage(): Promise<unknown> {
+          return { message_id: 'x', label_ids: [] }
+        },
+      } as unknown as GmailClient
+
+      const r = await runEmailPipelineTick({
+        gmail,
+        store,
+        classify: { cache_lookup: () => null, cache_store: () => undefined, llm: null },
+        escalate: {
+          deliver: async (_t, e): Promise<unknown> => {
+            delivered.push(e.body)
+            return { prompt_id: 'p1', persisted: true, delivered_live: true }
+          },
+          topic_id: 'app:owner',
+          push: null,
+          project_slug: 'instance',
+        },
+        now: () => NOW,
+      })
+
+      // Both handled on the SAME tick: the newsletter archived, the important
+      // one escalated.
+      expect(r.scanned).toBe(2)
+      expect(r.escalated).toBe(1)
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0]).toContain('billing@vendor.example.com')
+    })
+  })
+})

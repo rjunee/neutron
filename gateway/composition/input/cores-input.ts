@@ -7,8 +7,23 @@ import type { BundledRegistryEvent } from '@neutronai/cores-runtime/bundled-regi
 import type { SecretsPrompter } from '@neutronai/cores-runtime/lifecycle.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import type { EmailPipelineCompositionConfig } from '../../cores/email-pipeline-wiring.ts'
 
 export interface CoresCompositionInput {
+  /**
+   * Email pipeline (Email Core consolidation P1). When supplied, `tasksModule`
+   * registers the `email-pipeline-poll` cron on the shared registries — the
+   * poll/classify/escalate tick. The bundle carries the composition root's
+   * `deliver` seam, the `PushDispatcher`, the owner-timezone resolver and the
+   * substrate one-shot LLM; the Core itself never imports any of them.
+   *
+   * Optional — absent ⇒ no cron registers and nothing polls (the unchanged
+   * default for a composer with no Gmail). Wired in `open/composer.ts`.
+   *
+   * Per docs/plans/2026-08-06-email-core-consolidation-plan.md § 5-6.
+   */
+  email_pipeline?: EmailPipelineCompositionConfig
+
   /**
    * P3 cores wire-up (2026-05-18). When supplied, the composer builds
    * the bundled-Cores registry, drives each Core's idempotent install

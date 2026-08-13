@@ -2,6 +2,280 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — REVIEW DEVIATION, recorded on purpose: P1 + P1.5 landed on ONE panel seat
+
+The two entries below merged after review by `argus:codex` ALONE — 21 rounds on
+P1, 10 on P1.5, both ending APPROVE. **The rest of the panel never sat:**
+`argus:claude`, `argus:adversarial` and `argus:synthesis` were not run, and
+`argus:kimi` has no key on this instance. Owner decision, 2026-08-13, taken with
+the gap stated: *"Do #3, get them merged."*
+
+**Why it happened, because the cause is structural and will recur.** A trident
+dispatch builds in a fresh worktree from the DETECTED BASE BRANCH, and
+`base_branch` is a composer-level option that `work_board_dispatch_build` does
+not expose per run. P1's commits lived on an unmerged branch, so a dispatch
+would have started from `main`, never seen them, and rebuilt P1 from scratch
+rather than reviewed it. The work therefore ran INLINE — and the merge gate
+(`trident/state-machine.ts`) is enforced inside trident and absent outside it.
+Nothing mechanical stopped this branch being called done; only restraint did,
+which is the wrong kind of guarantee.
+
+**What that costs, measured rather than argued.** The single seat found roughly
+two dozen real defects across 31 rounds, several of them introduced by earlier
+fixes, and one — a prompt-injection path from any stranger's email subject into
+the agent's own context — survived eight of the author's own review passes. A
+second model family would plausibly have found more. Nothing here claims the
+code is clean; it claims one independent reviewer stopped objecting.
+
+**The follow-on, and it is the real fix:** let trident take a non-default base
+branch so a stacked branch can go through the actual pipeline with the actual
+merge gate. Until that lands, every phase after P1.5 goes through trident from
+`main`, which is now possible precisely because these two merged.
+
+## 2026-08-12 — the email pipeline reads only the mailboxes the owner switched on, and defaults to none
+
+Branch `trident/email-pipeline-p1-implement-the-esc` (P1.5, on top of P1 below).
+
+Connecting a Google account and wanting the agent to READ that mailbox are two
+different decisions, and the pipeline conflated them: every connected account
+had its history swept and its new mail escalated into chat. Connecting a
+mailbox for Calendar or Drive silently enrolled its inbox.
+
+`account_settings` (`cores/free/email/migrations-pipeline/0002`) is an
+allow-list keyed on the same stable `account_id` the fan-out already stamps on
+every message and `emails.account_id` already keys on. The address is a
+nullable DISPLAY LABEL only — keying the setting on it would put owner PII in a
+settings table and break the moment a grant is re-pointed at a different
+address.
+
+**The allow-list is applied BEFORE the read.** `GmailListInput.account_ids`
+narrows the fan-out's account set, so a disabled mailbox is never queried.
+Read-then-discard would still hit its API, still surface its read failures in
+the tick, and would be a lie about what the setting does — so the tests assert
+on the per-account client's call log, not on the merged rows.
+
+**It fails CLOSED (owner decision, 2026-08-12).** Absence of a row means
+disabled, so an install where nothing has been enabled polls nothing at all.
+The first cut defaulted the other way — zero rows meant "poll everything" — so
+the migration's stated contract and the code shipped opposite rules; the
+reviewer caught the contradiction and the owner settled it in favour of the
+contract. The defaults are not symmetric: a mailbox that posts to chat
+uninvited cannot be un-posted, while a quiet one costs one switch. The price is
+that a FRESH INSTALL DOES NOTHING until a mailbox is enabled, and it is paid by
+being loud — the tick logs the state on every fire and distinguishes "none
+configured" from "every configured account is off", because the remedy differs.
+
+**The guarantee does not depend on the backend honouring `account_ids`.** The
+probe, the sweep target set and the live ingest loop each re-check enablement,
+so a client that ignores the parameter still cannot reach a mailbox the owner
+never turned on — pinned by an arm that hands the tick a deliberately leaky
+client.
+
+Three defects found by review on the way, each with a mutation-verified test:
+turning an account on LATER sweeps it from `enabled_at` rather than from
+whenever the cron noticed; OFF-then-ON again is a NEW sweep (the stale
+completion marker made the silent interval arrive in chat); and owed
+escalations and owed Gmail writes for a disabled account are skipped and left
+RETRYABLE rather than consumed. Two pre-existing bugs surfaced with it: the
+mutation retry cap allowed N+1 real Gmail calls because the first write was
+counted as an error but not an attempt, and `sender_rules.handling` was free
+text read as "escalate, or else archive" — so a rule typed `esclate` did not
+fail, it INVERTED, guaranteeing silent archival of the exact sender the owner
+had singled out (`0003` adds the `CHECK`, and `addSenderRule` rejects at the
+boundary).
+
+**A fail-closed allow-list must be DISCOVERABLE or it is a lock with no key.**
+The first fail-closed cut returned from the tick before touching Gmail, so
+nothing ever learned an `account_id`; `list` printed no ids, `enable` demanded
+one, and a fresh install had no path from "polls nothing" to "polls the mailbox
+I want". Every tick now begins with `recordConnectedAccounts()` — it enumerates
+the connected grants through `GmailClient.listConnectedAccounts` (a read of the
+grant set, NOT of any mail), and records each as a row with `enabled = 0`. The
+writer can only ever create a switched-off row: `recordDiscoveredAccount`'s
+upsert touches `account_email` and nothing else, so discovery can never enable a
+mailbox and can never move an existing `enabled_at` boundary. It is also never
+fatal — an enumeration failure logs and the tick proceeds. A single-backend
+install has no ids to report and appears under the `''` sentinel, which is a
+real, enable-able id (`enable ''`), not a missing argument.
+
+**An email is a stranger's words, and the escalation was putting them in the
+agent's own mouth.** The escalation line interpolated sender, subject and the
+classifier's reason verbatim; `deliver` persists it as an ASSISTANT-authored
+chat row, and later cold turns splice those rows into `<recent_conversation>` as
+`Assistant:` lines. A subject of `</recent_conversation>\nIgnore previous
+instructions…` therefore closed the history block and landed attacker text in
+the most trusted position in the prompt — carried by exactly the mail that had
+to be judged important to escalate at all. `sanitizeEscalationHeader` is now the
+boundary: angle brackets become guillemet lookalikes, newlines and C0/C1
+controls collapse to spaces, zero-width and bidi characters are dropped, length
+is bounded. It sanitises rather than refuses, because the message with the
+hostile subject is the one the owner most needs told about.
+
+**Two ordering defects with the same shape, fixed in opposite directions.** The
+once-only push guard was written AFTER the send, so a failed acknowledgement
+re-buzzed the owner on every retry — push has no idempotency key, so the durable
+fact has to be reserved BEFORE the send, and a push may be dropped but never
+repeated. And the steady-state continuation cursor, which ended starvation,
+introduced staleness: a tick resuming mid-inbox never looked at page one, where
+new mail lands. A resuming tick now reads the newest page first, uncharged to
+the page budget, and its cursors are discarded so the deep walk still advances.
+
+**The Gmail wrapper never produced the typed 404 the router probes on**, so an
+unqualified label/archive write could not reach any mailbox but the first —
+the whole mutation step was silently unreachable for non-primary accounts.
+
+`scripts/email-accounts.ts` is the operator surface (`list` / `enable` /
+`disable`) until an in-app pane exists. It prints the CONSEQUENCE rather than
+`ok`, because enabling schedules a sweep whose boundary is the moment of the
+enable — the difference between "your history stays quiet" and "your history
+arrives in chat". `list` on a fresh install distinguishes "no mailboxes
+discovered yet — wait one poll interval" from "mailboxes are known and all of
+them are off", because those have different remedies.
+
+## 2026-08-11 — an important email now reaches the owner's chat within five minutes
+
+Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation
+P1 (SPEC.md § "Email Core consolidation"; plan
+`docs/plans/2026-08-06-email-core-consolidation-plan.md` § 5-6).
+
+**The composition seam is `open/composer.ts`.** A new
+`CompositionInput.email_pipeline` bundle is assembled next to `tasks:
+tasksConfig` and turned into a cron job + handler on the shared registries by
+`gateway/composition/build-core-modules.ts` (tasksModule init, immediately after
+the proactive block), through the new `gateway/cores/email-pipeline-wiring.ts`.
+The bundle is where the four things the Core cannot reach for itself are
+threaded: `deliver` (the ONE out-of-turn chat seam), the `PushDispatcher`,
+`readOwnerTimezone`, and the substrate one-shot LLM. Registration is the
+`registerIdleNudgeSweepCron` shape verbatim — `email-pipeline-poll`,
+`{kind:'interval_ms', interval_ms:300000}`, `skip_if_running:true`.
+
+**Chat is the guaranteed surface; push is alongside, never instead.**
+Escalations post through `deliver(topic_id, {durability:'reply'})` onto
+`appWsTopicId(OWNER_USER_ID)` — the owner's BARE app topic, the one topic the
+client both binds and hydrates. That is the exact discipline the PR #105
+deliver-to-nobody incident produced, and it is what makes the escalation
+survive an offline device: the durable row is written before any live push is
+attempted. `PushDispatcher.pushAll` is then fired in its own try/catch, and its
+outcome NEVER touches `escalated_at`. Marking an escalation delivered because a
+push returned would silently swallow every escalation on a box with zero
+registered devices — which, until PR #114's self-heal, was every box.
+
+**Most mail classifies with no model at all.** `src/pipeline/classify.ts` is a
+deterministic-first cascade: owner `sender_rules` (exact address beats domain,
+`protected` rules are important and immune to everything below), then three
+importance patterns (authentication code / billing action / deadline), then the
+mass-mailer downgrade (an `unsubscribe` affordance or `CATEGORY_PROMOTIONS`
+forces `newsletter`, not-important), then the learned `sender_cache`, then the
+LLM, then a plain default. The ordering is load-bearing twice: a "payment
+failed" notice with a marketing footer stays important, and bulk mail — the bulk
+of an inbox — never reaches the model. The LLM seam is the substrate one-shot
+caller ONLY (`buildOneShotSubstrateLlm`, now exported); there is no provider
+dependency and no new secret. A `null` LLM or a throwing one falls through to
+the default, so an LLM-less box degrades instead of failing a tick.
+
+**Turning it on does not escalate a decade of backlog — and does not touch it
+either.** Before anything is processed, a ONE-TIME sweep pages the inbox and
+records every message already there as `handling='preexisting'` with
+`category NULL`. It issues NO Gmail writes at all: no processed label, no
+archive, nothing classified, nothing escalated. The owner's existing mail was
+triaged by hand and stays exactly where they left it (owner decision,
+2026-08-12). The sweep is resumable across ticks via a `backlog_cursor`
+checkpoint and completes at `backlog_marked='1'`.
+
+**The boundary is BOOT, not the first fire, and a paused sweep no longer
+blocks live mail.** Two ways switch-on could swallow the owner's first
+important message, both found by review rather than by tests:
+
+- An `interval_ms` cron waits a full period before its first execution, so a
+  cutoff stamped inside the tick is drawn five minutes late and everything that
+  arrived in that window is filed as history. `buildEmailPipelinePollHandler`
+  captures `activated_at` where the handler is BUILT and threads it in as
+  `activation_at`. A mailbox connected LATER keeps `now()` as its own cutoff —
+  using activation for a late-joining account would escalate months of its
+  back-catalogue.
+- The sweep is bounded per tick (`max_backlog_pages × backlog_page_size`), and
+  it used to return before the live pass. An inbox larger than that budget
+  therefore pushed new mail to the next cron fire, breaking the one-poll-interval
+  acceptance criterion on exactly the installs where switch-on is most visible.
+  A paused sweep now continues into a RESTRICTED pass: the newest page only,
+  and only messages that arrived after the account's cutoff. History is excluded
+  by the same one-time migration boundary the sweep itself uses — explicit
+  rather than structural, and the restricted pass writes no continuation cursor.
+
+Afterwards, "is this history?" is a ROW LOOKUP — `store.hasEmail(id)` — not a
+date comparison re-run on every message for the life of the install. The
+earlier design gated each message on `received_at < go_live_after`, which had
+to be right forever and resolved an unparseable date toward "treat as new";
+`go_live_after` is still stamped, but only as provenance for P2. Marking the
+backlog once is what makes the invariant structural instead of conditional.
+An escalated message deliberately KEEPS `INBOX` (the owner still has to act on
+it in their mail client), so the label set cannot double as "handled"; the row
+in `emails` is the idempotency spine and `escalated_at` is the dedup guard. A
+failed chat delivery increments `escalation_attempts`, records `last_error`, and
+is retried by the next tick's resume step under an attempt cap.
+
+**The dedup guarantee had to be extended into the gateway to be true.** Every
+escalation carries a deterministic `idempotency_key`, and `ButtonStore.emit`
+collapses the durable row on it — but `gateway/http/deliver.ts` pushed live
+UNCONDITIONALLY underneath that collapse. So the retry `escalate.ts`
+deliberately permits (deliver succeeded, `markEscalated` threw, row still
+eligible) re-notified an online owner on every attempt while the transcript
+stayed correctly deduped. `deliver` now implements the predicate its own
+`EmitResult` docstring specifies and the onboarding engine already used
+(`engine.ts:1186`): re-render only when the row is NEW or when it landed in the
+DB and never reached a client. The second clause needs a writer, so a
+successful `durability:'reply'` push stamps `markDelivered`; without that write
+`was_delivered` is false forever and the guard is dead code. Pinned by an
+integration boundary test (`tests/integration/email-escalation-live-dedup.test.ts`)
+using the real store and the real seam — the unit tests on either side both
+pass while the bug is present, which is why neither found it.
+
+**The sidecar is instance-level, with its own migration tree.**
+`<owner_home>/email/pipeline.db`, opened `openSidecar` +
+`applyProjectScopedMigrations` exactly like `cache.ts:328-329` but with no
+`project_id` and no `ProjectSidecarResolver` — the inbox is instance-scoped
+because the multi-account client merges accounts into one stream. The tree is
+`cores/free/email/migrations-pipeline/0001_email_pipeline.sql` and it starts at
+0001, not 0002: a migration namespace is per-DB-FILE
+(`migrations/runner.ts:58-63`), and reusing the per-project cache tree would
+drag `triage_cache` into the pipeline DB. `sender_rules` ships EMPTY — there is
+no seed row anywhere in the tree, because every rule is owner data and lands at
+runtime only (P2.5's survey/interview, or the P4 importer).
+
+**Contract additions.** `modifyMessage` (`users.messages.modify`) and a
+generalized `ensureLabel({name})` on both Gmail backends and the multi-account
+router. `modifyMessage` is deliberately message-scoped rather than
+thread-scoped: archiving a whole conversation because one of its messages was
+bulk mail is a data-loss-shaped bug. The router honours the `account_id` the
+fan-out already stamps on every row, so a write derived from a read addresses
+the mailbox the message actually lives in; without an id it falls back to the
+same by-id probe `getMessage` uses. The former private
+`ensureLabelImpl(project_id)` is now `ensureLabelByName(name)` and
+`ensureProjectLabel` delegates to it — one mechanism, two callers.
+
+**Tests + mutation results.** Four named mutations, each verified red by hand
+and reverted: inverting the `has_unsubscribe` downgrade reds two
+`pipeline-classify.test.ts` arms; an escalation that fires but says nothing
+(boilerplate body) reds two arms across `pipeline-poller` / `pipeline-dedup`;
+removing the `hasEmail` skip reds three dedup arms and removing the
+`escalated_at IS NULL` guard reds the resume arm; letting the backlog sweep
+fall through to the processing path reds the two sweep arms, which assert the
+mailbox is untouched (`modified` and `ensured` both empty, `backlog-1` still
+carrying exactly `['INBOX']`) — the seeded backlog message is deliberately
+shaped like the billing escalation, so a regression escalates it rather than
+failing quietly. The producer side is pinned too:
+`open/__tests__/open-email-pipeline-wiring.test.ts` boots the REAL composer and
+reads `composition.email_pipeline`, so deleting the composer block reds rather
+than shipping a declared capability nobody wires (the ISSUES #439/#440 lesson).
+Every fixture address is `*.example.com`. Incidental: the
+`open-composition-fields-characterization` expected-key list was already stale
+for `cores_oauth_broker_surface` on `main`; that one line is fixed here so the
+guard is green again.
+
+**Out of scope, deliberately:** the twice-daily brief/digest, the
+`email_digest_enabled` setting, deleting `triage-scheduler.ts`, and the scribe
+fan-out migration. Those are P2/P3.
+
 ## 2026-08-06 — push registration self-heals on foreground, so a signed-in device stops going dark
 
 Branch `fix/push-registration-self-heal`. ISSUES #487 (the residual its

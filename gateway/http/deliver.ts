@@ -179,6 +179,14 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
 
     // DURABLE-ROW-FIRST — persist BEFORE the best-effort live push.
     let prompt_id: string
+    // An idempotent RE-emit that already rendered live must not render AGAIN.
+    // `emit` collapses the durable row on `idempotency_key`, but the live push
+    // ran unconditionally underneath it — so a producer that persisted its row,
+    // failed its own post-delivery bookkeeping and retried (the email pipeline's
+    // deliver→markEscalated seam is exactly this shape) re-notified an online
+    // owner on every retry while the durable history stayed correctly deduped.
+    // The dedup guarantee has to cover BOTH surfaces or it isn't one.
+    let alreadyRendered = false
     try {
       if (durability === 'reply') {
         const prompt = buildButtonPrompt({
@@ -194,6 +202,11 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
         })
         const emitted = await buttonStore.emit(prompt, { topic_id })
         prompt_id = emitted.prompt_id
+        // The EmitResult contract, verbatim: re-render only when the row is new
+        // OR when it landed in the DB but never reached a client (a transient
+        // send failure on the prior call). The same predicate the onboarding
+        // engine uses (`engine.ts:1186`) — one idiom, not two.
+        alreadyRendered = !emitted.was_new && emitted.was_delivered
       } else {
         const persisted = await buttonStore.persistInertAgentTurn({ topic_id, body })
         prompt_id = persisted.prompt_id
@@ -209,6 +222,11 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       return { prompt_id: null, persisted: false, delivered_live: false }
     }
 
+    // Already on the owner's screen from the first emit — the durable row is
+    // deduped and so is the bubble. Reported as delivered_live because that is
+    // the recorded fact (`delivered_at` is set), not a guess about this call.
+    if (alreadyRendered) return { prompt_id, persisted: true, delivered_live: true }
+
     const delivered = await routedPush(topic_id, {
       type: 'agent_message',
       body,
@@ -220,6 +238,18 @@ export function createDeliver(input: CreateDeliverInput): Deliver {
       allow_freeform: true,
       prompt_id,
     })
+    // Record the render so a later re-emit can skip it. Without this write
+    // `was_delivered` is false forever and the guard above is dead code. Failure
+    // here is logged, never surfaced: the message HAS been delivered, and the
+    // worst consequence of a missed stamp is one duplicate bubble on a retry —
+    // strictly better than failing a delivery that already succeeded.
+    if (durability === 'reply' && delivered) {
+      try {
+        await buttonStore.markDelivered(prompt_id)
+      } catch (err) {
+        log(`${LOG_TAG} markDelivered failed topic=${topic_id} prompt=${prompt_id}: ${errMsg(err)}`)
+      }
+    }
     return { prompt_id, persisted: true, delivered_live: delivered }
   }
 }
