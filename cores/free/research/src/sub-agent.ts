@@ -278,7 +278,7 @@ async function runWithTimeout<T>(p: Promise<T>, budget_ms: number): Promise<T> {
  *  production path; it exists only as a safe non-crashing default for OTHER
  *  callers (tests, other cores) that dispatch without supplying `model`. Keep it
  *  in sync with `runtime/models.ts`'s `SONNET_MODEL` default. */
-export const DEFAULT_SUB_AGENT_MODEL: string = 'claude-sonnet-4-6'
+export const DEFAULT_SUB_AGENT_MODEL: string = 'claude-sonnet-5'
 
 /**
  * Build a canned `RuntimeSubAgentDispatcher` for tests. Returns
