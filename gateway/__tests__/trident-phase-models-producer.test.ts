@@ -29,6 +29,7 @@ import {
   readTridentPhaseModelsWithRejected,
   writeTridentPhaseModels,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
+import type { CodexAvailability } from '@neutronai/trident/codex-credential.ts'
 import { TRIDENT_PHASES } from '@neutronai/trident/phase-models.ts'
 
 const SCOPE = 'owner'
@@ -187,10 +188,13 @@ describe('the chain is actually connected — each link asserted separately', ()
     expect(start).toBeGreaterThan(-1)
     const block = src.slice(start, src.indexOf('\n    })', start))
     expect(block.includes('codexCredentialService.resolveActiveCodexHome')).toBe(true)
-    // BOTH HALVES OF "CAN CODEX RUN HERE". The wrapper exits 10 with no credential
-    // and 11 with no CLI, so a pane that greyed on the credential alone would offer a
-    // tier that dies at dispatch on a box where `codex` was never installed.
-    expect(block.includes('codexCliOnPath(env)')).toBe(true)
+    // ALL THREE PRECONDITIONS OF "CAN CODEX RUN HERE", via the ONE function that
+    // decides them (`codexExecutorAvailability` — credential, `codex` CLI, `perl`;
+    // exits 10, 11 and 3 respectively). Asserted as the call rather than as the
+    // conditions themselves precisely so the conditions live somewhere a test can
+    // drive with a real PATH — `trident/codex-credential.test.ts` does exactly that.
+    expect(block.includes('codexExecutorAvailability({')).toBe(true)
+    expect(block.includes('env,')).toBe(true)
     // THE KIMI HALF IS UNTOUCHED BY THE BUILD MOVE, and it is asserted here so that
     // stays true: the pane's answer and the trident launch's come from the one
     // function, or a greyed row and a dispatching panelist disagree.
@@ -212,7 +216,12 @@ describe('the chain is actually connected — each link asserted separately', ()
 
 describe('the HTTP surface', () => {
   const auth = { resolve: async () => ({ user_id: 'owner', project_slug: SCOPE }) } as never
-  const surfaceFor = async (connections = { codex: true, kimi: true }) => {
+  const surfaceFor = async (
+    connections: { codex: CodexAvailability; kimi: boolean } = {
+      codex: { usable: true },
+      kimi: true,
+    },
+  ) => {
     const { createTridentPhaseModelsSurface } = await import(
       '@neutronai/gateway/http/trident-phase-models-surface.ts'
     )
@@ -370,7 +379,10 @@ describe('the HTTP surface', () => {
     // The install that cannot run codex — no credential, or no CLI. Dropping those
     // options would leave the owner unable to account for a missing choice, which is
     // how a whole capability stayed invisible for weeks (ISSUES #551).
-    const s = await surfaceFor({ codex: false, kimi: false })
+    const s = await surfaceFor({
+      codex: { usable: false, reason: 'needs a Codex connection' },
+      kimi: false,
+    })
     const res = await s.handler(req('GET'))
     const json = (await res!.json()) as Record<string, unknown>
     const tiers = json['model_tiers'] as Array<Record<string, unknown>>
@@ -388,6 +400,29 @@ describe('the HTTP surface', () => {
     })
     // The Claude tiers need nothing and stay selectable.
     expect(tiers.find((t) => t['tier'] === 'opus')!['available']).toBe(true)
+  })
+
+  it('the codex reason is the CALLER\'S, so a missing CLI does not read as a missing login', async () => {
+    // THE DEFECT THIS PINS. Codex needs a credential, the `codex` CLI and `perl`, and
+    // the wrapper hard-fails on each. The pane used to answer "needs a Codex
+    // connection" for all three, so an owner whose login was fine ran `codex login`,
+    // watched it succeed, and was exactly where they started. The surface must not own
+    // that sentence at all — it renders whichever one the availability check produced.
+    const s = await surfaceFor({
+      codex: { usable: false, reason: 'needs the Codex CLI installed on this machine' },
+      kimi: true,
+    })
+    const json = (await (await s.handler(req('GET')))!.json()) as Record<string, unknown>
+    const tiers = json['model_tiers'] as Array<Record<string, unknown>>
+    expect(tiers.find((t) => t['tier'] === 'sol')).toMatchObject({
+      available: false,
+      unavailable_reason: 'needs the Codex CLI installed on this machine',
+    })
+    // And no tier is ever unavailable without saying why — `available` is DERIVED from
+    // the reason, so the two cannot disagree.
+    for (const t of tiers) {
+      expect(t['available']).toBe(t['unavailable_reason'] === null)
+    }
   })
 
   it('hands back a REFUSED stored value so the row can show what was dropped', async () => {

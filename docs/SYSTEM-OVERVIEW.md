@@ -2841,6 +2841,21 @@ generation"), mobile `app/app/codegen.tsx`, both over
   twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
   goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
   that `git push` / `gh pr create` need.
+  - **The child shell also has to KEEP the credentials it was handed.** The sandbox
+    grant says the shell MAY reach the network; it says nothing about whether the shell
+    is given the credential to get past GitHub. `codex exec` filters the environment it
+    hands the model's commands (`shell_environment_policy`), defaulting to
+    `inherit = "core"` plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*` —
+    and the instance's GitHub token travels through the ENVIRONMENT AND NOWHERE ELSE by
+    design (`github/credential.ts` writes no config file and puts no token in a remote
+    URL): `GH_TOKEN`, which matches `*TOKEN*`, plus a github.com-scoped helper in
+    `GIT_CONFIG_KEY_0`, which matches `*KEY*`. Under the defaults both are stripped, the
+    build's push runs unauthenticated, and the run reports "nothing was built" about a
+    build that built everything. So the wrapper passes
+    `-c shell_environment_policy.inherit=all -c
+    shell_environment_policy.ignore_default_excludes=true`; neither is sufficient alone.
+    The metered `OPENAI_API_KEY` is `unset` before `codex` is launched, so it is not in
+    the inherited set.
   - **The downstream contract is MEASURED, not narrated.** `codex exec` does accept
     `--output-schema`, but a schema-shaped answer is still the model reporting on
     itself and the failing case is the build that believes it committed. So after it
@@ -2875,13 +2890,22 @@ generation"), mobile `app/app/codegen.tsx`, both over
     a false "auth expired". `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
     remote tip equals it — because a fresh probe of a shared ref is what
     `inner-workflow.mjs` forbids for `reviewedHead`: a third-party push read back there
-    would be pinned by `--match-head-commit` and certified as reviewed.
+    would be pinned by `--match-head-commit` and certified as reviewed. That witness
+    probe is asked up to three times, and only when it FAILED: an unanswered one costs
+    the run the whole build ("produced no commitSha — nothing was built" about a build
+    that pushed), while a probe that completed has given a real answer and re-asking it
+    is the one way a true "not pushed" could become a false "pushed".
   - **The brief carries a receipt.** The workflow reaches a shell only through a bridge
     agent that must reproduce the whole brief in a heredoc, so the command ships
     `<bytes>:<fnv32>` for exactly those bytes and the wrapper recomputes both before
     spending a token — a truncated or reworded brief is DEFERRED rather than built.
     FNV-1a/32 because the composing script has no imports and no promised host API; it
-    is a corruption check, not a signature.
+    is a corruption check, not a signature. Its UTF-8 encoder is written out longhand
+    rather than borrowed from `encodeURIComponent`, which THROWS on the unpaired
+    surrogate a length-capped task text leaves behind mid-emoji. And the bridge gets
+    exactly one retry on that specific exit: the wrapper refuses before spending a
+    token, so a re-copy is cheap, while a copying wobble with no retry abandons an
+    already-built branch. A second identical failure is final.
   - **No fallback to Claude, and no review of nothing.** A lane reporting
     `not_connected`/`deferred` stops the run with the status named — re-Forging on
     Opus would spend the quota the owner moved the phase to protect, invisibly. A lane
@@ -2908,15 +2932,21 @@ generation"), mobile `app/app/codegen.tsx`, both over
   rest.** The payload carries `groups` (every executor the step dispatches on) beside
   `group` (its default), and `tierChoices` greys by `groups`. Every tier is listed;
   one from a group this step cannot reach renders disabled with "<Executor> is not
-  wired for this step yet — it runs on <every executor the step reaches>", and one this install has no
-  credential for with "needs a Codex connection" — never disappearing. The surface
-  answers availability from the SAME resolvers the build uses (the shared
-  `kimiConfigured()` that `resolve_kimi_configured` also uses), and from BOTH halves of
-  "can codex run here" (`open/composer.ts`:
-  `codexCredentialService.resolveActiveCodexHome` AND `codexCliOnPath`, which requires
-  an executable REGULAR FILE — `X_OK` alone passes for any directory named `codex`),
-  because the wrapper hard-fails on a missing credential and on a missing CLI alike —
-  so the pane and the run cannot disagree.
+  wired for this step yet — it runs on <every executor the step reaches>", and one this
+  install cannot run with the reason that NAMES THE MISSING PIECE — never disappearing.
+  The surface answers availability from the SAME resolvers the build uses (the shared
+  `kimiConfigured()` that `resolve_kimi_configured` also uses), and from ALL THREE
+  preconditions of "can codex run here", via one function
+  (`codexExecutorAvailability` in `trident/codex-credential.ts`, called by
+  `open/composer.ts`): a credential (`resolveActiveCodexHome`), the `codex` CLI, and
+  `perl`. The wrapper hard-fails on each — exit 10, exit 11, exit 3
+  `CODEX_BUILD_NO_PERL` — so the pane and the run cannot disagree. It returns
+  `{ usable: true }` or `{ usable: false, reason }` rather than a boolean, because the
+  gate grew from one condition to three while the string stayed "needs a Codex
+  connection", sending an owner whose login was fine to a `codex login` that changed
+  nothing; the surface derives `available` FROM the reason, so a greyed tier without an
+  explanation is unrepresentable. Both PATH probes require an executable REGULAR FILE —
+  `X_OK` alone passes for any directory named `codex`.
 - **One step is never two rows, and a follower is never settable.**
   `build_mechanical` is the build step under the planner's internal `[mechanical]`
   tag; it DECLARES that it follows `build` (`TridentPhase.follows`), the workflow's

@@ -40,28 +40,25 @@ import {
 export const CODEX_CREDENTIAL_SERVICE = 'codex'
 
 /**
- * Is the `codex` CLI on PATH — the OTHER half of "can this install run codex".
+ * Is `name` an executable on PATH?
  *
- * A CREDENTIAL IS NOT ENOUGH. `trident/codex-build.sh` exits 10 with no credential
- * and 11 with no CLI, and the two failures are indistinguishable downstream: a build
- * that never happened. A settings pane that greyed on the credential alone would
- * offer a codex tier on a box where `codex` was never installed, and the owner would
- * discover it as a build that stopped rather than as a disabled option with a reason.
- *
- * PATH IS SCANNED IN-PROCESS rather than shelled out to. This is called per request
- * (the pane must un-grey without a restart), and `command -v` per request is a
- * subprocess per request for a question a directory read answers.
+ * PATH IS SCANNED IN-PROCESS rather than shelled out to. The callers ask per request
+ * (the settings pane must un-grey without a restart), and `command -v` per request is
+ * a subprocess per request for a question a directory read answers.
  *
  * `env` is passed rather than read from `process.env` so the caller decides which
  * environment the answer is about — the same one the build will be launched with.
  */
-export function codexCliOnPath(env: Record<string, string | undefined>): boolean {
+export function executableOnPath(
+  env: Record<string, string | undefined>,
+  name: string,
+): boolean {
   const path = env['PATH']
   if (typeof path !== 'string' || path === '') return false
   for (const dir of path.split(delimiter)) {
     if (dir === '') continue
     try {
-      const candidate = join(dir, 'codex')
+      const candidate = join(dir, name)
       // X_OK, not merely "the name exists": a non-executable file called `codex` is
       // not a CLI, and `execvp` would skip it exactly the way this does.
       accessSync(candidate, constants.X_OK)
@@ -77,6 +74,71 @@ export function codexCliOnPath(env: Record<string, string | undefined>): boolean
     }
   }
   return false
+}
+
+/**
+ * Is the `codex` CLI on PATH — the SECOND of the three things a codex build needs.
+ *
+ * A CREDENTIAL IS NOT ENOUGH. `trident/codex-build.sh` exits 10 with no credential
+ * and 11 with no CLI, and the two failures are indistinguishable downstream: a build
+ * that never happened. A settings pane that greyed on the credential alone would
+ * offer a codex tier on a box where `codex` was never installed, and the owner would
+ * discover it as a build that stopped rather than as a disabled option with a reason.
+ */
+export function codexCliOnPath(env: Record<string, string | undefined>): boolean {
+  return executableOnPath(env, 'codex')
+}
+
+/**
+ * Is `perl` on PATH — the THIRD, and the one an availability check keeps forgetting.
+ *
+ * `trident/codex-build.sh` bounds EVERY network call with `perl -e 'alarm N; exec …'`
+ * and recomputes the brief's checksum with it, so it refuses up front (exit 3,
+ * `CODEX_BUILD_NO_PERL`) on a host that has none. Alpine and the `-slim` Debian images
+ * are exactly that host. Gating the pane on credential + CLI alone advertised a codex
+ * tier that deterministically dies at dispatch on those boxes — the same
+ * "selectable but unwired" shape the CLI check was added to close, one precondition
+ * further along.
+ */
+export function codexBuildPerlOnPath(env: Record<string, string | undefined>): boolean {
+  return executableOnPath(env, 'perl')
+}
+
+/**
+ * Whether the codex executor can run on this install — and WHEN IT CANNOT, WHY, in
+ * the words the owner is shown.
+ *
+ * NOT A BOOLEAN, and the reason is a bug this shape makes unrepresentable. The check
+ * grew from one condition to three while the owner-facing string stayed "needs a Codex
+ * connection", so a box with a healthy login and no CLI sent the owner to a
+ * `codex login` that would change nothing. Carrying the reason WITH the answer means
+ * the only way to report unavailable is to name the missing piece.
+ *
+ * ONE FUNCTION rather than a condition in the composer, so the decision is testable
+ * against a real PATH instead of only assertable as a source substring — this is the
+ * gate that decides whether a tier is offered, and offering one that dies at dispatch
+ * is worse than greying it.
+ *
+ * THE ORDER IS WHAT THE OWNER FIXES FIRST. A box missing all three is told about the
+ * credential, because connecting is the step they came to do; the next load names the
+ * next missing piece.
+ */
+export type CodexAvailability = { usable: true } | { usable: false; reason: string }
+
+export function codexExecutorAvailability(opts: {
+  /** The resolved `CODEX_HOME` for this owner, or null when codex was never connected. */
+  codexHome: string | null
+  /** The environment the BUILD will be launched with — its PATH is the one that counts. */
+  env: Record<string, string | undefined>
+}): CodexAvailability {
+  if (opts.codexHome === null) return { usable: false, reason: 'needs a Codex connection' }
+  if (!codexCliOnPath(opts.env)) {
+    return { usable: false, reason: 'needs the Codex CLI installed on this machine' }
+  }
+  if (!codexBuildPerlOnPath(opts.env)) {
+    return { usable: false, reason: 'needs perl installed on this machine' }
+  }
+  return { usable: true }
 }
 
 /**

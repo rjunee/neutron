@@ -408,6 +408,16 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // The bridge is TOLD the check exists, so a model inclined to tidy the block has a
     // reason not to.
     expect(cmd).toContain('REFUSES to build (exit 3)')
+    // …AND IT IS TOLD TO TRY EXACTLY ONCE MORE. Reproducing kilobytes verbatim is still
+    // a model doing a copy, so a corrupt receipt is a real failure rate — and with no
+    // retry it is terminal: deferred, a throw, and an already-built, already-reviewed
+    // branch thrown away over a copying wobble. It is also the ONE failure here that is
+    // cheap and knowably transient, because the wrapper refuses BEFORE spending a
+    // token. The cap matters as much as the retry: a model that produced the same wrong
+    // copy twice will produce it a third time, and fail-closed is the right end state.
+    expect(cmd).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(cmd).toContain('RE-RUN THE WHOLE BLOCK ONCE')
+    expect(cmd).toContain('Exactly ONE retry')
     // A DIFFERENT brief gets a DIFFERENT receipt — the value is a function of the
     // text, not a constant that happens to match.
     const other = await runWorkflow({ ...productionArgs(CODEX_BUILD), task: 'build something else' })

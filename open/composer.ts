@@ -443,7 +443,10 @@ import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-cred
 import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-connect-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
-import { CodexCredentialService, codexCliOnPath } from '@neutronai/trident/codex-credential.ts'
+import {
+  CodexCredentialService,
+  codexExecutorAvailability,
+} from '@neutronai/trident/codex-credential.ts'
 import { makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
@@ -3246,10 +3249,14 @@ export function buildOpenGraphComposer(
       // configured would grey the wrong option — or worse, offer a tier whose
       // build then never happens for a reason the owner cannot see.
       //
-      // BOTH HALVES OF "CAN CODEX RUN HERE", because the wrapper hard-fails on either:
-      // exit 10 with no credential, exit 11 with no `codex` on PATH
-      // (`trident/codex-build.sh`). A credential on a box where the CLI was never
-      // installed is a selectable tier that dies at dispatch.
+      // ALL THREE PRECONDITIONS OF "CAN CODEX RUN HERE", because the wrapper hard-fails
+      // on each of them and every failure looks the same downstream — a build that
+      // never happened: exit 10 with no credential, exit 11 with no `codex` on PATH,
+      // exit 3 `CODEX_BUILD_NO_PERL` with no `perl` (`trident/codex-build.sh` bounds
+      // every network call with `perl -e alarm`, which the `-slim` and Alpine base
+      // images do not ship). Each answer NAMES THE MISSING PIECE: an owner told "needs
+      // a Codex connection" on a box with a healthy login runs `codex login`, watches
+      // it succeed, and is exactly where they started.
       //
       // WHOSE PATH IS SCANNED. The wrapper is exec'd by the `claude` REPL child, not
       // by this process — so the answer is only right if the child's PATH is this
@@ -3260,9 +3267,10 @@ export function buildOpenGraphComposer(
       // it would have to update this answer with it — hence the note rather than a
       // silent assumption.
       connections: () => ({
-        codex:
-          codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !== null &&
-          codexCliOnPath(env),
+        codex: codexExecutorAvailability({
+          codexHome: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)),
+          env,
+        }),
         kimi: kimiConfigured(),
       }),
     })

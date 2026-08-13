@@ -155,6 +155,44 @@
 # pinned to the reviewed commit. This grant makes the codex builder EQUAL to the
 # Claude builder, not more privileged than it.
 #
+# ── AND THE SANDBOX GRANT IS NOT ENOUGH: THE CHILD SHELL NEEDS THE ENVIRONMENT ─
+# `--sandbox danger-full-access` says the child shell MAY reach the network. It says
+# nothing about whether the child shell is handed the credential it needs to get past
+# GitHub, and by default it is not.
+#
+# `codex exec` filters the environment it gives the commands the model runs
+# (`shell_environment_policy`). The defaults are `inherit = "core"` — HOME, PATH,
+# SHELL, TMPDIR, LOGNAME and a handful more — plus a default EXCLUDE list of
+# `*KEY*`, `*SECRET*`, `*TOKEN*` applied on top. Verified against the CLI shipped here
+# (`codex-cli 0.147.0`): both field names are accepted by `--strict-config` and an
+# invented one is refused, and the pattern list is in the binary beside the core set.
+#
+# That is exactly the wrong filter for this build, because of how the instance's
+# GitHub token is handed to a child process. `github/credential.ts` deliberately writes
+# NOTHING to any config file — no `credential.helper` on disk, no token in the remote
+# URL — and passes the credential through the ENVIRONMENT ALONE, as `GH_TOKEN` plus a
+# github.com-scoped helper in `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` /
+# `GIT_CONFIG_VALUE_0`. Under the default policy `GH_TOKEN` matches `*TOKEN*` and
+# `GIT_CONFIG_KEY_0` matches `*KEY*`, so BOTH are stripped: the build's `git push` and
+# `gh pr create` run unauthenticated, `emit_trailer` then measures an empty
+# REMOTE_HEAD, and the run aborts claiming "nothing was built" about a build that
+# built the whole thing and could not post it.
+#
+#   -c shell_environment_policy.inherit=all
+#   -c shell_environment_policy.ignore_default_excludes=true
+#
+# Both are required and neither is sufficient alone: `inherit=all` without the second
+# still drops the two credential variables by pattern, and clearing the excludes
+# without the first never sees them because `core` did not carry them in.
+#
+# WHAT THIS DOES *NOT* WIDEN. The one secret that must not reach the build — the
+# metered `OPENAI_API_KEY` — is `unset` from THIS script's own environment before
+# `codex` is launched at all (see the billing contract above), so it is not in the set
+# being inherited. Everything else the child now sees is what the wrapper itself was
+# given by the phase that started it. The child shell already has
+# `danger-full-access`; withholding the environment from it does not contain it, it
+# only makes it fail at the last step.
+#
 # Usage (from inside the build worktree):
 #   CODEX_HOME=<dir> NEUTRON_CODEX_BUILD_BRIEF_FILE=<file> \
 #     NEUTRON_CODEX_BUILD_TRAILER_FILE=<file> bash trident/codex-build.sh <branch>
@@ -236,11 +274,33 @@ bounded() {
 # The tip of `refs/heads/$1` on origin, or the empty string — bounded, and never a
 # reason for the build to hang. `awk` splits the `<sha>\trefs/heads/<branch>` line off
 # the file `bounded` captured; no match prints nothing.
+#
+#   remote_tip <branch> [attempts]
+#
+# `attempts` (default 1) is how many times to ASK WHEN THE PROBE FAILS — a non-zero
+# `git ls-remote`, or the alarm cutting it off. A probe that COMPLETED ends the loop
+# whatever it found, including finding nothing: "the branch is not on the remote" is a
+# real answer, and re-asking it would be waiting for the remote to change its mind
+# (and, in the witness case below, is the one way a true "not pushed" could become a
+# false "pushed" if something else landed mid-loop). Only the failure — which is the
+# outcome that cannot be told apart from a blip — is retried.
+#
+# THE RETRY LIVES IN HERE, not in the caller, because the caller reads this through
+# `$(…)`: a subshell, whose variables never reach the parent, so a caller could not see
+# whether the probe failed or merely came back empty.
 remote_tip() {
-  local out tip
+  local out tip attempts n
+  attempts="${2:-1}"
   out="${TMPDIR:-/tmp}/trident-codex-build-ls.$$"
-  bounded "$out" 10 env GIT_TERMINAL_PROMPT=0 git ls-remote origin "refs/heads/$1" || true
-  tip="$(awk 'NR==1 {print $1}' "$out" 2>/dev/null || true)"
+  tip=''
+  n=1
+  while [ "$n" -le "$attempts" ]; do
+    if bounded "$out" 10 env GIT_TERMINAL_PROMPT=0 git ls-remote origin "refs/heads/$1"; then
+      tip="$(awk 'NR==1 {print $1}' "$out" 2>/dev/null || true)"
+      break
+    fi
+    n=$((n + 1))
+  done
   rm -f "$out"
   sha_or_empty "$tip"
 }
@@ -285,7 +345,16 @@ emit_trailer() {
     # tokens are already spent, so a remote that hangs must cost the run a fact, not
     # the build — and this function also runs on the FAILURE path, where a hang would
     # eat the DEFERRED report the bridge is waiting for.
-    [ "$(remote_tip "$BRANCH")" = "$head" ] && remote_head="$head"
+    #
+    # RETRIED 3×, AND ONLY ON A FAILED PROBE. This is the single most consequential
+    # probe in the script: one that never answers empties REMOTE_HEAD, the bridge then
+    # reports no commitSha, and the workflow throws "produced no commitSha — nothing
+    # was built" about a build that committed, pushed and opened a PR. The claim is
+    # false and the entire build is discarded to make it, so one blip on a shared
+    # remote must not be the last word — the auth precheck above already retries three
+    # times for a far cheaper mistake. See `remote_tip` for why an ANSWER, even an
+    # unwelcome one, ends the loop.
+    [ "$(remote_tip "$BRANCH" 3)" = "$head" ] && remote_head="$head"
   fi
   pr_number=''
   if [ -n "$BRANCH" ] && command -v gh >/dev/null 2>&1; then
@@ -489,6 +558,14 @@ if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
   exit 5
 fi
 
+# HAND THE CHILD SHELL THE ENVIRONMENT IT WAS GIVEN — see the header. Without both of
+# these, `codex exec`'s default `shell_environment_policy` (inherit=core, then exclude
+# `*KEY*`/`*SECRET*`/`*TOKEN*`) strips `GH_TOKEN` and `GIT_CONFIG_KEY_0`, which is the
+# ONLY channel `github/credential.ts` uses to authenticate a push. The build then
+# commits, fails to push, and the run reports that nothing was built.
+set -- -c shell_environment_policy.inherit=all \
+  -c shell_environment_policy.ignore_default_excludes=true
+
 # PIN THE BUILD MODEL, for the same reason the review lane pins its own: unpinned,
 # `codex exec` takes the CLI's own default, which OpenAI moved to the cheapest 5.6
 # tier — so an owner who moved the build to the flagship tier would silently get the
@@ -498,9 +575,7 @@ fi
 # the `sol` registry entry, so the two cannot drift.
 BUILD_MODEL="${CODEX_BUILD_MODEL-gpt-5.6-sol}"
 if [ -n "$BUILD_MODEL" ]; then
-  set -- --model "$BUILD_MODEL"
-else
-  set --
+  set -- "$@" --model "$BUILD_MODEL"
 fi
 
 # `--sandbox danger-full-access` — see the header for what each narrower policy

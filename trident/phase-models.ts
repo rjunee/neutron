@@ -138,11 +138,16 @@ export interface TridentPhase {
    * rows here are one step split by an internal cost tag, which is not a distinction
    * the owner has any way to act on.
    *
-   * The KEY still exists: an explicitly stored entry for it wins (it is the more
-   * specific key, and a config that names it meant it), and it still routes labels for
-   * the coverage test. The workflow's `phaseOverrideFor` implements this, and
-   * `__tests__/phase-model-coverage.test.ts` asserts the pair matches what is declared
-   * here so the two cannot drift.
+   * THE KEY IS NOT A BACK DOOR. A stored entry naming the follower does NOT win — it
+   * is refused at the boundary (`parsePhaseModelConfig` below rejects it, and the read
+   * path drops one stored before that rule existed) and the workflow's
+   * `phaseOverrideFor` ignores it unconditionally. The reason is the same one that
+   * hides the row: a value the pane cannot display is a value the owner cannot clear,
+   * so honouring it would pin the mechanical build to a model nothing on screen
+   * mentions — which on this phase means invisible Anthropic spend after a move to
+   * codex. The key still exists only to route labels for the coverage test;
+   * `__tests__/phase-model-coverage.test.ts` asserts the declaration and
+   * `phaseOverrideFor` match, so the two cannot drift.
    */
   follows?: string
 }
@@ -480,6 +485,19 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
       errors.push(
         `phase '${key}' is not settable — it is the '${followed}' step under an internal complexity tag and always takes '${followed}'s setting`,
       )
+      // …AND IT IS *NOT* PUT IN `rejected`, which is the one deliberate exception to
+      // "never revert a choice silently" in this file. `rejected` exists so a ROW can
+      // show what was dropped, struck through — both clients look it up BY PHASE KEY
+      // (`rejectedModel(phase, rejected)`), and a follower has no row for them to look
+      // it up from. Sending it would add a key to the payload nothing can render,
+      // while re-opening the round-trip this rule closed: the pane echoes the payload
+      // back on the next PUT, which is how a stored `build_mechanical` kept the
+      // mechanical build on Anthropic after the owner moved Build to codex.
+      // `gateway/__tests__/trident-phase-models-producer.test.ts` pins the key out of
+      // the payload entirely. The owner is not left uninformed either: the WRITE path
+      // 400s and names the key, and the only silent case left is a value stored before
+      // this rule existed — which no pane has ever displayed, so there is no control
+      // that appears to revert.
       continue
     }
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {

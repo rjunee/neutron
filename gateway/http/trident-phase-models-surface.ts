@@ -50,6 +50,7 @@
  */
 
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { CodexAvailability } from '@neutronai/trident/codex-credential.ts'
 import { modelTierRegistry } from '@neutronai/trident/model-tiers.ts'
 import {
   EFFORTS,
@@ -67,16 +68,17 @@ const PATH = '/api/app/trident/phase-models'
 /** Which cross-model executors this install can actually run. */
 export interface CrossModelConnections {
   /**
-   * The codex executor is USABLE — a credential AND the `codex` CLI on PATH.
-   *
-   * BOTH, because both are hard failures with the same consequence. The wrapper exits
-   * 10 with no credential and 11 with no CLI (`trident/codex-build.sh`), and either
-   * one turns a selected codex tier into a build that never happens. Reporting a tier
-   * available on the strength of the credential alone would offer a choice that dies
-   * at dispatch, which is worse than a greyed one.
+   * Whether the codex executor can run here — and WHEN IT CANNOT, WHY, in the words
+   * the owner is shown. Answered by `codexExecutorAvailability`, which is the same
+   * decision the build's own preconditions make; see its header for why the reason
+   * travels WITH the answer instead of beside it.
    */
-  codex: boolean
-  /** A Kimi key — without it the K3 tier cannot run. */
+  codex: CodexAvailability
+  /**
+   * A Kimi key — without it the K3 tier cannot run. Still a boolean because the Kimi
+   * REVIEW lane has exactly one precondition, so "needs a Kimi key" cannot become the
+   * wrong sentence the way the codex one did.
+   */
   kimi: boolean
 }
 
@@ -157,7 +159,21 @@ function vocabulary(connections: CrossModelConnections): object {
     // the owner unable to account for a missing option, which is exactly how a
     // capability stays invisible for weeks (ISSUES #551).
     model_tiers: modelTierRegistry().map((t) => {
-      const available = t.requires === null || connections[t.requires]
+      // THE REASON IS COMPUTED FIRST AND `available` IS DERIVED FROM IT, so a tier
+      // cannot be marked unavailable without saying why. The other order — a boolean
+      // plus a reason looked up beside it — is how "needs a Codex connection" outlived
+      // the single condition it described.
+      const reason =
+        t.requires === null
+          ? null
+          : t.requires === 'codex'
+            ? connections.codex.usable
+              ? null
+              : connections.codex.reason
+            : connections.kimi
+              ? null
+              : 'needs a Kimi key'
+      const available = reason === null
       return {
         tier: t.tier,
         provider: t.provider,
@@ -172,11 +188,7 @@ function vocabulary(connections: CrossModelConnections): object {
         // cannot use.
         effort_supported: t.transport === 'agent',
         available,
-        unavailable_reason: available
-          ? null
-          : t.requires === 'codex'
-            ? 'needs a Codex connection'
-            : 'needs a Kimi key',
+        unavailable_reason: reason,
       }
     }),
     efforts: [...EFFORTS],

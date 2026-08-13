@@ -29,6 +29,7 @@ import {
   CODEX_CREDENTIAL_SERVICE,
   CodexCredentialService,
   codexCliOnPath,
+  codexExecutorAvailability,
 } from './codex-credential.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -363,5 +364,82 @@ describe('codexCliOnPath — the OTHER half of "can this install run codex"', ()
     const missing = join(dir, 'does-not-exist')
     expect(codexCliOnPath({ PATH: missing })).toBe(false)
     expect(codexCliOnPath({ PATH: `${missing}${delimiter}${bin('after', 0o755)}` })).toBe(true)
+  })
+})
+
+describe('codexExecutorAvailability — the answer the settings pane shows, and WHY', () => {
+  // THE DEFECT. This gate grew from one precondition to three — a credential (the
+  // wrapper exits 10), the `codex` CLI (exit 11), and `perl` (exit 3,
+  // `CODEX_BUILD_NO_PERL`; every network call in `trident/codex-build.sh` is bounded
+  // with `perl -e alarm`, and the `-slim`/Alpine images ship none) — while the
+  // owner-facing string stayed "needs a Codex connection". So a box with a healthy
+  // login and no CLI sent the owner to a `codex login` that changed nothing, and a
+  // perl-less box advertised a tier that dies deterministically at dispatch.
+  //
+  // DRIVEN WITH A REAL PATH, not asserted as a source substring: the composer's own
+  // wiring is pinned separately (`gateway/__tests__/trident-phase-models-producer`),
+  // and this is where the decision itself is observed.
+  let dir = ''
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'codex-availability-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  /** A PATH directory holding executables with these names, and nothing else. */
+  const pathWith = (...names: string[]): string => {
+    const d = join(dir, names.join('-') || 'none')
+    mkdirSync(d, { recursive: true })
+    for (const n of names) {
+      writeFileSync(join(d, n), '#!/bin/sh\nexit 0\n')
+      chmodSync(join(d, n), 0o755)
+    }
+    return d
+  }
+  const HOME = '/somewhere/codex-home'
+
+  test('all three present → usable, with no reason to show', () => {
+    // THE POSITIVE CONTROL for the three negatives below: on the same PATH shape, a
+    // box that has everything must come back usable, or each "unavailable" below
+    // could be passing for a reason that has nothing to do with what it names.
+    expect(
+      codexExecutorAvailability({ codexHome: HOME, env: { PATH: pathWith('codex', 'perl') } }),
+    ).toEqual({ usable: true })
+  })
+
+  test('no credential → the reason names the connection, and nothing else', () => {
+    expect(
+      codexExecutorAvailability({ codexHome: null, env: { PATH: pathWith('codex', 'perl') } }),
+    ).toEqual({ usable: false, reason: 'needs a Codex connection' })
+  })
+
+  test('credential but no `codex` CLI → the reason names the CLI, NOT the login', () => {
+    const answer = codexExecutorAvailability({ codexHome: HOME, env: { PATH: pathWith('perl') } })
+    expect(answer).toEqual({
+      usable: false,
+      reason: 'needs the Codex CLI installed on this machine',
+    })
+    // The whole point: the owner must not be sent to re-run a login that is fine.
+    expect(answer).not.toMatchObject({ reason: 'needs a Codex connection' })
+  })
+
+  test('credential and CLI but no `perl` → the reason names perl', () => {
+    // The wrapper refuses BEFORE it spends a token here, so this tier was previously
+    // offered as available and then died at dispatch on every alpine/debian-slim host.
+    expect(
+      codexExecutorAvailability({ codexHome: HOME, env: { PATH: pathWith('codex') } }),
+    ).toEqual({ usable: false, reason: 'needs perl installed on this machine' })
+  })
+
+  test('an unavailable answer ALWAYS carries a non-empty reason', () => {
+    // The shape is what enforces this — `{ usable: false }` does not typecheck without
+    // one — but the pane renders the string, so an empty one would be a greyed row
+    // with no explanation, which is the state this whole check exists to end.
+    for (const env of [{ PATH: pathWith() }, { PATH: '' }, {}]) {
+      const answer = codexExecutorAvailability({ codexHome: HOME, env })
+      expect(answer.usable).toBe(false)
+      expect(answer.usable === false && answer.reason.length).toBeGreaterThan(10)
+    }
   })
 })

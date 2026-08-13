@@ -827,10 +827,20 @@ const codexBuildDiffFile = () => `/tmp/trident-codex-build-${runId || slug}.diff
  *
  * FNV-1a/32 OVER THE UTF-8 BYTES, hand-rolled, and both halves of that are forced:
  * this file runs with no imports and no host API it is promised (see the header), so
- * the digest must come out of language builtins alone. `encodeURIComponent` is one,
- * and it enumerates the exact UTF-8 bytes — every byte outside the unreserved ASCII
- * set arrives as `%XX`, and the rest are their own byte. `Math.imul` is the 32-bit
+ * the digest must come out of language builtins alone. `Math.imul` is the 32-bit
  * multiply the checksum needs (a plain `*` loses the low bits past 2**53).
+ *
+ * THE UTF-8 ENCODER IS WRITTEN OUT rather than borrowed from `encodeURIComponent`,
+ * and the reason is one input: an UNPAIRED SURROGATE. The brief carries the owner's
+ * task text, which arrives length-capped, and a cap that lands mid-emoji leaves half
+ * a surrogate pair behind. `encodeURIComponent` THROWS `URIError` on one — from here
+ * that is an exception on the codex route BEFORE anything is dispatched, with a
+ * message naming neither the brief nor the task, for a build the Claude path would
+ * have run without noticing. So the encoder below does what every real UTF-8 encoder
+ * does with a lone surrogate — emits U+FFFD (`ef bf bd`) and keeps going — and the
+ * receipt stays computable. If the bridge then reproduces the text differently the
+ * wrapper refuses it (exit 3, DEFERRED), which is the fail-closed answer this check
+ * exists to give; a crash is not.
  *
  * NOT A SIGNATURE, and not claimed as one: the author of the brief and its verifier
  * are the same run, so nothing here has to survive a deliberate collision. It has to
@@ -838,19 +848,40 @@ const codexBuildDiffFile = () => `/tmp/trident-codex-build-${runId || slug}.diff
  * plus a checksum does.
  */
 function briefIntegrity(text) {
-  const enc = encodeURIComponent(text)
   let bytes = 0
   let h = 0x811c9dc5
-  for (let i = 0; i < enc.length; i++) {
-    let b
-    if (enc[i] === '%') {
-      b = parseInt(enc.slice(i + 1, i + 3), 16)
-      i += 2
-    } else {
-      b = enc.charCodeAt(i)
-    }
+  const push = (b) => {
     bytes++
     h = Math.imul(h ^ b, 0x01000193) >>> 0
+  }
+  for (let i = 0; i < text.length; i++) {
+    let cp = text.charCodeAt(i)
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      const lo = i + 1 < text.length ? text.charCodeAt(i + 1) : 0
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00)
+        i++
+      } else {
+        cp = 0xfffd // a high surrogate with nothing after it
+      }
+    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+      cp = 0xfffd // a low surrogate with nothing before it
+    }
+    if (cp < 0x80) {
+      push(cp)
+    } else if (cp < 0x800) {
+      push(0xc0 | (cp >> 6))
+      push(0x80 | (cp & 0x3f))
+    } else if (cp < 0x10000) {
+      push(0xe0 | (cp >> 12))
+      push(0x80 | ((cp >> 6) & 0x3f))
+      push(0x80 | (cp & 0x3f))
+    } else {
+      push(0xf0 | (cp >> 18))
+      push(0x80 | ((cp >> 12) & 0x3f))
+      push(0x80 | ((cp >> 6) & 0x3f))
+      push(0x80 | (cp & 0x3f))
+    }
   }
   return `${bytes}:${h.toString(16).padStart(8, '0')}`
 }
@@ -894,6 +925,16 @@ HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from
  * heredoc (`<<'MARKER'`) needs no escaping at all, so what codex reads is byte-for-byte
  * what this function composed — and the marker is grown below until it provably does
  * not occur in the brief, which is what keeps that safety from depending on luck.
+ *
+ * AND IT GETS EXACTLY ONE RETRY. Reproducing several kilobytes verbatim is still a
+ * MODEL doing a copy, so `CODEX_BUILD_BRIEF_CORRUPT` (exit 3) is a real, if unmeasured,
+ * failure rate — and with no retry it is terminal: `codexStatus='deferred'`, the throw
+ * below, and an already-built, already-reviewed branch abandoned over a copying
+ * wobble. That exit is also the one failure here that is CHEAP to retry and knowably
+ * transient: the wrapper refuses before it spends a token, so the retry costs a copy
+ * and nothing else, and the fault is in the copy rather than in the build. One retry,
+ * not a loop — a model that produced the same wrong copy twice will produce it a third
+ * time, and the fail-closed refusal is the correct end state.
  */
 function codexBuildPrompt(slot, brief, route) {
   const uniq = runId || slug
@@ -949,7 +990,8 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
   testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
-- EXIT 3 or 5 → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
+- EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE HEREDOC ABOVE, NOT THE BUILD. That error means the brief file did not match the byte count and checksum in the command — i.e. YOUR copy of it lost, gained or reworded something; no tokens were spent and nothing was built. RE-RUN THE WHOLE BLOCK ONCE, copying the heredoc body character for character this time (do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation). Exactly ONE retry: if the second attempt reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred' — a third identical copy is not going to differ, and building against an approximation of the brief is the outcome this check exists to prevent.
+- EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
 For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null and testsPassed as false, even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
 Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred'.`
 }

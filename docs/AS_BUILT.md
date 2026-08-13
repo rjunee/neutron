@@ -99,11 +99,31 @@ Five things make the measurement honest rather than merely measured:
   exact bytes the heredoc writes and the wrapper recomputes both before spending a
   token; a mismatch or a missing receipt is DEFERRED (exit 3). FNV-1a/32 rather than
   SHA-256 because the composing side has no imports and no host API it is promised —
-  the digest must come out of language builtins (`encodeURIComponent`, `Math.imul`).
-  It is not a signature and is not claimed as one: author and verifier are the same run.
-  `codex-build.test.ts` lifts the JS function out of the workflow source and runs it
-  against the wrapper's perl, so the two implementations are checked against each other
-  on real UTF-8 rather than trusted to agree.
+  the digest must come out of language builtins (`Math.imul`, and a UTF-8 encoder
+  written out longhand). It is not a signature and is not claimed as one: author and
+  verifier are the same run. `codex-build.test.ts` lifts the JS function out of the
+  workflow source and runs it against the wrapper's perl, so the two implementations are
+  checked against each other on real UTF-8 rather than trusted to agree.
+
+  The encoder is longhand rather than `encodeURIComponent` because of one input: an
+  UNPAIRED SURROGATE. The brief carries the owner's task text, it arrives length-capped,
+  and a cap landing mid-emoji leaves half a surrogate pair behind — on which
+  `encodeURIComponent` THROWS `URIError`, aborting the codex route before dispatch with
+  a message naming neither the brief nor the task, for a build the Claude path would
+  have run without noticing. The encoder does what every real UTF-8 encoder does with a
+  lone surrogate (emits U+FFFD and continues), so the receipt stays computable; if the
+  bridge then reproduces the text differently the wrapper refuses it, which is the
+  fail-closed answer this check exists to give. A crash is not.
+
+  **And the receipt check gets exactly one retry.** Reproducing kilobytes verbatim is
+  still a model doing a copy, so `CODEX_BUILD_BRIEF_CORRUPT` is a real (if unmeasured)
+  failure rate — and with no retry it is terminal: `deferred`, a throw, and an
+  already-built, already-reviewed branch abandoned over a copying wobble. That exit is
+  also the only failure here that is cheap and knowably transient, because the wrapper
+  refuses BEFORE it spends a token: the retry costs a copy and nothing else, and the
+  fault is in the copy rather than in the build. One retry, not a loop — a model that
+  produced the same wrong copy twice will produce it a third time, and the fail-closed
+  refusal is the correct end state.
 - **The diff path is CLEARED before launch — and regenerated when a build earns one.**
   It is handed in by the caller and survives between rounds, so a build that committed
   without rewriting it pointed the review panel at an earlier round's diff (the #545
@@ -168,6 +188,43 @@ Claude builder, which already has those powers, and the blast radius is bounded 
 same way: an isolated worktree on its own branch, a panel that reads the diff, a merge
 pinned to the reviewed commit.
 
+**…and the sandbox grant alone would still have pushed anonymously.** `--sandbox
+danger-full-access` says the child shell MAY reach the network; it says nothing about
+whether that shell is handed the credential it needs to get past GitHub, and by default
+it is not. `codex exec` filters the environment it gives the commands the model runs
+(`shell_environment_policy`), defaulting to `inherit = "core"` plus a default exclude
+list of `*KEY*`, `*SECRET*`, `*TOKEN*`. The instance's GitHub token reaches a child
+process through the ENVIRONMENT AND NOWHERE ELSE, deliberately — `github/credential.ts`
+writes no config file and puts no token in a remote URL, passing `GH_TOKEN` plus a
+github.com-scoped helper in `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`.
+`GH_TOKEN` matches `*TOKEN*`; `GIT_CONFIG_KEY_0` matches `*KEY*`. Under the defaults
+both are stripped, so the build's `git push` and `gh pr create` run unauthenticated,
+the trailer measures an empty `REMOTE_HEAD`, and the run aborts saying "nothing was
+built" about a build that built the whole thing and could not post it. The wrapper
+therefore passes `-c shell_environment_policy.inherit=all -c
+shell_environment_policy.ignore_default_excludes=true`. Both are required and neither
+is sufficient alone: `inherit=all` still drops the two by pattern, and clearing the
+excludes without it never sees them because `core` did not carry them in. Both field
+names were checked against the CLI in use (`codex-cli 0.147.0`) with `--strict-config`,
+against an invented field as the negative control. This widens nothing that matters:
+the one secret that must not reach the build — the metered `OPENAI_API_KEY` — is
+`unset` from the wrapper's own environment before `codex` is launched, so it is not in
+the inherited set, and everything else the child now sees is what the wrapper itself
+was given. A shell that already has `danger-full-access` is not contained by
+withholding its environment; it is only made to fail at the last step.
+
+**The pushed-sha probe retries, because losing it discards the whole build.** The
+witness `git ls-remote` in `emit_trailer` is the most consequential call in the
+wrapper: one that never answers empties `REMOTE_HEAD`, the bridge reports no
+`commitSha`, and the workflow throws "produced no commitSha — nothing was built" about
+a build that committed, pushed and opened a PR. It now asks up to three times (the auth
+precheck already did, for a far cheaper mistake), and ONLY when the probe FAILED — a
+probe that completed ends the loop whatever it found, including finding nothing, because
+"the branch is not on the remote" is a real answer and re-asking it is the one way a
+true "not pushed" could become a false "pushed". The retry lives inside `remote_tip`
+rather than in the caller: callers read it through `$(…)`, a subshell, and so cannot
+see whether the probe failed or merely came back empty.
+
 **No silent fallback to Claude, ever.** A build lane that reports `not_connected` or
 `deferred` throws with the status named. Re-Forging on Opus would spend precisely the
 quota the owner moved the phase to protect and would hide that it had done so — so
@@ -200,13 +257,20 @@ codex tiers through a different script — so interpolating it told a BUILD-row 
 their tier "runs as a `trident/codex-review.sh` subprocess", a true sentence about a
 phase they were not configuring. The message says which executor each side runs on.
 
-**Availability means the executor can actually RUN, not that a credential exists.**
-`trident/codex-build.sh` exits 10 with no credential and 11 with no `codex` on PATH,
-and downstream those are the same thing: a build that never happened. `codexCliOnPath`
-(`trident/codex-credential.ts`) scans PATH in-process for an executable REGULAR FILE
-called `codex` — a directory read rather than a subprocess, because the pane asks this
-per request — and `open/composer.ts` requires both halves before reporting a codex tier
-available. Regular file, not merely executable: `X_OK` on a DIRECTORY means
+**Availability means the executor can actually RUN, not that a credential exists — and
+the reason says WHICH piece is missing.** `trident/codex-build.sh` hard-fails on three
+preconditions and downstream they are the same thing, a build that never happened: exit
+10 with no credential, exit 11 with no `codex` on PATH, exit 3 `CODEX_BUILD_NO_PERL`
+with no `perl` (every network call in the wrapper is bounded with `perl -e alarm`, and
+the `-slim` and Alpine base images ship none). `codexExecutorAvailability`
+(`trident/codex-credential.ts`) answers all three and returns `{ usable: true }` or
+`{ usable: false, reason }` — a shape rather than a boolean, because the gate grew from
+one condition to three while the owner-facing string stayed "needs a Codex connection",
+which sent an owner whose login was fine to a `codex login` that changed nothing. The
+surface DERIVES `available` from the reason, so a tier cannot be greyed without saying
+why. The underlying probe, `executableOnPath`, scans PATH in-process for an executable
+REGULAR FILE — a directory read rather than a subprocess, because the pane asks this
+per request. Regular file, not merely executable: `X_OK` on a DIRECTORY means
 "searchable", which every normal directory is, so a PATH entry holding a `codex/`
 subdirectory would otherwise un-grey every codex tier on a box with no CLI at all. The
 PATH scanned is the gateway's, which is the one the `claude` REPL child inherits — the

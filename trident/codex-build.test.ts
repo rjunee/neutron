@@ -494,6 +494,33 @@ describe('trident/codex-build.sh — exit-code contract', () => {
 })
 
 describe('the BRIEF is what codex is asked to build', () => {
+  test('an UNPAIRED SURROGATE in the task text does not abort the route before dispatch', () => {
+    // THE DEFECT. The brief carries the owner's task text, which arrives length-capped,
+    // and a cap landing mid-emoji leaves half a surrogate pair behind. The receipt used
+    // to be computed with `encodeURIComponent`, which THROWS `URIError` on one — so the
+    // codex build route died before anything was dispatched, with a message naming
+    // neither the brief nor the task, on input the Claude path would not have noticed.
+    const half = String.fromCharCode(0xd83d) // a high surrogate, alone
+    const brief = `You are FORGE. Ship the ${half} thing on branch trident/a-run.\n`
+    expect(() => briefIntegrity(brief)).not.toThrow()
+
+    // …and the receipt is still CORRECT, not merely non-throwing: the wrapper's perl
+    // recomputation has to agree, or every brief with one in it would be refused as
+    // corrupt. `run()` hands over the JS receipt and the wrapper checks it in perl, so
+    // exit 0 is the two implementations agreeing on the real bytes on disk — U+FFFD,
+    // which is what any UTF-8 encoder writes for a lone surrogate.
+    const { status, codexStdin } = run({ authed: true, codexLoginExit: 0, brief })
+    expect(status).toBe(0)
+    expect(codexStdin).toContain('Ship the')
+    // POSITIVE CONTROL that the check is still live on this input: a receipt for a
+    // DIFFERENT text must still be refused, so exit 0 above is agreement and not a
+    // check that quietly stopped running.
+    expect(
+      run({ authed: true, codexLoginExit: 0, brief, integrity: briefIntegrity('something else') })
+        .status,
+    ).toBe(3)
+  })
+
   test('it arrives on STDIN, verbatim, and never as an argv entry', () => {
     // On stdin because a brief is kilobytes of contract text and a single argv entry
     // that large can exceed ARG_MAX and fail before codex starts.
@@ -541,6 +568,46 @@ describe('the BRIEF is what codex is asked to build', () => {
     // present would stay green if the value became `/tmp` — codex would run outside
     // the checkout, which is the failure the flag exists to prevent.
     expect(r.codexArgv).toContain(`--cd\n${realpathSync(r.dir)}\n`)
+  })
+
+  test('THE REAL `codex exec` LINE IS WHAT THESE ARGV ASSERTIONS MEASURE', () => {
+    // PROVENANCE, asserted rather than assumed. `codex-argv.txt` is written by the
+    // mock `codex` on PATH, and the mock returns early for `login status` — so the
+    // only thing in this wrapper that can produce that file is the REAL invocation
+    // line, reached only when `NEUTRON_CODEX_BUILD_EXEC_CMD` is unset (as it is in
+    // every argv test in this block). Pinning the first argument makes that explicit:
+    // a future change that routed these cases through the test seam would leave the
+    // file empty and this red, instead of quietly asserting the seam's argv.
+    const r = run({ authed: true, codexLoginExit: 0 })
+    expect(r.codexArgv.split('\n')[0]).toBe('exec')
+    expect(r.codexArgv).not.toBe('')
+    // …and the seam really is the other path: with it set, the real line never runs.
+    const seamed = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: 'cat >/dev/null' },
+    })
+    expect(seamed.codexArgv).toBe('')
+  })
+
+  test('the child shell KEEPS the credentials it was handed — else the push is anonymous', () => {
+    // THE BUG THIS PINS, end to end. `codex exec` filters the environment it gives the
+    // commands the model runs: `shell_environment_policy` defaults to `inherit="core"`
+    // plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*`. The instance's
+    // GitHub credential reaches a child process through the ENVIRONMENT AND NOWHERE
+    // ELSE by deliberate design (`github/credential.ts` writes no config file and puts
+    // no token in the remote URL) — as `GH_TOKEN` and a github.com-scoped helper in
+    // `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`. `GH_TOKEN` matches
+    // `*TOKEN*`; `GIT_CONFIG_KEY_0` matches `*KEY*`. Under the defaults BOTH are
+    // stripped, the build's `git push` and `gh pr create` run unauthenticated, and the
+    // trailer then measures an empty REMOTE_HEAD — which the workflow reports as
+    // "produced no commitSha — nothing was built" about a build that built everything.
+    const { codexArgv } = run({ authed: true, codexLoginExit: 0 })
+    // BOTH, and neither is sufficient alone: `inherit=all` still drops the two by
+    // pattern, and clearing the excludes without it never sees them, because `core`
+    // did not carry them in.
+    expect(codexArgv).toContain('-c\nshell_environment_policy.inherit=all\n')
+    expect(codexArgv).toContain('-c\nshell_environment_policy.ignore_default_excludes=true\n')
   })
 
   test('a metered API key is scrubbed before the build runs — subscription OAuth only', () => {
@@ -752,6 +819,71 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     expect(ours.trailerRaw).not.toContain(theirs)
   })
 
+  /**
+   * Replace `git` on the fixture's PATH with one that COUNTS every `ls-remote`, fails
+   * the first `failFirst` of them, and delegates everything else to the real binary.
+   *
+   * Counted as well as failed, because the assertions below are about HOW MANY TIMES
+   * the wrapper asked — "it retried" and "it answered first time" are otherwise
+   * indistinguishable from the trailer alone.
+   */
+  function countingLsRemote(dir: string, failFirst: number): () => number {
+    const counter = join(dir, 'lsremote.count')
+    const shim = join(dir, 'bin', 'git')
+    writeFileSync(
+      shim,
+      `#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "ls-remote" ]; then
+    n=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > ${JSON.stringify(counter)}
+    [ "$n" -le ${failFirst} ] && exit 128
+  fi
+done
+exec /usr/bin/git "$@"
+`,
+    )
+    chmodSync(shim, 0o755)
+    return () => Number(readFileSync(counter, 'utf8').trim())
+  }
+
+  test('a TRANSIENT `git ls-remote` failure does not throw away a build that pushed', () => {
+    // THE COST OF GETTING THIS WRONG is the whole build. An unanswered probe empties
+    // REMOTE_HEAD; the bridge then reports no commitSha; and the workflow throws
+    // "produced no commitSha — nothing was built" about a build that committed,
+    // pushed, and opened a PR. One blip on a shared remote must not be the last word
+    // — the auth precheck retries three times for a far cheaper mistake.
+    const r = pushable()
+    // Fails the baseline probe AND the first two witness attempts; the third answers.
+    const probes = countingLsRemote(r.dir, 3)
+    const pushed = rerun(r, `${FAKE_BUILD}; git push -q origin trident/a-run`)
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(pushed.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
+    // THE ASSERTION. Without the retry this is '' and the round is discarded.
+    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(head)
+    // It really did have to ask more than once — otherwise this would be green on a
+    // wrapper that never retried and simply got lucky.
+    expect(probes()).toBe(4)
+  })
+
+  test('a probe that ANSWERS is not asked again, however unwelcome the answer', () => {
+    // The retry is for an UNANSWERED probe only. A tip that came back and is not our
+    // sha is a real finding — a stale branch, a failed push, someone else's commit —
+    // and re-asking would be waiting for the remote to change its mind, which is the
+    // one way a true "not pushed" could turn into a false "pushed".
+    const r = pushable()
+    const probes = countingLsRemote(r.dir, 0)
+    const ours = rerun(r, FAKE_BUILD) // commits, never pushes
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(ours.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
+    expect(ours.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    // ONE baseline probe and ONE witness probe. A retry loop that re-asked an answered
+    // probe would show four, and would add 20s of remote round-trips to every build
+    // that legitimately did not push.
+    expect(probes()).toBe(2)
+  })
+
   test('the PR number comes from gh, and a non-numeric answer is dropped', () => {
     const found = run({
       authed: true,
@@ -923,9 +1055,11 @@ chmod 755 "$HOME/bin/gh"`,
       authed: true,
       codexLoginExit: 0,
       hangingLsRemote: true,
-      // Well short of the mock's 120s. WHICH of the two happened is the assertion — a
-      // signal means the bound did not hold — not how long it took.
-      spawnTimeoutMs: 60_000,
+      // Well short of the mock's 120s-per-call hang, and comfortably ABOVE the
+      // wrapper's own worst case — one baseline probe plus three retried witness
+      // attempts, each capped at 10s, so ~40s of alarms. WHICH of the two happened is
+      // the assertion — a signal means a bound did not hold — not how long it took.
+      spawnTimeoutMs: 90_000,
       env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
     })
     expect(r.signal).toBeNull()
@@ -935,7 +1069,7 @@ chmod 755 "$HOME/bin/gh"`,
     // …and the one fact the remote owed us is empty rather than guessed.
     expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
     expect(Object.keys(r.trailer)).toHaveLength(6)
-  }, 120_000)
+  }, 180_000)
 
   test('the trailer is emitted on the FAILURE path too', () => {
     // A codex run that died after committing still left work on the branch, and the
@@ -947,9 +1081,11 @@ chmod 755 "$HOME/bin/gh"`,
     expect(Object.keys(r.trailer)).toHaveLength(6)
   })
 
-  test('all six trailer keys are present on every path that ran codex', () => {
+  test('all six trailer keys are present for a build that COMMITTED, one that did NOT, and one that FAILED', () => {
     // A missing key and an empty key read the same to a regex; the bridge is told to
-    // copy six values, so six must always be there to copy.
+    // copy six values, so six must always be there to copy. Three shapes of build, not
+    // "every path" — the paths that never reach codex write no trailer at all, which
+    // is the test below this one.
     for (const cmd of [FAKE_BUILD, FAKE_NO_COMMIT, FAKE_FAIL]) {
       const r = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: cmd } })
       expect(Object.keys(r.trailer).sort()).toEqual([
