@@ -178,6 +178,94 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   })
 })
 
+describe('orchestrator — ISSUES #563: a run whose PR is ALREADY merged', () => {
+  test('is done, is a SUCCESS, and never runs a second gh pr merge', async () => {
+    // The inner loop found the PR merged and stopped there (`prMerged`). Falling
+    // through to the APPROVE path would run `gh pr merge` against an already-merged
+    // PR — which fails, and would record this successful run as `merge failed`: a
+    // shipped change reported as broken, which is worse than the waste #563 removes.
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'APPROVE',
+          prNumber: 215,
+          branch: 'feat-x',
+          checkpoint: 'pr-merged',
+          prMerged: true,
+          remainingTasks: 0,
+          // The workflow records NO reviewed head on this path — there is no merge
+          // left to pin. Under the old code that alone would have failed the run.
+          reviewedHead: null,
+        },
+        argusCheckpoint: 'pr-merged',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(final.failure_reason).toBeNull()
+    expect(final.inner_verdict).toBe('APPROVE')
+    expect(final.inner_checkpoint).toBe('pr-merged')
+    expect(final.pr).toBe(215)
+    // The whole point: NOTHING was merged, deleted or torn down by the outer loop.
+    const joined = h.hostCalls.map((c) => c.join(' '))
+    expect(joined.some((c) => c.startsWith('gh pr merge'))).toBe(false)
+    expect(joined.some((c) => c.includes('push origin --delete'))).toBe(false)
+    // …and it harvested exactly once — no re-fire of a merged run.
+    expect(h.inputs.length).toBe(1)
+    expect(isTridentHarvestTerminal(final)).toBe(true)
+  })
+
+  test('a merged Ralph iteration stops instead of re-firing the next task', async () => {
+    // The next task would be built onto a branch the merge deleted. `prMerged` is
+    // read BEFORE the re-fire, so even a result that still claims remaining tasks
+    // ends the run.
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'APPROVE',
+          prNumber: 215,
+          branch: 'feat-x',
+          checkpoint: 'pr-merged',
+          prMerged: true,
+          remainingTasks: 3,
+        },
+        argusCheckpoint: 'pr-merged',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(h.inputs.length).toBe(1)
+    expect(h.refirePatches).toHaveLength(0)
+  })
+
+  test('WITHOUT the flag, an APPROVE with no reviewed head still fails — the guard is not a bypass', async () => {
+    // The mutant: treat any APPROVE carrying a `pr-merged`-ish checkpoint as merged.
+    // A run that merely CLAIMS approval, with nothing recorded, must still be
+    // refused — #563 must not become a way around #545's fail-closed merge.
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'APPROVE',
+          prNumber: 215,
+          branch: 'feat-x',
+          checkpoint: 'pr-merged',
+          reviewedHead: null,
+        },
+        argusCheckpoint: 'pr-merged',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.startsWith('gh pr merge'))).toBe(false)
+  })
+})
+
 describe('orchestrator — #545: a head that MOVED after the review never merges', () => {
   test('GitHub refuses the pinned merge → the run FAILS loudly (nothing is torn down)', async () => {
     // The observed window (PR #171 went clean → dirty mid-review): a commit lands

@@ -249,13 +249,14 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     key: 'bookkeeping',
     label: 'Bookkeeping',
     description:
-      'The mechanical steps — checkpoints, reading a branch sha, checking CI, writing the result, cleaning up the worktree.',
+      'The mechanical steps — checkpoints, reading a branch sha, checking CI, asking whether the PR merged, writing the result, cleaning up the worktree.',
     labels: [
       { label: 'checkpoint:', dynamic: true },
       { label: 'terminal-result' },
       { label: 'cleanup:worktree' },
       { label: 'head-probe-round-', dynamic: true },
       { label: 'ci-probe-round-', dynamic: true },
+      { label: 'merge-probe-round-', dynamic: true },
     ],
     default: { tier: 'fast', effort: 'low' },
   },

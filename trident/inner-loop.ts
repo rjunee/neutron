@@ -129,6 +129,19 @@ export interface InnerResult {
    * as 0 (no re-fire) so legacy rows and single-task builds are unchanged.
    */
   remaining_tasks: number | null
+  /**
+   * A MERGE IS TERMINAL (ISSUES #563) — the PR was ALREADY merged when the inner
+   * workflow stopped, so the change has shipped and there is nothing left for the
+   * outer loop to merge. `true` ONLY for the exact boolean the workflow writes; the
+   * field is absent on every other terminal path (and on every row predating #563),
+   * which decodes to `false` and leaves the normal merge/fail paths untouched.
+   *
+   * The outer loop reads this BEFORE the verdict, because this result also carries
+   * `verdict: 'APPROVE'` (it IS a success) and the APPROVE path would otherwise run
+   * a second `gh pr merge` against an already-merged PR — failing, and recording a
+   * successful run as `merge failed`.
+   */
+  pr_merged: boolean
 }
 
 /** The terminal outcome of FIRING the workflow (NOT the build result). */
@@ -414,6 +427,11 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     branch: typeof p.branch === 'string' ? p.branch : null,
     round: typeof p.round === 'number' && Number.isFinite(p.round) ? p.round : 0,
     checkpoint: typeof p.checkpoint === 'string' ? p.checkpoint : null,
+    // A MERGE IS TERMINAL (#563). The EXACT boolean only: a string 'true', a 1, or
+    // any other truthy stand-in is a field that did not arrive in the shape the
+    // workflow writes, and this flag SKIPS the merge — so an accidental true would
+    // silently strand an unmerged PR as "done".
+    pr_merged: p.prMerged === true,
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)
