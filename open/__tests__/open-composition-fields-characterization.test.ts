@@ -157,6 +157,11 @@ const EXPECTED_COMPOSITION_KEYS = [
   // nothing ever polls the inbox.
   'email_pipeline',
   'heartbeat_tracker',
+  // Owner-approved host deploy — the `host_deploy_request` /
+  // `host_deploy_status` agent tools plus the install hook that hands the
+  // service the graph's ApprovalManager. Its presence HERE is the proof the
+  // capability is wired on a real boot, not merely that the module exists.
+  'host_deploy',
   'import_resume_handler',
   'import_upload_handler',
   'init_ritual_planner',

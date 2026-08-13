@@ -367,4 +367,26 @@ export interface MiscCompositionInput {
   create_project?: {
     service: import('../../../gateway/wiring/create-project-tool.ts').CreateProjectToolService
   }
+  /**
+   * Owner-approved host deploy — when supplied, the `tools` module registers the
+   * `host_deploy_request` + `host_deploy_status` agent tools, and the `approval`
+   * module hands the freshly-built `ApprovalManager` to `install`.
+   *
+   * TWO FIELDS, ONE REASON: the `tools` module initializes BEFORE `approval`
+   * (`approval` declares `deps:['tools']`), but the service needs the graph's
+   * `ApprovalManager` — the same instance whose rows the owner's button tap
+   * resolves. So the tool registers against a LATE-BOUND `service` getter and
+   * `install` fills it in from the approval module's init. Identical shape to
+   * the composer's existing late-bound `ritualRegistration` getter; `null`
+   * until installed, which reads as "not wired on this instance" rather than
+   * throwing.
+   *
+   * The instance holds no deploy capability either way: the service only ASKS.
+   */
+  host_deploy?: {
+    service: () =>
+      | import('../../../gateway/wiring/host-deploy-tool.ts').HostDeployToolService
+      | null
+    install: (deps: { approvals: import('@neutronai/tools/approval.ts').ApprovalManager }) => void
+  }
 }

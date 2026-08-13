@@ -141,24 +141,43 @@ export class ApprovalManager {
   /**
    * Apply a decision. Called by the channel adapter when the user clicks
    * approve/deny. Idempotent: a second decision on the same id no-ops.
+   *
+   * ATOMIC CLAIM. Returns TRUE only for the call that actually transitioned the
+   * row out of 'pending', and FALSE when the row was already decided, expired or
+   * absent. The `WHERE status = 'pending'` predicate and the affected-row count
+   * are read inside ONE transaction, so of two callers racing the same id
+   * exactly one is told `true`. A caller that DOES something on the strength of a
+   * decision — dispatches a deploy, schedules a ritual — must gate that side
+   * effect on this boolean; without it, two taps that interleave across an
+   * `await` both believe they won, and an Approve can act after a concurrent Deny
+   * has already settled the row (Argus r1 BLOCKER against the host-deploy caller,
+   * `open/host-deploy.ts`). Callers that ignore the value keep their previous
+   * behaviour exactly.
    */
   async respondApproval(
     id: string,
     decision: 'approved' | 'denied',
     decided_by: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const decided_at = this.now() / 1000
-    await this.db.run(
-      `UPDATE tool_approvals
-         SET status = ?, decided_at = ?, decided_by = ?
-       WHERE id = ? AND status = 'pending'`,
-      [decision, decided_at, decided_by, id],
-    )
+    // `runSync` inside `transaction` because only the sync form reports
+    // `changes`; the transaction holds the per-instance mutex across the read of
+    // that count, so the claim and its result cannot be split by another writer.
+    const claimed = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE tool_approvals
+           SET status = ?, decided_at = ?, decided_by = ?
+         WHERE id = ? AND status = 'pending'`,
+        [decision, decided_at, decided_by, id],
+      )
+      return res.changes > 0
+    })
     const waiter = this.pending.get(id)
     if (waiter) {
       this.pending.delete(id)
       waiter.resolve(decision)
     }
+    return claimed
   }
 
   /**
