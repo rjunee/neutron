@@ -30,9 +30,10 @@
  * ── AND THE PAYLOAD IS REFETCHED, BECAUSE AGEING ALONE IS NOT THE ANSWER ─────
  * Computing the deltas at paint fixes the LIE; it does not fix the DATA. A screen
  * that only advanced its clock would walk a perfectly healthy install into
- * staleness: `stale_after_ms` for the Anthropic pool is two minutes, so ~2.5
- * minutes after the screen opened the card would floor its gauges to "≥" and drop
- * its standing to "unknown" while the poller behind it was writing a fresh row
+ * staleness: `stale_after_ms` for the Anthropic pool is two and a half minutes
+ * (`60_000 × 2 + 30_000` — the constant, not a round number in prose), so a couple
+ * of minutes after the screen opened the card would floor its gauges to "≥" and
+ * drop its standing to "unknown" while the poller behind it was writing a fresh row
  * every 60 seconds. So the screens poll on {@link USAGE_POLL_MS}, which is pinned
  * BELOW the tightest staleness deadline any pool ships — a healthy install can
  * then only ever be painted stale by something actually being wrong.
@@ -150,8 +151,9 @@ export const FALLBACK_STALE_AFTER_MS = 60_000
  * healthy install would paint itself broken minutes after the tab opened.
  *
  * So this must stay STRICTLY BELOW the tightest `stale_after_ms` any pool ships
- * (Anthropic's, at two minutes — `persistence/usage-samples-store.ts`), with room
- * for one dropped request. Thirty seconds gives three attempts inside that window
+ * (Anthropic's, at two and a half minutes — `persistence/usage-samples-store.ts`),
+ * with room for one dropped request. Thirty seconds gives five attempts inside that
+ * window
  * and matches the render clock, so one interval drives both and they cannot drift.
  * A parity test pins the relationship rather than the number, because the number
  * that matters is the store's.
@@ -311,6 +313,13 @@ export interface ProjectedWindow extends UsageWindow {
    * its age rather than blanking it or extrapolating past it.
    */
   floor: boolean
+  /**
+   * True when this window's reset instant has PASSED as of this paint, so the
+   * fraction beside it describes a window that has already rolled. The row still
+   * shows it — it is the last thing that was read — but no line that makes a claim
+   * about CAPACITY may quote it as the current constraint.
+   */
+  rolled: boolean
 }
 
 /** One account's standing inside a pool, as of this paint. One card chip each. */
@@ -380,6 +389,25 @@ export interface ProjectedPool {
 const SPENT_HEADROOM_FRACTION = 0.05
 
 /**
+ * Is this window spent? COMPARED ON THE FRACTION SIDE, and that is not a stylistic
+ * choice — it is the only side on which the boundary lands where the constant says.
+ *
+ * `1 - fraction <= SPENT_HEADROOM_FRACTION` reads identically and is wrong at
+ * exactly one input: `1 - 0.95` is `0.050000000000000044` in binary floating point,
+ * so a window at precisely 95% used comes out with MORE than 5% headroom and
+ * classifies as available. `fraction >= 1 - SPENT_HEADROOM_FRACTION` computes its
+ * threshold once, exactly (`1 - 0.05 === 0.95`), and 0.95 is spent.
+ *
+ * The direction is the point. The docstring above commits this constant to erring
+ * PESSIMISTIC — calling a nearly-spent account spent costs one build routed
+ * elsewhere, and the reverse costs a wall — and the subtraction form errs the other
+ * way at the boundary the constant is named after.
+ */
+function windowSpent(fraction: number): boolean {
+  return fraction >= 1 - SPENT_HEADROOM_FRACTION
+}
+
+/**
  * What one window says about capacity.
  *
  * THE POLICY IS "WHAT DOES THIS READING STILL PROVE", and every branch refuses to
@@ -412,8 +440,8 @@ export function windowCapacity(
   now: number,
   stale: boolean,
 ): CapacityStanding {
-  const rolled = win.reset_at !== null && win.reset_at <= now
-  const spent = 1 - win.fraction <= SPENT_HEADROOM_FRACTION
+  const rolled = windowRolled(win, now)
+  const spent = windowSpent(win.fraction)
   if (stale) {
     if (!rolled && spent && win.reset_at !== null) {
       return { state: 'returns', at: win.reset_at, window, in_ms: win.reset_at - now }
@@ -427,6 +455,32 @@ export function windowCapacity(
       : { state: 'returns', at: win.reset_at, window, in_ms: win.reset_at - now }
   }
   return { state: 'available' }
+}
+
+/**
+ * Has this window's reset instant passed? One definition, used by everything that
+ * has to agree about it — the standing, the floor, and the two tie-breaks.
+ */
+function windowRolled(win: UsageWindow, now: number): boolean {
+  return win.reset_at !== null && win.reset_at <= now
+}
+
+/**
+ * What this window's headroom is worth to a COMPARISON, once the clock is applied.
+ *
+ * A ROLLED WINDOW COUNTS AS FULLY OPEN, because its stored fraction describes a
+ * window that no longer exists. {@link windowCapacity} already treats a rolled
+ * window as available; ranking it on the pre-roll number afterwards is the same
+ * reading believed twice under two different rules, and it names the window that
+ * just freed up as the account's constraint. The symptom is a card that contradicts
+ * itself — "1 available now (5h window 99% used)" printed beside a row saying that
+ * same window is available now.
+ *
+ * NOT used for DISPLAY. The row still shows the last figure that was actually read,
+ * with its age; this is only what the ordering is allowed to believe.
+ */
+function comparableHeadroom(win: UsageWindow, now: number): number {
+  return windowRolled(win, now) ? 1 : 1 - win.fraction
 }
 
 /**
@@ -508,7 +562,10 @@ export function accountCapacity(
     // is closest to constraining this account. Left to declaration order it would
     // name whichever window happened to be checked first, and the headline would
     // then report the roomier window as the constraint.
-    if (rank > worstRank || (rank === worstRank && 1 - c.win.fraction < 1 - worst.win.fraction)) {
+    if (
+      rank > worstRank ||
+      (rank === worstRank && comparableHeadroom(c.win, now) < comparableHeadroom(worst.win, now))
+    ) {
       worst = c
     }
   }
@@ -537,7 +594,35 @@ function projectWindow(
   now: number,
 ): ProjectedWindow | null {
   if (win === null) return null
-  return { ...win, floor: stale && win.reset_at !== null && win.reset_at > now }
+  const rolled = windowRolled(win, now)
+  return { ...win, rolled, floor: stale && win.reset_at !== null && !rolled }
+}
+
+/**
+ * How much room the account the headline would name actually has, for TIE-BREAKS.
+ *
+ * Read off the account's BINDING window — the one {@link accountCapacity} already
+ * decided is closest to constraining it — so the pool ranks accounts by the same
+ * quantity the headline then prints.
+ *
+ * WITHOUT THIS, EVERY AVAILABLE ACCOUNT TIES. {@link capacityRank} maps every
+ * `available` standing to a single sentinel, so a strict comparison keeps
+ * `accounts[0]` — and the store returns accounts newest-measurement-first, which
+ * is not an ordering by capacity at all. A pool holding one account at 94% used
+ * and one at 5% used would headline "2 available now (5h window 94% used)" and
+ * point "Next up:" at the spent one purely because it was probed most recently.
+ * Latent while an install holds one account per pool; N accounts is the feature.
+ *
+ * `NEGATIVE_INFINITY` for an account with no binding window, so it never wins a
+ * tie: the same posture as `unknown` sorting last in {@link capacityRank}.
+ */
+function bindingHeadroom(a: ProjectedAccount): number {
+  if (a.binding === null) return Number.NEGATIVE_INFINITY
+  const win = a.binding === 'session' ? a.session : a.weekly
+  if (win === null) return Number.NEGATIVE_INFINITY
+  // Already projected against the render clock, so the rolled case is decided —
+  // the same rule {@link comparableHeadroom} applies one level down.
+  return win.rolled ? 1 : 1 - win.fraction
 }
 
 /** The pool headline: the first account to have capacity, and what still binds it. */
@@ -564,7 +649,14 @@ function poolCapacity(accounts: ProjectedAccount[]): PoolCapacity {
   }
   let best = accounts[0]!
   for (const a of accounts.slice(1)) {
-    if (capacityRank(a.capacity) < capacityRank(best.capacity)) best = a
+    const rank = capacityRank(a.capacity)
+    const bestRank = capacityRank(best.capacity)
+    // MORE headroom wins a tie — the opposite direction to `accountCapacity`'s
+    // tie-break, and deliberately so: that one looks for the WORST window inside
+    // one account, this one looks for the BEST account inside one pool.
+    if (rank < bestRank || (rank === bestRank && bindingHeadroom(a) > bindingHeadroom(best))) {
+      best = a
+    }
   }
   // The window that did NOT bind — the one the headline names as the remaining
   // constraint ("… 7d window 64% used"). Reported by its utilisation, not by its
@@ -798,6 +890,24 @@ export function formatWindowFraction(win: ProjectedWindow): string {
 }
 
 /**
+ * How a window is named inside a CAPACITY claim: `"5h window 64% used"`, or
+ * `"5h window just reset"` when its instant has passed.
+ *
+ * A ROLLED WINDOW HAS NO CURRENT UTILISATION TO QUOTE. Its fraction was measured
+ * against a window that has since ended, so printing it inside the headline states
+ * a constraint that stopped existing — and does it beside a row that says the same
+ * window is available, so the card contradicts itself in one glance. "Just reset"
+ * is the fact the clock actually supports.
+ *
+ * The ROW is untouched: it keeps showing the last figure read, with its age chip.
+ * This is only the rule for sentences that claim something about capacity.
+ */
+function capacityWindowNote(key: 'session' | 'weekly', win: ProjectedWindow): string {
+  const name = windowName(key, win.window_ms)
+  return win.rolled ? `${name} just reset` : `${name} ${formatWindowFraction(win)} used`
+}
+
+/**
  * One account's own answer to "can this take work".
  *
  * `unknown` NAMES ITS REASON when the reason is a missing window, because the two
@@ -854,9 +964,7 @@ export function capacityLine(pool: ProjectedPool): string | null {
     const headroom =
       c.next_binding === null || c.next_binding_window === null
         ? ''
-        : ` (${windowName(c.next_binding_window, c.next_binding.window_ms)} ${formatWindowFraction(
-            c.next_binding,
-          )} used)`
+        : ` (${capacityWindowNote(c.next_binding_window, c.next_binding)})`
     return `${c.available_now} available now${headroom}${unknownSuffix}`
   }
   if (c.next.state === 'returns') {
@@ -864,11 +972,7 @@ export function capacityLine(pool: ProjectedPool): string | null {
     if (c.next_other_window !== null && c.next_other !== null) {
       // The OTHER window's figure carries its own "≥" when it is floored: the
       // headline and the row beneath it are one number and must read as one claim.
-      parts.push(
-        `${windowName(c.next_other_window, c.next_other.window_ms)} ${formatWindowFraction(
-          c.next_other,
-        )} used`,
-      )
+      parts.push(capacityWindowNote(c.next_other_window, c.next_other))
     }
     return `Next capacity in ${formatCountdown(c.next.in_ms)} (${parts.join(
       '; ',
@@ -917,15 +1021,31 @@ export function nextAccountNote(pool: ProjectedPool): string | null {
  * would sit in front of a sentence that is quietly false. So it says what happened
  * and where to look, and still shows no number: a failed gauge read is loud and
  * empty, never a zero.
+ *
+ * ── AND THE REFUSAL OUTRANKS "IT HAS NUMBERS ON IT" ───────────────────────
+ * Which is why `unreadable` is checked BEFORE the "has readings" shortcut, and it is
+ * the difference between this refusal being visible and being theoretical. Samples
+ * are retained for thirty days (`persistence/usage-samples-store.ts`), so the
+ * realistic refusal is not a pool that never read — it is a pool that read fine for
+ * a week and then had its key rotated or its schema shift underneath it. Behind an
+ * `accounts.length > 0` return, that card keeps its figures, keeps ageing its chips,
+ * and says NOTHING about the fact that no reading will ever replace them. The whole
+ * point of the state is that the owner learns a refusal is permanent, and a card
+ * with stale numbers on it needs that sentence MORE than an empty one does, not
+ * less.
  */
 export function connectionNote(pool: ProjectedPool): string | null {
+  if (pool.connection === 'unreadable') {
+    // Two sentences, because the second half differs on whether there is anything
+    // on the card to disown. Both say the same thing: nothing newer is coming.
+    return pool.accounts.length > 0
+      ? "Connected, but the last gauge read didn't produce a reading — check the key, then the logs. The figures below are the last that could be read, and nothing newer is coming until it's fixed."
+      : "Connected, but the last gauge read didn't produce a reading — check the key, then the logs. Nothing is shown rather than a zero."
+  }
   if (pool.accounts.length > 0) return null
   if (pool.connection === 'not_connected') return 'Not connected.'
   if (pool.connection === 'no_meter') {
     return 'Connected, but this credential is billed per token and has no window to meter.'
-  }
-  if (pool.connection === 'unreadable') {
-    return "Connected, but the last gauge read didn't produce a reading — check the key, then the logs. Nothing is shown rather than a zero."
   }
   return 'No readings yet.'
 }

@@ -204,4 +204,18 @@ describe('the card can say WHY it is empty, not just that it is', () => {
     expect(recovering.readStanding()).toBe('ok')
     expect(store.count()).toBe(1)
   })
+
+  test('a PERMANENTLY broken endpoint is REFUSED — a 404 is not a dropped packet', async () => {
+    // ARGUS ROUND 4: every non-auth 4xx came back `error`, which this monitor treats
+    // as transient — so a wrong path (the probe's own header says the endpoint is
+    // unverified, which makes it the likeliest first-install failure) kept the card
+    // on "No readings yet." forever, retrying a request that can never work.
+    for (const httpStatus of [400, 404, 410, 422]) {
+      const rejected = monitorFor({ kind: 'rejected', httpStatus })
+      await rejected.measureOnce()
+      expect(rejected.readStanding()).toBe('refused')
+    }
+    // And still no row — loud and EMPTY, never a zero.
+    expect(store.count()).toBe(0)
+  })
 })

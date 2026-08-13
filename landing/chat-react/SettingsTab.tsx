@@ -190,9 +190,9 @@ export function SettingsTab({
   //
   // Advancing the clock alone is what ages a card honestly across a DEAD poller —
   // but run against a LIVE one it is a slow lie in the other direction. The
-  // Anthropic pool goes stale at two minutes, so a tab left open would floor its
-  // gauges to "≥" and drop capacity to "unknown" about two and a half minutes in
-  // while a healthy poller wrote a fresh row every 60 seconds behind it. A screen
+  // Anthropic pool goes stale at two and a half minutes, so a tab left open would
+  // floor its gauges to "≥" and drop capacity to "unknown" that soon in, while a
+  // healthy poller wrote a fresh row every 60 seconds behind it. A screen
   // that paints a working install as broken is the same defect as one that paints a
   // broken install as working; both are the card disagreeing with the truth.
   //
@@ -1704,15 +1704,24 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
           {nextUp}
         </p>
       ) : null}
+      {/* WHY THE CARD HAS NOTHING TO SAY, OR WHY NOTHING NEWER IS COMING.
+          Four different fixes hide behind an empty card — connect an account, wait
+          for a reading, fix a refused gauge, or nothing at all — so the card says
+          which, instead of drawing zeros.
+
+          A BANNER, NOT AN ALTERNATIVE TO THE ROWS. It used to replace them, which
+          meant a pool that read for a week and was then refused could not show both
+          facts at once: either its last figures or the sentence saying nothing will
+          replace them. Samples are kept thirty days, so that is the refusal that
+          actually happens, and hiding the readings behind the note is the same
+          blanking the staleness rule forbids. The note reads null on a healthy card,
+          so nothing is added to the common case. */}
       {note !== null ? (
-        // Three different fixes hide behind an empty card — connect an account,
-        // wait for a reading, or nothing at all — so the card says which, instead
-        // of drawing zeros.
         <div className="cset-empty" data-testid={`usage-${view.pool}-empty`}>
           {note}
         </div>
-      ) : (
-        view.accounts.map((account, i) => (
+      ) : null}
+      {view.accounts.map((account, i) => (
           <div
             className="cset-usage-account"
             key={account.account_label ?? `unlabelled-${i}`}
@@ -1748,8 +1757,7 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
               now={now}
             />
           </div>
-        ))
-      )}
+      ))}
     </div>
   )
 }

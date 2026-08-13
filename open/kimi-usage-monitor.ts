@@ -67,8 +67,10 @@ const moduleLog = createLogger('kimi-usage')
  *
  *   - `null`    — nothing has been read yet, or no key is configured. Wait.
  *   - `ok`      — the last read produced a sample.
- *   - `refused` — the endpoint answered and the parser could not read it, or the
- *     key was rejected. This does not fix itself; the key names are in the log.
+ *   - `refused` — the endpoint answered and the parser could not read it, the key
+ *     was rejected (401/403), or the REQUEST was rejected with any other 4xx (a
+ *     wrong path returns 404, and the path is unverified upstream). None of these
+ *     fix themselves; the status or the key names are in the log.
  *   - `error`   — transport, timeout or 5xx. Transient; the next tick retries, so
  *     it is deliberately NOT surfaced as a broken card.
  */
@@ -179,6 +181,15 @@ export class KimiUsageMonitor {
       case 'unauthorized':
         this.last = 'refused'
         moduleLog.warn('kimi_usage_unauthorized', { status: outcome.httpStatus })
+        return
+      case 'rejected':
+        // A NON-AUTH 4xx IS REFUSED, NOT RETRIED FOREVER. The usages path is
+        // unverified upstream, so a 404 or a 400 is the likeliest first-install
+        // failure and it does not improve with waiting. Left in the transient arm
+        // it kept the card on "No readings yet." — a sentence promising a reading
+        // that cannot arrive — instead of telling the owner to go and look.
+        this.last = 'refused'
+        moduleLog.warn('kimi_usage_rejected', { status: outcome.httpStatus })
         return
       case 'unrecognised':
         this.last = 'refused'

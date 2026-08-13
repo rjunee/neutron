@@ -303,6 +303,42 @@ describe('what the screen refuses to say', () => {
     expect(byTestId('usage-kimi-acct-0-session-fill')).toBeNull();
   });
 
+  it('a refused pool that ALREADY HAS readings shows both the figures and the refusal', async () => {
+    // ARGUS ROUND 4: the note replaced the rows, and it was gated on the card being
+    // empty — so the refusal that actually happens (a pool that read for a week and
+    // then had its key rotated) could show neither fact. Samples are kept thirty
+    // days, so behind that gate the card aged silently, with nothing saying the
+    // figures on it were the last that would ever be read.
+    response = {
+      status: 200,
+      body: {
+        pools: [
+          poolOf({
+            pool: 'kimi',
+            connection: 'unreadable',
+            accounts: [account({ account_label: 'owner-a' })],
+          }),
+        ],
+      },
+    };
+    await mountUsage();
+    const empty = textOf('usage-kimi-empty');
+    expect(empty).toContain("didn't produce a reading");
+    expect(empty).toContain('last that could be read');
+    // AND THE ROWS ARE STILL THERE — loud is not the same as blanking.
+    expect(textOf('usage-kimi-acct-0-session-pct')).toBe('75%');
+    expect(textOf('usage-kimi-acct-0-name')).toBe('owner-a');
+  });
+
+  it('a healthy pool carries NO refusal banner — the control for the case above', async () => {
+    // Without this, "always render the note" would pass the case above and put a
+    // sentence on every card in the product.
+    response = { status: 200, body: { pools: [poolOf({ pool: 'kimi' })] } };
+    await mountUsage();
+    expect(byTestId('usage-kimi-empty')).toBeNull();
+    expect(textOf('usage-kimi-acct-0-session-pct')).toBe('75%');
+  });
+
   it('never guesses the account, and uses a real label when given one', async () => {
     await mountUsage();
     expect(textOf('usage-anthropic-acct-0-name')).toBe('active credential');
@@ -394,7 +430,7 @@ describe('the screen REFETCHES, not just re-renders', () => {
   it('a healthy install stays fresh across the staleness deadline', async () => {
     // THE DEFECT THIS PINS. Computing every delta at paint is what ages a card
     // honestly across a DEAD poller — and, on its own, it is a slow lie in the other
-    // direction. This pool goes stale at two minutes, so a screen left open with a
+    // direction. This pool's fixture goes stale at two minutes, so a screen left open with a
     // fetch-once mount would floor its gauge to "≥ 75%" and drop capacity to
     // "unknown" about two and a half minutes in, while the poller behind it wrote a
     // fresh row every 60 seconds, and would stay that way. A screen that paints a

@@ -344,17 +344,17 @@ describe('probeKimiUsage — transport', () => {
     expect(seenAuth).toBe('Bearer secret-key')
   })
 
+  const statusOutcome = async (code: number) =>
+    probeKimiUsage('k', {
+      baseUrl: 'https://kimi.example.com/coding',
+      now: () => NOW,
+      fetch: (async () => new Response('', { status: code })) as unknown as typeof fetch,
+    })
+
   test('401 is unauthorized, 5xx is an error, and a throw is an error — never ok', async () => {
-    const status = async (code: number) =>
-      probeKimiUsage('k', {
-        baseUrl: 'https://kimi.example.com/coding',
-        now: () => NOW,
-        fetch: (async () => new Response('', { status: code })) as unknown as typeof fetch,
-      })
-    expect((await status(401)).kind).toBe('unauthorized')
-    expect((await status(403)).kind).toBe('unauthorized')
-    expect((await status(500)).kind).toBe('error')
-    expect((await status(404)).kind).toBe('error')
+    expect((await statusOutcome(401)).kind).toBe('unauthorized')
+    expect((await statusOutcome(403)).kind).toBe('unauthorized')
+    expect((await statusOutcome(500)).kind).toBe('error')
     const threw = await probeKimiUsage('k', {
       baseUrl: 'https://kimi.example.com/coding',
       now: () => NOW,
@@ -365,14 +365,54 @@ describe('probeKimiUsage — transport', () => {
     expect(threw).toEqual({ kind: 'error', message: 'socket hang up' })
   })
 
-  test('a 200 carrying HTML is an error or unrecognised — never a zero reading', async () => {
+  // ── A PERMANENTLY-BROKEN ENDPOINT IS REFUSED, NOT RETRIED FOREVER ──────────
+  // Argus round 4: every non-2xx that was not 401/403 came back `error`, which the
+  // monitor treats as transient — so a wrong path (this file's own header says the
+  // endpoint is UNVERIFIED) left the card on "No readings yet." for good, a
+  // sentence promising a reading that could never arrive.
+  test('a non-auth 4xx is REJECTED — permanent, not the transient arm', async () => {
+    for (const code of [400, 404, 410, 422]) {
+      const out = await statusOutcome(code)
+      expect(out.kind).toBe('rejected')
+      expect(out).toEqual({ kind: 'rejected', httpStatus: code })
+    }
+  })
+
+  test('408 and 429 stay TRANSIENT — the two 4xx codes that mean "ask again"', async () => {
+    // The negative control for the case above. Without this a blanket "4xx is
+    // permanent" rule would pass that test and would mark a rate-limited box
+    // permanently broken, which is the mirror-image defect.
+    expect((await statusOutcome(408)).kind).toBe('error')
+    expect((await statusOutcome(429)).kind).toBe('error')
+  })
+
+  test('a 200 that is not JSON is UNRECOGNISED — a wrong path serving HTML is refused', async () => {
+    // The other shape a wrong path takes: 200 with an HTML page. Parsing it threw,
+    // and a throw here is indistinguishable from a truncated body — so it landed in
+    // the transient arm too. The content type is what says which mistake this is.
     const out = await probeKimiUsage('k', {
       baseUrl: 'https://kimi.example.com/coding',
       now: () => NOW,
       fetch: (async () =>
-        new Response('<html>signed out</html>', { status: 200 })) as unknown as typeof fetch,
+        new Response('<html>signed out</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        })) as unknown as typeof fetch,
     })
-    expect(out.kind === 'error' || out.kind === 'unrecognised').toBe(true)
-    expect(out.kind).not.toBe('ok')
+    expect(out.kind).toBe('unrecognised')
+    expect(out.kind === 'unrecognised' ? out.observed : []).toEqual([
+      'content-type=text/html; charset=utf-8',
+    ])
+  })
+
+  test('a JSON content type still reaches the parser — the positive control', async () => {
+    // Without this, a probe that returned `unrecognised` for every response would
+    // pass the case above and every refusal test in this file.
+    const out = await probeKimiUsage('k', {
+      baseUrl: 'https://kimi.example.com/coding',
+      now: () => NOW,
+      fetch: (async () => okResponse(usagesBody())) as unknown as typeof fetch,
+    })
+    expect(out.kind).toBe('ok')
   })
 })

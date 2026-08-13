@@ -29,6 +29,10 @@ function stubFetch(res: Response): typeof fetch {
 }
 
 describe('parseUnifiedRateLimitHeaders', () => {
+  // The clock the plausibility bound is measured against. Both reset instants in
+  // the fixture below land inside it: 1785464400 is ~4.6 days after this.
+  const NOW = 1785_064_400_000
+
   it('reads both windows and normalises the reset headers from seconds to ms', () => {
     const reading = parseUnifiedRateLimitHeaders(
       new Headers({
@@ -37,6 +41,7 @@ describe('parseUnifiedRateLimitHeaders', () => {
         [UNIFIED_5H_RESET_HEADER]: '1785464400',
         [UNIFIED_7D_RESET_HEADER]: '1785866400',
       }),
+      NOW,
     )
     expect(reading).toEqual({
       session: 0.17,
@@ -47,12 +52,66 @@ describe('parseUnifiedRateLimitHeaders', () => {
   })
 
   it('returns null — never a zero — when the windows are absent', () => {
-    expect(parseUnifiedRateLimitHeaders(new Headers())).toBeNull()
+    expect(parseUnifiedRateLimitHeaders(new Headers(), NOW)).toBeNull()
   })
 
   it('returns null when only ONE of the two windows is reported', () => {
     const headers = new Headers({ [UNIFIED_5H_UTILIZATION_HEADER]: '0.5' })
-    expect(parseUnifiedRateLimitHeaders(headers)).toBeNull()
+    expect(parseUnifiedRateLimitHeaders(headers, NOW)).toBeNull()
+  })
+
+  // ── THE RESET INSTANTS ARE BOUNDED, THE SAME WAY KIMI'S ARE ────────────────
+  // Argus round 4: this side had no plausibility check while the other provider's
+  // had one, so a `…-reset` header that was ALREADY in milliseconds was multiplied
+  // by 1000 again and rendered downstream as a countdown of "11574074d 1h" with
+  // nothing on the card flagging it. The windows still read; only the unbelievable
+  // instant is dropped, and an absent instant renders as "unknown", never as "now".
+
+  it('DROPS a reset instant that is absurdly far in the future — an already-ms header', () => {
+    const reading = parseUnifiedRateLimitHeaders(
+      new Headers({
+        [UNIFIED_5H_UTILIZATION_HEADER]: '0.17',
+        [UNIFIED_7D_UTILIZATION_HEADER]: '0.34',
+        // The seconds field carrying a MILLISECONDS value: ×1000 puts it ~31,000
+        // years out. `formatCountdown` would print it without complaint.
+        [UNIFIED_5H_RESET_HEADER]: String(NOW),
+        [UNIFIED_7D_RESET_HEADER]: '1785866400',
+      }),
+      NOW,
+    )
+    expect(reading).not.toBeNull()
+    // The window itself still reads — a bad instant costs the countdown, not the gauge.
+    expect(reading?.session).toBe(0.17)
+    expect(reading?.session_reset_at).toBeUndefined()
+    expect(reading?.weekly_reset_at).toBe(1785866400000)
+  })
+
+  it('DROPS a reset instant further in the past than clock skew — a ms value read as seconds', () => {
+    const reading = parseUnifiedRateLimitHeaders(
+      new Headers({
+        [UNIFIED_5H_UTILIZATION_HEADER]: '0.9',
+        [UNIFIED_7D_UTILIZATION_HEADER]: '0.9',
+        // Epoch ms divided by 1000 twice over: lands in 1970.
+        [UNIFIED_5H_RESET_HEADER]: '1785464',
+        [UNIFIED_7D_RESET_HEADER]: '1785866400',
+      }),
+      NOW,
+    )
+    expect(reading?.session_reset_at).toBeUndefined()
+  })
+
+  it('KEEPS an instant a minute in the past — a window that just rolled is not skew', () => {
+    const justRolled = Math.floor((NOW - 60_000) / 1000)
+    const reading = parseUnifiedRateLimitHeaders(
+      new Headers({
+        [UNIFIED_5H_UTILIZATION_HEADER]: '0.9',
+        [UNIFIED_7D_UTILIZATION_HEADER]: '0.4',
+        [UNIFIED_5H_RESET_HEADER]: String(justRolled),
+        [UNIFIED_7D_RESET_HEADER]: '1785866400',
+      }),
+      NOW,
+    )
+    expect(reading?.session_reset_at).toBe(justRolled * 1000)
   })
 })
 

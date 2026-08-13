@@ -120,6 +120,20 @@ export type KimiUsageProbeOutcome =
   | { kind: 'ok'; sample: KimiUsageSample }
   /** 401/403 — the stored key is dead. Permanent until it is replaced. */
   | { kind: 'unauthorized'; httpStatus: number }
+  /**
+   * Any OTHER 4xx the endpoint rejected the request with — 400, 404, 410, 422.
+   * PERMANENT, and that is the whole reason it is not folded into `error`.
+   *
+   * The header of this file says the path and schema are UNVERIFIED, which makes a
+   * wrong path the single most likely first-install failure — and a 404 retried
+   * every ten minutes forever is a refusal that never announces itself. Folded into
+   * the transient arm it leaves the card saying "No readings yet.", a sentence
+   * promising a reading that cannot arrive.
+   *
+   * 408 and 429 are excluded and stay transient: a timeout and a rate limit are the
+   * two 4xx codes that mean "ask again later" rather than "this request is wrong".
+   */
+  | { kind: 'rejected'; httpStatus: number }
   /** Transport failure, timeout, or 5xx. Transient. */
   | { kind: 'error'; message: string }
   /**
@@ -419,6 +433,20 @@ export function parseKimiUsages(
 }
 
 /**
+ * Which 4xx codes mean "this request will never work" rather than "try again".
+ *
+ * 401/403 are handled before this and keep their own outcome, because "the key was
+ * rejected" and "the request was rejected" send the owner to different places. Of
+ * what remains, 408 (request timeout) and 429 (rate limited) are the two the spec
+ * defines as retryable; everything else in the 4xx range is a statement about the
+ * request itself and does not improve by being repeated.
+ */
+function isPermanentRejection(status: number): boolean {
+  if (status < 400 || status >= 500) return false
+  return status !== 408 && status !== 429
+}
+
+/**
  * Ask the account where it stands. NEVER throws — every failure mode is a tagged
  * outcome, because this runs inside a tick loop and a thrown probe would spend
  * the loop's error budget on something as ordinary as a dropped packet.
@@ -446,8 +474,21 @@ export async function probeKimiUsage(
   if (res.status === 401 || res.status === 403) {
     return { kind: 'unauthorized', httpStatus: res.status }
   }
+  if (isPermanentRejection(res.status)) {
+    return { kind: 'rejected', httpStatus: res.status }
+  }
   if (!res.ok) {
     return { kind: 'error', message: `upstream returned ${res.status}` }
+  }
+  // A 2xx THAT IS NOT JSON IS A SHAPE PROBLEM, NOT A NETWORK ONE. The other likely
+  // shape of a wrong path is a 200 carrying an HTML page, and `res.json()` throwing
+  // on it looks exactly like a truncated body — so without this check that failure
+  // lands in the transient arm and retries forever behind "No readings yet.".
+  // The content type is logged rather than the body: it is the one value that says
+  // which mistake this is, and it carries nothing of the account.
+  const contentType = res.headers.get('content-type') ?? ''
+  if (!/\bjson\b/i.test(contentType)) {
+    return { kind: 'unrecognised', observed: [`content-type=${contentType || 'absent'}`] }
   }
   let body: unknown
   try {

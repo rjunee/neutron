@@ -43,14 +43,15 @@
  *
  * AND THE PAYLOAD ITSELF IS REPOLLED on that same tick (`USAGE_POLL_MS`), which is
  * the other half of the same rule. Ageing a held payload is right across a dead
- * poller and wrong across a live one: the Anthropic pool goes stale at two minutes,
- * so a screen that only advanced its clock would paint a perfectly healthy install
- * as stale two and a half minutes after it opened, and stay that way. The poll is
+ * poller and wrong across a live one: the Anthropic pool goes stale at two and a
+ * half minutes (`60_000 × 2 + 30_000`), so a screen that only advanced its clock
+ * would paint a perfectly healthy install as stale that soon after it opened, and
+ * stay that way. The poll is
  * pinned below that deadline so staleness on this screen only ever means staleness.
  */
 
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -233,22 +234,30 @@ function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
           {nextUp}
         </Text>
       ) : null}
+      {/* WHY THE CARD HAS NOTHING TO SAY, OR WHY NOTHING NEWER IS COMING.
+          Four different fixes hide behind an empty card — connect an account, wait
+          for a reading, fix a refused gauge, or nothing at all — so it says which,
+          instead of drawing zeros.
+
+          A BANNER, NOT AN ALTERNATIVE TO THE ROWS. It used to replace them, which
+          meant a pool that read for a week and was then refused could not show both
+          facts at once: either its last figures or the sentence saying nothing will
+          replace them. Samples are kept thirty days, so that is the refusal that
+          actually happens, and hiding the readings behind the note is the same
+          blanking the staleness rule forbids. */}
       {note !== null ? (
-        // Three different fixes hide behind an empty card — connect an account,
-        // wait for a reading, or nothing at all — so it says which.
         <Text style={styles.muted} testID={`usage-${view.pool}-empty`}>
           {note}
         </Text>
-      ) : (
-        view.accounts.map((account, i) => (
-          <AccountCard
-            key={account.account_label ?? `unlabelled-${i}`}
-            account={account}
-            testID={`usage-${view.pool}-acct-${i}`}
-            now={now}
-          />
-        ))
-      )}
+      ) : null}
+      {view.accounts.map((account, i) => (
+        <AccountCard
+          key={account.account_label ?? `unlabelled-${i}`}
+          account={account}
+          testID={`usage-${view.pool}-acct-${i}`}
+          now={now}
+        />
+      ))}
     </View>
   );
 }
@@ -307,6 +316,20 @@ export default function ModelUsageScreen() {
   // ever visibly wrong.
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
+  // A poll in flight when the screen unmounts must not land. The interval is
+  // cleared on teardown, but the `await` already outstanding when that happens is
+  // not — and its `setUsage` would then write to an unmounted tree. The web twin
+  // guards the same await for the same reason (`landing/chat-react/SettingsTab.tsx`);
+  // this is the pair of files the parity test keeps line-for-line, so the guard is
+  // on both or it is documentation.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const load = useCallback(
     async (visible: boolean) => {
       if (client === null) return;
@@ -315,6 +338,7 @@ export default function ModelUsageScreen() {
       // thirty seconds forever, and would disable the control he came to press.
       if (visible) setRefreshing(true);
       const next = await client.load();
+      if (!mountedRef.current) return;
       setUsage(next);
       if (visible) setRefreshing(false);
     },
@@ -329,9 +353,9 @@ export default function ModelUsageScreen() {
   //
   // Advancing the clock alone is what ages a card honestly across a DEAD poller —
   // but run against a LIVE one it is a slow lie in the other direction. The
-  // Anthropic pool goes stale at two minutes, so a screen left open would floor its
-  // gauges to "≥" and drop capacity to "unknown" about two and a half minutes in
-  // while a healthy poller wrote a fresh row every 60 seconds behind it. A screen
+  // Anthropic pool goes stale at two and a half minutes, so a screen left open would
+  // floor its gauges to "≥" and drop capacity to "unknown" that soon in, while a
+  // healthy poller wrote a fresh row every 60 seconds behind it. A screen
   // that paints a working install as broken is the same defect as one that paints a
   // broken install as working; both are the card disagreeing with the truth.
   //

@@ -65,11 +65,23 @@ naming the soonest reset while ignoring the other window. The measured half stil
 renders in full; only the capacity claim is withheld, and the chip says why
 ("capacity unknown — one window not reported").
 
-**A refused gauge read says so.** A fourth connection state, `unreadable`, for a gauge
-that was asked and whose answer could not be turned into a reading. "No readings yet."
-promises a first reading is coming; a rejected key or an unmodelled payload means none
-is, and against an unpublished schema that is the realistic first-install failure.
-Still no number on the card — loud and empty, never a zero.
+**A refused gauge read says so, and it says so on a card that already has numbers.**
+A fourth connection state, `unreadable`, for a gauge that was asked and whose answer
+could not be turned into a reading. "No readings yet." promises a first reading is
+coming; a rejected key, a non-auth 4xx from a path this build has wrong, or an
+unmodelled payload means none is. Samples are kept thirty days, so the refusal that
+actually happens is not an empty pool — it is a pool that read fine for a week and
+then had its key rotated or its schema shift underneath it. So the sentence is a
+BANNER above the rows rather than a replacement for them: the last known figures keep
+rendering with their age chips, and the note says nothing newer is coming. An empty
+refused card still shows no number — loud and empty, never a zero.
+
+Reaching that state is decided by the LIVE probe on both pools that have one, never by
+a credential file: `open/active-credential.ts` performs no validity check, so a revoked
+Anthropic token resolves as present forever, and the composer now reads
+`CredentialUsageMonitor.readStanding()` per request — the same shape the Kimi arm uses.
+A transient failure stays `connected` on both, because a dropped packet must not
+repaint the card as broken.
 
 Per provider, in its own unit, never summed, and **no dollar value anywhere** — the
 subscription is flat, so a currency figure would assert a marginal cost the owner does

@@ -467,6 +467,48 @@ describe('when capacity comes back — the line the owner reads first', () => {
     root.unmount()
   })
 
+  it('a refused pool that ALREADY HAS readings shows both the figures and the refusal', async () => {
+    // ARGUS ROUND 4: the note replaced the rows, and it was gated on the card being
+    // empty — so the refusal that actually happens (a pool that read for a week and
+    // then had its key rotated) could show neither fact. Samples are kept thirty
+    // days, so behind that gate the card aged silently, with nothing saying the
+    // figures on it were the last that would ever be read.
+    const { container, root } = await mount(() =>
+      json({
+        pools: [
+          poolOf({
+            pool: 'kimi',
+            connection: 'unreadable',
+            accounts: [account({ account_label: 'owner-a' })],
+          }),
+        ],
+      }),
+    )
+    const empty = container.querySelector('[data-testid="usage-kimi-empty"]')?.textContent ?? ''
+    expect(empty).toContain("didn't produce a reading")
+    expect(empty).toContain('last that could be read')
+    // AND THE ROWS ARE STILL THERE — loud is not the same as blanking. The last
+    // known figure keeps rendering, which is the locked staleness posture.
+    expect(
+      container.querySelector('[data-testid="usage-kimi-acct-0-session-pct"]')?.textContent,
+    ).toBe('75%')
+    expect(container.querySelector('[data-testid="usage-kimi-acct-0-name"]')?.textContent).toBe(
+      'owner-a',
+    )
+    root.unmount()
+  })
+
+  it('a healthy pool carries NO refusal banner — the control for the case above', async () => {
+    // Without this, "always render the note" would pass the case above and put a
+    // sentence on every card in the product.
+    const { container, root } = await mount(() => json({ pools: [poolOf({ pool: 'kimi' })] }))
+    expect(container.querySelector('[data-testid="usage-kimi-empty"]')).toBeNull()
+    expect(
+      container.querySelector('[data-testid="usage-kimi-acct-0-session-pct"]')?.textContent,
+    ).toBe('75%')
+    root.unmount()
+  })
+
   it('counts down to the BINDING window, and names what still constrains it', async () => {
     // The defect in a bare countdown: the 5-hour window resets in 17 minutes, but
     // the 7-day window is 97% spent, so almost nothing comes back at that reset. A
@@ -530,9 +572,9 @@ describe('the card REFETCHES, not just re-renders', () => {
   it('a healthy install stays fresh across the staleness deadline', async () => {
     // THE DEFECT THIS PINS. Computing every delta at paint is what ages a card
     // honestly across a DEAD poller — and, on its own, it is a slow lie in the other
-    // direction. This pool goes stale at two minutes, so a tab left open with a
-    // fetch-once mount would floor its gauge to "≥ 75%" and drop capacity to
-    // "unknown" about two and a half minutes in, while the poller behind it wrote a
+    // direction. This pool's fixture goes stale at two minutes, so a tab left open
+    // with a fetch-once mount would floor its gauge to "≥ 75%" and drop capacity to
+    // "unknown" shortly after, while the poller behind it wrote a
     // fresh row every 60 seconds. It would then stay that way for as long as the
     // owner left the screen up. A screen that paints a working install as broken is
     // the same defect as one that paints a broken install as working.

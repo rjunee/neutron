@@ -42,9 +42,10 @@ export interface AppUsageSurfaceOptions {
   /**
    * Summarises the persisted series, one entry per quota pool.
    *
-   * An ARRAY even though exactly one pool exists, so a second subscription can
-   * be reported later without changing the payload's shape under a client that
-   * has already shipped.
+   * An ARRAY because a box meters SEVERAL providers side by side — the composer
+   * fills this from `USAGE_POOLS`, so a pool leaves the payload only by being
+   * deleted from that list and never by having no samples. It was an array before
+   * that was true, which is why adding the others changed nothing here.
    */
   dashboard: () => ReadonlyArray<PoolSummary>
 }

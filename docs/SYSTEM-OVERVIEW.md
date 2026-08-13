@@ -4758,7 +4758,16 @@ are deliberately different scopes of the same measurement, not two sources of it
   token check, not an LLM call site; it carries no owner content, no `system`
   field and no signature. `parseUnifiedRateLimitHeaders` is exported as a pure
   function so any other consumer of these headers shares one definition of which
-  header means what.
+  header means what — and it takes `now` as a PARAMETER rather than reading a clock,
+  so every consumer also shares the plausibility bound below rather than being able to
+  opt out of it by accident. Each `…-reset` instant is bounded after conversion, the
+  same rule Kimi's equivalents get: refused more than 30 days out (a header already in
+  milliseconds, multiplied again, rendered as a countdown of "11574074d 1h" with
+  nothing flagging it) or more than five minutes of clock skew in the past. A refused
+  instant is absent, and an absent instant renders "unknown" — never "now". The API
+  base is threaded from the composition env (`ANTHROPIC_BASE_URL`, the variable the
+  Anthropic SDK itself reads), so a box pointed at a gateway keeps its gauge pointed
+  where its turns go.
 - **Which credential — `open/active-credential.ts`.** Walks the same precedence
   `resolveOpenLlmPool` uses, resolving one tier further than dispatch needs:
   `CLAUDE_CODE_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` (per-token billing — no
@@ -4862,7 +4871,14 @@ throughput decision of whether to raise build concurrency.
   carrying one window from a provider that only HAS one window, and an account whose
   weekly figure was silently dropped would render as one with no weekly limit at all.
   `KimiUsageSample`'s two windows are non-nullable, so that invariant is a type rather
-  than a habit.
+  than a habit. TRANSPORT OUTCOMES ARE SPLIT BY WHETHER WAITING HELPS: 401/403 is a
+  dead key, any OTHER 4xx except 408 and 429 is a `rejected` request — permanent, and
+  the likeliest first-install failure given the path is unverified — and a 2xx whose
+  content type is not JSON is `unrecognised` carrying that content type, because the
+  other shape a wrong path takes is a 200 serving an HTML page. Folded into the
+  transient arm, both of those retried every ten minutes forever behind "No readings
+  yet.", a sentence promising a reading that could not arrive. Timeouts, 5xx and
+  transport failures stay transient, and the card keeps ageing.
 - **Staleness is shown, never hidden.** Every reading carries its age, on every
   card, not only the stale ones. A reading older than its pool's deadline
   (`POOL_STALE_AFTER_MS` — each polled pool's cadence plus ONE missed probe of
@@ -4881,7 +4897,11 @@ throughput decision of whether to raise build concurrency.
   longer a writer has been dead.
 - **Capacity is the WORST window, never the soonest reset.** A FRESH reading is
   believed — rolled (the instant has passed) → available; spent (≤5% headroom) →
-  returns at its reset; spent with no instant → unknown; room → available. A STALE
+  returns at its reset; spent with no instant → unknown; room → available. "Spent" is
+  compared on the FRACTION side (`fraction >= 1 - SPENT_HEADROOM_FRACTION`) rather than
+  by subtracting, because `1 - 0.95` is `0.050000000000000044` in binary floating point
+  and the subtraction form put a window at exactly 95% used one float epsilon on the
+  OPTIMISTIC side of a constant whose whole job is to err pessimistic. A STALE
   reading proves only that its window was AT LEAST this spent, and only while that
   same window is still running, so it yields a countdown when it says spent and
   `unknown` otherwise — including when its window has since rolled, where
@@ -4898,7 +4918,16 @@ throughput decision of whether to raise build concurrency.
   unknown" — names the binding window and the other window's utilisation, carries the
   headline account's own headroom even when it IS available (available is a boolean;
   the throughput decision it feeds is not), and counts an account nobody can vouch for
-  out loud rather than quietly excluding it.
+  out loud rather than quietly excluding it. TIES ARE BROKEN BY HEADROOM AT BOTH
+  LEVELS, and neither is cosmetic: every `available` standing ranks equal, so inside an
+  account the tie names the window closest to constraining it, and across a pool the
+  tie names the account with the MOST room. Left to payload order the pool tie kept
+  whichever account was measured most recently — so a pool holding one account at 94%
+  used and one at 5% headlined the spent one and pointed "Next up:" at it. A window
+  whose reset has PASSED counts as fully open in both tie-breaks and is rendered "just
+  reset" rather than at its pre-roll percentage, because its stored fraction describes
+  a window that no longer exists; ranking it anyway printed "1 available now (5h window
+  99% used)" beside a row saying that same window was available.
 - **Store the instant, render the delta — and NOTHING on the wire is a delta.**
   The payload carries only facts that do not age: each reading's `measured_at`,
   each window's length, reset instant, pace and projection (both anchored at the
@@ -4923,15 +4952,32 @@ throughput decision of whether to raise build concurrency.
   `no_meter`, not "not connected", because telling the owner to reconnect a
   working account sends them to fix the wrong thing. `unreadable` is the fourth
   because it is the one that does NOT resolve itself: the gauge was asked and its
-  answer could not be turned into a reading (rejected key, or a payload shape this
-  build does not model), where "No readings yet." would promise a first reading that is
-  never coming — the realistic first-install failure against Kimi's unpublished schema.
-  It is read PER REQUEST from `KimiUsageMonitor.readStanding()`, never latched, so the
-  card recovers the moment a tick succeeds; a transient error stays `connected` because
-  the next tick retries. The card still shows no number: loud and empty, never a zero.
+  answer could not be turned into a reading (a rejected key, a non-auth 4xx from a path
+  this build has wrong, or a payload shape it does not model), where "No readings yet."
+  would promise a first reading that is never coming — the realistic first-install
+  failure against Kimi's unpublished schema.
+
+  IT IS DECIDED BY THE LIVE PROBE, NEVER BY A CREDENTIAL FILE, and on BOTH pools that
+  have a writer. `resolveActiveCredential` answers "is a credential present", which is
+  a different question from "does upstream still accept it" and performs no validity
+  check — so a revoked Anthropic token resolved as connected forever while its 401
+  wrote no sample, leaving the one pool with a shipping writer stuck on "No readings
+  yet." So the composer reads `CredentialUsageMonitor.readStanding()` for Anthropic and
+  `KimiUsageMonitor.readStanding()` for Kimi, PER REQUEST and never latched, so a card
+  recovers the moment a tick succeeds; a transient failure stays `connected` on both,
+  because the next tick retries and a dropped packet must not repaint the card.
+
+  THE NOTE IS A BANNER, NOT A REPLACEMENT FOR THE ROWS. Samples are retained thirty
+  days, so the refusal that actually happens is a pool that read fine for a week and
+  then had its key rotated — behind an "only when the card is empty" gate that card
+  kept ageing silently with nothing saying its figures were the last that would ever be
+  read. The last known values keep rendering with their age chips beside the sentence.
+  An empty refused card still shows no number: loud and empty, never a zero.
   `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` boots the real composer
-  against a loopback server answering with an unmodelled body and asserts the composed
-  payload, with a positive control that a pool nobody asked is not reported unreadable.
+  against a loopback server answering with an unmodelled body, and
+  `open/__tests__/usage-dashboard-lapsed-wiring.test.ts` does the same against one
+  answering 401 with a subscription token on disk; both assert the composed payload,
+  each with a positive control that a pool nobody asked is not reported unreadable.
 - **Both clients — `landing/chat-react/SettingsTab.tsx` (Model usage) and
   `app/app/usage.tsx`,** over the twin clients `landing/chat-react/usage-dashboard-client.ts`
   and `app/lib/usage-dashboard-client.ts`. One card per provider, side by side,
@@ -4950,8 +4996,9 @@ throughput decision of whether to raise build concurrency.
   advances the render clock.** Computing the deltas at paint is what ages a card
   honestly across a DEAD poller; on its own it is a slow lie in the other direction,
   because a screen that only advanced its clock would walk a HEALTHY install into
-  staleness — the Anthropic pool's deadline is two minutes, so the card would floor
-  its gauges and drop capacity to "unknown" about two and a half minutes after the
+  staleness — the Anthropic pool's deadline is two and a half minutes
+  (`60_000 × 2 + 30_000`, the constant rather than a round number in prose), so the
+  card would floor its gauges and drop capacity to "unknown" that soon after the
   screen opened while a live poller wrote a fresh row every 60 seconds. One timer
   drives both, so the data and the clock it is measured against cannot drift, and the
   parity test bounds the RELATIONSHIP rather than the number

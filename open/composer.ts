@@ -3934,6 +3934,14 @@ export function buildOpenGraphComposer(
     const usageSamplesStore = new UsageSamplesStore({ db })
     const credentialUsageMonitor = new CredentialUsageMonitor({
       env,
+      // The API base is threaded from THIS composition's env, the same way the Kimi
+      // poller's is below. `ANTHROPIC_BASE_URL` is the variable the Anthropic SDK
+      // itself reads, so a box pointed at a gateway keeps its gauge pointed at the
+      // same place its turns go — and it is what lets the refusal path be exercised
+      // against the composed handler without touching a real host.
+      ...(typeof env['ANTHROPIC_BASE_URL'] === 'string' && env['ANTHROPIC_BASE_URL'].length > 0
+        ? { probeDeps: { apiBaseUrl: env['ANTHROPIC_BASE_URL'] } }
+        : {}),
       onStanding: createCredentialLapseNotifier({ deliver, topic_id: ownerNoticeTopic }),
       // PERSIST every reading, so the series outlives the 60-second tick. Before this
       // the monitor measured continuously and remembered nothing: it could say a window
@@ -4009,8 +4017,21 @@ export function buildOpenGraphComposer(
       switch (pool) {
         case 'anthropic': {
           const credential = resolveActiveCredential(env)
-          if (credential.kind === 'measurable') return 'connected'
-          return credential.reason === 'unsupported_credential' ? 'no_meter' : 'not_connected'
+          if (credential.kind !== 'measurable') {
+            return credential.reason === 'unsupported_credential' ? 'no_meter' : 'not_connected'
+          }
+          // A CREDENTIAL ON DISK IS NOT A CREDENTIAL UPSTREAM ACCEPTS, and the file
+          // is the only thing `resolveActiveCredential` reads — it performs no
+          // validity check, so a revoked token resolves `measurable` forever. The
+          // probe's 401 drops the cached reading and writes no sample, so without
+          // this the card sat on "No readings yet." for the one pool that HAS a
+          // shipping writer: asked, refused, and promising a first reading that
+          // could never arrive. The standing is read PER REQUEST from the live
+          // monitor and never latched into a sample, so the card recovers the moment
+          // a tick succeeds — the same rule the Kimi arm below follows, and a
+          // transient failure (`indeterminate`) stays `connected` for the same
+          // reason: a dropped packet must not repaint the card as broken.
+          return credentialUsageMonitor.readStanding() === 'lapsed' ? 'unreadable' : 'connected'
         }
         case 'kimi': {
           if (!kimiConfigured()) return 'not_connected'

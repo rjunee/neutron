@@ -273,8 +273,8 @@ describe('the two clients format identically', () => {
   })
 
   test('formatWindowFraction agrees, and floors a stale reading rather than blanking it', () => {
-    const live: web.ProjectedWindow = { ...WINDOW, floor: false }
-    const stale: web.ProjectedWindow = { ...WINDOW, floor: true }
+    const live: web.ProjectedWindow = { ...WINDOW, floor: false, rolled: false }
+    const stale: web.ProjectedWindow = { ...WINDOW, floor: true, rolled: false }
     expect(mobile.formatWindowFraction(live)).toBe(web.formatWindowFraction(live))
     expect(mobile.formatWindowFraction(stale)).toBe(web.formatWindowFraction(stale))
     expect(mobile.formatWindowFraction(live)).toBe('43%')
@@ -391,6 +391,39 @@ describe('the two clients format identically', () => {
     expect(unreadable).toContain("didn't produce a reading")
     // Still no number. Loud and EMPTY — never a zero.
     expect(unreadable).not.toContain('0%')
+  })
+
+  test('a REFUSED pool that already has readings still says so — history does not silence it', () => {
+    // ARGUS ROUND 4, THE BLOCKER: the refusal was gated behind `accounts.length === 0`,
+    // which made it unreachable in the failure that actually happens. Samples are kept
+    // for thirty days, so the realistic refusal is not a pool that never read — it is
+    // a pool that read fine for a week and then had its key rotated or its schema
+    // shift underneath it. Behind the empty-card gate that card kept its figures, kept
+    // ageing its chips, and said NOTHING about the fact that nothing newer is coming.
+    const pool = poolOf(
+      [{ session: WINDOW, weekly: win({ fraction: 0.5, window_ms: WEEKLY_MS }) }],
+      { connection: 'unreadable' },
+    )
+    const view = project(pool, NOW)
+    const note = web.connectionNote(view)
+    expect(mobile.connectionNote(view)).toBe(note)
+    expect(note).not.toBeNull()
+    expect(note).toContain("didn't produce a reading")
+    // It names the figures on the card as the LAST ones, so the reader knows the
+    // gauges beside it are terminal rather than merely current.
+    expect(note).toContain('last that could be read')
+    // AND THE READINGS ARE STILL THERE. Loud is not the same as blanking: the last
+    // known values keep rendering with their ages, which is the locked posture.
+    expect(view.accounts).toHaveLength(1)
+    expect(view.accounts[0]!.session!.fraction).toBe(0.43)
+  })
+
+  test('a CONNECTED pool with readings still needs no excuse — the control for the case above', () => {
+    // Without this, moving the refusal ahead of the empty-card gate could have been
+    // done by deleting the gate, and every card in the product would carry a sentence.
+    const view = project(poolOf([{ session: WINDOW }], { connection: 'connected' }), NOW)
+    expect(web.connectionNote(view)).toBeNull()
+    expect(mobile.connectionNote(view)).toBeNull()
   })
 })
 
@@ -641,6 +674,104 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
     expect(line(pool, NOW)).not.toContain('97%')
   })
 
+  test('between two AVAILABLE accounts the headline names the roomier one, not the first', () => {
+    // ARGUS ROUND 4: `capacityRank` maps every `available` standing to one sentinel,
+    // so a strict comparison kept `accounts[0]` — and the store returns accounts
+    // newest-measurement-first, which is not an ordering by capacity at all. The pool
+    // holding a 94%-used account and a 5%-used one headlined the SPENT one and
+    // pointed "Next up:" at it, purely because it was probed most recently.
+    const pool = poolOf([
+      {
+        account_label: 'owner-a',
+        session: win({ fraction: 0.94 }),
+        weekly: win({ fraction: 0.1, window_ms: WEEKLY_MS, reset_at: NOW + 5 * DAY }),
+      },
+      {
+        account_label: 'owner-b',
+        session: win({ fraction: 0.05 }),
+        weekly: win({ fraction: 0.1, window_ms: WEEKLY_MS, reset_at: NOW + 5 * DAY }),
+      },
+    ])
+    const view = project(pool, NOW)
+    expect(view.capacity.available_now).toBe(2)
+    expect(view.capacity.next_account_label).toBe('owner-b')
+    expect(nextUp(pool, NOW)).toBe('Next up: owner-b')
+    // 94% is owner-A's headroom. Quoting it is the failure: it tells the owner the
+    // pool is nearly full when the account he would be routed to is nearly empty.
+    // owner-B's own binding window is its weekly one (10% used), and that is the
+    // figure quoted — the headline and the account it names agree.
+    expect(line(pool, NOW)).toBe('2 available now (7d window 10% used)')
+  })
+
+  test('the same tie, ordered the other way, still names the roomier account', () => {
+    // The negative control for the case above: a fix that simply took the LAST
+    // account instead of the first would pass it and fail here.
+    const pool = poolOf([
+      {
+        account_label: 'owner-b',
+        session: win({ fraction: 0.05 }),
+        weekly: win({ fraction: 0.1, window_ms: WEEKLY_MS, reset_at: NOW + 5 * DAY }),
+      },
+      {
+        account_label: 'owner-a',
+        session: win({ fraction: 0.94 }),
+        weekly: win({ fraction: 0.1, window_ms: WEEKLY_MS, reset_at: NOW + 5 * DAY }),
+      },
+    ])
+    expect(project(pool, NOW).capacity.next_account_label).toBe('owner-b')
+  })
+
+  test('a window at EXACTLY 95% used is spent — the boundary lands pessimistic', () => {
+    // ARGUS ROUND 4: `1 - fraction <= SPENT_HEADROOM_FRACTION` is false at 0.95,
+    // because `1 - 0.95` is `0.050000000000000044` in binary floating point. One
+    // float epsilon on the OPTIMISTIC side of a constant whose docstring commits it
+    // to erring pessimistic — and it is exactly the value a provider reporting whole
+    // percents will hand over.
+    const at = (fraction: number): web.ProjectedAccount =>
+      project(poolOf([{ session: win({ fraction, reset_at: NOW + 20 * MINUTE }) }]), NOW)
+        .accounts[0]!
+    expect(at(0.95).capacity.state).toBe('returns')
+    // And the boundary is a boundary, not a blanket: a hair under it is still room.
+    expect(at(0.9499).capacity.state).toBe('available')
+  })
+
+  test('a window that ROLLED between measurement and paint is not quoted at its pre-roll figure', () => {
+    // ARGUS ROUND 4: `windowCapacity` already treats a passed reset as available, but
+    // the tie-break that picks the BINDING window still ranked the pre-roll fraction —
+    // so a session window measured at 99% and reset thirty seconds ago was named as
+    // the account's constraint, and the card printed "1 available now (5h window 99%
+    // used)" beside a row saying that same window is available now.
+    const pool = poolOf([
+      {
+        session: win({ fraction: 0.99, reset_at: NOW - 30_000 }),
+        weekly: win({ fraction: 0.2, window_ms: WEEKLY_MS, reset_at: NOW + 5 * DAY }),
+      },
+    ])
+    const view = project(pool, NOW)
+    expect(view.capacity.available_now).toBe(1)
+    // The rolled window is not the constraint — the weekly one is, and it is the
+    // figure the headline quotes.
+    expect(view.capacity.next_binding_window).toBe('weekly')
+    expect(line(pool, NOW)).toBe('1 available now (7d window 20% used)')
+    expect(line(pool, NOW)).not.toContain('99%')
+  })
+
+  test('when BOTH windows have rolled the headline says "just reset", never a pre-roll percent', () => {
+    // The other half: with nothing left to name as a constraint, the binding window
+    // IS a rolled one — and printing its fraction would assert a utilisation for a
+    // window that no longer exists.
+    const pool = poolOf([
+      {
+        session: win({ fraction: 0.99, reset_at: NOW - 30_000 }),
+        weekly: win({ fraction: 0.9, window_ms: WEEKLY_MS, reset_at: NOW - 45_000 }),
+      },
+    ])
+    // Neither window can be quoted, so the tie falls to declaration order and the
+    // sentence stays true either way: it names a window, and says it just reset.
+    expect(line(pool, NOW)).toBe('1 available now (5h window just reset)')
+    expect(line(pool, NOW)).not.toContain('%')
+  })
+
   test('an account nobody can vouch for never becomes the headline', () => {
     // `unknown` sorts LAST. Pointing the owner at the account with no evidence is
     // the same optimism as calling an absent reset "now".
@@ -724,10 +855,10 @@ describe('the poll cadence is bounded by the STORE’s staleness deadline', () =
   test('both clients poll on the same interval, and it is strictly under the tightest deadline', () => {
     // THE BUG THIS PINS: a screen that computes its deltas at paint but never
     // refetches. Ageing a held payload is right across a DEAD poller and wrong
-    // across a live one — the Anthropic pool goes stale at two minutes, so a screen
-    // left open would floor its gauges to "≥" and drop capacity to "unknown" about
-    // two and a half minutes in while a healthy poller wrote a fresh row every 60
-    // seconds behind it, and would stay that way forever.
+    // across a live one — the Anthropic pool goes stale at two and a half minutes
+    // (`60_000 × 2 + 30_000`), so a screen left open would floor its gauges to "≥"
+    // and drop capacity to "unknown" that soon in while a healthy poller wrote a
+    // fresh row every 60 seconds behind it, and would stay that way forever.
     //
     // The RELATIONSHIP is pinned, not the number: the number that matters belongs
     // to the store, so raising a pool's cadence without raising its deadline can

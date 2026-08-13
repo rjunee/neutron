@@ -135,8 +135,9 @@ dead, which is exactly backwards.
 **And the payload is REFETCHED, which is the other half of the same rule.** Moving
 the deltas to the paint fixes the lie; on its own it does not fix the data. A screen
 that only advanced its clock would walk a perfectly HEALTHY install into staleness:
-the Anthropic pool's deadline is two minutes, so roughly two and a half minutes after
-the screen opened the card would floor its gauges to "≥", drop capacity to "unknown"
+the Anthropic pool's deadline is two and a half minutes (`60_000 × 2 + 30_000` — the
+constant, not a round number in prose), so that soon after the screen opened the card
+would floor its gauges to "≥", drop capacity to "unknown"
 and stay there for as long as the owner left it up — while the poller behind it wrote
 a fresh row every 60 seconds. Ageing a held payload is right across a DEAD poller and
 wrong across a live one, and a screen that paints a working install as broken is the
@@ -362,21 +363,39 @@ than merely unreached.
 
 A fourth `connection` value, `unreadable`, and it is the one that does not resolve
 itself. "No readings yet." promises a first reading is coming; when the gauge has
-been asked and its answer refused — a rejected key, or a payload shape this build does
-not model — none is. Kimi's usages schema is unpublished, so that is the realistic
-first-install failure, and without this the card would say "No readings yet." forever
-while the poller logged the key names to a file nobody is watching.
+been asked and its answer refused — a rejected key, a non-auth 4xx from a path this
+build has wrong, or a payload shape it does not model — none is. Kimi's usages schema
+is unpublished, so that is the realistic first-install failure, and without this the
+card would say "No readings yet." forever while the poller logged the key names to a
+file nobody is watching.
 
-`KimiUsageMonitor.readStanding()` reports what the last completed read produced; the
-composer reads it PER REQUEST (never latched into a sample) so the card recovers the
-moment a tick succeeds. A transient error — dropped packet, 5xx — stays `connected`,
-because the next tick retries and a dropped packet must not repaint the card as
-broken. The card still shows NO number: loud and empty, never a zero.
+**It is decided by the live probe, never by a credential file, and on BOTH pools that
+have a writer.** `resolveActiveCredential` answers "is a credential present", which is
+a different question from "does upstream still accept it" and performs no validity
+check — so a revoked Anthropic token resolved as present forever while its 401 dropped
+the cache and wrote no sample, leaving the ONE pool with a shipping writer stuck on a
+sentence promising a reading that could never arrive. So the composer reads
+`CredentialUsageMonitor.readStanding()` for Anthropic and
+`KimiUsageMonitor.readStanding()` for Kimi, PER REQUEST and never latched into a
+sample, so a card recovers the moment a tick succeeds. A transient failure — dropped
+packet, timeout, 5xx — stays `connected` on both, because the next tick retries and a
+dropped packet must not repaint the card as broken.
 
-`open/__tests__/usage-dashboard-unreadable-wiring.test.ts` proves it end to end
-against the production composer, with a loopback server answering 200 with an
-unmodelled body — a hand-built `connection: 'unreadable'` literal would prove only
-that a test file can write one.
+**The sentence is a banner above the rows, not a replacement for them.** Samples are
+retained thirty days, so the refusal that actually happens is not an empty pool — it
+is a pool that read fine for a week and then had its key rotated or its schema shift
+underneath it. Gated on the card being empty, that card kept its figures, kept ageing
+its chips, and said nothing about the fact that no reading would ever replace them.
+The last known values keep rendering with their age chips beside the note; an empty
+refused card still shows NO number: loud and empty, never a zero.
+
+Two wiring tests prove it end to end against the production composer, each with a
+positive control that a pool nobody asked is not reported unreadable —
+`open/__tests__/usage-dashboard-unreadable-wiring.test.ts` against a loopback server
+answering 200 with an unmodelled body, and
+`open/__tests__/usage-dashboard-lapsed-wiring.test.ts` against one answering 401 with
+a subscription token on disk. A hand-built `connection: 'unreadable'` literal would
+prove only that a test file can write one.
 
 ## The one thing this phase still cannot demonstrate
 
@@ -418,8 +437,20 @@ deliberately NOT guessed at here.
   so the pair cannot pass on a parser that refuses everything), and a one-window
   response refused in both directions.
 - `open/__tests__/kimi-usage-monitor.test.ts` — gauge-failure-is-loud, by count,
-  with a control write; and the read standing, including the control that a
-  transport error is NOT reported as a refusal.
+  with a control write; and the read standing, including a permanent non-auth 4xx
+  reported as a refusal and the control that a transport error is NOT.
+- `open/__tests__/credential-usage-monitor.test.ts` — the Anthropic standing the card
+  reads: null before the first tick, `healthy` on a good read, `lapsed` on a 401, and
+  `indeterminate` on a dropped packet, plus the case that a throwing standing observer
+  does not cost the card the fact that the credential was rejected.
+- `auth/__tests__/credential-usage-probe.test.ts` — the reset plausibility bound, on
+  both sides, with the control that an instant a minute in the past (a window that
+  just rolled) is still believed.
+- `open/__tests__/usage-dashboard-lapsed-wiring.test.ts` — **against the production
+  composer's output.** A subscription token on disk and a loopback server answering
+  401: the composed payload reports `unreadable` for the Anthropic pool, still with no
+  accounts and no `measured_at`, and the sentence comes from the shipped client. The
+  mutant it kills is deriving "connected" from the credential file.
 - `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` — **also against the
   production composer's output.** The sibling wiring test points the poller at a
   CLOSED port, so it can only ever produce a transport error; this one boots the real
@@ -447,7 +478,13 @@ deliberately NOT guessed at here.
   formatters AND the twin projections side by side, including the killed poller
   ageing off one payload, the half-measured account refused in both directions with a
   positive control, and the lapsed-label ghost counted twice INSIDE the staleness
-  window and only subtracting after it.
+  window and only subtracting after it. It also pins the two headroom tie-breaks (the
+  roomier of two AVAILABLE accounts headlines the pool, asserted with the payload in
+  both orders so a fix that simply took the last account goes red), the spent boundary
+  at exactly 95%, and a window that rolled between measurement and paint rendering
+  "just reset" rather than at its pre-roll percentage. Both screens additionally assert
+  that a REFUSED pool which already has readings shows the figures AND the sentence,
+  with a control that a healthy pool carries no banner.
 
 ## Wire-shape change worth naming
 
