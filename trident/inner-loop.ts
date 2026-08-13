@@ -53,6 +53,7 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
+import { modelTierRegistry } from './model-tiers.ts'
 import { parsePhaseModelConfig } from './phase-models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
@@ -301,6 +302,16 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
       sonnet: SONNET_MODEL,
       fast: FAST_MODEL,
     },
+    // THE TIER REGISTRY, resolved here and threaded whole — the same reason `models`
+    // is: the workflow script cannot import it. This is what lets an owner override
+    // name a TIER (`terra`) and the dispatch reach a model id (`gpt-5.6-terra`)
+    // through the right transport, without the workflow holding a second copy of the
+    // registry that could disagree with the pane the owner read.
+    //
+    // `models` above is NOT derived from this and is deliberately left alone: it is
+    // the pre-existing role-routing map for the four Claude tiers, and rewriting it
+    // through the registry would change a working default path for no behaviour.
+    modelTiers: modelTierArgs(),
     // Per-phase overrides, re-validated at this boundary (see `phase_models`).
     // OMITTED rather than sent as `{}` when there is nothing to override, so a run
     // on an instance that has never touched the setting produces the same args it
@@ -309,6 +320,29 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // trust when something does go wrong.
     ...phaseModelArgs(input.phase_models),
   }
+}
+
+/**
+ * The tier registry as a plain map the workflow can index: tier → what it resolves to
+ * and how it is reached.
+ *
+ * A map rather than the descriptor array, because every workflow lookup is by tier
+ * name. Resolved at BUILD-ARGS time (not module load) so a watchdog model upgrade
+ * reaches the very next run.
+ */
+function modelTierArgs(): Record<
+  string,
+  { model_id: string; transport: string; env_var: string | null }
+> {
+  const out: Record<string, { model_id: string; transport: string; env_var: string | null }> = {}
+  for (const entry of modelTierRegistry()) {
+    out[entry.tier] = {
+      model_id: entry.model_id,
+      transport: entry.transport,
+      env_var: entry.env_var,
+    }
+  }
+  return out
 }
 
 /**

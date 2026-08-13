@@ -2,6 +2,79 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — the code-generation model selector: a table, three model families, and the wiring that makes GPT and Kimi selectable (#560)
+
+The pane could already put a build step on a different Claude tier. It could not
+offer a GPT or a Kimi model, because "which model" was only half an answer: the
+workflow cannot reach a non-Anthropic model through `agent({model})` (that resolves
+against Claude Code's own endpoint — `trident/kimi-review-cli.ts`), so those models
+are reachable ONLY as a CLI subprocess. Both wrappers already accepted a model —
+`trident/codex-review.sh` honours `CODEX_REVIEW_MODEL`, `trident/kimi-review-cli.ts`
+honours `KIMI_MODEL` — so this was wiring, not new capability.
+
+**One registry, and a tier now carries its transport.** `trident/model-tiers.ts` is
+the single place a model lives: `{tier, provider, model_id, transport, wrapper,
+env_var, requires}`, with `model_id` resolved at CALL time (the Claude tiers through
+`runtime/models.ts`, so a watchdog upgrade reaches the pane and the next build).
+Tiers added: `sol` / `terra` / `luna` (GPT 5.6, through the Codex CLI) and `k3`
+(Kimi K3). Retiring a model is one edit here rather than a hunt through a component,
+a router and a shell script — and `trident/__tests__/model-tiers.test.ts` pins each
+cli tier against the wrapper's own default AND greps that wrapper for the env knob
+the tier names, so a knob nobody reads cannot ship as a working selector.
+
+**The cross-model lanes are routed.** `argus:codex` / `argus:kimi` and their retry
+lanes sat in `UNROUTED_LABELS` on the grounds that the reviewing model was the CLI's
+own business — true only while nothing threaded one in. They are now the
+`review_codex` / `review_kimi` phases (`trident/phase-models.ts`), defaulting to the
+exact models the wrappers pinned themselves. `UNROUTED_LABELS` stays, empty: its job
+is to force a decision about a NEW lane, which is unchanged. The registry reaches the
+workflow as `args.modelTiers` (`trident/inner-loop.ts`), and
+`trident/inner-workflow.mjs` puts a cli-transport phase's resolved id on the
+subprocess command line instead of on the spawn — `withModel` now refuses to set a
+model at all for a cli route, which is the one failure the transport field exists to
+prevent.
+
+**A tier, and only a tier.** `model` used to accept a literal vendor id as an escape
+hatch. That hatch is closed: a bare id carries no transport, so `gpt-5.6-terra` typed
+into the old field looked like a pin and was really a Claude-endpoint lookup for a
+model only reachable as a subprocess. A retired tier or a legacy literal is now
+rejected at the settings boundary, the step falls back to its default, and the
+payload's new `rejected` map (via `readTridentPhaseModelsWithRejected`,
+`gateway/storage/owner-metadata.ts`) lets the row render it STRUCK THROUGH naming
+what is running instead. The workflow backstops the same case with
+`reason=unknown-tier` and the default. Moving a step across executors is refused the
+same way, with a message naming both.
+
+**The table.** One row per step — name · model dropdown · effort dropdown — keeping
+each row's one-line explanation, replacing the pill grid, on both clients
+(`landing/chat-react/SettingsTab.tsx`, `app/app/codegen.tsx`; React Native has no
+`<select>`, so its dropdown is a tap-to-reveal list). Every option names the model
+the tier resolves to right now (`fast · claude-haiku-4-5`), which is the owner's
+specific request: explicit about the actual model without the pane needing an edit
+when a tier's target moves. A tier from another executor, or one this install has no
+credential for, is DISABLED WITH THE REASON — never hidden; a missing option nobody
+can account for is exactly how ISSUES #551 stayed invisible for weeks. A CLI step's
+effort cell says "set by the CLI" instead of offering a control that changes nothing.
+Availability comes from the same resolvers the build uses (`open/composer.ts` now
+shares one `kimiConfigured()` between the pane and `resolve_kimi_configured`), so the
+greyed state and the panelist that actually runs cannot drift apart.
+
+**Scope is labelled honestly, not changed.** Storage is
+`instance_metadata.trident_phase_models`, keyed by instance slug with no project
+dimension, while the pane sits in project settings. The section now reads "every
+project on this computer". Making it genuinely per-project is a separate decision and
+is NOT in this change.
+
+**What the tests assert.** `trident/__tests__/cross-model-dispatch.test.ts` runs the
+production `buildWorkflowArgs` output through the real `inner-workflow.mjs` and
+asserts the RESOLVED id on the dispatch command — `CODEX_REVIEW_MODEL='gpt-5.6-sol'`
+by default (the byte-for-byte behaviour of an install that never opened the pane) and
+`'gpt-5.6-terra'` when the owner picks `terra` — plus the three degrade paths.
+`landing/chat-react/__tests__/codegen-settings-web.test.tsx` stopped asserting the
+section from its source and now MOUNTS the tab and drives the real controls; the
+mobile screen's presses were already real. Both were mutation-checked: breaking the
+select handler and the env-prefix builder each turned the relevant test red.
+
 ## 2026-08-13 — REVIEW DEVIATION, recorded on purpose: P1 + P1.5 landed on ONE panel seat
 
 The two entries below merged after review by `argus:codex` ALONE — 21 rounds on

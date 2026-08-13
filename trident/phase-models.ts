@@ -42,25 +42,41 @@
  *     fine, so the workflow logs it loudly and uses the default. The run continues;
  *     the log says exactly what was ignored.
  *
- * ── A tier name and a literal id are both allowed, on purpose ────────────────
- * `model` accepts either a TIER name (`opus`, `fable`, …), which resolves through the
- * threaded registry and therefore follows a model upgrade automatically, or a literal
- * model id, which does not. The tier is the better answer almost always and is what
- * the UI should offer first; the literal escape hatch exists because pinning an exact
- * id is sometimes the whole point (a specific snapshot, a model the registry does not
- * know yet) and the alternative is editing code again.
+ * ── A TIER, and only a tier ──────────────────────────────────────────────────
+ * `model` must name a tier in {@link modelTierRegistry}. It used to also accept a
+ * literal vendor id as an escape hatch, and that hatch is now CLOSED, because the
+ * registry made it unsafe rather than merely redundant: a tier carries a TRANSPORT,
+ * and a bare id does not. `gpt-5.6-terra` typed into the old text field looked like a
+ * pin and was really a Claude-endpoint lookup for a model that is only reachable as a
+ * subprocess — a build that quietly ran on the wrong model. A tier cannot be
+ * ambiguous that way, and adding one is a single edit in `model-tiers.ts`, which is
+ * what the hatch existed to avoid.
  *
- * NOTE ON SUBSTRATES. Every phase here dispatches a CLAUDE agent. Pointing a phase at
- * a non-Claude model id will not reach that model — a Codex or Kimi model runs as a
- * separate subprocess, which is a different execution path, not a different id in the
- * same one. Validation therefore accepts any well-formed string (it cannot know every
- * valid id) and this limitation is stated where the UI can quote it, rather than being
- * discovered as a run that quietly used the wrong model.
+ * A stored value that is NOT a tier (an older build's literal pin, or a tier since
+ * retired) is therefore invalid — and it degrades VISIBLY: it is rejected here, the
+ * phase falls back to its default, and {@link ParsedPhaseModelConfig.rejected} carries
+ * the offending value so the pane can show it struck through and say so.
+ *
+ * ── TRANSPORT IS A CAPABILITY, so a phase cannot take just any tier ──────────
+ * Every phase here dispatches through ONE executor. `agent({model})` resolves against
+ * Claude Code's own endpoint, so a GPT/Kimi tier cannot run a Claude phase; the codex
+ * wrapper reads `CODEX_REVIEW_MODEL`, so a Kimi tier cannot run it either. Moving a
+ * phase across transports is refused HERE, where the owner is present to read why,
+ * rather than being discovered as a run that used the wrong model.
  */
 
-/** The model TIERS the workflow resolves through the threaded registry. */
-export const MODEL_TIERS = ['fable', 'opus', 'sonnet', 'fast'] as const
-export type ModelTier = (typeof MODEL_TIERS)[number]
+import {
+  MODEL_TIERS,
+  type ModelTier,
+  type TierGroup,
+  type Transport,
+  isModelTier,
+  modelTier,
+  tiersAreInterchangeable,
+} from './model-tiers.ts'
+
+export { MODEL_TIERS, isModelTier }
+export type { ModelTier }
 
 /**
  * Reasoning-effort levels, lowest to highest.
@@ -138,6 +154,26 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     default: { tier: 'opus', effort: 'high' },
   },
   {
+    key: 'review_codex',
+    label: 'Cross-model review (Codex)',
+    description:
+      'A second opinion from a GPT model, run as a Codex CLI subprocess — a different model family than the rest of the panel.',
+    labels: [{ label: 'argus:codex' }, { label: 'argus:codex-retry' }],
+    // `sol` is the flagship GPT 5.6 tier and matches the wrapper's own standing pin,
+    // so an install that never opens the pane dispatches exactly what it dispatched
+    // before this phase existed. The effort below is INERT — a CLI chooses its own
+    // reasoning effort, and no dispatch reads this value (see `phaseSupportsEffort`).
+    default: { tier: 'sol', effort: 'high' },
+  },
+  {
+    key: 'review_kimi',
+    label: 'Cross-model review (Kimi)',
+    description:
+      'A second opinion from Kimi K3, run as a CLI subprocess — a third model family, so the panel is not two copies of one set of blind spots.',
+    labels: [{ label: 'argus:kimi' }, { label: 'argus:kimi-retry' }],
+    default: { tier: 'k3', effort: 'high' },
+  },
+  {
     key: 'synthesis',
     label: 'Synthesis / arbitration',
     description: 'Merges every reviewer’s verdict into one, and decides what blocks a merge.',
@@ -163,38 +199,23 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
 /**
  * Agent labels that are deliberately NOT model-configurable, with the reason.
  *
- * The cross-model reviewers dispatch an external CLI in a subprocess; the Claude agent
- * wrapping them only runs a command and maps an exit code, so "which model reviews"
- * for those lanes is decided by the CLI's own configuration, not here. Offering a
- * model control that could not affect the review would be a lie in the UI.
+ * CURRENTLY EMPTY, and that is a state to keep rather than a list to delete. The four
+ * cross-model lanes (`argus:codex`, `argus:kimi` and their retries) lived here on the
+ * grounds that "the reviewing model is the CLI's own configuration" — true only for as
+ * long as nothing threaded a model INTO the CLI. Both wrappers already read an env
+ * knob (`CODEX_REVIEW_MODEL`, `KIMI_MODEL`), so the lanes are now routed by the
+ * `review_codex` / `review_kimi` phases and were removed from this list deliberately.
  *
- * The coverage test requires every workflow label to be either claimed by a phase or
- * listed here, so adding a lane forces a decision instead of allowing a silent
- * fallthrough.
+ * The list itself stays because its JOB is unchanged: the coverage test requires every
+ * workflow label to be either claimed by a phase or listed here WITH A REASON, so a
+ * new lane forces a decision instead of silently falling through to the default.
  */
 export const UNROUTED_LABELS: ReadonlyArray<{ label: string; dynamic?: boolean; why: string }> =
-  Object.freeze([
-    {
-      label: 'argus:codex',
-      why: 'dispatches the codex CLI in a subprocess; the reviewing model is the CLI’s own configuration.',
-    },
-    {
-      label: 'argus:codex-retry',
-      why: 'the retry of the same subprocess lane.',
-    },
-    {
-      label: 'argus:kimi',
-      why: 'dispatches the Kimi review CLI in a subprocess; the reviewing model is that CLI’s.',
-    },
-    {
-      label: 'argus:kimi-retry',
-      why: 'the retry of the same subprocess lane.',
-    },
-  ])
+  Object.freeze([])
 
 /** An owner's override for one phase. Either field may be set alone. */
 export interface PhaseModelOverride {
-  /** A {@link ModelTier} name, or a literal model id. */
+  /** A {@link ModelTier} name. A literal vendor id is NOT accepted — see the header. */
   model?: string
   effort?: Effort
 }
@@ -212,6 +233,50 @@ export interface ParsedPhaseModelConfig {
    * believing a phase is pinned when it is not.
    */
   errors: ReadonlyArray<string>
+  /**
+   * The REJECTED values, per known phase, so a pane can show what was dropped.
+   *
+   * A stored override naming a retired tier must not just vanish into the default:
+   * the owner chose something, and a control that silently reverts is one they cannot
+   * trust again. The read path keeps this alongside the surviving config so the row
+   * can render the dead value struck through and name the fallback it is using.
+   * Unknown PHASE keys are absent here — there is no row to render them on.
+   */
+  rejected: PhaseModelConfig
+}
+
+/**
+ * The transport a phase dispatches through, derived from its default tier.
+ *
+ * Derived, never restated: the phase table names a tier and the registry owns what a
+ * tier is, so the two cannot drift into disagreeing about whether a phase is a Claude
+ * agent or a subprocess.
+ */
+export function phaseTransport(phase: TridentPhase): Transport {
+  return modelTier(phase.default.tier)?.transport ?? 'agent'
+}
+
+/**
+ * The EXECUTOR GROUP a phase dispatches on — `claude`, `codex`, `kimi`.
+ *
+ * The one question a settings row needs answered: a row may offer exactly the tiers in
+ * its own group, because those are the only ones its dispatch can reach. Derived from
+ * the phase's default tier, so the pane and the run cannot disagree.
+ */
+export function phaseGroup(phase: TridentPhase): TierGroup {
+  return modelTier(phase.default.tier)?.group ?? 'claude'
+}
+
+/**
+ * Does the effort control mean anything for this phase?
+ *
+ * Only for `agent` transport. A `cli` lane's reasoning effort is the CLI's own
+ * setting, which the wrapper does not expose — so the pane renders that cell disabled
+ * with the reason instead of offering a dropdown that changes nothing. (A phase's
+ * stored `default.effort` is inert for those rows and never reaches a dispatch.)
+ */
+export function phaseSupportsEffort(phase: TridentPhase): boolean {
+  return phaseTransport(phase) === 'agent'
 }
 
 const PHASE_KEYS: ReadonlySet<string> = new Set(TRIDENT_PHASES.map((p) => p.key))
@@ -224,11 +289,6 @@ export function isPhaseKey(key: string): boolean {
 /** True iff `value` is one of the {@link EFFORTS}. */
 export function isEffort(value: unknown): value is Effort {
   return typeof value === 'string' && (EFFORTS as ReadonlyArray<string>).includes(value)
-}
-
-/** True iff `value` names a {@link MODEL_TIERS} tier (rather than a literal id). */
-export function isModelTier(value: unknown): value is ModelTier {
-  return typeof value === 'string' && (MODEL_TIERS as ReadonlyArray<string>).includes(value)
 }
 
 /** Look up a phase by key, or null. */
@@ -263,13 +323,12 @@ export function isUnroutedLabel(label: string): boolean {
 }
 
 /**
- * The maximum length accepted for a literal model id.
+ * The maximum length accepted for a model value.
  *
- * A bound rather than a pattern: model ids are vendor strings whose shape changes
- * (`claude-opus-5`, `gpt-5.6-sol`), so a regex would reject valid future ids and send
- * the owner back to editing code — the exact problem this module exists to remove. A
- * length cap plus a control-character check is enough to keep a pathological value out
- * of a spawn argument without pretending to know the vendor's naming.
+ * Every accepted value is now a registry tier, so the length cap and the
+ * control-character check below are no longer the whole gate — they are the FIRST
+ * gate, and they still matter: they keep a hostile or corrupt stored value from being
+ * echoed back into an error message (and from there into a log) at arbitrary length.
  */
 const MODEL_ID_MAX = 128
 
@@ -277,17 +336,28 @@ const MODEL_ID_MAX = 128
  * Validate owner-supplied phase configuration.
  *
  * Rejects, with a message naming the offending key: an unknown phase, a non-object
- * entry, an unknown field, an empty/oversized/control-character model id, and an
+ * entry, an unknown field, a model that is not a registry TIER, a tier whose transport
+ * the phase cannot dispatch, an effort on a phase that has no effort control, and an
  * effort outside {@link EFFORTS}. An entry that validates but sets nothing is dropped
  * rather than stored, so `{}` never reads as "configured".
  */
 export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
   const errors: string[] = []
   const config: Record<string, PhaseModelOverride> = {}
+  // What was thrown away, per phase, so the pane can show it struck through rather
+  // than silently reverting a choice the owner made.
+  const rejected: Record<string, PhaseModelOverride> = {}
+  const reject = (key: string, patch: PhaseModelOverride): void => {
+    rejected[key] = { ...rejected[key], ...patch }
+  }
 
-  if (raw === null || raw === undefined) return { config: {}, errors: [] }
+  if (raw === null || raw === undefined) return { config: {}, errors: [], rejected: {} }
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    return { config: {}, errors: ['phase model config must be an object of phase → { model, effort }'] }
+    return {
+      config: {},
+      errors: ['phase model config must be an object of phase → { model, effort }'],
+      rejected: {},
+    }
   }
 
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
@@ -301,6 +371,7 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
       errors.push(`phase '${key}' must be an object with optional 'model' and 'effort'`)
       continue
     }
+    const phase = phaseByKey(key)!
     const entry: PhaseModelOverride = {}
     for (const [field, fieldValue] of Object.entries(value as Record<string, unknown>)) {
       if (field === 'model') {
@@ -328,6 +399,27 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           errors.push(`phase '${key}': 'model' contains control characters`)
           continue
         }
+        if (!isModelTier(model)) {
+          // A retired tier and an older build's literal id land here together, and
+          // both mean the same thing to a dispatch: a value nothing can resolve.
+          // Named in the message AND kept in `rejected`, so the pane can show what
+          // was dropped instead of quietly reverting to the default.
+          errors.push(
+            `phase '${key}': '${model}' is not a model tier — expected one of: ${MODEL_TIERS.join(', ')}`,
+          )
+          reject(key, { model })
+          continue
+        }
+        if (!tiersAreInterchangeable(phase.default.tier, model)) {
+          // Not a preference — a capability. See `tiersAreInterchangeable`.
+          const want = modelTier(phase.default.tier)
+          const got = modelTier(model)
+          errors.push(
+            `phase '${key}': '${model}' runs ${got?.transport === 'cli' ? `as a ${got.wrapper ?? 'CLI'} subprocess` : 'as a Claude agent'}, which cannot run this step — ${key} dispatches ${want?.transport === 'cli' ? `through ${want.wrapper ?? 'a CLI'}` : 'a Claude agent'}`,
+          )
+          reject(key, { model })
+          continue
+        }
         entry.model = model
         continue
       }
@@ -336,6 +428,15 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           errors.push(
             `phase '${key}': 'effort' must be one of: ${EFFORTS.join(', ')} (got ${JSON.stringify(fieldValue)})`,
           )
+          continue
+        }
+        if (!phaseSupportsEffort(phase)) {
+          // Storing an effort no dispatch reads would be a control the owner sets and
+          // nothing honours — the exact shape this module exists to prevent.
+          errors.push(
+            `phase '${key}': 'effort' is not settable — this step runs as a CLI subprocess, which chooses its own reasoning effort`,
+          )
+          reject(key, { effort: fieldValue })
           continue
         }
         entry.effort = fieldValue
@@ -347,7 +448,7 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
     if (entry.model !== undefined || entry.effort !== undefined) config[key] = entry
   }
 
-  return { config, errors }
+  return { config, errors, rejected }
 }
 
 /**

@@ -26,6 +26,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   readTridentPhaseModels,
+  readTridentPhaseModelsWithRejected,
   writeTridentPhaseModels,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
 
@@ -174,6 +175,22 @@ describe('the chain is actually connected — each link asserted separately', ()
     expect(src.includes('readTridentPhaseModels(db, owner_handle)')).toBe(true)
   })
 
+  it('the COMPOSER answers availability from the SAME resolvers the build uses', async () => {
+    // A pane with its own notion of "configured" would grey the wrong option — or
+    // offer a tier whose review then defers and blocks the merge for a reason the
+    // owner cannot see.
+    const src = strip(
+      await Bun.file(new URL('../../open/composer.ts', import.meta.url)).text(),
+    )
+    const start = src.indexOf('const tridentPhaseModelsSurface = createTridentPhaseModelsSurface({')
+    expect(start).toBeGreaterThan(-1)
+    const block = src.slice(start, src.indexOf('\n    })', start))
+    expect(block.includes('codexCredentialService.resolveActiveCodexHome')).toBe(true)
+    expect(block.includes('kimi: kimiConfigured()')).toBe(true)
+    // …and the trident launch reads the very same function, so the two cannot drift.
+    expect(src.includes('resolve_kimi_configured: kimiConfigured')).toBe(true)
+  })
+
   it('the HTTP surface is registered, not merely written', async () => {
     // A surface factory that no composer mounts is a route that 404s while its
     // tests pass.
@@ -188,14 +205,15 @@ describe('the chain is actually connected — each link asserted separately', ()
 
 describe('the HTTP surface', () => {
   const auth = { resolve: async () => ({ user_id: 'owner', project_slug: SCOPE }) } as never
-  const surfaceFor = async () => {
+  const surfaceFor = async (connections = { codex: true, kimi: true }) => {
     const { createTridentPhaseModelsSurface } = await import(
       '@neutronai/gateway/http/trident-phase-models-surface.ts'
     )
     return createTridentPhaseModelsSurface({
       auth,
-      read: (scope) => readTridentPhaseModels(db, scope),
+      read: (scope) => readTridentPhaseModelsWithRejected(db, scope),
       write: (scope, input) => writeTridentPhaseModels(db, scope, input),
+      connections: () => connections,
     })
   }
   const req = (method: string, body?: unknown): Request =>
@@ -216,6 +234,64 @@ describe('the HTTP surface', () => {
     expect(phases.every((p) => p.description.length > 20)).toBe(true)
     expect(json['efforts']).toContain('xhigh')
     expect(json['overrides']).toEqual({})
+    // The cross-model lanes are rows now, not an invisible part of the pipeline.
+    expect(phases.some((p) => p.key === 'review_codex')).toBe(true)
+    expect(phases.some((p) => p.key === 'review_kimi')).toBe(true)
+  })
+
+  it('RESOLVES every tier, so a row can name the model it will actually use', async () => {
+    const s = await surfaceFor()
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const tiers = json['model_tiers'] as Array<Record<string, unknown>>
+    // The tier is what the owner picks; the resolved id is what the build runs. A
+    // pane showing only the tier cannot answer "which model is that today", and a
+    // pane hardcoding the id needs an edit every time a tier's target moves.
+    expect(tiers.find((t) => t['tier'] === 'sol')).toMatchObject({
+      model_id: 'gpt-5.6-sol',
+      group: 'codex',
+      available: true,
+    })
+    const fast = tiers.find((t) => t['tier'] === 'fast')!
+    expect(String(fast['model_id'])).toStartWith('claude-haiku')
+    expect(fast['group']).toBe('claude')
+  })
+
+  it('shows an unrunnable tier DISABLED WITH THE REASON, never omitted', async () => {
+    // The install with no Codex connection and no Kimi key. Dropping those options
+    // would leave the owner unable to account for a missing choice — which is how a
+    // whole capability stayed invisible for weeks (ISSUES #551).
+    const s = await surfaceFor({ codex: false, kimi: false })
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const tiers = json['model_tiers'] as Array<Record<string, unknown>>
+    expect(tiers.find((t) => t['tier'] === 'sol')).toMatchObject({
+      available: false,
+      unavailable_reason: 'needs a Codex connection',
+    })
+    expect(tiers.find((t) => t['tier'] === 'k3')).toMatchObject({
+      available: false,
+      unavailable_reason: 'needs a Kimi key',
+    })
+    // The Claude tiers need nothing and stay selectable.
+    expect(tiers.find((t) => t['tier'] === 'opus')!['available']).toBe(true)
+  })
+
+  it('hands back a REFUSED stored value so the row can show what was dropped', async () => {
+    // Written straight past the validator, as a build predating the tier registry
+    // could have: a literal vendor id where a tier is now required.
+    await db.run(
+      `INSERT INTO instance_metadata (instance_slug, trident_phase_models) VALUES (?, ?)`,
+      [SCOPE, JSON.stringify({ build: { model: 'gpt-5.6-sol' } })],
+    )
+    const s = await surfaceFor()
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    // Not applied…
+    expect(json['overrides']).toEqual({})
+    // …and not silently forgotten either: the pane strikes it through and names the
+    // default it fell back to.
+    expect(json['rejected']).toEqual({ build: { model: 'gpt-5.6-sol' } })
   })
 
   it('PUT stores a valid set and echoes it back', async () => {

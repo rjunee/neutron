@@ -42,27 +42,56 @@ const OWNER = {
   token: 'harness-token',
 };
 
-/** A payload shaped like the real surface's, trimmed to two phases. */
-function payload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** A payload shaped like the real surface's, trimmed to three phases. */
+function payload(
+  overrides: Record<string, unknown> = {},
+  rejected: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     phases: [
       {
         key: 'build',
         label: 'Build',
         description: 'Writes the code and the tests, and re-writes them against findings.',
+        group: 'claude',
+        effort_supported: true,
         default: { model: 'opus', effort: 'high' },
       },
       {
         key: 'synthesis',
         label: 'Synthesis / arbitration',
         description: 'Merges every reviewer’s verdict into one and decides what blocks a merge.',
+        group: 'claude',
+        effort_supported: true,
         default: { model: 'fable', effort: 'high' },
       },
+      {
+        // The cross-model row: a different executor, and no effort control of its own.
+        key: 'review_codex',
+        label: 'Cross-model review (Codex)',
+        description: 'A second opinion from a GPT model, run through the Codex CLI.',
+        group: 'codex',
+        effort_supported: false,
+        default: { model: 'sol', effort: 'high' },
+      },
     ],
-    model_tiers: ['fable', 'opus', 'sonnet', 'fast'],
+    model_tiers: [
+      { tier: 'fable', provider: 'anthropic', model_id: 'claude-fable-5', group: 'claude', available: true, unavailable_reason: null },
+      { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', available: true, unavailable_reason: null },
+      { tier: 'sonnet', provider: 'anthropic', model_id: 'claude-sonnet-4-6', group: 'claude', available: true, unavailable_reason: null },
+      { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', available: true, unavailable_reason: null },
+      { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', available: true, unavailable_reason: null },
+      { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', available: true, unavailable_reason: null },
+      { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', available: false, unavailable_reason: 'needs a Kimi key' },
+    ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-    defaults: { build: { model: 'opus', effort: 'high' }, synthesis: { model: 'fable', effort: 'high' } },
+    defaults: {
+      build: { model: 'opus', effort: 'high' },
+      synthesis: { model: 'fable', effort: 'high' },
+      review_codex: { model: 'sol', effort: 'high' },
+    },
     overrides,
+    rejected,
   };
 }
 
@@ -141,6 +170,18 @@ async function press(id: string): Promise<void> {
   });
 }
 
+/**
+ * Open a row's dropdown, then choose one of its options.
+ *
+ * Two presses, because that is what the owner does: the table shows one line per
+ * step and the options only appear when asked for. A helper that reached the option
+ * directly would be testing a menu the screen never opens.
+ */
+async function choose(phase: string, control: 'model' | 'effort', value: string): Promise<void> {
+  await press(`phase-${phase}-${control}`);
+  await press(`phase-${phase}-${control}-${value}`);
+}
+
 const lastPut = (): Record<string, unknown> | undefined => {
   const put = [...sent].reverse().find((s) => s.method === 'PUT');
   return (put?.body as { overrides?: Record<string, unknown> })?.overrides;
@@ -158,9 +199,51 @@ describe('the screen renders what the SERVER says the phases are', () => {
     // No local copy of the vocabulary: a phase or tier added to the engine must
     // appear here without an app release, and one removed must disappear.
     await mountCodegen();
+    await press('phase-build-model');
     expect(byTestId('phase-build-model-sonnet')).not.toBeNull();
-    expect(byTestId('phase-build-effort-xhigh')).not.toBeNull();
     expect(byTestId('phase-build-model-nonexistent-tier')).toBeNull();
+    await press('phase-build-effort');
+    expect(byTestId('phase-build-effort-xhigh')).not.toBeNull();
+  });
+
+  it('names the model a tier resolves to, in the control and in every option', async () => {
+    // The owner picks a TIER so the setting survives a model change; what they need
+    // to see is which model that is TODAY.
+    await mountCodegen();
+    expect(byTestId('phase-build-model')!.textContent ?? '').toContain('claude-opus-5');
+    await press('phase-build-model');
+    const fast = byTestId('phase-build-model-fast')!;
+    expect(fast.textContent ?? '').toContain('claude-haiku-4-5');
+    expect(byTestId('phase-build-model-opus')!.textContent ?? '').toContain('(default)');
+  });
+
+  it('shows a tier this install cannot run DISABLED, with the reason, never hidden', async () => {
+    await mountCodegen();
+    await press('phase-review_codex-model');
+    // Listed on the row that could use it, greyed, saying what to go and fix.
+    const k3 = byTestId('phase-review_codex-model-k3');
+    expect(k3).not.toBeNull();
+    expect(k3!.textContent ?? '').toContain('Kimi steps only');
+    // …and pressing it changes nothing, which is the half a render check misses.
+    await press('phase-review_codex-model-k3');
+    expect(byTestId('phase-review_codex-changed')).toBeNull();
+  });
+
+  it('says a CLI step has no effort control instead of offering an inert one', async () => {
+    await mountCodegen();
+    expect(byTestId('phase-review_codex-effort')).toBeNull();
+    expect(byTestId('phase-review_codex-effort-na')!.textContent ?? '').toContain(
+      'set by the CLI',
+    );
+  });
+
+  it('shows a REFUSED stored value struck through, and what is running instead', async () => {
+    getPayload = payload({}, { build: { model: 'fable-2' } });
+    await mountCodegen();
+    const stale = byTestId('phase-build-stale')!;
+    expect(stale.textContent ?? '').toContain('fable-2');
+    expect(stale.textContent ?? '').toContain('no longer available');
+    expect(stale.textContent ?? '').toContain('opus');
   });
 
   it('marks a phase that already has an override', async () => {
@@ -174,7 +257,7 @@ describe('the screen renders what the SERVER says the phases are', () => {
 describe('pressing a chip and saving reaches the endpoint', () => {
   it('PUTs the chosen override', async () => {
     await mountCodegen();
-    await press('phase-build-effort-xhigh');
+    await choose('build', 'effort', 'xhigh');
     await press('codegen-save');
     expect(lastPut()).toEqual({ build: { effort: 'xhigh' } });
   });
@@ -182,7 +265,7 @@ describe('pressing a chip and saving reaches the endpoint', () => {
   it('sends the COMPLETE set, because the write replaces rather than merges', async () => {
     getPayload = payload({ synthesis: { model: 'opus' } });
     await mountCodegen();
-    await press('phase-build-effort-max');
+    await choose('build', 'effort', 'max');
     await press('codegen-save');
     // The pre-existing synthesis override must ride along, or saving one row would
     // silently clear every other.
@@ -196,7 +279,7 @@ describe('pressing a chip and saving reaches the endpoint', () => {
     getPayload = payload({ build: { model: 'sonnet' } });
     await mountCodegen();
     expect(byTestId('phase-build-changed')).not.toBeNull();
-    await press('phase-build-model-opus'); // opus IS build's default
+    await choose('build', 'model', 'opus'); // opus IS build's default
     expect(byTestId('phase-build-changed')).toBeNull();
     await press('codegen-save');
     expect(lastPut()).toEqual({});
@@ -206,16 +289,16 @@ describe('pressing a chip and saving reaches the endpoint', () => {
     // Every chip auto-saving would make a mis-tap a live config change on the next
     // build, with no chance to look at the row first.
     await mountCodegen();
-    await press('phase-build-effort-low');
+    await choose('build', 'effort', 'low');
     expect(sent.some((s) => s.method === 'PUT')).toBe(false);
   });
 
   it('confirms a successful save, and the confirmation goes stale on the next edit', async () => {
     await mountCodegen();
-    await press('phase-build-effort-xhigh');
+    await choose('build', 'effort', 'xhigh');
     await press('codegen-save');
     expect(byTestId('codegen-saved')).not.toBeNull();
-    await press('phase-build-effort-low');
+    await choose('build', 'effort', 'low');
     // Leaving "Saved" up would tell the owner their newest change is already stored.
     expect(byTestId('codegen-saved')).toBeNull();
   });
@@ -233,7 +316,7 @@ describe('a rejected save', () => {
       },
     };
     await mountCodegen();
-    await press('phase-build-effort-xhigh');
+    await choose('build', 'effort', 'xhigh');
     await press('codegen-save');
     const err = byTestId('codegen-error');
     expect(err).not.toBeNull();
@@ -246,7 +329,7 @@ describe('a rejected save', () => {
     // the work — and the owner would have to reconstruct what they had chosen.
     putFailure = { status: 400, body: { code: 'invalid_phase_models', message: 'nope' } };
     await mountCodegen();
-    await press('phase-build-effort-xhigh');
+    await choose('build', 'effort', 'xhigh');
     await press('codegen-save');
     expect(byTestId('phase-build-changed')).not.toBeNull();
     // And a retry still carries the edit rather than an empty set.
@@ -258,7 +341,7 @@ describe('a rejected save', () => {
   it('shows no success confirmation alongside an error', async () => {
     putFailure = { status: 400, body: { code: 'invalid_phase_models', message: 'nope' } };
     await mountCodegen();
-    await press('phase-build-effort-xhigh');
+    await choose('build', 'effort', 'xhigh');
     await press('codegen-save');
     expect(byTestId('codegen-saved')).toBeNull();
   });

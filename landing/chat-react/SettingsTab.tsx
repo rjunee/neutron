@@ -48,6 +48,8 @@ import {
   WebPhaseModelsClient,
   applyRowEdit,
   effectiveRow,
+  rejectedModel,
+  tierChoices,
   type PhaseModelsPayload,
   type PhaseOverride,
 } from './phase-models-client.ts'
@@ -1046,11 +1048,14 @@ export function SettingsTab({
           the engine appears here with no client change, and the phone and the web
           cannot disagree about what the phases are. */}
       <section className="cset-section" aria-label="Code generation">
-        <h2 className="cset-h">Code generation</h2>
+        <h2 className="cset-h">Code generation — every project on this computer</h2>
         <p className="cset-sub">
-          Which model runs each part of a build, and how hard it thinks. Changes apply to
-          the next build — nothing restarts. A dot marks the default; choosing it clears
-          the override, so the phase keeps following the default if that ever changes.
+          Which model runs each step of a build, and how hard it thinks. One setting for
+          the whole install: it is not per-project, because which model you can run is a
+          property of your subscriptions, not of the thing being built. Changes apply to
+          the next build — nothing restarts. Each option names the model it resolves to
+          today; choosing the one marked default clears the override, so the step keeps
+          following that default if it ever moves.
         </p>
 
         {phaseError !== null ? (
@@ -1070,54 +1075,89 @@ export function SettingsTab({
           </div>
         ) : (
           <>
+            {/* ONE ROW PER STEP: name · model · effort. A table rather than the old
+                grid of pills because the owner's question is "what runs each step",
+                which is a column to read down, not eleven pill rows to scan. Each
+                row keeps its one-line explanation — it is the only thing saying what
+                the step actually does. */}
+            <div className="cset-cg-head" aria-hidden="true">
+              <span>Step</span>
+              <span>Model</span>
+              <span>Effort</span>
+            </div>
             {phaseModels.phases.map((phase) => {
               const row = effectiveRow(phase, phaseOverrides)
+              const choices = tierChoices(phase, phaseModels.model_tiers)
+              const dead = rejectedModel(phase, phaseModels.rejected)
               return (
-                <fieldset
-                  className="cset-field"
-                  key={phase.key}
-                  data-testid={`phase-${phase.key}`}
-                >
-                  <legend className="cset-label">
-                    {phase.label}
-                    {row.overridden ? (
-                      <em data-testid={`phase-${phase.key}-changed`}> — changed</em>
+                <div className="cset-cg-row" key={phase.key} data-testid={`phase-${phase.key}`}>
+                  <div className="cset-cg-name">
+                    <span className="cset-label">
+                      {phase.label}
+                      {row.overridden ? (
+                        <em data-testid={`phase-${phase.key}-changed`}> — changed</em>
+                      ) : null}
+                    </span>
+                    <p className="cset-sub">{phase.description}</p>
+                    {dead !== null ? (
+                      // A saved choice that no longer resolves is SHOWN, struck
+                      // through, with what is running instead. Silently reverting it
+                      // would leave the owner believing a model they are not using.
+                      <p className="cset-cg-stale" data-testid={`phase-${phase.key}-stale`}>
+                        <s>{dead}</s> is no longer available — using {row.model}
+                      </p>
                     ) : null}
-                  </legend>
-                  <p className="cset-sub">{phase.description}</p>
-                  <div className="cset-chiprow">
-                    <span className="cset-label">Model</span>
-                    {phaseModels.model_tiers.map((tier) => (
-                      <button
-                        key={tier}
-                        type="button"
-                        className={`cset-chip${row.model === tier ? ' cset-chip-on' : ''}`}
-                        aria-pressed={row.model === tier}
-                        data-testid={`phase-${phase.key}-model-${tier}`}
-                        onClick={() => editPhase(phase.key, { model: tier })}
-                      >
-                        {tier}
-                        {phase.default.model === tier ? ' ·' : ''}
-                      </button>
-                    ))}
                   </div>
-                  <div className="cset-chiprow">
-                    <span className="cset-label">Effort</span>
-                    {phaseModels.efforts.map((eff) => (
-                      <button
-                        key={eff}
-                        type="button"
-                        className={`cset-chip${row.effort === eff ? ' cset-chip-on' : ''}`}
-                        aria-pressed={row.effort === eff}
-                        data-testid={`phase-${phase.key}-effort-${eff}`}
-                        onClick={() => editPhase(phase.key, { effort: eff })}
+                  <label className="cset-cg-cell">
+                    <span className="cset-cg-a11y">{phase.label} model</span>
+                    <select
+                      className="cset-cg-select"
+                      data-testid={`phase-${phase.key}-model`}
+                      value={row.model}
+                      onChange={(e) => editPhase(phase.key, { model: e.target.value })}
+                    >
+                      {choices.map((c) => (
+                        // NEVER HIDDEN, only disabled with the reason: an option the
+                        // owner cannot see is one they cannot ask about.
+                        <option
+                          key={c.tier}
+                          value={c.tier}
+                          disabled={!c.selectable}
+                          data-testid={`phase-${phase.key}-model-${c.tier}`}
+                        >
+                          {c.tier} · {c.model_id}
+                          {phase.default.model === c.tier ? ' (default)' : ''}
+                          {c.reason !== null ? ` — ${c.reason}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="cset-cg-cell">
+                    <span className="cset-cg-a11y">{phase.label} effort</span>
+                    {phase.effort_supported ? (
+                      <select
+                        className="cset-cg-select"
+                        data-testid={`phase-${phase.key}-effort`}
+                        value={row.effort}
+                        onChange={(e) => editPhase(phase.key, { effort: e.target.value })}
                       >
-                        {eff}
-                        {phase.default.effort === eff ? ' ·' : ''}
-                      </button>
-                    ))}
-                  </div>
-                </fieldset>
+                        {phaseModels.efforts.map((eff) => (
+                          <option key={eff} value={eff}>
+                            {eff}
+                            {phase.default.effort === eff ? ' (default)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      // Disabled with the reason rather than absent: a blank cell
+                      // reads as a missing feature, and an ENABLED one would be a
+                      // control that changes nothing.
+                      <span className="cset-cg-na" data-testid={`phase-${phase.key}-effort-na`}>
+                        set by the CLI
+                      </span>
+                    )}
+                  </label>
+                </div>
               )
             })}
             <button

@@ -1608,11 +1608,40 @@
   .cset-sub { font-size: 0.8667rem; color: var(--muted); margin: 0 0 12px; line-height: 1.4; }
   .cset-error { color: var(--error-fg); font-size: 0.8rem; padding: 6px 0; }
   .cset-empty { color: var(--muted); font-size: 0.8667rem; padding: 16px 0; text-align: center; }
-  /* Code-generation settings: one chip row per phase. Chips rather than a
-     <select> because the whole option set is short and worth seeing at a glance —
-     and because the default is marked inline with a dot, which a collapsed
-     control would hide behind a click. */
+  /* Code-generation settings: a TABLE — one row per step, name · model · effort.
+     Dropdowns rather than the old pill grid: the option set now spans three model
+     families and each option carries the id it resolves to, which is far too much
+     text to wear as a pill. The name column keeps the step's one-line explanation,
+     because that sentence is the only thing telling the owner what the step does. */
   .cset-saved { color: var(--muted); font-size: 0.8rem; padding: 4px 0; }
+  .cset-cg-head, .cset-cg-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) 190px 130px; gap: 10px;
+    align-items: start;
+  }
+  .cset-cg-head {
+    font-size: 0.7333rem; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  .cset-cg-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .cset-cg-name .cset-sub { margin: 2px 0 0; }
+  .cset-cg-cell { display: block; min-width: 0; }
+  /* The control is labelled for a screen reader without repeating the row's own
+     visible name beside it. */
+  .cset-cg-a11y {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap;
+  }
+  .cset-cg-select {
+    width: 100%; padding: 4px 6px; font-size: 0.8rem; border-radius: 6px;
+    background: var(--surface); color: var(--fg); border: 1px solid var(--border);
+  }
+  .cset-cg-select option:disabled { color: var(--muted); }
+  .cset-cg-na { font-size: 0.8rem; color: var(--muted); }
+  .cset-cg-stale { font-size: 0.8rem; color: var(--error-fg); margin: 4px 0 0; }
+  @media (max-width: 560px) {
+    .cset-cg-head { display: none; }
+    .cset-cg-row { grid-template-columns: 1fr; }
+  }
   .cset-chiprow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .cset-chiprow .cset-label { margin-right: 4px; }
   .cset-chip {

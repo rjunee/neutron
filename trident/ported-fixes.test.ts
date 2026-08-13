@@ -363,7 +363,12 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
     expect(src).not.toContain('claude-sonnet-4-6')
     // Every spawn is logged with its resolved model so a run is TALLY-ABLE.
     expect(src).toContain('trident.agent label=')
-    expect(src).toContain('model=codex-runtime')
+    // The cross-model lanes too — and they log the model the SUBPROCESS will run,
+    // not a placeholder. This assertion used to be `model=codex-runtime`, which the
+    // selector work turned into a lie the test could not see: the literal survived
+    // only in a COMMENT, so it kept passing while the log line had changed. Pin the
+    // interpolation instead, which cannot be satisfied by prose.
+    expect(src).toContain('`trident.agent label=${label} model=${route.model || fallback}')
   })
 
   test('FABLE_MODEL is defined in the model registry (single source of truth) and threaded via buildWorkflowArgs', () => {

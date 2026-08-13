@@ -528,9 +528,16 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
       'NO_PATTERN_KILL_RULE',
+      // The owner's chosen review model, resolved once per run and spliced onto the
+      // command as an env assignment. A REALISTIC value rather than '': the
+      // truncation readback is a tail of that same command line, so a prefix that
+      // shifted or broke its quoting has to be able to fail this.
+      'CODEX_ENV_PREFIX',
       [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
-    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '')('/tmp/some-diff.diff')
+    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '', "CODEX_REVIEW_MODEL='gpt-5.6-sol' ")(
+      '/tmp/some-diff.diff',
+    )
   }
 
   /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */

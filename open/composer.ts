@@ -171,7 +171,11 @@ import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
 import { UsageSamplesStore } from '@neutronai/persistence/usage-samples-store.ts'
-import { readTridentPhaseModels, writeTridentPhaseModels } from '@neutronai/gateway/storage/owner-metadata.ts'
+import {
+  readTridentPhaseModels,
+  readTridentPhaseModelsWithRejected,
+  writeTridentPhaseModels,
+} from '@neutronai/gateway/storage/owner-metadata.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 // The OVERNIGHT-WORK report (`onboarding/overnight/morning-brief.ts`). It used to
@@ -3214,13 +3218,37 @@ export function buildOpenGraphComposer(
       neutron_home: owner_home,
       free_bytes: freeBytesAt,
     })
+    // Is a Kimi K3 key usable RIGHT NOW? Defined once and shared by the settings
+    // pane (which greys the K3 tier without one) and the trident wiring below
+    // (which decides whether the panelist runs at all) — see the long note at
+    // `resolve_kimi_configured` for why the export side effect is load-bearing.
+    // One function, so the pane can never claim a capability the build lacks.
+    const kimiConfigured = (): boolean =>
+      ensureKimiKeyExported(env, () => {
+        // Global scope: a Kimi subscription is one account for the whole install,
+        // not a per-project token.
+        const found = projectCredentialStore.resolve(
+          asOwnerHandle(owner_handle),
+          undefined,
+          KIMI_CREDENTIAL_SERVICE,
+        )
+        return found?.plaintext ?? null
+      })
     // The read/write pair for the per-phase build models. Read PER REQUEST, like
     // the transcription choice beside it: the setting is a live control, so a
     // change must reach the next build with no restart and no cache to go stale.
     const tridentPhaseModelsSurface = createTridentPhaseModelsSurface({
       auth: appOwnerAuth,
-      read: (scope) => readTridentPhaseModels(db, scope),
+      read: (scope) => readTridentPhaseModelsWithRejected(db, scope),
       write: (scope, input) => writeTridentPhaseModels(db, scope, input),
+      // THE SAME RESOLVERS THE BUILD USES (`kimiConfigured` below is this exact
+      // function). A pane that answered "available" from its own notion of
+      // configured would grey the wrong option — or worse, offer a tier whose
+      // review then defers and blocks the merge for a reason the owner cannot see.
+      connections: () => ({
+        codex: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !== null,
+        kimi: kimiConfigured(),
+      }),
     })
     const voiceTranscriptionSurface = createVoiceTranscriptionSurface({
       auth: appOwnerAuth,
@@ -5690,19 +5718,11 @@ export function buildOpenGraphComposer(
               // for a key the child cannot see would be WORSE than not configured — a
               // deferred reviewer blocks the verdict, so every review would return
               // REQUEST_CHANGES for a reason invisible to the owner.
-              resolve_kimi_configured: (): boolean =>
-                ensureKimiKeyExported(env, () => {
-                  // Global scope: a Kimi subscription is one account for the whole
-                  // instance, not a per-project token, and this resolver is handed no
-                  // run to scope by. `resolve` with no project id consults the global
-                  // default only.
-                  const found = projectCredentialStore.resolve(
-                    asOwnerHandle(owner_handle),
-                    undefined,
-                    KIMI_CREDENTIAL_SERVICE,
-                  )
-                  return found?.plaintext ?? null
-                }),
+              //
+              // THE SAME FUNCTION the settings pane asks (`connections.kimi`), so the
+              // greyed-out state the owner sees and the panelist that actually runs
+              // can never disagree.
+              resolve_kimi_configured: kimiConfigured,
               // THE PRODUCER for the per-phase model/effort config. Read per launch
               // from `instance_metadata` (migration 0118) so a setting changed after
               // boot takes effect on the next run rather than the next restart, and

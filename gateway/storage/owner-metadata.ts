@@ -124,21 +124,42 @@ export function readTridentPhaseModels(
   db: ProjectDb,
   project_slug: string,
 ): Readonly<Record<string, { model?: string; effort?: string }>> {
+  return readTridentPhaseModelsWithRejected(db, project_slug).config
+}
+
+/**
+ * The same read, KEEPING what validation threw away.
+ *
+ * A settings pane needs both halves. A stored override naming a tier that has since
+ * been retired must not simply vanish into the default — the owner chose something,
+ * and a control that silently reverts is one they cannot trust again. So the pane gets
+ * `rejected` alongside `config` and renders the dead value struck through, naming the
+ * default it fell back to. The BUILD path deliberately takes only `config`: a run has
+ * nobody to tell.
+ */
+export function readTridentPhaseModelsWithRejected(
+  db: ProjectDb,
+  project_slug: string,
+): {
+  config: Readonly<Record<string, { model?: string; effort?: string }>>
+  rejected: Readonly<Record<string, { model?: string; effort?: string }>>
+} {
   const row = db
     .prepare<{ trident_phase_models: string | null }, [string]>(
       `SELECT trident_phase_models FROM instance_metadata WHERE instance_slug = ? LIMIT 1`,
     )
     .get(project_slug)
   const raw = row?.trident_phase_models
-  if (typeof raw !== 'string' || raw.trim().length === 0) return {}
+  if (typeof raw !== 'string' || raw.trim().length === 0) return { config: {}, rejected: {} }
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch {
     // Corrupt JSON is "no overrides", never a thrown error on a build launch.
-    return {}
+    return { config: {}, rejected: {} }
   }
-  return parsePhaseModelConfig(parsed).config
+  const { config, rejected } = parsePhaseModelConfig(parsed)
+  return { config, rejected }
 }
 
 /**

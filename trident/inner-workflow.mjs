@@ -169,6 +169,20 @@ const {
   // instance that has never touched the setting behaves EXACTLY as before. See
   // `applyPhaseOverride` for why an unusable entry logs rather than throws.
   phaseModels = null,
+  // THE MODEL-TIER REGISTRY — tier name → `{model_id, transport, env_var}`, resolved
+  // and threaded by the launcher (`trident/model-tiers.ts`; this script cannot import
+  // it, same as `models`). It is what lets an owner override name a TIER and this
+  // dispatch reach the right model over the right TRANSPORT:
+  //
+  //   • `transport: 'agent'` — an Anthropic id for `agent({model})`.
+  //   • `transport: 'cli'`   — a subprocess model. `agent({model})` resolves against
+  //     Claude Code's own endpoint and CANNOT reach it, so the id is passed to the
+  //     wrapper through `env_var` (CODEX_REVIEW_MODEL / KIMI_MODEL) instead.
+  //
+  // Absent (a dry source check / a legacy caller) → the four Claude tiers still
+  // resolve through MODELS, and the cross-model wrappers are invoked with NO env
+  // override, i.e. exactly the command they were invoked with before this existed.
+  modelTiers = null,
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -257,6 +271,49 @@ const MODELS = {
   fast: pickModel('fast', 'haiku'),
 }
 
+// The threaded tier registry (see the `modelTiers` arg). One lookup, used by both the
+// owner-override path and the two cross-model wrappers.
+const threadedTiers =
+  modelTiers && typeof modelTiers === 'object' && !Array.isArray(modelTiers) ? modelTiers : {}
+
+/**
+ * A tier name → `{model_id, transport, env_var}`, or null when nothing knows it.
+ *
+ * Falls back to MODELS for the four Claude tiers so a caller that threads `models`
+ * but no registry (a dry source check, a legacy launcher) keeps working exactly as
+ * before. A name in NEITHER is unknown — retired, misspelled, or an old build's
+ * literal vendor id — and the caller must fall back to the default rather than
+ * dispatch it: a model id nothing can place is one nothing can reach.
+ */
+const resolveTier = (name) => {
+  const entry = threadedTiers[name]
+  if (entry && typeof entry === 'object' && typeof entry.model_id === 'string' && entry.model_id) {
+    return {
+      model_id: entry.model_id,
+      transport: entry.transport === 'cli' ? 'cli' : 'agent',
+      env_var: typeof entry.env_var === 'string' && entry.env_var ? entry.env_var : null,
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(MODELS, name)) {
+    return { model_id: MODELS[name], transport: 'agent', env_var: null }
+  }
+  return null
+}
+
+// A CLI-transport route: the model is not handed to agent(), it is handed to the
+// WRAPPER through its env knob. `model: null` (no registry threaded) means "invoke the
+// wrapper with no override", which is the wrapper's own pinned default.
+const cliRoute = ({ tier, phaseKey }) => {
+  const resolved = resolveTier(tier)
+  return {
+    model: resolved !== null && resolved.transport === 'cli' ? resolved.model_id : null,
+    effort: null,
+    transport: 'cli',
+    envVar: resolved !== null ? resolved.env_var : null,
+    phaseKey,
+  }
+}
+
 // forge:* routes BY the planner's complexity tag: '[mechanical]' (boilerplate,
 // tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
 // ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
@@ -283,6 +340,16 @@ const ROLE_MODEL = {
   'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric' },
   'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial' },
   'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis' },
+  // THE TWO CROSS-MODEL LANES ARE ROUTED NOW. They used to be listed as deliberately
+  // unconfigurable ("the reviewing model is the CLI's own configuration"), which was
+  // true only while nothing threaded a model IN. Both wrappers read an env knob, so
+  // the owner picks a tier and the resolved id reaches the subprocess — the model is
+  // NOT handed to agent() (that resolves against Claude Code's endpoint and cannot
+  // reach a GPT/Kimi model; see the `modelTiers` arg). The thin Claude agent wrapping
+  // each still runs on the launcher default: its whole job is to run one command and
+  // map an exit code.
+  'argus:codex': cliRoute({ tier: 'sol', phaseKey: 'review_codex' }),
+  'argus:kimi': cliRoute({ tier: 'k3', phaseKey: 'review_kimi' }),
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
@@ -318,15 +385,35 @@ function applyPhaseOverride(route, phaseKey) {
   const override = threadedPhaseModels[phaseKey]
   if (!override || typeof override !== 'object' || Array.isArray(override)) return route
   let { model, effort } = route
+  const transport = route.transport === 'cli' ? 'cli' : 'agent'
   if (typeof override.model === 'string' && override.model.trim()) {
     const requested = override.model.trim()
-    // A tier name resolves through the registry; anything else is taken as a
-    // literal model id. Both are intentional (see phase-models.ts).
-    model = Object.prototype.hasOwnProperty.call(MODELS, requested) ? MODELS[requested] : requested
+    const tier = resolveTier(requested)
+    if (tier === null) {
+      // A RETIRED OR UNKNOWN TIER KEEPS THE DEFAULT. It is not passed through as a
+      // literal id: a value the registry cannot place carries no transport, so
+      // "dispatch it anyway" means handing an unplaceable id to whichever executor
+      // happens to be wired — which is how a build silently runs on the wrong model
+      // (or on nothing at all). The typed boundary drops these first; this is the
+      // backstop for a config that got past it.
+      log(`trident.phase-override IGNORED phase=${phaseKey} reason=unknown-tier tier=${requested}`)
+    } else if (tier.transport !== transport || (tier.env_var ?? null) !== (route.envVar ?? null)) {
+      // Transport is a capability, not a preference: a GPT tier cannot run a Claude
+      // agent step, and the codex wrapper cannot be pointed at a Kimi model.
+      log(
+        `trident.phase-override IGNORED phase=${phaseKey} reason=transport-mismatch tier=${requested} tier-transport=${tier.transport} phase-transport=${transport}`,
+      )
+    } else {
+      model = tier.model_id
+    }
   } else if (override.model !== undefined) {
     log(`trident.phase-override IGNORED phase=${phaseKey} reason=model-not-a-nonempty-string`)
   }
-  if (typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort)) {
+  if (transport === 'cli' && override.effort !== undefined) {
+    // The CLI picks its own reasoning effort and the wrapper exposes no knob for it,
+    // so an effort here would be a setting nothing reads.
+    log(`trident.phase-override IGNORED phase=${phaseKey} reason=effort-not-settable-on-cli-transport`)
+  } else if (typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort)) {
     effort = override.effort
   } else if (override.effort !== undefined) {
     log(
@@ -349,6 +436,13 @@ function routeModel(label, tag) {
           ? ROLE_MODEL['head-probe']
           : label.startsWith('ci-probe-round-')
             ? ROLE_MODEL['ci-probe']
+          // A retry lane is the SAME lane. Routing it separately (or letting it fall
+          // through to the default) would mean the owner's choice applied to the
+          // first attempt and silently not to the second.
+          : label === 'argus:codex-retry'
+            ? ROLE_MODEL['argus:codex']
+          : label === 'argus:kimi-retry'
+            ? ROLE_MODEL['argus:kimi']
           : ROLE_MODEL[label] || { model: MODELS.opus, effort: 'high', phaseKey: null }
   return applyPhaseOverride(base, base.phaseKey)
 }
@@ -368,10 +462,63 @@ function withModel(opts, tag) {
   log(
     `trident.agent label=${opts.label} model=${route.model} effort=${route.effort} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}${tag ? ` tag=${tag}` : ''}`,
   )
+  // A CLI-TRANSPORT ROUTE NEVER SETS agent() OPTS. Its model belongs to a subprocess
+  // (see `crossModelEnvPrefix`); putting it on the spawn would ask Claude Code's
+  // endpoint for a GPT/Kimi id, which is the one failure this whole transport field
+  // exists to make impossible. The wrapping agent keeps the launcher default.
+  if (route.transport === 'cli') return { ...opts }
   // Only model + effort cross into the agent opts. `phaseKey` is routing metadata
   // and must not leak into the spawn.
   return { ...opts, model: route.model, effort: route.effort }
 }
+
+/**
+ * The env assignment that carries the owner's chosen model INTO a cross-model wrapper.
+ *
+ * THIS IS THE WHOLE POINT OF THE CLI TRANSPORT. `agent({model})` resolves against
+ * Claude Code's own endpoint, so a GPT or Kimi model cannot be selected that way; the
+ * wrapper runs in its own process and reads its model from the environment
+ * (`CODEX_REVIEW_MODEL`, `KIMI_MODEL`), so the assignment on the command line is the
+ * seam that makes the setting real. A pane that saved a choice nothing put here would
+ * be a control with no consumer.
+ *
+ * Returns '' when no registry is threaded, which invokes the wrapper exactly as it was
+ * invoked before this existed — the wrapper's own pinned default, including codex's
+ * `${CODEX_REVIEW_MODEL-gpt-5.6-sol}` and its deliberate respect for an explicitly
+ * EMPTY value.
+ */
+function crossModelEnvPrefix(label) {
+  const route = routeModel(label)
+  if (route.transport !== 'cli' || !route.envVar || !route.model) return ''
+  return `${route.envVar}=${shSingleQuote(route.model)} `
+}
+
+/**
+ * Tally one cross-model spawn, naming the model the SUBPROCESS will actually run.
+ *
+ * The lane used to log a placeholder (`model=codex-runtime`) because the reviewing
+ * model was the CLI's own business. It is the owner's business now, so the line says
+ * which id was resolved and whether an override chose it — "did my setting take
+ * effect?" has to be answerable from a run's output, or the setting will not be
+ * trusted. `fallback` is still logged when nothing resolved, so the tally never
+ * silently drops a seat.
+ */
+function logCrossModelSpawn(label, fallback) {
+  const route = routeModel(label)
+  const overridden = route.phaseKey !== null && route.phaseKey in threadedPhaseModels
+  log(
+    `trident.agent label=${label} model=${route.model || fallback} effort=n/a transport=cli phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}`,
+  )
+}
+
+// RESOLVED ONCE PER RUN, not per prompt build. Two reasons beyond the obvious: the
+// value cannot change mid-run (the owner's config is threaded in at launch), and a
+// prompt builder that reached for it as a free function could no longer be lifted out
+// of this file and executed on its own — which is exactly how the codex bridge's
+// truncation-readback test proves the SHIPPED command, rather than a retyped copy of
+// it (`inner-workflow.test.ts`). A closure value it can pass in keeps that possible.
+const CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:codex')
+const KIMI_ENV_PREFIX = crossModelEnvPrefix('argus:kimi')
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -1554,6 +1701,7 @@ function codexPanelLine(status, review) {
   return `Verdict C (codex cross-model, GPT-5): ${JSON.stringify(review)} — treat as a full third panelist; an evidence-backed codex blocker VETOES APPROVE.`
 }
 
+
 // The codex cross-model reviewer prompt. It shells out to the wrapper
 // (trident/codex-review.sh) SYNCHRONOUSLY in the foreground (never backgrounded)
 // with the per-project CODEX_HOME, then maps the wrapper's EXIT CODE to a
@@ -1582,7 +1730,7 @@ function codexReviewerPrompt(diffFile) {
   // how GPT-5 worded its answer.
   return `You are the CODEX CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT GPT-5 second opinion alongside Claude/Argus). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
+  ${CODEX_ENV_PREFIX}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.
@@ -1604,7 +1752,7 @@ function kimiReviewerPrompt(diffFile) {
   // and the reviewer could approve without having reviewed the change.
   return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
+  ${KIMI_ENV_PREFIX}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
@@ -1676,7 +1824,7 @@ TASK: ${task}`,
     // would be inert; AND argus:codex is part of the independent MERGE GATE, which
     // must never carry the untrusted reflection block (see the trust-boundary note
     // above the reviewers array).
-    log('trident.agent label=argus:codex model=codex-runtime effort=n/a')
+    logCrossModelSpawn('argus:codex', 'codex-runtime')
     codexSlot = reviewers.length
     reviewers.push(() =>
       agent(codexReviewerPrompt(diffFile), {
@@ -1696,7 +1844,7 @@ TASK: ${task}`,
   // owner corrections would be inert; and this is part of the independent MERGE
   // GATE, which must never carry the untrusted reflection block.
   if (kimiConfigured) {
-    log('trident.agent label=argus:kimi model=kimi-runtime effort=n/a')
+    logCrossModelSpawn('argus:kimi', 'kimi-runtime')
     kimiSlot = reviewers.length
     reviewers.push(() =>
       agent(kimiReviewerPrompt(diffFile), {

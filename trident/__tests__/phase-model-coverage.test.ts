@@ -113,6 +113,22 @@ describe('coverage — no label falls through silently', () => {
     expect({ uncovered }).toEqual({ uncovered: [] })
   })
 
+  it('the cross-model lanes are ROUTED now, retries included', () => {
+    // They used to be listed as deliberately unconfigurable ("the reviewing model is
+    // the CLI's own configuration"), which held only while nothing threaded a model
+    // IN. Both wrappers read an env knob, so the exclusion was retired — and the
+    // RETRY lanes matter as much as the first attempt: an owner's choice that applied
+    // to one and not the other would be a review served by two different models.
+    for (const label of ['argus:codex', 'argus:codex-retry']) {
+      expect(phaseForLabel(label)?.key).toBe('review_codex')
+      expect(isUnroutedLabel(label)).toBe(false)
+    }
+    for (const label of ['argus:kimi', 'argus:kimi-retry']) {
+      expect(phaseForLabel(label)?.key).toBe('review_kimi')
+      expect(isUnroutedLabel(label)).toBe(false)
+    }
+  })
+
   it('head-probe specifically is routed — the regression this test was written for', () => {
     const phase = phaseForLabel('head-probe-round-4')
     expect(phase).not.toBeNull()
@@ -235,13 +251,49 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(parsePhaseModelConfig({ build: { model: 'x'.repeat(200) } }).errors).toHaveLength(1)
   })
 
-  it('accepts a LITERAL model id, not just a tier name', () => {
-    // The escape hatch: pinning an exact vendor id is sometimes the whole point, and
-    // a regex over vendor naming would reject valid future ids.
-    const { config, errors } = parsePhaseModelConfig({ build: { model: 'gpt-5.6-sol' } })
-    expect(errors).toEqual([])
-    expect(config['build']).toEqual({ model: 'gpt-5.6-sol' })
+  it('REJECTS a literal vendor id — a tier or nothing', () => {
+    // The old escape hatch, closed deliberately. A bare id carries no TRANSPORT, so
+    // `gpt-5.6-sol` in the build phase looked like a pin and was really a
+    // Claude-endpoint lookup for a model only reachable as a subprocess: a build that
+    // quietly runs on the wrong model. The message has to name the vocabulary,
+    // because "invalid" alone sends the owner to the source.
+    const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'gpt-5.6-sol' } })
+    expect(config).toEqual({})
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('gpt-5.6-sol')
+    expect(errors[0]).toContain('sonnet')
     expect(isModelTier('gpt-5.6-sol')).toBe(false)
+    // KEPT, not just dropped: the pane renders this struck through and names the
+    // default it fell back to, so a choice that stopped working is visible rather
+    // than silently reverted.
+    expect(rejected['build']).toEqual({ model: 'gpt-5.6-sol' })
+  })
+
+  it('REJECTS a tier the phase cannot dispatch, and says which executor each is', () => {
+    // Transport is a capability, not a preference. `sol` runs as a Codex subprocess;
+    // the build step is a Claude agent, and `agent({model})` resolves against Claude
+    // Code's own endpoint — it cannot reach a GPT model at all.
+    const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'sol' } })
+    expect(config).toEqual({})
+    expect(errors[0]).toContain('sol')
+    expect(errors[0]).toContain('Claude agent')
+    expect(rejected['build']).toEqual({ model: 'sol' })
+    // And the mirror: the codex lane cannot be pointed at a Claude tier either.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
+    // Within one transport it is allowed — that is the whole feature.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
+    // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toHaveLength(1)
+  })
+
+  it('REJECTS an effort on a phase whose executor has no effort control', () => {
+    // A stored setting that no dispatch reads is the exact defect this module exists
+    // to prevent — the owner sets it, nothing changes, the feature looks broken.
+    const { config, errors } = parsePhaseModelConfig({ review_codex: { effort: 'max' } })
+    expect(config).toEqual({})
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('not settable')
   })
 
   it('drops an entry that sets nothing, so {} never persists as configuration', () => {
@@ -251,8 +303,8 @@ describe('validation rejects loudly rather than dropping quietly', () => {
   })
 
   it('treats null/undefined as "no configuration", not as an error', () => {
-    expect(parsePhaseModelConfig(null)).toEqual({ config: {}, errors: [] })
-    expect(parsePhaseModelConfig(undefined)).toEqual({ config: {}, errors: [] })
+    expect(parsePhaseModelConfig(null)).toEqual({ config: {}, errors: [], rejected: {} })
+    expect(parsePhaseModelConfig(undefined)).toEqual({ config: {}, errors: [], rejected: {} })
   })
 
   it('rejects a non-object at the top level, including an array', () => {
@@ -378,10 +430,42 @@ describe('the args actually carry it (the TS half, end to end)', () => {
     const args = await makeInput({ build: { model: 'opus' } })
     const models = args['models'] as Record<string, string>
     // A regression here would mean the phase override resolves a tier name against
-    // nothing, silently producing the literal string 'opus' as a model id.
-    for (const tier of MODEL_TIERS) {
+    // nothing, silently producing the literal string 'opus' as a model id. Only the
+    // AGENT-transport tiers live in this map: it is the workflow's per-role Claude
+    // routing table, and a GPT id in it would be one `agent({model})` can't reach.
+    for (const tier of ['fable', 'opus', 'sonnet', 'fast']) {
       expect(typeof models[tier]).toBe('string')
       expect(models[tier]!.length).toBeGreaterThan(0)
     }
+  })
+
+  it('threads the whole TIER REGISTRY, resolved, so a cross-model choice can land', async () => {
+    const args = await makeInput(null)
+    const tiers = args['modelTiers'] as Record<
+      string,
+      { model_id: string; transport: string; env_var: string | null }
+    >
+    // EVERY tier, or a tier the pane offers is one the dispatch cannot resolve.
+    for (const tier of MODEL_TIERS) {
+      expect(typeof tiers[tier]?.model_id).toBe('string')
+      expect(tiers[tier]!.model_id.length).toBeGreaterThan(0)
+    }
+    // And the transport travels with it — the difference between a model the
+    // workflow can call and one it must shell out to.
+    expect(tiers['opus']).toEqual({
+      model_id: tiers['opus']!.model_id,
+      transport: 'agent',
+      env_var: null,
+    })
+    expect(tiers['sol']).toEqual({
+      model_id: 'gpt-5.6-sol',
+      transport: 'cli',
+      env_var: 'CODEX_REVIEW_MODEL',
+    })
+    expect(tiers['k3']).toEqual({
+      model_id: 'kimi-k3',
+      transport: 'cli',
+      env_var: 'KIMI_MODEL',
+    })
   })
 })
