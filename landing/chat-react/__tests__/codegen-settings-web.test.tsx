@@ -75,6 +75,17 @@ const BUILD = {
   default: { model: 'opus', effort: 'high' },
 }
 
+/** A Claude-ONLY row, so "wrong executor" and "no credential" can be told apart. */
+const RUBRIC = {
+  key: 'review_rubric',
+  label: 'Rubric review',
+  description: 'Reviews the diff against the fixed criteria.',
+  group: 'claude',
+  groups: ['claude'],
+  effort_supported: true,
+  default: { model: 'opus', effort: 'high' },
+}
+
 /** The codex row: a different executor, and no effort control of its own. */
 const CODEX = {
   key: 'review_codex',
@@ -86,7 +97,7 @@ const CODEX = {
   default: { model: 'sol', effort: 'high' },
 }
 
-/** Two Claude tiers, two Codex tiers, and one Kimi tier this install cannot run. */
+/** Two Claude tiers and three Codex tiers, one of which this install cannot run. */
 const TIERS = [
   {
     tier: 'opus',
@@ -125,13 +136,15 @@ const TIERS = [
     unavailable_reason: null,
   },
   {
-    tier: 'k3',
-    provider: 'moonshot',
-    model_id: 'kimi-k3',
-    group: 'kimi',
+    // UNAVAILABLE on purpose: this install has no codex credential (or no CLI), which
+    // is a different answer from "this step cannot reach codex" and must read as one.
+    tier: 'luna',
+    provider: 'openai',
+    model_id: 'gpt-5.6-luna',
+    group: 'codex',
     effort_supported: false,
     available: false,
-    unavailable_reason: 'needs a Kimi key',
+    unavailable_reason: 'needs a Codex connection',
   },
 ]
 
@@ -140,12 +153,13 @@ function payload(
   rejected: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
-    phases: [BUILD, CODEX],
+    phases: [BUILD, CODEX, RUBRIC],
     model_tiers: TIERS,
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaults: {
       build: { model: 'opus', effort: 'high' },
       review_codex: { model: 'sol', effort: 'high' },
+      review_rubric: { model: 'opus', effort: 'high' },
     },
     overrides,
     rejected,
@@ -282,13 +296,12 @@ describe('the display + edit rules', () => {
     const choices = tierChoices(BUILD, TIERS)
     expect(choices.find((c) => c.tier === 'sol')!.selectable).toBe(true)
     expect(choices.find((c) => c.tier === 'terra')!.selectable).toBe(true)
-    // The Claude default is still there, and Kimi keeps the honest reason.
+    // The Claude default is still there.
     expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
-    expect(choices.find((c) => c.tier === 'k3')!.selectable).toBe(false)
-    // …naming BOTH executors the step reaches, not just the one it defaults to.
-    expect(choices.find((c) => c.tier === 'k3')!.reason).toBe(
-      'Kimi is not wired for this step yet — it runs on Claude or Codex',
-    )
+    // A codex tier this install cannot RUN is unpickable for a different reason, and
+    // says so — "go connect codex" is actionable, "wrong executor" would not be.
+    expect(choices.find((c) => c.tier === 'luna')!.selectable).toBe(false)
+    expect(choices.find((c) => c.tier === 'luna')!.reason).toBe('needs a Codex connection')
   })
 
   it('moving the BUILD row to codex DROPS the effort — the pair fails the save', () => {
@@ -452,16 +465,18 @@ describe('the TABLE, pressed for real', () => {
   it('shows a tier it cannot run DISABLED, with the reason, never hidden', async () => {
     const { container, unmount } = await mountTab(payload())
     try {
-      const option = testId(container, 'phase-review_codex-model-k3') as HTMLOptionElement
+      const option = testId(container, 'phase-review_codex-model-luna') as HTMLOptionElement
       // Present…
       expect(option).not.toBeNull()
       // …unpickable…
       expect(option.disabled).toBe(true)
       // …and it SAYS WHY. A greyed row with no explanation is a dead end; this one
       // tells the owner what to go and fix.
-      expect(option.textContent).toContain('Kimi is not wired for this step yet')
-      const claudeRow = testId(container, 'phase-build-model-k3') as HTMLOptionElement
-      expect(claudeRow.textContent).toContain('Kimi is not wired for this step yet')
+      expect(option.textContent).toContain('needs a Codex connection')
+      // The OTHER kind of greying, on a step that cannot reach the executor at all.
+      const rubric = testId(container, 'phase-review_rubric-model-sol') as HTMLOptionElement
+      expect(rubric.disabled).toBe(true)
+      expect(rubric.textContent).toContain('Codex is not wired for this step yet')
     } finally {
       await unmount()
     }

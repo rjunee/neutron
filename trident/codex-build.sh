@@ -61,11 +61,23 @@
 # fails closed at both gates: no review of an unbuilt branch, and no merge.
 #
 # ── THE TWO SHAS ARE BOTH ABOUT *THIS* BUILD, NEVER ABOUT THE BRANCH ─────────
-# `HEAD` is recorded only when the local head is not where it was when codex STARTED.
-# A build that edited files and never committed leaves HEAD on the base commit, and
-# reporting that would hand the round a sha whose tree contains none of its work —
-# `roundLanded` would see a "landed" round and the merge would pin to a commit the
-# build did not make. Unmoved head → empty, which is the invariant above.
+# `HEAD` is recorded only when it is a commit that DID NOT ALREADY EXIST when codex
+# started. "Already existed" is three shas, not one, and the first version of this
+# script only knew about the first of them:
+#
+#   • the worktree's HEAD at launch;
+#   • the LOCAL tip of the target branch (`refs/heads/<branch>`);
+#   • the REMOTE tip of the target branch (`git ls-remote origin refs/heads/<branch>`).
+#
+# The last two are what make a re-entry honest. A second or third round starts in a
+# worktree parked on the base commit and the brief's first instruction is
+# `git switch <branch>` — so a build that switches and then decides it has nothing to
+# do moves HEAD without committing anything. Measured against the launch HEAD alone
+# that reads as "this build produced a commit", and the sha it hands back is the
+# PREVIOUS round's. `roundLanded` would see a landed round, and
+# `gh pr merge --match-head-commit` would pin to a commit this build never made and
+# succeed. Comparing against all three pre-existing tips makes the empty answer the
+# one that survives, which is the invariant above.
 #
 # `REMOTE_HEAD` is that measured local sha CONFIRMED PUSHED — it is emitted only when
 # the remote branch tip EQUALS it, and is otherwise empty. It is deliberately not "the
@@ -131,19 +143,31 @@ set -uo pipefail
 BRANCH="${1:-}"
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
-# The head as it stood BEFORE codex ran, set just before the launch below. A head
-# still equal to this one means no commit was made, whatever the transcript says.
-BASE_HEAD=''
+# Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
+# local branch tip, and the remote branch tip — one per line. Populated just before
+# the launch below. A head found in this set is not this build's commit, whatever the
+# transcript says. See the header for the re-entry case that needs all three.
+PRE_EXISTING_HEADS=''
 
-# A 40-character lowercase-hex sha, or the empty string. Charset AND length, because
+# A full-length lowercase-hex sha, or the empty string. Charset AND length, because
 # `git rev-parse --verify HEAD` in a repo with no commits echoes the literal `HEAD`
 # back, and a truncated or abbreviated value would be accepted by a charset test
-# alone while being useless to `--match-head-commit`.
+# alone while being useless to `--match-head-commit`. Both object formats count: 40
+# for sha1, 64 for sha256 — hard-coding 40 would collapse every measured sha on a
+# sha256 repo to empty and report "no commit was made" for a build that made one.
 sha_or_empty() {
   case "$1" in
     *[!0-9a-f]* | '') printf '' ;;
-    *) [ "${#1}" -eq 40 ] && printf '%s' "$1" || printf '' ;;
+    *) { [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; } && printf '%s' "$1" || printf '' ;;
   esac
+}
+
+# Was this sha already on the branch (or under HEAD) before codex ran?
+# Exact whole-line match against the captured set — a substring test would let an
+# abbreviation match a full sha.
+pre_existing() {
+  [ -n "$PRE_EXISTING_HEADS" ] || return 1
+  printf '%s\n' "$PRE_EXISTING_HEADS" | grep -qxF "$1"
 }
 
 # ── The trailer, written on EVERY path that got as far as running codex ───────
@@ -155,10 +179,12 @@ emit_trailer() {
   # A detached HEAD has no branch name, and `--abbrev-ref` spells that "HEAD".
   [ "$branch_name" = "HEAD" ] && branch_name=''
   head="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
-  # A HEAD THAT DID NOT MOVE IS NOT THIS BUILD'S COMMIT. See the header: reporting the
-  # pre-existing head for a build that edited but never committed would hand the round
-  # a sha whose tree holds none of its work, and both downstream gates would accept it.
-  [ -n "$head" ] && [ "$head" = "$BASE_HEAD" ] && head=''
+  # A HEAD THAT ALREADY EXISTED IS NOT THIS BUILD'S COMMIT. See the header: reporting
+  # a pre-existing head — the launch HEAD for a build that edited but never committed,
+  # or the previous round's branch tip for a re-entry that switched onto it and did
+  # nothing — would hand the round a sha whose tree holds none of its work, and both
+  # downstream gates would accept it.
+  [ -n "$head" ] && pre_existing "$head" && head=''
   remote_head=''
   if [ -n "$head" ] && [ -n "$BRANCH" ]; then
     local tip
@@ -263,10 +289,35 @@ fi
 # ARG_MAX and fail before codex starts — the same hazard the review wrapper hit with
 # a near-cap diff.
 #
-# THE HEAD BEFORE THE BUILD, captured here and nowhere else: everything after this
-# line is the build's, and the trailer's "did it commit" question is answered by
-# comparing against this value.
-BASE_HEAD="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
+# WHAT ALREADY EXISTED, captured here and nowhere else: everything after this line is
+# the build's, and the trailer's "did it commit" question is answered by comparing
+# against this set. All three tips, because the brief tells a re-entry to
+# `git switch <branch>` and that moves HEAD onto the previous round's commit without
+# producing one (header: THE TWO SHAS).
+for _pre in \
+  "$(git rev-parse --verify HEAD 2>/dev/null || true)" \
+  "$(git rev-parse --verify "refs/heads/${BRANCH}" 2>/dev/null || true)"; do
+  _pre="$(sha_or_empty "$_pre")"
+  [ -n "$_pre" ] && PRE_EXISTING_HEADS="${PRE_EXISTING_HEADS}${_pre}
+"
+done
+if [ -n "$BRANCH" ]; then
+  # Bounded like every other remote probe here: a remote that hangs must cost the run
+  # a baseline, not the build. Missing it only ever costs PRECISION in one direction —
+  # a re-entry whose previous round exists only on the remote — and the local tips
+  # above already cover the common case.
+  _pre="$(sha_or_empty "$(GIT_TERMINAL_PROMPT=0 perl -e 'alarm 10; exec @ARGV or exit 1' \
+    git ls-remote origin "refs/heads/${BRANCH}" 2>/dev/null | awk 'NR==1 {print $1}' || true)")"
+  [ -n "$_pre" ] && PRE_EXISTING_HEADS="${PRE_EXISTING_HEADS}${_pre}
+"
+fi
+
+# CLEAR THE DIFF FILE BEFORE THE BUILD, never after. `emit_trailer` reports this path
+# when it is non-empty, and a path left over from an earlier round is non-empty with
+# SOMEONE ELSE'S diff in it — the reviewers would then read a diff this build never
+# wrote (the #545 class: a review of a diff no one built). Removed rather than
+# truncated so a build that never writes it leaves nothing at all behind.
+[ -n "${NEUTRON_CODEX_BUILD_DIFF_FILE:-}" ] && rm -f "${NEUTRON_CODEX_BUILD_DIFF_FILE}"
 
 # A test seam (NEUTRON_CODEX_BUILD_EXEC_CMD) replaces the real invocation so tests
 # never call OpenAI. It reads the same STDIN and runs in the same cwd, so the trailer

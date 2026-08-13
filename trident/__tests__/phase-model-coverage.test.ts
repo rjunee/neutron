@@ -114,19 +114,24 @@ describe('coverage — no label falls through silently', () => {
     expect({ uncovered }).toEqual({ uncovered: [] })
   })
 
-  it('the cross-model lanes are ROUTED now, retries included', () => {
-    // They used to be listed as deliberately unconfigurable ("the reviewing model is
+  it('the CODEX review lane is ROUTED now, retry included — and kimi stays unrouted', () => {
+    // Codex used to be listed as deliberately unconfigurable ("the reviewing model is
     // the CLI's own configuration"), which held only while nothing threaded a model
-    // IN. Both wrappers read an env knob, so the exclusion was retired — and the
-    // RETRY lanes matter as much as the first attempt: an owner's choice that applied
-    // to one and not the other would be a review served by two different models.
+    // IN. `trident/codex-review.sh` reads `CODEX_REVIEW_MODEL`, so the exclusion was
+    // retired — and the RETRY lane matters as much as the first attempt: an owner's
+    // choice that applied to one and not the other would be a review served by two
+    // different models.
     for (const label of ['argus:codex', 'argus:codex-retry']) {
       expect(phaseForLabel(label)?.key).toBe('review_codex')
       expect(isUnroutedLabel(label)).toBe(false)
     }
+    // KIMI IS DELIBERATELY STILL UNROUTED. Nothing threads a model into
+    // `trident/kimi-review-cli.ts`, so a row for it would save a choice the dispatch
+    // never reads. It is excluded WITH A REASON rather than forgotten — which is the
+    // difference this list exists to record.
     for (const label of ['argus:kimi', 'argus:kimi-retry']) {
-      expect(phaseForLabel(label)?.key).toBe('review_kimi')
-      expect(isUnroutedLabel(label)).toBe(false)
+      expect(phaseForLabel(label)).toBeNull()
+      expect(isUnroutedLabel(label)).toBe(true)
     }
   })
 
@@ -271,36 +276,31 @@ describe('validation rejects loudly rather than dropping quietly', () => {
   })
 
   it('REJECTS a tier the phase cannot dispatch, and says which executor each is', () => {
-    // The executor is a capability, not a preference. `k3` runs through the Kimi CLI
-    // and nothing dispatches the build step that way, so it is refused — even though
-    // the build step DOES have a second executor (see the codex case below). "Has
-    // more than one" is not "has any".
-    const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'k3' } })
+    // The executor is a capability, not a preference. `sol` runs as a codex
+    // subprocess and the rubric reviewer has only `agent({model})`, which resolves
+    // against Claude Code's endpoint — so it is refused.
+    const { config, errors, rejected } = parsePhaseModelConfig({ review_rubric: { model: 'sol' } })
     expect(config).toEqual({})
-    expect(errors[0]).toContain('k3')
-    expect(errors[0]).toContain('kimi executor')
-    // The message names the executors this step DOES dispatch on, so the owner can
+    expect(errors[0]).toContain('sol')
+    expect(errors[0]).toContain('codex executor')
+    // The message names the executor this step DOES dispatch on, so the owner can
     // tell "wrong family" from "not wired yet".
-    expect(errors[0]).toContain('claude or codex')
+    expect(errors[0]).toContain('claude')
     // AND IT NEVER NAMES A SCRIPT. A tier's registered `wrapper` is the CROSS-MODEL
     // REVIEW wrapper; the build reaches the same codex tiers through
     // `trident/codex-build.sh`. Interpolating it told a BUILD-row owner their tier
     // "runs as a trident/codex-review.sh subprocess" — a true sentence about a phase
-    // they were not configuring. Pinned on the codex tier, where the wrong name was.
-    const codexOnKimiRow = parsePhaseModelConfig({ review_kimi: { model: 'sol' } })
-    expect(codexOnKimiRow.errors[0]).toContain('codex executor')
-    for (const message of [...errors, ...codexOnKimiRow.errors]) {
+    // they were not configuring.
+    for (const message of errors) {
       expect(message).not.toContain('codex-review.sh')
       expect(message).not.toContain('.sh')
     }
-    expect(rejected['build']).toEqual({ model: 'k3' })
+    // KEPT, not just dropped, so the pane can show it struck through.
+    expect(rejected['review_rubric']).toEqual({ model: 'sol' })
     // And the mirror: the codex review lane cannot be pointed at a Claude tier.
     expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
     // Within one executor it is allowed — that is the whole feature.
     expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
-    expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
-    // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
-    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toHaveLength(1)
   })
 
   it('ACCEPTS a codex tier on the build phases — the executor they are now wired to', () => {
@@ -550,12 +550,6 @@ describe('the args actually carry it (the TS half, end to end)', () => {
       transport: 'cli',
       env_var: 'CODEX_REVIEW_MODEL',
       group: 'codex',
-    })
-    expect(tiers['k3']).toEqual({
-      model_id: 'kimi-k3',
-      transport: 'cli',
-      env_var: 'KIMI_MODEL',
-      group: 'kimi',
     })
   })
 })

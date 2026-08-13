@@ -51,8 +51,14 @@ export interface PhaseDescriptor {
    *
    * Not the whole answer for a row: a step with two executors keeps this true while the
    * owner has it on a tier that cannot use an effort. Ask {@link effortSettable}.
+   *
+   * OPTIONAL FOR THE SAME REASON `groups` IS. It arrived with the CLI executors, and a
+   * gateway predating it sends the field not at all — read as a bare boolean that is
+   * `undefined`, which is falsy, and EVERY effort control on the pane silently
+   * disappears. Absent means "the server has no opinion", which is the old behaviour:
+   * the control stays. Read it through {@link effortSettable}, never directly.
    */
-  effort_supported: boolean;
+  effort_supported?: boolean;
   default: { model: string; effort: string };
 }
 
@@ -63,8 +69,13 @@ export interface TierOption {
   /** What the tier points at RIGHT NOW — `fast → claude-haiku-4-5-…`. */
   model_id: string;
   group: string;
-  /** False for a subprocess tier, which chooses its own reasoning effort. */
-  effort_supported: boolean;
+  /**
+   * False for a subprocess tier, which chooses its own reasoning effort.
+   *
+   * Optional for the same version-skew reason as the phase-level field: absent is
+   * "no opinion", not `false`. Read it through {@link effortSettable}.
+   */
+  effort_supported?: boolean;
   /** False when this install has no credential for it. Still shown, never hidden. */
   available: boolean;
   unavailable_reason: string | null;
@@ -219,6 +230,11 @@ export function phaseGroupsOf(phase: PhaseDescriptor): string[] {
  * An unknown tier (a saved override the server no longer resolves) keeps the phase's
  * own answer: the row is already telling the owner that value is dead.
  *
+ * BOTH READS ARE `!== false`, NOT TRUTHINESS. An older gateway omits these fields
+ * entirely, and `undefined` under a truthiness test means "no effort control anywhere"
+ * — the same version-skew blanking `phaseGroupsOf` above already guards against.
+ * Absent is not the same answer as false.
+ *
  * MUST MATCH `landing/chat-react/phase-models-client.ts#effortSettable`.
  */
 export function effortSettable(
@@ -226,9 +242,9 @@ export function effortSettable(
   tier: string,
   tiers: TierOption[],
 ): boolean {
-  if (!phase.effort_supported) return false;
+  if (phase.effort_supported === false) return false;
   const chosen = tiers.find((t) => t.tier === tier);
-  return chosen === undefined ? true : chosen.effort_supported;
+  return chosen === undefined ? true : chosen.effort_supported !== false;
 }
 
 /**

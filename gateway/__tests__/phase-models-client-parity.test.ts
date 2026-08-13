@@ -52,15 +52,15 @@ const CODEX = {
   default: { model: 'sol', effort: 'high' },
 }
 
-/** The kimi review row — the one whose only tier this install cannot run. */
-const KIMI = {
-  key: 'review_kimi',
-  label: 'Cross-model review (Kimi)',
-  description: 'A second opinion from Kimi K3.',
-  group: 'kimi',
-  groups: ['kimi'],
-  effort_supported: false,
-  default: { model: 'k3', effort: 'high' },
+/** A Claude-only row, so "wrong executor" and "no credential" can be told apart. */
+const RUBRIC = {
+  key: 'review_rubric',
+  label: 'Rubric review',
+  description: 'Reviews the diff against the fixed criteria.',
+  group: 'claude',
+  groups: ['claude'],
+  effort_supported: true,
+  default: { model: 'opus', effort: 'high' },
 }
 
 /**
@@ -72,7 +72,9 @@ const TIERS = [
   { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
   { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
   { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
-  { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', effort_supported: false, available: false, unavailable_reason: 'needs a Kimi key' },
+  // UNAVAILABLE on purpose: the case where the two clients could most easily
+  // disagree about whether to grey an option or drop it.
+  { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', effort_supported: false, available: false, unavailable_reason: 'needs a Codex connection' },
 ]
 
 /**
@@ -185,11 +187,11 @@ describe('effectiveRow — the phone and the browser show the same row', () => {
 })
 
 describe('tierChoices — the phone and the browser grey the same options, for the same reason', () => {
-  for (const phase of [BUILD, CODEX, KIMI]) {
+  for (const phase of [BUILD, CODEX, RUBRIC]) {
     test(`${phase.key} offers the same set`, () => {
-      // The reason STRING is compared too, not just the boolean: "needs a Kimi key"
-      // and a blank grey box are very different answers to "why can't I pick this",
-      // and only one of them lets the owner fix it.
+      // The reason STRING is compared too, not just the boolean: "needs a Codex
+      // connection" and a blank grey box are very different answers to "why can't I
+      // pick this", and only one of them lets the owner fix it.
       expect(web.tierChoices(phase, TIERS)).toEqual(mobile.tierChoices(phase, TIERS))
     })
   }
@@ -203,11 +205,9 @@ describe('tierChoices — the phone and the browser grey the same options, for t
       expect(sol).toEqual({ tier: 'sol', model_id: 'gpt-5.6-sol', selectable: true, reason: null })
       // The Claude tiers are still selectable — a second executor ADDS a choice.
       expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
-      // Kimi is NOT wired for the build, so it keeps the honest reason.
-      // …and the reason names BOTH executors the step reaches, not just its default.
-      expect(choices.find((c) => c.tier === 'k3')!.reason).toBe(
-        'Kimi is not wired for this step yet — it runs on Claude or Codex',
-      )
+      // …and a codex tier this install has no credential for is still SELECTABLE-
+      // eligible for the row: the reason is the missing connection, not the wiring.
+      expect(choices.find((c) => c.tier === 'terra')!.reason).toBe('needs a Codex connection')
     }
   })
 
@@ -255,17 +255,18 @@ describe('the agreement is real, not vacuous', () => {
     expect(web.tierChoices(legacyBuild, TIERS).find((c) => c.tier === 'sol')!.reason).toBe(
       'Codex is not wired for this step yet — it runs on Claude',
     )
-    // WRONG-GROUP BEATS UNAVAILABLE, deliberately: telling the owner of a Codex row
-    // to go get a Kimi key would send them to fix something that would not help.
-    expect(choices.find((c) => c.tier === 'k3')!.reason).toContain('Kimi is not wired for this step yet')
-    // On the row that COULD use it, the missing credential is the reason — and the
+    // WRONG-GROUP BEATS UNAVAILABLE, deliberately: telling the owner of a Claude-only
+    // row to go connect Codex would send them to fix something that would not help.
+    expect(web.tierChoices(RUBRIC, TIERS).find((c) => c.tier === 'terra')!.reason).toContain(
+      'Codex is not wired for this step yet',
+    )
+    // On a row that COULD use it, the missing credential is the reason — and the
     // option is still listed rather than hidden.
-    const kimiChoices = web.tierChoices(KIMI, TIERS)
-    expect(kimiChoices.find((c) => c.tier === 'k3')).toEqual({
-      tier: 'k3',
-      model_id: 'kimi-k3',
+    expect(web.tierChoices(CODEX, TIERS).find((c) => c.tier === 'terra')).toEqual({
+      tier: 'terra',
+      model_id: 'gpt-5.6-terra',
       selectable: false,
-      reason: 'needs a Kimi key',
+      reason: 'needs a Codex connection',
     })
   })
 
@@ -289,7 +290,7 @@ describe('effortSettable — both clients disable the same cell', () => {
     ['opus', true],
     ['fast', true],
     ['sol', false],
-    ['k3', false],
+    ['terra', false],
     // A saved override the server no longer resolves keeps the phase's own answer —
     // the row is already telling the owner that value is dead.
     ['retired-tier', true],
@@ -303,6 +304,26 @@ describe('effortSettable — both clients disable the same cell', () => {
 
   test('a row with no effort control at all stays off, whatever the tier', () => {
     expect(web.effortSettable(CODEX, 'sol', TIERS)).toBe(false)
+    expect(mobile.effortSettable(CODEX, 'opus', TIERS)).toBe(false)
+  })
+
+  test('a gateway that predates `effort_supported` keeps every effort control', () => {
+    // THE VERSION-SKEW HAZARD, and it is the opposite shape from the one above.
+    // `effort_supported` arrived with the CLI executors; an older gateway omits it,
+    // and `undefined` under a truthiness test is falsy — so EVERY row on the pane
+    // would lose its effort dropdown at once, silently, on a payload that used to
+    // render fine. Absent means "no opinion", which is the old behaviour: keep it.
+    // (`groups` already had this guard; this field shipped without one.)
+    const { effort_supported: _phaseOmitted, ...legacyPhase } = BUILD
+    const legacyTiers = TIERS.map(({ effort_supported: _tierOmitted, ...rest }) => rest)
+    for (const client of [web, mobile]) {
+      expect(client.effortSettable(legacyPhase, 'opus', legacyTiers)).toBe(true)
+      // …including on a tier the old server had no opinion about either.
+      expect(client.effortSettable(legacyPhase, 'sol', legacyTiers)).toBe(true)
+    }
+    // THE CONTROL: an explicit `false` from a CURRENT gateway still disables, so the
+    // fallback did not simply switch the feature off.
+    expect(web.effortSettable(BUILD, 'sol', TIERS)).toBe(false)
     expect(mobile.effortSettable(CODEX, 'opus', TIERS)).toBe(false)
   })
 

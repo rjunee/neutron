@@ -39,8 +39,6 @@ const shellCode = (src: string): string =>
     .split('\n')
     .filter((l) => !/^\s*#/.test(l))
     .join('\n')
-const KIMI_REVIEW = await Bun.file(new URL('../kimi-review.ts', import.meta.url)).text()
-const KIMI_CLI = await Bun.file(new URL('../kimi-review-cli.ts', import.meta.url)).text()
 
 describe('every tier is complete and resolvable', () => {
   it('resolves each tier to a non-empty id, with no duplicates', () => {
@@ -68,7 +66,7 @@ describe('every tier is complete and resolvable', () => {
         // would know a model id and have nowhere to put it.
         expect(typeof entry.wrapper).toBe('string')
         expect(typeof entry.env_var).toBe('string')
-        expect(entry.requires === 'codex' || entry.requires === 'kimi').toBe(true)
+        expect(entry.requires).toBe('codex')
       }
     }
   })
@@ -99,7 +97,6 @@ describe('the registry and the wrappers cannot drift apart', () => {
     // while the pane insists otherwise.
     const sources: Record<string, string> = {
       'trident/codex-review.sh': CODEX_WRAPPER,
-      'trident/kimi-review-cli.ts': KIMI_CLI,
     }
     for (const entry of modelTierRegistry()) {
       if (entry.transport !== 'cli') continue
@@ -129,11 +126,6 @@ describe('the registry and the wrappers cannot drift apart', () => {
     // difference is one character and no test would otherwise see it.
     expect(CODEX_WRAPPER).toContain('"${CODEX_REVIEW_MODEL-gpt-5.6-sol}"')
     expect(CODEX_WRAPPER).not.toContain('${CODEX_REVIEW_MODEL:-')
-  })
-
-  it('`k3` IS the Kimi reviewer\'s own default model', () => {
-    expect(modelTier('k3')!.model_id).toBe('kimi-k3')
-    expect(KIMI_REVIEW).toContain("KIMI_DEFAULT_MODEL = 'kimi-k3'")
   })
 
   it('the BUILD wrapper pins the same `sol` id, on its OWN knob', () => {

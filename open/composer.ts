@@ -443,7 +443,7 @@ import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-cred
 import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-connect-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
-import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { CodexCredentialService, codexCliOnPath } from '@neutronai/trident/codex-credential.ts'
 import { makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
@@ -3241,13 +3241,18 @@ export function buildOpenGraphComposer(
       auth: appOwnerAuth,
       read: (scope) => readTridentPhaseModelsWithRejected(db, scope),
       write: (scope, input) => writeTridentPhaseModels(db, scope, input),
-      // THE SAME RESOLVERS THE BUILD USES (`kimiConfigured` below is this exact
-      // function). A pane that answered "available" from its own notion of
-      // configured would grey the wrong option — or worse, offer a tier whose
-      // review then defers and blocks the merge for a reason the owner cannot see.
+      // THE SAME RESOLVER THE BUILD USES. A pane that answered "available" from its
+      // own notion of configured would grey the wrong option — or worse, offer a tier
+      // whose build then never happens for a reason the owner cannot see.
+      //
+      // BOTH HALVES OF "CAN CODEX RUN HERE", because the wrapper hard-fails on either:
+      // exit 10 with no credential, exit 11 with no `codex` on PATH
+      // (`trident/codex-build.sh`). A credential on a box where the CLI was never
+      // installed is a selectable tier that dies at dispatch.
       connections: () => ({
-        codex: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !== null,
-        kimi: kimiConfigured(),
+        codex:
+          codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !== null &&
+          codexCliOnPath(env),
       }),
     })
     const voiceTranscriptionSurface = createVoiceTranscriptionSurface({

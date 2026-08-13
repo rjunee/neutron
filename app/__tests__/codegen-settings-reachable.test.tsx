@@ -86,7 +86,9 @@ function payload(
       { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
       { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
       { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
-      { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', effort_supported: false, available: false, unavailable_reason: 'needs a Kimi key' },
+      // UNAVAILABLE on purpose: no codex credential (or no codex CLI) on this
+      // install, which is a DIFFERENT answer from "this step cannot reach codex".
+      { tier: 'luna', provider: 'openai', model_id: 'gpt-5.6-luna', group: 'codex', effort_supported: false, available: false, unavailable_reason: 'needs a Codex connection' },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaults: {
@@ -225,11 +227,11 @@ describe('the screen renders what the SERVER says the phases are', () => {
     await mountCodegen();
     await press('phase-review_codex-model');
     // Listed on the row that could use it, greyed, saying what to go and fix.
-    const k3 = byTestId('phase-review_codex-model-k3');
-    expect(k3).not.toBeNull();
-    expect(k3!.textContent ?? '').toContain('Kimi is not wired for this step yet');
+    const luna = byTestId('phase-review_codex-model-luna');
+    expect(luna).not.toBeNull();
+    expect(luna!.textContent ?? '').toContain('needs a Codex connection');
     // …and pressing it changes nothing, which is the half a render check misses.
-    await press('phase-review_codex-model-k3');
+    await press('phase-review_codex-model-luna');
     expect(byTestId('phase-review_codex-changed')).toBeNull();
   });
 
@@ -244,10 +246,12 @@ describe('the screen renders what the SERVER says the phases are', () => {
     expect(sol!.textContent ?? '').not.toContain('not wired for this step yet');
     await press('phase-build-model-sol');
     expect(byTestId('phase-build-changed')).not.toBeNull();
-    // …and Kimi on the SAME row stays greyed, because nothing wired it.
-    await press('phase-build-model');
-    expect(byTestId('phase-build-model-k3')!.textContent ?? '').toContain(
-      'Kimi is not wired for this step yet',
+    // …while the OTHER kind of greying is unchanged: the synthesis row has only a
+    // Claude dispatch, so a codex tier there still says so rather than becoming
+    // pickable because a different row was wired.
+    await press('phase-synthesis-model');
+    expect(byTestId('phase-synthesis-model-sol')!.textContent ?? '').toContain(
+      'Codex is not wired for this step yet',
     );
   });
 

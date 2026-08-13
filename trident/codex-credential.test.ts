@@ -17,7 +17,11 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { codexAuthPath, readMaterializedAuth } from './codex-auth.ts'
-import { CODEX_CREDENTIAL_SERVICE, CodexCredentialService } from './codex-credential.ts'
+import {
+  CODEX_CREDENTIAL_SERVICE,
+  CodexCredentialService,
+  codexCliOnPath,
+} from './codex-credential.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REVIEW_SCRIPT = join(HERE, 'codex-review.sh')
@@ -282,5 +286,51 @@ describe('connect → codex-review.sh sees CONNECTED (exit 0)', () => {
       env: { PATH: `${bin}${delimiter}/usr/bin${delimiter}/bin`, CODEX_HOME: codexHome },
     })
     expect(res.status).toBe(10)
+  })
+})
+
+describe('codexCliOnPath — the OTHER half of "can this install run codex"', () => {
+  // A credential is not enough. `trident/codex-build.sh` exits 10 with no credential
+  // and 11 with no CLI, and downstream the two are the same thing: a build that never
+  // happened. A pane that greyed on the credential alone would offer a codex tier on
+  // a box where `codex` was never installed.
+  let dir = ''
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'codex-cli-probe-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const bin = (name: string, mode: number): string => {
+    const d = join(dir, name)
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'codex'), '#!/bin/sh\nexit 0\n')
+    chmodSync(join(d, 'codex'), mode)
+    return d
+  }
+
+  test('finds an executable `codex` anywhere on PATH', () => {
+    const d = bin('real', 0o755)
+    // Behind an entry that does NOT have it, so the scan is proved to continue.
+    expect(codexCliOnPath({ PATH: `${join(dir, 'empty')}${delimiter}${d}` })).toBe(true)
+  })
+
+  test('a NON-EXECUTABLE file called codex is not a CLI', () => {
+    // `execvp` skips it, so reporting the tier available would offer a build that
+    // fails at launch — the exact failure this probe exists to pre-empt.
+    expect(codexCliOnPath({ PATH: bin('notexec', 0o644) })).toBe(false)
+  })
+
+  test('an absent, empty or unset PATH answers false rather than throwing', () => {
+    mkdirSync(join(dir, 'bare'), { recursive: true })
+    expect(codexCliOnPath({ PATH: join(dir, 'bare') })).toBe(false)
+    expect(codexCliOnPath({ PATH: '' })).toBe(false)
+    expect(codexCliOnPath({})).toBe(false)
+    // An unreadable/nonexistent entry must not decide the answer for the ones after
+    // it — the positive control is the same PATH with a real directory appended.
+    const missing = join(dir, 'does-not-exist')
+    expect(codexCliOnPath({ PATH: missing })).toBe(false)
+    expect(codexCliOnPath({ PATH: `${missing}${delimiter}${bin('after', 0o755)}` })).toBe(true)
   })
 })

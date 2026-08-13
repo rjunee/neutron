@@ -186,9 +186,10 @@ describe('the chain is actually connected — each link asserted separately', ()
     expect(start).toBeGreaterThan(-1)
     const block = src.slice(start, src.indexOf('\n    })', start))
     expect(block.includes('codexCredentialService.resolveActiveCodexHome')).toBe(true)
-    expect(block.includes('kimi: kimiConfigured()')).toBe(true)
-    // …and the trident launch reads the very same function, so the two cannot drift.
-    expect(src.includes('resolve_kimi_configured: kimiConfigured')).toBe(true)
+    // BOTH HALVES OF "CAN CODEX RUN HERE". The wrapper exits 10 with no credential
+    // and 11 with no CLI, so a pane that greyed on the credential alone would offer a
+    // tier that dies at dispatch on a box where `codex` was never installed.
+    expect(block.includes('codexCliOnPath(env)')).toBe(true)
   })
 
   it('the HTTP surface is registered, not merely written', async () => {
@@ -205,7 +206,7 @@ describe('the chain is actually connected — each link asserted separately', ()
 
 describe('the HTTP surface', () => {
   const auth = { resolve: async () => ({ user_id: 'owner', project_slug: SCOPE }) } as never
-  const surfaceFor = async (connections = { codex: true, kimi: true }) => {
+  const surfaceFor = async (connections = { codex: true }) => {
     const { createTridentPhaseModelsSurface } = await import(
       '@neutronai/gateway/http/trident-phase-models-surface.ts'
     )
@@ -234,9 +235,12 @@ describe('the HTTP surface', () => {
     expect(phases.every((p) => p.description.length > 20)).toBe(true)
     expect(json['efforts']).toContain('xhigh')
     expect(json['overrides']).toEqual({})
-    // The cross-model lanes are rows now, not an invisible part of the pipeline.
+    // The codex review lane is a row now, not an invisible part of the pipeline.
     expect(phases.some((p) => p.key === 'review_codex')).toBe(true)
-    expect(phases.some((p) => p.key === 'review_kimi')).toBe(true)
+    // KIMI IS NOT. Nothing threads a model into `trident/kimi-review-cli.ts`, so a row
+    // for it would save a choice the dispatch never reads — a selectable option that
+    // does not dispatch is worse than an absent one.
+    expect(phases.some((p) => p.key === 'review_kimi')).toBe(false)
   })
 
   it('tells each row EVERY executor it can dispatch on, not just its default', async () => {
@@ -295,7 +299,6 @@ describe('the HTTP surface', () => {
     // A subprocess picks its own reasoning effort, whichever wrapper reaches it.
     expect(flag('sol')).toBe(false)
     expect(flag('terra')).toBe(false)
-    expect(flag('k3')).toBe(false)
     // Every tier carries the field — a missing one reads as `false` in a client and
     // would silently disable a control that works.
     for (const t of tiers) expect(typeof t['effort_supported']).toBe('boolean')
@@ -307,21 +310,19 @@ describe('the HTTP surface', () => {
   })
 
   it('shows an unrunnable tier DISABLED WITH THE REASON, never omitted', async () => {
-    // The install with no Codex connection and no Kimi key. Dropping those options
-    // would leave the owner unable to account for a missing choice — which is how a
-    // whole capability stayed invisible for weeks (ISSUES #551).
-    const s = await surfaceFor({ codex: false, kimi: false })
+    // The install that cannot run codex — no credential, or no CLI. Dropping those
+    // options would leave the owner unable to account for a missing choice, which is
+    // how a whole capability stayed invisible for weeks (ISSUES #551).
+    const s = await surfaceFor({ codex: false })
     const res = await s.handler(req('GET'))
     const json = (await res!.json()) as Record<string, unknown>
     const tiers = json['model_tiers'] as Array<Record<string, unknown>>
-    expect(tiers.find((t) => t['tier'] === 'sol')).toMatchObject({
-      available: false,
-      unavailable_reason: 'needs a Codex connection',
-    })
-    expect(tiers.find((t) => t['tier'] === 'k3')).toMatchObject({
-      available: false,
-      unavailable_reason: 'needs a Kimi key',
-    })
+    for (const tier of ['sol', 'terra', 'luna']) {
+      expect(tiers.find((t) => t['tier'] === tier)).toMatchObject({
+        available: false,
+        unavailable_reason: 'needs a Codex connection',
+      })
+    }
     // The Claude tiers need nothing and stay selectable.
     expect(tiers.find((t) => t['tier'] === 'opus')!['available']).toBe(true)
   })

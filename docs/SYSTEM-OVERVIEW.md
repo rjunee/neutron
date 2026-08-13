@@ -2800,7 +2800,7 @@ the machine, which is what the agent recommended when a push failed — see
   not blank a flow that is working, and the `device_code` is not rendered even
   when a response carries one.
 
-### Code-generation model selector — one tier registry, three model families
+### Code-generation model selector — one tier registry, two executors
 
 Which model runs each step of a build is owner-editable, as a TABLE: one row per
 named step — **name · model dropdown · effort dropdown** — plus the step's one-line
@@ -2812,28 +2812,30 @@ generation"), mobile `app/app/codegen.tsx`, both over
   ONE registry: `{tier, provider, model_id, transport, wrapper, env_var, requires}`,
   where `model_id` is RESOLVED AT CALL TIME (the Claude tiers through
   `runtime/models.ts`, including the watchdog's adopted `getBestModel()`). Retiring a
-  model is a single edit here. Tiers: `fable`/`opus`/`sonnet`/`fast` (Anthropic),
-  `sol`/`terra`/`luna` (GPT 5.6, via Codex), `k3` (Kimi K3).
+  model is a single edit here. Tiers: `fable`/`opus`/`sonnet`/`fast` (Anthropic) and
+  `sol`/`terra`/`luna` (GPT 5.6, via Codex).
 - **A tier carries a TRANSPORT, because that is what makes it reachable.** The
   workflow cannot reach a non-Anthropic model through `agent({model})` — that
-  resolves against Claude Code's own endpoint (`trident/kimi-review-cli.ts`). So
-  `transport: 'agent'` goes on the spawn, and `transport: 'cli'` is passed to a
-  SUBPROCESS through the wrapper's env knob: `CODEX_REVIEW_MODEL` for
-  `trident/codex-review.sh`, `KIMI_MODEL` for `trident/kimi-review-cli.ts`. The
-  registry is threaded to the workflow as `args.modelTiers` (`trident/inner-loop.ts`
-  `buildWorkflowArgs`), alongside the existing `args.models`, because the `.mjs` has
-  no module resolution.
-- **The cross-model lanes are routed phases now.** `argus:codex` / `argus:kimi` (and
-  their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
-  `review_kimi` phases in `trident/phase-models.ts`, defaulting to `sol` and `k3` —
-  the same models the wrappers pinned themselves, so an install that never opens the
-  pane is unchanged. `trident/__tests__/model-tiers.test.ts` pins the registry
-  against each wrapper's own default (and against the `${VAR-x}` form that lets an
-  explicitly EMPTY `CODEX_REVIEW_MODEL` mean "the CLI default").
+  resolves against Claude Code's own endpoint. So `transport: 'agent'` goes on the
+  spawn, and `transport: 'cli'` is passed to a SUBPROCESS through the wrapper's env
+  knob (`CODEX_REVIEW_MODEL` for `trident/codex-review.sh`). The registry is threaded
+  to the workflow as `args.modelTiers` (`trident/inner-loop.ts` `buildWorkflowArgs`),
+  alongside the existing `args.models`, because the `.mjs` has no module resolution.
+- **The codex review lane is a routed phase now; the kimi one is not.**
+  `argus:codex` and its retry were in `UNROUTED_LABELS`; they are the `review_codex`
+  phase in `trident/phase-models.ts`, defaulting to `sol` — the same model the wrapper
+  pinned itself, so an install that never opens the pane is unchanged.
+  `trident/__tests__/model-tiers.test.ts` pins the registry against the wrapper's own
+  default (and against the `${VAR-x}` form that lets an explicitly EMPTY
+  `CODEX_REVIEW_MODEL` mean "the CLI default"). `argus:kimi` STAYS in
+  `UNROUTED_LABELS` with its reason: nothing threads a model into
+  `trident/kimi-review-cli.ts`, so a row for it would store a choice the dispatch
+  never reads.
 - **THE BUILD STEP RUNS ON CODEX TOO.** It is the one step with two executors, and
   the reason is the Anthropic quota: the build is by far the most expensive phase.
   Pin `build` (or `build_mechanical` — same labels, same dispatch, split only by the
-  planner's complexity tag) to `sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
+  planner's complexity tag — `build`'s setting covers both, via `phaseOverrideFor`)
+  to `sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
   hands the assembled Forge brief to `trident/codex-build.sh` instead of to
   `agent({model})`; no Anthropic model id is requested for the phase. The wrapper
   runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree,
@@ -2854,23 +2856,32 @@ generation"), mobile `app/app/codegen.tsx`, both over
   - **The trailer is a FILE, and both shas are about THIS build.** It goes to
     `NEUTRON_CODEX_BUILD_TRAILER_FILE` (required; the bridge `cat`s exactly that) so a
     transcript narrating trailer-shaped lines cannot compete with the measurement on
-    one stream. `HEAD` is reported only when it moved past where it stood before codex
-    launched, so a build that edited and never committed reports nothing rather than
-    the base commit. `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
+    one stream. `HEAD` is reported only when it is a commit that did not ALREADY exist
+    — measured against three tips, the worktree HEAD at launch plus the local and
+    remote tips of the target branch — so neither a build that edited without
+    committing nor a re-entry that only ran `git switch` can hand back a sha it did
+    not produce. The diff path is deleted before launch for the same reason: it
+    survives between rounds, and an unrewritten one would point the panel at an
+    earlier round's diff. `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
     remote tip equals it — because a fresh probe of a shared ref is what
     `inner-workflow.mjs` forbids for `reviewedHead`: a third-party push read back there
     would be pinned by `--match-head-commit` and certified as reviewed.
-  - **No fallback to Claude.** A lane reporting `not_connected`/`deferred` stops the
-    run with the status named. Re-Forging on Opus would spend the quota the owner
-    moved the phase to protect, invisibly.
+  - **No fallback to Claude, and no review of nothing.** A lane reporting
+    `not_connected`/`deferred` stops the run with the status named — re-Forging on
+    Opus would spend the quota the owner moved the phase to protect, invisibly. A lane
+    that CONNECTED and produced no sha or no diff stops too: round 1 had no
+    did-it-land gate, so an empty build reached the panel and five reviewers APPROVED
+    a change that did not exist.
   - **A codex build makes the codex REVIEWER same-family.** The cross-model gate is
     unchanged and still cannot turn a deferred review into an APPROVE, but on a codex
     build the panel's family diversity comes from `argus:claude`,
-    `argus:adversarial` and `review_kimi`.
+    `argus:adversarial` and the kimi seat.
 - **The effort cell follows the CHOSEN tier, not just the step.** The payload carries
   `effort_supported` on each PHASE (does its default executor read one) and on each
   TIER (does that tier read one), and both clients disable the cell when either says
-  no — the build row keeps its control on `opus` and loses it on `sol`. `applyRowEdit`
+  no — the build row keeps its control on `opus` and loses it on `sol`. Both reads are
+  `!== false`, never truthiness: an older gateway omits the field, and `undefined`
+  under a truthiness test would blank every effort control at once. `applyRowEdit`
   clears an effort the newly-chosen tier cannot use; `parsePhaseModelConfig` drops one
   that arrives anyway and lets the write SUCCEED, because failing it
   400s the whole PUT and makes the codex tiers unpickable for anyone who ever touched
@@ -2881,9 +2892,11 @@ generation"), mobile `app/app/codegen.tsx`, both over
   one from a group this step cannot reach renders disabled with "<Executor> is not
   wired for this step yet — it runs on <every executor the step reaches>", and one this install has no
   credential for with "needs a Codex connection" — never disappearing. The surface
-  answers availability from the SAME resolvers the build uses (`open/composer.ts`:
-  `codexCredentialService.resolveActiveCodexHome`, and the shared `kimiConfigured()`
-  that `resolve_kimi_configured` also uses), so the pane and the run cannot disagree.
+  answers availability from the SAME resolvers the build uses, and from BOTH halves of
+  "can codex run here" (`open/composer.ts`:
+  `codexCredentialService.resolveActiveCodexHome` AND `codexCliOnPath`), because the
+  wrapper hard-fails on a missing credential and on a missing CLI alike — so the pane
+  and the run cannot disagree.
 - **A refused stored value degrades visibly.** `model` must name a tier (the old
   literal-id escape hatch is closed: a bare id carries no transport). A retired tier
   or a legacy literal is rejected at the boundary, the phase falls back to its
@@ -2897,7 +2910,11 @@ generation"), mobile `app/app/codegen.tsx`, both over
 - **The chain is asserted end to end**, not per layer:
   `trident/__tests__/cross-model-dispatch.test.ts` runs the REAL `buildWorkflowArgs`
   output through the REAL `inner-workflow.mjs` and asserts the resolved id lands on
-  the subprocess command line (`CODEX_REVIEW_MODEL='gpt-5.6-terra'`).
+  the subprocess command line (`CODEX_REVIEW_MODEL='gpt-5.6-terra'`,
+  `CODEX_BUILD_MODEL='gpt-5.6-terra'`), with a positive control beside every absence
+  assertion. `trident/codex-build.test.ts` spawns the wrapper against real temporary
+  git repositories — including a real bare origin and a sha256 repo — and drives it
+  into each state the trailer must tell the truth about.
 
 ## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 

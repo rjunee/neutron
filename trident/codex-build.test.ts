@@ -52,6 +52,8 @@ interface RunOpts {
   diff?: string | null
   /** Seed the repo with a commit BEFORE the wrapper runs (the base state). Default true. */
   commit?: boolean
+  /** `git init --object-format` — 'sha256' gives 64-character shas. Default sha1. */
+  objectFormat?: 'sha256'
   /** Don't set NEUTRON_CODEX_BUILD_TRAILER_FILE at all. */
   noTrailerFile?: boolean
   /** What the mock `gh pr list` prints for the PR number. */
@@ -126,7 +128,7 @@ function run(opts: RunOpts = {}): RunResult {
     const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
     if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
   }
-  git('init', '-q', '-b', branch)
+  git('init', '-q', '-b', branch, ...(opts.objectFormat === undefined ? [] : ['--object-format', opts.objectFormat]))
   git('config', 'user.email', 'build@localhost')
   git('config', 'user.name', 'build')
   let baseHead = ''
@@ -192,8 +194,16 @@ const NARRATE =
 // APPENDS rather than overwrites, so running it twice in one fixture produces two
 // DIFFERENT commits — a second round whose tree matched the first would leave HEAD
 // where it was and quietly test the wrong thing.
-/** A build that COMMITS, which is what a real one does. */
-const FAKE_BUILD = `cat >/dev/null; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'`
+/**
+ * Writing the branch diff is the BUILD's job — the brief tells it to — so the seam
+ * that stands in for a real build has to do it too. Anything already at that path is
+ * an earlier round's, and the wrapper deletes it before launch.
+ */
+const WRITE_DIFF = 'printf "diff --git a/x b/x\\n+change\\n" > "$NEUTRON_CODEX_BUILD_DIFF_FILE"'
+/** A build that COMMITS and writes its diff, which is what a real one does. */
+const FAKE_BUILD = `cat >/dev/null; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'; ${WRITE_DIFF}`
+/** A build that commits but never writes a diff — the stale-diff hazard. */
+const FAKE_BUILD_NO_DIFF = `cat >/dev/null; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'`
 /** A build that RUNS and edits but never commits — the case that must report nothing. */
 const FAKE_NO_COMMIT = `cat >/dev/null; ${NARRATE}; echo edited > built.txt`
 const FAKE_FAIL = `cat >/dev/null; ${NARRATE}; echo "boom" >&2; exit 7`
@@ -358,7 +368,10 @@ describe('the BRIEF is what codex is asked to build', () => {
     expect(codexArgv).not.toContain('--model')
   })
 
-  test('the sandbox grant is explicit — a build cannot commit or push without it', () => {
+  test('the sandbox grant is on the command line, and it is the wide one', () => {
+    // What this proves is the ARGV — that the grant is explicit and not left to the
+    // CLI's read-only default. That a narrower policy could not commit or push is
+    // reasoning recorded in the script header, not something this assertion measures.
     const { codexArgv } = run({ authed: true, codexLoginExit: 0 })
     expect(codexArgv).toContain('--sandbox\ndanger-full-access')
     // …and codex is rooted in THIS worktree, not wherever it would infer a root.
@@ -409,6 +422,86 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     expect(r.head).toBe(r.baseHead)
     expect(r.baseHead.length).toBe(40)
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
+  })
+
+  test('a RE-ENTRY that switches onto the branch and commits nothing reports an empty sha', () => {
+    // THE RE-ENTRY HAZARD, and the reason the baseline is three tips and not one.
+    // Rounds 2..n start in a worktree parked on the base commit, and the brief's first
+    // instruction is `git switch <branch>`. A build that switches and then decides it
+    // has nothing to do has MOVED HEAD without producing a commit. Measured against
+    // the launch HEAD alone that reads as "this build committed", and the sha handed
+    // back is the PREVIOUS round's — `roundLanded` sees a landed round and
+    // `gh pr merge --match-head-commit` pins to a commit this build never made, and
+    // SUCCEEDS. Every crash-resume and every re-fire goes through here.
+    const r = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const roundOne = r.trailer['NEUTRON_CODEX_BUILD_HEAD'] ?? ''
+    expect(roundOne).not.toBe('')
+
+    // Park the worktree back on the base, exactly as a fresh re-entry checkout is.
+    spawnSync('git', ['switch', '--detach', r.baseHead], { cwd: r.dir })
+    const second = rerun(r, `cat >/dev/null; git switch -q trident/a-run`)
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    // HEAD genuinely moved — the switch happened, so this is not passing by accident.
+    expect(head).toBe(roundOne)
+    expect(head).not.toBe(r.baseHead)
+    expect(second.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
+    expect(second.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    // Emphatically: round one's sha is nowhere in round two's trailer.
+    expect(second.trailerRaw).not.toContain(roundOne)
+  })
+
+  test('a re-entry that switches AND commits still reports its own sha', () => {
+    // The control for the test above: the baseline must not swallow a real commit.
+    const r = run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const roundOne = r.trailer['NEUTRON_CODEX_BUILD_HEAD'] ?? ''
+    spawnSync('git', ['switch', '--detach', r.baseHead], { cwd: r.dir })
+    const second = rerun(r, `git switch -q trident/a-run; ${FAKE_BUILD_NO_DIFF}`)
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(head).not.toBe(roundOne)
+    expect(second.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
+  })
+
+  test('a re-entry whose previous round exists only on the REMOTE reports an empty sha', () => {
+    // The third baseline tip. A brand-new worktree may have no local `refs/heads/<b>`
+    // at all — the build fetches and creates it — so the local pair cannot see the
+    // previous round, and only the remote can say the commit already existed.
+    const r = pushable()
+    rerun(r, `${FAKE_BUILD_NO_DIFF}; git push -q origin trident/a-run`)
+    const roundOne = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    // Erase every LOCAL trace of it, leaving the remote as the only witness.
+    spawnSync('git', ['switch', '--detach', r.baseHead], { cwd: r.dir })
+    spawnSync('git', ['branch', '-q', '-D', 'trident/a-run'], { cwd: r.dir })
+    expect(
+      spawnSync('git', ['rev-parse', '--verify', 'refs/heads/trident/a-run'], { cwd: r.dir }).status,
+    ).not.toBe(0)
+
+    const second = rerun(
+      r,
+      `cat >/dev/null; git fetch -q origin trident/a-run; git switch -q -c trident/a-run FETCH_HEAD`,
+    )
+    expect(
+      spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim(),
+    ).toBe(roundOne)
+    expect(second.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
+    expect(second.trailerRaw).not.toContain(roundOne)
+  })
+
+  test('a sha256 repository reports its 64-character sha, not an empty one', () => {
+    // The length test is what stops `git rev-parse HEAD` echoing the literal `HEAD`
+    // back in an empty repo from being reported as a sha — but hard-coded to 40 it
+    // also collapses every sha on a sha256 repository, and the wrapper would then say
+    // "no commit was made" about a build that made one. Both object formats count.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      objectFormat: 'sha256',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.head.length).toBe(64)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
+    // …and the pre-existing baseline still bites at this width.
+    expect(r.baseHead.length).toBe(64)
+    expect(r.trailerRaw).not.toContain(r.baseHead)
   })
 
   test('a repo with NO commit at all reports an empty sha rather than inventing one', () => {
@@ -497,7 +590,7 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
       authed: true,
       codexLoginExit: 0,
       diff: null,
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
     })
     expect(missing.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
 
@@ -505,10 +598,42 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     const empty = run({
       authed: true,
       codexLoginExit: 0,
-      diff: '',
-      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+      env: {
+        NEUTRON_CODEX_BUILD_EXEC_CMD: `${FAKE_BUILD_NO_DIFF}; : > "$NEUTRON_CODEX_BUILD_DIFF_FILE"`,
+      },
     })
     expect(empty.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
+  })
+
+  test('a STALE diff from an earlier round is not reported as this round\'s', () => {
+    // #545's class of defect one file over: the path is handed in by the caller and
+    // survives between rounds, so a build that commits without rewriting it would
+    // point the review panel at a diff it did not produce — and the panel would
+    // review it without noticing. The wrapper deletes the path before launch, so the
+    // only diff it can report is one this build wrote.
+    const stale = run({
+      authed: true,
+      codexLoginExit: 0,
+      diff: 'diff --git a/prior b/prior\n+A DIFF FROM AN EARLIER ROUND\n',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD_NO_DIFF },
+    })
+    // The build committed — so this is not passing because nothing happened.
+    expect(stale.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
+    expect(stale.trailer['NEUTRON_CODEX_BUILD_DIFF']).toBe('')
+    // …and the file itself is gone, not merely unreported: nothing downstream can
+    // pick it up off the path by another route.
+    expect(existsSync(join(stale.dir, 'branch.diff'))).toBe(false)
+
+    // The control: the SAME stale file, and a build that does rewrite it, reports the
+    // path — with this round's contents.
+    const fresh = run({
+      authed: true,
+      codexLoginExit: 0,
+      diff: 'diff --git a/prior b/prior\n+A DIFF FROM AN EARLIER ROUND\n',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(fresh.trailer['NEUTRON_CODEX_BUILD_DIFF']).toContain('branch.diff')
+    expect(readFileSync(join(fresh.dir, 'branch.diff'), 'utf8')).not.toContain('EARLIER ROUND')
   })
 
   test('the trailer is emitted on the FAILURE path too', () => {

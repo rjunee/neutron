@@ -349,9 +349,11 @@ const codexBuildRoute = (route, modelId) => ({
 //
 // `alsoRunsOn` mirrors the phase table (`trident/phase-models.ts`): the groups this
 // route can be MOVED to by an owner override, beyond its own. Both build phases carry
-// it because they are the same dispatch under two complexity tags — greying one and
-// not the other would mean a `mechanical` task quietly stayed on Claude after the
-// owner moved the build off it.
+// it because they are the same dispatch under two complexity tags — but carrying it
+// only makes the move POSSIBLE for each key independently, and the owner sets one.
+// What actually keeps a `[mechanical]` task off Claude when the build moves to codex
+// is `phaseOverrideFor` below, which reads `build`'s setting for `build_mechanical`.
+// Do not remove one and keep the other.
 const modelForTag = (tag) =>
   tag === 'mechanical'
     ? { model: MODELS.sonnet, effort: 'medium', phaseKey: 'build_mechanical', group: 'claude', alsoRunsOn: ['codex'] }
@@ -375,16 +377,21 @@ const ROLE_MODEL = {
   'argus:claude': { model: MODELS.opus, effort: 'high', phaseKey: 'review_rubric' },
   'argus:adversarial': { model: MODELS.opus, effort: 'high', phaseKey: 'review_adversarial' },
   'argus:synthesis': { model: MODELS.fable, effort: 'high', phaseKey: 'synthesis' },
-  // THE TWO CROSS-MODEL LANES ARE ROUTED NOW. They used to be listed as deliberately
+  // THE CODEX REVIEW LANE IS ROUTED NOW. It used to be listed as deliberately
   // unconfigurable ("the reviewing model is the CLI's own configuration"), which was
-  // true only while nothing threaded a model IN. Both wrappers read an env knob, so
-  // the owner picks a tier and the resolved id reaches the subprocess — the model is
-  // NOT handed to agent() (that resolves against Claude Code's endpoint and cannot
-  // reach a GPT/Kimi model; see the `modelTiers` arg). The thin Claude agent wrapping
-  // each still runs on the launcher default: its whole job is to run one command and
-  // map an exit code.
+  // true only while nothing threaded a model IN. `trident/codex-review.sh` reads
+  // `CODEX_REVIEW_MODEL`, so the owner picks a tier and the resolved id reaches the
+  // subprocess — the model is NOT handed to agent() (that resolves against Claude
+  // Code's endpoint and cannot reach a GPT id; see the `modelTiers` arg). The thin
+  // Claude agent wrapping it still runs on the launcher default: its whole job is to
+  // run one command and map an exit code.
+  //
+  // `argus:kimi` is NOT here. Nothing in this repository threads a model into
+  // `trident/kimi-review-cli.ts`, so a route for it would carry a value the
+  // subprocess never reads — a setting with no consumer, which is the defect this
+  // whole file's transport field exists to prevent. It stays in `UNROUTED_LABELS`
+  // with that reason until something wires it.
   'argus:codex': cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }),
-  'argus:kimi': cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }),
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
@@ -415,9 +422,22 @@ const threadedPhaseModels =
   phaseModels && typeof phaseModels === 'object' && !Array.isArray(phaseModels) ? phaseModels : {}
 const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
+// THE BUILD IS ONE STEP WITH TWO COMPLEXITY TAGS, AND THE OWNER SEES ONE ROW.
+// `modelForTag` splits the dispatch into `build` and `build_mechanical` by the
+// planner's `[mechanical]` tag — an internal cost optimisation, not a setting. The
+// pane offers "Build" once, which writes `build`. Without this, every Ralph task the
+// planner happens to tag `[mechanical]` kept dispatching on Claude after the owner
+// moved the build to codex, and the log line would say so in a phase name the owner
+// has never seen. An EXPLICIT `build_mechanical` entry still wins — it is the more
+// specific key, and a config that names it meant it.
+const phaseOverrideFor = (phaseKey) =>
+  phaseKey === 'build_mechanical' && threadedPhaseModels['build_mechanical'] === undefined
+    ? threadedPhaseModels['build']
+    : threadedPhaseModels[phaseKey]
+
 function applyPhaseOverride(route, phaseKey) {
   if (!phaseKey) return route
-  const override = threadedPhaseModels[phaseKey]
+  const override = phaseOverrideFor(phaseKey)
   if (!override || typeof override !== 'object' || Array.isArray(override)) return route
   let { model, effort } = route
   const transport = route.transport === 'cli' ? 'cli' : 'agent'
@@ -508,8 +528,6 @@ function routeModel(label, tag) {
           // first attempt and silently not to the second.
           : label === 'argus:codex-retry'
             ? ROLE_MODEL['argus:codex']
-          : label === 'argus:kimi-retry'
-            ? ROLE_MODEL['argus:kimi']
           : ROLE_MODEL[label] || { model: MODELS.opus, effort: 'high', phaseKey: null }
   return applyPhaseOverride(base, base.phaseKey)
 }
@@ -525,13 +543,13 @@ function withModel(opts, tag) {
   // output — and an owner who cannot answer it will not trust the setting. Note
   // `route.phaseKey` is the owner-facing config key; `opts.phase` is the workflow's
   // progress group and is deliberately a different field.
-  const overridden = route.phaseKey !== null && route.phaseKey in threadedPhaseModels
+  const overridden = route.phaseKey !== null && phaseOverrideFor(route.phaseKey) !== undefined
   log(
     `trident.agent label=${opts.label} model=${route.model} effort=${route.effort} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}${tag ? ` tag=${tag}` : ''}`,
   )
   // A CLI-TRANSPORT ROUTE NEVER SETS agent() OPTS. Its model belongs to a subprocess
   // (see `crossModelEnvPrefix`); putting it on the spawn would ask Claude Code's
-  // endpoint for a GPT/Kimi id, which is the one failure this whole transport field
+  // endpoint for a GPT id, which is the one failure this whole transport field
   // exists to make impossible. The wrapping agent keeps the launcher default.
   if (route.transport === 'cli') return { ...opts }
   // Only model + effort cross into the agent opts. `phaseKey` is routing metadata
@@ -543,11 +561,11 @@ function withModel(opts, tag) {
  * The env assignment that carries the owner's chosen model INTO a cross-model wrapper.
  *
  * THIS IS THE WHOLE POINT OF THE CLI TRANSPORT. `agent({model})` resolves against
- * Claude Code's own endpoint, so a GPT or Kimi model cannot be selected that way; the
- * wrapper runs in its own process and reads its model from the environment
- * (`CODEX_REVIEW_MODEL`, `KIMI_MODEL`), so the assignment on the command line is the
- * seam that makes the setting real. A pane that saved a choice nothing put here would
- * be a control with no consumer.
+ * Claude Code's own endpoint, so a GPT model cannot be selected that way; the wrapper
+ * runs in its own process and reads its model from the environment
+ * (`CODEX_REVIEW_MODEL`), so the assignment on the command line is the seam that makes
+ * the setting real. A pane that saved a choice nothing put here would be a control
+ * with no consumer.
  *
  * Returns '' when no registry is threaded, which invokes the wrapper exactly as it was
  * invoked before this existed — the wrapper's own pinned default, including codex's
@@ -572,7 +590,7 @@ function crossModelEnvPrefix(label) {
  */
 function logCrossModelSpawn(label, fallback) {
   const route = routeModel(label)
-  const overridden = route.phaseKey !== null && route.phaseKey in threadedPhaseModels
+  const overridden = route.phaseKey !== null && phaseOverrideFor(route.phaseKey) !== undefined
   log(
     `trident.agent label=${label} model=${route.model || fallback} effort=n/a transport=cli phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}`,
   )
@@ -585,7 +603,6 @@ function logCrossModelSpawn(label, fallback) {
 // truncation-readback test proves the SHIPPED command, rather than a retyped copy of
 // it (`inner-workflow.test.ts`). A closure value it can pass in keeps that possible.
 const CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:codex')
-const KIMI_ENV_PREFIX = crossModelEnvPrefix('argus:kimi')
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -1967,7 +1984,7 @@ function kimiReviewerPrompt(diffFile) {
   // and the reviewer could approve without having reviewed the change.
   return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${KIMI_ENV_PREFIX}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
+  bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
@@ -2314,6 +2331,34 @@ ${task}${reflectionGuidance}`,
   )
 
   if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
+
+  // ── ROUND 1 HAS TO HAVE LANDED SOMETHING, TOO ────────────────────────────────
+  // The fix loop already refuses to re-review a round that left no trace on the
+  // branch (`roundLanded`, below); round 1 had no equivalent, and a build that
+  // completes and produces NOTHING went straight into the review panel. Five
+  // reviewers then read an empty diff, find nothing wrong with it, and APPROVE —
+  // spending precisely the Anthropic quota this route exists to protect, on a
+  // change that does not exist. Only the outer merge's empty-`reviewedHead`
+  // refusal stopped it from shipping, and that is one gate too far down.
+  //
+  // Either fact missing is fatal, and for different reasons: with no sha the run
+  // can never merge (`reviewedHead` is empty and `--match-head-commit` has nothing
+  // to pin), and with no diff there is nothing for a reviewer to read. The codex
+  // wrapper reports both as EMPTY rather than wrong when it cannot establish them,
+  // which is what makes this check possible at all — and a Claude Forge run that
+  // returns the same emptiness is just as unbuilt, so the gate is on the shared
+  // path and not on the codex branch of it.
+  const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
+  const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
+  if (forgeSha === '' || forgeDiff === '') {
+    const missing = [forgeSha === '' ? 'commitSha' : null, forgeDiff === '' ? 'diffFile' : null]
+      .filter((m) => m !== null)
+      .join(' and ')
+    throw new Error(
+      `forge:build completed but produced no ${missing} — nothing was built. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
+    )
+  }
+
   if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
 
   // C1 checkpoint — Forge done (PR + branch persisted).

@@ -40,6 +40,7 @@ interface Captured {
 /** The production launcher args for a run, with the owner's overrides applied. */
 function productionArgs(
   phase_models: Record<string, { model?: string; effort?: string }> | null,
+  runOverrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return buildWorkflowArgs({
     run: {
@@ -52,6 +53,7 @@ function productionArgs(
       pr: null,
       merge_mode: 'local',
       ralph: false,
+      ...runOverrides,
     } as never,
     base_branch: 'main',
     db_path: null as never,
@@ -66,7 +68,12 @@ function productionArgs(
 
 async function runWorkflow(
   args: Record<string, unknown>,
-  opts: { requestChangesOnce?: boolean } = {},
+  opts: {
+    requestChangesOnce?: boolean
+    complexity?: 'mechanical' | 'reasoning'
+    /** Round 1 comes back with these instead of a sha + a diff path. */
+    buildProduces?: { commitSha?: string; diffFile?: string }
+  } = {},
 ): Promise<{ captured: Captured[]; logs: string[]; result: Record<string, unknown> }> {
   const captured: Captured[] = []
   const logs: string[] = []
@@ -76,12 +83,19 @@ async function runWorkflow(
     const label = o?.['label'] as string | undefined
     captured.push({ label, prompt, opts: o ?? {} })
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
+      const empty = opts.buildProduces !== undefined && label === 'forge:build'
       const built = {
         prNumber: null,
         branch: 'trident/a-run',
-        diffFile: '/tmp/x.diff',
+        // A build that ran and produced NOTHING is the wrapper's honest answer, not a
+        // malformed one: it measures with git and emits EMPTY rather than wrong.
+        diffFile: empty ? (opts.buildProduces?.diffFile ?? '') : '/tmp/x.diff',
         worktreePath: '/wt',
-        commitSha: label === 'forge:build' ? 'abc' : 'def',
+        commitSha: empty
+          ? (opts.buildProduces?.commitSha ?? '')
+          : label === 'forge:build'
+            ? 'abc'
+            : 'def',
         testsPassed: true,
       }
       // THE BRIDGE'S SHAPE, not a second happy path. A codex build comes back through
@@ -91,6 +105,18 @@ async function runWorkflow(
       return prompt.includes('CODEX BUILD bridge')
         ? { ...built, codexStatus: 'connected' }
         : built
+    }
+    if (label === 'plan:fable') {
+      // Ralph's planner. `complexity` is the field that splits the build dispatch
+      // into `build` and `build_mechanical`, which is the whole point of the test
+      // that asks for it.
+      return {
+        implementationPlan: '- [ ] the one task\n',
+        topTask: 'the one task',
+        executionSpec: 'TARGET FILES: x\nACCEPTANCE CRITERION: y\nTEST PLAN: z',
+        complexity: opts.complexity ?? 'reasoning',
+        remainingTasks: 0,
+      }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: 'APPROVE', findings: [] }
@@ -127,7 +153,10 @@ async function runWorkflow(
   ) => (...a: unknown[]) => Promise<unknown>
   const fn = AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', body)
   const result = (await fn(agent, parallel, phase, log, budget, args)) as Record<string, unknown>
-  expect(synthCount).toBeGreaterThan(0)
+  // Every healthy run reaches synthesis, so a workflow that silently stopped early
+  // cannot pass a test by dispatching nothing. `buildProduces` is the one case that
+  // is SUPPOSED to stop before the panel, and it asserts that itself.
+  if (opts.buildProduces === undefined) expect(synthCount).toBeGreaterThan(0)
   return { captured, logs, result }
 }
 
@@ -138,20 +167,30 @@ const promptFor = (captured: Captured[], label: string): string => {
 }
 
 describe('THE DEFAULT PATH — an install that never opened the pane', () => {
-  test('codex still reviews on gpt-5.6-sol, and kimi on kimi-k3', async () => {
+  test('codex still reviews on gpt-5.6-sol', async () => {
     const { captured } = await runWorkflow(productionArgs(null))
     // The wrapper's own pin says `sol` too (`model-tiers.test.ts` holds those two
     // together), so this is the behaviour that shipped before the selector existed —
     // now stated by the dispatch instead of left to the CLI's default.
     expect(promptFor(captured, 'argus:codex')).toContain("CODEX_REVIEW_MODEL='gpt-5.6-sol'")
-    expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
+  })
+
+  test('the KIMI lane is left exactly as it was — nothing threads a model into it', async () => {
+    // Kimi is out of scope for this change, and "out of scope" has to be visible in
+    // the dispatch and not just in a commit message. The seat still runs; its command
+    // carries no model assignment, because `trident/kimi-review-cli.ts` is not wired
+    // to read one and a variable the subprocess ignores is a setting with no consumer.
+    const { captured } = await runWorkflow(productionArgs(null))
+    const cmd = promptFor(captured, 'argus:kimi')
+    expect(cmd).toContain('kimi-review-cli.ts')
+    expect(cmd).not.toContain('KIMI_MODEL=')
   })
 
   test('the model is set on the SUBPROCESS, never on the wrapping agent', async () => {
     // `agent({model})` resolves against Claude Code's own endpoint; a GPT id there
     // reaches nothing. The thin bridge agent must therefore carry NO model at all.
     const { captured } = await runWorkflow(productionArgs(null))
-    for (const label of ['argus:codex', 'argus:kimi']) {
+    for (const label of ['argus:codex']) {
       const seat = captured.find((c) => c.label === label)!
       expect({ label, model: seat.opts['model'] ?? null }).toEqual({ label, model: null })
     }
@@ -182,7 +221,7 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
       true,
     )
     // The OTHER cross-model lane is untouched — one row's choice is one row's choice.
-    expect(promptFor(captured, 'argus:kimi')).toContain("KIMI_MODEL='kimi-k3'")
+    expect(promptFor(captured, 'argus:kimi')).not.toContain('gpt-5.6-terra')
   })
 
   test('a Claude phase override still lands on the agent opts', async () => {
@@ -199,13 +238,22 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
   })
 })
 
-describe('THE BUILD RUNS ON CODEX — and stops spending Anthropic when it does', () => {
+describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the phase', () => {
   /**
    * The reason to move a build off Claude is the Anthropic quota, so "it routes to
    * codex but still pays Anthropic for the build" is a failure even if the build
    * succeeds. These tests therefore assert an ABSENCE as well as a presence, and pair
    * the absence with a positive control on the same label — an absence assertion with
    * no control is the shape that passes because nothing ran.
+   *
+   * WHAT THIS DOES NOT CLAIM, said plainly because the describe used to overclaim it:
+   * the phase does not reach ZERO Anthropic tokens. A workflow step has no way to
+   * reach a shell except through `agent()`, so a thin Claude bridge is still spawned
+   * to run one command and copy six measured values, and it runs on the launcher's own
+   * default model. What moves off Anthropic is the BUILD — the reading, the editing,
+   * the test loop, which is essentially all of the phase's tokens. The bridge's prompt
+   * is the command string plus a "do not build anything yourself" instruction, and
+   * `the bridge is told not to build` below is what holds that line.
    */
   const CODEX_BUILD = { build: { model: 'terra' } }
 
@@ -292,7 +340,55 @@ describe('THE BUILD RUNS ON CODEX — and stops spending Anthropic when it does'
     expect(cmd).toContain('DO NOT BUILD ANYTHING YOURSELF')
   })
 
-  test('every FIX round lands on the same executor as round 1', async () => {
+  test('a Ralph task tagged [mechanical] goes to codex too — one row, both build phases', async () => {
+    // THE SECOND BUILD PHASE. `modelForTag` splits the forge dispatch by the planner's
+    // complexity tag, so a Ralph iteration tagged `mechanical` resolves the separate
+    // `build_mechanical` phase key — which the owner never sees and never sets. Read
+    // literally, that key has no override, so it kept dispatching Sonnet on Anthropic
+    // for exactly the tasks a codex build was moved off Claude to cover.
+    const ralphArgs = productionArgs(CODEX_BUILD, { ralph: true })
+    expect(ralphArgs['ralph']).toBe(true)
+    const { captured } = await runWorkflow(ralphArgs, { complexity: 'mechanical' })
+    const build = captured.find((c) => c.label === 'forge:build')!
+    expect(build.prompt).toContain("bash '/repo/trident/codex-build.sh'")
+    expect(build.prompt).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
+    expect(build.opts['model'] ?? null).toBeNull()
+    // …and the run SAYS the owner's setting reached this phase. A mirrored override
+    // that logged `phase=build_mechanical` with no `override=owner` would leave the
+    // one honest answer to "did my setting take effect?" reading like a no.
+    const { logs } = await runWorkflow(ralphArgs, { complexity: 'mechanical' })
+    expect(
+      logs.some((l) => l.includes('phase=build_mechanical') && l.includes('override=owner')),
+    ).toBe(true)
+
+    // THE CONTROL, on the same ralph+mechanical path: with no override the very same
+    // dispatch carries Sonnet, so the assertions above are caused by the mirroring
+    // and not by a mechanical route that never ran.
+    const plain = await runWorkflow(productionArgs(null, { ralph: true }), {
+      complexity: 'mechanical',
+    })
+    expect(plain.captured.find((c) => c.label === 'forge:build')!.opts['model']).toBe(SONNET_MODEL)
+    expect(plain.logs.some((l) => l.includes('override=owner'))).toBe(false)
+  })
+
+  test('an explicit build_mechanical entry still wins over the mirrored one', async () => {
+    // Mirroring is a default, not an override. A config that names the more specific
+    // key meant it — otherwise an owner who deliberately kept the cheap mechanical
+    // lane on Claude could not express that.
+    const { captured } = await runWorkflow(
+      productionArgs(
+        { build: { model: 'terra' }, build_mechanical: { model: 'sonnet', effort: 'low' } },
+        { ralph: true },
+      ),
+      { complexity: 'mechanical' },
+    )
+    const build = captured.find((c) => c.label === 'forge:build')!
+    expect(build.prompt).not.toContain('codex-build.sh')
+    expect(build.opts['model']).toBe(SONNET_MODEL)
+    expect(build.opts['effort']).toBe('low')
+  })
+
+  test('a FIX round lands on the same executor as round 1', async () => {
     const { captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
       requestChangesOnce: true,
     })
@@ -362,6 +458,39 @@ describe('THE BUILD RUNS ON CODEX — and stops spending Anthropic when it does'
     // coda has to say out loud that it supersedes it — which the line above does.
     expect(prompt).toContain('/tmp/trident-a-run.diff')
     expect(prompt).toContain('REPLACES steps 5 and 6 above')
+  })
+
+  test('a build that CONNECTED but produced nothing never reaches the review panel', async () => {
+    // The sibling of the not_connected case above, and the more expensive one. Here
+    // codex ran to completion and the wrapper measured honestly: no sha, no diff. The
+    // status is `connected`, so the executor gate passes — and round 1 had no
+    // did-it-land check, so five reviewers were dispatched to read an empty diff, find
+    // nothing wrong with it, and APPROVE. Only the outer merge's empty-`reviewedHead`
+    // refusal stopped it shipping, one gate too far down and the whole review budget
+    // already spent on a change that does not exist.
+    const { captured, result } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      buildProduces: { commitSha: '', diffFile: '' },
+    })
+    expect(result['ok']).toBe(false)
+    expect(result['checkpoint']).toBe('inner-error')
+    expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+    expect(captured.filter((c) => String(c.label).startsWith('forge:fix-round-'))).toEqual([])
+    // Never an APPROVE — an empty diff must not be able to produce one.
+    expect(result['verdict'] ?? null).not.toBe('APPROVE')
+
+    // EACH FACT ALONE IS FATAL, for a different reason: a diff with no sha can never
+    // be merged (`--match-head-commit` has nothing to pin), and a sha with no diff
+    // gives the panel nothing to read.
+    for (const produced of [{ commitSha: 'abc', diffFile: '' }, { commitSha: '', diffFile: '/tmp/x.diff' }]) {
+      const half = await runWorkflow(productionArgs(CODEX_BUILD), { buildProduces: produced })
+      expect(half.result['ok']).toBe(false)
+      expect(half.captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+    }
+
+    // THE CONTROL: the same harness with a real sha and diff DOES reach the panel, so
+    // the emptiness above is the guard firing and not a workflow that never reviews.
+    const healthy = await runWorkflow(productionArgs(CODEX_BUILD))
+    expect(healthy.captured.filter((c) => String(c.label).startsWith('argus:')).length).toBeGreaterThan(0)
   })
 
   test('a build lane that never ran STOPS the run instead of falling back to Claude', async () => {
@@ -444,15 +573,17 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
   })
 
   test('a tier from an executor this step cannot reach is refused, not handed to agent()', async () => {
-    // `k3` is the Kimi CLI's tier. The build step has TWO executors now (Claude and
-    // codex) and Kimi is neither, so the override is dropped rather than handed to
-    // `agent({model: 'kimi-k3'})` — a spawn against an endpoint that has never heard
-    // of it.
-    expect(productionArgs({ build: { model: 'k3' } })['phaseModels']).toBeUndefined()
+    // The rubric reviewer has ONE dispatch, `agent({model})`, which resolves against
+    // Claude Code's endpoint. `sol` is a codex tier, so the override is dropped rather
+    // than handed to `agent({model: 'gpt-5.6-sol'})` — a spawn against an endpoint
+    // that has never heard of it. (The BUILD row is the counter-example, and the whole
+    // point of this change: it declares a codex dispatch, so the same tier is accepted
+    // there. `alsoRunsOn` is what separates the two.)
+    expect(productionArgs({ review_rubric: { model: 'sol' } })['phaseModels']).toBeUndefined()
 
-    const { captured, logs } = await runWorkflow(past({ build: { model: 'k3' } }))
-    const build = captured.find((c) => c.label === 'forge:build')!
-    expect(build.opts['model']).not.toBe('kimi-k3')
+    const { captured, logs } = await runWorkflow(past({ review_rubric: { model: 'sol' } }))
+    const rubric = captured.find((c) => c.label === 'argus:claude')!
+    expect(rubric.opts['model']).toBe(getBestModel())
     expect(logs.some((l) => l.includes('IGNORED') && l.includes('executor-mismatch'))).toBe(true)
   })
 

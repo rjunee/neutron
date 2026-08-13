@@ -64,12 +64,18 @@ import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts
 
 const PATH = '/api/app/trident/phase-models'
 
-/** Which cross-model credentials this install actually has. */
+/** Which cross-model executors this install can actually run. */
 export interface CrossModelConnections {
-  /** A Codex connection — without it the GPT tiers cannot run. */
+  /**
+   * The codex executor is USABLE — a credential AND the `codex` CLI on PATH.
+   *
+   * BOTH, because both are hard failures with the same consequence. The wrapper exits
+   * 10 with no credential and 11 with no CLI (`trident/codex-build.sh`), and either
+   * one turns a selected codex tier into a build that never happens. Reporting a tier
+   * available on the strength of the credential alone would offer a choice that dies
+   * at dispatch, which is worse than a greyed one.
+   */
   codex: boolean
-  /** A Kimi key — without it the K3 tier cannot run. */
-  kimi: boolean
 }
 
 export interface TridentPhaseModelsSurfaceOptions {
@@ -157,11 +163,7 @@ function vocabulary(connections: CrossModelConnections): object {
         // cannot use.
         effort_supported: t.transport === 'agent',
         available,
-        unavailable_reason: available
-          ? null
-          : t.requires === 'codex'
-            ? 'needs a Codex connection'
-            : 'needs a Kimi key',
+        unavailable_reason: available ? null : 'needs a Codex connection',
       }
     }),
     efforts: [...EFFORTS],

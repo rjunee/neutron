@@ -20,6 +20,9 @@
  * re-write it so the loop's CODEX_HOME is always populated.
  */
 
+import { accessSync, constants } from 'node:fs'
+import { delimiter, join } from 'node:path'
+
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import type { CredentialScope } from '@neutronai/project-credentials/store.ts'
 import type { OwnerHandle } from '@neutronai/persistence/index.ts'
@@ -35,6 +38,40 @@ import {
 
 /** The reserved `project_credentials.service` name for the Codex OAuth bundle. */
 export const CODEX_CREDENTIAL_SERVICE = 'codex'
+
+/**
+ * Is the `codex` CLI on PATH — the OTHER half of "can this install run codex".
+ *
+ * A CREDENTIAL IS NOT ENOUGH. `trident/codex-build.sh` exits 10 with no credential
+ * and 11 with no CLI, and the two failures are indistinguishable downstream: a build
+ * that never happened. A settings pane that greyed on the credential alone would
+ * offer a codex tier on a box where `codex` was never installed, and the owner would
+ * discover it as a build that stopped rather than as a disabled option with a reason.
+ *
+ * PATH IS SCANNED IN-PROCESS rather than shelled out to. This is called per request
+ * (the pane must un-grey without a restart), and `command -v` per request is a
+ * subprocess per request for a question a directory read answers.
+ *
+ * `env` is passed rather than read from `process.env` so the caller decides which
+ * environment the answer is about — the same one the build will be launched with.
+ */
+export function codexCliOnPath(env: Record<string, string | undefined>): boolean {
+  const path = env['PATH']
+  if (typeof path !== 'string' || path === '') return false
+  for (const dir of path.split(delimiter)) {
+    if (dir === '') continue
+    try {
+      // X_OK, not merely "the name exists": a non-executable file called `codex` is
+      // not a CLI, and `execvp` would skip it exactly the way this does.
+      accessSync(join(dir, 'codex'), constants.X_OK)
+      return true
+    } catch {
+      // Not here, or not executable. Keep looking — an unreadable directory on PATH
+      // must not decide the answer for the ones after it.
+    }
+  }
+  return false
+}
 
 /**
  * Where to store/read the Codex credential. `global` (the DEFAULT) is the
