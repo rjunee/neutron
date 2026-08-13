@@ -69,6 +69,11 @@
 #                                    or empty
 #   NEUTRON_CODEX_BUILD_WORKTREE=    `pwd`
 #
+# The last four are measured AFTER this script has published (see THE PUBLISH
+# BOUNDARY below), and they are still measurements: the push and the `gh pr create`
+# happen here, and then `git ls-remote` and `gh pr list` are asked what is actually
+# on GitHub. What this script did is not evidence of what landed.
+#
 # Every one of them is EMPTY rather than wrong when it cannot be established, and
 # the bridge that reads them passes the empty value straight through. An empty sha
 # fails closed at both gates: no review of an unbuilt branch, and no merge.
@@ -199,7 +204,7 @@
 #
 # So the defaults stay on, and on top of them:
 #
-#   -c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]
+#   -c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*","GH_*","GITHUB_*"]
 #
 # NOT REDUNDANT WITH THE DEFAULTS, and that is the point of writing it out. The default
 # list catches these three families only by SUBSTRING COINCIDENCE — `ANTHROPIC_API_KEY`
@@ -210,6 +215,17 @@
 # instead of contingent on someone else's regex. `KIMI_*` is here for the same reason:
 # `trident/kimi-key.ts` puts `KIMI_API_KEY` into this process's environment on purpose,
 # and the review lane's key has no business in the build's shell.
+#
+# `GH_*` AND `GITHUB_*` ARE THE NEW ENTRIES, and they are the point of THE PUBLISH
+# BOUNDARY below: this script's own environment may now hold a GitHub credential,
+# because this script is the side that publishes. The build must not inherit it. The
+# `exclude` line covers the whole family for the shells the model runs; the two names
+# `gh` actually reads on github.com — `GH_TOKEN` and `GITHUB_TOKEN` — are additionally
+# `env -u`'d off the `codex` process itself at the launch below, so they are gone one
+# level higher than the CLI's own filter and their absence does not depend on the CLI
+# honouring a config key at all. THE DIRECTION OF THIS CHANGE IS THE WHOLE DESIGN: the
+# sandbox LOSES a capability it never had working, and the credential moves further
+# from it, not closer.
 #
 # AND `--strict-config`, WHICH IS WHAT MAKES THE LINE ABOVE LOAD-BEARING RATHER THAN
 # DECORATIVE. Without it an unrecognised `-c` key is accepted and ignored, so a future
@@ -226,31 +242,74 @@
 # this script's own environment before `codex` is launched at all (see the billing
 # contract above), so it is not in the set being filtered.
 #
-# ── SO HOW DOES THE BUILD PUSH? IT IS ASKED WHETHER IT CAN, FIRST ────────────
-# Removing the grant does not create the push problem; it stops hiding it. In `pr` mode
-# the Forge contract orders the build to `git push` and reuse its PR, and nothing in
-# this process tree is guaranteed to hold a credential that can. `SPEC.md` carries the
-# owner-directed fix for that — the build agent should not hold a credential at all, it
-# should ask the HOST to push — and that is a change to the workflow's shape, not to
-# this wrapper.
+# ── THE PUBLISH BOUNDARY: THE BUILD COMMITS, THE HOST PUBLISHES ──────────────
+# THE SPLIT THIS SECTION DESCRIBES IS THE FIX FOR A MEASURED FAILURE. On 2026-08-13 a
+# codex build wrote an entire feature across eleven files and got the suite green, and
+# then delivered NOTHING: its trailer and its transcript were both 0 bytes, the workflow
+# received empty BRANCH/HEAD/PR values, scored the seat `deferred`, and ended the round
+# with no PR and no review panel. A build that cannot publish looks exactly like a build
+# that produced nothing, and only a preserved dirty worktree made the work recoverable.
 #
-# What this wrapper owes the run in the meantime is HONESTY ABOUT THE OUTCOME BEFORE IT
-# SPENDS THE TOKENS. `push_credential_ok` below asks git itself — `git credential fill`
-# against the push remote's host, which consults exactly the helpers a real `git push`
-# would consult — and when no credential answers, the run is DEFERRED (exit 3) with a
-# message naming the missing piece. The alternative is what used to happen: a full
-# build runs, commits, fails to push, and `emit_trailer` measures an empty REMOTE_HEAD,
-# which the workflow reports as "produced no commitSha — nothing was built" about a
-# build that built the whole thing. Same failed run, one round earlier, a truthful
-# message, and no tokens.
+# The cause was that HALF the publish path had a surviving credential and half did not,
+# and the half that did not is the half that REPORTS the result:
 #
-# THE PROBE MEASURES CAPABILITY, IT DOES NOT ASSUME A MECHANISM. It does not test for
-# `GH_TOKEN`: any configured helper that answers for that host — a store file, an
-# osxkeychain, the env-injected helper if a future change does thread it through — is a
-# credential a push can use, and the probe accepts all of them. An `ssh://`/`git@`
-# remote is skipped rather than failed, because it authenticates with a key and never
-# consults a credential helper at all; failing those would break every install that
-# pushes over ssh to protect the ones that push over https.
+#   • `git push` could authenticate: the credential is a `store --file=…` helper named
+#     in `~/.gitconfig`, and a FILE survives the child's environment filter.
+#   • `gh pr create` could not, ever: `gh` on this host has no `hosts.yml` and
+#     authenticates purely from `GH_TOKEN`, which is exactly what the default
+#     `*TOKEN*` exclude strips from the shells the model runs — deliberately, and that
+#     exclude is not going to be widened (see THE CHILD SHELL'S ENVIRONMENT: the last
+#     attempt to widen it leaked the owner's Anthropic credential into a
+#     `danger-full-access` GPT shell and still delivered nothing).
+#
+# So the contract is SPLIT AT THE PUBLISH BOUNDARY, which is what `SPEC.md` records the
+# owner asking for — the build agent should not hold a credential at all, it should ask
+# the HOST to publish:
+#
+#   THE BUILD (inside the sandbox) creates/checks out the branch, writes the code, runs
+#   the tests until they pass, COMMITS LOCALLY, and writes the branch diff. It is told
+#   not to push and not to open a PR (`codexBuildCoda` in `trident/inner-workflow.mjs`).
+#
+#   THE HOST (this script, outside the sandbox) pushes the branch and opens the PR, and
+#   then MEASURES what landed. `publish()` below is that step.
+#
+# Nothing sensitive crosses into the GPT sandbox to make this work — the movement is the
+# other way: the two names `gh` reads are now stripped from the codex process on top of
+# the CLI's own filter. The sandbox loses a capability rather than gaining one.
+#
+# WHAT DOES NOT CHANGE, AND MUST NOT. The publish happens INSIDE the same
+# `emit_trailer` that already refuses to report a pre-existing sha, and it is gated on
+# that same `head`: only a commit THIS RUN PRODUCED, on the branch this run was asked
+# for, is ever pushed. And `REMOTE_HEAD` is still the WITNESS probe — `git ls-remote`
+# asked after the push and compared for equality with our own sha — never "the push
+# command exited 0". This script doing the pushing is not evidence that the commit is
+# on the remote; the remote saying so is (#545: a verdict may not land on a base the
+# review never saw).
+#
+# ── THE PRECHECK NOW ASKS ABOUT THE HOST, AND STILL ASKS EARLY ───────────────
+# The question "can the push authenticate" did not disappear with the split, it changed
+# subject: it is now about THIS process, which is the one that will run the commands. It
+# is still asked BEFORE codex is launched, because the value of asking is that a run
+# that cannot deliver costs a round and no tokens instead of a full build reported as
+# "produced no commitSha — nothing was built".
+#
+# Two capabilities are needed and both are probed, because half of one is what produced
+# the incident above:
+#
+#   • `push_credential_ok` — `git credential fill` against the push remote's host, which
+#     consults exactly the helpers a real `git push` consults. IT MEASURES CAPABILITY
+#     AND DOES NOT ASSUME A MECHANISM: it does not test for `GH_TOKEN`, because a store
+#     file, an osxkeychain or any other configured helper is a credential a push can
+#     use. An `ssh://`/`git@` remote is SKIPPED rather than failed — a key
+#     authenticates it and no helper is ever consulted, and failing those would break
+#     every install that pushes over ssh in order to protect the ones that push over
+#     https.
+#   • `gh_auth_ok` — `gh auth status`, for the same reason and in the same spirit: the
+#     tool that will open the PR is asked whether it can, through whatever mechanism it
+#     is configured with. This half is NEW, and it is the half that was missing: the
+#     run that failed had a working push and an unauthenticated `gh`, and nothing asked.
+#
+# Both are `pr`-mode-and-an-origin only. A `local` run pushes nothing and opens nothing.
 #
 # ── THE MERGE MODE DECIDES WHAT MUST BE TRUE ─────────────────────────────────
 # `pr` and `local` are not the same build with a different ending, and three checks
@@ -308,11 +367,17 @@
 #                       precheck failed, no brief, a brief that did not survive the
 #                       trip intact, nowhere writable to put the trailer, a remote
 #                       baseline that could not be measured, or — in `pr` mode — no
-#                       credential that could authenticate the push the build is about
-#                       to be ordered to make). Every one of these is decided BEFORE
-#                       codex is launched, so a DEFERRED build costs a round and no
-#                       tokens.
+#                       credential that could authenticate the push this script will
+#                       make, no `gh`, or a `gh` that cannot authenticate the PR this
+#                       script will open). Every one of these is decided BEFORE codex
+#                       is launched, so a DEFERRED build costs a round and no tokens.
 #   5   DEFERRED      — codex ran and exited non-zero.
+#
+# A PUBLISH THAT FAILS IS NOT ON THIS LIST, and that is deliberate: it comes out as an
+# empty REMOTE_HEAD (and an empty PR) in a trailer that still names the branch, the
+# local sha and the diff. Exit 5 would map to `deferred` at the bridge, which blanks
+# every field — throwing away the two facts an operator needs to recover a build that
+# really did happen.
 # Unlike the REVIEW lane, NOT_CONNECTED is not a graceful degrade here: a build that
 # did not happen is not a reduced panel, it is no build. The bridge reports it and
 # the workflow stops rather than quietly re-running on Claude — the owner moved the
@@ -510,6 +575,121 @@ push_credential_ok() {
   return "$rc"
 }
 
+# Can THIS PROCESS — the host side of the publish boundary — open a PR? Prints
+# nothing; the STATUS is the answer.
+#
+# `gh auth status` is the probe for exactly the reason `git credential fill` is the
+# probe for the push: it asks THE TOOL THAT WILL DO THE WORK whether it can, through
+# whatever mechanism it is configured with (a token in this environment, a hosts.yml, a
+# keychain), instead of testing for one variable and calling that a capability. On this
+# host it happens to resolve to `GH_TOKEN`, but nothing here depends on that.
+#
+# BOUNDED, AND ASKED UP TO THREE TIMES. `gh auth status` validates against the API, so
+# on a single attempt a network blip is indistinguishable from a missing credential —
+# and the answer here DEFERS a build, so a false negative costs the run a round. Same
+# retry shape as every other network probe in this script.
+#
+# NOTHING FROM ITS OUTPUT IS PRINTED OR KEPT: `gh auth status` names the credential's
+# source, and with `--show-token` (never passed here) prints the secret itself, so both
+# streams go to /dev/null and only the status is read.
+gh_auth_ok() {
+  local n
+  n=1
+  while [ "$n" -le 3 ]; do
+    bounded /dev/null 10 gh auth status && return 0
+    n=$((n + 1))
+  done
+  return 1
+}
+
+# The number of the OPEN PR for branch `$1`, or the empty string. Bounded like every
+# other network call here: `gh` talks to the API and to a credential helper, either of
+# which can block forever, and one of this function's two callers runs on the failure
+# path where a hang would eat the DEFERRED report the bridge is waiting for.
+#
+# ONE READER FOR TWO QUESTIONS, deliberately. `publish` asks it before `gh pr create`
+# ("is there already one, so this is a fix round and not a duplicate"), and
+# `emit_trailer` asks it AGAIN afterwards to measure what goes in the trailer. The
+# second call is not redundant with the first: it makes the reported number a fact read
+# back from GitHub rather than this script's memory of what it just did — the same rule
+# `REMOTE_HEAD` follows, for the same reason.
+open_pr_number() {
+  local out n
+  out="${TMPDIR:-/tmp}/trident-codex-build-pr.$$"
+  bounded "$out" 10 \
+    gh pr list --head "$1" --state open --json number --jq '.[0].number' || true
+  n="$(head -n 1 "$out" 2>/dev/null || true)"
+  rm -f "$out"
+  # `--jq` prints `null` when the list is empty, and a literal "null" reported as a PR
+  # number is worse than none at all.
+  case "$n" in
+    '' | *[!0-9]*) printf '' ;;
+    *) printf '%s' "$n" ;;
+  esac
+}
+
+# ── THE HOST PUBLISHES: push the branch, then open the PR ─────────────────────
+# Called with the sha THIS BUILD PRODUCED — `emit_trailer` has already blanked a head
+# that pre-existed or that was made on the wrong branch, so this can only ever publish
+# a commit the run is entitled to.
+#
+# NOTHING IT DOES IS REPORTED AS A FACT. The trailer's REMOTE_HEAD and PR are measured
+# afterwards by asking the remote and `gh`; a push that exits 0 is not evidence that
+# the commit is on the branch, and a `gh pr create` that exits 0 is not evidence that a
+# PR is open. This function only makes the facts possible.
+#
+# A FAILED PUBLISH DOES NOT FAIL THE SCRIPT. See the exit-code list in the header: the
+# fail-closed answer is an empty REMOTE_HEAD in a trailer that still carries the branch,
+# the local sha and the diff path, which is what an operator recovers the work from.
+#
+# THE TOOLS' OWN OUTPUT IS NEVER ECHOED. `git push` and `gh` both quote the remote URL
+# in their errors, and a URL can carry an embedded credential
+# (`https://x-access-token:<secret>@host/…`), so the failure is named and the text is
+# dropped. `emit_trailer`'s measurements are what diagnose it.
+publish() {
+  local head="$1" existing rc
+  # THE REFSPEC IS EXPLICIT and it is never forced. `git push origin <branch>` obeys
+  # `push.default` and the branch's upstream config, neither of which this script set;
+  # naming `refs/heads/X:refs/heads/X` pushes exactly the branch that was measured and
+  # nothing else. A non-fast-forward is a real refusal — the remote moved under us —
+  # and it must stay one: the witness probe below then reports an empty REMOTE_HEAD
+  # and the run stops, which is the correct end for a branch this build no longer
+  # understands.
+  #
+  # BOUNDED AT 300s rather than the 10s the read-only probes use: this one sends the
+  # whole branch, and a slow-but-working link must not be cut off into a false "the
+  # build produced nothing".
+  if ! bounded /dev/null 300 \
+    env GIT_TERMINAL_PROMPT=0 git push origin "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
+    echo "CODEX_BUILD_PUSH_FAILED: 'git push origin refs/heads/${BRANCH}' did not succeed, so ${head} exists only in this worktree. The trailer reports an empty REMOTE_HEAD and the run stops rather than review a commit no reviewer can fetch." >&2
+    return 1
+  fi
+  # REUSE, NEVER A DUPLICATE — the same rule the Forge contract states for the Claude
+  # builder. A fix round runs this function again on a branch that already has its PR,
+  # and `gh pr create` on that branch would either fail or open a second PR for the
+  # same work.
+  existing="$(open_pr_number "$BRANCH")"
+  if [ -n "$existing" ]; then
+    return 0
+  fi
+  # `--fill` takes the title and body from the commits, which is the only source here
+  # that is not a model asked to describe itself. `--base` only when the caller named
+  # one: an empty `$2` means "no base was passed", and inventing one would open the PR
+  # against a branch this run never heard of.
+  if [ -n "$BASE_BRANCH" ]; then
+    bounded /dev/null 60 gh pr create --head "$BRANCH" --base "$BASE_BRANCH" --fill
+    rc=$?
+  else
+    bounded /dev/null 60 gh pr create --head "$BRANCH" --fill
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "CODEX_BUILD_PR_CREATE_FAILED: the branch was pushed but 'gh pr create --head ${BRANCH}' did not succeed. The trailer reports whatever 'gh pr list' can still see for the branch, which may be nothing." >&2
+    return 1
+  fi
+  return 0
+}
+
 # Was this sha already on the branch (or under HEAD) before codex ran?
 # Exact whole-line match against the captured set — a substring test would let an
 # abbreviation match a full sha.
@@ -521,8 +701,18 @@ pre_existing() {
 # ── The trailer, written on EVERY path that got as far as running codex ───────
 # A function so the measurement is written once and cannot drift between the
 # success and failure exits. It measures; it never infers.
+#
+#   emit_trailer <outcome>   — `ok` when codex exited 0, anything else when it did not.
+#
+# THE OUTCOME DECIDES EXACTLY ONE THING: whether the host publishes. A codex run that
+# died may still have left a commit, and the trailer reports it either way so an
+# operator can recover the work — but pushing a branch and opening a PR for a round
+# the workflow is about to discard leaves a stray PR nobody asked for. Anything other
+# than the literal `ok` is treated as "did not complete", so a caller that forgets the
+# argument lands on the side that publishes nothing.
 emit_trailer() {
-  local head remote_head pr_number diff_path branch_name _pr_out
+  local outcome head remote_head pr_number diff_path branch_name
+  outcome="${1:-}"
   branch_name="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
   # A detached HEAD has no branch name, and `--abbrev-ref` spells that "HEAD".
   [ "$branch_name" = "HEAD" ] && branch_name=''
@@ -540,6 +730,21 @@ emit_trailer() {
   # still goes out in the trailer, so the reader is told WHICH branch it ended up on.
   if [ -n "$head" ] && [ -n "$BRANCH" ] && [ "$branch_name" != "$BRANCH" ]; then
     head=''
+  fi
+  # ── THE PUBLISH, and it happens HERE for a reason ───────────────────────────
+  # Behind the same `$head` the two gates above just established. That is the whole
+  # safety argument for moving the push into this script: the only sha it can publish
+  # is one THIS RUN PRODUCED, on the branch this run was ASKED FOR. A publish placed
+  # before those gates — or keyed off "did the build commit something" — would push a
+  # re-entry's `git switch` onto the previous round's tip and open a PR for work this
+  # invocation did not do.
+  #
+  # `pr` mode with an origin only, and only when codex actually completed. The push
+  # credential and `gh auth` were both proved before launch, so reaching here without
+  # them means something changed mid-build; the failure is named on stderr and the
+  # measurements below tell the truth about what landed.
+  if [ "$outcome" = 'ok' ] && is_pr_mode && [ -n "$head" ] && [ -n "$BRANCH" ] && has_origin; then
+    publish "$head" || true
   fi
   remote_head=''
   # `pr` MODE ONLY, like the baseline and the PR probe. In local mode nothing is ever
@@ -575,22 +780,13 @@ emit_trailer() {
   # standing on a branch that happened to have an open PR (a re-run of a branch already
   # pushed, say) reported that unrelated PR's number as its own. Every other field here
   # is a measurement; this one would have been a coincidence.
+  #
+  # ASKED AGAIN AFTER `publish`, never taken from it. `gh pr create` printing a URL is
+  # this script's claim about what it did; `gh pr list` is GitHub's answer about what
+  # exists. On a fix round nothing was created at all and this is the only source there
+  # has ever been.
   if is_pr_mode && [ -n "$BRANCH" ] && command -v gh >/dev/null 2>&1; then
-    # BOUNDED, exactly like the `git ls-remote` probes: `gh` talks to the network and
-    # to a credential helper, either of which can block forever, and this function runs
-    # on the FAILURE path too — an unbounded call here does not merely lose the PR
-    # number, it hangs the build phase and the DEFERRED report never reaches the
-    # bridge.
-    _pr_out="${TMPDIR:-/tmp}/trident-codex-build-pr.$$"
-    bounded "$_pr_out" 10 \
-      gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' || true
-    pr_number="$(head -n 1 "$_pr_out" 2>/dev/null || true)"
-    rm -f "$_pr_out"
-    # `--jq` prints `null` when the list is empty, and a literal "null" reported as a
-    # PR number is worse than none at all.
-    case "$pr_number" in
-      '' | *[!0-9]*) pr_number='' ;;
-    esac
+    pr_number="$(open_pr_number "$BRANCH")"
   fi
   # THE DIFF OF LAST RESORT. The launch below DELETES this path so a stale diff from an
   # earlier round can never be reported as this one's (#545). That leaves a real gap on
@@ -773,19 +969,37 @@ if is_pr_mode && [ -n "$BRANCH" ] && has_origin; then
 "
 fi
 
-# ── DEFERRED: pr mode is about to order a push nothing here can authenticate ───
-# See SO HOW DOES THE BUILD PUSH in the header. In `pr` mode the brief's steps 4 and 5
-# are `git push` and reuse-the-PR, and the build is graded on the PUSHED sha — so a run
-# with no usable credential has already failed, it just does not know it yet. Asking now
-# turns a full build that ends in "produced no commitSha — nothing was built" into a
+# ── DEFERRED: pr mode, and THIS PROCESS cannot publish what it is about to build ─
+# See THE PRECHECK NOW ASKS ABOUT THE HOST in the header. In `pr` mode the run is graded
+# on the PUSHED sha and on an open PR, and BOTH are this script's job now — so a host
+# that cannot do them has already failed the round, it just does not know it yet. Asking
+# here turns a full build that ends in "produced no commitSha — nothing was built" into a
 # free, named deferral one round earlier.
 #
 # Ordered AFTER the baseline probe and BEFORE the launch, with the rest of the pre-launch
 # refusals: everything above this line costs a round and no tokens, and this belongs on
 # that side of the line.
+#
+# THE PUSH HALF FIRST, because it is the local, instant one — `git credential fill`
+# consults configured helpers and returns, while `gh auth status` is a round trip to the
+# API. A host missing both should hear about the cheaper check.
 if is_pr_mode && has_origin && ! push_credential_ok; then
-  echo "CODEX_BUILD_NO_PUSH_CREDENTIAL: 'git credential fill' found no credential for the push remote's host, so the 'git push' this build is about to be ordered to make would be anonymous and would fail. DEFERRED before any tokens were spent. The GitHub credential is wired to trident's OUTER loop only (open/composer.ts run_host); the inner workflow that launched this build does not receive it. Connect GitHub, configure a credential helper for the push host, or run this build in local merge-mode." >&2
+  echo "CODEX_BUILD_NO_PUSH_CREDENTIAL: 'git credential fill' found no credential for the push remote's host, so the 'git push' THIS WRAPPER makes after the build would be anonymous and would fail. DEFERRED before any tokens were spent. Connect GitHub, configure a credential helper for the push host, or run this build in local merge-mode." >&2
   exit 3
+fi
+# THE PR HALF, which is the one that was missing. A host with a working push and an
+# unauthenticated `gh` is exactly the run this split exists to fix: it built the whole
+# feature, committed, and then had nowhere to deliver it — and because the delivery step
+# is also the reporting step, the round looked identical to one that produced nothing.
+if is_pr_mode && has_origin; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "CODEX_BUILD_NO_GH_CLI: 'gh' is not on PATH, and in pr mode THIS WRAPPER opens the PR after the build (the build itself is told not to, and holds no GitHub credential). DEFERRED before any tokens were spent — install the GitHub CLI, or run this build in local merge-mode." >&2
+    exit 3
+  fi
+  if ! gh_auth_ok; then
+    echo "CODEX_BUILD_NO_GH_CREDENTIAL: 'gh auth status' could not authenticate in 3 attempts, so the 'gh pr create' THIS WRAPPER makes after the build would fail and the build would have nowhere to be delivered. DEFERRED before any tokens were spent — authenticate gh (a GH_TOKEN in this process's environment, or 'gh auth login'), or run this build in local merge-mode." >&2
+    exit 3
+  fi
 fi
 
 # CLEAR THE DIFF FILE BEFORE THE BUILD, never after. `emit_trailer` reports this path
@@ -806,12 +1020,18 @@ fi
 # `NEUTRON_CODEX_EXEC_CMD`; one name across both would mean a value exported to stub
 # the reviewer silently replaced the BUILD's entire invocation — the same cross-talk
 # the two model knobs (CODEX_BUILD_MODEL vs CODEX_REVIEW_MODEL) exist to prevent.
+#
+# THE SEAM IS SCRUBBED THE SAME WAY THE REAL LAUNCH IS (`env -u GH_TOKEN
+# -u GITHUB_TOKEN`, below). A seam standing in for the sandbox must inherit the
+# SANDBOX's blindness, not the host's reach: without this a test build could reach for
+# a credential the thing it stands in for cannot see, and would "prove" a publish path
+# that does not exist in production.
 if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
-  if <"$BRIEF_FILE" sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
-    emit_trailer
+  if <"$BRIEF_FILE" env -u GH_TOKEN -u GITHUB_TOKEN sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
+    emit_trailer ok
     exit 0
   fi
-  emit_trailer
+  emit_trailer failed
   echo "CODEX_BUILD_CALL_FAILED: the codex build call failed. DEFERRED — no build happened." >&2
   exit 5
 fi
@@ -825,12 +1045,17 @@ fi
 # protect. The defaults already catch these three by substring; this line makes it
 # intentional rather than contingent on another project's pattern list.
 #
+# `GH_*` AND `GITHUB_*` JOIN THEM NOW THAT THE HOST PUBLISHES. This process may hold a
+# GitHub credential — it is the side that pushes and opens the PR — and the build must
+# not inherit it. See THE PUBLISH BOUNDARY: the sandbox loses a capability here, it does
+# not gain one.
+#
 # `--strict-config` IS PART OF THE SAME FIX, not a tidy-up beside it. Without it the CLI
 # accepts an unrecognised `-c` key and moves on, so the day the field is renamed the line
 # below becomes decoration and the leak returns with no symptom. With it a renamed field
 # is a config error that names itself, raised before any tokens are spent.
 set -- --strict-config \
-  -c 'shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]'
+  -c 'shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*","GH_*","GITHUB_*"]'
 
 # PIN THE BUILD MODEL, for the same reason the review lane pins its own: unpinned,
 # `codex exec` takes the CLI's own default, which OpenAI moved to the cheapest 5.6
@@ -851,10 +1076,20 @@ fi
 # path, captured as `pwd` at the top, not a bare `.`: equivalent today, but it is what
 # the trailer reports as `NEUTRON_CODEX_BUILD_WORKTREE` and pinning the same value in
 # both places is what stops them drifting.
-if <"$BRIEF_FILE" codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
-  emit_trailer
+#
+# `env -u GH_TOKEN -u GITHUB_TOKEN` — THE TWO NAMES `gh` READS, TAKEN OFF THE CODEX
+# PROCESS ITSELF. The `-c shell_environment_policy.exclude` line above asks the CLI to
+# keep them out of the shells the model runs; this takes them out one level higher, so
+# their absence does not depend on the CLI honouring a config key, on the default
+# `*TOKEN*` pattern surviving another project's next release, or on the model never
+# reading its own `/proc/self/environ`. Both, because the exclude covers the whole
+# family (`GH_ENTERPRISE_TOKEN`, anything added later) and this covers the two that
+# matter absolutely.
+if <"$BRIEF_FILE" env -u GH_TOKEN -u GITHUB_TOKEN \
+  codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
+  emit_trailer ok
   exit 0
 fi
-emit_trailer
+emit_trailer failed
 echo "CODEX_BUILD_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — the build did not complete." >&2
 exit 5

@@ -2,6 +2,98 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — the codex builder stops holding a credential it never had: the HOST publishes
+
+**What happened, measured from the run's own artifacts.** A codex build on `gpt-5.6-sol`
+wrote an entire feature across eleven files and got 1046 trident tests green. Then it
+delivered nothing: its trailer file and its transcript file were both **0 bytes**, the
+workflow received empty `NEUTRON_CODEX_BUILD_BRANCH` / `_PR` / `_HEAD`, scored the seat
+`codexStatus: "deferred"`, and ended round 1 with `ok:false`, `checkpoint:"inner-error"`,
+no PR and no review panel. The work was recoverable only because #541 preserves the dirty
+worktree. **A build that cannot publish looks identical to a build that produced nothing.**
+
+**Why, exactly — and it is not "the sandbox has no credential".** Half the publish path
+had a surviving credential and half did not, and the half that did not is the half that
+REPORTS the result. `git push` WOULD have worked: that credential is a
+`store --file=…/.git-credentials` helper configured in `~/.gitconfig`, and a FILE survives
+the child's environment filter (`git credential fill` for `github.com` answers, exit 0).
+`gh pr create` could not, ever: `gh` on this host has no config file, so it authenticates
+purely from `GH_TOKEN`, and `codex exec`'s `shell_environment_policy` strips `*TOKEN*` by
+default — deliberately. That default is not going to be widened: the one time it was
+(`ignore_default_excludes=true`), it leaked the owner's Anthropic credential into a
+`danger-full-access` GPT shell and still delivered nothing.
+
+**The fix is the one `trident/codex-build.sh`'s own header already specified:** split the
+Forge contract at the publish boundary.
+
+- **The build** creates/checks out the branch, writes the code, runs the tests until
+  green, **commits locally**, and writes the branch diff. `codexBuildCoda` in
+  `trident/inner-workflow.mjs` stands step 4 down in words — pr mode only — so the build
+  does not spend tokens on a `git push` and a `gh pr create` that cannot succeed.
+- **The host** — `trident/codex-build.sh`, running outside the sandbox in the process tree
+  that holds the credential — pushes the branch and opens the PR, then measures what
+  landed.
+
+**The sandbox LOSES a capability here; it never gains one.** The environment filter is not
+widened. `GH_*` and `GITHUB_*` join the wrapper's named exclude list for the shells the
+model runs, and `GH_TOKEN`/`GITHUB_TOKEN` are additionally `env -u`'d off the `codex`
+process itself — one level above the CLI, where their absence does not depend on the CLI
+honouring a config key or on another project's default pattern list surviving its next
+release. No token is ever put on a command line (`ps` is world-readable).
+
+**The invariants a naive split would have broken, and where each one now lives.**
+
+- *`HEAD` may only name a commit THIS RUN produced.* The publish happens INSIDE
+  `emit_trailer`, behind the same `$head` the pre-existing-sha and wrong-branch gates just
+  established — so a re-entry whose first act is `git switch` onto the previous round's tip
+  pushes nothing and opens nothing, exactly as it already reported nothing.
+- *`REMOTE_HEAD` must equal `HEAD` after the push, and it is what proves the commit is on
+  the remote (#545).* Doing the push does not make the wrapper a witness to it: the value
+  is still `git ls-remote` compared for equality with our own sha, retried three times and
+  only on a FAILED probe. A push that failed leaves it empty, and the run stops.
+- *The PR number is still measured.* `gh pr list` is asked AFTER the create, and it is the
+  same reader the publish step uses to decide whether a PR already exists — so a fix round
+  reuses its PR and never opens a duplicate, and the reported number is GitHub's answer
+  rather than the wrapper's memory of what it just did.
+- *A failed publish is not a failed script.* It comes out as an empty `REMOTE_HEAD` in a
+  trailer that still carries the branch, the local sha and the diff path. Exiting non-zero
+  would map to `deferred` at the bridge, which blanks every field — throwing away the two
+  facts an operator recovers the work from.
+- *A codex run that FAILED after committing is not published at all.* The round is
+  discarded; a PR for a discarded round is litter.
+
+**The precheck changed subject, not place.** It used to ask whether the SANDBOX could push.
+It now asks whether THIS PROCESS can run the two commands it is about to run —
+`git credential fill` against the push remote's host, and `gh auth status` — and it still
+asks before `codex` is launched, so a host that cannot deliver costs a round and no tokens.
+The `gh` half is the half that was missing, and its absence is the whole incident: a
+working push and an unauthenticated `gh`, with nothing asking. A missing `gh` and an
+unauthenticated `gh` are different DEFERRED messages, because they are different things to
+install.
+
+**Proof, end to end.** `trident/codex-build.test.ts` drives a build whose sandbox holds no
+GitHub credential — a mock `gh` that, like the real one here, refuses every subcommand
+without `GH_TOKEN` — against a real bare origin. The build records the token it can see
+(`sandbox GH_TOKEN=[]`) and actually TRIES `gh pr create` (`sandbox pr create FAILED`), and
+the run still ends with the branch on the remote, a `pr create` made by the side that HAD
+the token, `REMOTE_HEAD` equal to `HEAD` and a PR number in the trailer. The credential
+assertion is made against the mock `codex`'s own dumped environment, beside two positives
+that make the negative falsifiable: a same-family decoy (`GH_TOKEN_DECOY`, which survives
+the scrub and appears in the dump) and a `gh` call log showing the host had the token in
+the same run.
+
+**Mutants run, not asserted** (each applied in turn; the named test goes red, and the tree
+is restored afterwards): the `env -u` scrub removed from the launch; the publish call
+removed; the publish gated on the measured branch instead of on this run's own commit; the
+`REMOTE_HEAD` witness replaced by trusting the push; the `gh auth` precheck removed; the
+push-credential precheck removed; the PR-reuse check removed; the failure path publishing
+too; the `GH_*`/`GITHUB_*` families dropped from the child-shell exclude list; and the
+coda's stand-down paragraph removed. Ten mutants, ten reds.
+
+**Superseding an earlier entry in this log.** "So how does the build push? It is asked
+whether it can, first" (the 2026-08-13 BUILD-on-codex entry) described the interim state:
+the wrapper refusing honestly because the fix was a change to the workflow's shape. This is
+that change. The dated entry keeps its text — it is a log, not current state.
 ## 2026-08-13 — a successful merge is TERMINAL: the run lifecycle ends where the change ships
 
 ISSUES #563. A lane approved its PR and merged it; the merge deleted the head branch;
@@ -515,8 +607,11 @@ use (`codex-cli 0.147.0`): an invented `shell_environment_policy` field is refus
 proves the check can fail on this input shape, which is what makes the acceptance mean
 anything.
 
-**So how does the build push? It is asked whether it can, first.** Removing the grant
-does not create the push problem; it stops hiding it. In `pr` mode the Forge contract
+**So how does the build push? It is asked whether it can, first.** *(SUPERSEDED
+2026-08-13 by "the codex builder stops holding a credential it never had: the HOST
+publishes", at the top of this log — the build no longer pushes at all, and the precheck
+now asks about the HOST's two commands. The text below stays as the record of the interim
+state.)* Removing the grant does not create the push problem; it stops hiding it. In `pr` mode the Forge contract
 orders the build to `git push` and reuse its PR, and nothing in the inner workflow's
 process tree is guaranteed to hold a credential that can. `SPEC.md` carries the
 owner-directed fix — a build agent should not hold a credential at all, it should ask

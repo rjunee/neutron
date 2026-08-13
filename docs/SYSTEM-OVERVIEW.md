@@ -2842,7 +2842,37 @@ generation"), mobile `app/app/codegen.tsx`, both over
   `workspace-write` writes only inside the workspace and a build writes outside it
   twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
   goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
-  that `git push` / `gh pr create` need.
+  a build needs to fetch a base branch or install a dependency.
+  - **THE PUBLISH BOUNDARY: the build COMMITS, the WRAPPER pushes and opens the PR —
+    and the credential is on the wrapper's side of that line.** On 2026-08-13 a codex
+    build wrote a whole feature across eleven files, got 1046 tests green, and delivered
+    nothing: a 0-byte trailer, empty branch/sha/PR at the workflow, `deferred`, no PR and
+    no panel. A build that cannot publish is indistinguishable from a build that produced
+    nothing. The cause was that half the publish path had a credential and half did not,
+    and the half that did not is the half that REPORTS: `git push` reads a
+    `store --file=…` helper named in `~/.gitconfig`, and a FILE survives the child's
+    environment filter, while `gh` on that host has no `hosts.yml` and authenticates
+    purely from `GH_TOKEN` — exactly what the filter strips, permanently (see the next
+    bullet for what happened the one time it was widened). So the Forge contract is split
+    at the publish boundary, which is what `SPEC.md` records the owner asking for: the
+    codex build creates the branch, writes the code, runs the tests, COMMITS LOCALLY and
+    writes the diff, and `trident/codex-build.sh` — running outside the sandbox, in the
+    process tree that holds the credential — does the `git push` and the `gh pr create`.
+    `codexBuildCoda` in `trident/inner-workflow.mjs` stands step 4 down in words, so the
+    build does not spend tokens on a command that cannot succeed. Nothing sensitive
+    crosses INTO the sandbox to make this work; the movement is the other way.
+    - **Publishing does not make the wrapper a witness to itself.** The push happens
+      inside `emit_trailer`, BEHIND the same `$head` the pre-existing-sha and
+      wrong-branch gates just established — so the only thing it can ever push is a
+      commit this run produced on the branch this run was asked for. `REMOTE_HEAD` is
+      still `git ls-remote` compared for equality with that sha, never "the push exited
+      0", and the PR number still comes from `gh pr list` after the create, never from
+      the create's own output (#545: a verdict may not land on a base the review never
+      saw). A failed publish is an empty `REMOTE_HEAD` in a trailer that still names the
+      branch, the local sha and the diff — not a non-zero exit, which would blank every
+      field and throw away what an operator recovers the work from. A codex run that
+      FAILED after committing is not published at all: the round is discarded, and a PR
+      for a discarded round is litter.
   - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
     MAY reach the network; it says nothing about what environment it is handed.
     `codex exec` filters that (`shell_environment_policy`), defaulting to
@@ -2858,27 +2888,40 @@ generation"), mobile `app/app/codegen.tsx`, both over
     `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It handed the quota this route
     exists to conserve to a GPT-driven `danger-full-access` shell, and bought an
     anonymous push with it. So the defaults stay, plus
-    `-c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]` — not
-    redundant, because the defaults catch those only by substring coincidence in
+    `-c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*","GH_*","GITHUB_*"]`
+    — not redundant, because the defaults catch those only by substring coincidence in
     another project's pattern list. `--strict-config` is what stops that line becoming
     decoration: without it an unrecognised `-c` key is accepted and ignored, so a
     renamed field would silently stop excluding anything. The metered `OPENAI_API_KEY`
-    is `unset` before `codex` is launched, separately and earlier.
-  - **The push credential is checked BEFORE the tokens are spent.** In `pr` mode the
-    contract orders a push, and nothing in the inner workflow's process tree is
-    guaranteed to hold a credential that can make one. `SPEC.md` carries the
-    owner-directed fix (the build agent should not hold a credential at all — it asks
-    the HOST to push), which is a change to the workflow's shape. Until then the
-    wrapper refuses honestly and early: `git credential fill` against the push remote's
-    host — the same helpers a real push consults — and a DEFERRED exit 3 naming the
-    missing piece when nothing answers. The alternative is the same failed run one
-    round later, after a full build, reported as "nothing was built". ssh and
-    filesystem remotes are skipped rather than failed (a key authenticates those, never
-    a helper), and the secret is never printed, logged or stored.
-  - **The merge mode is an ARGUMENT, not an inference.** Four checks are pr-only — the
-    remote baseline, the push-credential probe, the pushed-sha witness and the
-    `gh pr list` probe — and the wrapper is handed the run's mode as `$3`. Keyed
-    instead on "does an `origin` exist", which asks about the CLONE and not the RUN,
+    is `unset` before `codex` is launched, separately and earlier. The two GitHub
+    families are the NEW entries and they are the publish boundary's other half: the
+    wrapper's own environment may now hold a GitHub credential, and the build must not
+    inherit it — so on top of the config line, `GH_TOKEN` and `GITHUB_TOKEN` are
+    `env -u`'d off the `codex` process itself, one level above the CLI's filter, where
+    their absence does not depend on the CLI honouring a config key. The direction is
+    the whole design: the sandbox LOSES a capability, it never gains one.
+    `trident/codex-build.test.ts` asserts that absence against the mock `codex`'s own
+    dumped environment, with a same-family decoy (`GH_TOKEN_DECOY`, which survives) and
+    a `gh` call log showing the HOST had the token in the same run — so the negative is
+    read beside two positives rather than alone.
+  - **The HOST's ability to publish is checked BEFORE the tokens are spent.** The
+    precheck changed SUBJECT with the split, not place: it used to ask whether the
+    sandbox could push, which no longer matters, and now asks whether THIS PROCESS can
+    run the two commands it is going to run — still before `codex` is launched, so a run
+    that cannot deliver costs a round and no tokens instead of a full build reported as
+    "produced no commitSha — nothing was built". Both halves are probed, because having
+    only one is what produced the incident: `git credential fill` against the push
+    remote's host (the same helpers a real push consults) and `gh auth status` (the tool
+    that will open the PR, asked whether it can). Each MEASURES A CAPABILITY rather than
+    testing for `GH_TOKEN`, so any configured mechanism passes; ssh and filesystem
+    remotes are skipped rather than failed (a key authenticates those, never a helper);
+    a missing `gh` is a different DEFERRED message from an unauthenticated one, because
+    they are different things to install; and no secret is ever printed, logged or
+    stored. Both are `pr`-mode-with-an-origin only.
+  - **The merge mode is an ARGUMENT, not an inference.** Five checks are pr-only — the
+    remote baseline, the two publish prechecks, the publish itself, the pushed-sha
+    witness and the `gh pr list` probe — and the wrapper is handed the run's mode as
+    `$3`. Keyed instead on "does an `origin` exist", which asks about the CLONE and not the RUN,
     any local-mode build in a clone with an unreachable origin hard-DEFERRED before
     codex launched, every round; and a local build standing on a branch that happened
     to have an open PR reported that unrelated PR's number where the contract says

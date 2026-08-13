@@ -915,13 +915,30 @@ function briefIntegrity(text) {
  * six fields the inner loop needs are measured by the wrapper instead (see
  * `trident/codex-build.sh`), so the coda's job is to pin the two things the
  * measurement depends on — the branch and the diff path — and to stand down step 6.
+ *
+ * AND IT STANDS DOWN THE PUBLISH HALF OF STEP 4, which is the newer half of its job.
+ * The codex build holds NO GitHub credential and is not going to be given one: the
+ * child shell's environment filter strips `*TOKEN*` (see `trident/codex-build.sh`, THE
+ * CHILD SHELL'S ENVIRONMENT, for the leak that got the last attempt at widening it
+ * reverted), so `gh pr create` inside that sandbox cannot authenticate, ever. A build
+ * ordered to push and open a PR anyway did exactly what the order implied: it wrote the
+ * whole feature, could not deliver it, and the round came back indistinguishable from
+ * one that produced nothing. So the contract is split at the publish boundary — the
+ * build commits locally, and the WRAPPER, which runs outside the sandbox where the
+ * credential lives, pushes and opens the PR. Telling the build to attempt it anyway
+ * would burn tokens on a command that cannot succeed and end in a report of a PR that
+ * does not exist.
  */
 function codexBuildCoda() {
+  const publish = isPr
+    ? `
+- STEP 4'S PUSH AND PR ARE NOT YOURS, and this REPLACES that step: COMMIT LOCALLY on ${forgeBranch} and stop there. Do NOT run \`git push\` and do NOT run \`gh\` at all. You are running without a GitHub credential — that is deliberate, not an oversight to work around — so a push or a \`gh pr create\` from here cannot authenticate and will fail. The wrapper that launched you does both from OUTSIDE this sandbox after you exit, and then measures what actually landed. Your commit is the deliverable; publishing it is someone else's step.`
+    : ''
   return `
 
 HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from you — this REPLACES steps 5 and 6 above):
 - There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
-- Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make, or did not push, is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.
+- Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
 - Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
 - Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
 }

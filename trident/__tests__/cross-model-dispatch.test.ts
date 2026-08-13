@@ -736,6 +736,42 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(prompt).toContain('REPLACES steps 5 and 6 above')
   })
 
+  test('the codex brief STANDS DOWN the push and the PR — the host publishes them', async () => {
+    // THE PUBLISH BOUNDARY, on the composing side. The codex build holds no GitHub
+    // credential and is never going to: `gh` authenticates from `GH_TOKEN` and the
+    // child shell's environment filter strips it, deliberately (widening that filter is
+    // what leaked the owner's Anthropic credential into a `danger-full-access` GPT
+    // shell the one time it was tried). A build ordered to push and open a PR anyway
+    // did exactly what that implies — wrote the whole feature, could not deliver it,
+    // and came back indistinguishable from a build that produced nothing. So the
+    // wrapper publishes and the brief says so.
+    const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
+    const codexPr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
+    expect(codexPr).toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
+    expect(codexPr).toContain('COMMIT LOCALLY')
+    expect(codexPr).toContain('Do NOT run `git push`')
+
+    // THE CONTROL THAT MAKES THAT MEAN SOMETHING. The Claude builder on the SAME
+    // pr-mode run still owns its own push and PR — the brief is one text for both
+    // executors and only the coda differs, so an assertion about the coda has to be
+    // read against a brief that still carries step 4.
+    const claudePr = promptFor(
+      (await runWorkflow({ ...productionArgs(null), mergeMode: 'pr' })).captured,
+      'forge:build',
+    )
+    expect(claudePr).toContain('open a PR with `gh pr create`')
+    expect(claudePr).not.toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
+    // …and the codex brief still carries step 4's own text, which is exactly why the
+    // coda has to supersede it out loud rather than by omission.
+    expect(codexPr).toContain('open a PR with `gh pr create`')
+
+    // LOCAL MODE STANDS NOTHING DOWN, because there was never anything to publish:
+    // step 4 already says "commit on the branch, do NOT push".
+    const codexLocal = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
+    expect(codexLocal).toContain('do NOT push or run `gh pr create`')
+    expect(codexLocal).not.toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
+  })
+
   test('a build that CONNECTED but produced nothing never reaches the review panel', async () => {
     // The sibling of the not_connected case above, and the more expensive one. Here
     // codex ran to completion and the wrapper measured honestly: no sha, no diff. The
