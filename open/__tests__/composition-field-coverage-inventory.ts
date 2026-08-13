@@ -127,6 +127,11 @@ export const WIRED_FIELDS: readonly CompositionFieldWiredEntry[] = [
     provides: 'the doc-search agent tool over project files',
   },
   {
+    field: 'email_pipeline',
+    provides:
+      "the email poll/classify/escalate cron — unset, no `email-pipeline-poll` job registers and an important email never reaches the owner's chat",
+  },
+  {
     field: 'loop_registry',
     provides:
       'the single loop inventory shared across the composition — unset, the boot inventory line reports only the graph half of the running loops',

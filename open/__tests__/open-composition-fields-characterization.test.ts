@@ -138,10 +138,24 @@ const EXPECTED_COMPOSITION_KEYS = [
   // (`connect/surface-gate.ts`) — see `open-connect-served.test.ts`.
   'connect_api',
   'cores',
+  // `cores_oauth_broker_surface` is DELIBERATELY ABSENT. It is composed only
+  // when a Google client and a declared origin are configured, and this boot
+  // configures neither — the env is cleared above precisely so the key set does
+  // not depend on what the host happens to have exported.
+  //
+  // An earlier revision added it here and called it pre-existing inventory
+  // drift. That was wrong: the field was missing on this developer box's boot
+  // only because the box exports a real Google client, so the "fix" made the
+  // characterization pass locally and fail on CI, which exports none.
   'create_project',
   'cron_jobs',
   'db',
   'doc_search',
+  // Email Core consolidation P1 — the email pipeline's deps bundle. Its
+  // presence HERE is what proves the cron is actually registered on a real
+  // boot: without the field, `build-core-modules.ts` skips registration and
+  // nothing ever polls the inbox.
+  'email_pipeline',
   'heartbeat_tracker',
   'import_resume_handler',
   'import_upload_handler',
@@ -202,6 +216,15 @@ const SAVED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NOTIFY_SOCKET',
+  // THE HOST'S OWN GOOGLE CLIENT MUST NOT DECIDE THIS TEST. `cores_oauth_broker
+  // _surface` is composed only when a Google client AND a declared origin are
+  // configured, so leaving these inherited makes the expected key set differ
+  // between a developer box that has them and CI, which does not — the exact
+  // way this characterization went red on CI while passing locally. Cleared
+  // below so the boot is deterministic in both places.
+  'NEUTRON_CORES_GOOGLE_CLIENT_ID',
+  'NEUTRON_CORES_GOOGLE_CLIENT_SECRET',
+  'NEUTRON_CONNECT_PUBLIC_BASE_URL',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -220,6 +243,9 @@ beforeEach(() => {
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-test-comp-fields'
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env['NOTIFY_SOCKET']
+  delete process.env['NEUTRON_CORES_GOOGLE_CLIENT_ID']
+  delete process.env['NEUTRON_CORES_GOOGLE_CLIENT_SECRET']
+  delete process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL']
 })
 
 afterEach(() => {

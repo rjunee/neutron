@@ -334,8 +334,13 @@ escalated important-email notifications. Everything else must justify itself
 against one of those or be deleted.
 
 - [ ] **P1 — pipeline store + poller + classification + escalation.** The
-      escalation half end to end. _Acceptance: an important message arriving in the
-      real mailbox produces an escalation in chat within a poll interval. Names the
+      escalation half end to end. **THE PIPELINE IS OPT-IN PER MAILBOX** (owner
+      decision, 2026-08-12): connecting a Google account and asking the agent to
+      READ that mailbox are two different decisions, so absence of an enablement
+      row means DISABLED and a grant taken out for Calendar or Drive never enrols
+      its inbox. _Acceptance: an important message arriving in a CONNECTED AND
+      ENABLED real mailbox produces an escalation in chat within a poll interval,
+      and a connected-but-not-enabled mailbox produces nothing at all. Names the
       composition seam it wires; a bookkeeping assertion does NOT satisfy this._
 - [ ] **P2 — the twice-daily brief, DELIVERED AS EMAIL, + the digest on/off
       setting.** **The brief is an EMAIL; chat and push carry escalations ONLY and a

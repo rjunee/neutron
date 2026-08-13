@@ -48,11 +48,13 @@
 export {
   DEFAULT_LABEL,
   DEFAULT_LIST_LIMIT,
+  PROCESSED_LABEL_NAME,
 } from './contract.ts'
 export type {
   GmailClient,
   GmailDraftInput,
   GmailDraftResult,
+  GmailEnsureLabelInput,
   GmailGetInput,
   GmailLabelEnsureInput,
   GmailLabelEnsureResult,
@@ -60,6 +62,8 @@ export type {
   GmailListResult,
   GmailMessageFull,
   GmailMessageMeta,
+  GmailMessageModifyInput,
+  GmailMessageModifyResult,
   GmailSearchInput,
   GmailSendInput,
   GmailSendResult,
