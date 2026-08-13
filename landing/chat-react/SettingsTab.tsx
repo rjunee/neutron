@@ -55,14 +55,25 @@ import {
   type PhaseOverride,
 } from './phase-models-client.ts'
 import {
+  USAGE_POLL_MS,
   WebUsageDashboardClient,
+  accountCapacityNote,
   accountName,
-  formatDuration,
+  capacityLine,
+  connectionNote,
+  formatAge,
+  formatCountdown,
+  formatProjection,
   formatPace,
-  formatPercent,
+  formatWindowFraction,
+  nextAccountNote,
   paceNote,
+  poolTitle,
+  projectPool,
+  windowName,
+  type ProjectedWindow,
   type UsageDashboard,
-  type UsageWindow,
+  type UsagePool,
 } from './usage-dashboard-client.ts'
 import {
   WebVoiceTranscriptionClient,
@@ -161,12 +172,54 @@ export function SettingsTab({
   // third representation would put the same branch in two places.
   const [usage, setUsage] = useState<UsageDashboard | null>(null)
 
+  // THE RENDER CLOCK for every countdown on the card. The payload carries reset
+  // INSTANTS, and the delta to now is computed at paint — so this has to advance
+  // on its own, or a card left open would keep insisting capacity returns in the
+  // same 17 minutes it did an hour ago. It is advanced by the poll effect below, on
+  // a tick finer than the whole minutes the card renders in, so no countdown is
+  // ever visibly wrong.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now())
+
+  // WHICH LOAD IS THE LATEST ONE ASKED FOR. Polls overlap: the interval below fires
+  // every `USAGE_POLL_MS` and does not wait for the previous response, so a slow
+  // request and the fresh one behind it are in flight together and can settle in
+  // either order. Without a sequence the older answer wins simply by landing last,
+  // and the card rolls BACKWARDS onto a stale sample — countdowns jumping back up,
+  // capacity re-appearing after it was spent. That is a fabricated-freshness bug
+  // wearing the age chip of the newer reading, which is the one class this card
+  // exists to make impossible. The mobile twin (`app/app/usage.tsx`) carries the
+  // same guard, for the same reason.
+  const usageSeqRef = useRef(0)
   const loadUsage = useCallback((): void => {
+    const seq = (usageSeqRef.current += 1)
     void usageDashboardClient.load().then((next) => {
       if (!mountedRef.current) return
+      // A superseded response is DROPPED, never rendered.
+      if (seq !== usageSeqRef.current) return
       setUsage(next)
     })
   }, [usageDashboardClient])
+
+  // ONE TICK ADVANCES THE CLOCK **AND** REFETCHES, and the pairing is the fix.
+  //
+  // Advancing the clock alone is what ages a card honestly across a DEAD poller —
+  // but run against a LIVE one it is a slow lie in the other direction. The
+  // Anthropic pool goes stale at two and a half minutes, so a tab left open would
+  // floor its gauges to "≥" and drop capacity to "unknown" that soon in, while a
+  // healthy poller wrote a fresh row every 60 seconds behind it. A screen
+  // that paints a working install as broken is the same defect as one that paints a
+  // broken install as working; both are the card disagreeing with the truth.
+  //
+  // So the payload is refetched on the SAME interval. One timer, so the data and
+  // the clock it is measured against can never drift apart, and `USAGE_POLL_MS`
+  // stays below the tightest staleness deadline the store ships (pinned by a test).
+  useEffect(() => {
+    const handle = setInterval(() => {
+      setNowMs(Date.now())
+      loadUsage()
+    }, USAGE_POLL_MS)
+    return () => clearInterval(handle)
+  }, [loadUsage])
 
   // ── per-phase build models ──
   const [phaseModels, setPhaseModels] = useState<PhaseModelsPayload | null>(null)
@@ -992,8 +1045,11 @@ export function SettingsTab({
 
           It reports PACE, not just fullness — the meter in the divider already
           says how full the window is, and "72%" is not a decision until you know
-          whether it is climbing. Everything here is server-computed off the
-          persisted series; this markup does no arithmetic on quota. */}
+          whether it is climbing. The figures come off the persisted series; the
+          DELTAS — age, staleness, the "≥" floors, every countdown and each
+          account's standing — are computed at paint from the instants the server
+          sent, because a delta baked into a response is already wrong when it
+          renders. See `projectPool` in `./usage-dashboard-client.ts`. */}
       <section className="cset-section" aria-label="Model usage">
         <h2 className="cset-h">Model usage</h2>
         <p className="cset-sub">
@@ -1015,30 +1071,7 @@ export function SettingsTab({
           </div>
         ) : (
           usage.pools.map((pool) => (
-            <div className="cset-usage-pool" key={pool.pool} data-testid={`usage-${pool.pool}`}>
-              {/* NEVER a guessed account name. The credential is swapped by a
-                  process outside this box, so nothing here can know which account
-                  a reading belongs to unless something upstream labels it. */}
-              <p className="cset-label" data-testid={`usage-${pool.pool}-account`}>
-                {accountName(pool.account_label)}
-              </p>
-              {pool.measured_at === null ? (
-                <div className="cset-empty">No readings yet.</div>
-              ) : (
-                <>
-                  <UsageWindowRow
-                    label="5-hour window"
-                    testid={`usage-${pool.pool}-session`}
-                    win={pool.session}
-                  />
-                  <UsageWindowRow
-                    label="7-day window"
-                    testid={`usage-${pool.pool}-weekly`}
-                    win={pool.weekly}
-                  />
-                </>
-              )}
-            </div>
+            <UsagePoolCard key={pool.pool} pool={pool} now={nowMs} />
           ))
         )}
       </section>
@@ -1644,6 +1677,111 @@ function CredentialRow({
 }
 
 /**
+ * One provider's card: the capacity line first, then a chip per account.
+ *
+ * PER PROVIDER, IN ITS OWN UNIT, NEVER SUMMED. The providers meter different
+ * things, so a combined headline would be a number about nothing. The cards sit
+ * adjacently and each answers for itself.
+ */
+function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.JSX.Element {
+  // EVERY DELTA ON THIS CARD IS COMPUTED HERE, from the render clock, on every
+  // paint — the age, the staleness, the "≥" floors and each account's standing.
+  // The payload carries instants and a threshold and nothing else, so a card left
+  // open across a dead poller ages in front of the owner instead of insisting on
+  // the freshness it had when the response was built.
+  const view = projectPool(pool, now)
+  const line = capacityLine(view)
+  const nextUp = nextAccountNote(view)
+  const note = connectionNote(view)
+  return (
+    <div className="cset-usage-pool" data-testid={`usage-${view.pool}`}>
+      <div className="cset-usage-poolhead">
+        <p className="cset-label" data-testid={`usage-${view.pool}-title`}>
+          {poolTitle(view.pool)}
+        </p>
+        {/* THE AGE IS ALWAYS SHOWN, not only when something is wrong: an age that
+            appears only on failure is an age nobody learns to read, and staleness
+            here is a value rather than an error state. */}
+        <span className="cset-usage-age" data-testid={`usage-${view.pool}-age`}>
+          {formatAge(view.age_ms)}
+        </span>
+      </div>
+      {/* THE LINE THE OWNER ASKED FOR, first in the card and above every bar: "how
+          hard can I push this provider right now". It names the BINDING window,
+          because a countdown to a 5-hour reset says nothing about capacity while
+          the 7-day window is spent. */}
+      {line !== null ? (
+        <p className="cset-usage-capacity" data-testid={`usage-${view.pool}-capacity`}>
+          {line}
+        </p>
+      ) : null}
+      {/* WHICH account the line above is about. The headline says WHEN; on a pool
+          with more than one account the owner still has to know WHOSE, because
+          that is the account he routes the next build to. */}
+      {nextUp !== null ? (
+        <p className="cset-sub" data-testid={`usage-${view.pool}-nextup`}>
+          {nextUp}
+        </p>
+      ) : null}
+      {/* WHY THE CARD HAS NOTHING TO SAY, OR WHY NOTHING NEWER IS COMING.
+          Four different fixes hide behind an empty card — connect an account, wait
+          for a reading, fix a refused gauge, or nothing at all — so the card says
+          which, instead of drawing zeros.
+
+          A BANNER, NOT AN ALTERNATIVE TO THE ROWS. It used to replace them, which
+          meant a pool that read for a week and was then refused could not show both
+          facts at once: either its last figures or the sentence saying nothing will
+          replace them. Samples are kept thirty days, so that is the refusal that
+          actually happens, and hiding the readings behind the note is the same
+          blanking the staleness rule forbids. The note reads null on a healthy card,
+          so nothing is added to the common case. */}
+      {note !== null ? (
+        <div className="cset-empty" data-testid={`usage-${view.pool}-empty`}>
+          {note}
+        </div>
+      ) : null}
+      {view.accounts.map((account, i) => (
+          <div
+            className="cset-usage-account"
+            key={account.account_label ?? `unlabelled-${i}`}
+            data-testid={`usage-${view.pool}-acct-${i}`}
+          >
+            <div className="cset-usage-accounthead">
+              {/* NEVER a guessed account name. The credential is swapped by a
+                  process outside this box, so nothing here can know which account
+                  a reading belongs to unless something labels it. */}
+              <span className="cset-label" data-testid={`usage-${view.pool}-acct-${i}-name`}>
+                {accountName(account.account_label)}
+              </span>
+              <span
+                className="cset-usage-chip"
+                data-testid={`usage-${view.pool}-acct-${i}-capacity`}
+              >
+                {accountCapacityNote(account)}
+              </span>
+              <span className="cset-usage-age" data-testid={`usage-${view.pool}-acct-${i}-age`}>
+                {formatAge(account.age_ms)}
+              </span>
+            </div>
+            <UsageWindowRow
+              windowKey="session"
+              testid={`usage-${view.pool}-acct-${i}-session`}
+              win={account.session}
+              now={now}
+            />
+            <UsageWindowRow
+              windowKey="weekly"
+              testid={`usage-${view.pool}-acct-${i}-weekly`}
+              win={account.weekly}
+              now={now}
+            />
+          </div>
+      ))}
+    </div>
+  )
+}
+
+/**
  * One window's row: a bar, the percent, when it resets, and the pace.
  *
  * WHY THE BAND COMES FROM `@neutronai/contracts`. The same three thresholds
@@ -1656,14 +1794,21 @@ function CredentialRow({
  * track is the specific, possibly false claim "0% used".
  */
 function UsageWindowRow({
-  label,
+  windowKey,
   testid,
   win,
+  now,
 }: {
-  label: string
+  windowKey: 'session' | 'weekly'
   testid: string
-  win: UsageWindow | null
+  win: ProjectedWindow | null
+  now: number
 }): React.JSX.Element {
+  // The label comes from the LENGTH the provider reported, not from a fixed
+  // "5-hour window": lengths differ per provider and one of them has already
+  // changed regime, so a hardcoded label eventually names the wrong thing with
+  // complete confidence.
+  const label = windowName(windowKey, win?.window_ms ?? null)
   if (win === null) {
     return (
       <div className="cset-usage-row" data-testid={testid}>
@@ -1681,8 +1826,11 @@ function UsageWindowRow({
     <div className="cset-usage-row" data-testid={testid}>
       <div className="cset-usage-head">
         <span className="cset-label">{label}</span>
+        {/* Floored with a "≥" when the reading is stale and its window is still
+            running — the last known value, marked as a lower bound, rather than a
+            blank or a fresh-looking number. */}
         <span className="cset-usage-pct" data-testid={`${testid}-pct`}>
-          {formatPercent(win.fraction)}
+          {formatWindowFraction(win)}
         </span>
       </div>
       <div
@@ -1703,8 +1851,15 @@ function UsageWindowRow({
       </div>
       <dl className="cset-usage-facts">
         <div>
+          {/* THE COUNTDOWN, computed HERE from the absolute instant the server
+              sent. A duration computed server-side is already wrong when it
+              paints, and a payload held for an hour would still say "17m".
+              "unknown" and "available now" are different answers and neither may
+              collapse into the other. */}
           <dt>Resets in</dt>
-          <dd data-testid={`${testid}-resets`}>{formatDuration(win.resets_in_ms)}</dd>
+          <dd data-testid={`${testid}-resets`}>
+            {formatCountdown(win.reset_at === null ? null : win.reset_at - now)}
+          </dd>
         </div>
         <div>
           <dt>Pace</dt>
@@ -1720,11 +1875,11 @@ function UsageWindowRow({
             — the window refills faster than it drains — and an always-present row
             reading "—" would train the eye to look for a warning that is normally
             absent. */}
-        {win.exhausts_at !== null ? (
+        {formatProjection(win.exhausts_at, now) !== null ? (
           <div>
             <dt>Caps out in</dt>
             <dd data-testid={`${testid}-exhausts`}>
-              {formatDuration(win.exhausts_at - Date.now())}
+              {formatProjection(win.exhausts_at, now)}
             </dd>
           </div>
         ) : null}

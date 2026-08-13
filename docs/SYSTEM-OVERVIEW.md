@@ -4903,10 +4903,13 @@ the left, the whole fill green under 85%, amber to 95%, red past it. It is the
 divider, not a widget beside one — so it costs no layout and no attention until
 the colour changes.
 
-**Exactly ONE credential is described.** The reading is always the credential the
-box is dispatching with right now. There is no pooling, no averaging, and no
-multi-account concept anywhere in this path — a deployment that swaps credentials
-underneath simply gets the new one measured on the next tick.
+**Exactly ONE credential is described HERE.** The meter's reading is always the
+credential the box is dispatching with right now. There is no pooling, no
+averaging, and no multi-account concept in this path — a deployment that swaps
+credentials underneath simply gets the new one measured on the next tick. The
+readings the probe produces are also persisted, and the surface that reads that
+history is multi-pool and multi-account: see **Usage dashboard** below. The two
+are deliberately different scopes of the same measurement, not two sources of it.
 
 - **Where the numbers come from — `auth/credential-usage-probe.ts`.** Anthropic
   reports utilization on the response headers of an authenticated API call
@@ -4919,7 +4922,16 @@ underneath simply gets the new one measured on the next tick.
   token check, not an LLM call site; it carries no owner content, no `system`
   field and no signature. `parseUnifiedRateLimitHeaders` is exported as a pure
   function so any other consumer of these headers shares one definition of which
-  header means what.
+  header means what — and it takes `now` as a PARAMETER rather than reading a clock,
+  so every consumer also shares the plausibility bound below rather than being able to
+  opt out of it by accident. Each `…-reset` instant is bounded after conversion, the
+  same rule Kimi's equivalents get: refused more than 30 days out (a header already in
+  milliseconds, multiplied again, rendered as a countdown of "11574074d 1h" with
+  nothing flagging it) or more than five minutes of clock skew in the past. A refused
+  instant is absent, and an absent instant renders "unknown" — never "now". The API
+  base is threaded from the composition env (`ANTHROPIC_BASE_URL`, the variable the
+  Anthropic SDK itself reads), so a box pointed at a gateway keeps its gauge pointed
+  where its turns go.
 - **Which credential — `open/active-credential.ts`.** Walks the same precedence
   `resolveOpenLlmPool` uses, resolving one tier further than dispatch needs:
   `CLAUDE_CODE_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` (per-token billing — no
@@ -4961,6 +4973,244 @@ underneath simply gets the new one measured on the next tick.
   before the meter existed. The clients never coerce a missing number to zero: an
   empty coloured track would assert "0% used", which is a claim, and the whole
   purpose of the unavailable state is that there is none to make.
+
+## Usage dashboard — every connected account, and when capacity comes back
+
+The meter says how full ONE window on ONE credential is. The dashboard answers the
+two questions a single reading cannot, for every provider this instance can see:
+**"is this going to run out before it resets"** (pace, and the cap-out projected
+off it) and **"when does capacity COME BACK"** (a countdown to each window's
+reset). They are opposite questions and both ship — pace says when the wall
+arrives, the countdown says when it moves, and the second one is the input to the
+throughput decision of whether to raise build concurrency.
+
+- **The series — `migrations/0121_usage_pool_samples_account_grain.sql`,
+  `persistence/usage-samples-store.ts`.** One row per (instant, pool, account),
+  30-day retention, pruned by the writers' own ticks. The key carries the account
+  because the dashboard answers a per-account question: two accounts of one pool
+  measured in the same millisecond must be two rows, not one overwrite that serves
+  the second account's numbers under the first one's name. `account_label` is
+  `NOT NULL` with an empty-string sentinel for "nothing can name this account" —
+  a nullable column in a primary key is not a key, since SQLite compares NULL to
+  NULL as unequal — and the store maps that sentinel back to `null` at the
+  boundary, so no surface can mistake it for a name. `session_window_ms` /
+  `weekly_window_ms` carry the window LENGTH the provider reported: pace divides
+  by it, lengths are not a constant across providers, and Codex has already
+  changed regime once, so a series that straddles the change is summarised
+  per-sample rather than with one global constant. A utilisation outside `[0, 1]` is
+  not a reading and is refused HERE, on the write side and again on the read side,
+  because this is the boundary every writer crosses: `Number.isFinite` alone lets a
+  negative through, and a negative fraction divided by elapsed renders as a NEGATIVE
+  pace — "−0.2×", which the card paints as comfortably within the refill rate. The
+  Kimi parser refuses negatives at its own edge; the Anthropic header path does not
+  (`numberHeader` returns any finite parse), so one writer's guard was never the
+  property. Above 1 is refused rather than clamped, because a percent under a
+  fraction's name clamped to 1.0 is an unreadable field rendered as a confident
+  "fully spent".
+- **Pools — `UsagePool = 'anthropic' | 'codex' | 'kimi'`.** Every pool is served
+  every time, in `USAGE_POOLS` order, so a provider can vanish from the screen
+  only by being deleted from that list. Codex has no writer yet (its gauge is
+  harvested from real `codex` runs and lands with the lane writers). With no Codex
+  credential it renders "Not connected."; WITH one it renders `no_gauge` — "this
+  build doesn't meter this provider yet" — and never a row of zeros. `connected`
+  would be wrong there: it means "empty because the first reading has not landed
+  YET", and no writer records `pool: 'codex'` in this binary (the positive controls
+  `pool: 'anthropic'` and `pool: 'kimi'` both appear in `open/composer.ts`), so the
+  card would promise a tick from a poller that does not exist. The state disappears
+  by deletion when the Codex gauge lands — no flag, no second path.
+- **The second gauge — `open/kimi-usage-monitor.ts` + `trident/kimi-usage-probe.ts`.**
+  Kimi publishes no rate-limit headers, so its standing is read from
+  `GET {KIMI_BASE_URL}/v1/usages` on a 10-minute `SupervisedLoop`, armed
+  unconditionally beside the credential probe; the key is read PER TICK from the
+  credential store the Settings pane writes, so a key entered now is metered
+  without a restart. The endpoint is **account-wide** — two keys on one
+  subscription return the same numbers — so per-key attribution is never
+  fabricated and the card is titled accordingly. The response schema is not
+  published: the parser accepts a written-down alias set and answers
+  `unrecognised` (logging the KEY NAMES it saw, never values) for anything else,
+  which writes NO row and leaves the card ageing. Units are checked, not trusted:
+  a percent above 100 and a fraction above 1 are refused rather than clamped — and
+  refusing a PRESENT field never falls through to another alias, so
+  `{used_percent: 150, utilization: 0.5}` refuses the entry instead of answering 0.5
+  under the broken field's meaning. A percent-named value INSIDE `(0, 1]` is
+  ambiguous (`used_percent: 0.85` is either 0.85% or 85%, and dividing anyway is the
+  optimistic reading that paints an 85%-spent window as a 1% bar), so it is resolved
+  from the SAME payload where that payload proves the scale and refused where it does
+  not: a field carrying fractions can never exceed 1, so a sibling window reading
+  `used_percent: 64` is positive proof that this response writes percents. The
+  inference is one-directional — no fraction payload can produce the evidence — and is
+  scoped per payload and per key name. Without it, a healthy 5-hour window sitting at
+  1% beside a readable 64% weekly window discarded BOTH windows and painted the
+  permanent-fault banner ("check the key, then the logs") on a gauge that was answering
+  correctly, flapping in and out of it as the short window crossed 1%. Every reset
+  instant is
+  plausibility-checked against the clock after conversion, so a seconds value read
+  as ms (1970) or an ms value converted again (year 57,000) fails loudly instead of
+  rendering. That plausibility bound is ASYMMETRIC, and each side is measured in the
+  thing that actually bounds it. Going FORWARD it is ONE WINDOW LENGTH, scaled per
+  entry, because a rolling window of length L resets within L and window length is not
+  a constant. Going BACK it is CLOCK SKEW and nothing more (five minutes): the current
+  window's reset is always ahead of now, so the only legitimate past instant is the one
+  that rolled moments ago. Scaling the PAST allowance with the window was itself a
+  defect — it let a five-hour window absorb a reset four hours old, and a reset that
+  has passed reads downstream as "the window rolled, this account is free", so a
+  99%-spent account rendered "1 available now". A PARTIAL read is refused outright for
+  the same reason: one unreadable entry — an unmodelled shape, a missing length, or a
+  second window landing in an already-filled slot — or a list carrying only ONE of the
+  two windows discards the whole response, because nothing downstream can tell a sample
+  carrying one window from a provider that only HAS one window, and an account whose
+  weekly figure was silently dropped would render as one with no weekly limit at all.
+  `KimiUsageSample`'s two windows are non-nullable, so that invariant is a type rather
+  than a habit. TRANSPORT OUTCOMES ARE SPLIT BY WHETHER WAITING HELPS: 401/403 is a
+  dead key, any OTHER 4xx except 408 and 429 is a `rejected` request — permanent, and
+  the likeliest first-install failure given the path is unverified — and a 2xx whose
+  content type is not JSON is `unrecognised` carrying that content type, because the
+  other shape a wrong path takes is a 200 serving an HTML page. Folded into the
+  transient arm, both of those retried every ten minutes forever behind "No readings
+  yet.", a sentence promising a reading that could not arrive. Timeouts, 5xx and
+  transport failures stay transient, and the card keeps ageing.
+- **Staleness is shown, never hidden.** Every reading carries its age, on every
+  card, not only the stale ones. A reading older than its pool's deadline
+  (`POOL_STALE_AFTER_MS` — each polled pool's cadence plus ONE missed probe of
+  grace PLUS the clients' own poll interval, because the deadline is checked on the
+  client against a payload refetched every `USAGE_POLL_MS` and a written row can be one
+  poll away from being on screen; all three are pinned against the pollers' and the
+  clients' own intervals by `open/__tests__/usage-dashboard-wiring.test.ts`) renders
+  FLOORED — "≥ 43%" plus
+  its age — while its window is still running, and unfloored once the window has
+  rolled, because "at least this much" stops being true after a reset. Codex has no
+  cadence (its gauge is harvested, not polled) and therefore gets a flat 30-minute
+  MAX AGE instead: "no cadence" must never become "never stale", or a three-week-old
+  harvested reading would claim "available now" beside a "21d ago" chip. Pace is
+  computed **as of the measurement**, never as of the render clock: dividing a
+  stale fraction by an elapsed-since-now would report a calmer and calmer burn the
+  longer a writer has been dead.
+- **Capacity is the WORST window, never the soonest reset.** A FRESH reading is
+  believed — rolled (the instant has passed) → available; spent (≤5% headroom) →
+  returns at its reset; spent with no instant → unknown; room → available. "Spent" is
+  compared on the FRACTION side (`fraction >= 1 - SPENT_HEADROOM_FRACTION`) rather than
+  by subtracting, because `1 - 0.95` is `0.050000000000000044` in binary floating point
+  and the subtraction form put a window at exactly 95% used one float epsilon on the
+  OPTIMISTIC side of a constant whose whole job is to err pessimistic. A STALE
+  reading proves only that its window was AT LEAST this spent, and only while that
+  same window is still running, so it yields a countdown when it says spent and
+  `unknown` otherwise — including when its window has since rolled, where
+  consumption restarted and nobody measured what followed. An account's standing is the worst of
+  its two, so a 5-hour window resetting in 17 minutes is not reported as capacity
+  while the 7-day window is spent for another three days. **And an account with only
+  ONE of its two windows measured has no standing at all**: a null window is the
+  absence of a measurement, not a measured zero, so ranking the windows that happen to
+  be present and reporting that as the account is the same defect reached by the other
+  road. The measured half still renders in full and only the capacity claim is
+  withheld, with the chip naming the reason. The pool line —
+  "1 available now (5h window 75% used)", or
+  "Next capacity in 3d 0h (7d window; 5h window 98% used)", or "Next capacity
+  unknown" — names the binding window and the other window's utilisation, carries the
+  headline account's own headroom even when it IS available (available is a boolean;
+  the throughput decision it feeds is not), and counts an account nobody can vouch for
+  out loud rather than quietly excluding it. TIES ARE BROKEN BY HEADROOM AT BOTH
+  LEVELS, and neither is cosmetic: every `available` standing ranks equal, so inside an
+  account the tie names the window closest to constraining it, and across a pool the
+  tie names the account with the MOST room. Left to payload order the pool tie kept
+  whichever account was measured most recently — so a pool holding one account at 94%
+  used and one at 5% headlined the spent one and pointed "Next up:" at it. A window
+  whose reset has PASSED counts as fully open in both tie-breaks and is rendered "just
+  reset" rather than at its pre-roll percentage, because its stored fraction describes
+  a window that no longer exists; ranking it anyway printed "1 available now (5h window
+  99% used)" beside a row saying that same window was available.
+- **Store the instant, render the delta — and NOTHING on the wire is a delta.**
+  The payload carries only facts that do not age: each reading's `measured_at`,
+  each window's length, reset instant, pace and projection (both anchored at the
+  measurement), and the pool's `stale_after_ms` THRESHOLD. The age, the staleness
+  verdict, the "≥" floors and every capacity standing are computed by the clients
+  in `projectPool`, on every paint, against their own clock — which ticks on a
+  30-second interval. `persistence/usage-samples-store.ts` cannot bake a delta
+  because `summariseWindow` takes no `now` at all. That is structural rather than
+  reviewed, and it is the difference between a card that ages honestly across a
+  dead poller and one that insists "just now, available" for as long as the tab
+  stays open: both clients fetch once and hold the payload between fetches.
+  `CapacityStanding` is a TAGGED union (`available` / `returns` / `unknown`) rather
+  than a nullable number, so a client cannot render "unknown" as "now" by writing
+  `if (!ms)`; its `returns` arm carries a strictly-positive `in_ms` computed at
+  projection, which is what makes the sentence "capacity in ‹countdown›" unable to
+  render "capacity in available now".
+- **Serving — `gateway/http/app-usage-surface.ts`, `GET /api/app/usage/dashboard`,
+  composed in `open/composer.ts`.** Owner-gated, always 200. Each pool carries a
+  `connection` of `connected` / `not_connected` / `no_meter` / `no_gauge` /
+  `unreadable`, resolved
+  from the SAME functions the rest of the product uses (`kimiConfigured`,
+  `resolveActiveCodexHome`, `resolveActiveCredential`) — a per-token API key is
+  `no_meter`, not "not connected", because telling the owner to reconnect a
+  working account sends them to fix the wrong thing. TWO OF THE FIVE EXIST BECAUSE
+  "No readings yet." IS A PROMISE, and each is a case where nothing can keep it.
+  `unreadable`: the gauge was asked and its
+  answer could not be turned into a reading (a rejected key, a non-auth 4xx from a path
+  this build has wrong, or a payload shape it does not model) — the realistic
+  first-install failure against Kimi's unpublished schema. `no_gauge`: the credential
+  is fine and NOTHING IS POLLING that provider in this build, so no tick is even going
+  to be attempted. They are kept apart because they send the owner to different places
+  — a refusal is a fault to go and fix, an unshipped phase is not.
+
+  IT IS DECIDED BY THE LIVE PROBE, NEVER BY A CREDENTIAL FILE, and on BOTH pools that
+  have a writer. `resolveActiveCredential` answers "is a credential present", which is
+  a different question from "does upstream still accept it" and performs no validity
+  check — so a revoked Anthropic token resolved as connected forever while its 401
+  wrote no sample, leaving the one pool with a shipping writer stuck on "No readings
+  yet." So the composer reads `CredentialUsageMonitor.readStanding()` for Anthropic and
+  `KimiUsageMonitor.readStanding()` for Kimi, PER REQUEST and never latched, so a card
+  recovers the moment a tick succeeds; a transient failure stays `connected` on both,
+  because the next tick retries and a dropped packet must not repaint the card.
+
+  THE NOTE IS A BANNER, NOT A REPLACEMENT FOR THE ROWS. Samples are retained thirty
+  days, so the refusal that actually happens is a pool that read fine for a week and
+  then had its key rotated — behind an "only when the card is empty" gate that card
+  kept ageing silently with nothing saying its figures were the last that would ever be
+  read. The last known values keep rendering with their age chips beside the sentence.
+  An empty refused card still shows no number: loud and empty, never a zero.
+  `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` boots the real composer
+  against a loopback server answering with an unmodelled body, and
+  `open/__tests__/usage-dashboard-lapsed-wiring.test.ts` does the same against one
+  answering 401 with a subscription token on disk; both assert the composed payload,
+  each with a positive control that a pool nobody asked is not reported unreadable.
+- **Both clients — `landing/chat-react/SettingsTab.tsx` (Model usage) and
+  `app/app/usage.tsx`,** over the twin clients `landing/chat-react/usage-dashboard-client.ts`
+  and `app/lib/usage-dashboard-client.ts`. One card per provider, side by side,
+  each in its own unit and never summed: the three providers meter different
+  things, so a combined headline would be a number about nothing. No dollar figure
+  appears anywhere — the subscription is flat, so a currency value would assert a
+  marginal cost the owner does not incur. The formatters are executed side by side
+  by `gateway/__tests__/usage-dashboard-client-parity.test.ts`, because a
+  divergence there is the failure nobody reports: each screen stays
+  self-consistent and the owner gets two different answers about one quota. That
+  parity test is also where the CAPACITY POLICY is pinned, because the policy is a
+  function of the render clock and therefore lives in the clients: `projectPool` is
+  executed on both copies over the same payload at the same instant and the results
+  are compared whole.
+- **And both screens REFETCH on `USAGE_POLL_MS` (30s), on the same interval that
+  advances the render clock.** Computing the deltas at paint is what ages a card
+  honestly across a DEAD poller; on its own it is a slow lie in the other direction,
+  because a screen that only advanced its clock would walk a HEALTHY install into
+  staleness — the Anthropic pool's deadline is two and a half minutes
+  (`60_000 × 2 + 30_000`, the constant rather than a round number in prose), so the
+  card would floor its gauges and drop capacity to "unknown" that soon after the
+  screen opened while a live poller wrote a fresh row every 60 seconds. One timer
+  drives both, so the data and the clock it is measured against cannot drift, and the
+  parity test bounds the RELATIONSHIP rather than the number
+  (`USAGE_POLL_MS × 2 < min(POOL_STALE_AFTER_MS)`, importing the store's own
+  deadlines), so a pool cannot get a deadline tighter than the screens can keep up
+  with. Each screen has a mutation-checked test: a tick that advances the clock and
+  does not refetch turns it red.
+
+  AND THE POLLS ARE SEQUENCED, because they overlap. The interval does not wait for
+  the previous response, so two requests are routinely in flight together and a slow
+  one settling LAST would win by arriving late — repainting a reading already known to
+  be superseded, wearing the newer one's age chip. That is fabricated freshness, the
+  one class this surface exists to prevent, reached from the client side. Each load
+  takes a generation number and a superseded response is dropped rather than rendered.
+  A counter rather than an `AbortController`: a late reading is still a good reading
+  and the next tick is seconds away, so there is nothing to gain by cancelling it —
+  only a discarded one to avoid painting. Both screens pin it with two gated responses
+  released newest-first, and removing the guard turns each red.
 
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 

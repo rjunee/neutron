@@ -2,6 +2,117 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — the usage dashboard, Phase 1: every connected account on one screen, and when capacity comes back
+
+Phase 1 of `docs/plans/usage-quota-dashboard-design-2026-08-13.md` (§9). The gauge in
+the divider already said how full a window was; "72%" is not a decision until you know
+two more things, and they are opposite questions. **Pace** — consumed ÷ elapsed —
+answers "at this rate, when do I hit the cap". **The countdown** answers "when does
+capacity come back", which is the input to the throughput decision the owner actually
+makes. Both ship, side by side, per account.
+
+**A bare countdown was a defect, and fixing it is the interesting part.** The 5-hour
+and 7-day windows reset independently, so an account whose short window resets in 17
+minutes but whose weekly window is 97% spent has almost nothing coming back — and a
+headline reading "next capacity in 17m" would have been an instruction to push
+concurrency into a wall. So an account's standing is the WORST of its windows, every
+countdown is rendered beside the utilisation of the window it belongs to, and the pool
+line names the binding window plus the other window's figure: `Next capacity in 3d 0h
+(7d window; 5h window 98% used)`, with a "Next up: ‹account›" line naming whose it is.
+
+**Nothing on the wire is a delta.** The payload carries `measured_at`, each window's
+length and reset instant, the pace and projection anchored at the measurement, and
+`stale_after_ms` — a THRESHOLD, not a verdict. The age, the staleness, the "≥" floor
+and the capacity standing are all functions of "now", so all four are computed at
+PAINT by `projectPool` in the two clients; `summariseWindow` takes no `now` at all, so
+the server cannot bake a delta because it cannot see the clock. And the payload is
+REPOLLED on the same 30-second tick that advances the render clock: ageing a held
+payload is right across a dead poller and wrong across a live one, and a screen that
+only advanced its clock would have painted a perfectly healthy install as stale two
+and a half minutes after it opened.
+
+**Per account, both windows, retained.** The owner asked of one account "when it
+resets in 17m, how much WEEKLY capacity is left" and it was unanswerable from stored
+state. Migration 0121 rebuilds `usage_pool_samples` onto `(ts, pool, account_label)`
+and adds `session_window_ms` / `weekly_window_ms`, so each sample is summarised with
+its OWN length — window length is data, not a constant, and a historical series
+straddles a regime change. A non-active account's headroom now renders with its age
+and without a live probe.
+
+**The Kimi poller, against an endpoint nobody has published.**
+`trident/kimi-usage-probe.ts` reads `GET {KIMI_BASE_URL}/v1/usages` on a 10-minute
+supervised loop. The schema is unverified, so the parser is built to be wrong LOUDLY:
+a written-down alias set per field, units checked rather than trusted, an asymmetric
+plausibility bound on every reset instant, and `unrecognised` — carrying the key NAMES
+it saw, never values — for anything else. A partial read is a refusal, not a smaller
+answer: one unreadable entry — or a list carrying only ONE of the two windows —
+discards the whole response and writes no row, because nothing downstream can tell a
+sample with one window from a provider that only HAS one window.
+
+The reset bound is measured in the thing that actually bounds each side: CLOCK SKEW
+going back (a rolling window's current reset is always ahead of now, so the only
+legitimate past instant is the one that rolled moments ago) and ONE WINDOW LENGTH
+going forward. A bound of one window in BOTH directions still believed a reset four
+hours into a five-hour window's past, and a reset that has passed reads downstream as
+"the window rolled, this account is free" — so a 99%-spent account rendered "1
+available now".
+
+**Half a reading buys no standing, at the renderer too.** An account with only one of
+its two windows measured has no capacity standing at all, on both clients: a null
+window is the absence of a measurement, not a measured zero, so ranking the windows
+that happen to be present and reporting that as the account is the same defect as
+naming the soonest reset while ignoring the other window. The measured half still
+renders in full; only the capacity claim is withheld, and the chip says why
+("capacity unknown — one window not reported").
+
+**A refused gauge read says so, and it says so on a card that already has numbers.**
+A fourth connection state, `unreadable`, for a gauge that was asked and whose answer
+could not be turned into a reading. "No readings yet." promises a first reading is
+coming; a rejected key, a non-auth 4xx from a path this build has wrong, or an
+unmodelled payload means none is. Samples are kept thirty days, so the refusal that
+actually happens is not an empty pool — it is a pool that read fine for a week and
+then had its key rotated or its schema shift underneath it. So the sentence is a
+BANNER above the rows rather than a replacement for them: the last known figures keep
+rendering with their age chips, and the note says nothing newer is coming. An empty
+refused card still shows no number — loud and empty, never a zero.
+
+Reaching that state is decided by the LIVE probe on both pools that have one, never by
+a credential file: `open/active-credential.ts` performs no validity check, so a revoked
+Anthropic token resolves as present forever, and the composer now reads
+`CredentialUsageMonitor.readStanding()` per request — the same shape the Kimi arm uses.
+A transient failure stays `connected` on both, because a dropped packet must not
+repaint the card as broken.
+
+Per provider, in its own unit, never summed, and **no dollar value anywhere** — the
+subscription is flat, so a currency figure would assert a marginal cost the owner does
+not incur. Codex has no sample writer in this build — the positive controls
+`pool: 'anthropic'` and `pool: 'kimi'` both hit in `open/composer.ts` and `'codex'`
+does not — so its arm reports a fifth connection state, `no_gauge`: "Connected. This
+build doesn't meter this provider yet, so there is nothing to read." `connected` was
+wrong there and the card said "No readings yet.", promising a tick from a poller that
+is not in the binary; `not_connected` is wrong too on a box that HAS Codex credentials.
+Either way no zeros are drawn. The state disappears by deletion when the Codex gauge
+lands. Shipped on both clients, no flag and no dual path.
+
+**A refusal has to be TRUE, or it is the same lie in the other direction.** Two
+boundary reads were refusing readings they could actually resolve, and one was
+accepting a number that was not a reading at all. Kimi's percent-named fields inside
+`(0, 1]` are genuinely ambiguous read alone — 0.85 is either 0.85% or 85% — but a
+field carrying fractions can never exceed 1, so a sibling window at 64% in the SAME
+response is positive proof that this response writes percents. Without that proof step,
+a healthy install whose 5-hour window sat at 1% beside a readable 64% weekly window
+discarded BOTH windows and painted "check the key, then the logs" over a gauge that was
+answering correctly — flapping in and out of the fault state as the short window crossed
+1%. The inference runs one way only (nothing can wrongly prove "percent") and is scoped
+per payload and per key name; where the payload proves nothing, the refusal stands. In
+the other direction, a utilisation outside `[0, 1]` is now refused at the sample store,
+the boundary every writer crosses: `Number.isFinite` alone let a negative through, and a
+negative fraction divided by elapsed renders as a negative pace — "−0.2×", which paints
+as comfortably within the refill rate. Kimi refused negatives at its own edge; the
+Anthropic header path did not, so one writer's guard was never the property.
+
+Detail: `docs/as-built/2026-08-13-usage-dashboard-phase-1.md`.
+
 ## 2026-08-13 — the BUILD phase runs on codex: a second executor for the most expensive step
 
 The selector (#560, below) could put the build on a different **Claude** tier and

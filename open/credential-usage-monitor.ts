@@ -163,6 +163,8 @@ export class CredentialUsageMonitor {
 
   /** Last SUCCESSFUL measurement, if there has ever been one. */
   private cached: CachedReading | null = null
+  /** What the last tick learned about the credential itself. Null before the first. */
+  private lastStanding: CredentialStanding | null = null
   /** Why there is currently nothing to show, when there is nothing to show. */
   private unavailable: Extract<CredentialUsagePayload, { available: false }> = {
     available: false,
@@ -207,6 +209,27 @@ export class CredentialUsageMonitor {
     // A cached reading that has aged out is not evidence of anything any more.
     if (cached !== null) return { available: false, reason: 'probe_failed' }
     return this.unavailable
+  }
+
+  /**
+   * WHAT THE LAST LIVE READ LEARNED ABOUT THE CREDENTIAL — the twin of
+   * `KimiUsageMonitor.readStanding()`, and it exists for the same reason.
+   *
+   * "IS A CREDENTIAL ON DISK" AND "DOES UPSTREAM STILL ACCEPT IT" ARE TWO
+   * DIFFERENT QUESTIONS, and the usage card has to ask the second one. A revoked
+   * token stays on disk looking exactly like a live one: `resolveActiveCredential`
+   * performs no validity check, the probe's 401 drops the cached reading and
+   * writes no sample, and the card is then left with a pool that has a credential,
+   * has no new readings, and says "No readings yet." — a sentence promising a
+   * first reading that will never come. This is the only pool with a shipping
+   * writer, so it is the one where that sentence is most likely to be read.
+   *
+   * `indeterminate` IS NOT A REFUSAL and must never be rendered as one: a dropped
+   * packet keeps the card connected, exactly as the notice latch treats it. Only
+   * `lapsed` — an actual 401/403 from upstream — is the permanent answer.
+   */
+  readStanding(): CredentialStanding | null {
+    return this.lastStanding
   }
 
   /** One measurement. Exposed so tests can drive ticks deterministically. */
@@ -291,6 +314,10 @@ export class CredentialUsageMonitor {
   }
 
   private async report(standing: CredentialStanding): Promise<void> {
+    // Recorded BEFORE the observer is consulted, and unconditionally: the usage
+    // card reads this whether or not anything is listening, and an observer that
+    // throws must not cost the card the fact that the credential was rejected.
+    this.lastStanding = standing
     const observer = this.onStanding
     if (observer === undefined) return
     try {
