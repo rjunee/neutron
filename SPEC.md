@@ -310,6 +310,46 @@ Each carries an acceptance criterion; all in `neutron-open`.
 - [ ] **Native-crash visibility for the mobile app.** App remote diagnostics (2026-07-27) covers JS errors
       only; a crash before the JS bundle runs produces nothing. Acceptance: a native process-start crash on
       the owner's device is diagnosable without a USB cable.
+- [ ] **A deploy must not kill the builds in flight — trident is presently its own worst enemy**
+      (owner-directed 2026-08-13, from the forensics on run `bb3c8c8e`). The inner workflow is not its own
+      process: it runs detached inside a WARM `claude` REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`,
+      `open/wiring/substrates.ts`). Restarting the tenant SIGTERMs that REPL and every workflow inside it, and
+      the wedge watchdog then correctly reports `pid-dead → "pooled child exited"` — the detector working, not
+      the fault. Three of five recorded `trident_launcher_crashes` land 18–28 s after a vendor checkout
+      (08-11 20:16:44→20:17:02, 08-12 19:37:55→19:38:13, 08-13 04:05:27→04:05:55). The 08-13 deploy rolled
+      `282f10b6`, *trident's own merge*: **a build that lands kills the builds still running**, at exactly the
+      rate the pipeline succeeds. Acceptance: a deploy either drains/defers while a run is in flight, or the
+      workflow survives its launcher's restart — and either way the owner is TOLD which happened, never handed
+      a bare "child crashed" for an event that was a deploy. (Two crashes — 08-10 23:30, 08-11 06:04 — have no
+      checkout near them and are NOT explained by this; a fix must not be credited with closing them.)
+- [ ] **A retry must resume from the checkpoint, not merely from the PR.** A re-dispatch creates a NEW run
+      row with `inner_checkpoint = null` and `ralph_round = 0`; only the fire-time `detectExistingPr` probe
+      (`trident/orchestrator.ts` `launch`) recovers continuity, by setting `pr` and so making the inner
+      workflow's `resuming` true. That is enough to preserve the *code* (Forge re-enters the branch, the
+      planner is told to read the committed work) but the governed plan is regenerated from scratch and the
+      review rounds restart — planning and review tokens are re-spent every crash. Acceptance: a retry carries
+      the dead run's `inner_checkpoint` and `ralph_round` forward, or states plainly on the card that it will
+      not. A resume that depends on a GitHub PR probe also silently degrades to zero in `local` merge-mode.
+- [ ] **A preserved worktree must not be able to strand its branch.** Since #541 a crashed run's worktree is
+      deliberately kept (it holds uncommitted work), which leaves the build branch checked out. Git refuses
+      the same branch in two worktrees, so the retry's re-enter contract
+      (`git switch <branch> || git switch -c <branch>`, `trident/inner-workflow.mjs`) has both arms fail on the
+      literal path. Observed 2026-08-13: run `36b95167` did NOT deadlock — Forge worked inside the preserved
+      worktree instead — but that recovery is an LLM improvising around a broken contract, not a guarantee,
+      and it silently rejoins a worktree whose base may be stale. Acceptance: the re-enter path is
+      DETERMINISTIC — the retry either adopts the preserved worktree by design or releases the branch first,
+      and a test pins whichever is chosen.
+- [ ] **"Is this build alive?" must be answerable from the board, not from file mtimes**
+      (owner question, 2026-08-13: *"How can we tell if it's working? I want to minimize waste."*). Today it
+      is not. Run `36b95167` sat at `phase = forge-init`, `last_advanced_at = 04:10:08` while it was healthy —
+      its planner had finished, Forge had committed `4eb50c4` at 04:19:38, and its agent transcript was being
+      written seconds earlier. Every durable surface only moves on HARVEST, so a working build and a dead one
+      look identical for the whole span of a task. The only true liveness signal is off-board: the mtime of
+      `<session>/subagents/workflows/<wf_id>/agent-*.jsonl`. This is why the 90-minute hang reaper is
+      dangerous — it measures `last_advanced_at`, the harvest clock, NOT whether an agent is working, so it
+      can kill a healthy run (a live candidate for what happened to `eca83d1f`). Acceptance: a heartbeat
+      derived from real agent activity reaches the run row and the card; the reaper judges on that clock; and
+      the owner can tell working from dead without opening a terminal.
 
 ### Email Core consolidation — absorb the standalone email system (owner-directed 2026-08-07)
 
