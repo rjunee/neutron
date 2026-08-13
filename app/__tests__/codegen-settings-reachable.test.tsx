@@ -223,7 +223,7 @@ describe('the screen renders what the SERVER says the phases are', () => {
     // Listed on the row that could use it, greyed, saying what to go and fix.
     const k3 = byTestId('phase-review_codex-model-k3');
     expect(k3).not.toBeNull();
-    expect(k3!.textContent ?? '').toContain('Kimi steps only');
+    expect(k3!.textContent ?? '').toContain('Kimi is not wired for this step yet');
     // …and pressing it changes nothing, which is the half a render check misses.
     await press('phase-review_codex-model-k3');
     expect(byTestId('phase-review_codex-changed')).toBeNull();
