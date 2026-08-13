@@ -42,12 +42,34 @@ and without a live probe.
 **The Kimi poller, against an endpoint nobody has published.**
 `trident/kimi-usage-probe.ts` reads `GET {KIMI_BASE_URL}/v1/usages` on a 10-minute
 supervised loop. The schema is unverified, so the parser is built to be wrong LOUDLY:
-a written-down alias set per field, units checked rather than trusted, a one-sided
+a written-down alias set per field, units checked rather than trusted, an asymmetric
 plausibility bound on every reset instant, and `unrecognised` — carrying the key NAMES
 it saw, never values — for anything else. A partial read is a refusal, not a smaller
-answer: one unreadable entry discards the whole response and writes no row, because
-nothing downstream can tell a sample with one window from a provider that only HAS
-one window.
+answer: one unreadable entry — or a list carrying only ONE of the two windows —
+discards the whole response and writes no row, because nothing downstream can tell a
+sample with one window from a provider that only HAS one window.
+
+The reset bound is measured in the thing that actually bounds each side: CLOCK SKEW
+going back (a rolling window's current reset is always ahead of now, so the only
+legitimate past instant is the one that rolled moments ago) and ONE WINDOW LENGTH
+going forward. A bound of one window in BOTH directions still believed a reset four
+hours into a five-hour window's past, and a reset that has passed reads downstream as
+"the window rolled, this account is free" — so a 99%-spent account rendered "1
+available now".
+
+**Half a reading buys no standing, at the renderer too.** An account with only one of
+its two windows measured has no capacity standing at all, on both clients: a null
+window is the absence of a measurement, not a measured zero, so ranking the windows
+that happen to be present and reporting that as the account is the same defect as
+naming the soonest reset while ignoring the other window. The measured half still
+renders in full; only the capacity claim is withheld, and the chip says why
+("capacity unknown — one window not reported").
+
+**A refused gauge read says so.** A fourth connection state, `unreadable`, for a gauge
+that was asked and whose answer could not be turned into a reading. "No readings yet."
+promises a first reading is coming; a rejected key or an unmodelled payload means none
+is, and against an unpublished schema that is the realistic first-install failure.
+Still no number on the card — loud and empty, never a zero.
 
 Per provider, in its own unit, never summed, and **no dollar value anywhere** — the
 subscription is flat, so a currency figure would assert a marginal cost the owner does

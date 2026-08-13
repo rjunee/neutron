@@ -26,6 +26,13 @@
  * how the parser's alias list gets corrected from a real response instead of a
  * guess. The card then ages visibly, which is the whole point: a killed poller
  * must show an ageing number, never a confident zero.
+ *
+ * AND LOUD ON THE SCREEN, NOT ONLY IN THE LOG. A log line is loud to whoever is
+ * reading logs. On a first install with no sample yet there is no number to age,
+ * and "No readings yet." reads identically whether the first tick simply has not
+ * landed (resolves itself) or the endpoint answered in a shape this build cannot
+ * read (does not). {@link KimiUsageMonitor.readStanding} is what lets the card tell
+ * those apart — the composer reads it per request and the card says which.
  */
 
 import { createLogger } from '@neutronai/logger'
@@ -47,6 +54,25 @@ import {
 export const KIMI_USAGE_POLL_INTERVAL_MS = 10 * 60_000
 
 const moduleLog = createLogger('kimi-usage')
+
+/**
+ * What the LAST gauge read produced — the card's answer to "why is this empty".
+ *
+ * A log line is loud to whoever is reading logs; the owner is reading a card. The
+ * Kimi schema is unpublished (see `trident/kimi-usage-probe.ts`), so the realistic
+ * first-install failure is a payload the parser refuses — and "No readings yet."
+ * is the one sentence that makes that indistinguishable from "the first tick has
+ * not landed", which is the one thing that resolves itself. So the standing is
+ * exported and the composer turns it into a connection state the card renders.
+ *
+ *   - `null`    — nothing has been read yet, or no key is configured. Wait.
+ *   - `ok`      — the last read produced a sample.
+ *   - `refused` — the endpoint answered and the parser could not read it, or the
+ *     key was rejected. This does not fix itself; the key names are in the log.
+ *   - `error`   — transport, timeout or 5xx. Transient; the next tick retries, so
+ *     it is deliberately NOT surfaced as a broken card.
+ */
+export type KimiUsageReadStanding = 'ok' | 'refused' | 'error'
 
 /** One reading, in the store's own vocabulary. */
 export interface KimiPersistedSample {
@@ -81,6 +107,9 @@ export class KimiUsageMonitor {
   private readonly onSample: ((s: KimiPersistedSample) => void | Promise<void>) | undefined
   private readonly probe: (key: string) => Promise<KimiUsageProbeOutcome>
 
+  /** What the last completed read produced. Null until one completes. */
+  private last: KimiUsageReadStanding | null = null
+
   constructor(deps: KimiUsageMonitorDeps) {
     this.key = deps.key
     this.onSample = deps.onSample
@@ -102,6 +131,15 @@ export class KimiUsageMonitor {
     })
   }
 
+  /**
+   * What the last completed read produced, for the surface that has to explain an
+   * empty card. Read per request by the composer — never latched into the payload,
+   * because it is a live fact about the poller and not a property of a reading.
+   */
+  readStanding(): KimiUsageReadStanding | null {
+    return this.last
+  }
+
   /** One read. Exposed so tests drive ticks deterministically. */
   async measureOnce(): Promise<void> {
     let key: string | null
@@ -119,31 +157,40 @@ export class KimiUsageMonitor {
     const outcome = await this.probe(key)
     switch (outcome.kind) {
       case 'ok': {
+        // BOTH windows are present by construction — `parseKimiUsages` refuses a
+        // response that carries only one, because a half-read sample and a
+        // one-window provider are the same wire shape downstream.
         const { session, weekly, account_label } = outcome.sample
+        this.last = 'ok'
         await this.persist({
           account_label,
-          session: session?.fraction ?? null,
-          weekly: weekly?.fraction ?? null,
-          session_reset_at: session?.reset_at ?? null,
-          weekly_reset_at: weekly?.reset_at ?? null,
+          session: session.fraction,
+          weekly: weekly.fraction,
+          session_reset_at: session.reset_at,
+          weekly_reset_at: weekly.reset_at,
           // The lengths the response reported, carried per sample. Never a
           // constant: the two slots and the pace both depend on them, and the
           // series has to stay readable across a regime change.
-          session_window_ms: session?.window_ms ?? null,
-          weekly_window_ms: weekly?.window_ms ?? null,
+          session_window_ms: session.window_ms,
+          weekly_window_ms: weekly.window_ms,
         })
         return
       }
       case 'unauthorized':
+        this.last = 'refused'
         moduleLog.warn('kimi_usage_unauthorized', { status: outcome.httpStatus })
         return
       case 'unrecognised':
+        this.last = 'refused'
         // The key names, never the values. This line IS the "print a real value
         // before keying logic on it" step: one occurrence is enough to correct
         // the parser's alias list against the real endpoint.
         moduleLog.warn('kimi_usage_shape_unrecognised', { observed: outcome.observed.join(',') })
         return
       case 'error':
+        // TRANSIENT, so the standing stays whatever it was. A dropped packet must
+        // not repaint the card as broken; the age chip already carries the gap.
+        this.last = this.last ?? 'error'
         moduleLog.warn('kimi_usage_probe_failed', { error: outcome.message })
         return
     }

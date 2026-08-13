@@ -47,42 +47,47 @@ import { KIMI_BASE_URL } from './kimi-review.ts'
 export const KIMI_USAGE_TIMEOUT_MS = 20_000
 
 /**
- * How far into the FUTURE a reset instant may land and still be believed.
+ * The OUTER ceiling on how far into the future a reset instant may land.
  *
- * A rolling quota window resets within days, so anything a year out is a unit slip
- * — a milliseconds value converted as if it were seconds. Refused rather than
- * stored, because a year-57000 reset renders as a countdown nobody can read.
- *
- * Generous on purpose: erring long here is the PESSIMISTIC direction (capacity
- * looks further away than it is), and the bound only has to catch unit slips.
+ * The real future bound is the entry's own window length — for a rolling window of
+ * length L the next reset is at most L away — and that is what
+ * {@link parseResetInstant} normally applies. This constant is the backstop for the
+ * case where the LENGTH ITSELF is absurd: `window_seconds` read off a field that
+ * meant something else can produce a century-long window, and a bound derived from
+ * it would wave through a year-57000 instant that renders as a countdown nobody can
+ * read. Whichever of the two is tighter wins.
  */
 export const RESET_FUTURE_PLAUSIBILITY_MS = 400 * 24 * 60 * 60 * 1000
 
 /**
- * How far into the PAST a reset instant may land and still be believed: ONE
- * WINDOW LENGTH, and the asymmetry is the whole point.
+ * How far into the PAST a reset instant may land and still be believed: A FEW
+ * MINUTES OF SKEW, and nothing more.
  *
  * A reset instant slightly in the past is ordinary and true — the window rolled
- * moments ago and the probe read it just after. But an instant more than one
- * window-length back describes a window that has since rolled AT LEAST once with
- * nobody measuring it, so it cannot be the current window's reset. It is either a
- * unit slip (a seconds value read as milliseconds lands in 1970) or a field that
- * means something other than what its name says.
+ * while the request was in flight, or the two clocks disagree by a little, and the
+ * probe read it just after. That is the ONLY legitimate past reading, and it is
+ * bounded by network latency plus clock skew rather than by anything about the
+ * window: for a rolling window of length L, the CURRENT window's reset is always
+ * in `(now, now + L]`, so an instant genuinely in the past can only ever be the
+ * one that just rolled, moments ago.
  *
- * A SYMMETRIC BOUND WAS THE BUG. An earlier draft accepted anything within ±400
- * days of now, so an instant a year in the past passed the check and was stored —
+ * TWO EARLIER BOUNDS WERE BOTH TOO LOOSE, and both failed the same way. A
+ * symmetric ±400 days believed an instant a year back. Replacing it with ONE
+ * WINDOW LENGTH still believed a reset four hours into a five-hour window's past —
  * and downstream `windowCapacity` reads a reset that has already passed as "the
- * window rolled, this account is available". A 99%-spent window would then render
- * as capacity, which is precisely the optimistic answer that sends the owner to
- * raise concurrency into a wall. Refusing leaves `reset_at` null, which renders as
- * "unknown": the honest answer, and the one the acceptance case pins.
+ * window rolled, this account is available", so a 99%-spent window rendered as
+ * capacity. That is precisely the optimistic answer that sends the owner to raise
+ * concurrency into a wall, and against an unpublished schema it is exactly what a
+ * `reset`/`reset_time` field carrying the window's START would produce. Refusing
+ * leaves `reset_at` null, which renders as "unknown": the honest answer, and the
+ * one the acceptance case pins.
  *
- * Expressed as a MULTIPLE of the entry's own reported length rather than as a
- * constant, because window length is not a constant — it differs per provider and
- * one of them has already changed regime, so a fixed "no more than 5 hours back"
- * would be wrong the moment a 7-day window came through it.
+ * A CONSTANT rather than a multiple of the window, on purpose. The quantity being
+ * tolerated here is CLOCK SKEW, which does not grow because the window is longer —
+ * scaling it with the window is what let a five-hour window absorb four hours of
+ * "skew". Window length still bounds the FUTURE side, where it genuinely applies.
  */
-export const RESET_PAST_TOLERANCE_WINDOWS = 1
+export const RESET_PAST_TOLERANCE_MS = 5 * 60_000
 
 /** The divider between the two window slots the series keeps. */
 export const SHORT_WINDOW_CEILING_MS = 24 * 60 * 60 * 1000
@@ -99,10 +104,15 @@ export interface KimiUsageWindow {
 export interface KimiUsageSample {
   /** The account the endpoint named, or null. NEVER inferred from the key. */
   account_label: string | null
-  /** The short rolling window (≤ 24h), when one was reported. */
-  session: KimiUsageWindow | null
-  /** The long rolling window (> 24h), when one was reported. */
-  weekly: KimiUsageWindow | null
+  /**
+   * The short rolling window (≤ 24h). NON-NULL, and that is the all-or-nothing
+   * rule expressed as a type: a response missing either slot never becomes a
+   * sample, so no caller can hold half a reading and no caller needs a branch for
+   * one. A nullable field here would be a dead branch dressed as safety.
+   */
+  session: KimiUsageWindow
+  /** The long rolling window (> 24h). NON-NULL, for the same reason. */
+  weekly: KimiUsageWindow
 }
 
 export type KimiUsageProbeOutcome =
@@ -176,10 +186,16 @@ function finiteNumber(v: unknown): number | null {
  * instant that renders as a countdown nobody can read, and a seconds value read as
  * ms into a refusal instead of "available now" in 1970.
  *
- * THE BOUND IS ONE-SIDED, and asymmetric on purpose — see
- * {@link RESET_PAST_TOLERANCE_WINDOWS}. The window's own length is required rather
- * than defaulted, because the past bound is measured in windows and a guessed
- * length would decide which instants are believable using a number nobody read.
+ * THE BOUND IS ASYMMETRIC ON PURPOSE, and each side is measured in the thing that
+ * actually bounds it:
+ *
+ *   - the FUTURE side is ONE WINDOW LENGTH (plus the same skew allowance), because
+ *     a rolling window of length L resets within L. The window's own length is
+ *     required rather than defaulted for exactly this reason: a guessed length
+ *     would decide which instants are believable using a number nobody read;
+ *   - the PAST side is a few minutes of CLOCK SKEW and nothing more — see
+ *     {@link RESET_PAST_TOLERANCE_MS}. A reset further back than that cannot be
+ *     the current window's, and believing one renders a spent window as free.
  */
 export function parseResetInstant(
   entry: Record<string, unknown>,
@@ -206,10 +222,12 @@ export function parseResetInstant(
       if (Number.isFinite(parsed)) candidates.push(parsed)
     }
   }
-  const earliest = now - RESET_PAST_TOLERANCE_WINDOWS * window_ms
+  const earliest = now - RESET_PAST_TOLERANCE_MS
+  // The tighter of "one window away" and the absurd-length backstop.
+  const furthest = Math.min(window_ms + RESET_PAST_TOLERANCE_MS, RESET_FUTURE_PLAUSIBILITY_MS)
   for (const at of candidates) {
     if (at === null) continue
-    if (at >= earliest && at - now <= RESET_FUTURE_PLAUSIBILITY_MS) return at
+    if (at >= earliest && at - now <= furthest) return at
   }
   return null
 }
@@ -336,6 +354,17 @@ function parseAccountLabel(body: Record<string, unknown>): string | null {
  * "Could not read one of these" must not be able to arrive as "there is nothing
  * there", and the only shape in which that is structurally impossible is refusal.
  *
+ * AND "ALL" MEANS BOTH SLOTS, not just "every entry I happened to see". A response
+ * that lists ONE window read cleanly through the earlier draft: nothing was
+ * unreadable, so it returned `ok` with `weekly: null` — the identical wire shape as
+ * the dropped-window case above, and the identical wall. The endpoint reports the
+ * account's 5-hour AND weekly standings (design §6.3), so a list carrying only one
+ * of them is a shape this parser does not model, and it says so rather than
+ * shipping half an answer. The clients refuse the same reading independently
+ * (`accountCapacity` in `app/lib/usage-dashboard-client.ts`) — a half-measured
+ * account has no capacity standing, whatever wrote it — so this is the loud half of
+ * a defence that does not depend on one file being right.
+ *
  * The refusal is not silent: `observed` carries the KEY NAMES (never values), so
  * one real response is enough to correct the alias lists above — the "print a real
  * value before keying logic on it" step, performed in production instead of
@@ -380,7 +409,10 @@ export function parseKimiUsages(
     else if (slot === 'weekly' && weekly === null) weekly = win
     else unreadable = true
   }
-  if (unreadable || (session === null && weekly === null)) {
+  // BOTH slots, not "at least one": a one-window response is the same wire shape a
+  // dropped window produces, and downstream neither can be told from a provider
+  // that has no such window. See the header.
+  if (unreadable || session === null || weekly === null) {
     return { kind: 'unrecognised', observed: observedKeys(body) }
   }
   return { kind: 'ok', sample: { account_label: parseAccountLabel(body), session, weekly } }

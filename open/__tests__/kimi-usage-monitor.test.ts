@@ -149,20 +149,59 @@ describe('the Kimi poller writes what it read, and nothing it did not', () => {
     expect(probed).toEqual(['the-stored-one'])
   })
 
-  test('a partial reading writes the half it has, not a zero for the other', async () => {
-    await monitorFor({
-      kind: 'ok',
-      sample: {
-        account_label: null,
-        session: { fraction: 0.42, reset_at: null, window_ms: 5 * HOUR },
-        weekly: null,
+  test('a sample carries BOTH windows — a half read never reaches the series', async () => {
+    // There is no "partial sample" shape to write any more, and that is enforced by
+    // the type rather than by care: `KimiUsageSample.weekly` is non-nullable, so
+    // `parseKimiUsages` refusing a one-window response is the ONLY way a reading
+    // gets here. A half sample and a provider with one window are the same wire
+    // shape downstream, so the refusal happens before the store, not after.
+    await monitorFor(OK_OUTCOME).measureOnce()
+    const account = store.summarise('kimi').accounts[0]!
+    expect(account.session!.fraction).toBe(0.42)
+    expect(account.weekly!.fraction).toBe(0.64)
+    expect(account.weekly!.window_ms).toBe(7 * 24 * HOUR)
+  })
+})
+
+describe('the card can say WHY it is empty, not just that it is', () => {
+  test('an unreadable payload marks the read REFUSED, and a good tick clears it', async () => {
+    // THE MUTANT THIS KILLS: leaving the standing at `ok`/null on a refusal, which
+    // renders the card as "No readings yet." — a sentence that promises a first
+    // reading is coming. Kimi's usages schema is unpublished, so a refused payload
+    // is the realistic first-install failure and the owner would wait on it forever
+    // while the key names went to a log nobody is watching.
+    const refused = monitorFor({ kind: 'unrecognised', observed: ['limits', 'quota'] })
+    // Nothing read yet is NOT a refusal: the honest answer before the first tick is
+    // "wait", and a card that opened on an error would be its own false alarm.
+    expect(refused.readStanding()).toBeNull()
+    await refused.measureOnce()
+    expect(refused.readStanding()).toBe('refused')
+    // And no row: loud and EMPTY, never a zero.
+    expect(store.count()).toBe(0)
+
+    // A rejected key is the same standing — the card's sentence covers both, and
+    // both need a human rather than a wait.
+    const dead = monitorFor({ kind: 'unauthorized', httpStatus: 401 })
+    await dead.measureOnce()
+    expect(dead.readStanding()).toBe('refused')
+
+    // A TRANSPORT failure is NOT: the next tick retries, so a dropped packet must
+    // not repaint the card as broken. This is the control that stops the assertions
+    // above from passing on a monitor that calls everything refused.
+    const flaky = monitorFor({ kind: 'error', message: 'socket hang up' })
+    await flaky.measureOnce()
+    expect(flaky.readStanding()).not.toBe('refused')
+
+    // And a successful read clears it — the standing is live, not latched.
+    const recovering = new KimiUsageMonitor({
+      key: () => 'stored-key',
+      probe: async () => OK_OUTCOME,
+      onSample: async (sample) => {
+        await store.record({ pool: 'kimi', ts: NOW, ...sample })
       },
-    }).measureOnce()
-    const row = store.latest('kimi')!
-    expect(row.session).toBe(0.42)
-    expect(row.weekly).toBeNull()
-    expect(row.weekly_window_ms).toBeNull()
-    // Null, not 0 — a weekly window nobody reported must not render as untouched.
-    expect(store.summarise('kimi').accounts[0]!.weekly).toBeNull()
+    })
+    await recovering.measureOnce()
+    expect(recovering.readStanding()).toBe('ok')
+    expect(store.count()).toBe(1)
   })
 })

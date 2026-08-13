@@ -140,18 +140,31 @@ export interface PoolSampleSummary {
 }
 
 /**
- * Whether this pool has a credential at all, in the vocabulary
- * `UsageUnavailableReason` already uses for the meter: a pool with no credential
- * and a pool whose credential carries no windows are different facts with
- * different fixes, and neither is "connected and idle".
+ * WHY A CARD IS EMPTY, in the vocabulary `UsageUnavailableReason` already uses for
+ * the meter. Every value here is a DIFFERENT FIX, which is the point: an empty card
+ * that cannot say which of these it is sends the owner to fix the wrong thing, or —
+ * worse — to wait for a first reading that is never coming.
  */
 export type UsagePoolConnection =
-  /** A credential is configured and can be metered. */
+  /** A credential is configured and can be metered. Empty = no reading YET. */
   | 'connected'
   /** Nothing is configured for this provider. */
   | 'not_connected'
   /** Configured, but this credential has no subscription window to read. */
   | 'no_meter'
+  /**
+   * Configured, the gauge was asked, and the answer could not be turned into a
+   * reading — the key was rejected, or the payload was in a shape this build does
+   * not understand.
+   *
+   * A SEPARATE STATE BECAUSE IT DOES NOT RESOLVE ITSELF, and that is exactly what
+   * "connected, no readings yet" implies. Kimi's usages schema is unpublished, so a
+   * refused payload is the realistic first-install failure: without this the card
+   * would say "No readings yet." forever while the poller logged the key names to a
+   * file nobody is watching. A transient error (dropped packet, 5xx) is NOT this —
+   * the next tick retries and the card stays `connected`.
+   */
+  | 'unreadable'
 
 /** What `GET /api/app/usage/dashboard` serves per pool. */
 export interface PoolSummary extends PoolSampleSummary {
@@ -213,6 +226,26 @@ export const POOL_CADENCE_MS: Record<UsagePool, number | null> = {
 const STALE_GRACE_MULTIPLE = 2
 
 /**
+ * AND THE CLIENT HOLDS THE PAYLOAD, so the grace has to pay for that too.
+ *
+ * The deadline is checked against `now − measured_at` on the CLIENT, against a
+ * payload it refetches every `USAGE_POLL_MS` (30 s, both clients). So a row can be
+ * written and still be up to one poll interval away from being on screen. Budget
+ * cadence × grace ALONE and that hold comes straight out of the grace: rows at
+ * t=0, t=60 and t=180 (one missed probe at t=120) with a 120 s deadline paint the
+ * card stale from t=181 until the next fetch lands the t=180 row — up to ~29 s of
+ * "stale" on an install that has already recovered, which falsifies the property
+ * this whole arrangement exists for ("a healthy install can only be painted stale
+ * by something actually wrong").
+ *
+ * PINNED, NOT COPIED: the parity test in `gateway/__tests__` asserts this equals
+ * `USAGE_POLL_MS` in both clients. `persistence` cannot import a client — that is
+ * the layering rule — so the two are held together by a test rather than by an
+ * import, the same way the cadences above are.
+ */
+export const CLIENT_POLL_BUDGET_MS = 30_000
+
+/**
  * How old a reading may get before it is stale, per pool. NEVER null: a pool with
  * no deadline is a pool whose oldest reading claims "available now" forever.
  *
@@ -221,11 +254,12 @@ const STALE_GRACE_MULTIPLE = 2
  * polled — but "no cadence" must not become "never stale", which would let a
  * three-week-old harvested reading render as current beside a "21d ago" chip. So
  * an unpolled pool gets a flat MAX AGE instead: past it, the reading is floored
- * and its standing is unknown, exactly as a missed poll would be.
+ * and its standing is unknown, exactly as a missed poll would be. It needs no poll
+ * budget: 30 minutes is already sixty times the client's hold.
  */
 export const POOL_STALE_AFTER_MS: Record<UsagePool, number> = {
-  anthropic: 60_000 * STALE_GRACE_MULTIPLE,
-  kimi: 10 * 60_000 * STALE_GRACE_MULTIPLE,
+  anthropic: 60_000 * STALE_GRACE_MULTIPLE + CLIENT_POLL_BUDGET_MS,
+  kimi: 10 * 60_000 * STALE_GRACE_MULTIPLE + CLIENT_POLL_BUDGET_MS,
   // Half of the shortest window anyone meters. A harvested reading older than this
   // describes a window that has plausibly moved on without anybody watching.
   codex: 30 * 60_000,

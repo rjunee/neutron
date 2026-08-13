@@ -4847,22 +4847,30 @@ throughput decision of whether to raise build concurrency.
   an 85%-spent window as a 1% bar), and every reset instant is
   plausibility-checked against the clock after conversion, so a seconds value read
   as ms (1970) or an ms value converted again (year 57,000) fails loudly instead of
-  rendering. That plausibility bound is ONE-SIDED: an instant slightly in the past is
-  ordinary (the window rolled and the probe read it just after), but one more than a
-  WINDOW LENGTH back describes a window that has since rolled unobserved, and
-  believing it would make a 99%-spent window render as "available now". The bound is
-  expressed in windows rather than as a constant, because window length is not a
-  constant. A PARTIAL read is refused outright for the same reason: one unreadable
-  entry — an unmodelled shape, a missing length, or a second window landing in an
-  already-filled slot — discards the whole response, because nothing downstream can
-  tell a sample carrying one window from a provider that only HAS one window, and an
-  account whose weekly figure was silently dropped would render as one with no weekly
-  limit at all.
+  rendering. That plausibility bound is ASYMMETRIC, and each side is measured in the
+  thing that actually bounds it. Going FORWARD it is ONE WINDOW LENGTH, scaled per
+  entry, because a rolling window of length L resets within L and window length is not
+  a constant. Going BACK it is CLOCK SKEW and nothing more (five minutes): the current
+  window's reset is always ahead of now, so the only legitimate past instant is the one
+  that rolled moments ago. Scaling the PAST allowance with the window was itself a
+  defect — it let a five-hour window absorb a reset four hours old, and a reset that
+  has passed reads downstream as "the window rolled, this account is free", so a
+  99%-spent account rendered "1 available now". A PARTIAL read is refused outright for
+  the same reason: one unreadable entry — an unmodelled shape, a missing length, or a
+  second window landing in an already-filled slot — or a list carrying only ONE of the
+  two windows discards the whole response, because nothing downstream can tell a sample
+  carrying one window from a provider that only HAS one window, and an account whose
+  weekly figure was silently dropped would render as one with no weekly limit at all.
+  `KimiUsageSample`'s two windows are non-nullable, so that invariant is a type rather
+  than a habit.
 - **Staleness is shown, never hidden.** Every reading carries its age, on every
   card, not only the stale ones. A reading older than its pool's deadline
   (`POOL_STALE_AFTER_MS` — each polled pool's cadence plus ONE missed probe of
-  grace, pinned against the pollers' own intervals by
-  `open/__tests__/usage-dashboard-wiring.test.ts`) renders FLOORED — "≥ 43%" plus
+  grace PLUS the clients' own poll interval, because the deadline is checked on the
+  client against a payload refetched every `USAGE_POLL_MS` and a written row can be one
+  poll away from being on screen; all three are pinned against the pollers' and the
+  clients' own intervals by `open/__tests__/usage-dashboard-wiring.test.ts`) renders
+  FLOORED — "≥ 43%" plus
   its age — while its window is still running, and unfloored once the window has
   rolled, because "at least this much" stops being true after a reset. Codex has no
   cadence (its gauge is harvested, not polled) and therefore gets a flat 30-minute
@@ -4879,11 +4887,18 @@ throughput decision of whether to raise build concurrency.
   `unknown` otherwise — including when its window has since rolled, where
   consumption restarted and nobody measured what followed. An account's standing is the worst of
   its two, so a 5-hour window resetting in 17 minutes is not reported as capacity
-  while the 7-day window is spent for another three days. The pool line —
-  "1 available now", or "Next capacity in 3d 0h (7d window; 5h window 98% used)",
-  or "Next capacity unknown" — names the binding window and the other window's
-  utilisation, and an account nobody can vouch for is counted out loud rather than
-  quietly excluded.
+  while the 7-day window is spent for another three days. **And an account with only
+  ONE of its two windows measured has no standing at all**: a null window is the
+  absence of a measurement, not a measured zero, so ranking the windows that happen to
+  be present and reporting that as the account is the same defect reached by the other
+  road. The measured half still renders in full and only the capacity claim is
+  withheld, with the chip naming the reason. The pool line —
+  "1 available now (5h window 75% used)", or
+  "Next capacity in 3d 0h (7d window; 5h window 98% used)", or "Next capacity
+  unknown" — names the binding window and the other window's utilisation, carries the
+  headline account's own headroom even when it IS available (available is a boolean;
+  the throughput decision it feeds is not), and counts an account nobody can vouch for
+  out loud rather than quietly excluding it.
 - **Store the instant, render the delta — and NOTHING on the wire is a delta.**
   The payload carries only facts that do not age: each reading's `measured_at`,
   each window's length, reset instant, pace and projection (both anchored at the
@@ -4902,11 +4917,21 @@ throughput decision of whether to raise build concurrency.
   render "capacity in available now".
 - **Serving — `gateway/http/app-usage-surface.ts`, `GET /api/app/usage/dashboard`,
   composed in `open/composer.ts`.** Owner-gated, always 200. Each pool carries a
-  `connection` of `connected` / `not_connected` / `no_meter`, resolved from the
-  SAME functions the rest of the product uses (`kimiConfigured`,
+  `connection` of `connected` / `not_connected` / `no_meter` / `unreadable`, resolved
+  from the SAME functions the rest of the product uses (`kimiConfigured`,
   `resolveActiveCodexHome`, `resolveActiveCredential`) — a per-token API key is
   `no_meter`, not "not connected", because telling the owner to reconnect a
-  working account sends them to fix the wrong thing.
+  working account sends them to fix the wrong thing. `unreadable` is the fourth
+  because it is the one that does NOT resolve itself: the gauge was asked and its
+  answer could not be turned into a reading (rejected key, or a payload shape this
+  build does not model), where "No readings yet." would promise a first reading that is
+  never coming — the realistic first-install failure against Kimi's unpublished schema.
+  It is read PER REQUEST from `KimiUsageMonitor.readStanding()`, never latched, so the
+  card recovers the moment a tick succeeds; a transient error stays `connected` because
+  the next tick retries. The card still shows no number: loud and empty, never a zero.
+  `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` boots the real composer
+  against a loopback server answering with an unmodelled body and asserts the composed
+  payload, with a positive control that a pool nobody asked is not reported unreadable.
 - **Both clients — `landing/chat-react/SettingsTab.tsx` (Model usage) and
   `app/app/usage.tsx`,** over the twin clients `landing/chat-react/usage-dashboard-client.ts`
   and `app/lib/usage-dashboard-client.ts`. One card per provider, side by side,

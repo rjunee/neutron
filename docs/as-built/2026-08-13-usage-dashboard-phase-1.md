@@ -190,13 +190,22 @@ by a sidecar outside this process. If it stops resolving, the SAME credential be
 writing rows that name no account, and the series then holds two account keys for one
 physical credential — a chip for each, until the older one falls out of retention.
 Nothing in the store can tell that from a second account genuinely appearing, so it
-does not guess. What makes it safe rather than merely noisy is the DIRECTION: the
-lapsed reading ages, so the client floors its gauge and drops its standing to
-`unknown`, which can only subtract confidence from the pool headline (a
-"(1 unknown)" suffix) and can never add availability that is not there. A recency
-cut-off was considered and refused — it would delete exactly the non-active-account
-headroom this store exists to retain, and "no readings yet" about an account that
-has readings is a worse sentence than an honest old one.
+does not guess.
+
+**What it costs, stated exactly**, because an earlier draft of this paragraph claimed
+the ghost "can never add availability that is not there" and that is FALSE while the
+ghost is still fresh. Inside `stale_after_ms` the older row is projected like any
+other reading, so one physical credential briefly counts twice and the headline can
+read "2 available now" on a pool holding one account. The window is BOUNDED by
+`stale_after_ms` (150 s for Anthropic) and closes on its own: past the deadline the
+reading floors, its standing falls to `unknown`, and from then on the ghost only ever
+subtracts confidence (a "(1 unknown)" suffix). Both halves of that — the transient
+double count and the bound that ends it — are pinned by name in
+`gateway/__tests__/usage-dashboard-client-parity.test.ts`.
+
+A recency cut-off was considered and refused — it would delete exactly the
+non-active-account headroom this store exists to retain, and "no readings yet" about
+an account that has readings is a worse sentence than an honest old one.
 
 ## The Kimi poller, against an endpoint nobody has published
 
@@ -221,16 +230,32 @@ clock AFTER conversion — so a seconds value read as ms (1970, which would rend
 "available now") and an ms value converted again (year 57,000) both fail loudly.
 Window SLOTS are chosen by reported length, never by array position.
 
-**That plausibility bound is ONE-SIDED, and the symmetry was a bug.** The first cut
-accepted any instant within ±400 days of now. Downstream, a reset that has already
-passed means "the window rolled, this account is free", so a year-old instant on a
-99%-spent window rendered as capacity — the optimistic answer the whole feature
-exists to refuse. The past bound is now ONE WINDOW LENGTH (`RESET_PAST_TOLERANCE_WINDOWS`):
-an instant slightly behind is ordinary (the window rolled and the probe read it just
-after), while one more than a window back describes a window that has since rolled
-unobserved and cannot be the current one. It is expressed in windows rather than as a
-constant because window length is not a constant — the same instant that is
-implausible for a 5-hour window is ordinary for a 7-day one, and a test pins both.
+**That plausibility bound is ASYMMETRIC, and it took two cuts to get right.** The
+first accepted any instant within ±400 days of now. Downstream, a reset that has
+already passed means "the window rolled, this account is free", so a year-old instant
+on a 99%-spent window rendered as capacity — the optimistic answer the whole feature
+exists to refuse. The second narrowed the past side to ONE WINDOW LENGTH, which was
+still too loose by a whole window: a 5-hour window whose reported reset was four
+hours in the PAST passed the check, and a 99%-spent account rendered "1 available
+now". Against an unpublished schema that is exactly what a `reset`/`reset_time` field
+carrying the window's START would produce.
+
+Each side is now measured in the thing that actually bounds it:
+
+- the PAST side is CLOCK SKEW and nothing more (`RESET_PAST_TOLERANCE_MS`, five
+  minutes). For a rolling window of length L the current window's reset is in
+  `(now, now + L]`, so the only legitimate past instant is the one that rolled
+  moments ago — bounded by latency and skew, which do not grow because the window is
+  longer. Scaling that allowance with the window is precisely what let five hours
+  absorb four hours of "skew";
+- the FUTURE side is ONE WINDOW LENGTH, scaled, because that is where window length
+  genuinely applies — a rolling window resets within its own length. Window length is
+  not a constant, so the same instant that is implausible for a 5-hour window is
+  ordinary for a 7-day one, and a test pins both directions. `RESET_FUTURE_PLAUSIBILITY_MS`
+  survives only as the backstop for an absurd reported length.
+
+A refused instant leaves `reset_at` null, which renders as "unknown" — the honest
+answer, and the one the acceptance case pins.
 
 **A PARTIAL read is a refusal, not a smaller answer.** An earlier cut dropped the
 entries it could not parse and returned `ok` with whatever it understood — which is
@@ -244,6 +269,20 @@ written, and the key names go out so one real response corrects the alias list.
 `observedKeys` reports every element of the list rather than the first, because the
 entry that fails to parse is rarely the first one.
 
+**And "all" means BOTH SLOTS, which the first version of that rule missed.** A
+response listing ONE window read cleanly: nothing was unreadable, so it returned `ok`
+with `weekly: null` — byte-for-byte the wire shape the dropped-window case produces,
+and the same wall. `{session: 20%, weekly: null}` rendered "1 available now" with zero
+unknowns; `{session: 99%, resets in 40m, weekly: null}` rendered the bare "Next
+capacity in 40m (5h window)" — the verbatim failure string this document already
+named as the thing the design prevents. The endpoint reports both standings, so one of
+them is a shape this parser does not model, and `KimiUsageSample.session`/`weekly` are
+now NON-NULLABLE: the invariant is a type rather than a habit, and no caller holds
+half a reading or needs a branch for one.
+
+**The clients refuse the same reading independently**, which is the half that does not
+depend on any one writer being right — see "half a reading buys no standing" below.
+
 Per-key attribution is not offered: the endpoint is account-wide (two keys on one
 subscription return identical numbers), so the card is titled "Kimi (account-wide)"
 and a response that names no account carries a null label.
@@ -251,8 +290,8 @@ and a response that names no account carries a null label.
 ## What the surface says, and what it refuses to
 
 Three pools are served every time, in `USAGE_POOLS` order, each with a `connection`
-of `connected` / `not_connected` / `no_meter` resolved from the SAME functions the
-rest of the product uses. Codex has no writer until Phase 3 and renders
+of `connected` / `not_connected` / `no_meter` / `unreadable` resolved from the SAME
+functions the rest of the product uses. Codex has no writer until Phase 3 and renders
 "Not connected." rather than a row of zeros — a connected-and-idle account and an
 unconfigured one are different problems with different fixes. A per-token Anthropic
 API key is `no_meter`, not "not connected", because telling the owner to reconnect a
@@ -263,6 +302,103 @@ combined headline would be a number about nothing. **No dollar value appears
 anywhere** — the subscription is flat, so a currency figure would assert a marginal
 cost the owner does not incur. (The design's cost-weighted column uses list prices
 as unrendered WEIGHTS and is Phase 6.)
+
+## Half a reading buys no standing
+
+`accountCapacity` (both clients) refuses to project ANY capacity for an account with
+only one of its two windows measured. "The worst of the windows I can see" is only
+safe when what is absent is nothing, and `weekly: null` is not a measured zero — it
+is the absence of a measurement, indistinguishable from a provider with no weekly
+limit, a parser that dropped the entry, or a sample predating the column.
+
+The two shapes it was reproduced in: `{session: 20%, weekly: null}` rendered
+"1 available now" with `unknown: 0`, and `{session: 99%, resets in 40m, weekly: null}`
+rendered the bare "Next capacity in 40m (5h window)". That is the same defect as
+naming the soonest reset while ignoring the other window, reached by the other road —
+not by mis-ranking two windows, but by ranking one and reporting it as the pair.
+
+**The rest of the card is untouched.** The measured window keeps its figure, its bar,
+its pace and its own countdown; the missing one already rendered "not reported". Only
+the capacity CLAIM is withheld, because that is the single output that requires both.
+And the withholding is LOUD rather than merely quiet: the chip reads
+"capacity unknown — one window not reported", so "capacity unknown" beside a
+full-looking bar cannot be mistaken for a glitch.
+
+This is deliberately redundant with the Kimi parser's both-slots rule. One is a
+refusal at the writer and one at the renderer, and neither depends on the other being
+right — the store's shape cannot express "measured as absent", so the renderer has to
+be safe against any writer, present or future.
+
+## Three smaller honesty fixes in the same pass
+
+**The staleness deadline now budgets for the client's poll hold.** The deadline is
+checked on the CLIENT against a payload it refetches every `USAGE_POLL_MS` (30 s), so
+a written row can be up to one poll away from being on screen. Budgeting cadence × 2
+alone spent the grace twice: rows at t=0, t=60 and t=180 (one missed probe at t=120)
+against a 120 s deadline painted the card stale from t=181 until the next fetch landed
+the t=180 row — ~29 s of "stale" on an install that had already recovered, falsifying
+the property the arrangement exists for. `POOL_STALE_AFTER_MS` is now
+`cadence × 2 + CLIENT_POLL_BUDGET_MS`; `persistence` cannot import a client, so the
+budget is held equal to `USAGE_POLL_MS` by the wiring test rather than by an import.
+Two consecutive misses still cross it, which is the half a bigger grace would give
+away.
+
+**The client's fallback staleness deadline is tighter than every real one.** It is
+used only on version skew, when the payload omits the threshold, and it was five
+minutes — 2.5× LOOSER than Anthropic's real 120 s, so the "cautious" default was the
+loosest number on the screen and a five-minute-old reading painted fresh and
+non-floored. It is now 60 s: below the tightest deadline the store ships, and still
+twice the poll interval, with the relationship pinned by the parity test rather than
+the number.
+
+**`formatCountdown` and `formatAge` fold a non-finite input into their absent arm.**
+Every production caller was traced and none can produce one today, but these are
+exported policy functions and the failure would be silent and total: `NaN` walks
+through every comparison and prints "NaNd NaNh", which is neither a countdown nor an
+admission that there is none. One comparison makes the bad render unreachable rather
+than merely unreached.
+
+## "Asked and refused" is not "no readings yet"
+
+A fourth `connection` value, `unreadable`, and it is the one that does not resolve
+itself. "No readings yet." promises a first reading is coming; when the gauge has
+been asked and its answer refused — a rejected key, or a payload shape this build does
+not model — none is. Kimi's usages schema is unpublished, so that is the realistic
+first-install failure, and without this the card would say "No readings yet." forever
+while the poller logged the key names to a file nobody is watching.
+
+`KimiUsageMonitor.readStanding()` reports what the last completed read produced; the
+composer reads it PER REQUEST (never latched into a sample) so the card recovers the
+moment a tick succeeds. A transient error — dropped packet, 5xx — stays `connected`,
+because the next tick retries and a dropped packet must not repaint the card as
+broken. The card still shows NO number: loud and empty, never a zero.
+
+`open/__tests__/usage-dashboard-unreadable-wiring.test.ts` proves it end to end
+against the production composer, with a loopback server answering 200 with an
+unmodelled body — a hand-built `connection: 'unreadable'` literal would prove only
+that a test file can write one.
+
+## The one thing this phase still cannot demonstrate
+
+**The Kimi alias list has never been checked against a real response**, and no
+mechanism inside this repo can check it: the endpoint is undocumented upstream and no
+live body has been printed here. The direction is safe — every unmatched field yields
+`unrecognised`, which writes no row — but the honest reading of Phase 1's stated
+acceptance ("two populated cards") is that the Kimi card will most likely render an
+empty state on a real install until the alias list is corrected.
+
+What this build does about it, given it cannot fix it:
+
+- the refusal carries the KEY NAMES it saw (never values) into a log line, so ONE
+  real response is enough to correct the list — the "print it before keying logic on
+  it" step performed in production instead of skipped;
+- the empty card now says the gauge was asked and refused, rather than implying a
+  first reading is on its way, so the owner discovers it at a glance instead of
+  waiting on it;
+- nothing is fabricated in the meantime.
+
+Correcting the alias list from that log line is a one-line follow-up and is
+deliberately NOT guessed at here.
 
 ## What the tests assert, and where
 
@@ -276,9 +412,21 @@ as unrendered WEIGHTS and is Phase 6.)
   here is a delta". The capacity policy is NOT tested here any more, because it is
   not computed here any more.
 - `trident/__tests__/kimi-usage-probe.test.ts` — the modelled shape, and every
-  refusal including both unit slips.
+  refusal including both unit slips, both sides of the asymmetric reset bound (a
+  four-hour-old reset refused on a 5-hour AND a 7-day window; a two-day-out reset
+  refused on the 5-hour one and believed on the weekly one, with a positive control
+  so the pair cannot pass on a parser that refuses everything), and a one-window
+  response refused in both directions.
 - `open/__tests__/kimi-usage-monitor.test.ts` — gauge-failure-is-loud, by count,
-  with a control write.
+  with a control write; and the read standing, including the control that a
+  transport error is NOT reported as a refusal.
+- `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` — **also against the
+  production composer's output.** The sibling wiring test points the poller at a
+  CLOSED port, so it can only ever produce a transport error; this one boots the real
+  composer against a loopback server that ANSWERS with an unmodelled body and asserts
+  the composed payload's `connection`, the empty accounts beside it, the sentence the
+  shipped client renders from it, and a positive control that a pool nobody asked is
+  not reported as unreadable.
 - `open/__tests__/usage-dashboard-wiring.test.ts` — **against the production
   composer's output.** It boots the real Open composer, takes the handler the
   composition actually carries in `app_usage_surface`, and issues a real request:
@@ -297,13 +445,17 @@ as unrendered WEIGHTS and is Phase 6.)
   `measured_at`, the same lever a dead poller pulls — and
   `gateway/__tests__/usage-dashboard-client-parity.test.ts` executes the twin
   formatters AND the twin projections side by side, including the killed poller
-  ageing off one payload.
+  ageing off one payload, the half-measured account refused in both directions with a
+  positive control, and the lapsed-label ghost counted twice INSIDE the staleness
+  window and only subtracting after it.
 
 ## Wire-shape change worth naming
 
 `PoolSummary` moved its windows from the pool level onto `accounts[]` and gained
 `connection` and `stale_after_ms`. It deliberately does NOT carry `age_ms`, `stale`,
 `floor`, `binding`, `capacity` or `resets_in_ms`: every one of those is a delta, and
-the section above is why. There is no dual path and no flag: the two clients ship in
+the section above is why. `connection` gained a fourth value, `unreadable`; an older
+client decodes an unknown value as `connected`, which is the honest degradation — it
+says nothing rather than blaming the owner's setup. There is no dual path and no flag: the two clients ship in
 this PR. A client older than this one decodes zero accounts and renders its honest
 empty state rather than a fabricated reading.

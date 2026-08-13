@@ -291,6 +291,21 @@ function pool(session: unknown, weekly: unknown, account_label: string | null = 
 
 const SESSION_HOT = window_()
 
+/**
+ * A measured WEEKLY window with room to spare, for cases about the session.
+ *
+ * Not `null`: a null window is the ABSENCE of a measurement, and an account holding
+ * one has no capacity standing at all. A case that left it null would quietly stop
+ * testing what it names and start testing the half-measured refusal.
+ */
+const WEEKLY_ROOMY = window_({
+  window_ms: 7 * DAY,
+  fraction: 0.5,
+  reset_at: NOW + 4 * DAY,
+  pace: null,
+  exhausts_at: null,
+})
+
 describe('the rendered usage card', () => {
   it('shows the percent, the pace and its reading for a measured window', async () => {
     const { container, root } = await mount(() => pool(SESSION_HOT, null))
@@ -401,9 +416,54 @@ describe('the rendered usage card', () => {
 describe('when capacity comes back — the line the owner reads first', () => {
   it('says how many accounts are free right now', async () => {
     const { container, root } = await mount(() => json({ pools: [poolOf()] }))
+    // AND HOW MUCH ROOM, on the window closest to taking it away. "Available" is a
+    // boolean and the throughput decision it feeds is not: 75% of the 5-hour window
+    // leaves less headroom than 50% of the weekly one, so that is the figure quoted.
     expect(
       container.querySelector('[data-testid="usage-anthropic-capacity"]')?.textContent,
-    ).toBe('1 available now')
+    ).toBe('1 available now (5h window 75% used)')
+    root.unmount()
+  })
+
+  it('a HALF-MEASURED account claims no capacity, and says which half is missing', async () => {
+    // THE BLOCKER FROM ROUND 3, at the surface the owner reads. A missing window is
+    // not a window with room: `{session: 75% used, weekly: absent}` previously
+    // rendered "1 available now" with nothing unknown, because the standing was
+    // ranked over the windows that happened to be present. `weekly: null` is the
+    // absence of a measurement — indistinguishable from a provider with no weekly
+    // limit or a parser that dropped the entry — so no capacity claim is made.
+    const half = account({ account_label: 'owner-a', session: SESSION_HOT, weekly: null })
+    const { container, root } = await mount(() => json({ pools: [poolOf({ accounts: [half] })] }))
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-capacity"]')?.textContent,
+    ).toBe('capacity unknown — one window not reported')
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-capacity"]')?.textContent,
+    ).toBe('Next capacity unknown (1 unknown)')
+    expect(container.textContent).not.toContain('available now')
+    // The half that WAS measured still renders in full — only the capacity CLAIM is
+    // withheld, because that is the one output that needs both windows.
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-session-pct"]')?.textContent,
+    ).toBe('75%')
+    expect(
+      container.querySelector('[data-testid="usage-anthropic-acct-0-weekly-none"]')?.textContent,
+    ).toBe('not reported')
+    root.unmount()
+  })
+
+  it('an UNREADABLE gauge says so, instead of promising a first reading', async () => {
+    // "No readings yet." promises one is coming. When the gauge has been asked and
+    // its answer refused — a rejected key, or a payload shape this build does not
+    // model — none is, and Kimi's usages schema is unpublished so that is the
+    // realistic first-install failure. Loud, and still empty: no number is drawn.
+    const { container, root } = await mount(() =>
+      json({ pools: [poolOf({ pool: 'kimi', connection: 'unreadable', accounts: [] })] }),
+    )
+    const empty = container.querySelector('[data-testid="usage-kimi-empty"]')?.textContent ?? ''
+    expect(empty).not.toBe('No readings yet.')
+    expect(empty).toContain("didn't produce a reading")
+    expect(container.querySelector('[data-testid="usage-kimi-acct-0-session-fill"]')).toBeNull()
     root.unmount()
   })
 
@@ -435,7 +495,9 @@ describe('when capacity comes back — the line the owner reads first', () => {
     const unknown = account({
       account_label: 'owner-a',
       session: window_({ fraction: 0.99, reset_at: null, pace: null, exhausts_at: null }),
-      weekly: null,
+      // MEASURED, and roomy — so the only thing missing is the session's reset
+      // instant, which is what this case is about.
+      weekly: WEEKLY_ROOMY,
     })
     const { container, root } = await mount(() =>
       json({ pools: [poolOf({ accounts: [unknown] })] }),

@@ -58,6 +58,9 @@ const COUNTDOWNS: Array<number | null> = [
   null, -1, 0, 1, 59_000, 60_000, 17 * 60_000, 3_600_000, 3_840_000, 86_400_000, 190_000_000,
 ]
 
+/** The cautious default both clients fall back to when the payload omits one. */
+const FALLBACK = web.FALLBACK_STALE_AFTER_MS
+
 const NOW = 1_800_000_000_000
 const MINUTE = 60_000
 const HOUR = 3_600_000
@@ -76,6 +79,20 @@ function win(over: Partial<web.UsageWindow> & { fraction: number }): web.UsageWi
   }
 }
 
+/**
+ * The default WEEKLY window: measured, roomy, and far from binding.
+ *
+ * NOT `null`, and the difference is load-bearing for every case below. A null
+ * window is the ABSENCE of a measurement, and an account holding one has no
+ * capacity standing at all — that is the policy, pinned in its own block further
+ * down. So a case that means to exercise the SESSION rules has to supply a weekly
+ * window it can ignore; leaving it null would stop testing the rule the case names
+ * and start testing the half-measured refusal instead, while still passing.
+ */
+function roomyWeekly(): web.UsageWindow {
+  return win({ fraction: 0.1, window_ms: WEEKLY_MS, reset_at: NOW + 5 * DAY })
+}
+
 /** One pool as it comes off the wire. `stale_after_ms` is anthropic's: 2 minutes. */
 function poolOf(
   accounts: Array<Partial<web.UsageAccount>>,
@@ -90,7 +107,7 @@ function poolOf(
       account_label: 'owner-a',
       measured_at: NOW,
       session: null,
-      weekly: null,
+      weekly: roomyWeekly(),
       ...a,
     })),
     ...over,
@@ -265,8 +282,11 @@ describe('the two clients format identically', () => {
   })
 
   test('capacityLine agrees on all three shapes', () => {
-    // The line the owner asked for, verbatim.
-    expect(line(AVAILABLE_POOL, NOW)).toBe('1 available now')
+    // The line the owner asked for — and it carries HOW MUCH room, on the window
+    // closest to taking it away. "Available" is a boolean; the decision it feeds
+    // ("how hard can I push") is not, and a 90%-spent weekly window is available
+    // and still nowhere to send concurrency.
+    expect(line(AVAILABLE_POOL, NOW)).toBe('1 available now (7d window 50% used)')
     // The countdown NAMES the binding window and reports the other one's
     // utilisation — a bare "next capacity in 17m" would be true of the 5h window
     // and false about capacity.
@@ -286,7 +306,12 @@ describe('the two clients format identically', () => {
       { account_label: 'owner-a', session: win({ fraction: 0.99, reset_at: NOW + 25 * MINUTE }) },
       { account_label: 'owner-b', session: win({ fraction: 0.99, reset_at: null }) },
     ])
-    expect(line(pool, NOW)).toBe('Next capacity in 25m (5h window) (1 unknown)')
+    // NEVER A BARE COUNTDOWN either: every countdown is paired with the other
+    // window's utilisation, so "capacity in 25m" cannot be read as capacity while
+    // the weekly window is the real constraint.
+    expect(line(pool, NOW)).toBe(
+      'Next capacity in 25m (5h window; 7d window 10% used) (1 unknown)',
+    )
   })
 
   test('the headline reports the OTHER window with its floor, exactly as the row does', () => {
@@ -344,19 +369,28 @@ describe('the two clients format identically', () => {
     expect(line(COOLING_POOL, later)).toBe('Next capacity unknown (1 unknown)')
   })
 
-  test('connectionNote agrees, and distinguishes the three empty cards', () => {
-    for (const connection of ['connected', 'not_connected', 'no_meter'] as const) {
+  test('connectionNote agrees, and distinguishes the FOUR empty cards', () => {
+    const note = (connection: web.UsagePoolConnection): string | null => {
       const pool = project(poolOf([], { connection }), NOW)
-      expect(mobile.connectionNote(pool)).toBe(web.connectionNote(pool))
+      const w = web.connectionNote(pool)
+      expect(mobile.connectionNote(pool)).toBe(w)
+      return w
     }
     // A card WITH readings needs no excuse.
     expect(web.connectionNote(project(AVAILABLE_POOL, NOW))).toBeNull()
-    expect(web.connectionNote(project(poolOf([], { connection: 'not_connected' }), NOW))).toBe(
-      'Not connected.',
-    )
-    expect(web.connectionNote(project(poolOf([], { connection: 'connected' }), NOW))).toBe(
-      'No readings yet.',
-    )
+    expect(note('not_connected')).toBe('Not connected.')
+    expect(note('connected')).toBe('No readings yet.')
+    expect(note('no_meter')).toContain('no window to meter')
+    // THE FOURTH, AND THE MUTANT IT KILLS: folding "asked and refused" into
+    // "connected", which renders "No readings yet." — a sentence that promises a
+    // first reading is coming when none is. Kimi's usages schema is unpublished, so
+    // a refused payload is the realistic first-install failure and the owner would
+    // otherwise wait on it forever.
+    const unreadable = note('unreadable')
+    expect(unreadable).not.toBe('No readings yet.')
+    expect(unreadable).toContain("didn't produce a reading")
+    // Still no number. Loud and EMPTY — never a zero.
+    expect(unreadable).not.toContain('0%')
   })
 })
 
@@ -412,6 +446,59 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
     expect(view.accounts[0]!.binding).toBeNull()
   })
 
+  test('an account with only ONE of its two windows measured has NO standing', () => {
+    // THE BLOCKER FROM ROUND 3, in the two shapes it was reproduced in.
+    //
+    // THE MUTANT THIS KILLS: ranking "the worst of the windows I can see" and
+    // calling that the account. "The worst of what is present" is only safe when
+    // what is absent is nothing — and `weekly: null` is not a measured zero, it is
+    // the ABSENCE of a measurement, indistinguishable from a provider with no
+    // weekly limit or a parser that dropped the entry. Ranking one window and
+    // reporting it as the pair is the same defect as naming the soonest reset while
+    // ignoring the other window, reached by the other road.
+    const sessionOnly = (session: web.UsageWindow): web.UsagePool =>
+      poolOf([{ session, weekly: null }])
+
+    // Shape one: a roomy session. Under the mutant this reads "1 available now"
+    // with zero unknowns — a confident claim of capacity from half a reading.
+    const roomy = project(sessionOnly(win({ fraction: 0.2 })), NOW)
+    expect(roomy.accounts[0]!.capacity).toEqual({ state: 'unknown' })
+    expect(roomy.accounts[0]!.binding).toBeNull()
+    expect(roomy.capacity.available_now).toBe(0)
+    expect(roomy.capacity.unknown).toBe(1)
+    expect(line(sessionOnly(win({ fraction: 0.2 })), NOW)).toBe('Next capacity unknown (1 unknown)')
+
+    // Shape two, and the verbatim failure string: a 99%-spent session resetting in
+    // 40 minutes rendered "Next capacity in 40m (5h window)" — a bare countdown,
+    // presented as capacity returning, computed without the window that may be the
+    // actual constraint.
+    const cooling = sessionOnly(win({ fraction: 0.99, reset_at: NOW + 40 * MINUTE }))
+    expect(project(cooling, NOW).accounts[0]!.capacity).toEqual({ state: 'unknown' })
+    expect(line(cooling, NOW)).toBe('Next capacity unknown (1 unknown)')
+    expect(line(cooling, NOW)).not.toContain('Next capacity in 40m')
+
+    // The refusal is LOUD rather than merely quiet: the chip names the reason, so
+    // "capacity unknown" beside a card with a full-looking bar is not read as a
+    // glitch. The other half of the card is untouched — the measured window keeps
+    // its figure, and the missing one renders as "not reported" (`app/app/usage.tsx`).
+    const note = web.accountCapacityNote(project(cooling, NOW).accounts[0]!)
+    expect(mobile.accountCapacityNote(project(cooling, NOW).accounts[0]!)).toBe(note)
+    expect(note).toBe('capacity unknown — one window not reported')
+    expect(project(cooling, NOW).accounts[0]!.session!.fraction).toBe(0.99)
+
+    // A weekly-only account is refused the same way — the rule is about the PAIR,
+    // not about which half happens to be missing.
+    const weeklyOnly = poolOf([
+      { session: null, weekly: win({ fraction: 0.2, window_ms: WEEKLY_MS }) },
+    ])
+    expect(project(weeklyOnly, NOW).accounts[0]!.capacity).toEqual({ state: 'unknown' })
+
+    // A POSITIVE CONTROL, so the block above cannot pass by refusing everything:
+    // the same session figure WITH a measured weekly is availability.
+    const both = poolOf([{ session: win({ fraction: 0.2 }), weekly: roomyWeekly() }])
+    expect(project(both, NOW).accounts[0]!.capacity).toEqual({ state: 'available' })
+  })
+
   test('a STALE reading that says there is room cannot claim availability', () => {
     // Usage only climbs between samples, so "40% used, three hours ago" does not
     // prove there is room now. A dead poller must never read as an idle account.
@@ -432,6 +519,10 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
       {
         measured_at: NOW - 3 * HOUR,
         session: win({ fraction: 0.96, reset_at: NOW + 40 * MINUTE }),
+        // Spent too, and sooner — so the SESSION is the binding window and this
+        // case says what it claims to. A roomy weekly here would go `unknown` on
+        // the same staleness and take the account's standing with it.
+        weekly: win({ fraction: 0.99, window_ms: WEEKLY_MS, reset_at: NOW + 20 * MINUTE }),
       },
     ])
     expect(project(pool, NOW).accounts[0]!.capacity).toEqual({
@@ -545,7 +636,9 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
     expect(view.capacity.available_now).toBe(1)
     expect(view.capacity.next_account_label).toBe('owner-b')
     expect(view.capacity.next).toEqual({ state: 'available' })
-    expect(line(pool, NOW)).toBe('1 available now')
+    expect(line(pool, NOW)).toBe('1 available now (7d window 30% used)')
+    // And it is owner-B's headroom that is quoted, not owner-A's near-spent week.
+    expect(line(pool, NOW)).not.toContain('97%')
   })
 
   test('an account nobody can vouch for never becomes the headline', () => {
@@ -564,6 +657,34 @@ describe('the two clients PROJECT identically — the policy, and the clock it r
       window: 'session',
       in_ms: 25 * MINUTE,
     })
+  })
+
+  test('a LAPSED label double-counts for exactly one staleness window, and no longer', () => {
+    // THE KNOWN LIMITATION, pinned on the side that renders it rather than only in
+    // the store's prose — where it was previously stated WRONGLY as "a ghost row can
+    // never add availability".
+    //
+    // The label comes from a sidecar outside this process. If it stops resolving,
+    // the SAME credential starts writing rows that name no account, and the series
+    // then holds two account keys for one physical credential. Nothing here can tell
+    // that from a second account genuinely appearing, so nothing guesses — and for
+    // as long as the older row is still FRESH it is projected like any other
+    // reading, so the headline counts one credential twice.
+    const ghosted = poolOf([
+      { account_label: 'owner-a', measured_at: NOW - 30 * 1000, session: win({ fraction: 0.2 }) },
+      { account_label: null, measured_at: NOW, session: win({ fraction: 0.2 }) },
+    ])
+    expect(project(ghosted, NOW).capacity.available_now).toBe(2)
+
+    // AND THE WINDOW IS BOUNDED BY `stale_after_ms`, which is what makes it a cost
+    // rather than a defect: past the deadline the ghost floors, its standing falls
+    // to `unknown`, and from then on it can only ever SUBTRACT confidence.
+    const after = project(ghosted, NOW + 3 * MINUTE)
+    expect(after.accounts.find((a) => a.account_label === 'owner-a')!.capacity).toEqual({
+      state: 'unknown',
+    })
+    expect(after.capacity.available_now).toBe(0)
+    expect(after.capacity.unknown).toBe(2)
   })
 
   test('the pool AGE comes off the pool instant, and "never measured" is not an age of zero', () => {
@@ -641,7 +762,7 @@ describe('the pool headline names WHICH account it is about', () => {
     expect(nextUp(pool, NOW)).toBe('Next up: owner-b')
     // A MUTANT THAT PICKS THE SOONEST RESET names owner-a here, so this is the same
     // acceptance case as the headline’s, asserted where the owner can see it.
-    expect(line(pool, NOW)).toBe('1 available now')
+    expect(line(pool, NOW)).toBe('1 available now (7d window 30% used)')
   })
 
   test('it adds nothing on a one-account pool, and never invents a name', () => {
@@ -765,11 +886,21 @@ describe('the two decoders agree about what is an answer', () => {
     // field defaulting to maximum freshness. A version skew that drops the deadline
     // must make the card MORE careful, not turn an arbitrarily old reading into a
     // confident "just now, available".
+    //
+    // AND "MORE CAREFUL" IS A NUMBER, not a sentiment: the fallback must be TIGHTER
+    // than every deadline the store actually ships, or the cautious default quietly
+    // becomes the loosest one on the screen. An earlier five minutes was 2.5× looser
+    // than Anthropic's real 120 s, so a skewed payload painted a five-minute-old
+    // Anthropic reading as fresh and non-floored.
+    expect(FALLBACK).toBeLessThanOrEqual(Math.min(...Object.values(POOL_STALE_AFTER_MS)))
+    // It must still be comfortably above the poll, or a healthy install would paint
+    // itself stale between fetches.
+    expect(FALLBACK).toBeGreaterThan(web.USAGE_POLL_MS)
     for (const bad of [undefined, null, 'soon', Number.NaN, 0, -1]) {
       const decoded = web.decodeDashboard({
         pools: [{ pool: 'kimi', stale_after_ms: bad, accounts: [{ measured_at: 1 }] }],
       })
-      expect(decoded.reachable && decoded.pools[0]!.stale_after_ms).toBe(5 * MINUTE)
+      expect(decoded.reachable && decoded.pools[0]!.stale_after_ms).toBe(FALLBACK)
       expect(mobile.decodeDashboard({
         pools: [{ pool: 'kimi', stale_after_ms: bad, accounts: [{ measured_at: 1 }] }],
       })).toEqual(decoded)

@@ -61,6 +61,23 @@ const HOT_SESSION = {
   exhausts_at: NOW + 50 * MINUTE,
 };
 
+/**
+ * The default WEEKLY window: measured, roomy, and far from binding.
+ *
+ * NOT `null`, and the difference decides what these cases are testing. A null
+ * window is the ABSENCE of a measurement, and an account holding one has no
+ * capacity standing at all — so a fixture that left it null would stop exercising
+ * the session rules it names and start exercising the half-measured refusal, while
+ * still passing. The one case that WANTS a missing window says so by name.
+ */
+const ROOMY_WEEKLY = {
+  fraction: 0.5,
+  window_ms: 7 * DAY,
+  reset_at: NOW + 4 * DAY,
+  pace: null,
+  exhausts_at: null,
+};
+
 type Json = Record<string, unknown>;
 
 /**
@@ -76,7 +93,7 @@ function account(over: Json = {}): Json {
     account_label: null,
     measured_at: NOW,
     session: HOT_SESSION,
-    weekly: null,
+    weekly: ROOMY_WEEKLY,
     ...over,
   };
 }
@@ -102,7 +119,7 @@ function pools(
   return { pools: [poolOf({ accounts: [account({ session, weekly, account_label })] })] };
 }
 
-let response: { status: number; body: unknown } = { status: 200, body: pools(HOT_SESSION, null) };
+let response: { status: number; body: unknown } = { status: 200, body: pools(HOT_SESSION, ROOMY_WEEKLY) };
 let requested: string[] = [];
 
 function installFetch(): void {
@@ -128,7 +145,7 @@ beforeEach(() => {
   }
   document.body.innerHTML = '';
   requested = [];
-  response = { status: 200, body: pools(HOT_SESSION, null) };
+  response = { status: 200, body: pools(HOT_SESSION, ROOMY_WEEKLY) };
   installFetch();
 });
 
@@ -178,7 +195,7 @@ describe('the screen reads the series and shows the standing', () => {
     // 0.9 is warning; the band rides on an accessibility label rather than only on a
     // style, because a test that can read only a colour cannot tell amber from red on
     // a 6px bar.
-    response = { status: 200, body: pools({ ...HOT_SESSION, fraction: 0.9 }, null) };
+    response = { status: 200, body: pools({ ...HOT_SESSION, fraction: 0.9 }, ROOMY_WEEKLY) };
     await mountUsage();
     const fill = byTestId('usage-anthropic-acct-0-session-fill');
     expect(fill?.getAttribute('aria-label') ?? fill?.getAttribute('accessibilityLabel') ?? '').toContain(
@@ -218,7 +235,7 @@ describe('what the screen refuses to say', () => {
       status: 200,
       body: pools(
         { fraction: 0.2, reset_at: null, pace: null, exhausts_at: null },
-        null,
+        ROOMY_WEEKLY,
       ),
     };
     await mountUsage();
@@ -232,7 +249,7 @@ describe('what the screen refuses to say', () => {
   it('OMITS the projection row when there is no projection', async () => {
     response = {
       status: 200,
-      body: pools({ ...HOT_SESSION, pace: 0.4, exhausts_at: null }, null),
+      body: pools({ ...HOT_SESSION, pace: 0.4, exhausts_at: null }, ROOMY_WEEKLY),
     };
     await mountUsage();
     expect(byTestId('usage-anthropic-acct-0-session-exhausts')).toBeNull();
@@ -245,15 +262,51 @@ describe('what the screen refuses to say', () => {
   });
 
   it('says a window was not reported rather than drawing an empty track', async () => {
+    response = { status: 200, body: pools(HOT_SESSION, null) };
     await mountUsage();
     expect(textOf('usage-anthropic-acct-0-weekly-none')).toBe('not reported');
     expect(byTestId('usage-anthropic-acct-0-weekly-fill')).toBeNull();
   });
 
+  it('a HALF-MEASURED account claims no capacity, and says which half is missing', async () => {
+    // THE BLOCKER FROM ROUND 3, at the surface the owner reads. A missing window is
+    // not a window with room: `{session: 75% used, weekly: absent}` previously
+    // rendered "1 available now" with nothing unknown, because the standing was
+    // ranked over the windows that happened to be present. The measured half still
+    // renders in full — only the capacity CLAIM is withheld, because that is the one
+    // output that needs both.
+    response = { status: 200, body: pools(HOT_SESSION, null) };
+    await mountUsage();
+    expect(textOf('usage-anthropic-acct-0-capacity')).toBe(
+      'capacity unknown — one window not reported',
+    );
+    expect(textOf('usage-anthropic-capacity')).toBe('Next capacity unknown (1 unknown)');
+    expect(document.body.textContent ?? '').not.toContain('available now');
+    // The half that WAS measured is untouched: figure, bar and its own countdown.
+    expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('75%');
+    expect(byTestId('usage-anthropic-acct-0-session-fill')).not.toBeNull();
+  });
+
+  it('an UNREADABLE gauge says so, instead of promising a first reading', async () => {
+    // "No readings yet." promises one is coming. When the gauge has been asked and
+    // its answer refused — a rejected key, or a payload shape this build does not
+    // model — none is, and Kimi's usages schema is unpublished so that is the
+    // realistic first-install failure. Loud, and still empty: no number is drawn.
+    response = {
+      status: 200,
+      body: { pools: [poolOf({ pool: 'kimi', connection: 'unreadable', accounts: [] })] },
+    };
+    await mountUsage();
+    const empty = textOf('usage-kimi-empty');
+    expect(empty).not.toBe('No readings yet.');
+    expect(empty).toContain("didn't produce a reading");
+    expect(byTestId('usage-kimi-acct-0-session-fill')).toBeNull();
+  });
+
   it('never guesses the account, and uses a real label when given one', async () => {
     await mountUsage();
     expect(textOf('usage-anthropic-acct-0-name')).toBe('active credential');
-    response = { status: 200, body: pools(HOT_SESSION, null, 'acct-2') };
+    response = { status: 200, body: pools(HOT_SESSION, ROOMY_WEEKLY, 'acct-2') };
     await press('usage-refresh');
     expect(textOf('usage-anthropic-acct-0-name')).toBe('acct-2');
   });
@@ -269,7 +322,10 @@ describe('what the screen refuses to say', () => {
 describe('when capacity comes back — the number the owner acts on', () => {
   it('says how many accounts are free right now, above the fold', async () => {
     await mountUsage();
-    expect(textOf('usage-anthropic-capacity')).toBe('1 available now');
+    // AND HOW MUCH ROOM, on the window closest to taking it away. "Available" is a
+    // boolean and the throughput decision it feeds is not: 75% of the 5-hour window
+    // leaves less headroom than 50% of the weekly one, so that is the figure quoted.
+    expect(textOf('usage-anthropic-capacity')).toBe('1 available now (5h window 75% used)');
   });
 
   it('counts down to the BINDING window and names what still constrains it', async () => {

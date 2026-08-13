@@ -106,8 +106,16 @@ export interface UsageAccount {
   weekly: UsageWindow | null
 }
 
-/** Why a pool has no readings, when it has none. */
-export type UsagePoolConnection = 'connected' | 'not_connected' | 'no_meter'
+/**
+ * Why a pool has no readings, when it has none — one value per DIFFERENT FIX.
+ *
+ * `unreadable` is the one that is not a rounding of the others: the gauge was
+ * asked and the answer could not be turned into a reading (key rejected, or a
+ * payload shape this build does not understand). It is separate from `connected`
+ * precisely because "no readings yet" promises a first reading is coming, and this
+ * one is not.
+ */
+export type UsagePoolConnection = 'connected' | 'not_connected' | 'no_meter' | 'unreadable'
 
 export interface UsagePool {
   pool: string
@@ -142,8 +150,15 @@ export interface UsageDashboardClientOptions {
  * must make a card MORE cautious, never less. The mirror-image bug — defaulting an
  * absent field to maximum freshness — is how a version skew turns an arbitrarily
  * old reading into a confident "just now".
+ *
+ * TIGHTER THAN EVERY DEADLINE THE STORE ACTUALLY SHIPS, which is what "more
+ * cautious" has to mean numerically. A previous value of five minutes was 2.5×
+ * LOOSER than Anthropic's real deadline, so on a version skew an Anthropic reading
+ * up to five minutes old painted fresh and non-floored — the fallback undoing the
+ * caution it was written for. One minute is below the tightest real deadline and
+ * still twice `USAGE_POLL_MS`, so a healthy install refetches inside it.
  */
-const FALLBACK_STALE_AFTER_MS = 5 * 60_000
+export const FALLBACK_STALE_AFTER_MS = 60_000
 
 /**
  * How often a mounted screen REFETCHES the payload.
@@ -217,7 +232,7 @@ function decodeConnection(v: unknown): UsagePoolConnection {
   // An unknown value decodes as `connected`, so an older or newer server never
   // makes a populated card claim "not connected" — the honest degradation is the
   // one that says nothing rather than the one that blames the owner's setup.
-  return v === 'not_connected' || v === 'no_meter' || v === 'connected'
+  return v === 'not_connected' || v === 'no_meter' || v === 'connected' || v === 'unreadable'
     ? (v as UsagePoolConnection)
     : 'connected'
 }
@@ -347,6 +362,8 @@ export interface PoolCapacity {
   next: CapacityStanding
   /** The window that BINDS the headline account, so the line can name it. */
   next_binding: ProjectedWindow | null
+  /** Its key, so the line can name the window without inverting the other one. */
+  next_binding_window: 'session' | 'weekly' | null
   next_other_window: 'session' | 'weekly' | null
   /**
    * The OTHER window on the headline account, so the line can name what still
@@ -461,6 +478,26 @@ function capacityRank(standing: CapacityStanding): number {
  * minutes buys nothing if the 7-day window is spent for another three days. Taking
  * the worst is what makes the pool headline safe to act on; taking the soonest
  * reset is the bug this function exists to make impossible.
+ *
+ * ── AND A WINDOW THAT IS ABSENT IS NOT A WINDOW WITH ROOM ───────────────────
+ * "The worst of what I can see" is only safe when what is missing is nothing. A
+ * null window is not a measured zero — it is the absence of a measurement, and the
+ * two are indistinguishable in this shape: `weekly: null` reads identically whether
+ * the provider has no weekly limit, the parser dropped the entry, or the sample
+ * predates the column. So an account with only ONE of its two windows measured has
+ * NO standing, and says so.
+ *
+ * WHAT THIS PREVENTS, in the failure's own words: a payload carrying a 20% session
+ * and no weekly rendered "1 available now" with `unknown: 0`, and a 99%-spent
+ * session resetting in 40 minutes rendered the bare countdown "Next capacity in 40m
+ * (5h window)" — a sentence about capacity returning, computed without looking at
+ * the window that might be the actual constraint. That is the same defect as
+ * naming the soonest reset while ignoring the other window, arrived at by the other
+ * road: not by mis-ranking two windows, but by ranking one and calling it the pair.
+ *
+ * THE OTHER WINDOW'S FIGURES STILL RENDER — the row shows "not reported" and the
+ * measured window keeps its bar, its pace and its own countdown. Only the CAPACITY
+ * CLAIM is withheld, because that is the only output that requires both.
  */
 export function accountCapacity(
   session: UsageWindow | null,
@@ -468,32 +505,30 @@ export function accountCapacity(
   now: number,
   stale: boolean,
 ): { binding: 'session' | 'weekly' | null; capacity: CapacityStanding } {
-  // Each candidate carries the WINDOW IT CAME FROM, not just its key. An earlier
-  // draft looked the window back up by key and had to defend against a null it
-  // could not receive — `windowCapacity` returns null for a null window, so a
-  // candidate's window is non-null by construction. A defensive branch that cannot
-  // fire is untestable, and untestable code reads as protection that has been
-  // exercised when it never has.
+  // HALF A READING BUYS NO STANDING. Checked before anything is ranked, so there is
+  // no path on which a one-window account reaches the comparison below and wins it.
+  if (session === null || weekly === null) return { binding: null, capacity: { state: 'unknown' } }
+  // Each candidate carries the WINDOW IT CAME FROM, not just its key, so the
+  // tie-break below reads headroom off the same object it ranked. An earlier draft
+  // looked the window back up by key and had to defend against a null it could not
+  // receive; a defensive branch that cannot fire is untestable, and untestable code
+  // reads as protection that has been exercised when it never has.
   const candidates: Array<{
     window: 'session' | 'weekly'
     win: UsageWindow
     standing: CapacityStanding
-  }> = []
-  if (session !== null) {
-    candidates.push({
+  }> = [
+    {
       window: 'session',
       win: session,
       standing: windowCapacity(session, 'session', now, stale),
-    })
-  }
-  if (weekly !== null) {
-    candidates.push({
+    },
+    {
       window: 'weekly',
       win: weekly,
       standing: windowCapacity(weekly, 'weekly', now, stale),
-    })
-  }
-  if (candidates.length === 0) return { binding: null, capacity: { state: 'unknown' } }
+    },
+  ]
   let worst = candidates[0]!
   for (const c of candidates.slice(1)) {
     const rank = capacityRank(c.standing)
@@ -510,10 +545,22 @@ export function accountCapacity(
   return { binding: worst.window, capacity: worst.standing }
 }
 
-/** A stale reading is a floor only while the window it describes is still running.
- *  Once the reset instant has passed the window has rolled and consumption started
- *  again from zero, so "at least this much" stops being true — and claiming it
- *  would overstate usage on exactly the account that just freed up. */
+/**
+ * A stale reading is a floor only while the window it describes is still running.
+ * Once the reset instant has passed the window has rolled and consumption started
+ * again from zero, so "at least this much" stops being true — and claiming it would
+ * overstate usage on exactly the account that just freed up.
+ *
+ * AND A STALE READING WITH NO RESET INSTANT IS NOT FLOORED EITHER — deliberate, not
+ * an oversight in the condition. "≥ 87%" is a claim that the window did not roll,
+ * and with no instant nobody knows whether it did: a floor there would be as
+ * invented as a fresh number. The doubt is carried by the two marks that ARE
+ * warranted — the age chip, and a capacity standing of "unknown" — so the card
+ * shows the last known figure with its age and declines to add a bound it cannot
+ * support. This is the one place where "floor a stale gauge" yields to "never state
+ * something you cannot know", and the direction is safe: the figure is presented as
+ * old rather than as current, and nothing downstream reads it as capacity.
+ */
 function projectWindow(
   win: UsageWindow | null,
   stale: boolean,
@@ -532,6 +579,7 @@ function poolCapacity(accounts: ProjectedAccount[]): PoolCapacity {
     next_account_label: null,
     next: { state: 'unknown' },
     next_binding: null,
+    next_binding_window: null,
     next_other_window: null,
     next_other: null,
   }
@@ -565,6 +613,7 @@ function poolCapacity(accounts: ProjectedAccount[]): PoolCapacity {
     // label: two unlabelled accounts share `null`, so a lookup by label would name
     // the first one's window while reporting the second one's standing.
     next_binding: best.binding === null ? null : best.binding === 'session' ? best.session : best.weekly,
+    next_binding_window: best.binding,
     next_other_window: other_window === null ? null : other,
     next_other: other_window,
   }
@@ -635,7 +684,14 @@ export function formatPercent(fraction: number): string {
  * construction; that is why the standing carries one.
  */
 export function formatCountdown(ms: number | null): string {
-  if (ms === null) return 'unknown'
+  // A NON-FINITE INPUT IS AN ABSENCE, NOT A DURATION. Every production caller is
+  // traced and none can produce one today, but these are EXPORTED policy functions
+  // and the failure they would otherwise have is silent and total: `NaN` walks
+  // through every comparison below and prints "NaNd NaNh", which is neither a
+  // countdown nor an admission that there is none. Folding it into the `null` arm
+  // costs one comparison and makes the bad render unreachable rather than merely
+  // unreached.
+  if (ms === null || !Number.isFinite(ms)) return 'unknown'
   if (ms <= 0) return 'available now'
   // CEIL, not floor, and not round. Flooring reports capacity arriving sooner than
   // it will — 16m59s rendered as "16m" — and every rounding error in this feature
@@ -694,7 +750,9 @@ export function formatProjection(exhausts_at: number | null, now: number): strin
  * against the payload's threshold, never from this string.
  */
 export function formatAge(ms: number | null): string {
-  if (ms === null) return 'never measured'
+  // Same guard, same reason as {@link formatCountdown}: a non-finite age is an
+  // absent one, and "NaNd NaNh ago" is a chip that looks like a reading.
+  if (ms === null || !Number.isFinite(ms)) return 'never measured'
   if (ms < 60_000) return 'just now'
   return `${formatMinutes(Math.floor(ms / 60_000))} ago`
 }
@@ -769,11 +827,23 @@ export function formatWindowFraction(win: ProjectedWindow): string {
   return win.floor ? `≥ ${formatPercent(win.fraction)}` : formatPercent(win.fraction)
 }
 
-/** One account's own answer to "can this take work". */
+/**
+ * One account's own answer to "can this take work".
+ *
+ * `unknown` NAMES ITS REASON when the reason is a missing window, because the two
+ * unknowns have different fixes and only one of them is about age. "Capacity
+ * unknown" beside a full-looking card reads as a glitch; "one window not reported"
+ * beside a row that already says "not reported" reads as the same fact twice, which
+ * is what makes it believable. This is the loud half of the refusal — the quiet
+ * half would be a card that simply declines to say anything.
+ */
 export function accountCapacityNote(account: ProjectedAccount): string {
   const c = account.capacity
   if (c.state === 'available') return 'available now'
   if (c.state === 'returns') return `capacity in ${formatCountdown(c.in_ms)}`
+  if (account.session === null || account.weekly === null) {
+    return 'capacity unknown — one window not reported'
+  }
   return 'capacity unknown'
 }
 
@@ -782,7 +852,14 @@ export function accountCapacityNote(account: ProjectedAccount): string {
  *
  * Three shapes, and the second one is why this function exists at all:
  *
- *   - `"1 available now"` — someone has room; that is the whole answer.
+ *   - `"1 available now (7d window 90% used)"` — someone has room, AND how much
+ *     room, on the window that is closest to taking it away. "Available" is a
+ *     boolean and the decision it feeds is not: an account 90% through its weekly
+ *     window is available and is still nowhere to send extra concurrency, and a
+ *     bare "1 available now" collapses that to the same glance as a fresh account.
+ *     The figure is the TIGHTEST window of the account the headline is about, and
+ *     it carries its own "≥" when the reading is a floor. Omitted only when no
+ *     window is known, which is the case the count already excludes.
  *   - `"Next capacity in 17m (5h window; 7d window 64% used)"` — nobody has room,
  *     so the countdown is to the window that actually BINDS the first account to
  *     free up, and the other window is named with its utilisation. A bare "next
@@ -801,7 +878,17 @@ export function capacityLine(pool: ProjectedPool): string | null {
   // card's empty state says the useful thing instead.
   if (pool.accounts.length === 0) return null
   const unknownSuffix = c.unknown > 0 ? ` (${c.unknown} unknown)` : ''
-  if (c.available_now > 0) return `${c.available_now} available now${unknownSuffix}`
+  if (c.available_now > 0) {
+    // HOW MUCH room, not just that there is some — the tightest window of the
+    // account the headline names, with its own floor marking.
+    const headroom =
+      c.next_binding === null || c.next_binding_window === null
+        ? ''
+        : ` (${windowName(c.next_binding_window, c.next_binding.window_ms)} ${formatWindowFraction(
+            c.next_binding,
+          )} used)`
+    return `${c.available_now} available now${headroom}${unknownSuffix}`
+  }
   if (c.next.state === 'returns') {
     const parts = [windowName(c.next.window, c.next_binding?.window_ms ?? null)]
     if (c.next_other_window !== null && c.next_other !== null) {
@@ -848,15 +935,27 @@ export function nextAccountNote(pool: ProjectedPool): string | null {
  * Why a pool has nothing to show, in the owner's terms. Null when it has
  * readings, because a card with numbers on it needs no excuse.
  *
- * Three different fixes hide behind one empty card, so they get three sentences:
- * connect an account, wait for the first reading, or nothing at all — a per-token
- * API key has no window to meter and never will.
+ * Four different fixes hide behind one empty card, so they get four sentences:
+ * connect an account, wait for the first reading, fix a gauge that answered with
+ * something unreadable, or nothing at all — a per-token API key has no window to
+ * meter and never will.
+ *
+ * THE FOURTH IS THE ONE THAT DOES NOT RESOLVE ITSELF, and it is why this is not a
+ * three-way branch. "No readings yet." promises a first reading is coming. When the
+ * gauge has been asked and its answer refused — a rejected key, or a payload shape
+ * this build does not model — no amount of waiting produces one, and the owner
+ * would sit in front of a sentence that is quietly false. So it says what happened
+ * and where to look, and still shows no number: a failed gauge read is loud and
+ * empty, never a zero.
  */
 export function connectionNote(pool: ProjectedPool): string | null {
   if (pool.accounts.length > 0) return null
   if (pool.connection === 'not_connected') return 'Not connected.'
   if (pool.connection === 'no_meter') {
     return 'Connected, but this credential is billed per token and has no window to meter.'
+  }
+  if (pool.connection === 'unreadable') {
+    return "Connected, but the last gauge read didn't produce a reading — check the key, then the logs. Nothing is shown rather than a zero."
   }
   return 'No readings yet.'
 }

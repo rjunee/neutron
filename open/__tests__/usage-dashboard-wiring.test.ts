@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
+  CLIENT_POLL_BUDGET_MS,
   POOL_CADENCE_MS,
   POOL_STALE_AFTER_MS,
   UsageSamplesStore,
@@ -53,6 +54,7 @@ import { USAGE_POLL_INTERVAL_MS } from '../credential-usage-monitor.ts'
 import { KIMI_USAGE_POLL_INTERVAL_MS } from '../kimi-usage-monitor.ts'
 
 import {
+  USAGE_POLL_MS,
   capacityLine,
   connectionNote,
   decodeDashboard,
@@ -257,7 +259,10 @@ test('the composed payload is what the real card reads, and the card says "1 ava
   expect(anthropic.accounts[0]!.account_label).toBe('owner-a')
   expect(anthropic.capacity.available_now).toBe(1)
   expect(anthropic.capacity.next).toEqual({ state: 'available' })
-  expect(capacityLine(anthropic)).toBe('1 available now')
+  // AND HOW MUCH ROOM, on the window closest to taking it away: 'available' is a
+  // boolean, and the decision it feeds is not. 75% of the 5-hour window leaves less
+  // headroom than 50% of the weekly one, so the 5-hour window is the one quoted.
+  expect(capacityLine(anthropic)).toBe('1 available now (5h window 75% used)')
   // And the age chip is a real, growing number rather than a frozen zero.
   expect(anthropic.age_ms).toBeGreaterThan(0)
 })
@@ -309,8 +314,19 @@ test('the staleness constants ARE the writers’ poll intervals, plus one missed
   // And the deadline the wire carries is that cadence with ONE missed probe of
   // grace. Zero grace blanks an account with headroom over a single flaky request,
   // which writes no row and would leave the card "unknown" for a full cadence.
-  expect(POOL_STALE_AFTER_MS.anthropic).toBe(USAGE_POLL_INTERVAL_MS * 2)
-  expect(POOL_STALE_AFTER_MS.kimi).toBe(KIMI_USAGE_POLL_INTERVAL_MS * 2)
+  // ...PLUS the client's poll hold. The deadline is checked on the client against a
+  // payload refetched every `USAGE_POLL_MS`, so a written row can be one poll away
+  // from being on screen; budgeting the grace alone spends it twice and paints a
+  // recovered install stale for the length of that hold.
+  expect(POOL_STALE_AFTER_MS.anthropic).toBe(
+    USAGE_POLL_INTERVAL_MS * 2 + CLIENT_POLL_BUDGET_MS,
+  )
+  expect(POOL_STALE_AFTER_MS.kimi).toBe(
+    KIMI_USAGE_POLL_INTERVAL_MS * 2 + CLIENT_POLL_BUDGET_MS,
+  )
+  // The budget is the clients' OWN poll interval, imported rather than restated —
+  // `persistence` cannot import a client, so this is where the two are held equal.
+  expect(CLIENT_POLL_BUDGET_MS).toBe(USAGE_POLL_MS)
   // Codex's gauge is harvested from real runs rather than polled, so it has no
   // cadence to violate — but it still gets a finite MAX AGE, because "no cadence"
   // must never become "never stale".

@@ -4012,8 +4012,17 @@ export function buildOpenGraphComposer(
           if (credential.kind === 'measurable') return 'connected'
           return credential.reason === 'unsupported_credential' ? 'no_meter' : 'not_connected'
         }
-        case 'kimi':
-          return kimiConfigured() ? 'connected' : 'not_connected'
+        case 'kimi': {
+          if (!kimiConfigured()) return 'not_connected'
+          // ASKED AND REFUSED IS NOT "NO READINGS YET". Kimi's usages schema is
+          // unpublished, so the realistic first-install failure is a payload the
+          // parser will not read — and that never resolves itself, while "no
+          // readings yet" promises it will. The standing is read PER REQUEST from
+          // the live poller (never latched into a sample) so the card recovers the
+          // moment a tick succeeds. A transient error stays `connected`: the next
+          // tick retries and a dropped packet must not repaint the card as broken.
+          return kimiUsageMonitor.readStanding() === 'refused' ? 'unreadable' : 'connected'
+        }
         case 'codex':
           // The gauge itself lands with the Codex lane writer; until then this
           // reports the credential honestly and the card says "no samples yet"

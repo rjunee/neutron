@@ -29,6 +29,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 import { ProjectDb } from './db.ts'
 import {
+  CLIENT_POLL_BUDGET_MS,
   POOL_CADENCE_MS,
   POOL_STALE_AFTER_MS,
   USAGE_POOLS,
@@ -416,13 +417,22 @@ describe('the store', () => {
     // genuinely appearing, so it does not guess — it reports both, each with its own
     // `measured_at`, and the card ages the older one in front of the owner.
     //
-    // THE DIRECTION IS WHAT MAKES THIS SAFE. The lapsed reading grows old, so the
-    // client's projection floors its gauge and falls to `unknown` — it can only ever
-    // subtract confidence from the headline (a "(1 unknown)" suffix), never add
-    // availability that is not there. A recency cut-off was considered and refused:
-    // it would delete exactly the non-active account headroom this store exists to
-    // retain, and "no readings yet" about an account that has readings is a worse
-    // sentence than an honest old one.
+    // WHAT IT COSTS, STATED EXACTLY, because an earlier version of this comment
+    // claimed the ghost "can only ever subtract confidence from the headline, never
+    // add availability that is not there" — AND THAT IS FALSE for as long as the
+    // ghost is still FRESH. Inside `stale_after_ms` the older row is projected like
+    // any other reading, so one physical credential briefly counts twice and the
+    // headline can read "2 available now" on a pool that holds one account. The
+    // window is BOUNDED by `stale_after_ms` (150 s for anthropic) and closes on its
+    // own: past the deadline the reading floors, its standing falls to `unknown`,
+    // and from then on the ghost only ever subtracts. The client-side half of this
+    // is pinned by name in `gateway/__tests__/usage-dashboard-client-parity.test.ts`.
+    //
+    // A recency cut-off was considered and refused: it would delete exactly the
+    // non-active account headroom this store exists to retain, and "no readings yet"
+    // about an account that has readings is a worse sentence than an honest old one.
+    // Nothing here can tell a label lapse from a second account genuinely appearing,
+    // and inventing a rule that guesses would break the case this store is for.
     await store.record({ pool: 'anthropic', ts: NOW, account_label: 'owner-a', session: 0.4 })
     await store.record({ pool: 'anthropic', ts: NOW + 60_000, session: 0.5 })
     const out = store.summarise('anthropic')
@@ -578,17 +588,48 @@ describe('the pool vocabulary', () => {
     expect(POOL_STALE_AFTER_MS.codex).toBe(30 * MINUTE)
   })
 
-  test('a polled pool tolerates exactly ONE missed probe before it is called stale', () => {
+  test('a polled pool tolerates ONE missed probe PLUS the client’s poll hold', () => {
     // Zero grace blanks an account with headroom over a single flaky request: a
     // failed probe writes no row, so the account would read "unknown" for a whole
     // cadence. Two cadences survives one miss and still catches a writer that has
     // stopped — and the age chip is on the card the whole time either way.
+    //
+    // AND THE CLIENT HOLDS THE PAYLOAD, which the grace has to pay for too. The
+    // deadline is checked on the client against a payload refetched every
+    // `USAGE_POLL_MS`, so a written row can be up to one poll away from being on
+    // screen. Budgeting two cadences ALONE spends the grace twice: rows at t=0,
+    // t=60 and t=180 (one missed probe at t=120) with a 120 s deadline paint the
+    // card stale from t=181 until the next fetch lands the t=180 row — ~29 s of
+    // "stale" on an install that has already recovered, which is the property this
+    // arrangement exists to have.
     for (const pool of USAGE_POOLS) {
       const cadence = POOL_CADENCE_MS[pool]
       if (cadence === null) continue
-      expect(POOL_STALE_AFTER_MS[pool]).toBe(cadence * 2)
+      expect(POOL_STALE_AFTER_MS[pool]).toBe(cadence * 2 + CLIENT_POLL_BUDGET_MS)
+      // The direction, stated independently of the formula: a card must survive a
+      // missed probe AND the wait for the next fetch.
+      expect(POOL_STALE_AFTER_MS[pool]).toBeGreaterThan(cadence * 2)
     }
     // A positive control: the loop above asserts nothing if no pool has a cadence.
     expect(USAGE_POOLS.filter((p) => POOL_CADENCE_MS[p] !== null).length).toBeGreaterThan(1)
+  })
+
+  test('the recovered-install timeline is inside the deadline, minute by minute', () => {
+    // The scenario spelled out as rows rather than as arithmetic, because the
+    // arithmetic above would happily agree with itself under a wrong constant.
+    // Anthropic's cadence is 60 s. The probe at t=120 fails, so the newest row the
+    // server can serve between t=120 and t=180 is the one written at t=60.
+    const cadence = POOL_CADENCE_MS.anthropic!
+    const newestRowAt = 60_000
+    const writerRecoversAt = 180_000
+    // The client fetched just before the recovery and holds that payload until its
+    // next poll, so the oldest age it can paint from a HEALTHY writer is this.
+    const worstAgePainted = writerRecoversAt + CLIENT_POLL_BUDGET_MS - newestRowAt
+    expect(worstAgePainted).toBeLessThanOrEqual(POOL_STALE_AFTER_MS.anthropic)
+    // Two consecutive misses DO cross it — the deadline still catches a writer that
+    // has actually stopped, which is the half a bigger grace would give away.
+    expect(writerRecoversAt + cadence + CLIENT_POLL_BUDGET_MS - newestRowAt).toBeGreaterThan(
+      POOL_STALE_AFTER_MS.anthropic,
+    )
   })
 })

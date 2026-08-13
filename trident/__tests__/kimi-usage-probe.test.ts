@@ -28,8 +28,8 @@ import {
 const NOW = Date.now()
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
-/** The 5-hour window the fixtures use. `parseResetInstant` measures its PAST
- *  tolerance in windows, so every direct call has to say which window it is for. */
+/** The 5-hour window the fixtures use. `parseResetInstant` bounds the FUTURE by
+ *  the window's own length, so every direct call has to say which window it is for. */
 const SESSION_MS = 300 * MINUTE
 
 /** The shape this parser models, in the units the endpoint is documented to use. */
@@ -191,30 +191,64 @@ describe('units — the two slips that render as plausible numbers', () => {
     expect(parseResetInstant({ reset_at: 'soon' }, NOW, SESSION_MS)).toBeNull()
   })
 
-  test('the PAST bound is ONE WINDOW, not a year — a stale instant is refused', () => {
-    // THE MUTANT THIS KILLS: a symmetric `Math.abs(at - now) <= PLAUSIBILITY`
-    // bound, which believes an instant up to 400 days in the PAST. Downstream, a
-    // reset that has already passed means "the window rolled, this account is
-    // free", so a year-old instant on a 99%-spent window renders as capacity — the
-    // optimistic answer that sends the owner to raise concurrency into a wall.
+  test('the PAST bound is CLOCK SKEW, not a window — a stale instant is refused', () => {
+    // THE BLOCKER FROM ROUND 3, and the two mutants it kills.
+    //
+    // FIRST: a symmetric `Math.abs(at - now) <= PLAUSIBILITY` bound, which believes
+    // an instant up to 400 days in the PAST. SECOND, and the one that actually
+    // shipped: a bound of ONE WINDOW LENGTH, which believes a reset four hours into
+    // a five-hour window's past. Downstream, a reset that has already passed means
+    // "the window rolled, this account is free", so a 99%-spent window with a
+    // four-hour-old reset rendered "1 available now" — the optimistic answer that
+    // sends the owner to raise concurrency into a wall. Against an unpublished
+    // schema that is exactly what a `reset`/`reset_time` field carrying the window's
+    // START would produce.
+    //
+    // For a rolling window of length L the CURRENT window's reset is in
+    // `(now, now + L]`, so the only legitimate past instant is the one that rolled
+    // moments ago — bounded by latency and clock skew, NOT by the window.
     const secondsAt = (ms: number): number => Math.round(ms / 1000)
-    // Just inside the window: the window rolled moments ago and the probe read it
-    // just after. Ordinary, true, and believed.
+    // Inside the skew allowance: the window rolled while the request was in flight
+    // and the probe read it just after. Ordinary, true, and believed.
     expect(parseResetInstant({ reset_at: secondsAt(NOW - MINUTE) }, NOW, SESSION_MS)).toBe(
       secondsAt(NOW - MINUTE) * 1000,
     )
-    // One window back and further: at least one whole window has rolled unobserved,
-    // so this cannot be the current window's reset.
-    expect(parseResetInstant({ reset_at: secondsAt(NOW - SESSION_MS - MINUTE) }, NOW, SESSION_MS))
-      .toBeNull()
-    expect(parseResetInstant({ reset_at: secondsAt(NOW - 300 * 24 * HOUR) }, NOW, SESSION_MS))
-      .toBeNull()
-    // AND THE BOUND SCALES WITH THE WINDOW, because window length is not a
-    // constant: the same instant that is implausible for a 5-hour window is
-    // ordinary for a 7-day one.
+    // Past it, on both windows — the bound does NOT scale with the window, because
+    // the quantity being tolerated is skew and skew does not grow with the window.
+    // Four hours back on a five-hour window is the reproduced failure, by value.
     const weekly = 7 * 24 * HOUR
-    expect(parseResetInstant({ reset_at: secondsAt(NOW - SESSION_MS - MINUTE) }, NOW, weekly))
-      .toBe(secondsAt(NOW - SESSION_MS - MINUTE) * 1000)
+    for (const window_ms of [SESSION_MS, weekly]) {
+      expect(parseResetInstant({ reset_at: secondsAt(NOW - 4 * HOUR) }, NOW, window_ms)).toBeNull()
+      expect(
+        parseResetInstant({ reset_at: secondsAt(NOW - SESSION_MS - MINUTE) }, NOW, window_ms),
+      ).toBeNull()
+      expect(
+        parseResetInstant({ reset_at: secondsAt(NOW - 300 * 24 * HOUR) }, NOW, window_ms),
+      ).toBeNull()
+    }
+  })
+
+  test('the FUTURE bound is ONE WINDOW, because that is where length applies', () => {
+    // The other half of the asymmetry, and the reason the window length is still a
+    // required argument. A rolling window of length L resets within L, so an instant
+    // further out than that is not this window's reset — it is a unit slip or a
+    // field that means something else. The bound SCALES here, because window length
+    // is not a constant and one provider has already changed regime.
+    const secondsAt = (ms: number): number => Math.round(ms / 1000)
+    const weekly = 7 * 24 * HOUR
+    // Two days out: implausible for a five-hour window, ordinary for a weekly one.
+    // The SAME instant, judged by the length the entry itself reported.
+    expect(parseResetInstant({ reset_at: secondsAt(NOW + 2 * 24 * HOUR) }, NOW, SESSION_MS))
+      .toBeNull()
+    expect(parseResetInstant({ reset_at: secondsAt(NOW + 2 * 24 * HOUR) }, NOW, weekly)).toBe(
+      secondsAt(NOW + 2 * 24 * HOUR) * 1000,
+    )
+    // And inside its own window it is believed either way — the positive control
+    // that stops the two refusals above from passing on a function that refuses
+    // everything.
+    expect(parseResetInstant({ reset_at: secondsAt(NOW + 3 * HOUR) }, NOW, SESSION_MS)).toBe(
+      secondsAt(NOW + 3 * HOUR) * 1000,
+    )
   })
 })
 
@@ -263,6 +297,27 @@ describe('a PARTIAL read is a refusal, not a smaller answer', () => {
       NOW,
     )
     expect(out.kind).toBe('unrecognised')
+  })
+
+  test('a response listing only ONE window is a refusal, not half a sample', () => {
+    // THE BLOCKER FROM ROUND 3, and the gap the "all or nothing" rule had: nothing
+    // in this body is UNREADABLE, so the earlier draft returned `ok` with
+    // `weekly: null` — byte-for-byte the wire shape a dropped window produces, and
+    // the same wall. `{session: 20%, weekly: null}` rendered "1 available now" with
+    // zero unknowns; `{session: 99%, resets in 40m, weekly: null}` rendered the bare
+    // "Next capacity in 40m (5h window)". The endpoint reports both standings, so
+    // one of them is a shape this parser does not model.
+    const sessionOnly = { usages: [{ window_minutes: 300, used_percent: 20 }] }
+    const out = parseKimiUsages(sessionOnly, NOW)
+    expect(out.kind).toBe('unrecognised')
+    // Still LOUD: the key names travel so one real response corrects the aliases.
+    if (out.kind !== 'unrecognised') return
+    expect(out.observed).toContain('window_minutes')
+    // The mirror image — a weekly-only response — is refused the same way. The rule
+    // is about the PAIR, not about which half is missing.
+    expect(
+      parseKimiUsages({ usages: [{ window_minutes: 10_080, used_percent: 64 }] }, NOW).kind,
+    ).toBe('unrecognised')
   })
 
   test('the modelled body is still ok — the refusal is not a blanket one', () => {
