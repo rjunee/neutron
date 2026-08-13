@@ -53,7 +53,7 @@ import {
   receiptEligibleMessageId,
   type ChatInitialAnchor,
 } from '../lib/chat-core/chat-initial-anchor';
-import { useMobileChat } from '../lib/chat-core/use-mobile-chat';
+import { activityLabel, useMobileChat } from '../lib/chat-core/use-mobile-chat';
 import { SPACING, THEME, TYPOGRAPHY } from '../lib/theme';
 import { useAuthSession } from '../lib/session';
 import { loadAppConfig } from '../lib/config';
@@ -94,6 +94,7 @@ import {
 import { useComposerDock } from '../lib/composer-dock';
 import { composerBottomInset } from '../lib/keyboard-inset';
 import { useKeyboardInset } from '../lib/use-keyboard-inset';
+import { useOpenActivityInspector } from '../lib/activity-inspector-opener';
 
 /** Quick-reaction palette the long-press tray offers (Track B Phase 4). */
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🎉', '🙏', '🔥'] as const;
@@ -129,6 +130,7 @@ export function ChatSyncSurface({
     rows,
     status,
     typing,
+    liveActivity,
     systemNotice,
     pendingCount,
     ready,
@@ -143,6 +145,7 @@ export function ChatSyncSurface({
     retry,
     selfDeviceId,
   } = useMobileChat(projectId);
+  const openActivityInspector = useOpenActivityInspector();
 
   // Bearer + gateway origin so agent attachments (`/api/app/upload/…`) render.
   const attachmentAuth = useMemo<AttachmentAuthCtx | null>(
@@ -689,7 +692,16 @@ export function ChatSyncSurface({
           // boundary crossing, so throttling exists to bound the bridge traffic,
           // not the React work.
           scrollEventThrottle={16}
-          ListFooterComponent={<TranscriptFooter typing={typing} notice={systemNotice} />}
+          ListFooterComponent={
+            <TranscriptFooter
+              typing={typing}
+              activityLabel={liveActivity === null ? null : activityLabel(liveActivity)}
+              onOpenInspector={
+                openActivityInspector === null ? undefined : () => openActivityInspector(projectId)
+              }
+              notice={systemNotice}
+            />
+          }
           // ISSUES #402 — only claim emptiness once history has SETTLED.
           // `ready` flips when the session object is constructed, before the
           // resume replay lands, so gating on it flashed "No messages yet" on
@@ -1077,15 +1089,19 @@ function ChatRow({
  */
 function TranscriptFooter({
   typing,
+  activityLabel,
+  onOpenInspector,
   notice,
 }: {
   typing: boolean;
+  activityLabel: string | null;
+  onOpenInspector?: () => void;
   notice: string | null;
 }): React.JSX.Element | null {
   if (!typing && notice === null) return null;
   return (
     <View>
-      {typing ? <TypingIndicator /> : null}
+      {typing ? <TypingIndicator label={activityLabel} onPress={onOpenInspector} /> : null}
       <SystemNoticePill text={notice} />
     </View>
   );
@@ -1117,13 +1133,20 @@ function SystemNoticePill({ text }: { text: string | null }): React.JSX.Element 
   );
 }
 
-function TypingIndicator(): React.JSX.Element {
+function TypingIndicator({ label, onPress }: { label: string | null; onPress?: () => void }): React.JSX.Element {
   return (
     <View style={[styles.bubbleWrap, styles.agentWrap, styles.footerGap]}>
       <View style={styles.bubbleColumn}>
-        <View style={[styles.bubble, styles.agentBubble, styles.agentTail, styles.typingBubble]}>
-          <Text style={styles.typingText}>•••</Text>
-        </View>
+        <Pressable
+          onPress={onPress}
+          disabled={onPress === undefined}
+          accessibilityRole={onPress === undefined ? undefined : 'button'}
+          accessibilityLabel="Show activity"
+          testID="chat-typing-indicator"
+          style={[styles.bubble, styles.agentBubble, styles.agentTail, styles.typingBubble]}
+        >
+          <Text style={styles.typingText}>•••{label === null ? '' : ` ${label}`}</Text>
+        </Pressable>
       </View>
     </View>
   );

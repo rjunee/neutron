@@ -10600,3 +10600,21 @@ the CLI transport does not consume that setting. Core-seat completeness also tre
 a deferred, unavailable, or dead Codex adversarial run as incomplete, so
 `enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
 the panel gate.
+
+## 2026-08-13 — typing catches up on connect and explains the live step
+
+Typing is now level-triggered for a socket opening during a turn and remains
+edge-triggered after that. `open/wiring/app-ws.ts:1153` reads the same
+`activeChatProjects` state as the project rail and directly targets the new socket;
+`open/wiring/typing-catchup.ts:4` does not touch the refcount or its fail-safe.
+Because the socket is registered before the synchronous check-and-send, an end can
+only happen before the check (no start) or afterward (the registered socket receives
+the end). Typing still bypasses the durable adapter and replay.
+
+Mobile now consumes the existing `activity_event` stream in
+`app/lib/chat-core/use-mobile-chat.ts:330`, displays a status row's `detail` instead
+of its generic `label`, and opens the existing inspector when the indicator is
+tapped through `app/lib/activity-inspector-opener.tsx:3`. Shell PreToolUse rows use
+the conservative command reducer in `open/activity-inspector.ts:620`: prefixes and
+control headers are skipped, scripts surface their filename, and command families
+carry their informative verb. Ambiguous input falls back to the tool name.

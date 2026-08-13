@@ -593,13 +593,58 @@ export function activityRowFromToolTap(input: {
   const content = isPre ? (input.args ?? '') : (input.result ?? input.args ?? '')
   const detail = summarize(input.detail !== '' ? input.detail : content)
   const body = clipBody(content)
+  const shellLabel = isPre ? commandLabelForShellTool(named.label, input.args) : null
   return {
     kind: isPre ? 'tool_start' : 'tool_end',
-    label: named.label,
+    label: shellLabel ?? named.label,
     ...sourceOf(named),
     ...(detail !== '' ? { detail } : {}),
     ...(body !== '' && body !== detail ? { body } : {}),
   }
+}
+
+const SHELL_TOOLS = new Set(['bash', 'shell', 'sh', 'zsh'])
+const MULTIPLEXERS = new Set(['bun', 'git', 'npm', 'pnpm', 'yarn', 'gh', 'docker'])
+const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'python', 'python3', 'ruby'])
+
+/** Best-effort inline label for a shell call. Ambiguous control flow stays generic. */
+export function commandLabelForShellTool(tool: string, command: string | undefined): string | null {
+  if (!SHELL_TOOLS.has(tool.toLowerCase()) || command === undefined) return null
+  let s = command.trim()
+  if (s === '' || /^(case|function|select)\b/.test(s)) return null
+  s = s.replace(/^\(+\s*/, '')
+  s = s.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)+/, '')
+  s = s.replace(/^cd\s+(?:'[^']*'|"[^"]*"|\S+)\s*&&\s*/, '')
+  s = s.replace(/^set\s+(?:-[A-Za-z]+|-[A-Za-z]+\s+\S+|\+\S+)(?:\s+\S+)*?\s*;\s*/, '')
+  if (/^(for|while)\b/.test(s)) {
+    const match = s.match(/\bdo\s+([^;|&]+)/)
+    if (match === null) return null
+    s = match[1]!.trim()
+  } else if (/^if\b/.test(s)) {
+    const match = s.match(/^if\s+([^;]+)(?:;\s*then\b)?/)
+    if (match === null) return null
+    s = match[1]!.trim()
+  }
+  const segment = s.split('|', 1)[0]!.replace(/^\(+\s*/, '').trim()
+  const tokens = segment.match(/(?:"[^"]*"|'[^']*'|[^\s;&]+)/g)?.map((t) => t.replace(/^['"]|['"]$/g, '')) ?? []
+  while (tokens[0]?.startsWith('-')) tokens.shift()
+  if (tokens.length === 0) return null
+  let first = tokens.shift()!
+  first = first.split('/').pop() ?? first
+  if (INTERPRETERS.has(first) && tokens[0] !== undefined && !tokens[0].startsWith('-')) {
+    const script = tokens[0].split('/').pop()!
+    if (/\.[A-Za-z0-9]+$/.test(script)) return script
+  }
+  if (MULTIPLEXERS.has(first)) {
+    const meaningful = tokens.filter((t) => !t.startsWith('-'))
+    let sub = meaningful[0]
+    if (first === 'npm' && sub === 'run') sub = meaningful[1] === undefined ? 'run' : `run ${meaningful[1]}`
+    if (first === 'docker' && sub === 'compose') sub = 'compose'
+    if (sub === undefined) return null
+    const label = `${first} ${sub}`
+    return label.split(/\s+/).slice(0, 3).join(' ')
+  }
+  return first.length > 0 && !/[$`{}]/.test(first) ? first : null
 }
 
 /** The label every assistant-message row carries, from either source. Shared so the

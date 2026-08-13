@@ -441,6 +441,8 @@ export interface CreateAppWsSurfaceOptions {
     project_slug: string
     channel_topic_id: string
     project_id?: string
+    /** Direct sender for the socket that just opened. */
+    send: (env: AppWsOutbound) => void
   }) => Promise<void>
   /**
    * Onboarding consolidation (2026-06-26) — fired when the client taps an
@@ -758,6 +760,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
               project_slug: data.project_slug,
               channel_topic_id: data.channel_topic_id,
               ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
+              send,
             })
           } catch (err) {
             moduleLog.warn('on_session_open_failed', {

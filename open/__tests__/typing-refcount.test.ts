@@ -25,6 +25,7 @@ import {
   TYPING_FAILSAFE_MS,
   type TypingScheduler,
 } from '../wiring/typing-refcount.ts'
+import { sendTypingCatchUp } from '../wiring/typing-catchup.ts'
 
 /** A scheduler that records instead of waiting, so a test can fire the timer. */
 function fakeScheduler(): TypingScheduler & {
@@ -66,6 +67,26 @@ function make(onExpire: (key: string) => void = () => {}) {
 }
 
 describe('the suppression guard — one visible typing lifetime per topic', () => {
+  test('connect catch-up neither changes depth nor re-arms the fail-safe', () => {
+    const { rc, scheduler } = make()
+    rc.transition(KEY, 'start')
+    const scheduledMs = scheduler.lastMs
+    const pending = scheduler.pending()
+    const sent: unknown[] = []
+    expect(sendTypingCatchUp({ active: new Set(['proj']), key: 'proj', now: () => 7, send: (f) => sent.push(f) })).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(rc.depthOf(KEY)).toBe(1)
+    expect(scheduler.pending()).toBe(pending)
+    expect(scheduler.lastMs).toBe(scheduledMs)
+    rc.transition(KEY, 'end')
+    expect(rc.transition(KEY, 'start').emit).toBe(true)
+  })
+
+  test('connect catch-up sends nothing when the shared active set is quiet', () => {
+    const sent: unknown[] = []
+    expect(sendTypingCatchUp({ active: new Set(), key: 'proj', now: () => 7, send: (f) => sent.push(f) })).toBe(false)
+    expect(sent).toEqual([])
+  })
   test('the first start emits; a nested start does NOT', () => {
     const { rc } = make()
     expect(rc.transition(KEY, 'start').emit).toBe(true)

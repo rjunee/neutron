@@ -84,6 +84,7 @@ import {
   type AppWsOutboundImportProgress,
   type AppWsOutboundOnboardingCompleted,
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { sendTypingCatchUp } from './typing-catchup.ts'
 import {
   buildProjectDocReader,
   buildDeterministicProjectOpening,
@@ -1150,7 +1151,20 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     // same process won't re-seed a duplicate opener (`contextSent` guard in the
     // live-agent runner); a fresh process re-seeds, which only repaints the
     // opening question — acceptable and idempotent enough for the loader.
-    on_session_open: async ({ user_id, channel_topic_id }) => {
+    on_session_open: async ({ user_id, channel_topic_id, project_id, send }) => {
+      // Typing is level-triggered for a newly-arrived socket. The rail and these
+      // dots read the SAME live-turn set; this direct send is deliberately not a
+      // refcount transition, timer re-arm, durable adapter send, or topic fan-out.
+      // JavaScript runs this check+send atomically. The socket was registered
+      // before this hook, so an end after this block reaches it; an end before it
+      // removes the key and suppresses this catch-up start.
+      sendTypingCatchUp({
+        active: activeChatProjects,
+        key: railChatKey(project_id),
+        ...(project_id !== undefined ? { project_id } : {}),
+        now: Date.now,
+        send,
+      })
       // FIX 1 (#85) — seed the projects rail baseline on connect (only records
       // the pre-existing set; the post-emit below catches a seed-driven change).
       emitProjectsChangedIfChanged(user_id)
