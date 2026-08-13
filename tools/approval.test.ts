@@ -101,6 +101,43 @@ describe('ApprovalManager', () => {
     expect(row?.decided_by).toBe('user-x')
   })
 
+  test('respondApproval REPORTS the claim: true for the winner, false for everyone after', async () => {
+    // Idempotency alone is not enough for a caller that DOES something on the
+    // strength of a decision. `open/host-deploy.ts` dispatches a deploy, so it has
+    // to be able to tell "I decided this" from "someone already had" — without
+    // this boolean the race loser silently believed it had won and dispatched a
+    // second time (Argus r1 BLOCKER).
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    const promise = mgr.requestApproval({
+      id: 'claim-1',
+      project_slug: 't1',
+      topic_id: null,
+      tool_name: 'shell_exec',
+      args: {},
+      policy: 'prompt-user',
+    })
+    expect(await mgr.respondApproval('claim-1', 'approved', 'owner')).toBe(true)
+    expect(await promise).toBe('approved')
+    // Same id again, either decision: the row is no longer claimable.
+    expect(await mgr.respondApproval('claim-1', 'denied', 'owner')).toBe(false)
+    expect(await mgr.respondApproval('claim-1', 'approved', 'owner')).toBe(false)
+    // A row that never existed is not a claim either.
+    expect(await mgr.respondApproval('never-existed', 'approved', 'owner')).toBe(false)
+    // And an EXPIRED row cannot be claimed back into a decision.
+    const expiring = mgr.requestApproval({
+      id: 'claim-2',
+      project_slug: 't1',
+      topic_id: null,
+      tool_name: 'shell_exec',
+      args: {},
+      policy: 'prompt-user',
+    })
+    expect(await mgr.cancelPending('claim-2')).toBe(true)
+    expect(await expiring).toBe('expired')
+    expect(await mgr.respondApproval('claim-2', 'approved', 'owner')).toBe(false)
+    expect(mgr.get('claim-2')?.status).toBe('expired')
+  })
+
   test('expireStale moves stale pending rows to expired', async () => {
     let now = 1_000_000_000_000
     const mgr = new ApprovalManager(db, recordingNotifier(), {

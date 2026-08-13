@@ -87,8 +87,17 @@ export const HOST_DEPLOY_VALUE_RE = /^hdp:[A-Za-z0-9_-]{22}:(a|d)$/
 /** The ref deployed when the caller names none. */
 export const HOST_DEPLOY_DEFAULT_REF = 'origin/main' as const
 
-/** Ref charset guard — refs are shelled to `git`, so keep them boring. */
-export const HOST_DEPLOY_REF_RE = /^[A-Za-z0-9._/-]{1,200}$/
+/**
+ * Ref charset guard — refs are shelled to `git`, so keep them boring.
+ *
+ * The leading `-` is rejected STRUCTURALLY, not left to the output check. A ref
+ * the agent chose is `argv` to `git rev-parse`, and `--parseopt`,
+ * `--local-env-vars` and `-h` all match the charset — they were previously
+ * contained only incidentally, by the `/^[0-9a-f]{40}$/` shape check on stdout
+ * (Argus r1 nit). Containment that depends on what a subcommand happens to print
+ * is containment a future git release can revoke.
+ */
+export const HOST_DEPLOY_REF_RE = /^(?!-)[A-Za-z0-9._/-]{1,200}$/
 
 /** How many commits the approval body itemizes before it says "and N more". */
 export const HOST_DEPLOY_COMMIT_RENDER_CAP = 40
@@ -109,6 +118,29 @@ export const HOST_DEPLOY_CALL_TIMEOUT_MS = 30_000
 export const HOST_DEPLOY_DETAIL_CAP = 400
 
 /**
+ * Shortest credential {@link resolveHostDeployConfig} will accept, and the floor
+ * {@link scrubHostDeploySecrets} redacts down to. ONE constant on purpose: when
+ * the config minimum sat below the scrubber's floor, a 5-character
+ * `NEUTRON_HOST_DEPLOY_TOKEN` was accepted as a live credential and then printed
+ * verbatim into the owner's chat and the log, because the scrubber skipped it as
+ * "too short to be a secret" (Argus r1 major). Whatever the scrubber refuses to
+ * hide, the config must refuse to accept. A credential this short is not a
+ * credential anyway, so rejecting it costs nothing real.
+ */
+export const HOST_DEPLOY_MIN_SECRET_CHARS = 16
+
+/**
+ * How long a pending host-deploy grant stays tappable. Mirrors
+ * `APPROVAL_DEFAULT_TTL_MS` (`tools/approval.ts:67`), but is enforced HERE, on
+ * the answer, rather than relying on the expire sweep: `expireStale()` has no
+ * production caller on this box, so a grant's documented lifetime was inert and
+ * a day-old Approve on an unmoved ref would still have deployed (Argus r1
+ * minor). Checked against the row's own `requested_at`, so it holds whether or
+ * not anything ever sweeps.
+ */
+export const HOST_DEPLOY_APPROVAL_TTL_MS = 5 * 60_000
+
+/**
  * Characters stripped from a git commit subject before it is rendered into the
  * approval body: bidi controls, zero-width/format characters and C0 controls.
  * A commit subject is attacker-influenceable (anyone who can land a commit can
@@ -118,10 +150,18 @@ export const HOST_DEPLOY_DETAIL_CAP = 400
  * it. STRIPPED, not refused — unlike a ritual prompt (which has one author and
  * can be fixed), refusing here would let any commit subject make the host
  * undeployable.
+ *
+ * EVERY C0 control except TAB is in the range, and that specifically includes CR
+ * and LF. CR is the classic line-overwrite hiding character — a subject of
+ * `ok<CR>DEPLOYING NOTHING AT ALL` reads as its second half on any renderer that
+ * honours it — and LF forges an extra line inside the fenced commit list. An
+ * earlier revision of this range skipped both, which defeated the exact purpose
+ * the paragraph above claims for it (Argus r1 minor). TAB is deliberately kept:
+ * it can neither hide a line nor forge one, and it is legitimate in a subject.
  */
 export const HOST_DEPLOY_BANNED_SUBJECT_CHARS_RE =
   // eslint-disable-next-line no-control-regex
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g
+  /[\u0000-\u0008\u000A-\u001F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g
 
 // ── Seams ────────────────────────────────────────────────────────────────────
 
@@ -259,6 +299,20 @@ export function resolveHostDeployConfig(env: EnvBag): HostDeployConfigState {
         `so a plaintext endpoint is refused.`,
     }
   }
+  if (token.length < HOST_DEPLOY_MIN_SECRET_CHARS) {
+    // A credential the scrubber would decline to redact must never become a live
+    // credential: the control plane echoes error bodies back into chat, and a
+    // 5-character token would ride through `scrubHostDeploySecrets` untouched and
+    // be printed verbatim to the owner (Argus r1 major). Disabled WITH the
+    // reason, like every other unconfigured state — never silently.
+    return {
+      configured: false,
+      reason:
+        `${HOST_DEPLOY_TOKEN_ENV} is shorter than ${HOST_DEPLOY_MIN_SECRET_CHARS} characters, which is too ` +
+        `short to be treated as a credential — a value that short cannot be reliably kept out of an error ` +
+        `message. Set a longer ${HOST_DEPLOY_TOKEN_ENV} to enable it.`,
+    }
+  }
   return { configured: true, endpoint: { url, token } }
 }
 
@@ -268,13 +322,18 @@ export function resolveHostDeployConfig(env: EnvBag): HostDeployConfigState {
  * line, so an endpoint that echoes its own Authorization header (or its URL)
  * back in an error body cannot leak it into the owner's transcript. `split`/
  * `join` rather than a regex so no escaping of the secret is required.
- * Short values are skipped — redacting a 2-character "secret" would blank out
- * unrelated prose without protecting anything.
+ *
+ * Values below {@link HOST_DEPLOY_MIN_SECRET_CHARS} are skipped — redacting a
+ * 2-character "secret" would blank out unrelated prose without protecting
+ * anything. That floor is only safe because {@link resolveHostDeployConfig}
+ * REFUSES a credential shorter than the SAME constant, so nothing this function
+ * declines to hide can ever be a live credential. The two used to disagree, and
+ * the gap was a 5-character token printed verbatim into chat (Argus r1 major).
  */
 export function scrubHostDeploySecrets(text: string, secrets: readonly string[]): string {
   let out = text
   for (const secret of secrets) {
-    if (typeof secret !== 'string' || secret.length < 6) continue
+    if (typeof secret !== 'string' || secret.length < HOST_DEPLOY_MIN_SECRET_CHARS) continue
     out = out.split(secret).join('[redacted]')
   }
   return out
@@ -319,15 +378,23 @@ export function renderHostDeployApprovalBody(input: {
   target_sha: string
   commits: readonly HostDeployCommit[]
   total: number
+  /** `target..current` — what a rollback/sideways move would REMOVE. */
+  removed?: readonly HostDeployCommit[]
+  removed_total?: number
 }): string {
   const { ref, current_sha, target_sha, commits, total } = input
-  const lines = commits.map(
-    (c) => `${shortSha(c.sha)}  ${sanitizeCommitSubject(c.subject)}`,
-  )
-  const hidden = total - commits.length
-  if (hidden > 0) lines.push(`… and ${hidden} more commit${hidden === 1 ? '' : 's'}`)
-  const listing = lines.length > 0 ? lines.join('\n') : '(no new commits)'
-  const fence = safeFence(listing)
+  const removed = input.removed ?? []
+  const removed_total = input.removed_total ?? removed.length
+
+  /** One fenced block of `<short sha>  <subject>`, with the remainder counted. */
+  const renderList = (list: readonly HostDeployCommit[], count: number, empty: string): string => {
+    const lines = list.map((c) => `${shortSha(c.sha)}  ${sanitizeCommitSubject(c.subject)}`)
+    const hidden = count - list.length
+    if (hidden > 0) lines.push(`… and ${hidden} more commit${hidden === 1 ? '' : 's'}`)
+    const listing = lines.length > 0 ? lines.join('\n') : empty
+    const fence = safeFence(listing)
+    return `${fence}\n${listing}\n${fence}`
+  }
 
   const parts: string[] = []
   parts.push('Host deploy approval needed')
@@ -339,12 +406,25 @@ export function renderHostDeployApprovalBody(input: {
   parts.push('')
   if (total > 0) {
     parts.push(`${total} commit${total === 1 ? '' : 's'} would land:`)
+    parts.push(renderList(commits, total, '(no new commits)'))
   } else {
     parts.push(
       'No new commits are between these two — approving would move the host SIDEWAYS or BACKWARD to a different sha:',
     )
+    parts.push(renderList(commits, total, '(no new commits)'))
+    // A ROLLBACK'S CONTENT IS THE COMMITS IT TAKES AWAY. `current..target` is
+    // empty in that direction, so rendering only that range asked the owner to
+    // approve the removal of N commits sight-unseen — the exact rubber stamp
+    // requirement 2 exists to prevent (Argus r1 minor). Show the other
+    // direction, which is what is actually at stake.
+    parts.push('')
+    parts.push(
+      removed_total > 0
+        ? `${removed_total} commit${removed_total === 1 ? '' : 's'} the host is running now would be ROLLED BACK:`
+        : 'Nothing would be rolled back either — these two shas share no commits in either direction.',
+    )
+    if (removed_total > 0) parts.push(renderList(removed, removed_total, '(none)'))
   }
-  parts.push(`${fence}\n${listing}\n${fence}`)
   parts.push('')
   parts.push(
     'Nothing is deployed unless you tap Approve. This approval is bound to ' +
@@ -369,6 +449,12 @@ export interface HostDeployServiceOptions {
   emit: (p: HostDeployEmit) => Promise<void>
   log?: (msg: string) => void
   default_ref?: string
+  /**
+   * Injectable clock, used ONLY by the grant-age gate. Defaults to `Date.now`,
+   * matching `ApprovalManager`'s own `now` seam so a test can roll the clock past
+   * {@link HOST_DEPLOY_APPROVAL_TTL_MS} without sleeping.
+   */
+  now?: () => number
 }
 
 /** The input shape the live-agent capture seam hands `handleOwnerButtonAnswer`. */
@@ -414,6 +500,7 @@ export function createHostDeployService(
   } = opts
   const log = opts.log ?? ((): void => undefined)
   const default_ref = opts.default_ref ?? HOST_DEPLOY_DEFAULT_REF
+  const now = opts.now ?? Date.now
 
   function status(): HostDeployStatus {
     const cfg = resolveConfig()
@@ -472,8 +559,16 @@ export function createHostDeployService(
     }
 
     let range: HostDeployCommitRange
+    let rolled_back: HostDeployCommitRange = { commits: [], total: 0 }
     try {
       range = await git.commitsBetween(current_sha, target_sha, HOST_DEPLOY_COMMIT_RENDER_CAP)
+      if (range.total === 0) {
+        // Sideways/backward: the forward range is empty, so the ONLY legible
+        // content of this approval is what it would take away. Read the reverse
+        // range so the owner is never asked to approve the removal of N commits
+        // he cannot see.
+        rolled_back = await git.commitsBetween(target_sha, current_sha, HOST_DEPLOY_COMMIT_RENDER_CAP)
+      }
     } catch (err) {
       // THE COMMIT LIST IS THE APPROVAL. Without it the owner would be asked to
       // approve "deploy?", which is a rubber stamp with extra steps — so this is
@@ -532,6 +627,8 @@ export function createHostDeployService(
           target_sha,
           commits: range.commits,
           total: range.total,
+          removed: rolled_back.commits,
+          removed_total: rolled_back.total,
         }),
         options,
         idempotency_key: `host-deploy-approval:${approval_id}`,
@@ -571,6 +668,17 @@ export function createHostDeployService(
     // option set of a recent prompt. Silence, a timeout, "yes", a paraphrase or
     // any unrelated reply is not an approval and never reaches a row — the same
     // discipline as `onboarding/interview/button-backed-answer.ts:207-209`.
+    //
+    // KNOWN SEAM, stated rather than implied: `prior_option_values` is the
+    // caller's recent-prompt window (four prompts on the topic, per
+    // `gateway/wiring/build-live-agent-turn.ts`), so after four further prompts
+    // the button stops being eligible and this returns null — the raw `hdp:`
+    // token then falls through to the LLM as ordinary text with no explanation to
+    // the owner. Inherited from the ritual-approval surface, and FAIL-SAFE in the
+    // direction that matters (an evicted button deploys nothing), but it is a
+    // silence the owner has to interpret. The grant-age gate below makes the same
+    // window explicit in time: a late tap on a STILL-eligible button is refused
+    // with a sentence rather than dropped.
     if (!HOST_DEPLOY_VALUE_RE.test(value)) return null
     if (!input.prior_option_values.includes(value)) return null
 
@@ -601,8 +709,32 @@ export function createHostDeployService(
     if (row.status !== 'pending') {
       // Includes 'expired' — an approval that timed out is NOT an approval, and
       // re-tapping a decided row never re-runs a deploy.
+      //
+      // The two answers differ because ONE of them would otherwise be false. On
+      // an already-APPROVED row a deploy DID go out on the earlier tap, so
+      // "nothing was deployed" would be a lie in the only record the owner keeps
+      // — and it is the sentence a late Deny tap would read.
       return {
-        body: `That deploy request was already ${row.status} — nothing was deployed. Ask again to see the current commit list.`,
+        body:
+          row.status === 'approved'
+            ? `That deploy request was already approved and the deploy already went out — this tap changed nothing. Ask again to deploy anything newer.`
+            : `That deploy request was already ${row.status} — nothing was deployed. Ask again to see the current commit list.`,
+      }
+    }
+
+    // ── (b2) THE GRANT'S OWN AGE. `requested_at` is seconds since epoch. This is
+    // enforced on the ANSWER rather than left to `ApprovalManager.expireStale()`,
+    // which nothing on this box calls — the documented 5-minute window was inert,
+    // so a grant tapped the next morning on an unmoved ref still deployed (Argus
+    // r1 minor). The row is expired as it is refused, so the same tap cannot be
+    // repeated into a race with a sweep that may never come.
+    const age_ms = now() - row.requested_at * 1000
+    if (age_ms > HOST_DEPLOY_APPROVAL_TTL_MS) {
+      await cancel(id)
+      return {
+        body:
+          `That deploy request is older than ${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} minutes, ` +
+          `so it has expired — nothing was deployed. Ask again to see the current commit list.`,
       }
     }
 
@@ -620,11 +752,22 @@ export function createHostDeployService(
     }
 
     if (value.endsWith(':d')) {
+      let denied: boolean
       try {
-        await approvals.respondApproval(id, 'denied', input.user_id)
+        denied = await approvals.respondApproval(id, 'denied', input.user_id)
       } catch (err) {
         log(`host-deploy deny not recorded id=${id}: ${errText(err)}`)
         return { body: 'That deny could not be recorded — but nothing was deployed either way.' }
+      }
+      if (!denied) {
+        // The claim is a gate on the MESSAGE here, not on a side effect. Saying
+        // "Deploy declined. The host stays where it is" to a Deny that lost the
+        // race to an Approve would be a flat lie: the deploy already went out.
+        // Report the status the row actually settled at.
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return {
+          body: `That deploy request was already ${settled} — this tap changed nothing.`,
+        }
       }
       return { body: `Deploy declined. The host stays where it is; nothing was deployed.` }
     }
@@ -661,12 +804,31 @@ export function createHostDeployService(
       }
     }
 
-    // ── (d) record the owner's decision durably BEFORE the call goes out.
+    // ── (d) CLAIM the row, atomically, BEFORE the call goes out. This is the
+    // GATE on dispatch, not a bookkeeping step.
+    //
+    // Everything above this line — reading the row, re-resolving the sha —
+    // happens across `await`s, so two taps that arrive in the same tick BOTH see
+    // `status:'pending'` and BOTH pass the stale check. Whether either of them
+    // may act is decided HERE and only here: `respondApproval` reports whether it
+    // was the call that actually transitioned the row out of 'pending'
+    // (`tools/approval.ts:145`), and exactly one racer can be told `true`. The
+    // loser dispatches NOTHING. That closes both halves of the race: two Approves
+    // cannot double-dispatch, and an Approve interleaved behind a Deny cannot
+    // deploy something the owner just declined (Argus r1 BLOCKER).
+    let claimed: boolean
     try {
-      await approvals.respondApproval(id, 'approved', input.user_id)
+      claimed = await approvals.respondApproval(id, 'approved', input.user_id)
     } catch (err) {
       log(`host-deploy approval not recorded id=${id}: ${errText(err)}`)
       return { body: 'Approval could not be recorded, so nothing was deployed. Ask again.' }
+    }
+    if (!claimed) {
+      const settled = approvals.get(id)?.status ?? 'decided'
+      log(`host-deploy approval lost the claim id=${id} status=${settled}`)
+      return {
+        body: `That deploy request was already ${settled} — nothing was deployed a second time.`,
+      }
     }
 
     // ── (e) RESOLVE THE ENDPOINT + CREDENTIAL NOW, not at composition time.

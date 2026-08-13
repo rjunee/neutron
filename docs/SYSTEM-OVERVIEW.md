@@ -4323,18 +4323,38 @@ indistinguishable from "deploys land on their own and just lag".
    request**.
 3. **EXECUTE** — the target ref is RE-RESOLVED. If it moved, the approval is STALE:
    it is killed, nothing deploys, and the owner is told the new sha and asked again.
-   Otherwise the decision is recorded and ONE authenticated call goes to the
-   configured control-plane endpoint. The outcome — landed, or refused, or
-   unreachable — posts back to the same chat.
+   Otherwise the row is CLAIMED — `respondApproval` (`tools/approval.ts`) does its
+   `UPDATE ... WHERE status='pending'` and reports the affected-row count in one
+   transaction, and only the caller it tells `true` may act. ONE authenticated call
+   then goes to the configured control-plane endpoint. The outcome — landed, or
+   refused, or unreachable — posts back to the same chat.
+
+**The claim, not the check, is the gate.** Everything in step 3 before the claim
+happens across `await`s, so two taps arriving in the same tick both see a pending
+row and both pass the stale check. Gating the dispatch on the affected-row count is
+what makes "exactly one deploy" true: two Approves dispatch once, and an Approve
+that interleaves behind a Deny dispatches nothing. A check that a row *was* pending
+is not a claim that this caller *made it* stop being pending.
+
+**A grant has a lifetime.** A pending approval older than five minutes is refused on
+the ANSWER, against the row's own `requested_at` — not left to a sweep, because
+`ApprovalManager.expireStale()` has no production caller on this box. A documented
+window that nothing enforces is not a window.
 
 **The approval renders the commit list, and that is the security.** The owner is the
 only gate, so the thing he is gating has to be legible in the message he taps: the
 current pin, the target sha, and every commit between them (capped at 40 rendered,
 with the true remainder counted — never silently truncated). An approval whose
 content the approver cannot see is a rubber stamp with extra steps. Commit subjects
-are stripped of bidi / zero-width / C0 characters and wrapped in a backtick fence
-longer than any run inside them, because a commit subject is chosen by whoever
-lands the commit and the button body is Markdown-rendered.
+are stripped of bidi / zero-width / C0 characters — including CR and LF, the
+line-overwrite and line-forging payloads — and wrapped in a backtick fence longer
+than any run inside them, because a commit subject is chosen by whoever lands the
+commit and the button body is Markdown-rendered.
+
+A ROLLBACK is rendered the same way, from the other direction: when no commits sit
+between the current pin and the target, the approval itemizes the commits the host
+is running now that would be TAKEN AWAY. The content of a rollback is what it
+removes, and an empty block above a warning is the same rubber stamp in reverse.
 
 **The approval binds to ONE sha.** Without the re-resolve, "approve" would quietly
 mean "deploy whatever is newest when this executes" — a different and unbounded
@@ -4352,7 +4372,11 @@ never captured at composition time (a credential read at composition time is a
 credential that is never there — Decisions Log 2026-08-07). Neither ever enters a
 prompt, a log line or a chat message: the credential rides an `Authorization`
 header and nothing else, and everything the control plane says is run through
-`scrubHostDeploySecrets` before it is shown or logged.
+`scrubHostDeploySecrets` before it is shown or logged — **scrubbed first, then
+truncated**, because the scrubber matches the whole secret and a value cut by the
+length cap would otherwise leave a real prefix of itself behind. A credential too
+short for the scrubber to redact safely is refused as configuration rather than
+accepted and printed: one constant governs both ends.
 
 **A refused contract gate is a NORMAL outcome.** The host saying "the deploy window
 is closed" reads as one sentence in chat, not as a crash.

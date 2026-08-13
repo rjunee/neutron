@@ -22,11 +22,12 @@
  * service catches that too.
  */
 
-import { createGitExec, type GitExecFn } from '@neutronai/gateway/git/git-exec.ts'
+import { createGitExec, errStdout, type GitExecFn } from '@neutronai/gateway/git/git-exec.ts'
 
 import {
   HOST_DEPLOY_CALL_TIMEOUT_MS,
   HOST_DEPLOY_DETAIL_CAP,
+  scrubHostDeploySecrets,
   type HostDeployCommit,
   type HostDeployCommitRange,
   type HostDeployDispatch,
@@ -48,13 +49,26 @@ export function createHostDeployGit(opts: {
 
   return {
     async revParse(ref: string): Promise<string | null> {
-      // `--verify --quiet` exits non-zero with empty stdout for an unknown ref;
+      // `--verify --quiet` exits 1 with empty stdout for an unknown ref;
       // `^{commit}` makes an annotated tag resolve to the commit it points at,
       // so the sha the approval binds to is the sha that would be deployed.
-      const { stdout } = await gitExec(
-        ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
-        { cwd: repo_dir, allowNonZero: true },
-      )
+      //
+      // NOT `allowNonZero` — that flag routes through `isExecChildError`, which
+      // is `err instanceof Error` (`gateway/git/git-exec.ts:135`) and therefore
+      // swallows a MISSING git binary, a timeout and a maxBuffer overrun into
+      // the same empty stdout an unknown ref produces. Under it a broken
+      // checkout was indistinguishable from "this ref does not exist" (Argus r1
+      // major). Only the one exit status `--quiet` documents becomes null; every
+      // other failure propagates and the service refuses.
+      let stdout: string
+      try {
+        ;({ stdout } = await gitExec(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
+          cwd: repo_dir,
+        }))
+      } catch (err) {
+        if (isUnknownRefExit(err)) return null
+        throw err
+      }
       const sha = stdout.trim()
       return /^[0-9a-f]{40}$/.test(sha) ? sha : null
     },
@@ -62,9 +76,14 @@ export function createHostDeployGit(opts: {
     async commitsBetween(from: string, to: string, limit: number): Promise<HostDeployCommitRange> {
       // TWO calls on purpose: the render is capped, the COUNT is not. "40
       // commits would land" when 300 would is a lie the owner cannot detect.
+      //
+      // Neither call passes `allowNonZero`. THE COMMIT LIST IS THE APPROVAL: if
+      // git cannot produce it, the only correct answer is the refusal
+      // `open/host-deploy.ts` already writes — not an empty list rendered under
+      // the "SIDEWAYS or BACKWARD" warning, which is what swallowing the failure
+      // showed the owner instead (Argus r1 major).
       const counted = await gitExec(['rev-list', '--count', `${from}..${to}`], {
         cwd: repo_dir,
-        allowNonZero: true,
       })
       const parsedTotal = Number.parseInt(counted.stdout.trim(), 10)
       const total = Number.isFinite(parsedTotal) && parsedTotal >= 0 ? parsedTotal : 0
@@ -77,7 +96,7 @@ export function createHostDeployGit(opts: {
           '--format=%H %s',
           `${from}..${to}`,
         ],
-        { cwd: repo_dir, allowNonZero: true },
+        { cwd: repo_dir },
       )
       const commits: HostDeployCommit[] = []
       for (const line of logged.stdout.split('\n')) {
@@ -94,6 +113,20 @@ export function createHostDeployGit(opts: {
       return { commits, total: Math.max(total, commits.length) }
     },
   }
+}
+
+/**
+ * True only for the ONE failure `git rev-parse --verify --quiet` uses to say
+ * "this checkout does not know that ref": exit status 1 with no stdout. A
+ * missing binary (`ENOENT`), a timeout (`SIGTERM`), a maxBuffer overrun and
+ * git's own `fatal:` exits (128) all fail this test and stay thrown, so a broken
+ * checkout can never be reported to the owner as a merely unknown ref.
+ */
+function isUnknownRefExit(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  const { code } = err as { code?: unknown }
+  if (code !== 1 && code !== '1') return false
+  return errStdout(err).trim().length === 0
 }
 
 /**
@@ -126,7 +159,17 @@ export function createHostDeployDispatch(
     })
     let text = ''
     try {
-      text = (await res.text()).trim().slice(0, HOST_DEPLOY_DETAIL_CAP)
+      // SCRUB THE WHOLE BODY, THEN TRUNCATE — never the other way round. Slicing
+      // first cuts the body at a fixed offset, and a credential straddling that
+      // offset leaves a PREFIX of itself behind: the scrubber is a `split`/
+      // `join` on the FULL secret, so a partial match is not a match and the
+      // fragment rode into the owner's chat and the log intact (Argus r1 major,
+      // reproduced independently by two reviewers). This function is the right
+      // place for it because it is the only one holding both the url and the
+      // token at the moment the bytes arrive; the service scrubs again on the
+      // way out, which is cheap and keeps the guarantee local to each layer.
+      const body = (await res.text()).trim()
+      text = scrubHostDeploySecrets(body, [token, url]).slice(0, HOST_DEPLOY_DETAIL_CAP)
     } catch {
       // A body we cannot read is not a failure signal — the status is.
     }

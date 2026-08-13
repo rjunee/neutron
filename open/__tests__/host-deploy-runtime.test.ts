@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createHostDeployDispatch, createHostDeployGit } from '../host-deploy-runtime.ts'
+import { HOST_DEPLOY_DETAIL_CAP } from '../host-deploy.ts'
 
 let repo: string
 
@@ -106,6 +107,47 @@ describe('createHostDeployGit — the read-only view of the host checkout', () =
     const g = createHostDeployGit({ repo_dir: repo })
     expect(await g.commitsBetween(sha, sha, 40)).toEqual({ commits: [], total: 0 })
   })
+
+  test('a BROKEN checkout throws — it is never reported as "no commits" or "unknown ref"', async () => {
+    // Argus r1 major, reproduced: `allowNonZero` routes through `isExecChildError`,
+    // which is `err instanceof Error` (`gateway/git/git-exec.ts:135`), so a
+    // missing git binary, a timeout and a maxBuffer overrun all collapsed into
+    // the SAME empty stdout an unknown ref produces. `commitsBetween` then
+    // returned `{commits:[],total:0}` with no throw, the refusal in
+    // `open/host-deploy.ts` never fired, and the owner was shown the
+    // "SIDEWAYS or BACKWARD" warning above an empty fence instead of being told
+    // the checkout could not be read.
+    const sha = commit('a.txt', 'base')
+    const broken = createHostDeployGit({ repo_dir: repo, git_binary: '/nonexistent/git' })
+
+    expect(broken.commitsBetween(sha, sha, 40)).rejects.toThrow()
+    expect(broken.revParse('HEAD')).rejects.toThrow()
+
+    // POSITIVE CONTROL: the same two calls against a working binary answer
+    // normally, so the rejections above are about the broken binary and not about
+    // a helper that always throws.
+    const ok = createHostDeployGit({ repo_dir: repo })
+    expect(await ok.revParse('HEAD')).toBe(sha)
+    expect(await ok.commitsBetween(sha, sha, 40)).toEqual({ commits: [], total: 0 })
+  })
+
+  test('a range naming a sha this checkout does not have throws rather than reporting zero', async () => {
+    const sha = commit('a.txt', 'base')
+    const g = createHostDeployGit({ repo_dir: repo })
+    const absent = 'ff00112233445566778899aabbccddeeff001122'
+    // "0 commits would land" for a range git cannot even parse is the same lie in
+    // a different costume.
+    expect(g.commitsBetween(sha, absent, 40)).rejects.toThrow()
+  })
+
+  test('an unknown ref is still just null — the one failure that IS an answer', async () => {
+    // The precise boundary of the change above: exit 1 with no stdout, which is
+    // what `--verify --quiet` documents, stays a null. Everything else throws.
+    commit('a.txt', 'base')
+    const g = createHostDeployGit({ repo_dir: repo })
+    expect(await g.revParse('origin/never-existed')).toBeNull()
+    expect(await g.revParse('HEAD')).toMatch(/^[0-9a-f]{40}$/)
+  })
 })
 
 describe('createHostDeployDispatch — where the credential goes', () => {
@@ -154,6 +196,52 @@ describe('createHostDeployDispatch — where the credential goes', () => {
     })
     expect(result.ok).toBe(false)
     expect(result.detail).toBe('HTTP 409 — the deploy window is closed until 06:00')
+  })
+
+  test('a credential straddling the detail cap cannot leak a PREFIX of itself', async () => {
+    // Argus r1 major, confirmed by two reviewers independently. The body used to
+    // be SLICED to HOST_DEPLOY_DETAIL_CAP and only then handed to the service's
+    // scrubber — and the scrubber is a split/join on the FULL secret, so a token
+    // cut by the slice is not a match and its surviving prefix rode into the
+    // owner's chat and the "host-deploy call refused" log line intact.
+    const token = 'hdp-secret-token-9f3a2b1c8d7e6f5a4b3c2d1e'
+    const url = 'https://control.example.test/v1/deploy'
+    // Place the token so it STRADDLES the cap: 24 of its 41 characters fall
+    // inside, 17 outside. Reviewer A's exact repro.
+    const prefixLen = HOST_DEPLOY_DETAIL_CAP - 24
+    const body = `${'e'.repeat(prefixLen)}${token} trailing`
+
+    const dispatch = createHostDeployDispatch({
+      fetchImpl: async () => new Response(body, { status: 401 }),
+    })
+    const result = await dispatch({ url, token, ref: 'origin/main', sha: 'f'.repeat(40) })
+
+    expect(result.ok).toBe(false)
+    // Not the whole token…
+    expect(result.detail).not.toContain(token)
+    // …and not any real prefix of it either. This is the assertion the old test
+    // could not make, because its body was short enough that the slice never cut
+    // anything.
+    for (let n = 6; n <= token.length; n += 1) {
+      expect(result.detail).not.toContain(token.slice(0, n))
+    }
+    // POSITIVE half: the owner is still told what the control plane said, and the
+    // detail is still capped.
+    expect(result.detail).toContain('HTTP 401')
+    expect(result.detail).toContain('[redacted]')
+    expect(result.detail.length).toBeLessThanOrEqual(HOST_DEPLOY_DETAIL_CAP + 'HTTP 401 — '.length)
+  })
+
+  test('the endpoint URL echoed back at any offset is redacted too', async () => {
+    const token = 't'.repeat(32)
+    const url = 'https://control.example.test/v1/deploy'
+    const dispatch = createHostDeployDispatch({
+      fetchImpl: async () =>
+        new Response(`${'x'.repeat(HOST_DEPLOY_DETAIL_CAP - 10)}${url} nope`, { status: 500 }),
+    })
+    const result = await dispatch({ url, token, ref: 'origin/main', sha: 'f'.repeat(40) })
+    expect(result.detail).not.toContain('control.example.test')
+    expect(result.detail).toContain('HTTP 500')
   })
 
   test('an empty success body still says something useful', async () => {

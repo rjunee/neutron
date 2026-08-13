@@ -10447,15 +10447,26 @@ read at composition time is a credential that is never there — 2026-08-07). Th
 rides an `Authorization` header and nothing else, and everything the control plane says is
 scrubbed of both the token and the URL before it reaches chat or a log line.
 
-**Mutants run, all 16 killed.** stale-sha gate removed; owner-only (no-self-approval) gate
-removed; prior-option eligibility removed; pending-status gate removed (kills the timeout and
-the replay tests); unconfigured early-return removed; secret scrub neutered; commit list
-dropped from the body; ref charset guard removed; emit-failure rollback removed;
-bidi/zero-width strip removed; tools hidden when nothing is configured; `request()` made to
-dispatch before asking; config captured once at composition instead of per call; credential
-moved into the request body; true commit total replaced by the rendered count; `rev-parse`
-stripped of `--verify --quiet` and `^{commit}`. Each was applied to the shipped source and
-each turned a named test RED.
+**Mutants run: 15 of 16 killed, and the 16th is recorded as SURVIVING.** stale-sha gate
+removed; owner-only (no-self-approval) gate removed; prior-option eligibility removed;
+pending-status gate removed (kills the timeout and the replay tests); unconfigured
+early-return removed; secret scrub neutered; commit list dropped from the body; ref charset
+guard removed; emit-failure rollback removed; bidi/zero-width strip removed; tools hidden when
+nothing is configured; `request()` made to dispatch before asking; config captured once at
+composition instead of per call; credential moved into the request body; true commit total
+replaced by the rendered count; `rev-parse` stripped of `^{commit}`. Each of those turned a
+named test RED.
+
+> **CORRECTION (round 2).** This paragraph originally read "all 16 killed", and that was
+> false for one of them. Argus applied the `--verify --quiet` removal to
+> `open/host-deploy-runtime.ts` and ran both host-deploy suites: 45 pass / 0 fail. The mutant
+> was behaviour-equivalent because the `/^[0-9a-f]{40}$/` check on stdout rejected git's
+> echoed argument either way, so the flags were decorative rather than load-bearing. **A
+> permanent record that claims a guard was proven when it was not is worse than no record**,
+> because the next person reads it as evidence and stops looking. The claim is corrected here
+> rather than deleted, and the underlying weakness is now fixed: the resolver no longer passes
+> `allowNonZero`, so `--quiet`'s exit status IS the signal it is read for, and re-running that
+> same mutant in round 2 turns two named tests RED.
 
 The secret-absence assertions are constructed so they can fail in BOTH directions: the control
 plane's error body is `boom: upstream <url> rejected Bearer <token>`, and the test asserts the
@@ -10474,6 +10485,103 @@ are the same tree — which is what a self-hoster and a single-box install both 
 the sha the host runs. Nothing here verifies that claim against the control plane, and a
 deploy whose plumbing lands the code elsewhere would show a pin that is locally true and
 globally wrong.
+
+Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
+
+
+## 2026-08-13 — host deploy, round 2: the gate that two taps could walk through
+
+Argus reviewed the branch above and found the approval was gated by a check, not by a claim.
+`handleOwnerButtonAnswer` read the pending row, then AWAITED `git.revParse` to re-check the
+sha, then dispatched. Two taps that interleaved inside that await both saw `status:'pending'`,
+both passed the stale check, and both dispatched — and `ApprovalManager.respondApproval`
+returned `Promise<void>`, so the loser had no way to discover the row had already been claimed.
+The same window let an Approve deploy something a concurrent Deny had just settled.
+
+**A decision is now a CLAIM, not a read.** `respondApproval` (`tools/approval.ts:145`) runs its
+`UPDATE ... WHERE status='pending'` and reads the affected-row count inside one transaction, and
+returns TRUE only for the call that actually moved the row. `open/host-deploy.ts` gates the
+dispatch on that boolean and nothing else. Everything before it is advisory; the claim is the
+gate. Existing callers that ignore the return value are unaffected. Two concurrent Approves now
+dispatch exactly once, and an Approve parked behind a Deny dispatches nothing.
+
+**Secrets are scrubbed before they are truncated, never after.** The control-plane body was
+sliced to `HOST_DEPLOY_DETAIL_CAP` and only then handed to the scrubber — and the scrubber is a
+`split`/`join` on the FULL secret, so a token straddling the cut left a real prefix of itself
+behind and rode into the owner's chat and the `host-deploy call refused` log line. Two reviewers
+reproduced it independently. The scrub now happens in `createHostDeployDispatch`
+(`open/host-deploy-runtime.ts`), which is the only place holding the url and the token at the
+moment the bytes arrive; the service scrubs again on the way out.
+
+**A credential the scrubber will not hide is no longer accepted as a credential.** The scrubber
+skipped values under a length floor while `resolveHostDeployConfig` accepted any non-empty
+token, so a five-character `NEUTRON_HOST_DEPLOY_TOKEN` was live AND unredactable and printed
+verbatim. One constant (`HOST_DEPLOY_MIN_SECRET_CHARS`) now governs both ends, and the config
+refuses anything shorter — visibly, with a reason, like every other unconfigured state.
+
+**A git failure is a refusal again.** `allowNonZero` routes through `isExecChildError`, which is
+`err instanceof Error` (`gateway/git/git-exec.ts:135`), so a missing binary, a timeout and a
+maxBuffer overrun all collapsed into the same empty stdout an unknown ref produces. The
+"commit list could not be built → refuse" guard was therefore unreachable, and a broken checkout
+showed the owner the SIDEWAYS/BACKWARD warning above an empty fence. `commitsBetween` no longer
+passes the flag at all, and `revParse` translates only the one exit status `--quiet` documents
+(1, empty stdout) into null — everything else propagates.
+
+**The documented approval lifetime is real.** `ApprovalManager.expireStale()` has no production
+caller on this box (both reviewers grepped it independently, and so did this round), so the
+5-minute TTL never fired and a grant tapped the next morning on an unmoved ref still deployed.
+Rather than wire a sweep the rest of the system does not have, the age is enforced on the
+ANSWER against the row's own `requested_at`, so it holds whether or not anything ever sweeps.
+
+**Smaller things, each with a test.** A rollback now itemizes the commits it would take away
+(`target..current`) instead of showing the owner an empty block and asking him to approve the
+removal of N commits sight-unseen. CR and LF are stripped from commit subjects — CR is the
+line-overwrite hiding character the docblock already claimed to defend against, and it was not
+in the range. `HOST_DEPLOY_REF_RE` rejects a leading `-`, so `--parseopt` and friends are
+refused structurally rather than contained incidentally by a check on git's stdout.
+
+**The two composition lines that switch the feature on are now covered.** Argus deleted each in
+turn and the suite stayed identically green: the only tests touching `host_deploy` asserted the
+composer EMITS the key and that the surface registers against a stub registry, so the wire
+between them could be cut with the whole tree passing.
+`gateway/composition/build-core-modules-host-deploy-wiring.test.ts` drives `buildCoreModules`
+itself and asserts the tools are registered AND reachable, that they are absent when the field
+is (the negative control), and that `install` receives the EXACT `ApprovalManager` the graph
+hands out.
+
+**Round-2 mutants, applied to the shipped source. 13 killed, 1 recorded as surviving.**
+
+| # | mutant | result |
+|---|---|---|
+| M1 | approve path ignores the claim result (the original TOCTOU) | RED — 2 tests |
+| M2 | deny path ignores the claim result | **SURVIVES — see below** |
+| M3 | `respondApproval` always reports a claim | RED — 3 tests |
+| M4 | grant-age (TTL) gate removed | RED |
+| M5 | rollback reverse-range read removed | RED |
+| M6 | CR+LF dropped from the subject strip | RED |
+| M7 | leading-dash ref guard removed | RED |
+| M8 | minimum-credential-length gate removed | RED |
+| M9 | truncate-before-scrub restored | RED |
+| M10a | `allowNonZero` restored on `commitsBetween` | RED — 2 tests |
+| M10b | `revParse` swallows every failure as "unknown ref" | RED |
+| M11 | tool-registration line deleted from `buildCoreModules` | RED |
+| M12 | `install()` line deleted from `buildCoreModules` | RED |
+| M13 | `rev-parse` stripped of `--verify --quiet` (the round-1 survivor) | RED — 2 tests |
+| M14 | `rev-parse` stripped of `^{commit}` | RED |
+
+**M2 SURVIVES, and is reported rather than papered over.** Ignoring the claim result on the DENY
+path changes no observable behaviour, because the synchronous `row.status !== 'pending'` check
+dominates every sequential case, and the interleaving that would make a Deny lose its claim
+cannot be constructed through the public seam — the deny path has no `await` between reading the
+row and claiming it. The guard is kept as defence-in-depth against a future edit that adds one,
+but it is NOT proven and this table says so. A test that passes both before and after certifies
+nothing while looking like proof, which is the whole reason the round-1 record needed correcting.
+
+That mutant did surface a real, reachable defect on the way through: a late Deny tap on an
+already-approved row was answered "That deploy request was already approved — **nothing was
+deployed**", which is false, because the deploy went out on the earlier tap. The transcript is
+the only record the owner keeps, so it now says what actually happened. That correction has its
+own test.
 
 Detail: `docs/SYSTEM-OVERVIEW.md` § "Owner-approved host deploy — request → approve → execute".
 ## 2026-08-13 — adversarial review can dispatch on Codex
