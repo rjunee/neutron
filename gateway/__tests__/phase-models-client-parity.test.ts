@@ -63,10 +63,22 @@ const RUBRIC = {
   default: { model: 'opus', effort: 'high' },
 }
 
+/** The kimi review row — a THIRD executor, which this lane did not touch. */
+const KIMI = {
+  key: 'review_kimi',
+  label: 'Cross-model review (Kimi)',
+  description: 'A second opinion from Kimi K3.',
+  group: 'kimi',
+  groups: ['kimi'],
+  effort_supported: false,
+  default: { model: 'k3', effort: 'high' },
+}
+
 /**
- * The tier vocabulary as the server sends it, with ONE tier deliberately
- * unavailable — the case where the two clients could most easily disagree about
- * whether to grey an option or drop it.
+ * The tier vocabulary as the server sends it, with tiers deliberately unavailable —
+ * the case where the two clients could most easily disagree about whether to grey an
+ * option or drop it. Three executors, because a rule that reduced to "claude or not"
+ * would look correct with two.
  */
 const TIERS = [
   { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
@@ -75,6 +87,7 @@ const TIERS = [
   // UNAVAILABLE on purpose: the case where the two clients could most easily
   // disagree about whether to grey an option or drop it.
   { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', effort_supported: false, available: false, unavailable_reason: 'needs a Codex connection' },
+  { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', effort_supported: false, available: false, unavailable_reason: 'needs a Kimi key' },
 ]
 
 /**
@@ -187,7 +200,7 @@ describe('effectiveRow — the phone and the browser show the same row', () => {
 })
 
 describe('tierChoices — the phone and the browser grey the same options, for the same reason', () => {
-  for (const phase of [BUILD, CODEX, RUBRIC]) {
+  for (const phase of [BUILD, CODEX, RUBRIC, KIMI]) {
     test(`${phase.key} offers the same set`, () => {
       // The reason STRING is compared too, not just the boolean: "needs a Codex
       // connection" and a blank grey box are very different answers to "why can't I
@@ -208,12 +221,18 @@ describe('tierChoices — the phone and the browser grey the same options, for t
       // …and a codex tier this install has no credential for is still SELECTABLE-
       // eligible for the row: the reason is the missing connection, not the wiring.
       expect(choices.find((c) => c.tier === 'terra')!.reason).toBe('needs a Codex connection')
+      // THE KIMI TIER IS STILL GREYED ON THE BUILD ROW, and the wiring reason is still
+      // the honest one: this lane wired codex and nothing else. An un-greyed option
+      // that dispatches nowhere is worse than a greyed one.
+      const k3 = choices.find((c) => c.tier === 'k3')!
+      expect(k3.selectable).toBe(false)
+      expect(k3.reason).toContain('Kimi is not wired for this step yet')
     }
   })
 
   test('nothing is ever dropped from the list', () => {
     // Hiding an option the owner cannot account for is how a capability stays
-    // invisible for weeks. Both copies must show all four.
+    // invisible for weeks. Both copies must show every tier the server sent.
     expect(web.tierChoices(BUILD, TIERS)).toHaveLength(TIERS.length)
     expect(mobile.tierChoices(CODEX, TIERS)).toHaveLength(TIERS.length)
   })
@@ -267,6 +286,19 @@ describe('the agreement is real, not vacuous', () => {
       model_id: 'gpt-5.6-terra',
       selectable: false,
       reason: 'needs a Codex connection',
+    })
+    // WRONG-GROUP BEATS UNAVAILABLE holds for the third executor too: telling the
+    // owner of a Codex row to go and get a Kimi key would send them to fix something
+    // that would not help. Kept here because this lane moved the build and nothing
+    // else — the Kimi answers must come out of it unchanged.
+    expect(web.tierChoices(CODEX, TIERS).find((c) => c.tier === 'k3')!.reason).toContain(
+      'Kimi is not wired for this step yet',
+    )
+    expect(web.tierChoices(KIMI, TIERS).find((c) => c.tier === 'k3')).toEqual({
+      tier: 'k3',
+      model_id: 'kimi-k3',
+      selectable: false,
+      reason: 'needs a Kimi key',
     })
   })
 

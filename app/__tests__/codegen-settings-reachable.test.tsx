@@ -89,6 +89,10 @@ function payload(
       // UNAVAILABLE on purpose: no codex credential (or no codex CLI) on this
       // install, which is a DIFFERENT answer from "this step cannot reach codex".
       { tier: 'luna', provider: 'openai', model_id: 'gpt-5.6-luna', group: 'codex', effort_supported: false, available: false, unavailable_reason: 'needs a Codex connection' },
+      // THE THIRD EXECUTOR, which this lane did not wire. It stays in the fixture so
+      // the greying rule is exercised against a group that is still unreachable from
+      // every row here — "claude or codex" would look correct without it.
+      { tier: 'k3', provider: 'moonshot', model_id: 'kimi-k3', group: 'kimi', effort_supported: false, available: false, unavailable_reason: 'needs a Kimi key' },
     ],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaults: {
@@ -233,6 +237,15 @@ describe('the screen renders what the SERVER says the phases are', () => {
     // …and pressing it changes nothing, which is the half a render check misses.
     await press('phase-review_codex-model-luna');
     expect(byTestId('phase-review_codex-changed')).toBeNull();
+    // THE OTHER KIND OF GREYING, on the executor this lane did not wire. "Go and get a
+    // Kimi key" would send the owner of a Codex row to fix something that would not
+    // help, so the reason has to be the wiring — and it must still say so after the
+    // build moved.
+    const k3 = byTestId('phase-review_codex-model-k3');
+    expect(k3).not.toBeNull();
+    expect(k3!.textContent ?? '').toContain('Kimi is not wired for this step yet');
+    await press('phase-review_codex-model-k3');
+    expect(byTestId('phase-review_codex-changed')).toBeNull();
   });
 
   it('lets the BUILD row be moved to a codex tier, and the choice actually takes', async () => {
@@ -244,6 +257,12 @@ describe('the screen renders what the SERVER says the phases are', () => {
     const sol = byTestId('phase-build-model-sol');
     expect(sol).not.toBeNull();
     expect(sol!.textContent ?? '').not.toContain('not wired for this step yet');
+    // ONLY WHAT IS WIRED IS UN-GREYED — asserted on the same open picker. The Kimi
+    // tier on this row still carries the honest reason: a selectable option that
+    // dispatches nowhere is worse than a greyed one, and this lane wired one executor.
+    expect(byTestId('phase-build-model-k3')!.textContent ?? '').toContain(
+      'Kimi is not wired for this step yet',
+    );
     await press('phase-build-model-sol');
     expect(byTestId('phase-build-changed')).not.toBeNull();
     // …while the OTHER kind of greying is unchanged: the synthesis row has only a

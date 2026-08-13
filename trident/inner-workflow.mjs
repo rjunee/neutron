@@ -423,12 +423,17 @@ const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 // pane offers "Build" once, which writes `build`. Without this, every Ralph task the
 // planner happens to tag `[mechanical]` kept dispatching on Claude after the owner
 // moved the build to codex, and the log line would say so in a phase name the owner
-// has never seen. An EXPLICIT `build_mechanical` entry still wins — it is the more
-// specific key, and a config that names it meant it.
+// has never seen.
+//
+// UNCONDITIONAL: an entry that NAMES the follower key does not win, it is ignored.
+// `build_mechanical` is not settable at the boundary (`parsePhaseModelConfig` rejects
+// it and the read path drops one stored before that rule existed), so a value arriving
+// here can only be a stale or hand-crafted blob — and honouring it would pin the
+// mechanical build to a model the pane cannot display and the owner cannot clear,
+// which is exactly the invisible Anthropic spend this mirroring exists to stop.
+// `trident/__tests__/phase-model-coverage.test.ts` holds the two halves together.
 const phaseOverrideFor = (phaseKey) =>
-  phaseKey === 'build_mechanical' && threadedPhaseModels['build_mechanical'] === undefined
-    ? threadedPhaseModels['build']
-    : threadedPhaseModels[phaseKey]
+  phaseKey === 'build_mechanical' ? threadedPhaseModels['build'] : threadedPhaseModels[phaseKey]
 
 function applyPhaseOverride(route, phaseKey) {
   if (!phaseKey) return route
@@ -810,6 +815,47 @@ CONTRACT
 const codexBuildDiffFile = () => `/tmp/trident-codex-build-${runId || slug}.diff`
 
 /**
+ * `<bytes>:<fnv32>` for a string, as `trident/codex-build.sh` recomputes it from the
+ * brief file before it spends a token.
+ *
+ * WHY THE BRIEF NEEDS A RECEIPT AT ALL. This script cannot exec anything; it reaches a
+ * shell only through a bridge agent that has to reproduce the whole brief inside a
+ * heredoc. A model that truncates or paraphrases it hands codex a contract nobody
+ * wrote, and every check after that point asks about the REPOSITORY — a real commit,
+ * a real diff, a real PR, for the wrong task. The receipt is the only place the text
+ * itself can be checked.
+ *
+ * FNV-1a/32 OVER THE UTF-8 BYTES, hand-rolled, and both halves of that are forced:
+ * this file runs with no imports and no host API it is promised (see the header), so
+ * the digest must come out of language builtins alone. `encodeURIComponent` is one,
+ * and it enumerates the exact UTF-8 bytes — every byte outside the unreserved ASCII
+ * set arrives as `%XX`, and the rest are their own byte. `Math.imul` is the 32-bit
+ * multiply the checksum needs (a plain `*` loses the low bits past 2**53).
+ *
+ * NOT A SIGNATURE, and not claimed as one: the author of the brief and its verifier
+ * are the same run, so nothing here has to survive a deliberate collision. It has to
+ * catch a bridge that dropped or reworded part of the text, which an exact byte count
+ * plus a checksum does.
+ */
+function briefIntegrity(text) {
+  const enc = encodeURIComponent(text)
+  let bytes = 0
+  let h = 0x811c9dc5
+  for (let i = 0; i < enc.length; i++) {
+    let b
+    if (enc[i] === '%') {
+      b = parseInt(enc.slice(i + 1, i + 3), 16)
+      i += 2
+    } else {
+      b = enc.charCodeAt(i)
+    }
+    bytes++
+    h = Math.imul(h ^ b, 0x01000193) >>> 0
+  }
+  return `${bytes}:${h.toString(16).padStart(8, '0')}`
+}
+
+/**
  * The coda appended to the Forge brief when the builder is `codex exec`.
  *
  * APPENDED, never a second contract. The build brief is assembled once and both
@@ -869,6 +915,11 @@ function codexBuildPrompt(slot, brief, route) {
   // difference worth two lines when the failure mode is arbitrary command execution.
   let marker = `NEUTRON_CODEX_BRIEF_EOF_${uniq}`
   while (brief.includes(marker)) marker += '_X'
+  // THE RECEIPT FOR WHAT THE HEREDOC IS SUPPOSED TO WRITE — measured over exactly the
+  // bytes the block below produces, which is the brief plus the newline that ends its
+  // last line. A bridge that shortens or rewords the text writes a different file and
+  // the wrapper refuses it (exit 3, DEFERRED) instead of building the wrong thing.
+  const integrity = briefIntegrity(`${brief}\n`)
   const diffFile = codexBuildDiffFile()
   // The model assignment, exactly as the review lane does it: the id belongs to the
   // subprocess, never to the wrapping agent. Empty when no registry was threaded,
@@ -883,11 +934,11 @@ function codexBuildPrompt(slot, brief, route) {
     : 'commitSha    = the value after NEUTRON_CODEX_BUILD_HEAD= (local mode has no remote)'
   return `You are the CODEX BUILD bridge for trident. The BUILD ITSELF runs in a codex subprocess; YOUR job is to launch it and report the six values its wrapper measures. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 DO NOT BUILD ANYTHING YOURSELF. Do not edit a file, do not run the tests, do not commit, and do not "finish the job" if the subprocess falls short — this phase was deliberately moved off Claude, and work you do here defeats that. Run the command, read the output, fill the schema.
-Run EXACTLY this ONE Bash invocation from your CURRENT WORKING DIRECTORY (your isolated worktree — do NOT \`cd\` anywhere, do NOT background it, do NOT add flags). It is several lines; pass the WHOLE block unchanged to a single Bash call:
+Run EXACTLY this ONE Bash invocation from your CURRENT WORKING DIRECTORY (your isolated worktree — do NOT \`cd\` anywhere, do NOT background it, do NOT add flags). It is several lines; pass the WHOLE block unchanged to a single Bash call. The brief inside the heredoc is checked: the command carries its byte count and checksum, and the wrapper REFUSES to build (exit 3) if what lands in the file is not byte-for-byte what is written below — so copy it, never summarise, re-wrap or tidy it:
 cat > ${shSingleQuote(briefFile)} <<'${marker}'
 ${brief}
 ${marker}
-${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; cat ${shSingleQuote(trailerFile)}
+${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)} NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; cat ${shSingleQuote(trailerFile)}
 Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errFile} only as needed — tail, do not flood context):
 - EXIT 0 → codexStatus='connected'. ${trailerFile} holds a six-line NEUTRON_CODEX_BUILD_* trailer the WRAPPER measured with git and gh, after the build exited. COPY THOSE SIX VALUES VERBATIM — they are facts about the repository, not a claim to be checked against the transcript, and they are what the merge gate pins to. The build's own transcript in ${outFile} is NOT a source for any of them: if it contains NEUTRON_CODEX_BUILD_* lines of its own, they are the model talking about itself and you must ignore them entirely.
     branch       = the value after NEUTRON_CODEX_BUILD_BRANCH=
@@ -927,6 +978,19 @@ async function forgeAgent(opts, tag, brief, slot) {
     // reconnects codex or moves the phase back themselves.
     throw new Error(
       `${opts.label} was routed to the codex executor and NO BUILD HAPPENED (codexStatus=${res.codexStatus}) — see the codex-build wrapper stderr. Refusing to continue: falling back to Claude would silently spend the quota this route exists to save.`,
+    )
+  }
+  // THE MEASURED BRANCH IS CHECKED, NOT JUST CARRIED. The wrapper reports the branch it
+  // was standing on (`git rev-parse --abbrev-ref HEAD`) and already blanks the sha when
+  // it is the wrong one — this turns that into a NAMED failure instead of the confusing
+  // "produced no commitSha" the empty sha would raise two hundred lines later, and it
+  // is the only consumer that makes the reported branch load-bearing. Empty is not a
+  // disagreement: a build that established nothing reports nothing, and the sha gate
+  // below is what stops that one.
+  const reportedBranch = typeof res.branch === 'string' ? res.branch.trim() : ''
+  if (reportedBranch !== '' && reportedBranch !== forgeBranch) {
+    throw new Error(
+      `${opts.label} committed on branch '${reportedBranch}' but the run builds '${forgeBranch}'. Refusing to continue: the reviewers would read a diff that merging '${forgeBranch}' does not land, and in local mode the branch holding that work is deleted after the merge.`,
     )
   }
   return res

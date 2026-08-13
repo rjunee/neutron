@@ -75,6 +75,8 @@ async function runWorkflow(
     buildProduces?: { commitSha?: string; diffFile?: string }
     /** The PR number round 1 reports. Default null (the local-mode shape). */
     buildPr?: number
+    /** The branch the build reports having committed on. Default the run's own. */
+    buildBranch?: string
     /** Ralph's planner says this many tasks remain AFTER the one being built. */
     remainingTasks?: number
   } = {},
@@ -90,7 +92,7 @@ async function runWorkflow(
       const empty = opts.buildProduces !== undefined && label === 'forge:build'
       const built = {
         prNumber: opts.buildPr ?? null,
-        branch: 'trident/a-run',
+        branch: opts.buildBranch ?? 'trident/a-run',
         // A build that ran and produced NOTHING is the wrapper's honest answer, not a
         // malformed one: it measures with git and emits EMPTY rather than wrong.
         diffFile: empty ? (opts.buildProduces?.diffFile ?? '') : '/tmp/x.diff',
@@ -160,7 +162,11 @@ async function runWorkflow(
   // Every healthy run reaches synthesis, so a workflow that silently stopped early
   // cannot pass a test by dispatching nothing. `buildProduces` is the one case that
   // is SUPPOSED to stop before the panel, and it asserts that itself.
-  if (opts.buildProduces === undefined && opts.remainingTasks === undefined) {
+  if (
+    opts.buildProduces === undefined &&
+    opts.remainingTasks === undefined &&
+    opts.buildBranch === undefined
+  ) {
     expect(synthCount).toBeGreaterThan(0)
   }
   return { captured, logs, result }
@@ -349,15 +355,81 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(cmd.indexOf(`\n${collide}\n`)).toBeLessThan(cmd.indexOf(`\n${chosen}\n`))
   })
 
-  test('the bridge is told not to build, so the phase cannot leak back onto Claude', async () => {
-    // The workflow runtime hands this script `agent()` and nothing else, so a
-    // subprocess is only reachable through a thin Claude agent — the same shape the
-    // codex REVIEW seat has had all along. That agent's whole job is to run one
-    // command and copy six measured values; an agent that decided to finish the build
-    // itself would put the expensive phase straight back on Anthropic.
+  test('the bridge is given a launcher prompt, not a build brief — and told so', async () => {
+    // WHAT THIS TEST CAN AND CANNOT SHOW, since the name used to overclaim it. The
+    // workflow runtime hands this script `agent()` and nothing else, so a subprocess
+    // is only reachable through a thin Claude agent. Nothing at runtime can stop that
+    // agent from editing a file — it holds the same tools in the same worktree. What
+    // is checkable, and checked here, is that it is given no reason or material to:
+    // the instruction is explicit, the prompt carries no build contract of its own,
+    // and every value it may report comes from a file the wrapper wrote.
+    const { captured } = await runWorkflow(productionArgs(CODEX_BUILD))
+    const build = captured.find((c) => c.label === 'forge:build')!
+    const cmd = build.prompt
+    expect(cmd).toContain('DO NOT BUILD ANYTHING YOURSELF')
+    expect(cmd).toContain('Do not edit a file, do not run the tests, do not commit')
+    // The bridge's OWN task is one command. The build contract exists in the prompt
+    // only as heredoc payload addressed to codex — never as an instruction to the
+    // agent reading it — so what surrounds it must say launch, not build.
+    expect(cmd).toContain('Run EXACTLY this ONE Bash invocation')
+    expect(cmd).toContain('YOUR job is to launch it')
+    // The six values are read from the WRAPPER'S trailer file, and the transcript is
+    // named as a non-source. A bridge that built something itself still has nowhere to
+    // report it from: every field it may fill names that file.
+    expect(cmd).toContain('COPY THOSE SIX VALUES VERBATIM')
+    expect(cmd).toContain('is NOT a source for any of them')
+    // And it is handed NO Anthropic build model or effort — the phase's tokens are
+    // not budgeted here (the positive control lives in the test above).
+    expect({ model: build.opts['model'] ?? null, effort: build.opts['effort'] ?? null }).toEqual({
+      model: null,
+      effort: null,
+    })
+  })
+
+  test('the brief travels with a RECEIPT, so a bridge that mangles it cannot build', async () => {
+    // The one part of this route that an LLM has to reproduce byte-for-byte. A bridge
+    // that truncates or paraphrases the heredoc hands codex a contract nobody wrote,
+    // and every check after that point asks about the repository — it would come back
+    // with a real sha, a real diff and a real PR for the wrong task.
     const { captured } = await runWorkflow(productionArgs(CODEX_BUILD))
     const cmd = promptFor(captured, 'forge:build')
-    expect(cmd).toContain('DO NOT BUILD ANYTHING YOURSELF')
+    const receipt = /NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY='(\d+):([0-9a-f]{8})'/.exec(cmd)
+    expect(receipt).not.toBeNull()
+    // IT DESCRIBES THE BYTES THE HEREDOC ACTUALLY WRITES, not some other string. Pull
+    // the payload back out of the command and measure it the way the wrapper does.
+    const marker = /<<'(NEUTRON_CODEX_BRIEF_EOF_[A-Za-z0-9_-]+)'\n/.exec(cmd)![1]!
+    const start = cmd.indexOf(`<<'${marker}'\n`) + `<<'${marker}'\n`.length
+    const written = cmd.slice(start, cmd.indexOf(`\n${marker}\n`, start) + 1)
+    expect(Buffer.byteLength(written, 'utf8')).toBe(Number(receipt![1]))
+    // Non-trivially long: a receipt for an empty brief would satisfy the equality
+    // above and mean nothing.
+    expect(Buffer.byteLength(written, 'utf8')).toBeGreaterThan(1000)
+    expect(written).toContain('You are FORGE')
+    // The bridge is TOLD the check exists, so a model inclined to tidy the block has a
+    // reason not to.
+    expect(cmd).toContain('REFUSES to build (exit 3)')
+    // A DIFFERENT brief gets a DIFFERENT receipt — the value is a function of the
+    // text, not a constant that happens to match.
+    const other = await runWorkflow({ ...productionArgs(CODEX_BUILD), task: 'build something else' })
+    const otherReceipt = /NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY='([^']+)'/.exec(
+      promptFor(other.captured, 'forge:build'),
+    )![1]
+    expect(otherReceipt).not.toBe(`${receipt![1]}:${receipt![2]}`)
+  })
+
+  test('a build reported on the WRONG BRANCH stops the run instead of being reviewed', async () => {
+    // The wrapper already blanks the sha when it measures the wrong branch; this is
+    // the workflow half, and it is what makes the reported branch load-bearing rather
+    // than decorative. In local mode the failure it prevents is silent: the reviewers
+    // read a real diff, `git merge --no-ff <branch>` then lands nothing, and the
+    // branch that held the work is deleted straight afterwards.
+    const { result, captured, logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      buildBranch: 'trident/some-other-branch',
+    })
+    expect(result['ok']).toBe(false)
+    expect(logs.some((l) => l.includes('trident/some-other-branch'))).toBe(true)
+    // No reviewer was paid to read a diff the merge cannot land.
+    expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
   })
 
   test('a Ralph task tagged [mechanical] goes to codex too — one row, both build phases', async () => {
@@ -391,21 +463,45 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(plain.logs.some((l) => l.includes('override=owner'))).toBe(false)
   })
 
-  test('an explicit build_mechanical entry still wins over the mirrored one', async () => {
-    // Mirroring is a default, not an override. A config that names the more specific
-    // key meant it — otherwise an owner who deliberately kept the cheap mechanical
-    // lane on Claude could not express that.
+  test('a stored build_mechanical entry cannot hold the mechanical build on Claude', async () => {
+    // THE ROW THAT DOES NOT EXIST CANNOT OUTVOTE THE ONE THAT DOES. `build_mechanical`
+    // is never rendered, so a value stored against it — by an older build, or by hand
+    // — is one the owner can neither see nor clear. Honouring it kept every
+    // `[mechanical]` task on Anthropic after Build was moved to codex, with the pane
+    // showing the codex tier and nothing anywhere admitting the difference.
+    //
+    // TWO LAYERS, asserted separately because either alone would leave a hole.
+    // First: the typed boundary drops the key, so the production launcher never
+    // forwards it.
+    const args = productionArgs({
+      build: { model: 'terra' },
+      build_mechanical: { model: 'sonnet', effort: 'low' },
+    })
+    expect(args['phaseModels']).toEqual({ build: { model: 'terra' } })
+
+    // Second: even handed the key directly — a blob threaded by something that skipped
+    // validation — the workflow ignores it and mirrors `build`.
     const { captured } = await runWorkflow(
-      productionArgs(
-        { build: { model: 'terra' }, build_mechanical: { model: 'sonnet', effort: 'low' } },
-        { ralph: true },
-      ),
+      {
+        ...productionArgs({ build: { model: 'terra' } }, { ralph: true }),
+        phaseModels: { build: { model: 'terra' }, build_mechanical: { model: 'sonnet', effort: 'low' } },
+      },
       { complexity: 'mechanical' },
     )
     const build = captured.find((c) => c.label === 'forge:build')!
-    expect(build.prompt).not.toContain('codex-build.sh')
-    expect(build.opts['model']).toBe(SONNET_MODEL)
-    expect(build.opts['effort']).toBe('low')
+    expect(build.prompt).toContain("bash '/repo/trident/codex-build.sh'")
+    expect(build.prompt).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
+    // No Anthropic model, and no effort from the ignored entry, on the wrapping agent.
+    expect({ model: build.opts['model'] ?? null, effort: build.opts['effort'] ?? null }).toEqual({
+      model: null,
+      effort: null,
+    })
+    // The CONTROL that keeps the assertion honest: SONNET_MODEL is what this dispatch
+    // carries when nothing moved it, so "no Anthropic model" above is a real absence.
+    const plain = await runWorkflow(productionArgs(null, { ralph: true }), {
+      complexity: 'mechanical',
+    })
+    expect(plain.captured.find((c) => c.label === 'forge:build')!.opts['model']).toBe(SONNET_MODEL)
   })
 
   test('a FIX round lands on the same executor as round 1', async () => {

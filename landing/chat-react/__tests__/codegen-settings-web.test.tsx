@@ -146,6 +146,17 @@ const TIERS = [
     available: false,
     unavailable_reason: 'needs a Codex connection',
   },
+  {
+    // THE THIRD EXECUTOR, untouched by this lane and kept in the fixture so the
+    // greying rule is still exercised against a group no row here can reach.
+    tier: 'k3',
+    provider: 'moonshot',
+    model_id: 'kimi-k3',
+    group: 'kimi',
+    effort_supported: false,
+    available: false,
+    unavailable_reason: 'needs a Kimi key',
+  },
 ]
 
 function payload(
@@ -302,6 +313,13 @@ describe('the display + edit rules', () => {
     // says so — "go connect codex" is actionable, "wrong executor" would not be.
     expect(choices.find((c) => c.tier === 'luna')!.selectable).toBe(false)
     expect(choices.find((c) => c.tier === 'luna')!.reason).toBe('needs a Codex connection')
+    // ONLY WHAT IS WIRED. The Kimi tier on the very same row is still greyed, and for
+    // the wiring reason rather than a missing key — this lane moved the build to one
+    // executor, and an un-greyed option that dispatches nowhere is the worse defect.
+    expect(choices.find((c) => c.tier === 'k3')!.selectable).toBe(false)
+    expect(choices.find((c) => c.tier === 'k3')!.reason).toContain(
+      'Kimi is not wired for this step yet',
+    )
   })
 
   it('moving the BUILD row to codex DROPS the effort — the pair fails the save', () => {

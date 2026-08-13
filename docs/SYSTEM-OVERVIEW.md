@@ -2861,12 +2861,27 @@ generation"), mobile `app/app/codegen.tsx`, both over
     survives between rounds, and an unrewritten one would point the panel at an
     earlier round's diff — and when a build DID commit and wrote no diff, the wrapper
     takes `git diff <base>..HEAD` itself rather than reporting a path it just deleted.
-    Every remote probe is wall-clock bounded, `gh` included: `emit_trailer` runs on the
-    failure path too, so an unbounded call there hangs the phase instead of losing a
-    field. `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
+    A head measured on the WRONG BRANCH is empty for the same reason a missing commit
+    is: a wrong-branch commit passes every later gate while `git merge --no-ff
+    <branch>` lands none of it, and local mode then deletes the branch that held it.
+    The measured branch name still ships and `forgeAgent` compares it, so the run stops
+    naming the branch instead of reporting an unexplained missing sha. Every remote
+    probe is wall-clock bounded and reads THROUGH A FILE — `gh pr list`, both
+    `git ls-remote` probes and the auth precheck, all through one `bounded()` helper:
+    `emit_trailer` runs on the failure path too, so an unbounded call there hangs the
+    phase instead of losing a field, and `$(…)` returns when the PIPE closes rather
+    than when the process exits, which is why the alarm alone was not a bound. `perl`
+    is a declared dependency of the wrapper, refused by name rather than surfacing as
+    a false "auth expired". `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
     remote tip equals it — because a fresh probe of a shared ref is what
     `inner-workflow.mjs` forbids for `reviewedHead`: a third-party push read back there
     would be pinned by `--match-head-commit` and certified as reviewed.
+  - **The brief carries a receipt.** The workflow reaches a shell only through a bridge
+    agent that must reproduce the whole brief in a heredoc, so the command ships
+    `<bytes>:<fnv32>` for exactly those bytes and the wrapper recomputes both before
+    spending a token — a truncated or reworded brief is DEFERRED rather than built.
+    FNV-1a/32 because the composing script has no imports and no promised host API; it
+    is a corruption check, not a signature.
   - **No fallback to Claude, and no review of nothing.** A lane reporting
     `not_connected`/`deferred` stops the run with the status named — re-Forging on
     Opus would spend the quota the owner moved the phase to protect, invisibly. A lane
@@ -2902,12 +2917,16 @@ generation"), mobile `app/app/codegen.tsx`, both over
   an executable REGULAR FILE — `X_OK` alone passes for any directory named `codex`),
   because the wrapper hard-fails on a missing credential and on a missing CLI alike —
   so the pane and the run cannot disagree.
-- **One step is never two rows.** `build_mechanical` is the build step under the
-  planner's internal `[mechanical]` tag; it DECLARES that it follows `build`
-  (`TridentPhase.follows`), the workflow's `phaseOverrideFor` hands it `build`'s
-  setting when it has none of its own, and the surface does not render it. Both halves
-  are required: inheriting without hiding is a row showing `sonnet` beside a run that
-  dispatched the owner's codex tier.
+- **One step is never two rows, and a follower is never settable.**
+  `build_mechanical` is the build step under the planner's internal `[mechanical]`
+  tag; it DECLARES that it follows `build` (`TridentPhase.follows`), the workflow's
+  `phaseOverrideFor` hands it `build`'s setting UNCONDITIONALLY, and neither the
+  surface's `phases` nor its `defaults` renders it. All three are required: inheriting
+  without hiding is a row showing `sonnet` beside a run that dispatched the owner's
+  codex tier, and hiding the row while still accepting a value for the key leaves a
+  stored override the owner can neither see nor clear — which kept `[mechanical]`
+  tasks on Anthropic after Build moved to codex. `parsePhaseModelConfig` rejects the
+  key by name, so the PUT 400s and the read path drops a value stored before the rule.
 - **A refused stored value degrades visibly.** `model` must name a tier (the old
   literal-id escape hatch is closed: a bare id carries no transport). A retired tier
   or a legacy literal is rejected at the boundary, the phase falls back to its

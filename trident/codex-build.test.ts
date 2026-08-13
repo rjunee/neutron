@@ -28,13 +28,43 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
+
+/**
+ * The WORKFLOW'S OWN receipt function, lifted out of the script that composes the
+ * brief and used here to hand the wrapper what production hands it.
+ *
+ * LIFTED RATHER THAN REIMPLEMENTED, and that is the point of doing it this way: the
+ * receipt is computed in JavaScript by `trident/inner-workflow.mjs` and recomputed in
+ * perl by the wrapper, and two implementations of a checksum that never meet is
+ * exactly how a check ends up rejecting every honest brief. Every `run()` below
+ * therefore exercises both halves against each other on real bytes.
+ */
+function loadBriefIntegrity(): (text: string) => string {
+  const src = readFileSync(join(HERE, 'inner-workflow.mjs'), 'utf8')
+  const start = src.indexOf('function briefIntegrity(')
+  if (start < 0) throw new Error('inner-workflow.mjs no longer defines briefIntegrity()')
+  const end = src.indexOf('\n}\n', start)
+  if (end < 0) throw new Error('could not find the end of briefIntegrity()')
+  return new Function(`${src.slice(start, end + 2)}; return briefIntegrity`)() as (
+    t: string,
+  ) => string
+}
+const briefIntegrity = loadBriefIntegrity()
 // Spawn bash by ABSOLUTE path: the CLI-absent case runs with a PATH containing only
 // the mock bin, so `bash` could not be resolved from it.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
@@ -48,6 +78,15 @@ interface RunOpts {
   codexLoginExit?: number | null
   /** The brief handed in. `null` → no brief file at all. */
   brief?: string | null
+  /**
+   * The receipt handed in for that brief. Undefined → the one the WORKFLOW would
+   * compute (the production case); `null` → none at all; a string → a wrong one.
+   */
+  integrity?: string | null
+  /** PATH holds ONLY the mock bin — no perl, no git, nothing from the system. */
+  bareBin?: boolean
+  /** Put a `git` on PATH that never returns for `ls-remote`, and delegates otherwise. */
+  hangingLsRemote?: boolean
   /** Content for the diff file the brief was told to write. `null` → never written. */
   diff?: string | null
   /** Seed the repo with a commit BEFORE the wrapper runs (the base state). Default true. */
@@ -114,7 +153,22 @@ function run(opts: RunOpts = {}): RunResult {
 
   const bin = join(dir, 'bin')
   mkdirSync(bin, { recursive: true })
-  const path = opts.codexLoginExit === null ? bin : `${bin}${delimiter}/usr/bin${delimiter}/bin`
+  const path =
+    opts.codexLoginExit === null || opts.bareBin === true
+      ? bin
+      : `${bin}${delimiter}/usr/bin${delimiter}/bin`
+
+  if (opts.hangingLsRemote === true) {
+    // A `git` that WEDGES on `ls-remote` and passes everything else through. Real git
+    // for every local measurement, an unanswerable remote for the two probes that
+    // talk to one — which is the shape of a remote that is up but not responding.
+    const shim = join(bin, 'git')
+    writeFileSync(
+      shim,
+      '#!/bin/sh\nfor a in "$@"; do [ "$a" = "ls-remote" ] && sleep 120; done\nexec /usr/bin/git "$@"\n',
+    )
+    chmodSync(shim, 0o755)
+  }
 
   if (opts.codexLoginExit !== null && opts.codexLoginExit !== undefined) {
     const mock = join(bin, 'codex')
@@ -165,6 +219,12 @@ function run(opts: RunOpts = {}): RunResult {
     writeFileSync(bf, brief)
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = bf
   }
+  // THE RECEIPT THE WORKFLOW WOULD HAVE SENT, computed by the workflow's own function
+  // — so the default path here is the production path, and the wrapper's perl
+  // recomputation is checked against the JS one on every single case in this file.
+  const integrity =
+    opts.integrity === undefined ? briefIntegrity(brief ?? '') : opts.integrity
+  if (integrity !== null) env['NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY'] = integrity
   const diff = opts.diff === undefined ? 'diff --git a/x b/x\n+change\n' : opts.diff
   const diffFile = join(dir, 'branch.diff')
   if (diff !== null) writeFileSync(diffFile, diff)
@@ -263,6 +323,9 @@ function rerun(
       CODEX_HOME: join(r.dir, 'codexhome'),
       NEUTRON_CODEX_AUTH_RETRY_DELAY: '0',
       NEUTRON_CODEX_BUILD_BRIEF_FILE: join(r.dir, 'build.brief'),
+      NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY: briefIntegrity(
+        readFileSync(join(r.dir, 'build.brief'), 'utf8'),
+      ),
       NEUTRON_CODEX_BUILD_TRAILER_FILE: trailerFile,
       NEUTRON_CODEX_BUILD_EXEC_CMD: execCmd,
     },
@@ -296,6 +359,17 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     expect(stderr).toContain('CODEX_BUILD_AUTH_EXPIRED')
   })
 
+  test('no `perl` → exit 3 NAMING perl, not a false report of expired auth', () => {
+    // Every bounded call in the wrapper is `perl -e alarm`, so a box without perl
+    // fails the auth precheck three times and reports invalid credentials — a
+    // true-sounding lie that sends the operator to re-run `codex login` forever. The
+    // dependency is checked beside the CLI and refused by name.
+    const { status, stderr } = run({ authed: true, codexLoginExit: 0, bareBin: true })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_BUILD_NO_PERL')
+    expect(stderr).not.toContain('AUTH_EXPIRED')
+  })
+
   test('NO BRIEF → exit 3, and codex is never launched', () => {
     // An empty prompt inside a real worktree with full write access is the one input
     // that must never reach the model: it would invent a task and commit it.
@@ -314,6 +388,73 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     const { status, stderr } = run({ authed: true, codexLoginExit: 0, brief: '' })
     expect(status).toBe(3)
     expect(stderr).toContain('CODEX_BUILD_NO_BRIEF')
+  })
+
+  test('a TRUNCATED brief → exit 3, and codex is never launched', () => {
+    // NON-EMPTY IS NOT INTACT, and this is the gap that made the check necessary: the
+    // brief reaches this file through a bridge agent that had to retype it into a
+    // heredoc. A shortened one still buys a full build and comes back with a real sha
+    // for a contract nobody wrote — nothing downstream can see it, because every gate
+    // after this point asks about the repository.
+    const whole = `${DEFAULT_BRIEF}Then run the tests, commit, and open a PR.\n`
+    const { status, stderr, codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      brief: DEFAULT_BRIEF,
+      integrity: briefIntegrity(whole),
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    // The message carries both measurements, so the failure is diagnosable from a log.
+    expect(stderr).toContain(briefIntegrity(DEFAULT_BRIEF))
+    expect(stderr).toContain(briefIntegrity(whole))
+    expect(codexStdin).toBe('')
+  })
+
+  test('a brief REWORDED to the same length is still refused', () => {
+    // The byte count alone would pass this one. The checksum is what makes "the same
+    // size" and "the same text" different questions.
+    const original = 'Build the parser and its tests.\n'
+    const reworded = 'Build the parser and its specs.\n'
+    expect(reworded.length).toBe(original.length)
+    const { status, stderr } = run({
+      authed: true,
+      codexLoginExit: 0,
+      brief: reworded,
+      integrity: briefIntegrity(original),
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+  })
+
+  test('NO RECEIPT AT ALL → exit 3, never a build that skips the check', () => {
+    // Optional-with-a-skip would switch the check off on exactly the call path that
+    // lost the bytes — a caller that dropped the receipt is the one to distrust.
+    const { status, stderr, codexStdin } = run({
+      authed: true,
+      codexLoginExit: 0,
+      integrity: null,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(status).toBe(3)
+    expect(stderr).toContain('CODEX_BUILD_NO_BRIEF_INTEGRITY')
+    expect(codexStdin).toBe('')
+  })
+
+  test('the WORKFLOW\'S receipt is accepted by the WRAPPER — the two agree on real bytes', () => {
+    // THE CROSS-IMPLEMENTATION CHECK. The receipt is computed in JavaScript by
+    // `inner-workflow.mjs` and recomputed in perl here; two implementations of a
+    // checksum that never meet is how a gate ends up rejecting every honest brief and
+    // stopping every build. `briefIntegrity` above is lifted from the workflow source,
+    // so this is the real pair — exercised on the bytes most likely to split them:
+    // multi-byte UTF-8, percent signs, backticks and quotes.
+    const brief = "Fix the encoder: 100% of `café — naïve` cases, ✅ don't guess.\n"
+    // No exec seam here: the mock `codex` itself records what it was handed, which is
+    // how "the check let the build through" is observed rather than assumed.
+    const { status, codexStdin } = run({ authed: true, codexLoginExit: 0, brief })
+    expect(status).toBe(0)
+    expect(codexStdin).toBe(brief)
   })
 
   test('NO TRAILER FILE → exit 3 BEFORE codex is launched, not after', () => {
@@ -394,10 +535,12 @@ describe('the BRIEF is what codex is asked to build', () => {
     // What this proves is the ARGV — that the grant is explicit and not left to the
     // CLI's read-only default. That a narrower policy could not commit or push is
     // reasoning recorded in the script header, not something this assertion measures.
-    const { codexArgv } = run({ authed: true, codexLoginExit: 0 })
-    expect(codexArgv).toContain('--sandbox\ndanger-full-access')
-    // …and codex is rooted in THIS worktree, not wherever it would infer a root.
-    expect(codexArgv).toContain('--cd\n')
+    const r = run({ authed: true, codexLoginExit: 0 })
+    expect(r.codexArgv).toContain('--sandbox\ndanger-full-access')
+    // …and codex is rooted in THIS worktree, BY NAME. Asserting only that `--cd` is
+    // present would stay green if the value became `/tmp` — codex would run outside
+    // the checkout, which is the failure the flag exists to prevent.
+    expect(r.codexArgv).toContain(`--cd\n${realpathSync(r.dir)}\n`)
   })
 
   test('a metered API key is scrubbed before the build runs — subscription OAuth only', () => {
@@ -470,6 +613,34 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     expect(second.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
     // Emphatically: round one's sha is nowhere in round two's trailer.
     expect(second.trailerRaw).not.toContain(roundOne)
+  })
+
+  test('a commit made on the WRONG BRANCH reports an empty sha, and names the branch', () => {
+    // EMPTY RATHER THAN WRONG, applied to the field that decides where the work lives.
+    // A build that wandered onto another branch and committed there produces a real
+    // sha and a real diff — and the run cannot merge either: `git merge <branch>`
+    // lands nothing, and in local mode the branch holding the work is deleted right
+    // after. Handing the sha over would put five reviewers on a diff that evaporates.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        NEUTRON_CODEX_BUILD_EXEC_CMD: `cat >/dev/null; git switch -q -c not-the-branch; ${FAKE_BUILD_NO_DIFF}`,
+      },
+    })
+    // The commit is REAL — the wrapper is suppressing a sha that exists, not reporting
+    // an absence it would have reported anyway.
+    const wrongHead = spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: r.dir,
+      encoding: 'utf8',
+    }).stdout.trim()
+    expect(wrongHead).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    expect(r.trailerRaw).not.toContain(wrongHead)
+    // …and the trailer SAYS where it ended up, so the failure names itself instead of
+    // arriving downstream as an unexplained missing sha.
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('not-the-branch')
   })
 
   test('a re-entry that switches AND commits still reports its own sha', () => {
@@ -739,6 +910,32 @@ chmod 755 "$HOME/bin/gh"`,
     // …with the PR number empty, because the probe was cut off rather than answered.
     expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
   }, 90_000)
+
+  test('a HANGING `git ls-remote` costs the run a fact, never the build phase', () => {
+    // THE SAME BOUND AS `gh`, on the two probes that were still inside a command
+    // substitution. `$(…)` returns when the PIPE closes, not when the process exits,
+    // so an alarm that killed the process did nothing while a child still held stdout
+    // — the wrapper waited on the remote forever and the build phase with it. Both
+    // probes run here: one before the launch (the re-entry baseline) and one after
+    // (the pushed-sha witness), against a git that answers everything except
+    // `ls-remote`.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      hangingLsRemote: true,
+      // Well short of the mock's 120s. WHICH of the two happened is the assertion — a
+      // signal means the bound did not hold — not how long it took.
+      spawnTimeoutMs: 60_000,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.signal).toBeNull()
+    expect(r.status).toBe(0)
+    // The local measurement is unaffected: the build's own commit is still reported.
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe('')
+    // …and the one fact the remote owed us is empty rather than guessed.
+    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    expect(Object.keys(r.trailer)).toHaveLength(6)
+  }, 120_000)
 
   test('the trailer is emitted on the FAILURE path too', () => {
     // A codex run that died after committing still left work on the branch, and the

@@ -209,17 +209,60 @@ describe('the workflow reads the argument this module produces', () => {
     // The table must actually declare one, or every assertion below is vacuous.
     expect(declared.map((p) => `${p.key}<-${p.follows}`)).toEqual(['build_mechanical<-build'])
     for (const phase of declared) {
+      // MATCHED AS A PATTERN, not as a literal block of source. The previous version
+      // pinned a multi-line substring including its indentation, so a reformat broke
+      // the guard with no behaviour change — and a guard that cries wolf gets deleted.
       expect(
-        WORKFLOW_SRC.includes(
-          `phaseKey === '${phase.key}' && threadedPhaseModels['${phase.key}'] === undefined\n    ? threadedPhaseModels['${phase.follows!}']`,
-        ),
+        new RegExp(
+          `phaseKey === '${phase.key}'\\s*\\?\\s*threadedPhaseModels\\['${phase.follows!}'\\]`,
+        ).test(WORKFLOW_SRC),
       ).toBe(true)
+      // AND THE MIRROR IS UNCONDITIONAL. A read of the follower's OWN key would give a
+      // stored-but-unrenderable entry precedence over the row the owner can actually
+      // see — the setting would be pinned somewhere they cannot reach it.
+      expect(WORKFLOW_SRC.includes(`threadedPhaseModels['${phase.key}']`)).toBe(false)
     }
     // And a phase with NO `follows` must not be quietly inheriting anyway.
     for (const phase of TRIDENT_PHASES) {
       if (phase.follows !== undefined) continue
-      expect(WORKFLOW_SRC.includes(`phaseKey === '${phase.key}' &&`)).toBe(false)
+      expect(new RegExp(`phaseKey === '${phase.key}'\\s*(\\?|&&)`).test(WORKFLOW_SRC)).toBe(false)
     }
+  })
+
+  it('implements every `alsoRunsOn` the table declares, and no other', () => {
+    // THE SECOND RULE THAT LIVES IN TWO PLACES, and it had no guard while the module
+    // header claimed one. `alsoRunsOn` is what makes a tier from another executor
+    // SELECTABLE for a phase; the workflow's route for that phase has to carry the
+    // same list, or `applyPhaseOverride` logs IGNORED and the owner's pick dispatches
+    // nowhere — a settable option that does nothing, which is worse than a greyed one.
+    const declared = TRIDENT_PHASES.filter((p) => (p.alsoRunsOn?.length ?? 0) > 0)
+    // Not vacuous: the table declares these today.
+    expect(declared.map((p) => p.key).sort()).toEqual(['build', 'build_mechanical'])
+    for (const phase of declared) {
+      // The route carrying this phase key must list the same groups.
+      const route = new RegExp(
+        `phaseKey: '${phase.key}'[^}]*alsoRunsOn: \\[([^\\]]*)\\]`,
+      ).exec(WORKFLOW_SRC)
+      expect({ key: phase.key, routed: route !== null }).toEqual({ key: phase.key, routed: true })
+      const groups = route![1]!
+        .split(',')
+        .map((g) => g.trim().replace(/^'|'$/g, ''))
+        .filter((g) => g.length > 0)
+      expect({ key: phase.key, groups }).toEqual({ key: phase.key, groups: [...phase.alsoRunsOn!] })
+      // …and every group named is one the workflow can actually DISPATCH: it needs a
+      // route of its own carrying that group, or the move lands on nothing.
+      for (const group of phase.alsoRunsOn!) {
+        expect(TIER_GROUPS).toContain(group)
+        expect(new RegExp(`group: '${group}'`).test(WORKFLOW_SRC)).toBe(true)
+      }
+    }
+    // A phase the table does NOT widen must not be widened in the workflow either —
+    // that direction un-greys nothing, but it would let an override past the group
+    // check that the pane would never have offered.
+    const widenedInWorkflow = [...WORKFLOW_SRC.matchAll(/phaseKey: '([a-z_]+)'[^}]*alsoRunsOn:/g)]
+      .map((m) => m[1]!)
+      .sort()
+    expect([...new Set(widenedInWorkflow)]).toEqual(declared.map((p) => p.key).sort())
   })
 })
 
@@ -328,21 +371,52 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(parsePhaseModelConfig({ build: { model: 'k3' } }).errors).toHaveLength(1)
   })
 
-  it('ACCEPTS a codex tier on the build phases — the executor they are now wired to', () => {
+  it('ACCEPTS a codex tier on the build row — the executor it is now wired to', () => {
     // The counterpart of the refusal above, and the reason this module grew
     // `alsoRunsOn`: the build dispatches to `trident/codex-build.sh` as well as to
-    // `agent()`, so a GPT tier on that row is a choice the run can honour. Both build
-    // rows, because they are the same dispatch under two complexity tags.
-    for (const key of ['build', 'build_mechanical']) {
-      for (const tier of ['sol', 'terra', 'luna']) {
-        const { config, errors } = parsePhaseModelConfig({ [key]: { model: tier } })
-        expect({ key, tier, errors }).toEqual({ key, tier, errors: [] })
-        expect(config).toEqual({ [key]: { model: tier } })
-      }
+    // `agent()`, so a GPT tier on that row is a choice the run can honour.
+    for (const tier of ['sol', 'terra', 'luna']) {
+      const { config, errors } = parsePhaseModelConfig({ build: { model: tier } })
+      expect({ tier, errors }).toEqual({ tier, errors: [] })
+      expect(config).toEqual({ build: { model: tier } })
     }
     // The Claude tiers still work on the same row — a second executor ADDS a choice,
     // it does not replace the default one.
     expect(parsePhaseModelConfig({ build: { model: 'sonnet' } }).errors).toEqual([])
+  })
+
+  it('REFUSES a follower phase outright, and DROPS one that was already stored', () => {
+    // `build_mechanical` has no row, so a value stored against it can never be seen or
+    // cleared — and the workflow would have kept the `[mechanical]` build on whatever
+    // it named while the pane showed the owner's codex tier on the only Build row
+    // there is. Refused on the WRITE (an error names the key)…
+    for (const entry of [{ model: 'sonnet' }, { model: 'terra' }, { effort: 'low' }, {}]) {
+      const { config, errors } = parsePhaseModelConfig({ build_mechanical: entry })
+      expect(config).toEqual({})
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toContain("phase 'build_mechanical' is not settable")
+      expect(errors[0]).toContain('build')
+    }
+    // …and DROPPED on the read, which is the migration: a blob persisted before this
+    // rule loses the follower entry and keeps everything else. The read path is the
+    // one that ignores `errors` and uses `config`.
+    const stored = parsePhaseModelConfig({
+      build: { model: 'terra' },
+      build_mechanical: { model: 'sonnet', effort: 'low' },
+    })
+    expect(stored.config).toEqual({ build: { model: 'terra' } })
+    // Never silently: the key is named, so the drop is visible to anything that reads
+    // errors (the settings PUT 400s with exactly this text).
+    expect(stored.errors).toHaveLength(1)
+    // The rule is the DECLARATION, not a hard-coded key.
+    for (const phase of TRIDENT_PHASES) {
+      const { errors } = parsePhaseModelConfig({ [phase.key]: { model: 'opus' } })
+      const settable = errors.every((e) => !e.includes('is not settable — it is the'))
+      expect({ key: phase.key, settable }).toEqual({
+        key: phase.key,
+        settable: phase.follows === undefined,
+      })
+    }
   })
 
   it('REJECTS an effort on a phase whose executor has no effort control', () => {
@@ -435,8 +509,17 @@ describe('validation rejects loudly rather than dropping quietly', () => {
 describe('the vocabulary a settings pane will render', () => {
   it('exposes defaults derived from the phase table, never restated', () => {
     const defaults = phaseModelDefaults()
-    expect(Object.keys(defaults).sort()).toEqual(TRIDENT_PHASES.map((p) => p.key).sort())
+    // ONE KEY PER ROW, and a follower is not a row: `build_mechanical` dispatches
+    // whatever `build` was set to, so shipping its own `sonnet` default would hand
+    // every client a key it cannot render and a value the run contradicts.
+    expect(Object.keys(defaults).sort()).toEqual(
+      TRIDENT_PHASES.filter((p) => p.follows === undefined)
+        .map((p) => p.key)
+        .sort(),
+    )
+    expect(defaults['build_mechanical']).toBeUndefined()
     for (const phase of TRIDENT_PHASES) {
+      if (phase.follows !== undefined) continue
       expect(defaults[phase.key]).toEqual({
         model: phase.default.tier,
         effort: phase.default.effort,

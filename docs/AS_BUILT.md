@@ -68,13 +68,42 @@ Five things make the measurement honest rather than merely measured:
   would then pin the merge to it and SUCCEED, certifying as reviewed a commit nobody
   read. The remote is a WITNESS for our own sha — reported only when the tip equals it,
   empty on every disagreement.
-- **Every remote probe is wall-clock bounded, `gh` included.** `emit_trailer` runs on
-  the FAILURE path too, so an unbounded call there does not merely lose a field — it
-  hangs the build phase forever and the DEFERRED report never reaches the bridge. The
-  `gh pr list` probe now carries the same 10-second alarm as the `git ls-remote` ones
-  beside it, and reads through a FILE rather than a command substitution: `$(…)`
-  returns when the pipe closes, not when the process exits, so a credential helper left
-  holding stdout would keep the substitution blocked long after the alarm fired.
+- **The branch is a GATE, not a field.** The wrapper reports the branch it was standing
+  on and also CHECKS it: a head measured on any branch other than the one the build was
+  asked for is reported EMPTY. A wrong-branch commit is real, so every downstream gate
+  accepts it — the panel reads a diff that `git merge --no-ff <branch>` will not land,
+  and in local mode the branch holding that work is deleted straight after the merge.
+  The measured name still ships, so the failure names itself; `forgeAgent` in
+  `inner-workflow.mjs` compares it and stops the run with that name rather than letting
+  an empty sha surface two hundred lines later as an unexplained "produced no
+  commitSha".
+- **Every remote probe is wall-clock bounded THROUGH A FILE — all four of them.**
+  `emit_trailer` runs on the FAILURE path too, so an unbounded call there does not
+  merely lose a field: it hangs the build phase forever and the DEFERRED report never
+  reaches the bridge. One `bounded()` helper now runs `gh pr list`, both `git ls-remote`
+  probes and the `codex login status` precheck under a `perl -e alarm` with stdout
+  REDIRECTED TO A FILE. The redirect is the half that makes the bound real — `$(…)`
+  returns when the PIPE closes, not when the process exits, so a child left holding
+  stdout kept the substitution blocked long after the alarm killed what it was waiting
+  for. Measured: a 30s command under `alarm 10` takes 30s inside `$( )` and 10s with the
+  redirect, and a wedged `ls-remote` used to take the whole phase down with it.
+- **`perl` is a declared dependency, refused by name.** Every bound above is `perl -e
+  alarm`, so a box without perl failed the auth precheck three times and reported
+  expired credentials — a true-sounding lie — while the pushed-sha probe silently came
+  back empty. It is checked beside the `codex` CLI and exits 3 saying so.
+- **The brief is COUNTED, because it arrives through an LLM.** The workflow cannot exec
+  anything; it reaches a shell only through a bridge agent that has to reproduce the
+  whole brief inside a heredoc, and a truncated or reworded one buys a full build and
+  returns a real sha for a contract nobody wrote — invisible to every later gate, which
+  all ask about the repository. So `codexBuildPrompt` ships `<bytes>:<fnv32>` for the
+  exact bytes the heredoc writes and the wrapper recomputes both before spending a
+  token; a mismatch or a missing receipt is DEFERRED (exit 3). FNV-1a/32 rather than
+  SHA-256 because the composing side has no imports and no host API it is promised —
+  the digest must come out of language builtins (`encodeURIComponent`, `Math.imul`).
+  It is not a signature and is not claimed as one: author and verifier are the same run.
+  `codex-build.test.ts` lifts the JS function out of the workflow source and runs it
+  against the wrapper's perl, so the two implementations are checked against each other
+  on real UTF-8 rather than trusted to agree.
 - **The diff path is CLEARED before launch — and regenerated when a build earns one.**
   It is handed in by the caller and survives between rounds, so a build that committed
   without rewriting it pointed the review panel at an earlier round's diff (the #545
@@ -110,6 +139,22 @@ disagreement `trident/phase-models.ts` exists to prevent — and "which of my tw
 rows applies" is not a question the owner can answer. The `.mjs` cannot import the
 registry, so `phase-model-coverage.test.ts` asserts the workflow implements exactly the
 `follows` pairs the table declares, and no others.
+
+A THIRD half turned out to be required, and it is the one that made hiding the row
+safe. Filtering the row out of `phases` left the stored VALUE alone: `overrides` shipped
+the whole map, both clients round-trip it verbatim, and the workflow gave an explicit
+`build_mechanical` entry precedence over the mirrored one — so a value written by an
+older build (or by hand) kept every `[mechanical]` task on Anthropic after the owner
+moved Build to codex, with no row to show it and no control to clear it. A follower
+phase is now NOT SETTABLE: `parsePhaseModelConfig` rejects the key by name, which 400s
+the PUT and — because the read path drops what it cannot use and continues — discards a
+stored one on the next read, which is the migration. `phaseModelDefaults()` omits it
+too, so the payload's `defaults` and `phases` are the same key set. The workflow's
+mirror is unconditional, and the drift guard asserts it never reads the follower's own
+key. `alsoRunsOn` got the drift guard the module header had been claiming for it: every
+group a phase declares must be carried by the route in the workflow and dispatchable
+there, or a future declaration would un-grey a tier that `applyPhaseOverride` silently
+ignores.
 
 **The sandbox grant is `danger-full-access`, deliberately.** `read-only` cannot edit a
 file. `workspace-write` writes only inside the workspace, and a build writes outside it

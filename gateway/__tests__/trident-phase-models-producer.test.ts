@@ -191,6 +191,11 @@ describe('the chain is actually connected — each link asserted separately', ()
     // and 11 with no CLI, so a pane that greyed on the credential alone would offer a
     // tier that dies at dispatch on a box where `codex` was never installed.
     expect(block.includes('codexCliOnPath(env)')).toBe(true)
+    // THE KIMI HALF IS UNTOUCHED BY THE BUILD MOVE, and it is asserted here so that
+    // stays true: the pane's answer and the trident launch's come from the one
+    // function, or a greyed row and a dispatching panelist disagree.
+    expect(block.includes('kimi: kimiConfigured()')).toBe(true)
+    expect(src.includes('resolve_kimi_configured: kimiConfigured')).toBe(true)
   })
 
   it('the HTTP surface is registered, not merely written', async () => {
@@ -262,6 +267,39 @@ describe('the HTTP surface', () => {
     // …and the key it follows IS one of the rows, or the setting it inherits could
     // never be made.
     expect(phases.some((p) => p.key === 'build')).toBe(true)
+    // EVERY MAP IN THE PAYLOAD OMITS IT TOO, not just the row list. `defaults` keyed
+    // by a phase with no row hands the clients a value they cannot render and the run
+    // contradicts — and it is the same key inconsistency that let an override survive
+    // below.
+    expect(Object.keys(json['defaults'] as object)).toEqual(phases.map((p) => p.key))
+  })
+
+  it('a STORED follower override never reaches the client, and cannot be written', async () => {
+    // THE BLOCKER THIS PINS, end to end through the real storage. The pane round-trips
+    // whatever `overrides` it is sent: a `build_mechanical` entry stored by an older
+    // build came back on every GET, went back out on every PUT, and kept the
+    // `[mechanical]` half of the build dispatching on Anthropic after the owner moved
+    // Build to codex — invisibly, because the row it belongs to is not drawn.
+    //
+    // WRITTEN THE ONLY WAY IT CAN EXIST NOW: straight into the metadata row, which is
+    // exactly the shape of a value persisted before the rule.
+    await db.run(
+      `INSERT INTO instance_metadata (instance_slug, trident_phase_models) VALUES (?, ?)
+         ON CONFLICT(instance_slug) DO UPDATE SET trident_phase_models = excluded.trident_phase_models`,
+      [SCOPE, JSON.stringify({ build: { model: 'sol' }, build_mechanical: { model: 'sonnet' } })],
+    )
+    const s = await surfaceFor()
+    const json = (await (await s.handler(req('GET')))!.json()) as Record<string, unknown>
+    // The owner's real choice survives; the unrenderable one is gone from the payload.
+    expect(json['overrides']).toEqual({ build: { model: 'sol' } })
+    expect(JSON.stringify(json)).not.toContain('build_mechanical')
+
+    // …and a client that sends one back is refused whole, by name, rather than
+    // storing a pin no row can clear.
+    const res = await s.handler(req('PUT', { overrides: { build_mechanical: { model: 'sonnet' } } }))
+    expect(res!.status).toBe(400)
+    expect(await res!.text()).toContain('build_mechanical')
+    expect(readTridentPhaseModels(db, SCOPE)).toEqual({ build: { model: 'sol' } })
   })
 
   it('tells each row EVERY executor it can dispatch on, not just its default', async () => {

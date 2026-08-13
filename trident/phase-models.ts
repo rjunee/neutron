@@ -465,6 +465,23 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
       )
       continue
     }
+    const followed = phaseByKey(key)!.follows
+    if (followed !== undefined) {
+      // A FOLLOWER PHASE IS NOT SETTABLE, AND A STORED ONE IS DROPPED RIGHT HERE.
+      // `build_mechanical` is the build step under the planner's internal complexity
+      // tag; it takes `build`'s setting and the pane deliberately does not render it
+      // (`TridentPhase.follows`). An entry for it therefore has no row to appear on
+      // and no way to be cleared — an owner who moved Build to codex would keep
+      // dispatching mechanical tasks on Anthropic, spending the quota the move existed
+      // to protect, with nothing on screen saying so. Rejecting it here covers both
+      // directions at once: the WRITE path 400s and names the key, and the READ path
+      // (which drops what it cannot use and continues) discards a value stored before
+      // this rule existed — which is the migration, applied on the next read.
+      errors.push(
+        `phase '${key}' is not settable — it is the '${followed}' step under an internal complexity tag and always takes '${followed}'s setting`,
+      )
+      continue
+    }
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
       errors.push(`phase '${key}' must be an object with optional 'model' and 'effort'`)
       continue
@@ -587,10 +604,18 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
  *
  * Derived from {@link TRIDENT_PHASES} rather than restated, so the pane and the run
  * can never disagree about what "default" means.
+ *
+ * A FOLLOWER PHASE IS NOT IN HERE, for the same reason it is not a row: its default is
+ * not the value that runs. `build_mechanical` reads `sonnet` from the table and
+ * dispatches whatever `build` was set to, so a `defaults` map that carried it would
+ * hand every client a key with no row, no override it can ever hold, and a value the
+ * run contradicts. The keys of this map and the phases in the payload are the same
+ * set, deliberately.
  */
 export function phaseModelDefaults(): Readonly<Record<string, { model: ModelTier; effort: Effort }>> {
   const out: Record<string, { model: ModelTier; effort: Effort }> = {}
   for (const phase of TRIDENT_PHASES) {
+    if (phase.follows !== undefined) continue
     out[phase.key] = { model: phase.default.tier, effort: phase.default.effort }
   }
   return out
