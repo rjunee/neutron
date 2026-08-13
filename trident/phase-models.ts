@@ -58,11 +58,27 @@
  * the offending value so the pane can show it struck through and say so.
  *
  * ── TRANSPORT IS A CAPABILITY, so a phase cannot take just any tier ──────────
- * Every phase here dispatches through ONE executor. `agent({model})` resolves against
- * Claude Code's own endpoint, so a GPT/Kimi tier cannot run a Claude phase; the codex
- * wrapper reads `CODEX_REVIEW_MODEL`, so a Kimi tier cannot run it either. Moving a
- * phase across transports is refused HERE, where the owner is present to read why,
- * rather than being discovered as a run that used the wrong model.
+ * A phase may only take a tier one of its OWN dispatches can reach. `agent({model})`
+ * resolves against Claude Code's own endpoint, so a GPT/Kimi tier cannot run a step that
+ * has only that dispatch; the codex review wrapper reads `CODEX_REVIEW_MODEL`, so a Kimi
+ * tier cannot run it either. Choosing a tier no dispatch can reach is refused HERE,
+ * where the owner is present to read why, rather than being discovered as a run that
+ * used the wrong model.
+ *
+ * ── A PHASE MAY HAVE MORE THAN ONE DISPATCH ({@link TridentPhase.alsoRunsOn}) ─
+ * The rule above used to be stated as "every phase has exactly one executor, derived
+ * from its default tier", which was true only because nothing had ever been wired to a
+ * second one. The BUILD phase now has two: the Claude `agent()` builder it defaults to,
+ * and the codex executor (`trident/codex-build.sh`, dispatched by the workflow's
+ * `forge:*` bridge). So the phase DECLARES the extra groups its dispatch can reach and
+ * `phaseAcceptsTier` answers from that list.
+ *
+ * THE LIST IS A CLAIM ABOUT WIRING, NOT A WISH. Adding a group here un-greys those
+ * tiers in the settings pane, so a group listed without a dispatch behind it ships a
+ * control that silently does nothing — strictly worse than a greyed one, and the exact
+ * defect this module exists to prevent. `__tests__/cross-model-dispatch.test.ts` runs
+ * the production launcher into the real workflow and asserts the dispatch for every
+ * group listed here, which is what keeps the claim honest.
  */
 
 import {
@@ -72,7 +88,6 @@ import {
   type Transport,
   isModelTier,
   modelTier,
-  tiersAreInterchangeable,
 } from './model-tiers.ts'
 
 export { MODEL_TIERS, isModelTier }
@@ -104,6 +119,37 @@ export interface TridentPhase {
   labels: ReadonlyArray<{ label: string; dynamic?: boolean }>
   /** The tier + effort used when the owner has set no override. */
   default: { tier: ModelTier; effort: Effort }
+  /**
+   * Executor groups this phase can dispatch on BESIDES the one its default tier
+   * implies — the phases that have more than one wired executor.
+   *
+   * Absent (the common case) means the single derived group and nothing else. See the
+   * header: an entry here un-greys those tiers in the pane, so it is a statement that
+   * the dispatch exists and is tested, not that it would be nice to have.
+   */
+  alsoRunsOn?: ReadonlyArray<TierGroup>
+  /**
+   * This phase takes another phase's setting when it has none of its own — and is
+   * therefore NOT an owner-facing row.
+   *
+   * A FOLLOWER IS NOT RENDERED. The settings surface omits it (`vocabulary`), because a
+   * row that displays its own default while the dispatch quietly uses another row's
+   * override is the pane/run disagreement this module's header forbids — and the two
+   * rows here are one step split by an internal cost tag, which is not a distinction
+   * the owner has any way to act on.
+   *
+   * THE KEY IS NOT A BACK DOOR. A stored entry naming the follower does NOT win — it
+   * is refused at the boundary (`parsePhaseModelConfig` below rejects it, and the read
+   * path drops one stored before that rule existed) and the workflow's
+   * `phaseOverrideFor` ignores it unconditionally. The reason is the same one that
+   * hides the row: a value the pane cannot display is a value the owner cannot clear,
+   * so honouring it would pin the mechanical build to a model nothing on screen
+   * mentions — which on this phase means invisible Anthropic spend after a move to
+   * codex. The key still exists only to route labels for the coverage test;
+   * `__tests__/phase-model-coverage.test.ts` asserts the declaration and
+   * `phaseOverrideFor` match, so the two cannot drift.
+   */
+  follows?: string
 }
 
 /**
@@ -127,6 +173,15 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Writes the code and the tests, and re-writes them against review findings.',
     labels: [{ label: 'forge:build' }, { label: 'forge:fix-round-', dynamic: true }],
     default: { tier: 'opus', effort: 'high' },
+    // THE BUILD RUNS ON CODEX WHEN THE OWNER PICKS A GPT TIER. The workflow's forge
+    // dispatch hands the assembled build brief to `trident/codex-build.sh` instead of
+    // to `agent({model})`, and NO ANTHROPIC MODEL ID IS REQUESTED FOR THE PHASE — the
+    // build's tokens are spent at OpenAI, which is the point: the reason to move a
+    // build off Claude is the Anthropic quota. (The subprocess is still LAUNCHED by a
+    // thin bridge agent running on the launcher's own default, because a workflow step
+    // has no other way to reach a shell; that agent runs one command and copies six
+    // measured values, and the build itself never touches Anthropic.)
+    alsoRunsOn: ['codex'],
   },
   {
     key: 'build_mechanical',
@@ -138,6 +193,16 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     // why `phaseForLabel` returns `build` for both and the tag decides.
     labels: [{ label: 'forge:build' }, { label: 'forge:fix-round-', dynamic: true }],
     default: { tier: 'sonnet', effort: 'medium' },
+    // The SAME dispatch as `build` — same labels, same forge bridge — so it reaches
+    // the codex executor for free.
+    alsoRunsOn: ['codex'],
+    // …AND IT IS NOT A SEPARATE ROW. The owner moves "Build" to codex; a task the
+    // planner happened to tag `[mechanical]` must not stay on Claude and keep spending
+    // the quota the move existed to protect. So this key follows `build`, and the pane
+    // does not render it — a visible row showing `sonnet` while the run dispatched
+    // `gpt-5.6-terra` is exactly the pane/run disagreement the header forbids, and
+    // "which of my two Build rows applies" is not a question the owner can answer.
+    follows: 'build',
   },
   {
     key: 'review_rubric',
@@ -257,14 +322,41 @@ export function phaseTransport(phase: TridentPhase): Transport {
 }
 
 /**
- * The EXECUTOR GROUP a phase dispatches on — `claude`, `codex`, `kimi`.
+ * The executor group a phase runs on BY DEFAULT — `claude`, `codex`, `kimi`.
  *
- * The one question a settings row needs answered: a row may offer exactly the tiers in
- * its own group, because those are the only ones its dispatch can reach. Derived from
- * the phase's default tier, so the pane and the run cannot disagree.
+ * Derived from the phase's default tier, so the pane and the run cannot disagree. This
+ * is the group a row names when it explains why an option is greyed ("…it runs on
+ * Claude"); {@link phaseGroups} is the set it may actually offer.
  */
 export function phaseGroup(phase: TridentPhase): TierGroup {
   return modelTier(phase.default.tier)?.group ?? 'claude'
+}
+
+/**
+ * EVERY executor group this phase can dispatch on, default first.
+ *
+ * The one question a settings row needs answered: a row may offer exactly the tiers in
+ * these groups, because those are the only ones its dispatch can reach. Most phases
+ * have one; see {@link TridentPhase.alsoRunsOn} for why `build` has two.
+ */
+export function phaseGroups(phase: TridentPhase): ReadonlyArray<TierGroup> {
+  const primary = phaseGroup(phase)
+  const extra = (phase.alsoRunsOn ?? []).filter((g) => g !== primary)
+  return [primary, ...extra]
+}
+
+/**
+ * Can this phase be moved to this tier?
+ *
+ * Asked of the PHASE, not of two tiers, because "what can substitute for what" depends
+ * on which dispatches the phase has — and that is a property of the workflow's wiring,
+ * not of the tier registry. THE ONLY form of this question in the codebase: the
+ * tier-to-tier version it replaced (`tiersAreInterchangeable`) was deleted rather than
+ * left beside it, because two answers to one question is how the pane and the run drift.
+ */
+export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean {
+  const group = modelTier(tier)?.group
+  return group !== undefined && phaseGroups(phase).includes(group)
 }
 
 /**
@@ -274,6 +366,13 @@ export function phaseGroup(phase: TridentPhase): TierGroup {
  * setting, which the wrapper does not expose — so the pane renders that cell disabled
  * with the reason instead of offering a dropdown that changes nothing. (A phase's
  * stored `default.effort` is inert for those rows and never reaches a dispatch.)
+ *
+ * THIS ANSWERS FOR THE PHASE'S DEFAULT TIER — "could this row ever have an effort
+ * control", not "does it have one right now". A phase with a second executor
+ * ({@link TridentPhase.alsoRunsOn}) can be moved to a tier whose effort is inert while
+ * this still returns true, so a pane must ALSO ask the chosen tier (the surface ships
+ * `effort_supported` per tier for exactly that) and `parsePhaseModelConfig` drops the
+ * effort when the chosen tier cannot use it.
  */
 export function phaseSupportsEffort(phase: TridentPhase): boolean {
   return phaseTransport(phase) === 'agent'
@@ -340,6 +439,12 @@ const MODEL_ID_MAX = 128
  * the phase cannot dispatch, an effort on a phase that has no effort control, and an
  * effort outside {@link EFFORTS}. An entry that validates but sets nothing is dropped
  * rather than stored, so `{}` never reads as "configured".
+ *
+ * ONE THING IS DROPPED RATHER THAN REJECTED: an effort paired with a CLI tier on a
+ * phase that DOES have an effort control (the build moved to codex). It lands in
+ * {@link ParsedPhaseModelConfig.rejected} and the write succeeds. Note that the WRITE
+ * path's caller never sees that field — see the comment at the end of the loop for
+ * where it is read and why the drop is still visible to the owner.
  */
 export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
   const errors: string[] = []
@@ -365,6 +470,36 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
       errors.push(
         `unknown phase '${key}' — expected one of: ${TRIDENT_PHASES.map((p) => p.key).join(', ')}`,
       )
+      continue
+    }
+    const followed = phaseByKey(key)!.follows
+    if (followed !== undefined) {
+      // A FOLLOWER PHASE IS NOT SETTABLE, AND A STORED ONE IS DROPPED RIGHT HERE.
+      // `build_mechanical` is the build step under the planner's internal complexity
+      // tag; it takes `build`'s setting and the pane deliberately does not render it
+      // (`TridentPhase.follows`). An entry for it therefore has no row to appear on
+      // and no way to be cleared — an owner who moved Build to codex would keep
+      // dispatching mechanical tasks on Anthropic, spending the quota the move existed
+      // to protect, with nothing on screen saying so. Rejecting it here covers both
+      // directions at once: the WRITE path 400s and names the key, and the READ path
+      // (which drops what it cannot use and continues) discards a value stored before
+      // this rule existed — which is the migration, applied on the next read.
+      errors.push(
+        `phase '${key}' is not settable — it is the '${followed}' step under an internal complexity tag and always takes '${followed}'s setting`,
+      )
+      // …AND IT IS *NOT* PUT IN `rejected`, which is the one deliberate exception to
+      // "never revert a choice silently" in this file. `rejected` exists so a ROW can
+      // show what was dropped, struck through — both clients look it up BY PHASE KEY
+      // (`rejectedModel(phase, rejected)`), and a follower has no row for them to look
+      // it up from. Sending it would add a key to the payload nothing can render,
+      // while re-opening the round-trip this rule closed: the pane echoes the payload
+      // back on the next PUT, which is how a stored `build_mechanical` kept the
+      // mechanical build on Anthropic after the owner moved Build to codex.
+      // `gateway/__tests__/trident-phase-models-producer.test.ts` pins the key out of
+      // the payload entirely. The owner is not left uninformed either: the WRITE path
+      // 400s and names the key, and the only silent case left is a value stored before
+      // this rule existed — which no pane has ever displayed, so there is no control
+      // that appears to revert.
       continue
     }
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -410,12 +545,18 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           reject(key, { model })
           continue
         }
-        if (!tiersAreInterchangeable(phase.default.tier, model)) {
-          // Not a preference — a capability. See `tiersAreInterchangeable`.
-          const want = modelTier(phase.default.tier)
+        if (!phaseAcceptsTier(phase, model)) {
+          // Not a preference — a capability. See `phaseAcceptsTier`.
+          //
+          // NAMES THE EXECUTOR GROUP, NOT A SCRIPT. A tier's `wrapper` is the CROSS-MODEL
+          // REVIEW wrapper it was registered with, and the build lane reaches the same
+          // codex tiers through a different script — so interpolating it here told a
+          // BUILD-row owner their tier "runs as a trident/codex-review.sh subprocess",
+          // which is a sentence about a phase they were not configuring. The group is
+          // true for every phase that can reach the tier.
           const got = modelTier(model)
           errors.push(
-            `phase '${key}': '${model}' runs ${got?.transport === 'cli' ? `as a ${got.wrapper ?? 'CLI'} subprocess` : 'as a Claude agent'}, which cannot run this step — ${key} dispatches ${want?.transport === 'cli' ? `through ${want.wrapper ?? 'a CLI'}` : 'a Claude agent'}`,
+            `phase '${key}': '${model}' runs on the ${got?.group ?? 'unknown'} executor, which cannot run this step — ${key} dispatches on ${phaseGroups(phase).join(' or ')}`,
           )
           reject(key, { model })
           continue
@@ -444,6 +585,41 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
       }
       errors.push(`phase '${key}': unknown field '${field}' — only 'model' and 'effort' are settable`)
     }
+    // AN EFFORT IS INERT ONCE THE CHOSEN TIER IS A SUBPROCESS, even on a phase whose
+    // DEFAULT tier has an effort control. `build` defaults to a Claude agent (effort
+    // settable) but may now be moved to the codex executor, which picks its own
+    // reasoning effort — so the pair `{model: 'sol', effort: 'max'}` would store a
+    // number no dispatch reads. Checked AFTER the field loop because the two fields
+    // arrive in whatever order the JSON had them, and the model is what decides.
+    //
+    // DROPPED, NOT AN ERROR, and this is the one place in this function that does not
+    // fail the write. The pair is not a bad value, it is a LEFTOVER: the row had a
+    // live effort control until the same save moved it to a subprocess. Rejecting it
+    // would 400 the whole PUT — every other row's pending edit with it — and make the
+    // codex tiers unpickable for any owner who had ever touched the effort control,
+    // which is a settable option that cannot be set.
+    //
+    // NOTHING IS HIDDEN BY THE DROP, and the reason is the pane, NOT a field on the
+    // response. A current pane never sends this pair at all (the effort cell is
+    // answered by the chosen tier, and `applyRowEdit` clears what that tier cannot
+    // use); a client that does send it renders the same disabled cell — "set by the
+    // CLI" — the moment the response comes back, because the response is a fresh read
+    // and the chosen tier is what decides that cell.
+    //
+    // BE PRECISE ABOUT WHAT THE CALLER IS TOLD: `rejected` is populated here and it is
+    // NOT threaded to the PUT's caller. `writeTridentPhaseModels`
+    // (`gateway/storage/owner-metadata.ts`) returns `{ok, errors}` and discards it, and
+    // the surface's response body is a re-read of storage — whose re-parse finds
+    // nothing to reject, because the pair is already gone. `rejected` earns its keep on
+    // the READ path (`rejectedModel(phase, rejected)`), where it explains a STORED value
+    // the dispatch could not use. Here it is a local record of what this pass dropped.
+    if (entry.effort !== undefined && entry.model !== undefined) {
+      const chosen = modelTier(entry.model)
+      if (chosen?.transport === 'cli') {
+        reject(key, { effort: entry.effort })
+        delete entry.effort
+      }
+    }
     // Drop an entry that set nothing, so an empty object never persists as config.
     if (entry.model !== undefined || entry.effort !== undefined) config[key] = entry
   }
@@ -456,10 +632,18 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
  *
  * Derived from {@link TRIDENT_PHASES} rather than restated, so the pane and the run
  * can never disagree about what "default" means.
+ *
+ * A FOLLOWER PHASE IS NOT IN HERE, for the same reason it is not a row: its default is
+ * not the value that runs. `build_mechanical` reads `sonnet` from the table and
+ * dispatches whatever `build` was set to, so a `defaults` map that carried it would
+ * hand every client a key with no row, no override it can ever hold, and a value the
+ * run contradicts. The keys of this map and the phases in the payload are the same
+ * set, deliberately.
  */
 export function phaseModelDefaults(): Readonly<Record<string, { model: ModelTier; effort: Effort }>> {
   const out: Record<string, { model: ModelTier; effort: Effort }> = {}
   for (const phase of TRIDENT_PHASES) {
+    if (phase.follows !== undefined) continue
     out[phase.key] = { model: phase.default.tier, effort: phase.default.effort }
   }
   return out

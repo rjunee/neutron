@@ -2823,20 +2823,180 @@ generation"), mobile `app/app/codegen.tsx`, both over
   registry is threaded to the workflow as `args.modelTiers` (`trident/inner-loop.ts`
   `buildWorkflowArgs`), alongside the existing `args.models`, because the `.mjs` has
   no module resolution.
-- **The cross-model lanes are routed phases now.** `argus:codex` / `argus:kimi` (and
-  their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
+- **The cross-model review lanes are routed phases.** `argus:codex` / `argus:kimi`
+  (and their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
   `review_kimi` phases in `trident/phase-models.ts`, defaulting to `sol` and `k3` —
   the same models the wrappers pinned themselves, so an install that never opens the
   pane is unchanged. `trident/__tests__/model-tiers.test.ts` pins the registry
   against each wrapper's own default (and against the `${VAR-x}` form that lets an
   explicitly EMPTY `CODEX_REVIEW_MODEL` mean "the CLI default").
-- **A row offers only its own executor's tiers, and says so about the rest.** Every
-  tier is listed; one from another group, or one this install has no credential for,
-  renders DISABLED WITH THE REASON ("needs a Codex connection") rather than
-  disappearing. The surface answers availability from the SAME resolvers the build
-  uses (`open/composer.ts`: `codexCredentialService.resolveActiveCodexHome`, and the
-  shared `kimiConfigured()` that `resolve_kimi_configured` also uses), so the pane
-  and the run cannot disagree.
+- **THE BUILD STEP RUNS ON CODEX TOO.** It is the one step with two executors, and
+  the reason is the Anthropic quota: the build is by far the most expensive phase.
+  Pin the **Build** row to `sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
+  hands the assembled Forge brief to `trident/codex-build.sh` instead of to
+  `agent({model})`; no Anthropic model id is requested for the phase. The wrapper
+  runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree,
+  and its own knob is `CODEX_BUILD_MODEL`, never the reviewer's `CODEX_REVIEW_MODEL`.
+  `workspace-write` writes only inside the workspace and a build writes outside it
+  twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
+  goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
+  that `git push` / `gh pr create` need.
+  - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
+    MAY reach the network; it says nothing about what environment it is handed.
+    `codex exec` filters that (`shell_environment_policy`), defaulting to
+    `inherit = "core"` plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*`.
+    An earlier version of the wrapper turned both off (`inherit=all` +
+    `ignore_default_excludes=true`) to deliver `GH_TOKEN` and `GIT_CONFIG_KEY_0` to the
+    build's push, and that was wrong twice: the credential is wired to trident's OUTER
+    loop only (`open/composer.ts` `run_host`), so the inner workflow that launches the
+    wrapper never had it to inherit — `SPEC.md` records `/proc/<pid>/environ` as
+    verified free of `GH_TOKEN` and `GIT_CONFIG_*` — while clearing the excludes DID
+    expose the owner's Anthropic credential, which
+    `gateway/wiring/build-import-substrate.ts` puts in that same REPL environment as
+    `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It handed the quota this route
+    exists to conserve to a GPT-driven `danger-full-access` shell, and bought an
+    anonymous push with it. So the defaults stay, plus
+    `-c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*"]` — not
+    redundant, because the defaults catch those only by substring coincidence in
+    another project's pattern list. `--strict-config` is what stops that line becoming
+    decoration: without it an unrecognised `-c` key is accepted and ignored, so a
+    renamed field would silently stop excluding anything. The metered `OPENAI_API_KEY`
+    is `unset` before `codex` is launched, separately and earlier.
+  - **The push credential is checked BEFORE the tokens are spent.** In `pr` mode the
+    contract orders a push, and nothing in the inner workflow's process tree is
+    guaranteed to hold a credential that can make one. `SPEC.md` carries the
+    owner-directed fix (the build agent should not hold a credential at all — it asks
+    the HOST to push), which is a change to the workflow's shape. Until then the
+    wrapper refuses honestly and early: `git credential fill` against the push remote's
+    host — the same helpers a real push consults — and a DEFERRED exit 3 naming the
+    missing piece when nothing answers. The alternative is the same failed run one
+    round later, after a full build, reported as "nothing was built". ssh and
+    filesystem remotes are skipped rather than failed (a key authenticates those, never
+    a helper), and the secret is never printed, logged or stored.
+  - **The merge mode is an ARGUMENT, not an inference.** Four checks are pr-only — the
+    remote baseline, the push-credential probe, the pushed-sha witness and the
+    `gh pr list` probe — and the wrapper is handed the run's mode as `$3`. Keyed
+    instead on "does an `origin` exist", which asks about the CLONE and not the RUN,
+    any local-mode build in a clone with an unreachable origin hard-DEFERRED before
+    codex launched, every round; and a local build standing on a branch that happened
+    to have an open PR reported that unrelated PR's number where the contract says
+    null. An absent or unrecognised `$3` means `pr`, the strict side of all four.
+  - **The downstream contract is MEASURED, not narrated.** `codex exec` does accept
+    `--output-schema`, but a schema-shaped answer is still the model reporting on
+    itself and the failing case is the build that believes it committed. So after it
+    exits the wrapper WRITES a six-line `NEUTRON_CODEX_BUILD_*` trailer it read from
+    `git rev-parse --verify HEAD`, `git ls-remote`, `gh pr list`, and the diff file's
+    existence. Any value it cannot establish is EMPTY, and empty fails closed at
+    `roundLanded` and at the merge. A thin bridge agent copies those six values into
+    the result schema — the same shape the codex REVIEW seat has, because `agent()` is
+    the only primitive the workflow runtime gives this script.
+  - **The trailer is a FILE, and both shas are about THIS build.** It goes to
+    `NEUTRON_CODEX_BUILD_TRAILER_FILE` (required; the bridge `cat`s exactly that) so a
+    transcript narrating trailer-shaped lines cannot compete with the measurement on
+    one stream. `HEAD` is reported only when it is a commit that did not ALREADY exist
+    — measured against three tips, the worktree HEAD at launch plus the local and
+    remote tips of the target branch — so neither a build that edited without
+    committing nor a re-entry that only ran `git switch` can hand back a sha it did
+    not produce. The diff path is deleted before launch for the same reason: it
+    survives between rounds, and an unrewritten one would point the panel at an
+    earlier round's diff — and when a build DID commit and wrote no diff, the wrapper
+    takes `git diff <base>..HEAD` itself rather than reporting a path it just deleted.
+    A head measured on the WRONG BRANCH is empty for the same reason a missing commit
+    is: a wrong-branch commit passes every later gate while `git merge --no-ff
+    <branch>` lands none of it, and local mode then deletes the branch that held it.
+    The measured branch name still ships and `forgeAgent` compares it, so the run stops
+    naming the branch instead of reporting an unexplained missing sha. Every remote
+    probe is wall-clock bounded and reads THROUGH A FILE — `gh pr list`, both
+    `git ls-remote` probes and the auth precheck, all through one `bounded()` helper:
+    `emit_trailer` runs on the failure path too, so an unbounded call there hangs the
+    phase instead of losing a field, and `$(…)` returns when the PIPE closes rather
+    than when the process exits, which is why the alarm alone was not a bound. `perl`
+    is a declared dependency of the wrapper, refused by name rather than surfacing as
+    a false "auth expired". `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
+    remote tip equals it — because a fresh probe of a shared ref is what
+    `inner-workflow.mjs` forbids for `reviewedHead`: a third-party push read back there
+    would be pinned by `--match-head-commit` and certified as reviewed. That witness
+    probe is asked up to three times, and only when it FAILED: an unanswered one costs
+    the run the whole build ("produced no commitSha — nothing was built" about a build
+    that pushed), while a probe that completed has given a real answer and re-asking it
+    is the one way a true "not pushed" could become a false "pushed". The PRE-LAUNCH
+    baseline probe asks the same three times, because asking once while the witness
+    asked three was itself the bug: a blip that defeats one attempt but not three drops
+    the remote-only tip from the baseline and the witness then confirms it as pushed, so
+    a re-entry that committed nothing reports the previous round's sha as its own. When
+    all three baseline attempts fail the run exits 3 (DEFERRED) instead of building — a
+    baseline nobody measured is not a baseline, and refusing before launch costs a round
+    and no tokens. `remote_tip` distinguishes "the branch is not there" (empty) from
+    "no attempt was answered" (the literal `unknown`); a repo with no `origin` skips the
+    probe without deferring, since it cannot have a remote-only branch.
+  - **Nowhere to write the trailer is refused BEFORE the tokens are spent.** The
+    trailer-file precheck proves the path by writing it (`: > "$TRAILER_FILE"`), not by
+    testing that the variable is set: the single `>` in `emit_trailer` fails silently
+    under `set -uo pipefail`, so an unwritable path let a completed build exit 0 having
+    reported nothing, and the workflow then said "produced no commitSha" about a build
+    that built everything.
+  - **The brief carries a receipt.** The workflow reaches a shell only through a bridge
+    agent that must reproduce the whole brief in a heredoc, so the command ships
+    `<bytes>:<fnv32>` for exactly those bytes and the wrapper recomputes both before
+    spending a token — a truncated or reworded brief is DEFERRED rather than built.
+    FNV-1a/32 because the composing script has no imports and no promised host API; it
+    is a corruption check, not a signature. Its UTF-8 encoder is written out longhand
+    rather than borrowed from `encodeURIComponent`, which THROWS on the unpaired
+    surrogate a length-capped task text leaves behind mid-emoji. And the bridge gets
+    exactly one retry on that specific exit: the wrapper refuses before spending a
+    token, so a re-copy is cheap, while a copying wobble with no retry abandons an
+    already-built branch. A second identical failure is final.
+  - **No fallback to Claude, and no review of nothing.** A lane reporting
+    `not_connected`/`deferred` stops the run with the status named — re-Forging on
+    Opus would spend the quota the owner moved the phase to protect, invisibly. A lane
+    that CONNECTED and produced no sha or no diff stops too: round 1 had no
+    did-it-land gate, so an empty build reached the panel and five reviewers APPROVED
+    a change that did not exist. That gate sits after the PR capture, the `forge-done`
+    checkpoint and the Ralph re-fire — it guards the review PANEL, and an intermediate
+    Ralph task opens none.
+  - **A codex build makes the codex REVIEWER same-family.** The cross-model gate is
+    unchanged and still cannot turn a deferred review into an APPROVE, but on a codex
+    build the panel's family diversity comes from `argus:claude`,
+    `argus:adversarial` and the kimi seat.
+- **The effort cell follows the CHOSEN tier, not just the step.** The payload carries
+  `effort_supported` on each PHASE (does its default executor read one) and on each
+  TIER (does that tier read one), and both clients disable the cell when either says
+  no — the build row keeps its control on `opus` and loses it on `sol`. Both reads are
+  `!== false`, never truthiness: an older gateway omits the field, and `undefined`
+  under a truthiness test would blank every effort control at once. `applyRowEdit`
+  clears an effort the newly-chosen tier cannot use; `parsePhaseModelConfig` drops one
+  that arrives anyway and lets the write SUCCEED, because failing it
+  400s the whole PUT and makes the codex tiers unpickable for anyone who ever touched
+  the build's effort. An effort on a phase that never had a control is still an error.
+- **Otherwise a row offers only its own executor's tiers, and says so about the
+  rest.** The payload carries `groups` (every executor the step dispatches on) beside
+  `group` (its default), and `tierChoices` greys by `groups`. Every tier is listed;
+  one from a group this step cannot reach renders disabled with "<Executor> is not
+  wired for this step yet — it runs on <every executor the step reaches>", and one this
+  install cannot run with the reason that NAMES THE MISSING PIECE — never disappearing.
+  The surface answers availability from the SAME resolvers the build uses (the shared
+  `kimiConfigured()` that `resolve_kimi_configured` also uses), and from ALL THREE
+  preconditions of "can codex run here", via one function
+  (`codexExecutorAvailability` in `trident/codex-credential.ts`, called by
+  `open/composer.ts`): a credential (`resolveActiveCodexHome`), the `codex` CLI, and
+  `perl`. The wrapper hard-fails on each — exit 10, exit 11, exit 3
+  `CODEX_BUILD_NO_PERL` — so the pane and the run cannot disagree. It returns
+  `{ usable: true }` or `{ usable: false, reason }` rather than a boolean, because the
+  gate grew from one condition to three while the string stayed "needs a Codex
+  connection", sending an owner whose login was fine to a `codex login` that changed
+  nothing; the surface derives `available` FROM the reason, so a greyed tier without an
+  explanation is unrepresentable. Both PATH probes require an executable REGULAR FILE —
+  `X_OK` alone passes for any directory named `codex`.
+- **One step is never two rows, and a follower is never settable.**
+  `build_mechanical` is the build step under the planner's internal `[mechanical]`
+  tag; it DECLARES that it follows `build` (`TridentPhase.follows`), the workflow's
+  `phaseOverrideFor` hands it `build`'s setting UNCONDITIONALLY, and neither the
+  surface's `phases` nor its `defaults` renders it. All three are required: inheriting
+  without hiding is a row showing `sonnet` beside a run that dispatched the owner's
+  codex tier, and hiding the row while still accepting a value for the key leaves a
+  stored override the owner can neither see nor clear — which kept `[mechanical]`
+  tasks on Anthropic after Build moved to codex. `parsePhaseModelConfig` rejects the
+  key by name, so the PUT 400s and the read path drops a value stored before the rule.
 - **A refused stored value degrades visibly.** `model` must name a tier (the old
   literal-id escape hatch is closed: a bare id carries no transport). A retired tier
   or a legacy literal is rejected at the boundary, the phase falls back to its
@@ -2850,7 +3010,11 @@ generation"), mobile `app/app/codegen.tsx`, both over
 - **The chain is asserted end to end**, not per layer:
   `trident/__tests__/cross-model-dispatch.test.ts` runs the REAL `buildWorkflowArgs`
   output through the REAL `inner-workflow.mjs` and asserts the resolved id lands on
-  the subprocess command line (`CODEX_REVIEW_MODEL='gpt-5.6-terra'`).
+  the subprocess command line (`CODEX_REVIEW_MODEL='gpt-5.6-terra'`,
+  `CODEX_BUILD_MODEL='gpt-5.6-terra'`), with a positive control beside every absence
+  assertion. `trident/codex-build.test.ts` spawns the wrapper against real temporary
+  git repositories — including a real bare origin and a sha256 repo — and drives it
+  into each state the trailer must tell the truth about.
 
 ## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 

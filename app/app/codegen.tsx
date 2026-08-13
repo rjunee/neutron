@@ -32,6 +32,7 @@ import {
   PhaseModelsClient,
   applyRowEdit,
   effectiveRow,
+  effortSettable,
   rejectedModel,
   tierChoices,
   type PhaseModelsPayload,
@@ -95,7 +96,7 @@ export default function CodeGenSettingsScreen() {
       if (payload === null) return;
       const phase = payload.phases.find((p) => p.key === phaseKey);
       if (phase === undefined) return;
-      setOverrides((prev) => applyRowEdit(prev, phase, patch));
+      setOverrides((prev) => applyRowEdit(prev, phase, patch, payload.model_tiers));
       // A pending edit invalidates the "Saved" confirmation — leaving it up would
       // tell the owner their newest change is already stored.
       setSaved(false);
@@ -227,7 +228,10 @@ export default function CodeGenSettingsScreen() {
                     </View>
                     <View style={styles.control}>
                       <Text style={styles.optionLabel}>Effort</Text>
-                      {phase.effort_supported ? (
+                      {/* Asked of the CHOSEN tier, not just the step: the build row
+                          has a live effort control on a Claude tier and none on a
+                          codex one, because the subprocess picks its own. */}
+                      {effortSettable(phase, row.model, payload.model_tiers) ? (
                         <Pressable
                           accessibilityRole="button"
                           accessibilityLabel={`${phase.label} effort`}

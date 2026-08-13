@@ -332,14 +332,22 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
  */
 function modelTierArgs(): Record<
   string,
-  { model_id: string; transport: string; env_var: string | null }
+  { model_id: string; transport: string; env_var: string | null; group: string }
 > {
-  const out: Record<string, { model_id: string; transport: string; env_var: string | null }> = {}
+  const out: Record<
+    string,
+    { model_id: string; transport: string; env_var: string | null; group: string }
+  > = {}
   for (const entry of modelTierRegistry()) {
     out[entry.tier] = {
       model_id: entry.model_id,
       transport: entry.transport,
       env_var: entry.env_var,
+      // THE EXECUTOR, threaded because the workflow now needs to answer "can this
+      // step run that tier" the same way the typed boundary does. It used to infer
+      // the answer from `transport` + `env_var` matching, which was a proxy that
+      // held only while every phase had exactly one executor — the build has two.
+      group: entry.group,
     }
   }
   return out
