@@ -6,11 +6,15 @@
  * one stream), so there is no `project_id` and no `ProjectSidecarResolver`
  * here; the per-project sidecars (`cache.ts`) are untouched.
  *
- * Open mechanics are exactly `cache.ts`'s: `openSidecar(path)` +
- * `applyProjectScopedMigrations(db, dir)` — but against this Core's SECOND
- * migration tree (`migrations-pipeline/`), because a migration namespace is
- * per-DB-file (`migrations/runner.ts:58-63`) and reusing the cache tree would
- * drag `triage_cache` et al. into the pipeline DB.
+ * Open mechanics mirror `cache.ts`'s: `openSidecar(path)` + apply this Core's
+ * SECOND migration tree (`migrations-pipeline/`), because a migration namespace
+ * is per-DB-file and reusing the cache tree would drag `triage_cache` et al.
+ * into the pipeline DB.
+ *
+ * The migrations are applied by the Core's OWN applier (`./migrate.ts`), not the
+ * host runner: a bundled Core may not import `migrations/` (nor the host logger
+ * it pulls in behind it) — see that module's header for why the duplication is
+ * the cheaper side of the trade.
  *
  * Per docs/plans/2026-08-06-email-core-consolidation-plan.md § 5.
  */
@@ -20,7 +24,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyProjectScopedMigrations } from '@neutronai/migrations/runner.ts'
+import { applyCoreMigrations } from './migrate.ts'
 import { openSidecar } from '@neutronai/persistence/index.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -528,6 +532,6 @@ export function openEmailPipelineStore(input: EmailPipelineStoreOptions): EmailP
   const dir = join(input.owner_home, EMAIL_PIPELINE_DIR)
   mkdirSync(dir, { recursive: true })
   const db = openSidecar(join(dir, EMAIL_PIPELINE_DB))
-  applyProjectScopedMigrations(db, input.migrations_dir ?? EMAIL_PIPELINE_MIGRATIONS_DIR)
+  applyCoreMigrations(db, input.migrations_dir ?? EMAIL_PIPELINE_MIGRATIONS_DIR)
   return new EmailPipelineStore(db, input.now ?? ((): number => Date.now()))
 }

@@ -33,3 +33,9 @@ leak-gate-pii-denylist*
 # scripts/ci/route-slot-ratchet-guard.sh so bun can import it, and removed on
 # exit. Ignored so a killed run can never leave a committable stray.
 .route-slot-inventory-main.*.ts
+
+# Runtime state for a locally-running instance (REPL registry, heartbeat,
+# restart markers). Machine-local and tenant-scoped — a committed
+# repl-registry.json carries the absolute tenant path, which the leak gate
+# correctly refuses.
+.neutron/

@@ -38,10 +38,12 @@
  * something is issued that id.
  */
 
-// Relative, not by package name: `scripts/` is not a workspace package and has
-// no dependency on the email Core. Reaching in directly keeps the operator tool
-// from adding a dependency edge that only exists to run a CLI.
-import { openEmailPipelineStore } from '../cores/free/email/src/pipeline/store.ts'
+// By PACKAGE NAME, not a relative path. An earlier revision reached across as
+// `../cores/free/email/...` and justified it as avoiding a dependency edge the
+// CLI did not need — but the edge exists either way, and the repo's
+// cross-workspace lint gate refuses the relative form precisely so it cannot be
+// hidden behind a path.
+import { openEmailPipelineStore } from '@neutronai/email-managed-core/pipeline/store'
 
 const USAGE = `usage:
   bun scripts/email-accounts.ts list                            [--home <owner_home>]

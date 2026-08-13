@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { openEmailPipelineStore } from '../../cores/free/email/src/pipeline/store.ts'
+import { openEmailPipelineStore } from '@neutronai/email-managed-core/pipeline/store'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, '..', 'email-accounts.ts')

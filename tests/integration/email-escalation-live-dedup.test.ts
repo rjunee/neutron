@@ -29,7 +29,7 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
-import type { ChatOutbound } from '../../landing/chat-protocol.ts'
+import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 // Relative, not by package name: the root workspace deliberately does not
 // depend on the email Core (and the Core deliberately does not depend on the
 // gateway). This file is the ONE place the two meet, and it reaches into both
@@ -37,10 +37,10 @@ import type { ChatOutbound } from '../../landing/chat-protocol.ts'
 import {
   openEmailPipelineStore,
   type EmailPipelineStore,
-} from '../../cores/free/email/src/pipeline/store.ts'
-import { escalateEmail } from '../../cores/free/email/src/pipeline/escalate.ts'
+} from '@neutronai/email-managed-core/pipeline/store'
+import { escalateEmail } from '@neutronai/email-managed-core/pipeline/escalate'
 
-import { createDeliver } from '../../gateway/http/deliver.ts'
+import { createDeliver } from '@neutronai/gateway/http/deliver.ts'
 
 const TOPIC = 'app:owner-1'
 const EMAIL_ID = 'msg-important-1'
