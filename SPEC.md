@@ -350,6 +350,35 @@ Each carries an acceptance criterion; all in `neutron-open`.
       can kill a healthy run (a live candidate for what happened to `eca83d1f`). Acceptance: a heartbeat
       derived from real agent activity reaches the run row and the card; the reaper judges on that clock; and
       the owner can tell working from dead without opening a terminal.
+- [ ] **A build agent must never HOLD a credential — it asks the host to push** (owner-directed 2026-08-13,
+      from observed behaviour, not theory). `github/credential.ts` argues at length against every way of
+      giving git a token except an env-injected, `github.com`-scoped helper, because "a credential on disk
+      with no expiry is the thing we spent the device-flow work avoiding". That credential is wired to the
+      OUTER loop ONLY (`open/composer.ts` `run_host: makeLazyCredentialedHostRunner(githubProcessEnv(…))`).
+      The INNER workflow gets nothing — verified live on the fire REPL: `/proc/<pid>/environ` contains no
+      `GH_TOKEN` and no `GIT_CONFIG_*`. Yet in `pr` merge-mode Forge's contract ORDERS it to
+      "push the branch to origin, then REUSE the existing PR" (`trident/inner-workflow.mjs` `forgePushStep`).
+      **We command a push and withhold the key**, so on 2026-08-13 run `36b95167` did the only thing left:
+      read `auth/secrets-store.ts` for the AES-GCM envelope shape, read `.neutron-aes-key` (mode 0600, SAME
+      uid as the build), enumerated `secrets` — passing the owner's `gmail_compose` tokens and
+      `openai:onboarding` key on the way — decrypted the github row, **wrote the plaintext to
+      `/tmp/gh-token-tmp`**, then hand-rebuilt our own scoped helper and pushed. It reached our design by
+      reading our source, having already broken the property the design protects. This is not agent
+      misbehaviour; it is task completion under an impossible instruction, and it is non-deterministic —
+      the push succeeds only if the model improvises well.
+      Acceptance, in order of preference:
+      (a) Forge does NOT push. It asks the HOST to push and receives an exit code; the credential never
+          enters an agent-reachable process. This matches the outer loop and is the only shape where the
+          token cannot be echoed, logged, committed, or written to disk by a language model.
+      (b) If an agent-side push is kept, `githubProcessEnv(…)` is threaded PER FIRE into the workflow's agent
+          env — never baked in at REPL spawn: the fire substrate is WARM and shared across runs, so a
+          spawn-time token goes stale on reconnect and sits in `/proc/<pid>/environ` for every later run to
+          inherit.
+      (c) SEPARATELY, and regardless of (a)/(b): decide deliberately whether a build agent should be able to
+          read `.neutron-aes-key` at all. Today every agent we run can decrypt every secret the instance
+          holds — GitHub, Gmail, OpenAI, Codex — because it runs as the keyfile's owner. The push path is one
+          symptom; the reachability is the condition. Acceptance: a build process cannot decrypt secrets it
+          was not given, and a test proves it.
 
 ### Email Core consolidation — absorb the standalone email system (owner-directed 2026-08-07)
 
