@@ -523,7 +523,7 @@ export function buildCannedCodegenLlmCall(
       // resolves the model via `input.model` from the host caller; this fallback
       // only stamps canned test responses that omit an explicit model. Keep in
       // sync with runtime/models.ts's `SONNET_MODEL` default.
-      model: chosen.model ?? 'claude-sonnet-4-6',
+      model: chosen.model ?? 'claude-sonnet-5',
     }
   }
 

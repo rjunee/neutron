@@ -61,6 +61,22 @@ const OPUS_5_PRICING_SOURCE_URL = 'https://www.anthropic.com/news/claude-opus-5'
 const OPUS_5_PRICING_VERIFIED_AT = '2026-08-03'
 
 /**
+ * Sonnet 5 rates, read off the live pricing table on the date below.
+ *
+ * NOT INHERITED FROM THE 4.x ROWS, and that is the point of reading it: Sonnet
+ * 5 is CHEAPER than Sonnet 4.6 ($2/$10 against $3/$15), so the pattern every
+ * other tier follows — "a generation bump keeps the same numbers" — is exactly
+ * wrong here. Assuming it would have over-billed every Sonnet dispatch by 50%
+ * in a field this table names `verified_at`.
+ *
+ * The page also records that the $2/$10 launch pricing, originally introductory
+ * through 2026-08-31, is now the standard price and the scheduled increase to
+ * $3/$15 will not happen — so there is no pending revision to diary.
+ */
+const SONNET_5_PRICING_SOURCE_URL = 'https://platform.claude.com/docs/en/about-claude/pricing'
+const SONNET_5_PRICING_VERIFIED_AT = '2026-08-13'
+
+/**
  * The pricing registry. Keys are canonical Anthropic model ids. The
  * date-suffixed snapshot id (e.g. `claude-haiku-4-5-20251001`) is registered
  * alongside its un-suffixed alias because both forms appear in production:
@@ -98,6 +114,22 @@ export const MODEL_PRICING_TABLE: Readonly<
     verified_at: OPUS_5_PRICING_VERIFIED_AT,
     source_url: OPUS_5_PRICING_SOURCE_URL,
   }),
+  // The current `runtime/models.ts:FABLE_MODEL` default — the tier trident
+  // gives decomposition and verdict synthesis.
+  //
+  // THIS ROW WAS SIMPLY MISSING until the coverage test in
+  // `runtime/__tests__/pricing-covers-defaults.test.ts` went looking, which is
+  // the whole argument for that test: `FABLE_MODEL` has been a live default
+  // with no pricing row, so `resolveModelPricing(FABLE_MODEL)` threw. Nothing
+  // caught it because nothing had asked. Read off the pricing table, where
+  // Fable is the most expensive tier by a wide margin — five times Opus 5 on
+  // output — which makes an absent row the worst one to be missing.
+  'claude-fable-5': Object.freeze({
+    input_usd_per_m: 10,
+    output_usd_per_m: 50,
+    verified_at: SONNET_5_PRICING_VERIFIED_AT,
+    source_url: SONNET_5_PRICING_SOURCE_URL,
+  }),
   // Retained: the BEST_MODEL default before the 2026-08-03 Opus 5 bump, and
   // still the id on any install pinning `NEUTRON_BEST_MODEL`.
   'claude-opus-4-8': Object.freeze({
@@ -114,6 +146,17 @@ export const MODEL_PRICING_TABLE: Readonly<
     verified_at: PRICING_VERIFIED_AT,
     source_url: PRICING_SOURCE_URL,
   }),
+  // The current `runtime/models.ts:SONNET_MODEL` default. Read off the pricing
+  // table rather than carried across from the 4.6 row, because Sonnet is the
+  // one tier whose generation bump CHANGED the numbers — downward.
+  'claude-sonnet-5': Object.freeze({
+    input_usd_per_m: 2,
+    output_usd_per_m: 10,
+    verified_at: SONNET_5_PRICING_VERIFIED_AT,
+    source_url: SONNET_5_PRICING_SOURCE_URL,
+  }),
+  // Retained: the SONNET_MODEL default before the 2026-08-13 Sonnet 5 bump, and
+  // still the id on any install pinning `NEUTRON_SONNET_MODEL`.
   'claude-sonnet-4-6': Object.freeze({
     input_usd_per_m: 3,
     output_usd_per_m: 15,

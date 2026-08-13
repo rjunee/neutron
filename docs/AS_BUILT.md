@@ -2,6 +2,51 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — the Sonnet tier was a generation behind, and the test written to prove it found a second, worse hole (ISSUES #564)
+
+**What the owner saw.** First look at the shipped model-selector pane: *"Minor bug -
+sonnet is pinned to 4.6. the current latest sonnet is 5"*. He was right.
+`runtime/models.ts` defaulted `SONNET_MODEL` to `claude-sonnet-4-6` while
+`BEST_MODEL` and `FABLE_MODEL` had both moved to their 5-generation ids.
+
+**Why it is not a one-line bump.** `resolveModelPricing` THROWS on an
+unregistered model id — deliberately, because silently billing at a default rate
+is the failure mode that preceded it — and it is reached at composer
+construction. So flipping the default without adding the pricing row does not
+mis-bill quietly; it fails the boot. The row had to come first.
+
+**And the row could not be inherited.** Every other tier in this table keeps its
+numbers across a generation boundary (Opus is $5/$25 from 4.5 through 5), so
+"carry the 4.6 row forward" is the plausible move. It is wrong: Sonnet 5 is
+**$2/$10 against 4.6's $3/$15** — cheaper, not equal — so inheriting would have
+over-billed every Sonnet dispatch by 50% in a field named `verified_at`. Read off
+the live pricing table 2026-08-13, which also records that the $2/$10 launch
+pricing is now standard and the scheduled September increase will not happen, so
+there is no pending revision to diary.
+
+**THE TEST FOUND SOMETHING THE BUG REPORT DID NOT.**
+`runtime/__tests__/pricing-covers-defaults.test.ts` asserts that every live model
+default resolves a pricing row, and it immediately failed on **`claude-fable-5`,
+which had no row at all** — a live default whose pricing lookup threw, unnoticed,
+because nothing had ever asked. Fable is the most expensive tier in the table by
+a wide margin (5× Opus 5 on output), which makes it the worst row to be missing.
+Added at $10/$50 from the same reading. ⇒ **A COVERAGE TEST WRITTEN FOR ONE
+KNOWN GAP IS WORTH IT FOR THE UNKNOWN ONE IT TRIPS OVER.**
+
+**The second guard is about the drift itself, not the value.** `config/index.ts`
+re-declares these ids as literals so the boot config resolves without importing
+the runtime, and the existing defaults test asserted each against *the same
+hand-copied literal* — so both copies could sit a generation behind and the test
+stayed green, which is precisely what happened. The new test compares the two
+SOURCES instead. Mutation-verified: reverting `SONNET_MODEL` to `claude-sonnet-4-6`
+turns it red; restored, 773 pass across `runtime/__tests__` and `config/__tests__`.
+
+Touched: `runtime/models.ts` (default + a docblock that had been describing a
+Pass-2 fallback rationale from May and no longer said which id was current or
+what must be bumped with it), `runtime/model-pricing.ts` (sonnet-5 + fable-5
+rows), `config/index.ts`, `config/__tests__/bootconfig-defaults.test.ts`,
+`app/__tests__/codegen-settings-reachable.test.tsx`.
+
 ## 2026-08-13 — a reviewer that DIES is a blocked round, not a dead lane (the recurrence #212 left open)
 
 **What happened.** A lane died at round 7 of 10 after about ten hours, with

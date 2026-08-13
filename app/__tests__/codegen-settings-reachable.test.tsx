@@ -82,7 +82,7 @@ function payload(
     model_tiers: [
       { tier: 'fable', provider: 'anthropic', model_id: 'claude-fable-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
       { tier: 'opus', provider: 'anthropic', model_id: 'claude-opus-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
-      { tier: 'sonnet', provider: 'anthropic', model_id: 'claude-sonnet-4-6', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
+      { tier: 'sonnet', provider: 'anthropic', model_id: 'claude-sonnet-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
       { tier: 'fast', provider: 'anthropic', model_id: 'claude-haiku-4-5', group: 'claude', effort_supported: true, available: true, unavailable_reason: null },
       { tier: 'sol', provider: 'openai', model_id: 'gpt-5.6-sol', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
       { tier: 'terra', provider: 'openai', model_id: 'gpt-5.6-terra', group: 'codex', effort_supported: false, available: true, unavailable_reason: null },
