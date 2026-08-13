@@ -1252,7 +1252,11 @@ function synthesisOrInfraBlock(synthesis) {
  * A round that died is the same infra block a synthesis that did not answer produces —
  * REQUEST_CHANGES, `infra-only`, one `lane` blocker naming the failure — so it can
  * never become an APPROVE and never buys a fix round against nothing. It takes a THUNK
- * rather than the arguments so the `reviewAndSynthesize(diffFile, round, pr)` CALL
+ * rather than the arguments so the reviewAndSynthesize CALL
+ * (deliberately NOT written with its argument list here: `inner-workflow.test.ts`
+ * locates that call with a bare `SRC.indexOf`, so any prose repeating the exact
+ * literal is found FIRST and silently becomes the anchor, breaking an ordering
+ * assertion about code this comment only describes)
  * stays at its own call site, where the ordering assertions in `round-landed.test.ts`
  * and `inner-workflow.test.ts` pin it (repinning those has broken correct code three
  * times already).
