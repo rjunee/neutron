@@ -312,3 +312,39 @@ export class CodexCredentialService {
     return true
   }
 }
+
+/**
+ * THE PRODUCTION `resolve_codex_home` CLOSURE, named and exported so it can be
+ * TESTED — which is the whole reason it is not written inline at the wiring site
+ * any more.
+ *
+ * On 2026-08-13 the inline version read:
+ *
+ *     resolve_codex_home: (run) =>
+ *       svc.resolveActiveCodexHome(asOwnerHandle(run.project_slug))
+ *
+ * and it took every build on the instance down. The credential is stored against
+ * the INSTANCE OWNER (`project_credentials.owner_slug`); a `TridentRun`'s
+ * `project_slug` is the PROJECT the run belongs to. Passing the run's slug as the
+ * owner handle LOOKED right — the property name matches the parameter name — and
+ * matched no row, so a connected, materialized credential resolved to null and
+ * `trident/codex-build.sh` exited 10 NOT_CONNECTED before a line was written.
+ *
+ * The two identifiers are separated here by TYPE and by POSITION: the owner
+ * handle is a branded `OwnerHandle` bound ONCE at composition, and the run only
+ * ever supplies a project. There is no argument at this call site for a caller to
+ * get in the wrong order.
+ *
+ * HONEST LIMIT: this does not make the original mistake unrepresentable — a
+ * future edit could still inline `asOwnerHandle(run.project_slug)` at the wiring
+ * site and every test here would keep passing. What it does is make that edit
+ * VISIBLE: it deletes a call to a named, tested factory and re-introduces an
+ * `asOwnerHandle(...)` cast over run-scoped data, which is a reviewable diff
+ * rather than a silent argument swap.
+ */
+export function buildRunCodexHomeResolver(
+  service: Pick<CodexCredentialService, 'resolveActiveCodexHome'>,
+  owner_handle: OwnerHandle,
+): (run: { project_slug: string }) => string | null {
+  return (run) => service.resolveActiveCodexHome(owner_handle, run.project_slug)
+}
