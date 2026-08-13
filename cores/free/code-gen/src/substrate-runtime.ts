@@ -522,8 +522,12 @@ export function buildCannedCodegenLlmCall(
       // (`cores-use-sdk-only` layering boundary). Real production dispatch
       // resolves the model via `input.model` from the host caller; this fallback
       // only stamps canned test responses that omit an explicit model. Keep in
-      // sync with runtime/models.ts's `SONNET_MODEL` default.
-      model: chosen.model ?? 'claude-sonnet-4-6',
+      // sync with runtime/models.ts's `SONNET_MODEL` default. BUMPED WITH IT
+      // (ISSUES #564): this copy is the same drift class the tier-staleness check
+      // exists for — a hand-maintained duplicate of a constant, pinned by a test that
+      // imports `SONNET_MODEL` rather than re-typing the id, so the two cannot
+      // silently disagree the way `config/index.ts:DEFAULTS` did.
+      model: chosen.model ?? 'claude-sonnet-5',
     }
   }
 

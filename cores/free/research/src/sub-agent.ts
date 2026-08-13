@@ -277,8 +277,10 @@ async function runWithTimeout<T>(p: Promise<T>, budget_ms: number): Promise<T> {
  *  still reaches the live dispatch. This literal is therefore unreachable on the
  *  production path; it exists only as a safe non-crashing default for OTHER
  *  callers (tests, other cores) that dispatch without supplying `model`. Keep it
- *  in sync with `runtime/models.ts`'s `SONNET_MODEL` default. */
-export const DEFAULT_SUB_AGENT_MODEL: string = 'claude-sonnet-4-6'
+ *  in sync with `runtime/models.ts`'s `SONNET_MODEL` default. BUMPED WITH IT
+ *  (ISSUES #564) — and the test below pins it to the imported constant rather than
+ *  to a re-typed id, so this copy cannot drift the way the tier defaults did. */
+export const DEFAULT_SUB_AGENT_MODEL: string = 'claude-sonnet-5'
 
 /**
  * Build a canned `RuntimeSubAgentDispatcher` for tests. Returns
