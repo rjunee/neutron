@@ -379,6 +379,53 @@ Each carries an acceptance criterion; all in `neutron-open`.
           holds — GitHub, Gmail, OpenAI, Codex — because it runs as the keyfile's owner. The push path is one
           symptom; the reachability is the condition. Acceptance: a build process cannot decrypt secrets it
           was not given, and a test proves it.
+- [ ] **The review loop must be able to STOP and re-plan — a fix round cannot repair a defect in the plan**
+      (owner-directed 2026-08-13, from run `36b95167`, which burned ten rounds and ~2.5h to reach a verdict
+      knowable at round 2). Three constraints compose into a trap, and no one of them is wrong alone:
+      (i) the verdict enum is effectively binary — `APPROVE` / `REQUEST_CHANGES` / `COMMENT` with `COMMENT`
+      normalised into `REQUEST_CHANGES` (`inner-workflow.mjs` `normalizeVerdict`), so a reviewer who
+      diagnoses a DESIGN gap has one channel and that channel means "go fix the code";
+      (ii) Forge is contractually a PURE EXECUTOR — "do NOT re-plan or redesign" — so the only agent that
+      receives the findings is the one forbidden to act on what they mean;
+      (iii) `plan:fable` is invoked ONCE, OUTSIDE the fix loop (`inner-workflow.mjs` ~2073 vs the `while` at
+      ~2175), so the only agent permitted to re-plan never hears a single reviewer finding.
+      The escape hatch already exists in exactly one flavour — the loop breaks on
+      `synthesis.blockKind !== 'infra-only'` — proving the category is understood; it simply has no siblings.
+      EVIDENCE (all nine review results of `36b95167`): three findings — the tautological "row/rail lockstep"
+      test, the out-of-spec `inline_active` proxy, and the untouched research/dispatch path — recur in ALL
+      NINE rounds, and the finding totals never converge (9, 8, 13, 9, 8, 12, 9, 10, 11). Note the planner
+      AUTHORED the tautological test in its execution spec, so no number of fix rounds could ever remove it.
+      TRIGGERS (a run must escalate when ANY fires):
+      (a) REVIEWER-DECLARED — extend `blockKind` with `design-gap` (the plan is wrong) and
+          `missing-dependency` (needs work outside this card), each REQUIRING a `whatIsMissing` field so it
+          cannot be a bare complaint. Fast (can fire at round 1) but self-declared, so it must never be the
+          only trigger — a self-declared exit is an escape hatch an agent can learn to pull.
+      (b) REPEAT-FINDING — a finding that survives a fix round means fixing is not working. This is the HARD
+          gate: it is arithmetic and requires no agent to be honest. Would have fired at ROUND 2 here, saving
+          seven rounds. PREREQUISITE: findings need STABLE IDENTITY (a reviewer-emitted key such as
+          `file:symbol:rule`, or a normalised fingerprint) — today they are free-text titles and "same
+          finding" is not machine-decidable. That prerequisite is part of this item, not an assumption of it.
+      (c) NO-PROGRESS — blocker+major count not strictly decreasing across two rounds (real data: 4, 2, 6, 4,
+          2, 4, 4, 4, 5 → fires round 3). Needs no finding identity, which is its only virtue; noisy, because
+          a round can legitimately fix three findings and surface two.
+      ROUTING — escalation goes to the ORCHESTRATOR (the project chat), never to a dead end:
+      • `design-gap` → ONE bounded re-plan per run, with the findings attached so the planner is no longer
+        deaf. Unbounded re-planning reproduces this same waste one level up as a plan↔fix oscillation.
+      • `missing-dependency` → the ORCHESTRATOR, which owns SEQUENCING: it reports in the project chat and
+        REORDERS the Work Board so the dependency precedes the blocked card. This is the case `36b95167` was
+        actually in, and it composes with the dependency-aware dispatch item — a card escalated this way must
+        move to a visibly BLOCKED state, not sit in `upcoming` looking startable.
+      • a repeat finding AFTER the bounded re-plan → the orchestrator. The re-plan gets exactly one chance to
+        prove it changed something.
+      GUARDRAIL: the RUN reports; the ORCHESTRATOR decides. A build must never mutate the board itself, or an
+      autonomous run could reorder the owner's priorities with no judgement in between. Creating a card for a
+      dependency that does not yet exist still follows the standing intake rule — spec first, then card;
+      reordering cards that ALREADY exist is the sequencing call the orchestrator may make and must report.
+      Escalating is cheap to make safe: branch and PR already survive a terminal failure, so stopping early
+      loses nothing. Round 10 bought nothing over round 2 except cost.
+      Acceptance: a run whose reviewers repeat a finding stops and escalates instead of iterating; the round
+      cap becomes the backstop it was meant to be rather than the primary exit; and the owner can see, on the
+      card, that a build stopped because it was blocked rather than because it failed.
 
 ### Email Core consolidation — absorb the standalone email system (owner-directed 2026-08-07)
 
