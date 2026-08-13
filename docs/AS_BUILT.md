@@ -10600,6 +10600,28 @@ the CLI transport does not consume that setting. Core-seat completeness also tre
 a deferred, unavailable, or dead Codex adversarial run as incomplete, so
 `enforceCrossModelGate` forces `REQUEST_CHANGES`; changing executors does not weaken
 the panel gate.
+## 2026-08-13 — killed Codex builds report themselves and survive the bridge bound
+
+The `typing-on-connect` artifacts establish the failure mechanism. The wrapper's
+stderr was modified from 22:29:26 through 22:40:01 while its trailer remained empty;
+that is the Claude Code Bash tool's 600-second maximum plus launch overhead, not the
+30-minute inactivity or 45-minute absolute fire watchdog. The stderr ends mid-diff,
+and both terminal branches in `trident/codex-build.sh` write the trailer, so the
+wrapper was killed before either branch ran.
+
+`trident/inner-workflow.mjs` now launches the wrapper with `nohup` in the background
+and polls its trailer in 540-second calls, below the Bash bound, for at most the fire
+session's 45-minute absolute ceiling. The trailer is the completion signal. An empty
+or missing trailer hard-DEFERREDs at the single Forge-result reader, naming the
+`.trailer`, `.err`, and preserved worktree; if `git status --porcelain` finds changes,
+the terminal result explicitly says the worktree holds uncommitted work. Existing
+completed `ok` and `CALL_FAILED` trailers keep their prior paths.
+
+`trident/__tests__/cross-model-dispatch.test.ts` contains the scaled real-mechanism
+proof: a foreground caller killed before a slow child completes no longer kills the
+detached child. It also pins the killed-wrapper message and artifact paths, the
+uncommitted-work recovery message, the existing failed-trailer mapping, and the happy
+path reaching review.
 
 ## 2026-08-13 — typing catches up on connect and explains the live step
 

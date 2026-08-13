@@ -22,7 +22,10 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
@@ -94,6 +97,10 @@ async function runWorkflow(
     fixLands?: boolean
     /** Make the codex-backed adversarial core seat fail closed. */
     deferredAdversarial?: boolean
+    /** Simulate a wrapper death before either trailer-writing branch. */
+    missingBuildTrailer?: boolean
+    /** The preserved build worktree contains changes after that death. */
+    preservedBuildWork?: boolean
   } = {},
 ): Promise<{ captured: Captured[]; logs: string[]; result: Record<string, unknown> }> {
   const captured: Captured[] = []
@@ -132,7 +139,13 @@ async function runWorkflow(
       // workflow refuses to continue without it. A mock that omitted `codexStatus`
       // would be testing a bridge that dropped it.
       return prompt.includes('CODEX BUILD bridge')
-        ? { ...built, codexStatus: 'connected' }
+        ? {
+            ...built,
+            codexStatus: opts.missingBuildTrailer === true ? 'deferred' : 'connected',
+            trailerComplete: opts.missingBuildTrailer !== true,
+            wrapperExitCode: opts.missingBuildTrailer === true ? 143 : 0,
+            preservedWork: opts.preservedBuildWork === true,
+          }
         : built
     }
     if (String(label).startsWith('head-probe-round-')) {
@@ -197,7 +210,8 @@ async function runWorkflow(
   if (
     opts.buildProduces === undefined &&
     opts.remainingTasks === undefined &&
-    opts.buildBranch === undefined
+    opts.buildBranch === undefined &&
+    opts.missingBuildTrailer !== true
   ) {
     expect(synthCount).toBeGreaterThan(0)
   }
@@ -412,6 +426,65 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
    * `the bridge is told not to build` below is what holds that line.
    */
   const CODEX_BUILD = { build: { model: 'terra' } }
+
+  test('the detached wrapper outlives the Bash-call bound that used to kill it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-codex-detach-'))
+    const marker = join(dir, 'completed')
+    try {
+      // Scaled reproduction of the real mechanism: the foreground caller is killed
+      // at 50ms, before the 250ms build finishes. `nohup` + backgrounding severs the
+      // wrapper from that caller, exactly as the generated production command does.
+      spawnSync(
+        'bash',
+        ['-c', `nohup sh -c 'sleep 0.25; printf done > "$1"' _ '${marker}' </dev/null >/dev/null 2>&1 & wait`],
+        { timeout: 50 },
+      )
+      await Bun.sleep(400)
+      expect(readFileSync(marker, 'utf8')).toBe('done')
+
+      const prompt = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
+      expect(prompt).toContain('600-second per-call ceiling')
+      expect(prompt).toContain('nohup setsid ')
+      expect(prompt).toContain('540 seconds')
+      expect(prompt).toContain('45 minutes total')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an absent completion trailer is DEFERRED and names the killed wrapper artifacts', async () => {
+    const { result, logs, captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      missingBuildTrailer: true,
+    })
+    expect(result['ok']).toBe(false)
+    expect(result['checkpoint']).toBe('inner-error')
+    const terminal = logs.find((line) => line.includes('inner THREW')) ?? ''
+    expect(terminal).toContain('DEFERRED: the build wrapper was killed before it could report')
+    expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.trailer')
+    expect(terminal).toContain('/tmp/trident-codex-build-run-1-r1.err')
+    expect(terminal).toContain('preserved worktree')
+    expect(terminal).not.toContain('produced no')
+    expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+  })
+
+  test('the terminal result says when the preserved worktree holds uncommitted work', async () => {
+    const { logs } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      missingBuildTrailer: true,
+      preservedBuildWork: true,
+    })
+    expect(logs.find((line) => line.includes('inner THREW'))).toContain(
+      'preserved worktree, which holds uncommitted work',
+    )
+  })
+
+  test('completed failed and ok trailers retain their existing result paths', async () => {
+    const prompt = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
+    expect(prompt).toContain("test -s '/tmp/trident-codex-build-run-1-r1.trailer'")
+    expect(prompt).toContain("EXIT 3 or 5 (any other reason) → codexStatus='deferred'")
+    const healthy = await runWorkflow(productionArgs(CODEX_BUILD))
+    expect(healthy.result['ok']).toBe(true)
+    expect(healthy.captured.filter((c) => String(c.label).startsWith('argus:')).length).toBeGreaterThan(0)
+  })
 
   test('the production launcher carries the choice — the typed boundary accepts it', () => {
     // If `parsePhaseModelConfig` still refused a codex tier on a build row, this is
@@ -973,6 +1046,9 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
           commitSha: '',
           testsPassed: false,
           codexStatus: 'not_connected',
+          trailerComplete: true,
+          wrapperExitCode: 10,
+          preservedWork: false,
         }
       }
       return ''
