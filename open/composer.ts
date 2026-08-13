@@ -452,6 +452,7 @@ import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-conne
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
 import {
+  buildRunCodexHomeResolver,
   CodexCredentialService,
   codexExecutorAvailability,
 } from '@neutronai/trident/codex-credential.ts'
@@ -1542,12 +1543,15 @@ export function buildOpenGraphComposer(
     // `codex_connect`/`codex_status` agent tools dispatch this ONE service:
     // validate a pasted ChatGPT-subscription auth.json (metered OPENAI_API_KEY
     // rejected), store it encrypted in the #149 credential store (service `codex`),
-    // and materialize it to the CODEX_HOME `trident/codex-review.sh` reads — the
-    // GLOBAL dir (`resolveCodexHome`) for the default, or a nested per-project dir
-    // (`codexProjectHome`) for an override. The trident loop threads the GLOBAL
-    // CODEX_HOME (the trident-wide default); `ensureMaterialized` self-heals the
-    // global file if a stored credential exists but the on-disk auth.json is
-    // missing (fresh process / wiped tmp).
+    // and materialize it to the CODEX_HOME `trident/codex-review.sh` AND
+    // `trident/codex-build.sh` read — the GLOBAL dir (`resolveCodexHome`) for the
+    // default, or a nested per-project dir (`codexProjectHome`) for an override.
+    // The trident loop resolves PER RUN — the run's project override first, the
+    // global default second (`buildRunCodexHomeResolver` → `resolveActiveCodexHome`
+    // → the #149 store resolver) — NOT the global dir unconditionally, which is
+    // what this comment used to claim and what the wiring below used to do.
+    // `ensureMaterialized` self-heals the global file if a stored credential
+    // exists but the on-disk auth.json is missing (fresh process / wiped tmp).
     const codexHome = resolveCodexHome({ owner_home })
     const codexCredentialService = new CodexCredentialService({
       store: projectCredentialStore,
@@ -5869,12 +5873,15 @@ export function buildOpenGraphComposer(
               // gracefully to a Claude-only panel; routing the BUILD through the
               // same credential (#222) turned that silent degrade into a hard stop.
               // So: owner handle FIRST, project id SECOND — which is also what
-              // makes a per-project override reachable at all.
-              resolve_codex_home: (run) =>
-                codexCredentialService.resolveActiveCodexHome(
-                  asOwnerHandle(owner_handle),
-                  run.project_slug,
-                ),
+              // makes a per-project override reachable at all. The closure is
+              // BUILT BY A NAMED, TESTED FACTORY rather than written inline here,
+              // because an inline closure at a wiring site is unreachable from a
+              // test and that is precisely how a one-argument error reached
+              // production. See `buildRunCodexHomeResolver` for the full account.
+              resolve_codex_home: buildRunCodexHomeResolver(
+                codexCredentialService,
+                asOwnerHandle(owner_handle),
+              ),
               codex_home: codexHome,
               // KIMI K3 — the cross-model panelist from a DIFFERENT model family.
               // Read from the environment PER LAUNCH, not captured here: a key added

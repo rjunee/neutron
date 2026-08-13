@@ -26,6 +26,7 @@ import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { codexAuthPath, readMaterializedAuth } from './codex-auth.ts'
 import {
+  buildRunCodexHomeResolver,
   CODEX_CREDENTIAL_SERVICE,
   CodexCredentialService,
   codexCliOnPath,
@@ -209,6 +210,39 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
     // Global default survives → the project falls back to it.
     expect(existsSync(codexAuthPath(codexHome))).toBe(true)
     expect(svc.status(OWNER, { project_id: PID }).scope).toBe('global')
+  })
+
+  // ── THE 2026-08-13 OUTAGE, at the seam the composer actually wires ─────────
+  // Every case above passes OWNER by hand, so it cannot catch the production
+  // defect: the wiring passed the RUN'S PROJECT SLUG where the owner handle
+  // belongs. These exercise `buildRunCodexHomeResolver` — the exported factory
+  // `open/composer.ts` now calls — with an owner and a project that are
+  // DELIBERATELY DIFFERENT STRINGS, because when they are equal the bug is
+  // invisible.
+  test('the run resolver asks by OWNER handle, with the run project as the override key', async () => {
+    const svc = newService()
+    await svc.connect(OWNER, subscriptionAuth())
+    const resolve = buildRunCodexHomeResolver(svc, OWNER)
+    // A run in a project with NO override resolves the owner's GLOBAL default.
+    // Pre-fix this returned null and the build died with CODEX_HOME unset.
+    expect(resolve({ project_slug: 'a-project-that-is-not-the-owner' })).toBe(codexHome)
+    // An override for THAT project wins; other projects still resolve global.
+    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    expect(resolve({ project_slug: PID })).toBe(projectHome())
+    expect(resolve({ project_slug: 'other' })).toBe(codexHome)
+  })
+
+  test('the defect itself: asking by the run project slug resolves NOTHING', async () => {
+    const svc = newService()
+    await svc.connect(OWNER, subscriptionAuth())
+    // What the wiring used to do — `resolveActiveCodexHome(asOwnerHandle(run.project_slug))`.
+    // The credential is stored against the owner, so this matches no row and a
+    // CONNECTED, MATERIALIZED credential reads as "not connected". Kept as an
+    // executable record of the failure: if this ever starts returning a home,
+    // the lookup key has changed meaning and the fix above needs revisiting.
+    expect(svc.resolveActiveCodexHome(asOwnerHandle('a-project-that-is-not-the-owner'))).toBeNull()
+    // And the credential really is there — it is only the NAME that was wrong.
+    expect(svc.resolveActiveCodexHome(OWNER)).toBe(codexHome)
   })
 
   test('ensureMaterialized ignores a project override (global-only self-heal)', async () => {
