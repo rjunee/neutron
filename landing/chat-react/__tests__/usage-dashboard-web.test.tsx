@@ -59,6 +59,7 @@ const {
   formatPace,
   formatPercent,
   paceNote,
+  projectPool,
   DASHBOARD_UNREACHABLE,
 } = await import('../usage-dashboard-client.ts')
 
@@ -143,14 +144,30 @@ describe('decoding keeps "answered with nothing" apart from "could not ask"', ()
     expect(out.pools[0]?.accounts[0]?.session).toBeNull()
   })
 
-  it('decodes an unmodelled capacity state as UNKNOWN, never as available', () => {
-    // A payload this client cannot read must not become "push more work at it".
+  it('ignores a capacity standing on the wire — the card computes its own', () => {
+    // The server has no standing to offer: "can this account take work" is a
+    // function of the render clock, and a verdict decoded here would be painted
+    // unchanged for as long as the payload was held. A cheerful "available" is
+    // dropped, and the honest answer is computed from the reading itself — 99%
+    // spent with no reset instant is UNKNOWN, never "push more work at it".
     const out = decodeDashboard({
-      pools: [{ pool: 'kimi', accounts: [{ measured_at: 1, capacity: { state: 'soon' } }] }],
+      pools: [
+        {
+          pool: 'kimi',
+          accounts: [
+            {
+              measured_at: 1,
+              capacity: { state: 'available' },
+              session: { fraction: 0.99, reset_at: null },
+            },
+          ],
+        },
+      ],
     })
     expect(out.reachable).toBe(true)
     if (!out.reachable) return
-    expect(out.pools[0]?.accounts[0]?.capacity).toEqual({ state: 'unknown' })
+    expect('capacity' in out.pools[0]!.accounts[0]!).toBe(false)
+    expect(projectPool(out.pools[0]!, 1).accounts[0]!.capacity).toEqual({ state: 'unknown' })
   })
 })
 
@@ -229,24 +246,27 @@ function window_(over: Json = {}): Json {
     fraction: 0.75,
     window_ms: 5 * HOUR,
     reset_at: NOW + 2.5 * HOUR,
-    resets_in_ms: 2.5 * HOUR,
     pace: 1.5,
     exhausts_at: NOW + 50 * MINUTE,
-    floor: false,
     ...over,
   }
 }
 
+/**
+ * One account as the SERVER sends it: instants and figures, and no verdicts.
+ *
+ * There is no `age_ms`, no `stale`, no `floor` and no `capacity` to override,
+ * because none of them ride the wire — the card derives all four from
+ * `measured_at`, `stale_after_ms` and its own clock. A test that wanted a stale
+ * card therefore backdates `measured_at`, which is the same lever a dead poller
+ * pulls.
+ */
 function account(over: Json = {}): Json {
   return {
     account_label: null,
     measured_at: NOW,
-    age_ms: 0,
-    stale: false,
     session: window_(),
     weekly: window_({ window_ms: 7 * DAY, fraction: 0.5, pace: 1, exhausts_at: null }),
-    binding: 'session',
-    capacity: { state: 'available' },
     ...over,
   }
 }
@@ -256,17 +276,9 @@ function poolOf(over: Json = {}): Json {
   return {
     pool: 'anthropic',
     connection: 'connected',
-    measured_at: NOW,
-    age_ms: 0,
-    capacity: {
-      available_now: accounts.length,
-      returning: 0,
-      unknown: 0,
-      next_account_label: (accounts[0]?.['account_label'] as string | null) ?? null,
-      next: { state: 'available' },
-      next_other_window: null,
-      next_other_fraction: null,
-    },
+    measured_at: (accounts[0]?.['measured_at'] as number | undefined) ?? NOW,
+    // Anthropic's deadline: a 60s cadence with one missed probe of grace.
+    stale_after_ms: 2 * MINUTE,
     ...over,
     accounts,
   }
@@ -404,26 +416,9 @@ describe('when capacity comes back — the line the owner reads first', () => {
       account_label: 'owner-a',
       session: window_({ fraction: 0.98, reset_at: NOW + 17 * MINUTE }),
       weekly: window_({ window_ms: 7 * DAY, fraction: 0.97, reset_at: NOW + 3 * DAY }),
-      binding: 'weekly',
-      capacity: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
     })
     const { container, root } = await mount(() =>
-      json({
-        pools: [
-          poolOf({
-            accounts: [cooling],
-            capacity: {
-              available_now: 0,
-              returning: 1,
-              unknown: 0,
-              next_account_label: 'owner-a',
-              next: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
-              next_other_window: 'session',
-              next_other_fraction: 0.98,
-            },
-          }),
-        ],
-      }),
+      json({ pools: [poolOf({ accounts: [cooling] })] }),
     )
     const line = container.querySelector('[data-testid="usage-anthropic-capacity"]')?.textContent
     expect(line).toContain('Next capacity in')
@@ -439,28 +434,11 @@ describe('when capacity comes back — the line the owner reads first', () => {
     // that sends the owner to raise concurrency into a wall.
     const unknown = account({
       account_label: 'owner-a',
-      session: window_({ fraction: 0.99, reset_at: null, resets_in_ms: null, pace: null, exhausts_at: null }),
+      session: window_({ fraction: 0.99, reset_at: null, pace: null, exhausts_at: null }),
       weekly: null,
-      binding: 'session',
-      capacity: { state: 'unknown' },
     })
     const { container, root } = await mount(() =>
-      json({
-        pools: [
-          poolOf({
-            accounts: [unknown],
-            capacity: {
-              available_now: 0,
-              returning: 0,
-              unknown: 1,
-              next_account_label: 'owner-a',
-              next: { state: 'unknown' },
-              next_other_window: null,
-              next_other_fraction: null,
-            },
-          }),
-        ],
-      }),
+      json({ pools: [poolOf({ accounts: [unknown] })] }),
     )
     expect(
       container.querySelector('[data-testid="usage-anthropic-acct-0-session-resets"]')?.textContent,
@@ -488,13 +466,23 @@ describe('when capacity comes back — the line the owner reads first', () => {
 
 describe('staleness is shown, never hidden', () => {
   it('floors a stale reading with a ≥ and shows its age', async () => {
+    // Nothing in this payload says "stale" — the reading is simply three hours old,
+    // and the card works that out against its own clock. That is the whole fix: a
+    // server that said "fresh" three hours ago cannot keep being believed.
     const stale = account({
       account_label: 'owner-a',
-      age_ms: 3 * HOUR,
-      stale: true,
-      session: window_({ fraction: 0.43, floor: true, pace: null, exhausts_at: null }),
+      // Deliberately OFF the minute boundary: ages round UP (the pessimistic
+      // direction, like every other duration here), so a fixture sitting exactly on
+      // a minute would render one way or the other depending on how many
+      // milliseconds the render took.
+      measured_at: NOW - (3 * HOUR + 30_000),
+      session: window_({
+        fraction: 0.43,
+        reset_at: NOW + 2 * HOUR,
+        pace: null,
+        exhausts_at: null,
+      }),
       weekly: null,
-      capacity: { state: 'unknown' },
     })
     const { container, root } = await mount(() => json({ pools: [poolOf({ accounts: [stale] })] }))
     // The last known value, marked as a lower bound — never blanked, never
@@ -504,7 +492,7 @@ describe('staleness is shown, never hidden', () => {
     ).toBe('≥ 43%')
     expect(
       container.querySelector('[data-testid="usage-anthropic-acct-0-age"]')?.textContent,
-    ).toBe('3h 00m ago')
+    ).toBe('3h 01m ago')
     root.unmount()
   })
 
@@ -518,17 +506,8 @@ describe('staleness is shown, never hidden', () => {
             pool: 'codex',
             connection: 'not_connected',
             measured_at: null,
-            age_ms: null,
+            stale_after_ms: 30 * MINUTE,
             accounts: [],
-            capacity: {
-              available_now: 0,
-              returning: 0,
-              unknown: 0,
-              next_account_label: null,
-              next: { state: 'unknown' },
-              next_other_window: null,
-              next_other_fraction: null,
-            },
           },
         ],
       }),

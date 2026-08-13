@@ -33,8 +33,14 @@
  *     owner into a wall.
  *   - `account_label: null` → "active credential", never a guessed account name.
  *
- * The server does every calculation except the countdowns, which are computed HERE
- * from the absolute instants it sent — a duration is wrong the moment it is stored.
+ * The server sends only facts that DO NOT AGE — the instant each reading was taken,
+ * each window's length and reset instant, the pace and the projection anchored at
+ * the measurement, and a staleness THRESHOLD. Every delta — the age chip, the "≥"
+ * floors, each account's standing and every countdown — is computed HERE against
+ * this device's clock, on every paint (`projectPool`). A duration is wrong the
+ * moment it is stored, and this screen holds its payload between refreshes: a
+ * server-computed age would read "just now" for as long as the screen stayed open,
+ * with a live countdown ticking beside it.
  */
 
 import { useRouter } from 'expo-router';
@@ -67,11 +73,12 @@ import {
   formatWindowFraction,
   paceNote,
   poolTitle,
+  projectPool,
   windowName,
-  type UsageAccount,
+  type ProjectedAccount,
+  type ProjectedWindow,
   type UsageDashboard,
   type UsagePool,
-  type UsageWindow,
 } from '../lib/usage-dashboard-client';
 
 const BAND_COLOUR: Record<string, string> = {
@@ -89,7 +96,7 @@ function WindowRow({
 }: {
   windowKey: 'session' | 'weekly';
   testID: string;
-  win: UsageWindow | null;
+  win: ProjectedWindow | null;
   now: number;
 }) {
   // From the LENGTH the provider reported, never a hardcoded "5-hour window":
@@ -181,40 +188,46 @@ function WindowRow({
  * cards sit adjacently and each answers for itself.
  */
 function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
-  const note = connectionNote(pool);
-  const line = capacityLine(pool, now);
+  // EVERY DELTA ON THIS CARD IS COMPUTED HERE, from the render clock, on every
+  // paint — the age, the staleness, the "≥" floors and each account's standing.
+  // The payload carries instants and a threshold and nothing else, so a card left
+  // open across a dead poller ages in front of the owner rather than insisting on
+  // the freshness it had when the response was built.
+  const view = projectPool(pool, now);
+  const note = connectionNote(view);
+  const line = capacityLine(view);
   return (
-    <View style={styles.pool} testID={`usage-${pool.pool}`}>
+    <View style={styles.pool} testID={`usage-${view.pool}`}>
       <View style={styles.poolHead}>
-        <Text style={styles.poolTitle} testID={`usage-${pool.pool}-title`}>
-          {poolTitle(pool.pool)}
+        <Text style={styles.poolTitle} testID={`usage-${view.pool}-title`}>
+          {poolTitle(view.pool)}
         </Text>
         {/* The age rides on every card, not only the stale ones — an age that
             shows up only when something is wrong is one nobody learns to read. */}
-        <Text style={styles.age} testID={`usage-${pool.pool}-age`}>
-          {formatAge(pool.age_ms)}
+        <Text style={styles.age} testID={`usage-${view.pool}-age`}>
+          {formatAge(view.age_ms)}
         </Text>
       </View>
       {/* THE LINE THE OWNER ASKED FOR: how hard can I push this provider right
           now. It names the BINDING window, because a countdown to a 5-hour reset
           says nothing about capacity while the 7-day window is spent. */}
       {line !== null ? (
-        <Text style={styles.capacity} testID={`usage-${pool.pool}-capacity`}>
+        <Text style={styles.capacity} testID={`usage-${view.pool}-capacity`}>
           {line}
         </Text>
       ) : null}
       {note !== null ? (
         // Three different fixes hide behind an empty card — connect an account,
         // wait for a reading, or nothing at all — so it says which.
-        <Text style={styles.muted} testID={`usage-${pool.pool}-empty`}>
+        <Text style={styles.muted} testID={`usage-${view.pool}-empty`}>
           {note}
         </Text>
       ) : (
-        pool.accounts.map((account, i) => (
+        view.accounts.map((account, i) => (
           <AccountCard
             key={account.account_label ?? `unlabelled-${i}`}
             account={account}
-            testID={`usage-${pool.pool}-acct-${i}`}
+            testID={`usage-${view.pool}-acct-${i}`}
             now={now}
           />
         ))
@@ -229,7 +242,7 @@ function AccountCard({
   testID,
   now,
 }: {
-  account: UsageAccount;
+  account: ProjectedAccount;
   testID: string;
   now: number;
 }) {
@@ -241,7 +254,7 @@ function AccountCard({
           {accountName(account.account_label)}
         </Text>
         <Text style={styles.chip} testID={`${testID}-capacity`}>
-          {accountCapacityNote(account, now)}
+          {accountCapacityNote(account)}
         </Text>
         <Text style={styles.age} testID={`${testID}-age`}>
           {formatAge(account.age_ms)}

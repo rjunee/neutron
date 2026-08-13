@@ -15,9 +15,15 @@
  *     product uses, so "not connected" and "no meter" are distinguishable from
  *     "connected and idle";
  *   - the second gauge is a REGISTERED, RUNNING loop, not a class nobody arms;
- *   - the staleness constants the store renders with are the intervals the
- *     writers actually poll at. Two numbers that must agree, in two packages that
- *     cannot import each other.
+ *   - the staleness constants the store SENDS are the intervals the writers
+ *     actually poll at. Two numbers that must agree, in two packages that cannot
+ *     import each other;
+ *   - the payload carries NO DELTA — no age, no staleness verdict, no floor, no
+ *     capacity standing. Those are functions of the render clock, so a card that
+ *     took the server's word for them would paint a dead poller as fresh for as
+ *     long as the tab stayed open. Pinned here, on the real composed response,
+ *     because "the store does not compute it" is not the same claim as "the wire
+ *     does not carry it".
  *
  * NO NETWORK. The Anthropic probe resolves an API-key credential (no windows, no
  * request) and the Kimi base URL points at a closed loopback port, so the pollers'
@@ -36,6 +42,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
   POOL_CADENCE_MS,
+  POOL_STALE_AFTER_MS,
   UsageSamplesStore,
   type PoolSummary,
 } from '@neutronai/persistence/usage-samples-store.ts'
@@ -44,6 +51,13 @@ import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { KIMI_CREDENTIAL_SERVICE } from '@neutronai/trident/kimi-key.ts'
 import { USAGE_POLL_INTERVAL_MS } from '../credential-usage-monitor.ts'
 import { KIMI_USAGE_POLL_INTERVAL_MS } from '../kimi-usage-monitor.ts'
+
+import {
+  capacityLine,
+  connectionNote,
+  decodeDashboard,
+  projectPool,
+} from '@neutronai/landing/chat-react/usage-dashboard-client.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -186,9 +200,31 @@ test('two cards carry real windows: fraction, pace, projection, countdown and ag
     // instant, not a duration: a stored countdown is wrong one millisecond later.
     expect(account.session!.reset_at).toBeGreaterThan(Date.now())
     expect(account.weekly!.reset_at).toBeGreaterThan(Date.now())
-    // The age chip's input, present on every card.
-    expect(pool.age_ms).toBeGreaterThanOrEqual(0)
-    expect(account.age_ms).toBeGreaterThanOrEqual(0)
+    // The age chip's input, present on every card: the measurement INSTANT, and
+    // the deadline the client measures it against. Never the age itself.
+    expect(pool.measured_at).toBeGreaterThan(0)
+    expect(account.measured_at).toBeGreaterThan(0)
+    expect(pool.stale_after_ms).toBe(POOL_STALE_AFTER_MS[name])
+  }
+})
+
+test('the composed payload carries NO DELTA — every one of them is the client\'s job', () => {
+  // THE ROUND-1 BLOCKER, pinned on the real response. `age_ms`, `stale`, `floor`
+  // and `capacity` are all functions of "now": baked here they would be frozen at
+  // response time, and both clients hold a payload between fetches while their own
+  // countdowns tick. A card would then insist "just now, available" about a poller
+  // that died hours ago.
+  //
+  // Asserted on the SERIALISED body rather than on the typed value, because a field
+  // that TypeScript no longer knows about can still ride the wire.
+  const serialised = JSON.stringify(pools)
+  for (const forbidden of ['age_ms', '"stale"', 'floor', 'capacity', 'resets_in_ms', 'binding']) {
+    expect(serialised).not.toContain(forbidden)
+  }
+  // A positive control on the search: the fields that SHOULD be there are, so a
+  // typo'd needle cannot make this pass over an empty haystack.
+  for (const present of ['measured_at', 'stale_after_ms', 'reset_at', 'fraction']) {
+    expect(serialised).toContain(present)
   }
 })
 
@@ -201,13 +237,29 @@ test('a window burning faster than it refills carries its projected cap-out', ()
   expect(account.session!.exhausts_at).not.toBeNull()
 })
 
-test('the pool line answers "how hard can I push" per provider', () => {
-  const anthropic = pools.find((p) => p.pool === 'anthropic')!
-  // 75% of the session window and 50% of the weekly one is room in both, so the
-  // account is available — and the headline names it.
+test('the composed payload is what the real card reads, and the card says "1 available now"', () => {
+  // END TO END through the CLIENT'S OWN projection, not a restatement of it: the
+  // bytes the composed handler served are decoded and projected by the shipped web
+  // client, at the clock the owner would be looking at. 75% of the session window
+  // and 50% of the weekly one is room in both, so the account is available and the
+  // headline says so.
+  //
+  // This is also the seam that would catch a rename: a server field the client does
+  // not read makes the line fall to "unknown" here rather than passing a
+  // hand-written expectation about a shape nobody renders.
+  const decoded = decodeDashboard({ pools })
+  expect(decoded.reachable).toBe(true)
+  if (!decoded.reachable) return
+  const anthropic = projectPool(
+    decoded.pools.find((p) => p.pool === 'anthropic')!,
+    Date.now(),
+  )
+  expect(anthropic.accounts[0]!.account_label).toBe('owner-a')
   expect(anthropic.capacity.available_now).toBe(1)
   expect(anthropic.capacity.next).toEqual({ state: 'available' })
-  expect(anthropic.capacity.next_account_label).toBe('owner-a')
+  expect(capacityLine(anthropic)).toBe('1 available now')
+  // And the age chip is a real, growing number rather than a frozen zero.
+  expect(anthropic.age_ms).toBeGreaterThan(0)
 })
 
 test('the Codex card is honestly empty — no accounts, no zeros, and a reason', () => {
@@ -215,9 +267,17 @@ test('the Codex card is honestly empty — no accounts, no zeros, and a reason',
   expect(codex.accounts).toEqual([])
   expect(codex.measured_at).toBeNull()
   expect(codex.connection).toBe('not_connected')
-  // NEVER a zero standing. The card says "not connected"; it does not draw a bar.
-  expect(codex.capacity.available_now).toBe(0)
-  expect(codex.capacity.next).toEqual({ state: 'unknown' })
+  // NEVER a zero standing, and never an unbounded one either: Codex has no cadence,
+  // but it still carries a finite deadline, so a harvested reading cannot claim
+  // freshness for three weeks once the Phase 3 writer lands.
+  expect(codex.stale_after_ms).toBe(POOL_STALE_AFTER_MS.codex)
+  expect(Number.isFinite(codex.stale_after_ms)).toBe(true)
+  // The card says "not connected"; it does not draw a bar.
+  const decoded = decodeDashboard({ pools })
+  if (!decoded.reachable) throw new Error('unreachable: the composed response is a payload')
+  const view = projectPool(decoded.pools.find((p) => p.pool === 'codex')!, Date.now())
+  expect(connectionNote(view)).toBe('Not connected.')
+  expect(capacityLine(view)).toBeNull()
 })
 
 test('each pool reports its connection from the SAME resolver the product uses', () => {
@@ -239,14 +299,21 @@ test('the Kimi gauge is a REGISTERED, RUNNING loop — not a class nobody arms',
   expect(loopNames).toContain('kimi-usage')
 })
 
-test('the staleness constants ARE the writers’ poll intervals', () => {
+test('the staleness constants ARE the writers’ poll intervals, plus one missed probe', () => {
   // `persistence` cannot import `open`, so the cadence that decides when a card
   // renders as stale is declared twice. Pinned here, where both are importable: a
   // poller slowed down without moving its cadence would silently mark every reading
   // stale, and a cadence relaxed without the poller would hide a dead writer.
   expect(POOL_CADENCE_MS.anthropic).toBe(USAGE_POLL_INTERVAL_MS)
   expect(POOL_CADENCE_MS.kimi).toBe(KIMI_USAGE_POLL_INTERVAL_MS)
+  // And the deadline the wire carries is that cadence with ONE missed probe of
+  // grace. Zero grace blanks an account with headroom over a single flaky request,
+  // which writes no row and would leave the card "unknown" for a full cadence.
+  expect(POOL_STALE_AFTER_MS.anthropic).toBe(USAGE_POLL_INTERVAL_MS * 2)
+  expect(POOL_STALE_AFTER_MS.kimi).toBe(KIMI_USAGE_POLL_INTERVAL_MS * 2)
   // Codex's gauge is harvested from real runs rather than polled, so it has no
-  // cadence to violate — its age is still rendered.
+  // cadence to violate — but it still gets a finite MAX AGE, because "no cadence"
+  // must never become "never stale".
   expect(POOL_CADENCE_MS.codex).toBeNull()
+  expect(POOL_STALE_AFTER_MS.codex).toBe(30 * MINUTE)
 })

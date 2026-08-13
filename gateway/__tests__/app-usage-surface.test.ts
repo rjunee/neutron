@@ -22,24 +22,14 @@ import { createAppUsageSurface } from '../http/app-usage-surface.ts'
 
 const OWNER = 'demo'
 
-/** No accounts, no standing — the shape a first render actually gets. */
-const NO_CAPACITY = {
-  available_now: 0,
-  returning: 0,
-  unknown: 0,
-  next_account_label: null,
-  next: { state: 'unknown' },
-  next_other_window: null,
-  next_other_fraction: null,
-} as const
-
+/** No accounts — the shape a first render actually gets. The staleness deadline
+ *  rides along even so: it describes the POOL, not any one reading. */
 const EMPTY_POOL: PoolSummary = {
   pool: 'anthropic',
   connection: 'not_connected',
   measured_at: null,
-  age_ms: null,
+  stale_after_ms: 120_000,
   accounts: [],
-  capacity: NO_CAPACITY,
 }
 
 function surfaceFor(
@@ -118,36 +108,27 @@ describe('GET /api/app/usage/dashboard', () => {
     pool: 'anthropic',
     connection: 'connected',
     measured_at: 1_700_000_000_000,
-    age_ms: 30_000,
+    stale_after_ms: 120_000,
     accounts: [
       {
         account_label: null,
         measured_at: 1_700_000_000_000,
-        age_ms: 30_000,
-        stale: false,
         session: {
           fraction: 0.75,
           window_ms: 18_000_000,
           reset_at: 1_700_009_000_000,
-          resets_in_ms: 9_000_000,
           pace: 1.5,
           exhausts_at: 1_700_003_000_000,
-          floor: false,
         },
         weekly: {
           fraction: 0.36,
           window_ms: 604_800_000,
           reset_at: null,
-          resets_in_ms: null,
           pace: null,
           exhausts_at: null,
-          floor: false,
         },
-        binding: 'weekly',
-        capacity: { state: 'available' },
       },
     ],
-    capacity: { ...NO_CAPACITY, available_now: 1, next: { state: 'available' } },
   }
 
   it('serves the summarised series under a `pools` array', async () => {

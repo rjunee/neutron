@@ -57,24 +57,26 @@ const HOT_SESSION = {
   fraction: 0.75,
   window_ms: 5 * HOUR,
   reset_at: NOW + 2.5 * HOUR,
-  resets_in_ms: 2.5 * HOUR,
   pace: 1.5,
   exhausts_at: NOW + 50 * MINUTE,
-  floor: false,
 };
 
 type Json = Record<string, unknown>;
 
+/**
+ * One account as the SERVER sends it: instants and figures, and no verdicts.
+ *
+ * There is no `age_ms`, no `stale`, no `floor` and no `capacity` to override,
+ * because none of them ride the wire — the screen derives all four from
+ * `measured_at`, `stale_after_ms` and its own clock. A test that wants a stale card
+ * backdates `measured_at`, which is the same lever a dead poller pulls.
+ */
 function account(over: Json = {}): Json {
   return {
     account_label: null,
     measured_at: NOW,
-    age_ms: 0,
-    stale: false,
     session: HOT_SESSION,
     weekly: null,
-    binding: 'session',
-    capacity: { state: 'available' },
     ...over,
   };
 }
@@ -84,17 +86,9 @@ function poolOf(over: Json = {}): Json {
   return {
     pool: 'anthropic',
     connection: 'connected',
-    measured_at: NOW,
-    age_ms: 0,
-    capacity: {
-      available_now: accounts.length,
-      returning: 0,
-      unknown: 0,
-      next_account_label: (accounts[0]?.['account_label'] as string | null) ?? null,
-      next: { state: 'available' },
-      next_other_window: null,
-      next_other_fraction: null,
-    },
+    measured_at: (accounts[0]?.['measured_at'] as number | undefined) ?? NOW,
+    // Anthropic's deadline: a 60s cadence with one missed probe of grace.
+    stale_after_ms: 2 * MINUTE,
     ...over,
     accounts,
   };
@@ -223,7 +217,7 @@ describe('what the screen refuses to say', () => {
     response = {
       status: 200,
       body: pools(
-        { fraction: 0.2, reset_at: null, resets_in_ms: null, pace: null, exhausts_at: null },
+        { fraction: 0.2, reset_at: null, pace: null, exhausts_at: null },
         null,
       ),
     };
@@ -293,28 +287,8 @@ describe('when capacity comes back — the number the owner acts on', () => {
         exhausts_at: null,
         pace: null,
       },
-      binding: 'weekly',
-      capacity: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
     });
-    response = {
-      status: 200,
-      body: {
-        pools: [
-          poolOf({
-            accounts: [cooling],
-            capacity: {
-              available_now: 0,
-              returning: 1,
-              unknown: 0,
-              next_account_label: 'owner-a',
-              next: { state: 'returns', at: NOW + 3 * DAY, window: 'weekly' },
-              next_other_window: 'session',
-              next_other_fraction: 0.98,
-            },
-          }),
-        ],
-      },
-    };
+    response = { status: 200, body: { pools: [poolOf({ accounts: [cooling] })] } };
     await mountUsage();
     const line = textOf('usage-anthropic-capacity');
     expect(line).toContain('Next capacity in');
@@ -343,22 +317,11 @@ describe('when capacity comes back — the number the owner acts on', () => {
                   ...HOT_SESSION,
                   fraction: 0.99,
                   reset_at: null,
-                  resets_in_ms: null,
                   pace: null,
                   exhausts_at: null,
                 },
-                capacity: { state: 'unknown' },
               }),
             ],
-            capacity: {
-              available_now: 0,
-              returning: 0,
-              unknown: 1,
-              next_account_label: 'owner-a',
-              next: { state: 'unknown' },
-              next_other_window: null,
-              next_other_fraction: null,
-            },
           }),
         ],
       },
@@ -379,17 +342,20 @@ describe('staleness is shown, never hidden', () => {
         pools: [
           poolOf({
             accounts: [
+              // Nothing here says "stale". The reading is simply three hours old and
+              // the screen works that out against its own clock — which is the whole
+              // fix: a server that said "fresh" three hours ago cannot keep being
+              // believed. The fixture sits OFF the minute boundary because ages round
+              // UP, the pessimistic direction every duration here rounds in.
               account({
-                age_ms: 3 * HOUR,
-                stale: true,
+                measured_at: NOW - (3 * HOUR + 30_000),
                 session: {
                   ...HOT_SESSION,
                   fraction: 0.43,
-                  floor: true,
+                  reset_at: NOW + 2 * HOUR,
                   pace: null,
                   exhausts_at: null,
                 },
-                capacity: { state: 'unknown' },
               }),
             ],
           }),
@@ -399,7 +365,7 @@ describe('staleness is shown, never hidden', () => {
     await mountUsage();
     // The last known value, marked as a lower bound. Never blanked, never a zero.
     expect(textOf('usage-anthropic-acct-0-session-pct')).toBe('≥ 43%');
-    expect(textOf('usage-anthropic-acct-0-age')).toBe('3h 00m ago');
+    expect(textOf('usage-anthropic-acct-0-age')).toBe('3h 01m ago');
   });
 
   it('a pool with no samples says WHY, and draws nothing', async () => {
@@ -413,17 +379,8 @@ describe('staleness is shown, never hidden', () => {
             pool: 'codex',
             connection: 'not_connected',
             measured_at: null,
-            age_ms: null,
+            stale_after_ms: 30 * MINUTE,
             accounts: [],
-            capacity: {
-              available_now: 0,
-              returning: 0,
-              unknown: 0,
-              next_account_label: null,
-              next: { state: 'unknown' },
-              next_other_window: null,
-              next_other_fraction: null,
-            },
           },
         ],
       },

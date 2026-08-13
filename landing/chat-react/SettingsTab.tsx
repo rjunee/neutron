@@ -66,10 +66,11 @@ import {
   formatWindowFraction,
   paceNote,
   poolTitle,
+  projectPool,
   windowName,
+  type ProjectedWindow,
   type UsageDashboard,
   type UsagePool,
-  type UsageWindow,
 } from './usage-dashboard-client.ts'
 import {
   WebVoiceTranscriptionClient,
@@ -1008,8 +1009,11 @@ export function SettingsTab({
 
           It reports PACE, not just fullness — the meter in the divider already
           says how full the window is, and "72%" is not a decision until you know
-          whether it is climbing. Everything here is server-computed off the
-          persisted series; this markup does no arithmetic on quota. */}
+          whether it is climbing. The figures come off the persisted series; the
+          DELTAS — age, staleness, the "≥" floors, every countdown and each
+          account's standing — are computed at paint from the instants the server
+          sent, because a delta baked into a response is already wrong when it
+          renders. See `projectPool` in `./usage-dashboard-client.ts`. */}
       <section className="cset-section" aria-label="Model usage">
         <h2 className="cset-h">Model usage</h2>
         <p className="cset-sub">
@@ -1641,19 +1645,25 @@ function CredentialRow({
  * adjacently and each answers for itself.
  */
 function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.JSX.Element {
-  const line = capacityLine(pool, now)
-  const note = connectionNote(pool)
+  // EVERY DELTA ON THIS CARD IS COMPUTED HERE, from the render clock, on every
+  // paint — the age, the staleness, the "≥" floors and each account's standing.
+  // The payload carries instants and a threshold and nothing else, so a card left
+  // open across a dead poller ages in front of the owner instead of insisting on
+  // the freshness it had when the response was built.
+  const view = projectPool(pool, now)
+  const line = capacityLine(view)
+  const note = connectionNote(view)
   return (
-    <div className="cset-usage-pool" data-testid={`usage-${pool.pool}`}>
+    <div className="cset-usage-pool" data-testid={`usage-${view.pool}`}>
       <div className="cset-usage-poolhead">
-        <p className="cset-label" data-testid={`usage-${pool.pool}-title`}>
-          {poolTitle(pool.pool)}
+        <p className="cset-label" data-testid={`usage-${view.pool}-title`}>
+          {poolTitle(view.pool)}
         </p>
         {/* THE AGE IS ALWAYS SHOWN, not only when something is wrong: an age that
             appears only on failure is an age nobody learns to read, and staleness
             here is a value rather than an error state. */}
-        <span className="cset-usage-age" data-testid={`usage-${pool.pool}-age`}>
-          {formatAge(pool.age_ms)}
+        <span className="cset-usage-age" data-testid={`usage-${view.pool}-age`}>
+          {formatAge(view.age_ms)}
         </span>
       </div>
       {/* THE LINE THE OWNER ASKED FOR, first in the card and above every bar: "how
@@ -1661,7 +1671,7 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
           because a countdown to a 5-hour reset says nothing about capacity while
           the 7-day window is spent. */}
       {line !== null ? (
-        <p className="cset-usage-capacity" data-testid={`usage-${pool.pool}-capacity`}>
+        <p className="cset-usage-capacity" data-testid={`usage-${view.pool}-capacity`}>
           {line}
         </p>
       ) : null}
@@ -1669,42 +1679,42 @@ function UsagePoolCard({ pool, now }: { pool: UsagePool; now: number }): React.J
         // Three different fixes hide behind an empty card — connect an account,
         // wait for a reading, or nothing at all — so the card says which, instead
         // of drawing zeros.
-        <div className="cset-empty" data-testid={`usage-${pool.pool}-empty`}>
+        <div className="cset-empty" data-testid={`usage-${view.pool}-empty`}>
           {note}
         </div>
       ) : (
-        pool.accounts.map((account, i) => (
+        view.accounts.map((account, i) => (
           <div
             className="cset-usage-account"
             key={account.account_label ?? `unlabelled-${i}`}
-            data-testid={`usage-${pool.pool}-acct-${i}`}
+            data-testid={`usage-${view.pool}-acct-${i}`}
           >
             <div className="cset-usage-accounthead">
               {/* NEVER a guessed account name. The credential is swapped by a
                   process outside this box, so nothing here can know which account
                   a reading belongs to unless something labels it. */}
-              <span className="cset-label" data-testid={`usage-${pool.pool}-acct-${i}-name`}>
+              <span className="cset-label" data-testid={`usage-${view.pool}-acct-${i}-name`}>
                 {accountName(account.account_label)}
               </span>
               <span
                 className="cset-usage-chip"
-                data-testid={`usage-${pool.pool}-acct-${i}-capacity`}
+                data-testid={`usage-${view.pool}-acct-${i}-capacity`}
               >
-                {accountCapacityNote(account, now)}
+                {accountCapacityNote(account)}
               </span>
-              <span className="cset-usage-age" data-testid={`usage-${pool.pool}-acct-${i}-age`}>
+              <span className="cset-usage-age" data-testid={`usage-${view.pool}-acct-${i}-age`}>
                 {formatAge(account.age_ms)}
               </span>
             </div>
             <UsageWindowRow
               windowKey="session"
-              testid={`usage-${pool.pool}-acct-${i}-session`}
+              testid={`usage-${view.pool}-acct-${i}-session`}
               win={account.session}
               now={now}
             />
             <UsageWindowRow
               windowKey="weekly"
-              testid={`usage-${pool.pool}-acct-${i}-weekly`}
+              testid={`usage-${view.pool}-acct-${i}-weekly`}
               win={account.weekly}
               now={now}
             />
@@ -1735,7 +1745,7 @@ function UsageWindowRow({
 }: {
   windowKey: 'session' | 'weekly'
   testid: string
-  win: UsageWindow | null
+  win: ProjectedWindow | null
   now: number
 }): React.JSX.Element {
   // The label comes from the LENGTH the provider reported, not from a fixed

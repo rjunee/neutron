@@ -133,6 +133,24 @@ describe('units — the two slips that render as plausible numbers', () => {
     expect(parseFraction({ used_percent: 42 })).toBe(0.42)
   })
 
+  test('a percent-named field INSIDE 0..1 is refused — the reading is ambiguous', () => {
+    // THE MUTANT THIS KILLS: dividing anything in [0, 100] by 100. `used_percent:
+    // 0.85` is either 0.85% or 85%, a factor of 100 apart, and the divide-anyway
+    // reading is the OPTIMISTIC one — an 85%-spent window rendered as a 1% bar
+    // labelled "available", which is the confident-wrong number that sends the
+    // owner to raise concurrency into a wall. Refusing writes no sample at all, and
+    // "no readings yet" is the honest card.
+    expect(parseFraction({ used_percent: 0.85 })).toBeNull()
+    expect(parseFraction({ used_percent: 1 })).toBeNull()
+    // Exactly zero is unambiguous — 0% and 0.0 are the same number.
+    expect(parseFraction({ used_percent: 0 })).toBe(0)
+    // Just past the ambiguous band, the percent reading is the only one available.
+    expect(parseFraction({ used_percent: 1.5 })).toBe(0.015)
+    // And a fraction-named field in that same band is still read as a fraction:
+    // the refusal is about the NAME disagreeing with the value, not about the band.
+    expect(parseFraction({ utilization: 0.85 })).toBe(0.85)
+  })
+
   test('a fraction-named field above 1 is refused — the name lied about the unit', () => {
     // 64 under a field called `utilization` is a percentage wearing a fraction's
     // name. Accepting it renders a 64% window as 6400%; clamping it renders it as

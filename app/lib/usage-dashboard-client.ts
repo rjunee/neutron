@@ -1,7 +1,7 @@
 /**
  * @neutronai/app — usage-dashboard client (mobile).
  *
- *   GET /api/app/usage/dashboard → { pools: [ { accounts, capacity, … } ] }
+ *   GET /api/app/usage/dashboard → { pools: [ { accounts, stale_after_ms, … } ] }
  *
  * THE TWIN of `landing/chat-react/usage-dashboard-client.ts`, kept line-for-line
  * identical below this header except for the client class (the web one takes an
@@ -16,12 +16,12 @@
  * reachable buys a drift risk for nothing: the phone could have called something
  * amber that the web still drew green.
  *
- * ⚠️ THE FORMATTERS ARE PRODUCT DECISIONS, NOT TRANSPORT, and they must not
- * diverge. A cross-client parity test in `gateway/__tests__` executes both copies
- * over the same inputs, because a divergence here is the failure nobody reports:
- * each surface stays self-consistent, neither looks broken, and the owner just
- * gets two different answers about their own quota depending on which device they
- * picked up.
+ * ⚠️ THE PROJECTION AND THE FORMATTERS ARE PRODUCT DECISIONS, NOT TRANSPORT, and
+ * they must not diverge. A cross-client parity test in `gateway/__tests__`
+ * executes both copies over the same inputs, because a divergence here is the
+ * failure nobody reports: each surface stays self-consistent, neither looks
+ * broken, and the owner just gets two different answers about their own quota
+ * depending on which device they picked up.
  *
  * The meter under the tab bar answers "how full is the window". This answers the
  * two questions a single reading cannot, and they are opposites:
@@ -30,11 +30,24 @@
  *   - **when does capacity come back** — the countdown to each window's reset,
  *     and the pool line that reads off it.
  *
- * Both come off the persisted series, so this file does no arithmetic on quota —
- * only formatting. The ONE exception is deliberate and load-bearing: **countdowns
- * are computed here, from the absolute instant the server sent, against this
- * device's clock.** A duration computed on the server is already wrong by the time
- * it renders, and a payload held for an hour would keep saying "17m".
+ * ── EVERY DELTA IS COMPUTED HERE, ON EVERY PAINT ─────────────────────────────
+ * The payload carries only facts that DO NOT AGE: the instant each reading was
+ * taken, each window's length and reset instant, the pace and projection anchored
+ * at the measurement, and `stale_after_ms` — a THRESHOLD, not a verdict. This file
+ * turns those into the four things that are pure functions of the clock:
+ *
+ *   - the AGE of a reading (`now − measured_at`);
+ *   - whether it is STALE (`age > stale_after_ms`);
+ *   - whether a gauge is a FLOOR (stale, and its window has not rolled yet);
+ *   - what CAPACITY an account has ({@link projectPool}).
+ *
+ * None of those may ride the wire, and that is the defect this shape exists to
+ * make impossible. This screen fetches on mount and on pull-to-refresh while its
+ * render clock ticks every 30 seconds, so a server-computed age would read "just
+ * now" for as long as the screen stayed open — a poller dead for six hours would
+ * paint as freshly measured with a live countdown running beside it, which is the
+ * exact "confident fresh number" the product forbids. Deltas are cheap; a wrong
+ * one is not.
  *
  * ── NULL IS AN ANSWER, NOT A ZERO ────────────────────────────────────────────
  * Each of these is legitimately absent and each means something different:
@@ -54,51 +67,35 @@
  *   - `capacity: { state: 'unknown' }` — nobody can say when this account frees
  *     up. Renders as "unknown", never as "now". A missing reset rendered as
  *     available is what would send the owner to raise concurrency into a wall,
- *     which is why the wire shape is a tagged state rather than a nullable number.
+ *     which is why the standing is a tagged state rather than a nullable number.
  *
  * A rejected fetch resolves to "unreachable", never to an empty series: an older
  * gateway does not mount the route, and a client that drew "0% used" from a 404
  * would be inventing a measurement.
  */
 
-/** One window's standing. Mirrors `@neutronai/persistence/usage-samples-store.ts`. */
+// ── The wire ─────────────────────────────────────────────────────────────────
+// Mirrors `@neutronai/persistence/usage-samples-store.ts`, re-declared rather than
+// imported — the convention every client here follows, and the reason this file has
+// a twin. NOTHING below is a duration relative to "now"; see the header.
+
+/** One window's standing, as measured. */
 export interface UsageWindow {
   fraction: number
   /** The window's own length, when the provider reported one. */
   window_ms: number | null
+  /** THE INSTANT the window rolls. The countdown to it is computed at paint. */
   reset_at: number | null
-  resets_in_ms: number | null
   pace: number | null
   exhausts_at: number | null
-  /** The fraction is a LOWER BOUND: the reading is stale and its window is live. */
-  floor: boolean
 }
-
-/** When an account can take work again. A tagged state, never a nullable number. */
-export type CapacityStanding =
-  | { state: 'available' }
-  | { state: 'returns'; at: number; window: 'session' | 'weekly' }
-  | { state: 'unknown' }
 
 export interface UsageAccount {
   account_label: string | null
+  /** THE INSTANT this reading was taken. The age chip is subtracted from it. */
   measured_at: number
-  age_ms: number
-  stale: boolean
   session: UsageWindow | null
   weekly: UsageWindow | null
-  binding: 'session' | 'weekly' | null
-  capacity: CapacityStanding
-}
-
-export interface PoolCapacity {
-  available_now: number
-  returning: number
-  unknown: number
-  next_account_label: string | null
-  next: CapacityStanding
-  next_other_window: 'session' | 'weekly' | null
-  next_other_fraction: number | null
 }
 
 /** Why a pool has no readings, when it has none. */
@@ -108,9 +105,9 @@ export interface UsagePool {
   pool: string
   connection: UsagePoolConnection
   measured_at: number | null
-  age_ms: number | null
+  /** How old a reading of this pool may get before it is stale. A threshold. */
+  stale_after_ms: number
   accounts: UsageAccount[]
-  capacity: PoolCapacity
 }
 
 /** What the card renders from. `reachable: false` is a display state. */
@@ -130,6 +127,16 @@ export interface UsageDashboardClientOptions {
   fetchImpl?: FetchImpl
 }
 
+/**
+ * How stale a reading is assumed to go when the server did not say.
+ *
+ * DELIBERATELY SHORT, and the direction is the whole point: a missing threshold
+ * must make a card MORE cautious, never less. The mirror-image bug — defaulting an
+ * absent field to maximum freshness — is how a version skew turns an arbitrarily
+ * old reading into a confident "just now".
+ */
+const FALLBACK_STALE_AFTER_MS = 5 * 60_000
+
 /** Decode one window, or null. A field of the wrong type makes the whole window
  *  null rather than coercing: a bar drawn from a coerced NaN is a lie with a
  *  length. */
@@ -142,10 +149,8 @@ function decodeWindow(raw: unknown): UsageWindow | null {
     fraction,
     window_ms: numOrNull(rec['window_ms']),
     reset_at: numOrNull(rec['reset_at']),
-    resets_in_ms: numOrNull(rec['resets_in_ms']),
     pace: numOrNull(rec['pace']),
     exhausts_at: numOrNull(rec['exhausts_at']),
-    floor: rec['floor'] === true,
   }
 }
 
@@ -153,28 +158,21 @@ function numOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
-function decodeWindowKey(v: unknown): 'session' | 'weekly' | null {
-  return v === 'session' || v === 'weekly' ? v : null
+/** An unusable threshold falls back to the CAUTIOUS default, never to "forever". */
+function decodeStaleAfter(v: unknown): number {
+  const n = numOrNull(v)
+  return n !== null && n > 0 ? n : FALLBACK_STALE_AFTER_MS
 }
 
 /**
- * Decode a capacity standing, defaulting to UNKNOWN.
+ * Decode one account, or null.
  *
- * Every unreadable shape lands on `unknown`, never on `available`: an unparseable
- * payload must not become "push more work at it".
+ * `measured_at` is required, and it is required because everything the card says
+ * about this reading is a delta from it: without the instant there is no age, no
+ * staleness and no floor, and a row rendered anyway would be a reading with no
+ * provenance. Refusing is the only honest option — there is no "assume it is
+ * fresh" that is not a fabrication.
  */
-function decodeCapacity(raw: unknown): CapacityStanding {
-  if (typeof raw !== 'object' || raw === null) return { state: 'unknown' }
-  const rec = raw as Record<string, unknown>
-  if (rec['state'] === 'available') return { state: 'available' }
-  if (rec['state'] === 'returns') {
-    const at = numOrNull(rec['at'])
-    const window = decodeWindowKey(rec['window'])
-    if (at !== null && window !== null) return { state: 'returns', at, window }
-  }
-  return { state: 'unknown' }
-}
-
 function decodeAccount(raw: unknown): UsageAccount | null {
   if (typeof raw !== 'object' || raw === null) return null
   const rec = raw as Record<string, unknown>
@@ -184,37 +182,8 @@ function decodeAccount(raw: unknown): UsageAccount | null {
   return {
     account_label: typeof label === 'string' && label.length > 0 ? label : null,
     measured_at,
-    age_ms: numOrNull(rec['age_ms']) ?? 0,
-    stale: rec['stale'] === true,
     session: decodeWindow(rec['session']),
     weekly: decodeWindow(rec['weekly']),
-    binding: decodeWindowKey(rec['binding']),
-    capacity: decodeCapacity(rec['capacity']),
-  }
-}
-
-const NO_CAPACITY: PoolCapacity = {
-  available_now: 0,
-  returning: 0,
-  unknown: 0,
-  next_account_label: null,
-  next: { state: 'unknown' },
-  next_other_window: null,
-  next_other_fraction: null,
-}
-
-function decodePoolCapacity(raw: unknown): PoolCapacity {
-  if (typeof raw !== 'object' || raw === null) return NO_CAPACITY
-  const rec = raw as Record<string, unknown>
-  const label = rec['next_account_label']
-  return {
-    available_now: numOrNull(rec['available_now']) ?? 0,
-    returning: numOrNull(rec['returning']) ?? 0,
-    unknown: numOrNull(rec['unknown']) ?? 0,
-    next_account_label: typeof label === 'string' && label.length > 0 ? label : null,
-    next: decodeCapacity(rec['next']),
-    next_other_window: decodeWindowKey(rec['next_other_window']),
-    next_other_fraction: numOrNull(rec['next_other_fraction']),
   }
 }
 
@@ -249,9 +218,8 @@ export function decodeDashboard(raw: unknown): UsageDashboard {
       pool,
       connection: decodeConnection(rec['connection']),
       measured_at: numOrNull(rec['measured_at']),
-      age_ms: numOrNull(rec['age_ms']),
+      stale_after_ms: decodeStaleAfter(rec['stale_after_ms']),
       accounts,
-      capacity: decodePoolCapacity(rec['capacity']),
     })
   }
   // An EMPTY array is reachable-with-nothing, which is different from unreachable
@@ -284,12 +252,304 @@ export class UsageDashboardClient {
   }
 }
 
+// ── The projection: everything that is a function of the clock ───────────────
+// Pure, exported, and executed side by side with its twin by
+// `gateway/__tests__/usage-dashboard-client-parity.test.ts`. This is POLICY, not
+// transport — "a stale reading proves only a lower bound", "an account's standing
+// is the worst of its windows" — and it lives here rather than on the server for
+// one reason: it is a function of `now`, and the only clock that matters is the
+// one running while the owner is looking at the card.
+
+/** When an account can take work again. A tagged state, never a nullable number. */
+export type CapacityStanding =
+  /** Has room right now, measured recently enough to say so. */
+  | { state: 'available' }
+  /**
+   * Spent; capacity returns at `at`, on this window.
+   *
+   * `in_ms` is that instant minus the `now` this standing was projected against,
+   * and it is ALWAYS strictly positive — a window whose reset has passed is not
+   * "returning", it has rolled. Carrying it makes the sentence "capacity in
+   * {countdown}" unable to render "capacity in available now", which is what an
+   * "in ‹…›" template does when it is handed a countdown formatter's zero
+   * sentinel. It is a duration that lives for the length of one paint and is
+   * recomputed on the next; the wire still carries only the instant.
+   */
+  | { state: 'returns'; at: number; window: 'session' | 'weekly'; in_ms: number }
+  /** Cannot be known: no reset instant, or a reading too old to claim room from. */
+  | { state: 'unknown' }
+
+/** One window as the card draws it: the reading, plus whether it is a floor. */
+export interface ProjectedWindow extends UsageWindow {
+  /**
+   * True when this fraction is a LOWER BOUND rather than a current reading: the
+   * sample is older than its pool's staleness deadline and the window has not
+   * reset since it was taken, so consumption can only have climbed. Rendered as
+   * "≥ 43%" with the age, which is the locked posture — floor a stale gauge with
+   * its age rather than blanking it or extrapolating past it.
+   */
+  floor: boolean
+}
+
+/** One account's standing inside a pool, as of this paint. One card chip each. */
+export interface ProjectedAccount {
+  account_label: string | null
+  measured_at: number
+  /** `now − measured_at`. Recomputed every paint; never taken from the wire. */
+  age_ms: number
+  stale: boolean
+  session: ProjectedWindow | null
+  weekly: ProjectedWindow | null
+  /**
+   * Which window decides this account's capacity — the one whose standing is
+   * worst. Null when nothing is known. This is the field that stops "the 5-hour
+   * window resets in 17m" from being reported as capacity when the 7-day window
+   * is the actual constraint.
+   */
+  binding: 'session' | 'weekly' | null
+  capacity: CapacityStanding
+}
+
+/** The pool-level headline: "how hard can I push, right now?" */
+export interface PoolCapacity {
+  available_now: number
+  returning: number
+  /** Accounts whose standing cannot be known. NEVER counted as available. */
+  unknown: number
+  next_account_label: string | null
+  /** The headline account's standing. The line renders this, and nothing else. */
+  next: CapacityStanding
+  /** The window that BINDS the headline account, so the line can name it. */
+  next_binding: ProjectedWindow | null
+  next_other_window: 'session' | 'weekly' | null
+  /**
+   * The OTHER window on the headline account, so the line can name what still
+   * binds: "next capacity in 17m (5h window; 7d window ≥ 98% used)". THE WHOLE
+   * WINDOW rather than a bare fraction, because the floor flag travels with it —
+   * a headline that printed "98%" exactly while the row beneath it said "≥ 98%"
+   * would be two different claims about one number, and the headline's would be
+   * the one that is not true.
+   */
+  next_other: ProjectedWindow | null
+}
+
+/** One pool's card, as of this paint. */
+export interface ProjectedPool {
+  pool: string
+  connection: UsagePoolConnection
+  /** Age of the pool's newest reading, or null when nothing was ever measured. */
+  age_ms: number | null
+  accounts: ProjectedAccount[]
+  capacity: PoolCapacity
+}
+
+/**
+ * Headroom at or below which a window counts as SPENT.
+ *
+ * Not zero, on purpose. The question this feature answers is "can I push more
+ * concurrency into this account", and 1% of a weekly window is not capacity you
+ * can push into — calling it available is the optimistic answer the owner
+ * explicitly does not want. Erring this way is safe in the only direction that
+ * matters: the cost of calling a nearly-spent account spent is one build routed
+ * elsewhere; the cost of the reverse is a wall.
+ */
+const SPENT_HEADROOM_FRACTION = 0.05
+
+/**
+ * What one window says about capacity.
+ *
+ * THE POLICY IS "WHAT DOES THIS READING STILL PROVE", and every branch refuses to
+ * be optimistic:
+ *
+ * A STALE reading proves exactly ONE thing: that its window was at least this
+ * spent, and only while that same window is still running — inside one window
+ * "at least this used" cannot become "less used". So a stale reading yields a
+ * countdown when it says SPENT, and `unknown` otherwise. In particular a stale
+ * reading whose window has since ROLLED proves nothing at all: consumption
+ * restarted and nobody measured what happened next, and calling that "available"
+ * would be a dead poller reading as an idle account.
+ *
+ * A FRESH reading is believed:
+ *   - the reset instant has PASSED → the window rolled moments ago and
+ *     consumption restarted: available;
+ *   - SPENT (headroom at or below the floor) → capacity returns at the reset,
+ *     or `unknown` when no instant was reported — never "now";
+ *   - room → available.
+ */
+export function windowCapacity(
+  win: UsageWindow | null,
+  window: 'session' | 'weekly',
+  now: number,
+  stale: boolean,
+): CapacityStanding | null {
+  if (win === null) return null
+  const rolled = win.reset_at !== null && win.reset_at <= now
+  const spent = 1 - win.fraction <= SPENT_HEADROOM_FRACTION
+  if (stale) {
+    if (!rolled && spent && win.reset_at !== null) {
+      return { state: 'returns', at: win.reset_at, window, in_ms: win.reset_at - now }
+    }
+    return { state: 'unknown' }
+  }
+  if (rolled) return { state: 'available' }
+  if (spent) {
+    return win.reset_at === null
+      ? { state: 'unknown' }
+      : { state: 'returns', at: win.reset_at, window, in_ms: win.reset_at - now }
+  }
+  return { state: 'available' }
+}
+
+/**
+ * How long until this standing yields capacity, for ordering only.
+ *
+ * `unknown` sorts LAST rather than first: an account nobody can vouch for is not
+ * the one to point the owner at.
+ */
+function capacityRank(standing: CapacityStanding): number {
+  if (standing.state === 'available') return Number.NEGATIVE_INFINITY
+  if (standing.state === 'returns') return standing.at
+  return Number.POSITIVE_INFINITY
+}
+
+/**
+ * An account's standing is the WORST of its windows, and that is the whole point.
+ *
+ * Capacity requires room in EVERY window, so a 5-hour window resetting in 17
+ * minutes buys nothing if the 7-day window is spent for another three days. Taking
+ * the worst is what makes the pool headline safe to act on; taking the soonest
+ * reset is the bug this function exists to make impossible.
+ */
+export function accountCapacity(
+  session: UsageWindow | null,
+  weekly: UsageWindow | null,
+  now: number,
+  stale: boolean,
+): { binding: 'session' | 'weekly' | null; capacity: CapacityStanding } {
+  const candidates: Array<{ window: 'session' | 'weekly'; standing: CapacityStanding }> = []
+  const s = windowCapacity(session, 'session', now, stale)
+  if (s !== null) candidates.push({ window: 'session', standing: s })
+  const w = windowCapacity(weekly, 'weekly', now, stale)
+  if (w !== null) candidates.push({ window: 'weekly', standing: w })
+  if (candidates.length === 0) return { binding: null, capacity: { state: 'unknown' } }
+  const headroom = (key: 'session' | 'weekly'): number => {
+    const win = key === 'session' ? session : weekly
+    return win === null ? 1 : 1 - win.fraction
+  }
+  let worst = candidates[0]!
+  for (const c of candidates.slice(1)) {
+    const rank = capacityRank(c.standing)
+    const worstRank = capacityRank(worst.standing)
+    // Equal standings — two available windows, or two resetting at the same
+    // instant — are broken by HEADROOM, so `binding` still names the window that
+    // is closest to constraining this account. Left to declaration order it would
+    // name whichever window happened to be checked first, and the headline would
+    // then report the roomier window as the constraint.
+    if (rank > worstRank || (rank === worstRank && headroom(c.window) < headroom(worst.window))) {
+      worst = c
+    }
+  }
+  return { binding: worst.window, capacity: worst.standing }
+}
+
+/** A stale reading is a floor only while the window it describes is still running.
+ *  Once the reset instant has passed the window has rolled and consumption started
+ *  again from zero, so "at least this much" stops being true — and claiming it
+ *  would overstate usage on exactly the account that just freed up. */
+function projectWindow(
+  win: UsageWindow | null,
+  stale: boolean,
+  now: number,
+): ProjectedWindow | null {
+  if (win === null) return null
+  return { ...win, floor: stale && win.reset_at !== null && win.reset_at > now }
+}
+
+/** The pool headline: the first account to have capacity, and what still binds it. */
+function poolCapacity(accounts: ProjectedAccount[]): PoolCapacity {
+  const empty: PoolCapacity = {
+    available_now: 0,
+    returning: 0,
+    unknown: 0,
+    next_account_label: null,
+    next: { state: 'unknown' },
+    next_binding: null,
+    next_other_window: null,
+    next_other: null,
+  }
+  if (accounts.length === 0) return empty
+  let available_now = 0
+  let returning = 0
+  let unknown = 0
+  for (const a of accounts) {
+    if (a.capacity.state === 'available') available_now += 1
+    else if (a.capacity.state === 'returns') returning += 1
+    else unknown += 1
+  }
+  let best = accounts[0]!
+  for (const a of accounts.slice(1)) {
+    if (capacityRank(a.capacity) < capacityRank(best.capacity)) best = a
+  }
+  // The window that did NOT bind — the one the headline names as the remaining
+  // constraint ("… 7d window 64% used"). Reported by its utilisation, not by its
+  // reset, because "how much is left over there" is the thing the countdown alone
+  // could not say.
+  const other: 'session' | 'weekly' | null =
+    best.binding === null ? null : best.binding === 'session' ? 'weekly' : 'session'
+  const other_window = other === null ? null : other === 'session' ? best.session : best.weekly
+  return {
+    available_now,
+    returning,
+    unknown,
+    next_account_label: best.account_label,
+    next: best.capacity,
+    // BOTH windows are carried by reference rather than looked up again from the
+    // label: two unlabelled accounts share `null`, so a lookup by label would name
+    // the first one's window while reporting the second one's standing.
+    next_binding: best.binding === null ? null : best.binding === 'session' ? best.session : best.weekly,
+    next_other_window: other_window === null ? null : other,
+    next_other: other_window,
+  }
+}
+
+/**
+ * THE ONE ENTRY POINT the card renders from: a pool as it stands AT `now`.
+ *
+ * Called on every paint with the render clock, so a payload held across a dead
+ * poller ages honestly in front of the owner: the age chip climbs, the gauges
+ * pick up their "≥", and the standing falls back to "unknown" instead of insisting
+ * on the availability it had when the response was built.
+ */
+export function projectPool(pool: UsagePool, now: number): ProjectedPool {
+  const accounts: ProjectedAccount[] = pool.accounts.map((account) => {
+    const age_ms = now - account.measured_at
+    const stale = age_ms > pool.stale_after_ms
+    const { binding, capacity } = accountCapacity(account.session, account.weekly, now, stale)
+    return {
+      account_label: account.account_label,
+      measured_at: account.measured_at,
+      age_ms,
+      stale,
+      session: projectWindow(account.session, stale, now),
+      weekly: projectWindow(account.weekly, stale, now),
+      binding,
+      capacity,
+    }
+  })
+  return {
+    pool: pool.pool,
+    connection: pool.connection,
+    age_ms: pool.measured_at === null ? null : now - pool.measured_at,
+    accounts,
+    capacity: poolCapacity(accounts),
+  }
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
-// MUST MATCH `landing/chat-react/usage-dashboard-client.ts`. Pinned by
-// `gateway/__tests__/usage-dashboard-client-parity.test.ts`, which executes both
-// copies over the same inputs — a twin that renders `pace: null` as "0.0×", or an
-// unknown reset as "now", would tell the same owner a different thing about the
-// same reading.
+// Pure, exported, and tested directly. These carry product decisions, so both
+// cards reuse the same RULES verbatim; a twin that renders `pace: null` as
+// "0.0×", or an unknown reset as "now", would tell the same owner a different
+// thing about the same reading depending on which device he picked up.
 
 /** `0.36` → `"36%"`. Rounded, because a tenth of a percent of a weekly window is
  *  noise the owner cannot act on. */
@@ -310,6 +570,11 @@ export function formatPercent(fraction: number): string {
  * ONE formatter, not two: an earlier version of this card had a plain duration
  * helper that collapsed "unknown" and "already past" into one dash — exactly the
  * distinction this feature turns on.
+ *
+ * BECAUSE "available now" IS A WHOLE SENTENCE, nothing may interpolate this into
+ * an "in ‹…›" template unless the value is known positive. The two callers that
+ * say "in …" read `in_ms` off a `returns` standing, which is positive by
+ * construction; that is why the standing carries one.
  */
 export function formatCountdown(ms: number | null): string {
   if (ms === null) return 'unknown'
@@ -367,9 +632,15 @@ export function formatAge(ms: number | null): string {
  * NOT a hardcoded "5-hour window": window lengths are not a constant across
  * providers and one of them has already changed regime, so a fixed label would
  * eventually name the wrong thing with total confidence.
+ *
+ * A SUB-HOUR WINDOW IS NAMED IN MINUTES, because rounding one to hours prints
+ * "0h window" — a fabricated zero, in a feature whose whole doctrine is that a
+ * fabricated zero must be structurally impossible. Kimi's endpoint can report a
+ * length in minutes or seconds, so this is reachable rather than theoretical.
  */
 export function windowName(key: 'session' | 'weekly', window_ms: number | null): string {
   if (window_ms === null || window_ms <= 0) return key === 'session' ? 'short window' : 'long window'
+  if (window_ms < 3_600_000) return `${Math.max(1, Math.round(window_ms / 60_000))}m window`
   const hours = Math.round(window_ms / 3_600_000)
   if (hours < 48) return `${hours}h window`
   return `${Math.round(hours / 24)}d window`
@@ -421,15 +692,15 @@ export function poolTitle(pool: string): string {
  * "≥ 43%" is the locked posture for a stale gauge: show the last known value with
  * its age rather than blanking it, and never present it as current.
  */
-export function formatWindowFraction(win: UsageWindow): string {
+export function formatWindowFraction(win: ProjectedWindow): string {
   return win.floor ? `≥ ${formatPercent(win.fraction)}` : formatPercent(win.fraction)
 }
 
 /** One account's own answer to "can this take work". */
-export function accountCapacityNote(account: UsageAccount, now: number): string {
+export function accountCapacityNote(account: ProjectedAccount): string {
   const c = account.capacity
   if (c.state === 'available') return 'available now'
-  if (c.state === 'returns') return `capacity in ${formatCountdown(c.at - now)}`
+  if (c.state === 'returns') return `capacity in ${formatCountdown(c.in_ms)}`
   return 'capacity unknown'
 }
 
@@ -447,10 +718,10 @@ export function accountCapacityNote(account: UsageAccount, now: number): string 
  *     back at that reset.
  *   - `"Next capacity unknown"` — never "now", never blank.
  *
- * An unknown account is always counted out loud, because a headline that hides
- * one is a headline computed over a subset.
+ * An unknown account is always counted out loud — in EVERY shape, including the
+ * countdown one. A headline that hides one is a headline computed over a subset.
  */
-export function capacityLine(pool: UsagePool, now: number): string | null {
+export function capacityLine(pool: ProjectedPool): string | null {
   const c = pool.capacity
   // A pool with no readings has no standing to report, and "next capacity unknown"
   // next to "Not connected." is noise that teaches the eye to skip the line. The
@@ -459,18 +730,19 @@ export function capacityLine(pool: UsagePool, now: number): string | null {
   const unknownSuffix = c.unknown > 0 ? ` (${c.unknown} unknown)` : ''
   if (c.available_now > 0) return `${c.available_now} available now${unknownSuffix}`
   if (c.next.state === 'returns') {
-    const account = pool.accounts.find((a) => a.account_label === c.next_account_label)
-    const bindingWindow = c.next.window === 'session' ? account?.session : account?.weekly
-    const parts = [windowName(c.next.window, bindingWindow?.window_ms ?? null)]
-    if (c.next_other_window !== null && c.next_other_fraction !== null) {
-      const otherWindow = c.next_other_window === 'session' ? account?.session : account?.weekly
+    const parts = [windowName(c.next.window, c.next_binding?.window_ms ?? null)]
+    if (c.next_other_window !== null && c.next_other !== null) {
+      // The OTHER window's figure carries its own "≥" when it is floored: the
+      // headline and the row beneath it are one number and must read as one claim.
       parts.push(
-        `${windowName(c.next_other_window, otherWindow?.window_ms ?? null)} ${formatPercent(
-          c.next_other_fraction,
+        `${windowName(c.next_other_window, c.next_other.window_ms)} ${formatWindowFraction(
+          c.next_other,
         )} used`,
       )
     }
-    return `Next capacity in ${formatCountdown(c.next.at - now)} (${parts.join('; ')})`
+    return `Next capacity in ${formatCountdown(c.next.in_ms)} (${parts.join(
+      '; ',
+    )})${unknownSuffix}`
   }
   return `Next capacity unknown${unknownSuffix}`
 }
@@ -483,7 +755,7 @@ export function capacityLine(pool: UsagePool, now: number): string | null {
  * connect an account, wait for the first reading, or nothing at all — a per-token
  * API key has no window to meter and never will.
  */
-export function connectionNote(pool: UsagePool): string | null {
+export function connectionNote(pool: ProjectedPool): string | null {
   if (pool.accounts.length > 0) return null
   if (pool.connection === 'not_connected') return 'Not connected.'
   if (pool.connection === 'no_meter') {

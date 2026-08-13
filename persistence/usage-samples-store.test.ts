@@ -30,12 +30,11 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from './db.ts'
 import {
   POOL_CADENCE_MS,
+  POOL_STALE_AFTER_MS,
   USAGE_POOLS,
   USAGE_SAMPLE_RETENTION_MS,
   UsageSamplesStore,
-  accountCapacity,
   summariseWindow,
-  windowCapacity,
   type UsagePool,
 } from './usage-samples-store.ts'
 
@@ -45,20 +44,24 @@ const SESSION_MS = 5 * HOUR
 const WEEKLY_MS = 7 * 24 * HOUR
 const NOW = 1_800_000_000_000
 
-/** The common case: a fresh reading, both clocks the same. */
+/**
+ * One reading, measured at `NOW` unless told otherwise.
+ *
+ * There is no `now` and no `stale` to pass, and that is the shape under test:
+ * `summariseWindow` cannot see the render clock, so it cannot bake a delta that
+ * would be wrong by the time it painted.
+ */
 function fresh(input: {
   fraction: number | null
   reset_at: number | null
   window_ms?: number | null
-  now?: number
+  measured_at?: number
 }) {
   return summariseWindow({
     fraction: input.fraction,
     reset_at: input.reset_at,
     window_ms: input.window_ms === undefined ? SESSION_MS : input.window_ms,
-    measured_at: input.now ?? NOW,
-    now: input.now ?? NOW,
-    stale: false,
+    measured_at: input.measured_at ?? NOW,
   })
 }
 
@@ -146,21 +149,19 @@ describe('summariseWindow — pace, and the cases where it refuses to answer', (
       fraction: 0.8,
       window_ms: SESSION_MS,
       reset_at: null,
-      resets_in_ms: null,
       pace: null,
       exhausts_at: null,
-      floor: false,
     })
   })
 
-  test('an UNKNOWN window length gives a fraction and a countdown, but no pace', () => {
+  test('an UNKNOWN window length gives a fraction and a reset instant, but no pace', () => {
     // A provider that reports "62% used, resets at T" and no window length has told
     // us two true things and not the third. Pace divides by the length, so it is
     // refused — borrowing another pool's 5h/7d constant here would produce a
     // confident number about a window nobody measured.
     const out = fresh({ fraction: 0.62, reset_at: NOW + HOUR, window_ms: null })
     expect(out!.fraction).toBe(0.62)
-    expect(out!.resets_in_ms).toBe(HOUR)
+    expect(out!.reset_at).toBe(NOW + HOUR)
     expect(out!.window_ms).toBeNull()
     expect(out!.pace).toBeNull()
     expect(out!.exhausts_at).toBeNull()
@@ -170,8 +171,17 @@ describe('summariseWindow — pace, and the cases where it refuses to answer', (
     expect(fresh({ fraction: 1, reset_at: NOW + SESSION_MS / 2 })!.exhausts_at).toBeNull()
   })
 
-  test('time-to-reset is reported even when pace is not', () => {
-    expect(fresh({ fraction: 0.01, reset_at: NOW + 90 * MINUTE })!.resets_in_ms).toBe(90 * MINUTE)
+  test('the reset is reported as an INSTANT, and there is no duration beside it', () => {
+    // The window carries when it rolls — as the instant, not as "90 minutes". A
+    // duration written into a response is a countdown frozen at response time, and a
+    // client holding the payload would have no way to tell it from a live one. The
+    // key list is exhaustive, so a well-meaning `resets_in_ms` convenience field
+    // fails here rather than in review.
+    const out = fresh({ fraction: 0.01, reset_at: NOW + 90 * MINUTE })!
+    expect(out.reset_at).toBe(NOW + 90 * MINUTE)
+    expect(Object.keys(out).sort()).toEqual(
+      ['exhausts_at', 'fraction', 'pace', 'reset_at', 'window_ms'].sort(),
+    )
   })
 
   test('an absent or non-finite fraction is no window at all', () => {
@@ -181,7 +191,7 @@ describe('summariseWindow — pace, and the cases where it refuses to answer', (
   })
 })
 
-describe('stale-pace-as-of-measurement — the sample anchors the maths, the clock anchors the countdown', () => {
+describe('pace-as-of-measurement — the sample anchors the maths, and there is no second clock', () => {
   test('pace for a 3h-old sample is computed AS OF the measurement', () => {
     // The mutation this kills: dividing by elapsed-as-of-NOW. Same reading, same
     // window; the render-clock version reports a calmer burn the longer the writer
@@ -190,14 +200,7 @@ describe('stale-pace-as-of-measurement — the sample anchors the maths, the clo
     // by assertion.
     const measured_at = NOW - 3 * HOUR
     const reset_at = measured_at + 2.5 * HOUR // half the 5h window had elapsed
-    const out = summariseWindow({
-      fraction: 0.75,
-      reset_at,
-      window_ms: SESSION_MS,
-      measured_at,
-      now: NOW,
-      stale: true,
-    })!
+    const out = fresh({ fraction: 0.75, reset_at, measured_at })!
     expect(out.pace).toBeCloseTo(1.5, 5)
     // What the render-clock version would have said, computed the wrong way on
     // purpose: elapsed grows to 1.1 windows, which is out of range and would have
@@ -207,79 +210,74 @@ describe('stale-pace-as-of-measurement — the sample anchors the maths, the clo
     expect(out.pace).not.toBeNull()
   })
 
-  test('the COUNTDOWN uses the render clock even when the pace does not', () => {
-    // Two clocks in one summary, and mixing them either way is a bug. The reset is a
-    // fact about the future and does not age; the fraction is a fact about the past
-    // and does.
-    const measured_at = NOW - 2 * HOUR
-    const out = summariseWindow({
-      fraction: 0.4,
-      reset_at: NOW + 40 * MINUTE,
-      window_ms: SESSION_MS,
-      measured_at,
-      now: NOW,
-      stale: true,
-    })!
-    expect(out.resets_in_ms).toBe(40 * MINUTE)
+  test('NOTHING in the summary is a delta, so a held payload cannot go quietly wrong', async () => {
+    // THE MUTANT THIS KILLS is the defect Argus found in round 1: an age, a
+    // staleness verdict, a floor flag or a capacity standing computed when the
+    // response was built. Every one of them is a function of `now`, and both clients
+    // hold a payload between fetches while their own countdowns tick — so a baked
+    // delta renders a poller that died hours ago as "just now, available".
+    //
+    // The refusal is STRUCTURAL rather than reviewed: this summary is identical
+    // whatever the clock says, because nothing that produces it can read the clock.
+    await store.record({
+      pool: 'anthropic',
+      ts: NOW,
+      account_label: 'owner-a',
+      session: 0.42,
+      weekly: 0.6,
+      session_reset_at: NOW + HOUR,
+      weekly_reset_at: NOW + 3 * 24 * HOUR,
+    })
+    clock = NOW
+    const atMeasurement = store.summarise('anthropic')
+    clock = NOW + 9 * 24 * HOUR
+    expect(store.summarise('anthropic')).toEqual(atMeasurement)
+    // A positive control on the comparison: the clock really did move, and the store
+    // really does read it elsewhere — `prune` runs off the same `now`, and at
+    // NOW + 9d nothing is past the 30-day retention yet.
+    clock = NOW + 40 * 24 * HOUR
+    expect(await store.prune()).toBe(1)
   })
 
-  test('a stale reading is a FLOOR while its window is still running, and not after', () => {
-    // Consumption only climbs inside a window, so an old 43% means "at least 43%".
-    // Once the window has rolled that stops being true, and claiming it would
-    // overstate usage on exactly the account that just freed up.
-    const running = summariseWindow({
-      fraction: 0.43,
-      reset_at: NOW + HOUR,
-      window_ms: SESSION_MS,
-      measured_at: NOW - 2 * HOUR,
-      now: NOW,
-      stale: true,
-    })!
-    expect(running.floor).toBe(true)
-    const rolled = summariseWindow({
-      fraction: 0.43,
-      reset_at: NOW - MINUTE,
-      window_ms: SESSION_MS,
-      measured_at: NOW - 2 * HOUR,
-      now: NOW,
-      stale: true,
-    })!
-    expect(rolled.floor).toBe(false)
-    // And a FRESH reading is never floored: "≥ 43%" on a 20-second-old sample is
-    // noise that teaches the eye to ignore the marking that matters.
-    expect(fresh({ fraction: 0.43, reset_at: NOW + HOUR })!.floor).toBe(false)
+  test('the summary carries the measurement INSTANT and a staleness THRESHOLD, and no verdict', async () => {
+    // The two halves of the age chip, split across the wire: the server owns the
+    // instant and the deadline (facts), the client owns the subtraction (a delta).
+    // The key lists are asserted exhaustively so re-adding `age_ms`, `stale`,
+    // `floor` or `capacity` to the payload fails here rather than in review.
+    await store.record({ pool: 'kimi', ts: NOW, session: 0.42 })
+    const out = store.summarise('kimi')
+    expect(out.measured_at).toBe(NOW)
+    expect(out.stale_after_ms).toBe(POOL_STALE_AFTER_MS.kimi)
+    expect(Object.keys(out).sort()).toEqual(
+      ['accounts', 'measured_at', 'pool', 'stale_after_ms'].sort(),
+    )
+    expect(Object.keys(out.accounts[0]!).sort()).toEqual(
+      ['account_label', 'measured_at', 'session', 'weekly'].sort(),
+    )
   })
 })
 
-describe('reset-jitter-window-membership — decided by TIME COMPARISON, never equality', () => {
-  test('two reports of the SAME window 8 seconds apart classify identically', () => {
+describe('reset-jitter — the instant travels as DATA, and is never rounded or equated', () => {
+  test('two reports of the SAME window 8 seconds apart differ only by those 8 seconds', () => {
     // Reset jitter is real: the same window's reported reset moves by seconds between
-    // reads. Anything that decided "is this still the window I measured" by comparing
-    // instants for EQUALITY would flip classification on that jitter alone. Here the
-    // jitter passes through as data (the countdowns differ by exactly 8s) and changes
-    // no decision.
+    // reads. Nothing here may round it away or key a decision on two instants being
+    // EQUAL — it passes through untouched, and the comparison that decides whether a
+    // window has rolled happens at paint against the render clock, where the boundary
+    // case is pinned (`gateway/__tests__/usage-dashboard-client-parity.test.ts`,
+    // "reset jitter is decided by TIME COMPARISON, never equality").
     const a = fresh({ fraction: 0.97, reset_at: NOW + 17 * MINUTE })!
     const b = fresh({ fraction: 0.97, reset_at: NOW + 17 * MINUTE + 8_000 })!
-    expect(windowCapacity(a, 'session', NOW, false)).toEqual({
-      state: 'returns',
-      at: NOW + 17 * MINUTE,
-      window: 'session',
-    })
-    expect(windowCapacity(b, 'session', NOW, false)).toEqual({
-      state: 'returns',
-      at: NOW + 17 * MINUTE + 8_000,
-      window: 'session',
-    })
-    expect(b.resets_in_ms! - a.resets_in_ms!).toBe(8_000)
+    expect(b.reset_at! - a.reset_at!).toBe(8_000)
+    // And the jitter changes nothing else about the reading.
+    expect(b.fraction).toBe(a.fraction)
+    expect(b.window_ms).toBe(a.window_ms)
   })
 
-  test('membership is "has the instant passed", so a jitter across NOW is a rolled window', () => {
-    // The comparison, exercised on both sides of the boundary a millisecond apart —
-    // the property an equality check cannot have.
-    const justBefore = fresh({ fraction: 0.99, reset_at: NOW + 1 })!
-    const justAfter = fresh({ fraction: 0.99, reset_at: NOW - 1 })!
-    expect(windowCapacity(justBefore, 'session', NOW, false)!.state).toBe('returns')
-    expect(windowCapacity(justAfter, 'session', NOW, false)!.state).toBe('available')
+  test('a jittered reset survives the round trip through the series unrounded', async () => {
+    // Storage is where a rounded-to-the-minute instant would creep in.
+    const jittered = NOW + 17 * MINUTE + 8_123
+    await store.record({ pool: 'anthropic', ts: NOW, session: 0.9, session_reset_at: jittered })
+    expect(store.summarise('anthropic').accounts[0]!.session!.reset_at).toBe(jittered)
   })
 })
 
@@ -318,8 +316,6 @@ describe('window-regime — the length travels with the sample, never as one con
       reset_at: NOW + NEW_REGIME / 2,
       window_ms: OLD_REGIME,
       measured_at: NOW,
-      now: NOW,
-      stale: false,
     })!
     expect(underOldConstant.pace).toBeNull()
   })
@@ -342,115 +338,11 @@ describe('window-regime — the length travels with the sample, never as one con
   })
 })
 
-describe('capacity — when does capacity come back, and never optimistically', () => {
-  test('an ABSENT reset instant is unknown, NEVER now', () => {
-    // The acceptance case, and the mutant it kills: turning "no instant" into
-    // "available" is what would send the owner to raise concurrency into a wall.
-    const spent = fresh({ fraction: 0.99, reset_at: null })!
-    expect(windowCapacity(spent, 'session', NOW, false)).toEqual({ state: 'unknown' })
-    const account = accountCapacity(spent, null, NOW, false)
-    expect(account.capacity).toEqual({ state: 'unknown' })
-    expect(account.capacity.state).not.toBe('available')
-  })
-
-  test('an account with NO windows at all is unknown, not available', () => {
-    expect(accountCapacity(null, null, NOW, false).capacity).toEqual({ state: 'unknown' })
-  })
-
-  test('a STALE reading that says there is room cannot claim availability', () => {
-    // Usage only climbs between samples, so "40% used, three hours ago" does not
-    // prove there is room now. A dead poller must never read as an idle account.
-    const roomy = summariseWindow({
-      fraction: 0.4,
-      reset_at: NOW + HOUR,
-      window_ms: SESSION_MS,
-      measured_at: NOW - 3 * HOUR,
-      now: NOW,
-      stale: true,
-    })!
-    expect(windowCapacity(roomy, 'session', NOW, true)).toEqual({ state: 'unknown' })
-    // The same reading fresh IS availability — so the refusal is about staleness,
-    // not about the number.
-    expect(windowCapacity(roomy, 'session', NOW, false)).toEqual({ state: 'available' })
-  })
-
-  test('a STALE reading that says SPENT still yields a countdown', () => {
-    // "At least 96% used" cannot become "less used" inside one window, so the reset
-    // instant is still the honest answer to when capacity returns.
-    const spent = summariseWindow({
-      fraction: 0.96,
-      reset_at: NOW + 40 * MINUTE,
-      window_ms: SESSION_MS,
-      measured_at: NOW - 3 * HOUR,
-      now: NOW,
-      stale: true,
-    })!
-    expect(windowCapacity(spent, 'session', NOW, true)).toEqual({
-      state: 'returns',
-      at: NOW + 40 * MINUTE,
-      window: 'session',
-    })
-  })
-
-  test('a STALE reading whose window has ROLLED proves nothing — not availability', () => {
-    // The subtle optimistic case. The reset instant passing is a fact about the
-    // clock, so the window did roll — but consumption restarted and nobody measured
-    // what happened next, and a poller dead for a week must not read as an account
-    // that has just freed up.
-    const rolledStale = summariseWindow({
-      fraction: 0.9,
-      reset_at: NOW - 2 * HOUR,
-      window_ms: SESSION_MS,
-      measured_at: NOW - 8 * HOUR,
-      now: NOW,
-      stale: true,
-    })!
-    expect(windowCapacity(rolledStale, 'session', NOW, true)).toEqual({ state: 'unknown' })
-    // Freshly rolled, on the other hand, IS availability: the window turned over
-    // moments ago and the reading is current.
-    const rolledFresh = summariseWindow({
-      fraction: 0.9,
-      reset_at: NOW - MINUTE,
-      window_ms: SESSION_MS,
-      measured_at: NOW,
-      now: NOW,
-      stale: false,
-    })!
-    expect(windowCapacity(rolledFresh, 'session', NOW, false)).toEqual({ state: 'available' })
-  })
-
-  test('an account is bound by its WORST window, not its soonest reset', () => {
-    // The defect the owner found in the countdown as first specified: a 5-hour window
-    // resetting in 17 minutes buys nothing while the 7-day window is spent for another
-    // three days. The mutant that picks the soonest reset dies here.
-    const session = fresh({ fraction: 0.95, reset_at: NOW + 17 * MINUTE })!
-    const weekly = fresh({
-      fraction: 0.96,
-      reset_at: NOW + 3 * 24 * HOUR,
-      window_ms: WEEKLY_MS,
-    })!
-    const out = accountCapacity(session, weekly, NOW, false)
-    expect(out.binding).toBe('weekly')
-    expect(out.capacity).toEqual({
-      state: 'returns',
-      at: NOW + 3 * 24 * HOUR,
-      window: 'weekly',
-    })
-  })
-
-  test('room in both windows is availability, bound by the tighter one', () => {
-    const session = fresh({ fraction: 0.2, reset_at: NOW + HOUR })!
-    const weekly = fresh({ fraction: 0.35, reset_at: NOW + 4 * 24 * HOUR, window_ms: WEEKLY_MS })!
-    const out = accountCapacity(session, weekly, NOW, false)
-    expect(out.capacity).toEqual({ state: 'available' })
-    expect(out.binding).toBe('weekly')
-  })
-
-  test('a window with under 5% left counts as spent — 1% is not capacity to push into', () => {
-    const almost = fresh({ fraction: 0.97, reset_at: NOW + 20 * MINUTE })!
-    expect(windowCapacity(almost, 'session', NOW, false)!.state).toBe('returns')
-  })
-})
+// THE CAPACITY POLICY IS NOT TESTED HERE ANY MORE, because it is not computed
+// here any more. "What does this reading still prove", "an account is bound by its
+// worst window", "an absent reset is unknown and never now" are all functions of
+// the render clock, so they live in the two clients and are executed side by side
+// over the same inputs by `gateway/__tests__/usage-dashboard-client-parity.test.ts`.
 
 describe('the store', () => {
   test('records and reads back the newest sample', async () => {
@@ -542,10 +434,10 @@ describe('summarise — what the dashboard receives', () => {
     const out = store.summarise('codex')
     expect(out.pool).toBe('codex')
     expect(out.measured_at).toBeNull()
-    expect(out.age_ms).toBeNull()
     expect(out.accounts).toEqual([])
-    expect(out.capacity.next).toEqual({ state: 'unknown' })
-    expect(out.capacity.available_now).toBe(0)
+    // A null instant is what the card renders as "never measured". The threshold is
+    // still reported, because it describes the pool rather than any one reading.
+    expect(out.stale_after_ms).toBe(POOL_STALE_AFTER_MS.codex)
   })
 
   test('both windows are summarised from the newest sample', async () => {
@@ -559,7 +451,6 @@ describe('summarise — what the dashboard receives', () => {
     })
     const out = store.summarise('anthropic')
     expect(out.measured_at).toBe(NOW)
-    expect(out.age_ms).toBe(0)
     const account = out.accounts[0]!
     expect(account.session!.pace).toBeCloseTo(1.5, 5)
     // The weekly window at half-elapsed and half-consumed is exactly keeping up.
@@ -602,97 +493,22 @@ describe('summarise — what the dashboard receives', () => {
     expect(out.accounts[0]!.account_label).toBe('owner-a')
     const b = out.accounts[1]!
     expect(b.weekly!.fraction).toBe(0.64)
-    expect(b.age_ms).toBe(3 * HOUR)
-    expect(b.stale).toBe(true)
-    // Its figures are floored and aged, never fresh-looking and never blank.
-    expect(b.weekly!.floor).toBe(true)
+    // The reading keeps its own measurement instant, three hours behind the pool's,
+    // which is what lets the card age THIS account rather than the whole card.
+    expect(b.measured_at).toBe(NOW - 3 * HOUR)
+    expect(out.measured_at).toBe(NOW)
+    // And three hours is past kimi's and anthropic's deadlines alike, so the client
+    // will floor it — asserted here as the input to that decision, and asserted as
+    // the rendered "≥" in the parity test.
+    expect(out.measured_at! - b.measured_at).toBeGreaterThan(out.stale_after_ms)
   })
 
-  test('the pool line points at the account with actual capacity, not the soonest reset', async () => {
-    // THE ACCEPTANCE CASE. Account A's 5-hour window resets in 17 minutes and its
-    // 7-day window is nearly spent; account B is healthy. A headline that picked the
-    // soonest reset would say "next capacity in 17m" and point at A — the answer that
-    // sends the owner to raise concurrency into a wall.
-    await store.record({
-      pool: 'anthropic',
-      ts: NOW,
-      account_label: 'owner-a',
-      session: 0.98,
-      weekly: 0.97,
-      session_reset_at: NOW + 17 * MINUTE,
-      weekly_reset_at: NOW + 3 * 24 * HOUR,
-    })
-    await store.record({
-      pool: 'anthropic',
-      ts: NOW,
-      account_label: 'owner-b',
-      session: 0.2,
-      weekly: 0.3,
-      session_reset_at: NOW + 2 * HOUR,
-      weekly_reset_at: NOW + 5 * 24 * HOUR,
-    })
-    const capacity = store.summarise('anthropic').capacity
-    expect(capacity.available_now).toBe(1)
-    expect(capacity.next_account_label).toBe('owner-b')
-    expect(capacity.next).toEqual({ state: 'available' })
-  })
-
-  test('with every account cooling, the headline names the binding window and the other one', async () => {
-    // "next capacity in 3d (7d window; 5h window 98% used)" — the countdown paired
-    // with the utilisation of the window it belongs to, and the other window named so
-    // the line cannot be read as unconditional capacity.
-    await store.record({
-      pool: 'anthropic',
-      ts: NOW,
-      account_label: 'owner-a',
-      session: 0.98,
-      weekly: 0.97,
-      session_reset_at: NOW + 17 * MINUTE,
-      weekly_reset_at: NOW + 3 * 24 * HOUR,
-    })
-    const capacity = store.summarise('anthropic').capacity
-    expect(capacity.available_now).toBe(0)
-    expect(capacity.returning).toBe(1)
-    expect(capacity.next).toEqual({
-      state: 'returns',
-      at: NOW + 3 * 24 * HOUR,
-      window: 'weekly',
-    })
-    expect(capacity.next_other_window).toBe('session')
-    expect(capacity.next_other_fraction).toBe(0.98)
-  })
-
-  test('an account nobody can vouch for never becomes the headline', async () => {
-    // `unknown` sorts LAST. Pointing the owner at the account with no evidence is the
-    // same optimism as calling an absent reset "now".
-    await store.record({
-      pool: 'anthropic',
-      ts: NOW,
-      account_label: 'owner-a',
-      session: 0.99,
-      session_reset_at: null,
-    })
-    await store.record({
-      pool: 'anthropic',
-      ts: NOW,
-      account_label: 'owner-b',
-      session: 0.99,
-      session_reset_at: NOW + 25 * MINUTE,
-    })
-    const capacity = store.summarise('anthropic').capacity
-    expect(capacity.unknown).toBe(1)
-    expect(capacity.next_account_label).toBe('owner-b')
-    expect(capacity.next).toEqual({
-      state: 'returns',
-      at: NOW + 25 * MINUTE,
-      window: 'session',
-    })
-  })
-
-  test('a KILLED poller ages the card — it never becomes a zero', async () => {
-    // The other acceptance case. Nothing writes for three hours: the card must still
-    // carry the last reading, marked with its age, and must not claim availability
-    // off it.
+  test('a KILLED poller keeps its last reading and its instant — it never becomes a zero', async () => {
+    // Half of the acceptance case; the other half is the render, pinned in the
+    // parity test ("a KILLED poller ages in front of the owner"). The series must
+    // still carry the last reading and the instant it was taken at, so the card can
+    // age it. A summary that dropped either would leave the client with a blank,
+    // which reads as no usage.
     await store.record({
       pool: 'kimi',
       ts: NOW,
@@ -704,10 +520,10 @@ describe('summarise — what the dashboard receives', () => {
     const out = store.summarise('kimi')
     const account = out.accounts[0]!
     expect(account.session!.fraction).toBe(0.42)
-    expect(account.age_ms).toBe(3 * HOUR)
-    expect(account.stale).toBe(true)
-    expect(account.session!.floor).toBe(true)
-    expect(account.capacity).toEqual({ state: 'unknown' })
+    expect(account.measured_at).toBe(NOW)
+    // Three hours is well past kimi's deadline, so the client's verdict is settled
+    // by these two numbers alone.
+    expect(clock - account.measured_at).toBeGreaterThan(out.stale_after_ms)
   })
 })
 
@@ -719,5 +535,34 @@ describe('the pool vocabulary', () => {
     expect([...USAGE_POOLS].sort()).toEqual(
       (Object.keys(POOL_CADENCE_MS) as UsagePool[]).sort(),
     )
+  })
+
+  test('EVERY pool has a FINITE staleness deadline — including the one with no cadence', () => {
+    // THE MUTANT THIS KILLS: `codex: null`, which made a harvested reading
+    // permanently non-stale. A three-week-old sample would then have claimed
+    // "available now" beside a "21d ago" chip — the confident-zero failure, one
+    // level up. "No cadence" is a reason to pick a different deadline, never a
+    // reason to have none.
+    for (const pool of USAGE_POOLS) {
+      const deadline = POOL_STALE_AFTER_MS[pool]
+      expect(Number.isFinite(deadline)).toBe(true)
+      expect(deadline).toBeGreaterThan(0)
+    }
+    expect(POOL_CADENCE_MS.codex).toBeNull()
+    expect(POOL_STALE_AFTER_MS.codex).toBe(30 * MINUTE)
+  })
+
+  test('a polled pool tolerates exactly ONE missed probe before it is called stale', () => {
+    // Zero grace blanks an account with headroom over a single flaky request: a
+    // failed probe writes no row, so the account would read "unknown" for a whole
+    // cadence. Two cadences survives one miss and still catches a writer that has
+    // stopped — and the age chip is on the card the whole time either way.
+    for (const pool of USAGE_POOLS) {
+      const cadence = POOL_CADENCE_MS[pool]
+      if (cadence === null) continue
+      expect(POOL_STALE_AFTER_MS[pool]).toBe(cadence * 2)
+    }
+    // A positive control: the loop above asserts nothing if no pool has a cadence.
+    expect(USAGE_POOLS.filter((p) => POOL_CADENCE_MS[p] !== null).length).toBeGreaterThan(1)
   })
 })

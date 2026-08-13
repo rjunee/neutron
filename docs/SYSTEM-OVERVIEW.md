@@ -4841,16 +4841,23 @@ throughput decision of whether to raise build concurrency.
   published: the parser accepts a written-down alias set and answers
   `unrecognised` (logging the KEY NAMES it saw, never values) for anything else,
   which writes NO row and leaves the card ageing. Units are checked, not trusted:
-  a percent above 100 and a fraction above 1 are refused rather than clamped, and
-  every reset instant is plausibility-checked against the clock after conversion,
-  so a seconds value read as ms (1970) or an ms value converted again (year
-  57,000) fails loudly instead of rendering.
+  a percent above 100 and a fraction above 1 are refused rather than clamped, a
+  percent-named value INSIDE `(0, 1]` is refused as ambiguous (`used_percent: 0.85`
+  is either 0.85% or 85%, and dividing anyway is the optimistic reading that paints
+  an 85%-spent window as a 1% bar), and every reset instant is
+  plausibility-checked against the clock after conversion, so a seconds value read
+  as ms (1970) or an ms value converted again (year 57,000) fails loudly instead of
+  rendering.
 - **Staleness is shown, never hidden.** Every reading carries its age, on every
-  card, not only the stale ones. A reading older than its pool's cadence
-  (`POOL_CADENCE_MS`, pinned against the pollers' own intervals by
+  card, not only the stale ones. A reading older than its pool's deadline
+  (`POOL_STALE_AFTER_MS` — each polled pool's cadence plus ONE missed probe of
+  grace, pinned against the pollers' own intervals by
   `open/__tests__/usage-dashboard-wiring.test.ts`) renders FLOORED — "≥ 43%" plus
   its age — while its window is still running, and unfloored once the window has
-  rolled, because "at least this much" stops being true after a reset. Pace is
+  rolled, because "at least this much" stops being true after a reset. Codex has no
+  cadence (its gauge is harvested, not polled) and therefore gets a flat 30-minute
+  MAX AGE instead: "no cadence" must never become "never stale", or a three-week-old
+  harvested reading would claim "available now" beside a "21d ago" chip. Pace is
   computed **as of the measurement**, never as of the render clock: dividing a
   stale fraction by an elapsed-since-now would report a calmer and calmer burn the
   longer a writer has been dead.
@@ -4867,12 +4874,22 @@ throughput decision of whether to raise build concurrency.
   or "Next capacity unknown" — names the binding window and the other window's
   utilisation, and an account nobody can vouch for is counted out loud rather than
   quietly excluded.
-- **Store the instant, render the delta.** Reset times are persisted and served as
-  absolute epoch-MS instants; every countdown is subtracted at paint time against
-  the client's own clock, which ticks on a 30-second interval so a screen left
-  open cannot keep insisting on the same 17 minutes. `CapacityStanding` is a
-  TAGGED union (`available` / `returns` / `unknown`) rather than a nullable
-  number, so a client cannot render "unknown" as "now" by writing `if (!ms)`.
+- **Store the instant, render the delta — and NOTHING on the wire is a delta.**
+  The payload carries only facts that do not age: each reading's `measured_at`,
+  each window's length, reset instant, pace and projection (both anchored at the
+  measurement), and the pool's `stale_after_ms` THRESHOLD. The age, the staleness
+  verdict, the "≥" floors and every capacity standing are computed by the clients
+  in `projectPool`, on every paint, against their own clock — which ticks on a
+  30-second interval. `persistence/usage-samples-store.ts` cannot bake a delta
+  because `summariseWindow` takes no `now` at all. That is structural rather than
+  reviewed, and it is the difference between a card that ages honestly across a
+  dead poller and one that insists "just now, available" for as long as the tab
+  stays open: both clients fetch once and hold the payload between fetches.
+  `CapacityStanding` is a TAGGED union (`available` / `returns` / `unknown`) rather
+  than a nullable number, so a client cannot render "unknown" as "now" by writing
+  `if (!ms)`; its `returns` arm carries a strictly-positive `in_ms` computed at
+  projection, which is what makes the sentence "capacity in ‹countdown›" unable to
+  render "capacity in available now".
 - **Serving — `gateway/http/app-usage-surface.ts`, `GET /api/app/usage/dashboard`,
   composed in `open/composer.ts`.** Owner-gated, always 200. Each pool carries a
   `connection` of `connected` / `not_connected` / `no_meter`, resolved from the
@@ -4889,7 +4906,11 @@ throughput decision of whether to raise build concurrency.
   marginal cost the owner does not incur. The formatters are executed side by side
   by `gateway/__tests__/usage-dashboard-client-parity.test.ts`, because a
   divergence there is the failure nobody reports: each screen stays
-  self-consistent and the owner gets two different answers about one quota.
+  self-consistent and the owner gets two different answers about one quota. That
+  parity test is also where the CAPACITY POLICY is pinned, because the policy is a
+  function of the render clock and therefore lives in the clients: `projectPool` is
+  executed on both copies over the same payload at the same instant and the results
+  are compared whole.
 
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 

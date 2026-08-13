@@ -18,21 +18,25 @@
  * absolute epoch-MS instant and every countdown is a subtraction at render time. A
  * cached "17m" that renders an hour later is a confidently precise lie.
  *
- * ── A COUNTDOWN ALONE IS MISLEADING, SO NOTHING HERE EMITS ONE ALONE ────────
- * The two windows reset independently. An account whose 5-hour window resets in 17
- * minutes but whose 7-day window is 96% spent has almost no capacity coming back,
- * and a headline reading "next capacity in 17m" would send the owner to raise
- * concurrency into a wall. So every window's countdown travels with that window's
- * own utilisation, and an ACCOUNT's standing is the WORST of its windows
- * ({@link accountCapacity}) — never the soonest reset.
+ * ── THIS FILE NEVER READS THE RENDER CLOCK, AND THAT IS STRUCTURAL ──────────
+ * Nothing summarised here is a function of "now": not the age of a reading, not
+ * whether it is stale, not whether a gauge should be floored, not whether an
+ * account has capacity. Every one of those is a DELTA, and a delta computed when
+ * the response is built is already wrong when it paints — a client that holds a
+ * payload (and both of ours do, between fetches) would render a dead poller as
+ * permanently fresh while its own countdown kept ticking beside it. So the wire
+ * carries only facts that do not age — the measurement instant, the window
+ * lengths, the reset instants, and the pace/projection anchored at the
+ * measurement — plus {@link POOL_STALE_AFTER_MS}, a THRESHOLD rather than a
+ * verdict. The clients turn those into age, staleness, floors and capacity
+ * against their own clock, on every paint. `summariseWindow` does not even take a
+ * `now` parameter, which is the point: this code cannot bake a delta because it
+ * cannot see the clock.
  *
- * ── NEVER OPTIMISTIC ─────────────────────────────────────────────────────────
- * Three refusals are load-bearing and each has a test:
- *   - an absent reset instant is `unknown`, never "now" and never omitted;
- *   - a STALE reading that says "plenty left" cannot claim availability — usage
- *     only climbs between samples, so the honest answer is `unknown`;
- *   - a stale reading that says "spent" still yields a countdown, because "more
- *     used than this" cannot become "less used than this" inside one window.
+ * The policy those deltas feed — "a stale reading proves only a lower bound", "an
+ * account's standing is the WORST of its windows" — lives with the clock, in
+ * `landing/chat-react/usage-dashboard-client.ts` and its `app/lib` twin, executed
+ * side by side by `gateway/__tests__/usage-dashboard-client-parity.test.ts`.
  */
 
 import type { ProjectDb } from './db.ts'
@@ -54,9 +58,6 @@ export type UsagePool = 'anthropic' | 'codex' | 'kimi'
  * store knows about — one list, one order, both clients.
  */
 export const USAGE_POOLS: readonly UsagePool[] = ['anthropic', 'kimi', 'codex']
-
-/** Which of the two windows a figure describes. */
-export type UsageWindowKey = 'session' | 'weekly'
 
 /** One persisted reading. Fractions are 0..1; every field may be absent upstream. */
 export interface UsageSample {
@@ -83,16 +84,14 @@ export interface WindowSummary {
    * is why `pace` can be null on a window whose fraction is known.
    */
   window_ms: number | null
-  /** Epoch MS the window resets, when upstream said. THE INSTANT, not a delta. */
-  reset_at: number | null
   /**
-   * Milliseconds until the reset AS OF THIS RESPONSE, or null when unknown.
-   *
-   * Convenience only. A client that holds a payload for an hour must recompute
-   * from `reset_at` and its own clock — that is the whole reason the instant is
-   * on the wire.
+   * Epoch MS the window resets, when upstream said. THE INSTANT, not a delta, and
+   * deliberately the ONLY thing on the wire about when this window rolls: there is
+   * no `resets_in_ms` companion, because a duration on the wire is a countdown
+   * frozen at response time and the client would have no way to tell it apart from
+   * a live one.
    */
-  resets_in_ms: number | null
+  reset_at: number | null
   /**
    * Consumed ÷ elapsed, over this window, AS OF THE MEASUREMENT. `null` when it
    * cannot be computed — an unknown reset time, an unknown window length, or a
@@ -109,74 +108,20 @@ export interface WindowSummary {
    * to project.
    */
   exhausts_at: number | null
-  /**
-   * True when this fraction is a LOWER BOUND rather than a current reading: the
-   * sample is older than the pool's cadence and the window has not reset since it
-   * was taken, so consumption can only have climbed. Rendered as "≥ 43%" with the
-   * age, which is the locked posture — floor a stale gauge with its age rather
-   * than blanking it or extrapolating past it.
-   */
-  floor: boolean
 }
-
-/**
- * When an account can take work again.
- *
- * A DISCRIMINATED UNION rather than a nullable number, deliberately. The
- * catastrophic render here is "unknown" drawn as "now" — it sends the owner to
- * raise concurrency into a wall — and a `number | null` field invites exactly
- * that: `0` and `null` are one `if (!ms)` apart. With a tagged state, a client
- * that has not handled `unknown` cannot accidentally render it as availability.
- */
-export type CapacityStanding =
-  /** Has room right now, measured recently enough to say so. */
-  | { state: 'available' }
-  /** Spent; capacity returns at this instant, on this window. */
-  | { state: 'returns'; at: number; window: UsageWindowKey }
-  /** Cannot be known: no reset instant, or a reading too old to claim room from. */
-  | { state: 'unknown' }
 
 /** One account's standing inside a pool. One card chip per entry. */
 export interface AccountSummary {
   /** The account, when something can name it. NEVER guessed. */
   account_label: string | null
-  /** Epoch MS of this account's newest sample. */
+  /**
+   * Epoch MS of this account's newest sample. THE INSTANT the age chip is
+   * subtracted from at paint — there is no `age_ms` on the wire, because an age
+   * baked at response time reads as "just now" forever on an open tab.
+   */
   measured_at: number
-  /** How old that sample is, as of this response. */
-  age_ms: number
-  /** True when the sample is older than this pool's expected cadence. */
-  stale: boolean
   session: WindowSummary | null
   weekly: WindowSummary | null
-  /**
-   * Which window decides this account's capacity — the one whose standing is
-   * worst. Null when nothing is known. This is the field that stops "the 5-hour
-   * window resets in 17m" from being reported as capacity when the 7-day window
-   * is the actual constraint.
-   */
-  binding: UsageWindowKey | null
-  capacity: CapacityStanding
-}
-
-/** The pool-level headline: "how hard can I push, right now?" */
-export interface PoolCapacity {
-  /** Accounts with room right now. */
-  available_now: number
-  /** Accounts that are spent but whose capacity returns at a known instant. */
-  returning: number
-  /** Accounts whose standing cannot be known. NEVER counted as available. */
-  unknown: number
-  /** The account the headline is about — the first one to have capacity. */
-  next_account_label: string | null
-  /** That account's standing. The line renders this, and nothing else. */
-  next: CapacityStanding
-  /**
-   * The OTHER window on that account, so the headline can name what still binds:
-   * "next capacity in 17m (5h window; 7d window 64% used)". Null when there is no
-   * second window to report.
-   */
-  next_other_window: UsageWindowKey | null
-  next_other_fraction: number | null
 }
 
 /** One pool's slice of the dashboard, as the series knows it. */
@@ -184,11 +129,14 @@ export interface PoolSampleSummary {
   pool: UsagePool
   /** Newest sample across accounts, or null when the series is empty. */
   measured_at: number | null
-  /** Age of that newest sample, or null when there is none. */
-  age_ms: number | null
+  /**
+   * How old a reading of this pool may get before it is STALE — a threshold, not
+   * a verdict, so it stays true however long the client holds the payload. See
+   * {@link POOL_STALE_AFTER_MS}.
+   */
+  stale_after_ms: number
   /** Newest sample first — the actively-probed account leads. */
   accounts: AccountSummary[]
-  capacity: PoolCapacity
 }
 
 /**
@@ -251,6 +199,39 @@ export const POOL_CADENCE_MS: Record<UsagePool, number | null> = {
 }
 
 /**
+ * ONE MISSED PROBE IS NOT A DEAD POLLER.
+ *
+ * A deadline set exactly at the cadence blanks an account with headroom the first
+ * time a single probe fails — and a probe that fails writes no row, so the account
+ * would read "unknown" for a whole cadence over one flaky request. Two cadences is
+ * the smallest grace that survives one miss and still catches a writer that has
+ * actually stopped, at the cost of one extra cadence of delay in saying so. The
+ * cost is bounded because the age chip is on the card the entire time: the card
+ * never claims freshness it does not have, it only declines to escalate for one
+ * more interval.
+ */
+const STALE_GRACE_MULTIPLE = 2
+
+/**
+ * How old a reading may get before it is stale, per pool. NEVER null: a pool with
+ * no deadline is a pool whose oldest reading claims "available now" forever.
+ *
+ * `codex` is the reason this record is separate from {@link POOL_CADENCE_MS}. It
+ * has no cadence — its gauge is HARVESTED from real `codex` runs rather than
+ * polled — but "no cadence" must not become "never stale", which would let a
+ * three-week-old harvested reading render as current beside a "21d ago" chip. So
+ * an unpolled pool gets a flat MAX AGE instead: past it, the reading is floored
+ * and its standing is unknown, exactly as a missed poll would be.
+ */
+export const POOL_STALE_AFTER_MS: Record<UsagePool, number> = {
+  anthropic: 60_000 * STALE_GRACE_MULTIPLE,
+  kimi: 10 * 60_000 * STALE_GRACE_MULTIPLE,
+  // Half of the shortest window anyone meters. A harvested reading older than this
+  // describes a window that has plausibly moved on without anybody watching.
+  codex: 30 * 60_000,
+}
+
+/**
  * Below this fraction elapsed, pace is reported as null.
  *
  * Two minutes into a five-hour window, one turn's worth of usage divides by ~0.007 and
@@ -259,18 +240,6 @@ export const POOL_CADENCE_MS: Record<UsagePool, number | null> = {
  * started. Refusing to answer is the honest response to a sample size of one.
  */
 const MIN_ELAPSED_FRACTION = 0.05
-
-/**
- * Headroom at or below which a window counts as SPENT.
- *
- * Not zero, on purpose. The question this feature answers is "can I push more
- * concurrency into this account", and 1% of a weekly window is not capacity you
- * can push into — calling it available is the optimistic answer the owner
- * explicitly does not want. Erring this way is safe in the only direction that
- * matters: the cost of calling a nearly-spent account spent is one build routed
- * elsewhere; the cost of the reverse is a wall.
- */
-const SPENT_HEADROOM_FRACTION = 0.05
 
 /** Keep a month. Pruned by the writers' own ticks — see the migration. */
 export const USAGE_SAMPLE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
@@ -282,13 +251,13 @@ export const USAGE_SAMPLE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
  * is which cases refuse to answer, and those are exactly the ones a rendered dashboard
  * makes hard to see.
  *
- * TWO CLOCKS, and mixing them is the bug this signature exists to prevent.
- * `measured_at` anchors everything derived FROM the fraction (pace, and the
- * projection off it), because the fraction was true then; `now` anchors only the
- * countdown, because a reset instant is a fact about the future that does not age.
- * Computing pace with a fresh `now` against a stale fraction silently deflates it
- * as the sample ages — the same reading reports a calmer and calmer burn the
- * longer the writer has been dead.
+ * ONE CLOCK, AND IT IS NOT THE RENDER CLOCK. There is no `now` parameter, on
+ * purpose: everything computed here is anchored at `measured_at`, because the
+ * fraction was true then. Pace computed against a fresh `now` silently deflates as
+ * a sample ages — the same reading would report a calmer and calmer burn the
+ * longer the writer had been dead — and anything else this function could derive
+ * from `now` (the countdown, the age, the staleness, the floor) is a delta that
+ * has to be recomputed on every paint, so it belongs to the clients and not here.
  */
 export function summariseWindow(input: {
   fraction: number | null
@@ -297,14 +266,9 @@ export function summariseWindow(input: {
   window_ms: number | null
   /** When the fraction was measured. */
   measured_at: number
-  /** The render clock. */
-  now: number
-  /** Whether the sample is older than its pool's cadence. */
-  stale: boolean
 }): WindowSummary | null {
-  const { fraction, reset_at, window_ms, measured_at, now, stale } = input
+  const { fraction, reset_at, window_ms, measured_at } = input
   if (fraction === null || !Number.isFinite(fraction)) return null
-  const resets_in_ms = reset_at !== null ? reset_at - now : null
   let pace: number | null = null
   if (reset_at !== null && window_ms !== null && window_ms > 0) {
     // The window STARTED one window-length before it resets, so elapsed is measured
@@ -348,151 +312,7 @@ export function summariseWindow(input: {
     // reads as protection that has never been exercised. If the pace definition ever
     // changes, this comment is the thing to re-derive.
   }
-  // A stale reading is a floor only while the window it describes is still running.
-  // Once the reset instant has passed the window has rolled and consumption started
-  // again from zero, so "at least this much" stops being true — and claiming it
-  // would overstate usage on exactly the account that just freed up.
-  const floor = stale && reset_at !== null && reset_at > now
-  return { fraction, window_ms, reset_at, resets_in_ms, pace, exhausts_at, floor }
-}
-
-/**
- * What one window says about capacity.
- *
- * THE POLICY IS "WHAT DOES THIS READING STILL PROVE", and every branch refuses to
- * be optimistic:
- *
- * A STALE reading proves exactly ONE thing: that its window was at least this
- * spent, and only while that same window is still running — inside one window
- * "at least this used" cannot become "less used". So a stale reading yields a
- * countdown when it says SPENT, and `unknown` otherwise. In particular a stale
- * reading whose window has since ROLLED proves nothing at all: consumption
- * restarted and nobody measured what happened next, and calling that "available"
- * would be a dead poller reading as an idle account.
- *
- * A FRESH reading is believed:
- *   - the reset instant has PASSED → the window rolled moments ago and
- *     consumption restarted: available;
- *   - SPENT (headroom at or below the floor) → capacity returns at the reset,
- *     or `unknown` when no instant was reported — never "now";
- *   - room → available.
- */
-export function windowCapacity(
-  win: WindowSummary | null,
-  window: UsageWindowKey,
-  now: number,
-  stale: boolean,
-): CapacityStanding | null {
-  if (win === null) return null
-  const rolled = win.reset_at !== null && win.reset_at <= now
-  const spent = 1 - win.fraction <= SPENT_HEADROOM_FRACTION
-  if (stale) {
-    if (!rolled && spent && win.reset_at !== null) {
-      return { state: 'returns', at: win.reset_at, window }
-    }
-    return { state: 'unknown' }
-  }
-  if (rolled) return { state: 'available' }
-  if (spent) {
-    return win.reset_at === null
-      ? { state: 'unknown' }
-      : { state: 'returns', at: win.reset_at, window }
-  }
-  return { state: 'available' }
-}
-
-/**
- * How long until this standing yields capacity, for ordering only.
- *
- * `unknown` sorts LAST rather than first: an account nobody can vouch for is not
- * the one to point the owner at.
- */
-function capacityRank(standing: CapacityStanding): number {
-  if (standing.state === 'available') return Number.NEGATIVE_INFINITY
-  if (standing.state === 'returns') return standing.at
-  return Number.POSITIVE_INFINITY
-}
-
-/**
- * An account's standing is the WORST of its windows, and that is the whole point.
- *
- * Capacity requires room in EVERY window, so a 5-hour window resetting in 17
- * minutes buys nothing if the 7-day window is spent for another three days. Taking
- * the worst is what makes the pool headline safe to act on; taking the soonest
- * reset is the bug this function exists to make impossible.
- */
-export function accountCapacity(
-  session: WindowSummary | null,
-  weekly: WindowSummary | null,
-  now: number,
-  stale: boolean,
-): { binding: UsageWindowKey | null; capacity: CapacityStanding } {
-  const candidates: Array<{ window: UsageWindowKey; standing: CapacityStanding }> = []
-  const s = windowCapacity(session, 'session', now, stale)
-  if (s !== null) candidates.push({ window: 'session', standing: s })
-  const w = windowCapacity(weekly, 'weekly', now, stale)
-  if (w !== null) candidates.push({ window: 'weekly', standing: w })
-  if (candidates.length === 0) return { binding: null, capacity: { state: 'unknown' } }
-  const headroom = (w: UsageWindowKey): number => {
-    const win = w === 'session' ? session : weekly
-    return win === null ? 1 : 1 - win.fraction
-  }
-  let worst = candidates[0]!
-  for (const c of candidates.slice(1)) {
-    const rank = capacityRank(c.standing)
-    const worstRank = capacityRank(worst.standing)
-    // Equal standings — two available windows, or two resetting at the same
-    // instant — are broken by HEADROOM, so `binding` still names the window that
-    // is closest to constraining this account. Left to declaration order it would
-    // name whichever window happened to be checked first, and the headline would
-    // then report the roomier window as the constraint.
-    if (rank > worstRank || (rank === worstRank && headroom(c.window) < headroom(worst.window))) {
-      worst = c
-    }
-  }
-  return { binding: worst.window, capacity: worst.standing }
-}
-
-/** The pool headline: the first account to have capacity, and what still binds it. */
-function poolCapacity(accounts: AccountSummary[]): PoolCapacity {
-  const empty: PoolCapacity = {
-    available_now: 0,
-    returning: 0,
-    unknown: 0,
-    next_account_label: null,
-    next: { state: 'unknown' },
-    next_other_window: null,
-    next_other_fraction: null,
-  }
-  if (accounts.length === 0) return empty
-  let available_now = 0
-  let returning = 0
-  let unknown = 0
-  for (const a of accounts) {
-    if (a.capacity.state === 'available') available_now += 1
-    else if (a.capacity.state === 'returns') returning += 1
-    else unknown += 1
-  }
-  let best = accounts[0]!
-  for (const a of accounts.slice(1)) {
-    if (capacityRank(a.capacity) < capacityRank(best.capacity)) best = a
-  }
-  // The window that did NOT bind — the one the headline names as the remaining
-  // constraint ("… 7d window 64% used"). Reported by its utilisation, not by its
-  // reset, because "how much is left over there" is the thing the countdown alone
-  // could not say.
-  const other: UsageWindowKey | null =
-    best.binding === null ? null : best.binding === 'session' ? 'weekly' : 'session'
-  const other_summary = other === null ? null : other === 'session' ? best.session : best.weekly
-  return {
-    available_now,
-    returning,
-    unknown,
-    next_account_label: best.account_label,
-    next: best.capacity,
-    next_other_window: other_summary === null ? null : other,
-    next_other_fraction: other_summary === null ? null : other_summary.fraction,
-  }
+  return { fraction, window_ms, reset_at, pace, exhausts_at }
 }
 
 export class UsageSamplesStore {
@@ -618,47 +438,31 @@ export class UsageSamplesStore {
    * render is a failure state teaches the owner to distrust it.
    */
   summarise(pool: UsagePool): PoolSampleSummary {
-    const now = this.now()
-    const cadence = POOL_CADENCE_MS[pool]
     const defaults = POOL_WINDOW_DEFAULT_MS[pool]
-    const accounts: AccountSummary[] = this.latestPerAccount(pool).map((sample) => {
-      const age_ms = now - sample.ts
-      const stale = cadence !== null && age_ms > cadence
-      const session = summariseWindow({
+    const accounts: AccountSummary[] = this.latestPerAccount(pool).map((sample) => ({
+      account_label: sample.account_label,
+      measured_at: sample.ts,
+      session: summariseWindow({
         fraction: sample.session,
         reset_at: sample.session_reset_at,
         window_ms: sample.session_window_ms ?? defaults.session,
         measured_at: sample.ts,
-        now,
-        stale,
-      })
-      const weekly = summariseWindow({
+      }),
+      weekly: summariseWindow({
         fraction: sample.weekly,
         reset_at: sample.weekly_reset_at,
         window_ms: sample.weekly_window_ms ?? defaults.weekly,
         measured_at: sample.ts,
-        now,
-        stale,
-      })
-      const { binding, capacity } = accountCapacity(session, weekly, now, stale)
-      return {
-        account_label: sample.account_label,
-        measured_at: sample.ts,
-        age_ms,
-        stale,
-        session,
-        weekly,
-        binding,
-        capacity,
-      }
-    })
-    const measured_at = accounts.length === 0 ? null : accounts[0]!.measured_at
+      }),
+    }))
     return {
       pool,
-      measured_at,
-      age_ms: measured_at === null ? null : now - measured_at,
+      // The NEWEST account leads (`latestPerAccount` orders by ts), so this is the
+      // freshest thing the pool knows. Null when nothing was ever measured, which
+      // the card renders as "never measured" rather than as an age of zero.
+      measured_at: accounts.length === 0 ? null : accounts[0]!.measured_at,
+      stale_after_ms: POOL_STALE_AFTER_MS[pool],
       accounts,
-      capacity: poolCapacity(accounts),
     }
   }
 }

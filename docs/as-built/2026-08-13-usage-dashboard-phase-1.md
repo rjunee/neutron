@@ -62,14 +62,62 @@ something false, so each is a named test:
 - **A failed gauge read writes NO row and logs loudly.** Asserted by count with a
   control write proving the counter can move, so "zero rows" cannot be a test that
   never wired the sink.
+- **A percent-named field inside `(0, 1]` is refused as ambiguous.**
+  `used_percent: 0.85` is either 0.85% or 85%, a factor of 100 apart, and dividing
+  by 100 anyway is the optimistic reading — an 85%-spent window painted as a 1% bar
+  labelled "available". Refusing writes no sample, and "no readings yet" is the
+  honest card.
+- **A sub-hour window is named in minutes.** Rounding one to hours prints
+  "0h window" — a fabricated zero, in a feature whose doctrine is that a fabricated
+  zero must be structurally impossible. Kimi's endpoint can report a length in
+  minutes or seconds, so this is reachable rather than theoretical.
+- **Every pool has a FINITE staleness deadline, including the one with no cadence.**
+  Codex's gauge is harvested from real runs rather than polled; "no cadence" became
+  "never stale" in the first cut, which would have let a three-week-old harvested
+  reading claim "available now" beside a "21d ago" chip the moment Phase 3's writer
+  landed. It gets a flat 30-minute max age instead. The polled pools get their
+  cadence plus ONE missed probe of grace, because a failed probe writes no row and a
+  zero-grace deadline blanks an account with headroom over a single flaky request.
 
-## Store the instant, render the delta
+## Store the instant, render the delta — and NOTHING on the wire is a delta
 
 Reset times are persisted and served as absolute epoch-MS instants; the countdown is
 subtracted at paint time against the client's own clock, which ticks every 30
 seconds. A stored duration is wrong the moment after it is written, and a cached
 "17m" rendered an hour later is a confidently precise lie — the same class of bug as
 a stale gauge rendering as fresh.
+
+**The countdown is not the only delta, and the first cut of this branch got the rest
+wrong.** The AGE of a reading, whether it is STALE, whether a gauge is a FLOOR and
+what CAPACITY an account has are all functions of "now" too, and all four were being
+computed when the response was built. Both clients fetch once and hold the payload
+between fetches while their own render clocks tick, so a poller dead for six hours
+painted as "just now, available" with a live countdown running beside it — the exact
+confident-fresh number the brief forbids, and the killed-poller acceptance criterion
+defeated in the render even though the store had the right data.
+
+The fix is structural rather than careful. The wire now carries only facts that do
+not age — `measured_at`, each window's length and reset instant, the pace and
+projection anchored at the measurement, and `stale_after_ms`, a THRESHOLD rather
+than a verdict — and `summariseWindow` takes no `now` parameter at all, so the
+server cannot bake a delta because it cannot see the clock
+(`persistence/usage-samples-store.test.ts`: the same series summarised nine days
+apart is identical, with `prune` as the positive control that the clock really did
+move). The capacity policy moved WITH the clock into the two clients' `projectPool`,
+which the card calls on every paint; it is executed on both copies over the same
+payload by `gateway/__tests__/usage-dashboard-client-parity.test.ts`, so every
+policy case there is a parity case too. `open/__tests__/usage-dashboard-wiring.test.ts`
+greps the SERIALISED composed response for `age_ms` / `stale` / `floor` / `capacity`
+(with a positive control on the fields that should be present), because "the store
+does not compute it" is a different claim from "the wire does not carry it".
+
+Two consequences worth naming. `CapacityStanding`'s `returns` arm carries an `in_ms`
+computed at projection and strictly positive by construction — a window whose reset
+has passed is not returning, it has rolled — which makes "capacity in ‹countdown›"
+unable to render "capacity in available now" once a card outlives the countdown it
+was showing. And an absent `stale_after_ms` decodes to a CAUTIOUS five-minute
+default rather than to "never stale": a missing field must make a card more careful,
+never less, which is the inverse of the `age_ms ?? 0` this branch used to carry.
 
 Pace moves the other way for the same reason: it is now computed **as of
 `measured_at`**, not as of the render clock. Dividing a stale fraction by
@@ -158,12 +206,15 @@ as unrendered WEIGHTS and is Phase 6.)
 
 ## What the tests assert, and where
 
-- `persistence/usage-samples-store.test.ts` — the pace maths and every refusal;
-  reset-jitter window membership decided by TIME COMPARISON (two reports of the same
-  window 8s apart classify identically; the boundary is exercised a millisecond
-  either side, which an equality check cannot do); a series straddling a window-regime
-  change summarised per sample; stale pace as of measurement; the binding-window pool
-  line; per-account retention; the killed poller that ages instead of zeroing.
+- `persistence/usage-samples-store.test.ts` — the pace maths and every refusal; the
+  reset instant travelling as DATA (two reports of the same window 8s apart differ
+  by exactly those 8s, and a jittered instant survives the round trip unrounded, so
+  nothing rounds it away or keys a decision on equality); a series straddling a
+  window-regime change summarised per sample; pace as of measurement; per-account
+  retention; the killed poller whose last reading and instant survive; and the
+  summary being identical nine days apart, which is the structural form of "nothing
+  here is a delta". The capacity policy is NOT tested here any more, because it is
+  not computed here any more.
 - `trident/__tests__/kimi-usage-probe.test.ts` — the modelled shape, and every
   refusal including both unit slips.
 - `open/__tests__/kimi-usage-monitor.test.ts` — gauge-failure-is-loud, by count,
@@ -173,17 +224,26 @@ as unrendered WEIGHTS and is Phase 6.)
   composition actually carries in `app_usage_surface`, and issues a real request:
   three pools in store order, two cards with windows/pace/countdowns/age, the Codex
   card honestly empty, the connection states, and `kimi-usage` present in the loop
-  registry. It also pins `POOL_CADENCE_MS` against the pollers' own intervals —
-  two constants in two packages that cannot import each other, where a poller slowed
-  down without moving its cadence would silently mark every reading stale.
+  registry. The composed bytes are then decoded and projected by the SHIPPED web
+  client at the render clock, so the assertion is on the sentence the card paints
+  ("1 available now") rather than on a restatement of the server's shape — a field
+  the client does not read falls to "unknown" there. It also pins `POOL_CADENCE_MS`
+  and `POOL_STALE_AFTER_MS` against the pollers' own intervals — constants in two
+  packages that cannot import each other, where a poller slowed down without moving
+  its cadence would silently mark every reading stale.
 - Both screens (`landing/chat-react/__tests__/usage-dashboard-web.test.tsx`,
-  `app/__tests__/usage-dashboard-reachable.test.tsx`) press the real components, and
+  `app/__tests__/usage-dashboard-reachable.test.tsx`) press the real components with
+  payloads that carry NO verdicts — a stale card is produced by backdating
+  `measured_at`, the same lever a dead poller pulls — and
   `gateway/__tests__/usage-dashboard-client-parity.test.ts` executes the twin
-  formatters side by side.
+  formatters AND the twin projections side by side, including the killed poller
+  ageing off one payload.
 
 ## Wire-shape change worth naming
 
 `PoolSummary` moved its windows from the pool level onto `accounts[]` and gained
-`connection`, `age_ms` and `capacity`. There is no dual path and no flag: the two
-clients ship in this PR. A client older than this one decodes zero accounts and
-renders its honest empty state rather than a fabricated reading.
+`connection` and `stale_after_ms`. It deliberately does NOT carry `age_ms`, `stale`,
+`floor`, `binding`, `capacity` or `resets_in_ms`: every one of those is a delta, and
+the section above is why. There is no dual path and no flag: the two clients ship in
+this PR. A client older than this one decodes zero accounts and renders its honest
+empty state rather than a fabricated reading.

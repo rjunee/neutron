@@ -33,9 +33,11 @@
  * A percent read as a fraction is a 100× error that renders as a plausible bar,
  * and a seconds instant read as milliseconds lands every reset in 1970. So:
  * `*_percent` is divided by 100 and refused above 100; a fraction-named field is
- * refused above 1; and every reset instant is plausibility-checked against the
- * caller's clock AFTER conversion ({@link parseResetInstant}), which is what
- * makes a double-converted value fail loudly instead of quietly.
+ * refused above 1; a percent-named field whose value is AMBIGUOUS between the two
+ * readings is refused outright ({@link parseFraction}); and every reset instant is
+ * plausibility-checked against the caller's clock AFTER conversion
+ * ({@link parseResetInstant}), which is what makes a double-converted value fail
+ * loudly instead of quietly.
  */
 
 import { KIMI_BASE_URL } from './kimi-review.ts'
@@ -177,13 +179,35 @@ export function parseResetInstant(
   return null
 }
 
-/** The 0..1 utilisation of one entry, or null when no alias carried a usable one. */
+/**
+ * The 0..1 utilisation of one entry, or null when no alias carried a usable one.
+ *
+ * ── THE AMBIGUOUS BAND IS REFUSED, NOT GUESSED ──────────────────────────────
+ * `used_percent: 0.85` has two readings — 0.85% and 85% — and they are a factor of
+ * 100 apart. The name says percent, but the name is not a contract: this schema is
+ * unverified (see the header), and dividing by 100 anyway is the OPTIMISTIC
+ * reading, which renders an 85%-spent window as a 1% bar labelled "available".
+ * That is precisely the confident-wrong number this feature exists to prevent, and
+ * it is invisible because both answers look plausible.
+ *
+ * So (0, 1] on a percent-named field is refused, and the entry falls through to
+ * the fraction aliases or to `unrecognised` — which writes NO sample, leaving the
+ * card to say "no readings yet" instead of inventing one. The cost is refusing a
+ * genuine 0.5%-used window, which is a window with nothing to report anyway; the
+ * cost of the other choice is a wall. Exactly 0 is unambiguous (0% is 0.0) and is
+ * accepted.
+ */
 export function parseFraction(entry: Record<string, unknown>): number | null {
   for (const key of PERCENT_KEYS) {
     const n = finiteNumber(entry[key])
+    if (n === null) continue
     // Above 100 is not a percentage of anything; refusing beats clamping, which
     // would render a broken field as a full window.
-    if (n !== null && n >= 0 && n <= 100) return n / 100
+    if (n < 0 || n > 100) continue
+    // The ambiguous band: could be a percent, could be a fraction under a
+    // percent's name. Refuse rather than pick the optimistic reading.
+    if (n > 0 && n <= 1) continue
+    return n / 100
   }
   for (const key of FRACTION_KEYS) {
     const n = finiteNumber(entry[key])
