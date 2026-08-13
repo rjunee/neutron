@@ -31,6 +31,15 @@ import {
 } from '../model-tiers.ts'
 
 const CODEX_WRAPPER = await Bun.file(new URL('../codex-review.sh', import.meta.url)).text()
+const CODEX_BUILD = await Bun.file(new URL('../codex-build.sh', import.meta.url)).text()
+const WORKFLOW_SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
+
+/** A shell script with its whole-line `#` comments removed — the executable half. */
+const shellCode = (src: string): string =>
+  src
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n')
 const KIMI_REVIEW = await Bun.file(new URL('../kimi-review.ts', import.meta.url)).text()
 const KIMI_CLI = await Bun.file(new URL('../kimi-review-cli.ts', import.meta.url)).text()
 
@@ -126,6 +135,29 @@ describe('the registry and the wrappers cannot drift apart', () => {
   it('`k3` IS the Kimi reviewer\'s own default model', () => {
     expect(modelTier('k3')!.model_id).toBe('kimi-k3')
     expect(KIMI_REVIEW).toContain("KIMI_DEFAULT_MODEL = 'kimi-k3'")
+  })
+
+  it('the BUILD wrapper pins the same `sol` id, on its OWN knob', () => {
+    // The codex tiers now have a SECOND consumer: `trident/codex-build.sh` runs the
+    // build. Its standing default has to be the same tier the registry calls `sol`,
+    // or the pane and a hand invocation disagree about which GPT model built.
+    expect(CODEX_BUILD).toContain('"${CODEX_BUILD_MODEL-gpt-5.6-sol}"')
+    expect(CODEX_BUILD).not.toContain('${CODEX_BUILD_MODEL:-')
+
+    // A DIFFERENT knob from the reviewer's, deliberately. `CODEX_REVIEW_MODEL` is
+    // documented for a direct human review invocation; if the build wrapper read the
+    // same name, a box that exports it would silently build on the reviewer's model
+    // (and the reverse). Neither wrapper may consult the other's knob — asserted on
+    // the CODE, with comment lines stripped, because both headers legitimately
+    // explain the distinction by naming both variables.
+    expect(shellCode(CODEX_BUILD)).not.toContain('CODEX_REVIEW_MODEL')
+    expect(shellCode(CODEX_WRAPPER)).not.toContain('CODEX_BUILD_MODEL')
+    // The stripper has to actually strip, or the two assertions above are vacuous.
+    expect(shellCode(CODEX_BUILD)).toContain('CODEX_BUILD_MODEL')
+
+    // …and the WORKFLOW sets exactly that name. Without this the wrapper would read
+    // a variable nothing writes and every codex build would take the default.
+    expect(WORKFLOW_SRC).toContain("CODEX_BUILD_MODEL_ENV = 'CODEX_BUILD_MODEL'")
   })
 })
 

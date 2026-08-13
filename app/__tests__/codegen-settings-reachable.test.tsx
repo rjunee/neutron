@@ -54,6 +54,8 @@ function payload(
         label: 'Build',
         description: 'Writes the code and the tests, and re-writes them against findings.',
         group: 'claude',
+        // TWO executors: the Claude builder it defaults to, and the codex one.
+        groups: ['claude', 'codex'],
         effort_supported: true,
         default: { model: 'opus', effort: 'high' },
       },
@@ -62,6 +64,7 @@ function payload(
         label: 'Synthesis / arbitration',
         description: 'Merges every reviewer’s verdict into one and decides what blocks a merge.',
         group: 'claude',
+        groups: ['claude'],
         effort_supported: true,
         default: { model: 'fable', effort: 'high' },
       },
@@ -71,6 +74,7 @@ function payload(
         label: 'Cross-model review (Codex)',
         description: 'A second opinion from a GPT model, run through the Codex CLI.',
         group: 'codex',
+        groups: ['codex'],
         effort_supported: false,
         default: { model: 'sol', effort: 'high' },
       },
@@ -227,6 +231,24 @@ describe('the screen renders what the SERVER says the phases are', () => {
     // …and pressing it changes nothing, which is the half a render check misses.
     await press('phase-review_codex-model-k3');
     expect(byTestId('phase-review_codex-changed')).toBeNull();
+  });
+
+  it('lets the BUILD row be moved to a codex tier, and the choice actually takes', async () => {
+    // The row the whole route exists for. A selectable option that does not change
+    // anything is worse than a greyed one, so the assertion is the CHANGED marker —
+    // the same half a render check misses in the greying test above.
+    await mountCodegen();
+    await press('phase-build-model');
+    const sol = byTestId('phase-build-model-sol');
+    expect(sol).not.toBeNull();
+    expect(sol!.textContent ?? '').not.toContain('not wired for this step yet');
+    await press('phase-build-model-sol');
+    expect(byTestId('phase-build-changed')).not.toBeNull();
+    // …and Kimi on the SAME row stays greyed, because nothing wired it.
+    await press('phase-build-model');
+    expect(byTestId('phase-build-model-k3')!.textContent ?? '').toContain(
+      'Kimi is not wired for this step yet',
+    );
   });
 
   it('says a CLI step has no effort control instead of offering an inert one', async () => {

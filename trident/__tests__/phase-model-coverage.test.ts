@@ -40,6 +40,7 @@ import {
   phaseForLabel,
   phaseModelDefaults,
 } from '../phase-models.ts'
+import { TIER_GROUPS } from '../model-tiers.ts'
 
 const WORKFLOW_SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
 
@@ -270,21 +271,42 @@ describe('validation rejects loudly rather than dropping quietly', () => {
   })
 
   it('REJECTS a tier the phase cannot dispatch, and says which executor each is', () => {
-    // Transport is a capability, not a preference. `sol` runs as a Codex subprocess;
-    // the build step is a Claude agent, and `agent({model})` resolves against Claude
-    // Code's own endpoint — it cannot reach a GPT model at all.
-    const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'sol' } })
+    // The executor is a capability, not a preference. `k3` runs through the Kimi CLI
+    // and nothing dispatches the build step that way, so it is refused — even though
+    // the build step DOES have a second executor (see the codex case below). "Has
+    // more than one" is not "has any".
+    const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'k3' } })
     expect(config).toEqual({})
-    expect(errors[0]).toContain('sol')
-    expect(errors[0]).toContain('Claude agent')
-    expect(rejected['build']).toEqual({ model: 'sol' })
-    // And the mirror: the codex lane cannot be pointed at a Claude tier either.
+    expect(errors[0]).toContain('k3')
+    expect(errors[0]).toContain('subprocess')
+    // The message names the executors this step DOES dispatch on, so the owner can
+    // tell "wrong family" from "not wired yet".
+    expect(errors[0]).toContain('claude or codex')
+    expect(rejected['build']).toEqual({ model: 'k3' })
+    // And the mirror: the codex review lane cannot be pointed at a Claude tier.
     expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
-    // Within one transport it is allowed — that is the whole feature.
+    // Within one executor it is allowed — that is the whole feature.
     expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
     expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
     // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
     expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toHaveLength(1)
+  })
+
+  it('ACCEPTS a codex tier on the build phases — the executor they are now wired to', () => {
+    // The counterpart of the refusal above, and the reason this module grew
+    // `alsoRunsOn`: the build dispatches to `trident/codex-build.sh` as well as to
+    // `agent()`, so a GPT tier on that row is a choice the run can honour. Both build
+    // rows, because they are the same dispatch under two complexity tags.
+    for (const key of ['build', 'build_mechanical']) {
+      for (const tier of ['sol', 'terra', 'luna']) {
+        const { config, errors } = parsePhaseModelConfig({ [key]: { model: tier } })
+        expect({ key, tier, errors }).toEqual({ key, tier, errors: [] })
+        expect(config).toEqual({ [key]: { model: tier } })
+      }
+    }
+    // The Claude tiers still work on the same row — a second executor ADDS a choice,
+    // it does not replace the default one.
+    expect(parsePhaseModelConfig({ build: { model: 'sonnet' } }).errors).toEqual([])
   })
 
   it('REJECTS an effort on a phase whose executor has no effort control', () => {
@@ -294,6 +316,26 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(config).toEqual({})
     expect(errors).toHaveLength(1)
     expect(errors[0]).toContain('not settable')
+  })
+
+  it('REJECTS an effort paired with a codex model on a phase that normally has one', () => {
+    // `build` HAS an effort control, because its default executor reads one. Move the
+    // row to the codex executor and that stops being true — a CLI picks its own
+    // reasoning effort — so the PAIR is refused rather than stored as a number
+    // nothing reads. The model half survives; only the inert half is dropped.
+    const { config, errors, rejected } = parsePhaseModelConfig({
+      build: { model: 'sol', effort: 'max' },
+    })
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('not settable')
+    expect(errors[0]).toContain('sol')
+    expect(config).toEqual({ build: { model: 'sol' } })
+    expect(rejected['build']).toEqual({ effort: 'max' })
+    // Field ORDER must not change the answer: the model decides, and JSON has no
+    // guaranteed order. Checked because the rule reads the two fields together.
+    expect(parsePhaseModelConfig({ build: { effort: 'max', model: 'sol' } }).errors).toHaveLength(1)
+    // …and the same effort with a Claude model is still perfectly fine.
+    expect(parsePhaseModelConfig({ build: { model: 'sonnet', effort: 'max' } }).errors).toEqual([])
   })
 
   it('drops an entry that sets nothing, so {} never persists as configuration', () => {
@@ -443,12 +485,16 @@ describe('the args actually carry it (the TS half, end to end)', () => {
     const args = await makeInput(null)
     const tiers = args['modelTiers'] as Record<
       string,
-      { model_id: string; transport: string; env_var: string | null }
+      { model_id: string; transport: string; env_var: string | null; group: string }
     >
     // EVERY tier, or a tier the pane offers is one the dispatch cannot resolve.
     for (const tier of MODEL_TIERS) {
       expect(typeof tiers[tier]?.model_id).toBe('string')
       expect(tiers[tier]!.model_id.length).toBeGreaterThan(0)
+      // The EXECUTOR travels too. Without it the workflow has to infer "can this
+      // step take that tier" from transport+env_var matching, which is a proxy that
+      // holds only while every phase has exactly one executor.
+      expect([...TIER_GROUPS] as string[]).toContain(tiers[tier]!.group)
     }
     // And the transport travels with it — the difference between a model the
     // workflow can call and one it must shell out to.
@@ -456,16 +502,19 @@ describe('the args actually carry it (the TS half, end to end)', () => {
       model_id: tiers['opus']!.model_id,
       transport: 'agent',
       env_var: null,
+      group: 'claude',
     })
     expect(tiers['sol']).toEqual({
       model_id: 'gpt-5.6-sol',
       transport: 'cli',
       env_var: 'CODEX_REVIEW_MODEL',
+      group: 'codex',
     })
     expect(tiers['k3']).toEqual({
       model_id: 'kimi-k3',
       transport: 'cli',
       env_var: 'KIMI_MODEL',
+      group: 'kimi',
     })
   })
 })

@@ -239,6 +239,26 @@ describe('the HTTP surface', () => {
     expect(phases.some((p) => p.key === 'review_kimi')).toBe(true)
   })
 
+  it('tells each row EVERY executor it can dispatch on, not just its default', async () => {
+    // The field the greying rule reads. `group` alone was enough only while every
+    // phase had exactly one executor; the build now has two, and a payload that sent
+    // only `group` would leave both clients greying an option the run can honour.
+    const s = await surfaceFor()
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const phases = json['phases'] as Array<{ key: string; group: string; groups: string[] }>
+    const build = phases.find((p) => p.key === 'build')!
+    expect(build.group).toBe('claude')
+    expect(build.groups).toEqual(['claude', 'codex'])
+    // Same dispatch, same answer — the mechanical build row is not a separate lane.
+    expect(phases.find((p) => p.key === 'build_mechanical')!.groups).toEqual(['claude', 'codex'])
+    // A single-executor row still says exactly one thing, and always includes its
+    // own default: a row that omitted it could not offer the model it already runs.
+    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['codex'])
+    expect(phases.find((p) => p.key === 'synthesis')!.groups).toEqual(['claude'])
+    for (const p of phases) expect(p.groups).toContain(p.group)
+  })
+
   it('RESOLVES every tier, so a row can name the model it will actually use', async () => {
     const s = await surfaceFor()
     const res = await s.handler(req('GET'))

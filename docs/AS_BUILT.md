@@ -2,6 +2,69 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-13 — the BUILD phase runs on codex: a second executor for the most expensive step
+
+The selector could put the build on a different **Claude** tier and nothing else, so
+every trident build spent Anthropic quota no matter what the pane said. The GPT tiers
+were greyed on that row with an honest reason — "Codex is not wired for this step yet
+— it runs on Claude" — and this change is the wiring that makes the reason obsolete.
+Nothing new was built to reach codex: `trident/codex-review.sh` has shelled into
+`codex exec` for the review seat all along, and a codex substrate adapter has been
+registered in `runtime/adapters/select-substrate.ts` for longer than that. What was
+missing was a route from the BUILD step.
+
+**A phase may now have more than one executor.** `TridentPhase.alsoRunsOn`
+(`trident/phase-models.ts`) lists the extra groups a step's dispatch can reach;
+`build` and `build_mechanical` carry `['codex']` and everything else is unchanged.
+`phaseGroups` / `phaseAcceptsTier` replace the old "one phase, one group derived from
+its default tier" rule, and the payload carries `groups` alongside `group` so both
+clients grey by what the dispatch can actually reach. Listing a group here un-greys
+those tiers, so the list is a claim about wiring that
+`trident/__tests__/cross-model-dispatch.test.ts` has to keep honest — the file this
+repository already treats as the answer to "built but never connected".
+
+**`trident/codex-build.sh`, and the trailer that is the interesting part.** The build
+brief — the SAME `forgeBuildContract` text the Claude builder gets, plus a coda about
+reporting — reaches the wrapper as a heredoc-written file and goes to `codex exec` on
+stdin. The hard part is downstream: `reviewedHead` pins the merge to the reviewed
+commit (#545) and `roundLanded` refuses to re-review a round that left no trace, and
+a `codex exec` subprocess has no result schema to report either through. The naive
+port asks the model to print its sha, which fails in exactly the case that matters —
+the build that believes it committed. So the wrapper does not ask. After codex exits
+it MEASURES `git rev-parse --verify HEAD`, `git ls-remote` (the PUSHED sha, which is
+the one a merge pins to), `gh pr list`, and whether the diff file exists and is
+non-empty, and prints six `NEUTRON_CODEX_BUILD_*` lines. Every one is EMPTY rather
+than wrong when it cannot be established, and empty fails closed at both gates.
+`testsPassed` is the only field left as the build's own claim.
+
+**The sandbox grant is `danger-full-access`, deliberately.** `read-only` cannot edit;
+`workspace-write` cannot COMMIT (a worktree's `.git` is a file pointing outside the
+workspace) and has no network, so `git push` / `gh pr create` / any install fails.
+The grant makes the codex builder EQUAL to the Claude builder, which already has
+those powers, and the blast radius is bounded the same way: an isolated worktree on
+its own branch, a panel that reads the diff, a merge pinned to the reviewed commit.
+
+**No silent fallback to Claude, ever.** A build lane that reports `not_connected` or
+`deferred` throws with the status named. Re-Forging on Opus would spend precisely the
+quota the owner moved the phase to protect and would hide that it had done so — so
+the run stops, and no reviewer is paid to read an unbuilt branch. An effort override
+paired with a codex model is refused at the settings boundary too: a CLI picks its own
+reasoning effort, so storing one would be a control nothing reads.
+
+**Two knobs, not one.** The build wrapper reads `CODEX_BUILD_MODEL`; the review
+wrapper keeps `CODEX_REVIEW_MODEL`. A shared name would let a box that exports one
+silently steer the other, and `model-tiers.test.ts` now asserts neither wrapper
+mentions the other's knob (comments stripped) and that the workflow sets the name the
+build wrapper reads.
+
+**An observation for the owner, not a change.** Moving the build to codex means a
+codex REVIEWER is no longer reviewing a different family's work. The cross-model gate
+(`trident/kimi-review.ts`, `enforceCrossModelGate`) is untouched and still refuses to
+turn a deferred review into an APPROVE, but on a codex build the `review_codex` seat
+is same-family and the diversity that seat exists for comes from `argus:claude` /
+`argus:adversarial` / `review_kimi`. Deciding what cross-model should MEAN in that
+configuration is the owner's call and is not made here.
+
 ## 2026-08-13 — the code-generation model selector: a table, three model families, and the wiring that makes GPT and Kimi selectable (#560)
 
 The pane could already put a build step on a different Claude tier. It could not

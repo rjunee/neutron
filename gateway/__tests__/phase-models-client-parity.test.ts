@@ -26,12 +26,17 @@ import { describe, expect, test } from 'bun:test'
 import * as mobile from '@neutronai/app/lib/phase-models-client'
 import * as web from '@neutronai/landing/chat-react/phase-models-client.ts'
 
-/** A phase whose two defaults differ, so a rule that confuses them is visible. */
+/**
+ * A phase whose two defaults differ, so a rule that confuses them is visible — and
+ * the ONE row with two executors, which is the case the greying rule gets wrong if
+ * either client still compares against `group` alone.
+ */
 const BUILD = {
   key: 'build',
   label: 'Build',
   description: 'Writes the code and the tests.',
   group: 'claude',
+  groups: ['claude', 'codex'],
   effort_supported: true,
   default: { model: 'opus', effort: 'high' },
 }
@@ -42,6 +47,7 @@ const CODEX = {
   label: 'Cross-model review (Codex)',
   description: 'A second opinion from a GPT model.',
   group: 'codex',
+  groups: ['codex'],
   effort_supported: false,
   default: { model: 'sol', effort: 'high' },
 }
@@ -52,6 +58,7 @@ const KIMI = {
   label: 'Cross-model review (Kimi)',
   description: 'A second opinion from Kimi K3.',
   group: 'kimi',
+  groups: ['kimi'],
   effort_supported: false,
   default: { model: 'k3', effort: 'high' },
 }
@@ -171,6 +178,22 @@ describe('tierChoices — the phone and the browser grey the same options, for t
       expect(web.tierChoices(phase, TIERS)).toEqual(mobile.tierChoices(phase, TIERS))
     })
   }
+
+  test('the BUILD row offers the codex tiers, on both clients', () => {
+    // The row has two executors now, so the GPT tiers are SELECTABLE — and the old
+    // reason must be gone, not merely reworded. A greyed option with an explanation
+    // that has become false is worse than the option being absent.
+    for (const choices of [web.tierChoices(BUILD, TIERS), mobile.tierChoices(BUILD, TIERS)]) {
+      const sol = choices.find((c) => c.tier === 'sol')!
+      expect(sol).toEqual({ tier: 'sol', model_id: 'gpt-5.6-sol', selectable: true, reason: null })
+      // The Claude tiers are still selectable — a second executor ADDS a choice.
+      expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
+      // Kimi is NOT wired for the build, so it keeps the honest reason.
+      expect(choices.find((c) => c.tier === 'k3')!.reason).toBe(
+        'Kimi is not wired for this step yet — it runs on Claude',
+      )
+    }
+  })
 
   test('nothing is ever dropped from the list', () => {
     // Hiding an option the owner cannot account for is how a capability stays

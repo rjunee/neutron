@@ -55,6 +55,7 @@ import {
   EFFORTS,
   TRIDENT_PHASES,
   phaseGroup,
+  phaseGroups,
   phaseModelDefaults,
   phaseSupportsEffort,
 } from '@neutronai/trident/phase-models.ts'
@@ -117,9 +118,14 @@ function vocabulary(connections: CrossModelConnections): object {
       key: p.key,
       label: p.label,
       description: p.description,
-      // WHICH EXECUTOR runs this step. The pane needs it to know which tiers a row
-      // can legally take: a Claude step cannot run a GPT tier and vice versa.
+      // WHICH EXECUTOR runs this step by DEFAULT — what the row names when it explains
+      // that an option is greyed ("…it runs on Claude").
       group: phaseGroup(p),
+      // EVERY executor this step can dispatch on, which is what decides whether a tier
+      // is selectable. Most steps have one; `build` has two (Claude and codex), and a
+      // row that compared against `group` alone would grey the codex tiers on a step
+      // that now genuinely reaches them.
+      groups: phaseGroups(p),
       // A `cli` step's reasoning effort is the CLI's own; the pane disables that cell
       // and says so rather than offering a control nothing reads.
       effort_supported: phaseSupportsEffort(p),

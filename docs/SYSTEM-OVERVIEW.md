@@ -2830,13 +2830,40 @@ generation"), mobile `app/app/codegen.tsx`, both over
   pane is unchanged. `trident/__tests__/model-tiers.test.ts` pins the registry
   against each wrapper's own default (and against the `${VAR-x}` form that lets an
   explicitly EMPTY `CODEX_REVIEW_MODEL` mean "the CLI default").
-- **A row offers only its own executor's tiers, and says so about the rest.** Every
-  tier is listed; one from another group, or one this install has no credential for,
-  renders DISABLED WITH THE REASON ("needs a Codex connection") rather than
-  disappearing. The surface answers availability from the SAME resolvers the build
-  uses (`open/composer.ts`: `codexCredentialService.resolveActiveCodexHome`, and the
-  shared `kimiConfigured()` that `resolve_kimi_configured` also uses), so the pane
-  and the run cannot disagree.
+- **THE BUILD STEP RUNS ON CODEX TOO.** It is the one step with two executors, and
+  the reason is the Anthropic quota: the build is by far the most expensive phase.
+  Pin `build` (or `build_mechanical` — same labels, same dispatch, split only by the
+  planner's complexity tag) to `sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
+  hands the assembled Forge brief to `trident/codex-build.sh` instead of to
+  `agent({model})`; no Anthropic model id is requested for the phase. The wrapper
+  runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree
+  (narrower policies cannot commit — a worktree's `.git` points outside the workspace
+  — and have no network for `git push` / `gh pr create`), and its own knob is
+  `CODEX_BUILD_MODEL`, never the reviewer's `CODEX_REVIEW_MODEL`.
+  - **The downstream contract is MEASURED, not narrated.** `codex exec` has no result
+    schema, so after it exits the wrapper prints a `NEUTRON_CODEX_BUILD_*` trailer it
+    read from `git rev-parse --verify HEAD`, `git ls-remote` (the PUSHED sha, which is
+    what `--match-head-commit` pins), `gh pr list`, and the diff file's existence. Any
+    value it cannot establish is EMPTY, and empty fails closed at `roundLanded` and at
+    the merge. A thin bridge agent copies those six values into the result schema —
+    the same shape the codex REVIEW seat has, because `agent()` is the only primitive
+    the workflow runtime gives this script.
+  - **No fallback to Claude.** A lane reporting `not_connected`/`deferred` stops the
+    run with the status named. Re-Forging on Opus would spend the quota the owner
+    moved the phase to protect, invisibly.
+  - **A codex build makes the codex REVIEWER same-family.** The cross-model gate is
+    unchanged and still cannot turn a deferred review into an APPROVE, but on a codex
+    build the panel's family diversity comes from `argus:claude`,
+    `argus:adversarial` and `review_kimi`.
+- **Otherwise a row offers only its own executor's tiers, and says so about the
+  rest.** The payload carries `groups` (every executor the step dispatches on) beside
+  `group` (its default), and `tierChoices` greys by `groups`. Every tier is listed;
+  one from a group this step cannot reach renders disabled with "<Executor> is not
+  wired for this step yet — it runs on <Executor>", and one this install has no
+  credential for with "needs a Codex connection" — never disappearing. The surface
+  answers availability from the SAME resolvers the build uses (`open/composer.ts`:
+  `codexCredentialService.resolveActiveCodexHome`, and the shared `kimiConfigured()`
+  that `resolve_kimi_configured` also uses), so the pane and the run cannot disagree.
 - **A refused stored value degrades visibly.** `model` must name a tier (the old
   literal-id escape hatch is closed: a bare id carries no transport). A retired tier
   or a legacy literal is rejected at the boundary, the phase falls back to its

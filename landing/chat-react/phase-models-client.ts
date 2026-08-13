@@ -27,14 +27,22 @@ export interface PhaseDescriptor {
   label: string
   description: string
   /**
-   * Which executor runs this step (`claude`, `codex`, `kimi`).
+   * Which executor runs this step by DEFAULT (`claude`, `codex`, `kimi`).
    *
-   * A row can only take a tier from its OWN group: a Claude step cannot run a GPT
-   * model (`agent({model})` resolves against Claude Code's endpoint), and the Codex
-   * wrapper cannot be pointed at Kimi. The server decides the grouping; this file just
-   * compares two strings.
+   * Used only to SAY what a greyed option would have to be — "it runs on Claude".
+   * Whether an option is selectable is `groups`, not this.
    */
   group: string
+  /**
+   * Every executor this step can dispatch on.
+   *
+   * A row can only take a tier from one of these groups: a step with only a Claude
+   * dispatch cannot run a GPT model (`agent({model})` resolves against Claude Code's
+   * endpoint), and the Codex wrapper cannot be pointed at Kimi. Most steps have one
+   * group; the build step has two, because its forge dispatch reaches the codex
+   * executor as well. The server decides; this file just compares strings.
+   */
+  groups: string[]
   /** False for a CLI step, whose reasoning effort is the CLI's own. */
   effort_supported: boolean
   default: { model: string; effort: string }
@@ -197,7 +205,7 @@ export function tierChoices(
   tiers: TierOption[],
 ): Array<{ tier: string; model_id: string; selectable: boolean; reason: string | null }> {
   return tiers.map((t) => {
-    if (t.group !== phase.group) {
+    if (!phase.groups.includes(t.group)) {
       // #565 — SAY WHY, AND WHAT WOULD CHANGE IT. The old reason read `Codex steps
       // only`, naming a category the reader has never heard of and explaining
       // nothing; the owner's first words on seeing it were "Wtf does that mean?".
@@ -205,8 +213,13 @@ export function tierChoices(
       // adapter is already built and registered (`runtime/adapters/codex-cli/`,
       // selected in `runtime/adapters/select-substrate.ts`), and trident's own
       // review seat already shells into `codex exec` — what is missing is a route
-      // from THIS step to it. Saying "no executor exists" would be a second false
+      // from THAT step to it. Saying "no executor exists" would be a second false
       // claim in place of the first.
+      //
+      // The test of the sentence is that it stops being shown the moment the route
+      // lands: the build step now dispatches to the codex executor, so `groups`
+      // carries `codex` for that row and the GPT tiers here are selectable rather
+      // than greyed with a reason that has become false.
       const optionExecutor = t.group.charAt(0).toUpperCase() + t.group.slice(1)
       const stepExecutor = phase.group.charAt(0).toUpperCase() + phase.group.slice(1)
       return {

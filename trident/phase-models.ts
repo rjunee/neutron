@@ -58,11 +58,27 @@
  * the offending value so the pane can show it struck through and say so.
  *
  * ── TRANSPORT IS A CAPABILITY, so a phase cannot take just any tier ──────────
- * Every phase here dispatches through ONE executor. `agent({model})` resolves against
- * Claude Code's own endpoint, so a GPT/Kimi tier cannot run a Claude phase; the codex
- * wrapper reads `CODEX_REVIEW_MODEL`, so a Kimi tier cannot run it either. Moving a
- * phase across transports is refused HERE, where the owner is present to read why,
- * rather than being discovered as a run that used the wrong model.
+ * A phase may only take a tier one of its OWN dispatches can reach. `agent({model})`
+ * resolves against Claude Code's own endpoint, so a GPT/Kimi tier cannot run a step
+ * that has only that dispatch; the codex wrapper reads `CODEX_REVIEW_MODEL`, so a Kimi
+ * tier cannot run it either. Choosing a tier no dispatch can reach is refused HERE,
+ * where the owner is present to read why, rather than being discovered as a run that
+ * used the wrong model.
+ *
+ * ── A PHASE MAY HAVE MORE THAN ONE DISPATCH ({@link TridentPhase.alsoRunsOn}) ─
+ * The rule above used to be stated as "every phase has exactly one executor, derived
+ * from its default tier", which was true only because nothing had ever been wired to a
+ * second one. The BUILD phase now has two: the Claude `agent()` builder it defaults to,
+ * and the codex executor (`trident/codex-build.sh`, dispatched by the workflow's
+ * `forge:*` bridge). So the phase DECLARES the extra groups its dispatch can reach and
+ * `phaseAcceptsTier` answers from that list.
+ *
+ * THE LIST IS A CLAIM ABOUT WIRING, NOT A WISH. Adding a group here un-greys those
+ * tiers in the settings pane, so a group listed without a dispatch behind it ships a
+ * control that silently does nothing — strictly worse than a greyed one, and the exact
+ * defect this module exists to prevent. `__tests__/cross-model-dispatch.test.ts` runs
+ * the production launcher into the real workflow and asserts the dispatch for every
+ * group listed here, which is what keeps the claim honest.
  */
 
 import {
@@ -72,7 +88,6 @@ import {
   type Transport,
   isModelTier,
   modelTier,
-  tiersAreInterchangeable,
 } from './model-tiers.ts'
 
 export { MODEL_TIERS, isModelTier }
@@ -104,6 +119,15 @@ export interface TridentPhase {
   labels: ReadonlyArray<{ label: string; dynamic?: boolean }>
   /** The tier + effort used when the owner has set no override. */
   default: { tier: ModelTier; effort: Effort }
+  /**
+   * Executor groups this phase can dispatch on BESIDES the one its default tier
+   * implies — the phases that have more than one wired executor.
+   *
+   * Absent (the common case) means the single derived group and nothing else. See the
+   * header: an entry here un-greys those tiers in the pane, so it is a statement that
+   * the dispatch exists and is tested, not that it would be nice to have.
+   */
+  alsoRunsOn?: ReadonlyArray<TierGroup>
 }
 
 /**
@@ -127,6 +151,12 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Writes the code and the tests, and re-writes them against review findings.',
     labels: [{ label: 'forge:build' }, { label: 'forge:fix-round-', dynamic: true }],
     default: { tier: 'opus', effort: 'high' },
+    // THE BUILD RUNS ON CODEX WHEN THE OWNER PICKS A GPT TIER. The workflow's forge
+    // dispatch hands the assembled build brief to `trident/codex-build.sh` instead of
+    // to `agent()`, and NO Anthropic call is made for the phase — which is the point:
+    // the reason to move a build off Claude is the Anthropic quota, so a route that
+    // still spends it would be a route that did not work.
+    alsoRunsOn: ['codex'],
   },
   {
     key: 'build_mechanical',
@@ -138,6 +168,11 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     // why `phaseForLabel` returns `build` for both and the tag decides.
     labels: [{ label: 'forge:build' }, { label: 'forge:fix-round-', dynamic: true }],
     default: { tier: 'sonnet', effort: 'medium' },
+    // The SAME dispatch as `build` — same labels, same forge bridge — so it reaches
+    // the codex executor for free. Listing it on one row and not the other would mean
+    // a Ralph task the planner tagged `mechanical` silently ran on Claude after the
+    // owner moved the build off it.
+    alsoRunsOn: ['codex'],
   },
   {
     key: 'review_rubric',
@@ -257,14 +292,40 @@ export function phaseTransport(phase: TridentPhase): Transport {
 }
 
 /**
- * The EXECUTOR GROUP a phase dispatches on — `claude`, `codex`, `kimi`.
+ * The executor group a phase runs on BY DEFAULT — `claude`, `codex`, `kimi`.
  *
- * The one question a settings row needs answered: a row may offer exactly the tiers in
- * its own group, because those are the only ones its dispatch can reach. Derived from
- * the phase's default tier, so the pane and the run cannot disagree.
+ * Derived from the phase's default tier, so the pane and the run cannot disagree. This
+ * is the group a row names when it explains why an option is greyed ("…it runs on
+ * Claude"); {@link phaseGroups} is the set it may actually offer.
  */
 export function phaseGroup(phase: TridentPhase): TierGroup {
   return modelTier(phase.default.tier)?.group ?? 'claude'
+}
+
+/**
+ * EVERY executor group this phase can dispatch on, default first.
+ *
+ * The one question a settings row needs answered: a row may offer exactly the tiers in
+ * these groups, because those are the only ones its dispatch can reach. Most phases
+ * have one; see {@link TridentPhase.alsoRunsOn} for why `build` has two.
+ */
+export function phaseGroups(phase: TridentPhase): ReadonlyArray<TierGroup> {
+  const primary = phaseGroup(phase)
+  const extra = (phase.alsoRunsOn ?? []).filter((g) => g !== primary)
+  return [primary, ...extra]
+}
+
+/**
+ * Can this phase be moved to this tier?
+ *
+ * Asked of the PHASE, not of two tiers, because "what can substitute for what" depends
+ * on which dispatches the phase has — and that is a property of the workflow's wiring,
+ * not of the tier registry. `tiersAreInterchangeable` answers the narrower tier-to-tier
+ * question and is still the right check for a single-executor step.
+ */
+export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean {
+  const group = modelTier(tier)?.group
+  return group !== undefined && phaseGroups(phase).includes(group)
 }
 
 /**
@@ -274,6 +335,11 @@ export function phaseGroup(phase: TridentPhase): TierGroup {
  * setting, which the wrapper does not expose — so the pane renders that cell disabled
  * with the reason instead of offering a dropdown that changes nothing. (A phase's
  * stored `default.effort` is inert for those rows and never reaches a dispatch.)
+ *
+ * This answers for the phase's DEFAULT tier. A phase with a second executor
+ * ({@link TridentPhase.alsoRunsOn}) can be moved to a tier whose effort is inert even
+ * though this returns true; `parsePhaseModelConfig` refuses that pair by name, so the
+ * owner is told rather than left with a control nothing reads.
  */
 export function phaseSupportsEffort(phase: TridentPhase): boolean {
   return phaseTransport(phase) === 'agent'
@@ -410,12 +476,11 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           reject(key, { model })
           continue
         }
-        if (!tiersAreInterchangeable(phase.default.tier, model)) {
-          // Not a preference — a capability. See `tiersAreInterchangeable`.
-          const want = modelTier(phase.default.tier)
+        if (!phaseAcceptsTier(phase, model)) {
+          // Not a preference — a capability. See `phaseAcceptsTier`.
           const got = modelTier(model)
           errors.push(
-            `phase '${key}': '${model}' runs ${got?.transport === 'cli' ? `as a ${got.wrapper ?? 'CLI'} subprocess` : 'as a Claude agent'}, which cannot run this step — ${key} dispatches ${want?.transport === 'cli' ? `through ${want.wrapper ?? 'a CLI'}` : 'a Claude agent'}`,
+            `phase '${key}': '${model}' runs ${got?.transport === 'cli' ? `as a ${got.wrapper ?? 'CLI'} subprocess` : 'as a Claude agent'}, which cannot run this step — ${key} dispatches on ${phaseGroups(phase).join(' or ')}`,
           )
           reject(key, { model })
           continue
@@ -443,6 +508,22 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
         continue
       }
       errors.push(`phase '${key}': unknown field '${field}' — only 'model' and 'effort' are settable`)
+    }
+    // AN EFFORT IS INERT ONCE THE CHOSEN TIER IS A SUBPROCESS, even on a phase whose
+    // DEFAULT tier has an effort control. `build` defaults to a Claude agent (effort
+    // settable) but may now be moved to the codex executor, which picks its own
+    // reasoning effort — so the pair `{model: 'sol', effort: 'max'}` would store a
+    // number no dispatch reads. Checked AFTER the field loop because the two fields
+    // arrive in whatever order the JSON had them, and the model is what decides.
+    if (entry.effort !== undefined && entry.model !== undefined) {
+      const chosen = modelTier(entry.model)
+      if (chosen?.transport === 'cli') {
+        errors.push(
+          `phase '${key}': 'effort' is not settable with model '${entry.model}' — that tier runs as a ${chosen.wrapper ?? 'CLI'} subprocess, which chooses its own reasoning effort`,
+        )
+        reject(key, { effort: entry.effort })
+        delete entry.effort
+      }
     }
     // Drop an entry that set nothing, so an empty object never persists as config.
     if (entry.model !== undefined || entry.effort !== undefined) config[key] = entry

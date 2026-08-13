@@ -58,11 +58,13 @@ afterAll(async () => {
 const { WebPhaseModelsClient, applyRowEdit, effectiveRow, rejectedModel, tierChoices } =
   await import('../phase-models-client.ts')
 
+/** The build row — the one with TWO executors, Claude by default and codex. */
 const BUILD = {
   key: 'build',
   label: 'Build',
   description: 'Writes the code and the tests.',
   group: 'claude',
+  groups: ['claude', 'codex'],
   effort_supported: true,
   default: { model: 'opus', effort: 'high' },
 }
@@ -73,6 +75,7 @@ const CODEX = {
   label: 'Cross-model review (Codex)',
   description: 'A second opinion from a GPT model, run through the Codex CLI.',
   group: 'codex',
+  groups: ['codex'],
   effort_supported: false,
   default: { model: 'sol', effort: 'high' },
 }
@@ -262,6 +265,15 @@ describe('the display + edit rules', () => {
     expect(choices.find((c) => c.tier === 'terra')!.selectable).toBe(true)
     expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('Claude is not wired for this step yet')
     expect(rejectedModel(BUILD, { build: { model: 'gone-tier' } })).toBe('gone-tier')
+  })
+
+  it('the BUILD row can be moved to a codex tier — the executor it is now wired to', () => {
+    const choices = tierChoices(BUILD, TIERS)
+    expect(choices.find((c) => c.tier === 'sol')!.selectable).toBe(true)
+    expect(choices.find((c) => c.tier === 'terra')!.selectable).toBe(true)
+    // The Claude default is still there, and Kimi keeps the honest reason.
+    expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
+    expect(choices.find((c) => c.tier === 'k3')!.selectable).toBe(false)
   })
 })
 

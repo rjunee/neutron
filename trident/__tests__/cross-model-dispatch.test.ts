@@ -25,7 +25,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { SONNET_MODEL } from '@neutronai/runtime/models.ts'
+import { SONNET_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 
 import { buildWorkflowArgs } from '../inner-loop.ts'
 
@@ -66,7 +66,8 @@ function productionArgs(
 
 async function runWorkflow(
   args: Record<string, unknown>,
-): Promise<{ captured: Captured[]; logs: string[] }> {
+  opts: { requestChangesOnce?: boolean } = {},
+): Promise<{ captured: Captured[]; logs: string[]; result: Record<string, unknown> }> {
   const captured: Captured[] = []
   const logs: string[] = []
   let synthCount = 0
@@ -75,14 +76,21 @@ async function runWorkflow(
     const label = o?.['label'] as string | undefined
     captured.push({ label, prompt, opts: o ?? {} })
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
-      return {
+      const built = {
         prNumber: null,
         branch: 'trident/a-run',
         diffFile: '/tmp/x.diff',
         worktreePath: '/wt',
-        commitSha: 'abc',
+        commitSha: label === 'forge:build' ? 'abc' : 'def',
         testsPassed: true,
       }
+      // THE BRIDGE'S SHAPE, not a second happy path. A codex build comes back through
+      // `CODEX_FORGE_SCHEMA`, which carries whether the executor ran at all — and the
+      // workflow refuses to continue without it. A mock that omitted `codexStatus`
+      // would be testing a bridge that dropped it.
+      return prompt.includes('CODEX BUILD bridge')
+        ? { ...built, codexStatus: 'connected' }
+        : built
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
       return { verdict: 'APPROVE', findings: [] }
@@ -95,7 +103,13 @@ async function runWorkflow(
     }
     if (label === 'argus:synthesis') {
       synthCount += 1
-      return { verdict: 'APPROVE', findings: [] }
+      // One REQUEST_CHANGES first when asked, which is the ONLY way a fix round is
+      // dispatched — and a fix round landing on a different executor than round 1 is
+      // precisely the drift worth catching.
+      return {
+        verdict: opts.requestChangesOnce === true && synthCount === 1 ? 'REQUEST_CHANGES' : 'APPROVE',
+        findings: [],
+      }
     }
     return ''
   }
@@ -112,9 +126,9 @@ async function runWorkflow(
     ...a: string[]
   ) => (...a: unknown[]) => Promise<unknown>
   const fn = AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', body)
-  await fn(agent, parallel, phase, log, budget, args)
+  const result = (await fn(agent, parallel, phase, log, budget, args)) as Record<string, unknown>
   expect(synthCount).toBeGreaterThan(0)
-  return { captured, logs }
+  return { captured, logs, result }
 }
 
 const promptFor = (captured: Captured[], label: string): string => {
@@ -185,6 +199,186 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
   })
 })
 
+describe('THE BUILD RUNS ON CODEX — and stops spending Anthropic when it does', () => {
+  /**
+   * The reason to move a build off Claude is the Anthropic quota, so "it routes to
+   * codex but still pays Anthropic for the build" is a failure even if the build
+   * succeeds. These tests therefore assert an ABSENCE as well as a presence, and pair
+   * the absence with a positive control on the same label — an absence assertion with
+   * no control is the shape that passes because nothing ran.
+   */
+  const CODEX_BUILD = { build: { model: 'terra' } }
+
+  test('the production launcher carries the choice — the typed boundary accepts it', () => {
+    // If `parsePhaseModelConfig` still refused a codex tier on a build row, this is
+    // where the chain would break, and every assertion below would be testing a
+    // hand-built literal instead of what the composer produces.
+    expect(productionArgs(CODEX_BUILD)['phaseModels']).toEqual({ build: { model: 'terra' } })
+  })
+
+  test('forge:build dispatches through the codex build wrapper, with the chosen model', async () => {
+    const { captured } = await runWorkflow(productionArgs(CODEX_BUILD))
+    const cmd = promptFor(captured, 'forge:build')
+    // The wrapper, by path, from the repo of record.
+    expect(cmd).toContain("bash '/repo/trident/codex-build.sh'")
+    // The MODEL on the subprocess's command line — the only place a GPT id can be
+    // real. `CODEX_BUILD_MODEL`, not the reviewer's `CODEX_REVIEW_MODEL`: one name
+    // for both knobs would let a box that exports one silently steer the other.
+    expect(cmd).toContain("CODEX_BUILD_MODEL='gpt-5.6-terra'")
+    expect(cmd).not.toContain('CODEX_REVIEW_MODEL=')
+    // And the BRIEF travels with it — the same Forge contract the Claude builder
+    // gets, so the two executors cannot be building to different rules.
+    expect(cmd).toContain('You are FORGE')
+    expect(cmd).toContain('do the thing')
+  })
+
+  test('NO Anthropic model is requested for the build phase — with a positive control', async () => {
+    const onCodex = await runWorkflow(productionArgs(CODEX_BUILD))
+    const codexBuild = onCodex.captured.find((c) => c.label === 'forge:build')!
+    // `agent({model})` resolves against Claude Code's endpoint. No model on the opts
+    // means nothing asked it for a build model, and no effort either — a CLI picks
+    // its own.
+    expect({ model: codexBuild.opts['model'] ?? null, effort: codexBuild.opts['effort'] ?? null })
+      .toEqual({ model: null, effort: null })
+    // No Anthropic id anywhere on ANY spawn in the build phase, not just this one.
+    const anthropicOnBuild = onCodex.captured
+      .filter((c) => String(c.label).startsWith('forge:'))
+      .map((c) => c.opts['model'])
+      .filter((m) => m !== undefined && m !== null)
+    expect(anthropicOnBuild).toEqual([])
+    // THE CONTROL. Without the override the very same label DOES carry an Anthropic
+    // id, so the emptiness above is caused by the codex route and not by an
+    // assertion that can never fail.
+    const onClaude = await runWorkflow(productionArgs(null))
+    expect(onClaude.captured.find((c) => c.label === 'forge:build')!.opts['model']).toBe(
+      getBestModel(),
+    )
+  })
+
+  test('a task that contains the heredoc terminator cannot break out of it', async () => {
+    // Part of the brief is the owner's free-form task text. A line equal to the
+    // terminator would close the heredoc early and leave the rest of the brief in
+    // the command as SHELL. The marker grows until it provably does not occur.
+    const args = productionArgs(CODEX_BUILD)
+    const runId = String((args as { runId?: unknown }).runId ?? '')
+    expect(runId.length).toBeGreaterThan(0)
+    const collide = `NEUTRON_CODEX_BRIEF_EOF_${runId}`
+    const { captured } = await runWorkflow({
+      ...args,
+      task: `build it\n${collide}\nrm -rf /tmp/should-never-run\n`,
+    })
+    const cmd = promptFor(captured, 'forge:build')
+    const chosen = `${collide}_X`
+    // The heredoc opens on the GROWN marker, not on the line the task supplied.
+    // (Delete the growth loop and this is the assertion that goes red.)
+    expect(cmd).toContain(`<<'${chosen}'`)
+    expect(cmd).not.toContain(`<<'${collide}'\n`)
+    // The colliding line survives INSIDE the brief, as data — it is not stripped,
+    // rewritten, or allowed to end the heredoc.
+    expect(cmd).toContain(`\n${collide}\nrm -rf /tmp/should-never-run\n`)
+    // …and the brief is still closed exactly once, after that line.
+    expect(cmd.split(`\n${chosen}\n`).length - 1).toBe(1)
+    expect(cmd.indexOf(`\n${collide}\n`)).toBeLessThan(cmd.indexOf(`\n${chosen}\n`))
+  })
+
+  test('the bridge is told not to build, so the phase cannot leak back onto Claude', async () => {
+    // The workflow runtime hands this script `agent()` and nothing else, so a
+    // subprocess is only reachable through a thin Claude agent — the same shape the
+    // codex REVIEW seat has had all along. That agent's whole job is to run one
+    // command and copy six measured values; an agent that decided to finish the build
+    // itself would put the expensive phase straight back on Anthropic.
+    const { captured } = await runWorkflow(productionArgs(CODEX_BUILD))
+    const cmd = promptFor(captured, 'forge:build')
+    expect(cmd).toContain('DO NOT BUILD ANYTHING YOURSELF')
+  })
+
+  test('every FIX round lands on the same executor as round 1', async () => {
+    const { captured } = await runWorkflow(productionArgs(CODEX_BUILD), {
+      requestChangesOnce: true,
+    })
+    const fix = captured.find((c) => c.label === 'forge:fix-round-2')
+    expect(fix).toBeDefined()
+    expect(fix!.prompt).toContain("bash '/repo/trident/codex-build.sh'")
+    expect(fix!.opts['model'] ?? null).toBeNull()
+    // …and it is still a FIX: the findings and the re-entry contract reached codex.
+    expect(fix!.prompt).toContain('You are FIXING')
+  })
+
+  test('the downstream contract survives: the measured sha becomes `reviewedHead`', async () => {
+    // The merge pins to `reviewedHead` (#545) and refuses when it is empty, so a
+    // codex build that could not report a pushed sha the way a Claude build does
+    // would fail every merge. The bridge copies it out of the wrapper's measured
+    // trailer, and it has to arrive here unchanged.
+    const { result } = await runWorkflow(productionArgs(CODEX_BUILD))
+    expect(result['reviewedHead']).toBe('abc')
+    expect(result['branch']).toBe('trident/a-run')
+    expect(result['verdict']).toBe('APPROVE')
+  })
+
+  test('the bridge reads the PUSHED sha in pr mode and the local one otherwise', async () => {
+    // Two different questions, and pinning a merge to the wrong one certifies a
+    // commit no reviewer or merge will ever see. `productionArgs` is local-mode.
+    const local = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
+    expect(local).toContain('NEUTRON_CODEX_BUILD_HEAD=')
+    expect(local).toContain('local mode has no remote')
+
+    const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
+    const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
+    expect(pr).toContain('NEUTRON_CODEX_BUILD_REMOTE_HEAD=')
+    expect(pr).toContain('the PUSHED sha')
+  })
+
+  test('a build lane that never ran STOPS the run instead of falling back to Claude', async () => {
+    // The failure mode this route must not have: codex is unreachable, the workflow
+    // quietly re-Forges on Opus, and the owner discovers the quota was spent anyway —
+    // with nothing in the output saying so.
+    const args = productionArgs(CODEX_BUILD)
+    const captured: Captured[] = []
+    const logs: string[] = []
+    const agent = async (prompt: string, o?: Record<string, unknown>): Promise<unknown> => {
+      captured.push({ label: o?.['label'] as string | undefined, prompt, opts: o ?? {} })
+      if (o?.['label'] === 'forge:build') {
+        return {
+          prNumber: null,
+          branch: '',
+          diffFile: '',
+          worktreePath: '',
+          commitSha: '',
+          testsPassed: false,
+          codexStatus: 'not_connected',
+        }
+      }
+      return ''
+    }
+    const body = SRC.replace('export const meta', 'const meta')
+    const AsyncFunction = Object.getPrototypeOf(async function (): Promise<void> {})
+      .constructor as (...a: string[]) => (...a: unknown[]) => Promise<unknown>
+    const fn = AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', body)
+    const result = (await fn(
+      agent,
+      async (fns: Array<() => Promise<unknown>>) => Promise.all(fns.map((f) => f())),
+      () => {},
+      (line: unknown) => {
+        logs.push(String(line))
+      },
+      { total: 0, spent: () => 0 },
+      args,
+    )) as Record<string, unknown>
+
+    expect(result['ok']).toBe(false)
+    expect(result['checkpoint']).toBe('inner-error')
+    // The run SAYS which lane failed and why. "The build did not happen" and "the
+    // build produced bad code" are opposite situations and the operator has to be
+    // able to tell them apart from the output of a run nobody watched.
+    expect(
+      logs.some((l) => l.includes('codexStatus=not_connected') && l.includes('forge:build')),
+    ).toBe(true)
+    // NO reviewer was paid to read an unbuilt branch, and nothing re-Forged on Claude.
+    expect(captured.filter((c) => String(c.label).startsWith('argus:'))).toEqual([])
+    expect(captured.filter((c) => String(c.label).startsWith('forge:fix-round-'))).toEqual([])
+  })
+})
+
 describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
   /**
    * These args are built by hand ON PURPOSE, and it is the one place in this file
@@ -213,15 +407,17 @@ describe('A CONFIG THAT GOT PAST THE TYPED BOUNDARY DEGRADES VISIBLY', () => {
     ).toBe(true)
   })
 
-  test('a tier from the WRONG transport is refused, not handed to agent()', async () => {
-    expect(productionArgs({ build: { model: 'sol' } })['phaseModels']).toBeUndefined()
+  test('a tier from an executor this step cannot reach is refused, not handed to agent()', async () => {
+    // `k3` is the Kimi CLI's tier. The build step has TWO executors now (Claude and
+    // codex) and Kimi is neither, so the override is dropped rather than handed to
+    // `agent({model: 'kimi-k3'})` — a spawn against an endpoint that has never heard
+    // of it.
+    expect(productionArgs({ build: { model: 'k3' } })['phaseModels']).toBeUndefined()
 
-    const { captured, logs } = await runWorkflow(past({ build: { model: 'sol' } }))
+    const { captured, logs } = await runWorkflow(past({ build: { model: 'k3' } }))
     const build = captured.find((c) => c.label === 'forge:build')!
-    // The build stays on its Claude default. The alternative — `agent({model:
-    // 'gpt-5.6-sol'})` — is a spawn against an endpoint that has never heard of it.
-    expect(build.opts['model']).not.toBe('gpt-5.6-sol')
-    expect(logs.some((l) => l.includes('IGNORED') && l.includes('transport-mismatch'))).toBe(true)
+    expect(build.opts['model']).not.toBe('kimi-k3')
+    expect(logs.some((l) => l.includes('IGNORED') && l.includes('executor-mismatch'))).toBe(true)
   })
 
   test('an effort on a CLI lane is refused rather than stored into a dispatch nothing reads', async () => {
