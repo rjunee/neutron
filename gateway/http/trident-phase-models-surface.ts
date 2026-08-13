@@ -50,11 +50,13 @@
  */
 
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import type { CodexAvailability } from '@neutronai/trident/codex-credential.ts'
 import { modelTierRegistry } from '@neutronai/trident/model-tiers.ts'
 import {
   EFFORTS,
   TRIDENT_PHASES,
   phaseGroup,
+  phaseGroups,
   phaseModelDefaults,
   phaseSupportsEffort,
 } from '@neutronai/trident/phase-models.ts'
@@ -63,11 +65,20 @@ import { jsonError, jsonOk, readJsonBody, resolveBearer } from './surface-kit.ts
 
 const PATH = '/api/app/trident/phase-models'
 
-/** Which cross-model credentials this install actually has. */
+/** Which cross-model executors this install can actually run. */
 export interface CrossModelConnections {
-  /** A Codex connection — without it the GPT tiers cannot run. */
-  codex: boolean
-  /** A Kimi key — without it the K3 tier cannot run. */
+  /**
+   * Whether the codex executor can run here — and WHEN IT CANNOT, WHY, in the words
+   * the owner is shown. Answered by `codexExecutorAvailability`, which is the same
+   * decision the build's own preconditions make; see its header for why the reason
+   * travels WITH the answer instead of beside it.
+   */
+  codex: CodexAvailability
+  /**
+   * A Kimi key — without it the K3 tier cannot run. Still a boolean because the Kimi
+   * REVIEW lane has exactly one precondition, so "needs a Kimi key" cannot become the
+   * wrong sentence the way the codex one did.
+   */
   kimi: boolean
 }
 
@@ -113,15 +124,29 @@ export interface TridentPhaseModelsSurface {
  */
 function vocabulary(connections: CrossModelConnections): object {
   return {
-    phases: TRIDENT_PHASES.map((p) => ({
+    // A FOLLOWER PHASE IS NOT A ROW. `build_mechanical` is the build step under the
+    // planner's internal complexity tag and takes `build`'s setting when it has none
+    // of its own (`TridentPhase.follows`, implemented by the workflow's
+    // `phaseOverrideFor`). Rendering it would show its own `sonnet` default beside a
+    // run that dispatched the owner's codex tier — the pane/run disagreement
+    // `trident/phase-models.ts` exists to prevent. Filtered HERE, once, rather than in
+    // each of the two clients, so they cannot disagree about it either.
+    phases: TRIDENT_PHASES.filter((p) => p.follows === undefined).map((p) => ({
       key: p.key,
       label: p.label,
       description: p.description,
-      // WHICH EXECUTOR runs this step. The pane needs it to know which tiers a row
-      // can legally take: a Claude step cannot run a GPT tier and vice versa.
+      // WHICH EXECUTOR runs this step by DEFAULT — what the row names when it explains
+      // that an option is greyed ("…it runs on Claude").
       group: phaseGroup(p),
-      // A `cli` step's reasoning effort is the CLI's own; the pane disables that cell
-      // and says so rather than offering a control nothing reads.
+      // EVERY executor this step can dispatch on, which is what decides whether a tier
+      // is selectable. Most steps have one; `build` has two (Claude and codex), and a
+      // row that compared against `group` alone would grey the codex tiers on a step
+      // that now genuinely reaches them.
+      groups: phaseGroups(p),
+      // Could this step EVER have an effort control — i.e. does its default executor
+      // read one. Whether the cell is live right now also depends on the tier the
+      // owner has chosen (see `effort_supported` on each tier below), because the
+      // build's second executor is a CLI that picks its own reasoning effort.
       effort_supported: phaseSupportsEffort(p),
       default: { model: p.default.tier, effort: p.default.effort },
     })),
@@ -134,18 +159,36 @@ function vocabulary(connections: CrossModelConnections): object {
     // the owner unable to account for a missing option, which is exactly how a
     // capability stays invisible for weeks (ISSUES #551).
     model_tiers: modelTierRegistry().map((t) => {
-      const available = t.requires === null || connections[t.requires]
+      // THE REASON IS COMPUTED FIRST AND `available` IS DERIVED FROM IT, so a tier
+      // cannot be marked unavailable without saying why. The other order — a boolean
+      // plus a reason looked up beside it — is how "needs a Codex connection" outlived
+      // the single condition it described.
+      const reason =
+        t.requires === null
+          ? null
+          : t.requires === 'codex'
+            ? connections.codex.usable
+              ? null
+              : connections.codex.reason
+            : connections.kimi
+              ? null
+              : 'needs a Kimi key'
+      const available = reason === null
       return {
         tier: t.tier,
         provider: t.provider,
         model_id: t.model_id,
         group: t.group,
+        // WHETHER PICKING THIS TIER LEAVES THE EFFORT CELL LIVE. Shipped per tier and
+        // derived here, so the rule ("a subprocess chooses its own reasoning effort")
+        // is stated once on the server rather than re-derived from `group` by each of
+        // the two clients. A row whose phase can reach two executors needs this: the
+        // build's effort control is real on `opus` and inert on `sol`, and a pane that
+        // asked only the PHASE kept the cell live and posted an effort the chosen tier
+        // cannot use.
+        effort_supported: t.transport === 'agent',
         available,
-        unavailable_reason: available
-          ? null
-          : t.requires === 'codex'
-            ? 'needs a Codex connection'
-            : 'needs a Kimi key',
+        unavailable_reason: reason,
       }
     }),
     efforts: [...EFFORTS],

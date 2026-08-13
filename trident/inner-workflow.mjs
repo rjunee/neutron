@@ -292,10 +292,14 @@ const resolveTier = (name) => {
       model_id: entry.model_id,
       transport: entry.transport === 'cli' ? 'cli' : 'agent',
       env_var: typeof entry.env_var === 'string' && entry.env_var ? entry.env_var : null,
+      // The EXECUTOR (`claude` / `codex` / `kimi`), threaded from the registry. A
+      // legacy caller that sends no group is treated as `claude`, which is what the
+      // MODELS fallback below is.
+      group: typeof entry.group === 'string' && entry.group ? entry.group : 'claude',
     }
   }
   if (Object.prototype.hasOwnProperty.call(MODELS, name)) {
-    return { model_id: MODELS[name], transport: 'agent', env_var: null }
+    return { model_id: MODELS[name], transport: 'agent', env_var: null, group: 'claude' }
   }
   return null
 }
@@ -303,24 +307,57 @@ const resolveTier = (name) => {
 // A CLI-transport route: the model is not handed to agent(), it is handed to the
 // WRAPPER through its env knob. `model: null` (no registry threaded) means "invoke the
 // wrapper with no override", which is the wrapper's own pinned default.
-const cliRoute = ({ tier, phaseKey }) => {
+const cliRoute = ({ tier, phaseKey, group }) => {
   const resolved = resolveTier(tier)
   return {
     model: resolved !== null && resolved.transport === 'cli' ? resolved.model_id : null,
     effort: null,
     transport: 'cli',
     envVar: resolved !== null ? resolved.env_var : null,
+    group,
     phaseKey,
   }
 }
 
+// ── THE BUILD'S SECOND EXECUTOR ──────────────────────────────────────────────
+// The build is the only phase with two wired dispatches, and this is the one the
+// owner reaches by pinning the build to a GPT tier: instead of `agent({model})` the
+// assembled brief goes to `trident/codex-build.sh`, which runs `codex exec` and
+// measures back the branch/sha/PR the inner loop needs (see `codexBuildPrompt`).
+//
+// A DIFFERENT ENV KNOB FROM THE REVIEWER'S. The registry names `CODEX_REVIEW_MODEL`
+// because that is the knob the REVIEW wrapper reads; the build wrapper reads
+// `CODEX_BUILD_MODEL`. One name for both would mean that on a box exporting it for a
+// direct review invocation, every codex build silently took the reviewer's model —
+// and the reverse. The two wrappers are two consumers, so they get two knobs.
+const CODEX_BUILD_MODEL_ENV = 'CODEX_BUILD_MODEL'
+const codexBuildRoute = (route, modelId) => ({
+  ...route,
+  model: modelId,
+  // A CLI chooses its own reasoning effort and the wrapper exposes no knob for it, so
+  // carrying the Claude route's effort forward would log a number nothing reads. The
+  // typed boundary refuses to STORE the pair for the same reason.
+  effort: null,
+  transport: 'cli',
+  group: 'codex',
+  envVar: CODEX_BUILD_MODEL_ENV,
+})
+
 // forge:* routes BY the planner's complexity tag: '[mechanical]' (boilerplate,
 // tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
 // ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
+//
+// `alsoRunsOn` mirrors the phase table (`trident/phase-models.ts`): the groups this
+// route can be MOVED to by an owner override, beyond its own. Both build phases carry
+// it because they are the same dispatch under two complexity tags — but carrying it
+// only makes the move POSSIBLE for each key independently, and the owner sets one.
+// What actually keeps a `[mechanical]` task off Claude when the build moves to codex
+// is `phaseOverrideFor` below, which reads `build`'s setting for `build_mechanical`.
+// Do not remove one and keep the other.
 const modelForTag = (tag) =>
   tag === 'mechanical'
-    ? { model: MODELS.sonnet, effort: 'medium', phaseKey: 'build_mechanical' }
-    : { model: MODELS.opus, effort: 'high', phaseKey: 'build' }
+    ? { model: MODELS.sonnet, effort: 'medium', phaseKey: 'build_mechanical', group: 'claude', alsoRunsOn: ['codex'] }
+    : { model: MODELS.opus, effort: 'high', phaseKey: 'build', group: 'claude', alsoRunsOn: ['codex'] }
 
 // label → {model, effort, phase}. forge:* is resolved dynamically (modelForTag)
 // since its model depends on the task; the rest are static. Fable orchestrates
@@ -348,8 +385,8 @@ const ROLE_MODEL = {
   // reach a GPT/Kimi model; see the `modelTiers` arg). The thin Claude agent wrapping
   // each still runs on the launcher default: its whole job is to run one command and
   // map an exit code.
-  'argus:codex': cliRoute({ tier: 'sol', phaseKey: 'review_codex' }),
-  'argus:kimi': cliRoute({ tier: 'k3', phaseKey: 'review_kimi' }),
+  'argus:codex': cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }),
+  'argus:kimi': cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }),
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
   'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping' },
@@ -380,12 +417,35 @@ const threadedPhaseModels =
   phaseModels && typeof phaseModels === 'object' && !Array.isArray(phaseModels) ? phaseModels : {}
 const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
+// THE BUILD IS ONE STEP WITH TWO COMPLEXITY TAGS, AND THE OWNER SEES ONE ROW.
+// `modelForTag` splits the dispatch into `build` and `build_mechanical` by the
+// planner's `[mechanical]` tag — an internal cost optimisation, not a setting. The
+// pane offers "Build" once, which writes `build`. Without this, every Ralph task the
+// planner happens to tag `[mechanical]` kept dispatching on Claude after the owner
+// moved the build to codex, and the log line would say so in a phase name the owner
+// has never seen.
+//
+// UNCONDITIONAL: an entry that NAMES the follower key does not win, it is ignored.
+// `build_mechanical` is not settable at the boundary (`parsePhaseModelConfig` rejects
+// it and the read path drops one stored before that rule existed), so a value arriving
+// here can only be a stale or hand-crafted blob — and honouring it would pin the
+// mechanical build to a model the pane cannot display and the owner cannot clear,
+// which is exactly the invisible Anthropic spend this mirroring exists to stop.
+// `trident/__tests__/phase-model-coverage.test.ts` holds the two halves together.
+const phaseOverrideFor = (phaseKey) =>
+  phaseKey === 'build_mechanical' ? threadedPhaseModels['build'] : threadedPhaseModels[phaseKey]
+
 function applyPhaseOverride(route, phaseKey) {
   if (!phaseKey) return route
-  const override = threadedPhaseModels[phaseKey]
+  const override = phaseOverrideFor(phaseKey)
   if (!override || typeof override !== 'object' || Array.isArray(override)) return route
   let { model, effort } = route
   const transport = route.transport === 'cli' ? 'cli' : 'agent'
+  // The executor this route runs on, and the ones it can be MOVED to. Compared by
+  // GROUP rather than by transport+env_var: that pair was a proxy for "the same
+  // executor", and it stopped being one the moment a phase had two.
+  const group = typeof route.group === 'string' ? route.group : 'claude'
+  const alsoRunsOn = Array.isArray(route.alsoRunsOn) ? route.alsoRunsOn : []
   if (typeof override.model === 'string' && override.model.trim()) {
     const requested = override.model.trim()
     const tier = resolveTier(requested)
@@ -397,9 +457,36 @@ function applyPhaseOverride(route, phaseKey) {
       // (or on nothing at all). The typed boundary drops these first; this is the
       // backstop for a config that got past it.
       log(`trident.phase-override IGNORED phase=${phaseKey} reason=unknown-tier tier=${requested}`)
-    } else if (tier.transport !== transport || (tier.env_var ?? null) !== (route.envVar ?? null)) {
-      // Transport is a capability, not a preference: a GPT tier cannot run a Claude
-      // agent step, and the codex wrapper cannot be pointed at a Kimi model.
+    } else if (tier.group === 'codex' && group !== 'codex' && alsoRunsOn.includes('codex')) {
+      // THE BUILD MOVES TO THE CODEX EXECUTOR. The whole route changes, not just the
+      // id: the dispatch stops being an `agent()` call and becomes the codex build
+      // wrapper, which is the difference between "the build runs on GPT" and "we
+      // asked Claude Code's endpoint for a GPT id".
+      log(
+        `trident.phase-override phase=${phaseKey} executor=codex tier=${requested} model=${tier.model_id}`,
+      )
+      if (override.effort !== undefined) {
+        // The step HAD an effort control while it ran on Claude; on the codex
+        // executor it does not. Said out loud rather than dropped, because a stored
+        // setting that quietly stopped mattering is one the owner keeps believing
+        // in. (The typed boundary refuses to STORE this pair — this is the backstop
+        // for a config written before it did.)
+        log(
+          `trident.phase-override IGNORED phase=${phaseKey} reason=effort-not-settable-on-cli-transport`,
+        )
+      }
+      return codexBuildRoute(route, tier.model_id)
+    } else if (tier.group !== group) {
+      // The executor is a capability, not a preference: a GPT tier cannot run a
+      // Claude agent step that has no codex dispatch, and the codex review wrapper
+      // cannot be pointed at a Kimi model.
+      log(
+        `trident.phase-override IGNORED phase=${phaseKey} reason=executor-mismatch tier=${requested} tier-executor=${tier.group} phase-executor=${group}`,
+      )
+    } else if (tier.transport !== transport) {
+      // Same executor, different transport — nothing in the registry produces this
+      // today, and a route that cannot say HOW it reaches a model must not dispatch
+      // it. Kept as a backstop rather than an assumption.
       log(
         `trident.phase-override IGNORED phase=${phaseKey} reason=transport-mismatch tier=${requested} tier-transport=${tier.transport} phase-transport=${transport}`,
       )
@@ -458,7 +545,7 @@ function withModel(opts, tag) {
   // output — and an owner who cannot answer it will not trust the setting. Note
   // `route.phaseKey` is the owner-facing config key; `opts.phase` is the workflow's
   // progress group and is deliberately a different field.
-  const overridden = route.phaseKey !== null && route.phaseKey in threadedPhaseModels
+  const overridden = route.phaseKey !== null && phaseOverrideFor(route.phaseKey) !== undefined
   log(
     `trident.agent label=${opts.label} model=${route.model} effort=${route.effort} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}${tag ? ` tag=${tag}` : ''}`,
   )
@@ -505,7 +592,7 @@ function crossModelEnvPrefix(label) {
  */
 function logCrossModelSpawn(label, fallback) {
   const route = routeModel(label)
-  const overridden = route.phaseKey !== null && route.phaseKey in threadedPhaseModels
+  const overridden = route.phaseKey !== null && phaseOverrideFor(route.phaseKey) !== undefined
   log(
     `trident.agent label=${label} model=${route.model || fallback} effort=n/a transport=cli phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}`,
   )
@@ -590,6 +677,22 @@ const FORGE_SCHEMA = {
     prNumber: { type: ['number', 'null'] },
     diffFile: { type: 'string' },
     testsPassed: { type: 'boolean' },
+  },
+}
+
+// The SAME six fields, plus whether the codex executor actually ran. The inner loop
+// downstream cannot tell "the build ran and produced nothing" from "the build never
+// happened" out of the six alone, and those need opposite handling: the first is what
+// `roundLanded` and the empty-`reviewedHead` merge refusal are for, the second is a
+// lane failure that must stop the run and say so rather than send a panel to review an
+// unbuilt branch.
+const CODEX_FORGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: [...FORGE_SCHEMA.required, 'codexStatus'],
+  properties: {
+    ...FORGE_SCHEMA.properties,
+    codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
   },
 }
 
@@ -700,6 +803,249 @@ CONTRACT
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
+}
+
+// ── THE BUILD, ON THE CODEX EXECUTOR ─────────────────────────────────────────
+// Everything below is the second dispatch for `forge:build` / `forge:fix-round-*`.
+// It is reached only when the owner has pinned the build phase to a GPT tier; an
+// install that never opens the settings pane goes down the Claude path above,
+// byte-identically.
+
+/** The deterministic diff path a codex build writes, so the wrapper can verify it. */
+const codexBuildDiffFile = () => `/tmp/trident-codex-build-${runId || slug}.diff`
+
+/**
+ * `<bytes>:<fnv32>` for a string, as `trident/codex-build.sh` recomputes it from the
+ * brief file before it spends a token.
+ *
+ * WHY THE BRIEF NEEDS A RECEIPT AT ALL. This script cannot exec anything; it reaches a
+ * shell only through a bridge agent that has to reproduce the whole brief inside a
+ * heredoc. A model that truncates or paraphrases it hands codex a contract nobody
+ * wrote, and every check after that point asks about the REPOSITORY — a real commit,
+ * a real diff, a real PR, for the wrong task. The receipt is the only place the text
+ * itself can be checked.
+ *
+ * FNV-1a/32 OVER THE UTF-8 BYTES, hand-rolled, and both halves of that are forced:
+ * this file runs with no imports and no host API it is promised (see the header), so
+ * the digest must come out of language builtins alone. `Math.imul` is the 32-bit
+ * multiply the checksum needs (a plain `*` loses the low bits past 2**53).
+ *
+ * THE UTF-8 ENCODER IS WRITTEN OUT rather than borrowed from `encodeURIComponent`,
+ * and the reason is one input: an UNPAIRED SURROGATE. The brief carries the owner's
+ * task text, which arrives length-capped, and a cap that lands mid-emoji leaves half
+ * a surrogate pair behind. `encodeURIComponent` THROWS `URIError` on one — from here
+ * that is an exception on the codex route BEFORE anything is dispatched, with a
+ * message naming neither the brief nor the task, for a build the Claude path would
+ * have run without noticing. So the encoder below does what every real UTF-8 encoder
+ * does with a lone surrogate — emits U+FFFD (`ef bf bd`) and keeps going — and the
+ * receipt stays computable. If the bridge then reproduces the text differently the
+ * wrapper refuses it (exit 3, DEFERRED), which is the fail-closed answer this check
+ * exists to give; a crash is not.
+ *
+ * NOT A SIGNATURE, and not claimed as one: the author of the brief and its verifier
+ * are the same run, so nothing here has to survive a deliberate collision. It has to
+ * catch a bridge that dropped or reworded part of the text, which an exact byte count
+ * plus a checksum does.
+ */
+function briefIntegrity(text) {
+  let bytes = 0
+  let h = 0x811c9dc5
+  const push = (b) => {
+    bytes++
+    h = Math.imul(h ^ b, 0x01000193) >>> 0
+  }
+  for (let i = 0; i < text.length; i++) {
+    let cp = text.charCodeAt(i)
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      const lo = i + 1 < text.length ? text.charCodeAt(i + 1) : 0
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00)
+        i++
+      } else {
+        cp = 0xfffd // a high surrogate with nothing after it
+      }
+    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+      cp = 0xfffd // a low surrogate with nothing before it
+    }
+    if (cp < 0x80) {
+      push(cp)
+    } else if (cp < 0x800) {
+      push(0xc0 | (cp >> 6))
+      push(0x80 | (cp & 0x3f))
+    } else if (cp < 0x10000) {
+      push(0xe0 | (cp >> 12))
+      push(0x80 | ((cp >> 6) & 0x3f))
+      push(0x80 | (cp & 0x3f))
+    } else {
+      push(0xf0 | (cp >> 18))
+      push(0x80 | ((cp >> 12) & 0x3f))
+      push(0x80 | ((cp >> 6) & 0x3f))
+      push(0x80 | (cp & 0x3f))
+    }
+  }
+  return `${bytes}:${h.toString(16).padStart(8, '0')}`
+}
+
+/**
+ * The coda appended to the Forge brief when the builder is `codex exec`.
+ *
+ * APPENDED, never a second contract. The build brief is assembled once and both
+ * builders get the same one — the alternative (a codex-flavoured copy of
+ * `forgeBuildContract`) is two texts that mean the same thing today and drift apart
+ * on the first edit, at which point the two executors quietly build to different
+ * rules. Only the REPORTING differs, because `codex exec` has no schema tool: the
+ * six fields the inner loop needs are measured by the wrapper instead (see
+ * `trident/codex-build.sh`), so the coda's job is to pin the two things the
+ * measurement depends on — the branch and the diff path — and to stand down step 6.
+ */
+function codexBuildCoda() {
+  return `
+
+HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from you — this REPLACES steps 5 and 6 above):
+- There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
+- Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make, or did not push, is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.
+- Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
+- Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
+}
+
+/**
+ * The codex BUILD bridge prompt — a thin Claude agent whose only job is to run one
+ * command and copy six measured values out of its output.
+ *
+ * SAME SHAPE AS THE REVIEW BRIDGE (`codexReviewerPrompt`), and for the same reason:
+ * the workflow runtime gives this script `agent()` and nothing else, so a subprocess
+ * can only be reached through an agent that shells out. The bridge does NOT build, and
+ * is told so explicitly — an agent that "helpfully" finished the job itself would put
+ * the phase back on Anthropic, which is the one outcome this whole route exists to
+ * avoid.
+ *
+ * THE BRIEF TRAVELS AS A HEREDOC, not as a quoted argv. It is kilobytes of contract
+ * text full of backticks and apostrophes; a single-quoted argument would need every
+ * quote escaped, and the bridge has to reproduce the command exactly. A quoted
+ * heredoc (`<<'MARKER'`) needs no escaping at all, so what codex reads is byte-for-byte
+ * what this function composed — and the marker is grown below until it provably does
+ * not occur in the brief, which is what keeps that safety from depending on luck.
+ *
+ * AND IT GETS EXACTLY ONE RETRY. Reproducing several kilobytes verbatim is still a
+ * MODEL doing a copy, so `CODEX_BUILD_BRIEF_CORRUPT` (exit 3) is a real, if unmeasured,
+ * failure rate — and with no retry it is terminal: `codexStatus='deferred'`, the throw
+ * below, and an already-built, already-reviewed branch abandoned over a copying
+ * wobble. That exit is also the one failure here that is CHEAP to retry and knowably
+ * transient: the wrapper refuses before it spends a token, so the retry costs a copy
+ * and nothing else, and the fault is in the copy rather than in the build. One retry,
+ * not a loop — a model that produced the same wrong copy twice will produce it a third
+ * time, and the fail-closed refusal is the correct end state.
+ */
+function codexBuildPrompt(slot, brief, route) {
+  const uniq = runId || slug
+  const briefFile = `/tmp/trident-codex-build-${uniq}-${slot}.brief`
+  const outFile = `/tmp/trident-codex-build-${uniq}-${slot}.out`
+  const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
+  // THE TRAILER GETS ITS OWN FILE, and that is the only place the six values are read
+  // from. Sharing stdout with the codex transcript put model-controlled text and the
+  // wrapper's measurement in the same window: a build that narrates
+  // "NEUTRON_CODEX_BUILD_HEAD=<sha>" produced two trailers with no rule saying which
+  // one won. A separate file has no ambiguity to resolve.
+  const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
+  const script = `${repoPath}/trident/codex-build.sh`
+  // THE HEREDOC TERMINATOR MUST NOT OCCUR IN THE BRIEF. A brief line equal to the
+  // marker would close the heredoc early and leave the REST OF THE BRIEF sitting in
+  // the command as shell — and part of the brief is the owner's task text, which is
+  // free-form. The run id already makes an accidental collision implausible; growing
+  // the marker until it provably does not appear makes it impossible, which is the
+  // difference worth two lines when the failure mode is arbitrary command execution.
+  let marker = `NEUTRON_CODEX_BRIEF_EOF_${uniq}`
+  while (brief.includes(marker)) marker += '_X'
+  // THE RECEIPT FOR WHAT THE HEREDOC IS SUPPOSED TO WRITE — measured over exactly the
+  // bytes the block below produces, which is the brief plus the newline that ends its
+  // last line. A bridge that shortens or rewords the text writes a different file and
+  // the wrapper refuses it (exit 3, DEFERRED) instead of building the wrong thing.
+  const integrity = briefIntegrity(`${brief}\n`)
+  const diffFile = codexBuildDiffFile()
+  // The model assignment, exactly as the review lane does it: the id belongs to the
+  // subprocess, never to the wrapping agent. Empty when no registry was threaded,
+  // which invokes the wrapper on its own pinned default.
+  const envPrefix =
+    route.envVar && route.model ? `${route.envVar}=${shSingleQuote(route.model)} ` : ''
+  // THE MERGE MODE IS HANDED TO THE WRAPPER AS ARG 3, not re-derived by it. Three of
+  // its checks are pr-only — the remote baseline, the push-credential precheck and the
+  // `gh pr list` probe — and before this argument existed it inferred "am I in pr mode"
+  // from "does an `origin` exist", which is a question about the CLONE and not about
+  // the RUN. A local-mode build in any clone with an unreachable origin (offline, a
+  // stale URL, a non-GitHub remote) hard-DEFERRED at the baseline before codex was ever
+  // launched, and did it again every round: the run could not progress, and the reason
+  // named a remote it was never going to push to. The wrapper defaults an absent arg to
+  // `pr`, the strict side, so the two cannot disagree in the dangerous direction.
+  //
+  // In pr mode the sha that matters is the PUSHED one — it is what a reviewer reads
+  // and what `--match-head-commit` pins the merge to. In local mode there is no
+  // remote, so the local head is the authority. Same split as `readBranchHead`.
+  const shaLine = isPr
+    ? 'commitSha    = the value after NEUTRON_CODEX_BUILD_REMOTE_HEAD= (the build\'s own commit, confirmed pushed — NOT the local one; an unpushed commit is one no reviewer and no merge will ever see)'
+    : 'commitSha    = the value after NEUTRON_CODEX_BUILD_HEAD= (local mode has no remote)'
+  return `You are the CODEX BUILD bridge for trident. The BUILD ITSELF runs in a codex subprocess; YOUR job is to launch it and report the six values its wrapper measures. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+DO NOT BUILD ANYTHING YOURSELF. Do not edit a file, do not run the tests, do not commit, and do not "finish the job" if the subprocess falls short — this phase was deliberately moved off Claude, and work you do here defeats that. Run the command, read the output, fill the schema.
+Run EXACTLY this ONE Bash invocation from your CURRENT WORKING DIRECTORY (your isolated worktree — do NOT \`cd\` anywhere, do NOT background it, do NOT add flags). It is several lines; pass the WHOLE block unchanged to a single Bash call. The brief inside the heredoc is checked: the command carries its byte count and checksum, and the wrapper REFUSES to build (exit 3) if what lands in the file is not byte-for-byte what is written below — so copy it, never summarise, re-wrap or tidy it:
+cat > ${shSingleQuote(briefFile)} <<'${marker}'
+${brief}
+${marker}
+${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)} NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; cat ${shSingleQuote(trailerFile)}
+Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errFile} only as needed — tail, do not flood context):
+- EXIT 0 → codexStatus='connected'. ${trailerFile} holds a six-line NEUTRON_CODEX_BUILD_* trailer the WRAPPER measured with git and gh, after the build exited. COPY THOSE SIX VALUES VERBATIM — they are facts about the repository, not a claim to be checked against the transcript, and they are what the merge gate pins to. The build's own transcript in ${outFile} is NOT a source for any of them: if it contains NEUTRON_CODEX_BUILD_* lines of its own, they are the model talking about itself and you must ignore them entirely.
+    branch       = the value after NEUTRON_CODEX_BUILD_BRANCH=
+    ${shaLine}
+    prNumber     = the value after NEUTRON_CODEX_BUILD_PR= as an integer, or null when it is empty
+    diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
+    worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
+  Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run.
+- EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
+- EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE HEREDOC ABOVE, NOT THE BUILD. That error means the brief file did not match the byte count and checksum in the command — i.e. YOUR copy of it lost, gained or reworded something; no tokens were spent and nothing was built. RE-RUN THE WHOLE BLOCK ONCE, copying the heredoc body character for character this time (do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation). Exactly ONE retry: if the second attempt reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred' — a third identical copy is not going to differ, and building against an approximation of the brief is the outcome this check exists to prevent.
+- EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
+For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null and testsPassed as false, even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
+Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred'.`
+}
+
+/**
+ * Dispatch one Forge turn — on Claude, or on the codex executor.
+ *
+ * ONE FUNCTION, so round 1 and every fix round cannot end up on different executors.
+ * The route decides; both call sites just hand over the brief.
+ */
+async function forgeAgent(opts, tag, brief, slot) {
+  const route = routeModel(opts.label, tag)
+  if (route.transport !== 'cli') {
+    return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
+  }
+  const res = await agent(
+    codexBuildPrompt(slot, `${brief}${codexBuildCoda()}`, route),
+    withModel({ ...opts, schema: CODEX_FORGE_SCHEMA }, tag),
+  )
+  if (!res) return null
+  if (res.codexStatus !== 'connected') {
+    // A LANE THAT COULD NOT RUN IS NOT A BUILD, and it must not be reported as one.
+    // The alternative is to fall back to Claude, which would spend exactly the quota
+    // the owner moved this phase to protect and would do it invisibly. Stop instead:
+    // the catch{} persists a terminal failure naming the status, and the operator
+    // reconnects codex or moves the phase back themselves.
+    throw new Error(
+      `${opts.label} was routed to the codex executor and NO BUILD HAPPENED (codexStatus=${res.codexStatus}) — see the codex-build wrapper stderr. Refusing to continue: falling back to Claude would silently spend the quota this route exists to save.`,
+    )
+  }
+  // THE MEASURED BRANCH IS CHECKED, NOT JUST CARRIED. The wrapper reports the branch it
+  // was standing on (`git rev-parse --abbrev-ref HEAD`) and already blanks the sha when
+  // it is the wrong one — this turns that into a NAMED failure instead of the confusing
+  // "produced no commitSha" the empty sha would raise two hundred lines later, and it
+  // is the only consumer that makes the reported branch load-bearing. Empty is not a
+  // disagreement: a build that established nothing reports nothing, and the sha gate
+  // below is what stops that one.
+  const reportedBranch = typeof res.branch === 'string' ? res.branch.trim() : ''
+  if (reportedBranch !== '' && reportedBranch !== forgeBranch) {
+    throw new Error(
+      `${opts.label} committed on branch '${reportedBranch}' but the run builds '${forgeBranch}'. Refusing to continue: the reviewers would read a diff that merging '${forgeBranch}' does not land, and in local mode the branch holding that work is deleted after the merge.`,
+    )
+  }
+  return res
 }
 
 // Argus review rubric (from prompts/argus.md): APPROVE / REQUEST_CHANGES /
@@ -1471,6 +1817,29 @@ function roundDidNotLandFinding(round, head) {
 }
 
 /**
+ * The message the run reports when a fix round LANDED but produced no diff.
+ *
+ * A different fault from the one above and a different recovery, which is why it is a
+ * different finding rather than a reworded one: the round's work is committed and on
+ * the branch — `roundLanded` just confirmed it — so there is nothing to recover. What
+ * is missing is the artefact the review panel reads. Round 1 refuses to open a panel
+ * on an empty diff because five reviewers paid to APPROVE nothing is the worst outcome
+ * available; this applies the same refusal to every later round.
+ */
+function roundLeftNoDiffFinding(round) {
+  return {
+    severity: 'blocker',
+    title: `PROCESS — fix round ${round} landed on the branch but produced no diff`,
+    evidence:
+      `round ${round}'s commit IS on the branch, so its work is not lost — but the round reported no ` +
+      'diff file, and the review panel reads the diff and nothing else. Opening it would pay five ' +
+      'reviewers to read an empty or missing file and report that they found nothing wrong with it, ' +
+      'which is an APPROVE of a diff no one saw rather than of a change no one made. Regenerate the ' +
+      'branch diff (`git diff <base>..HEAD`) and re-review; no work needs recovering.',
+  }
+}
+
+/**
  * Read the branch's CURRENT head, cheaply.
  *
  * In PR mode the authority is the REMOTE — `git ls-remote` — because "pushed" is
@@ -2088,15 +2457,18 @@ try {
   // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
   // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
   // planner's complexity tag.
-  const forge = await agent(
+  const forge = await forgeAgent(
+    { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
+    complexityTag,
     `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
 
 TASK:
 ${task}${reflectionGuidance}`,
-    withModel({ label: 'forge:build', phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA }, complexityTag),
+    'r1',
   )
 
   if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
+
   if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
 
   // C1 checkpoint — Forge done (PR + branch persisted).
@@ -2135,11 +2507,59 @@ ${task}${reflectionGuidance}`,
     return refireResult
   }
 
-  const diffFile = forge.diffFile
+  // ── ROUND 1 HAS TO HAVE LANDED SOMETHING, TOO ────────────────────────────────
+  // The fix loop already refuses to re-review a round that left no trace on the
+  // branch (`roundLanded`, below); round 1 had no equivalent, and a build that
+  // completes and produces NOTHING went straight into the review panel. Five
+  // reviewers then read an empty diff, find nothing wrong with it, and APPROVE —
+  // spending precisely the Anthropic quota this route exists to protect, on a
+  // change that does not exist. Only the outer merge's empty-`reviewedHead`
+  // refusal stopped it from shipping, and that is one gate too far down.
+  //
+  // Either fact missing is fatal, and for different reasons: with no sha the run
+  // can never merge (`reviewedHead` is empty and `--match-head-commit` has nothing
+  // to pin), and with no diff there is nothing for a reviewer to read. The codex
+  // wrapper reports both as EMPTY rather than wrong when it cannot establish them,
+  // which is what makes this check possible at all — and a Claude Forge run that
+  // returns the same emptiness is just as unbuilt, so the gate is on the shared
+  // path and not on the codex branch of it.
+  //
+  // PLACED HERE — AFTER the PR capture, the `forge-done` checkpoint and the Ralph
+  // re-fire — and each of those three is a deliberate ordering, not an accident:
+  //   • The PR number is captured FIRST so the error below can NAME the PR. A build
+  //     that opened a PR and reported no sha is the case an operator most needs the
+  //     number for, and throwing before `pr` was read left the terminal failure
+  //     unable to mention it at all.
+  //   • The checkpoint runs first so a resume re-enters the branch that exists.
+  //   • The Ralph re-fire runs first because THIS GATE GUARDS THE REVIEW PANEL, and
+  //     an intermediate Ralph task does not open one. A single task the planner
+  //     turned into a no-op is not a reason to abort a multi-task run — the outer
+  //     loop re-fires the next task, and the FINAL task still passes through here
+  //     before any reviewer is paid.
+  const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
+  const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
+  if (forgeSha === '' || forgeDiff === '') {
+    const missing = [forgeSha === '' ? 'commitSha' : null, forgeDiff === '' ? 'diffFile' : null]
+      .filter((m) => m !== null)
+      .join(' and ')
+    throw new Error(
+      `forge:build completed but produced no ${missing} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
+    )
+  }
+
+  // REASSIGNED BY EACH FIX ROUND to that round's own reported path — see the fix
+  // loop. A single round-1 path reused for every panel is how a round that left no
+  // diff still got one reviewed.
+  let diffFile = forge.diffFile
   // The baseline for the did-this-round-land check below. Round 1's own commit is
   // the starting point; every fix round must move the branch past it.
   let branchHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
   let roundLostItsWork = null
+  // The round that committed but left no reviewable diff. Its own block kind and
+  // finding, because it is not the same fault as a round that never landed: the work
+  // IS on the branch, and telling the operator it was lost would send them recovering
+  // a worktree that has nothing they need.
+  let roundLostItsDiff = null
 
   // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
   // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
@@ -2182,7 +2602,9 @@ ${task}${reflectionGuidance}`,
     // Fix round (> 1): the branch/PR were created in round 1, so ALWAYS re-enter
     // (`reenter=true`) — step 1 switches to the existing branch (no `-c`), step 4
     // reuses the PR (no duplicate). Codex [P1] fix.
-    const fix = await agent(
+    const fix = await forgeAgent(
+      { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree' },
+      complexityTag,
       `${forgeBuildContract(true)}
 
 You are FIXING Argus's findings on the EXISTING branch ${forgeBranch} (round ${round}). ${isPr ? `Do NOT open a new PR — push the SAME branch (\`gh pr list --head ${forgeBranch}\` to confirm it exists).` : `Commit on the SAME local branch ${forgeBranch} — no remote, no PR.`} Address every BLOCKER + important finding, run tests until green, commit${isPr ? ' + push' : ' locally'}, and re-write the diff file.
@@ -2191,10 +2613,7 @@ ${JSON.stringify(synthesis.findings)}
 
 TASK:
 ${task}${reflectionGuidance}`,
-      withModel(
-        { label: `forge:fix-round-${round}`, phase: 'Build', isolation: 'worktree', schema: FORGE_SCHEMA },
-        complexityTag,
-      ),
+      `r${round}`,
     )
     await checkpoint(`fix-round-${round}`, { pr })
     // DID IT LAND? A fix round runs in a throwaway worktree, so edits that were
@@ -2209,6 +2628,29 @@ ${task}${reflectionGuidance}`,
       break
     }
     branchHead = headAfter
+    // AND DID IT LEAVE A DIFF? Round 1 refuses to open the panel on an empty
+    // `diffFile` (the gate above); a fix round had no such check, and the two
+    // rounds are not symmetric in a way that made that safe. The codex wrapper
+    // DELETES the diff path before every launch so a stale diff can never be
+    // reported as this round's, and it only regenerates one when the build
+    // committed — so a fix round whose regeneration produced nothing leaves the
+    // path this loop captured in round 1 absent or empty, and the five reviewers
+    // are dispatched at it with no gate at all. That is round 1's "APPROVE
+    // nothing" failure, one round later and costing a full panel.
+    //
+    // The round's OWN reported path is what is checked and what is reviewed, not
+    // the round-1 variable: it is the only value that is a measurement of THIS
+    // round (for a codex build the wrapper measured it after the build exited and
+    // reports it empty when the file is missing or empty), and reusing round 1's
+    // path is precisely how an absent file goes unnoticed.
+    const fixDiff = typeof fix?.diffFile === 'string' ? fix.diffFile.trim() : ''
+    if (fixDiff === '') {
+      log(`trident-v2 fix loop: round=${round} LEFT NO DIFF — stopping`)
+      roundLostItsDiff = round
+      finalVerdict = 'REQUEST_CHANGES'
+      break
+    }
+    diffFile = fixDiff
     // …and the commit THIS round's review judges is, exactly as in round 1, the
     // one the fix agent reported committing — NOT `headAfter` (#545). The remote
     // probe above answers a different question ("did the branch move?"), and a
@@ -2252,8 +2694,13 @@ ${task}${reflectionGuidance}`,
     // when at least two were lane failures.
     // A round whose work never reached the branch is its OWN kind of block, and
     // it must not read as a code rejection: the code was not re-judged at all.
+    // A round that COMMITTED but produced no diff is 'round-lost' too: in both
+    // cases the code was not re-judged, which is the distinction this field
+    // exists to draw. The FINDING below is what tells the two apart, because the
+    // recovery differs — one needs the work recovered, the other needs a diff
+    // regenerated against work that is already safely on the branch.
     blockKind:
-      roundLostItsWork !== null
+      roundLostItsWork !== null || roundLostItsDiff !== null
         ? 'round-lost'
         : finalVerdict === 'APPROVE'
           ? 'none'
@@ -2262,7 +2709,9 @@ ${task}${reflectionGuidance}`,
     // is told which round to recover rather than being handed stale findings.
     ...(roundLostItsWork !== null
       ? { findings: [roundDidNotLandFinding(roundLostItsWork.round, roundLostItsWork.head)] }
-      : {}),
+      : roundLostItsDiff !== null
+        ? { findings: [roundLeftNoDiffFinding(roundLostItsDiff)] }
+        : {}),
   }
   await writeTerminalResult(terminalResult)
   return terminalResult

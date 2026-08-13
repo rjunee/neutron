@@ -319,8 +319,13 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
     const loopReview = SRC.lastIndexOf('reviewAndSynthesize(diffFile, round, pr)')
     expect(rePin).toBeGreaterThan(-1)
     expect(loopReview).toBeGreaterThan(rePin)
-    // The fix agent is asked for that sha under the same schema round 1 uses.
-    expect(SRC).toContain('const fix = await agent(')
+    // The fix agent is asked for that sha under the same schema round 1 uses —
+    // asserted as "through the SAME dispatch helper", which is the property that
+    // matters now that a build has two possible executors. Round 1 and every fix
+    // round going through one function is what stops a fix round from silently
+    // landing on a different builder than the one that opened the branch.
+    expect(SRC).toContain('const fix = await forgeAgent(')
+    expect(SRC).toContain('const forge = await forgeAgent(')
   })
 
   test('the terminal result carries `reviewedHead` (the field merge.ts pins on)', () => {

@@ -29,6 +29,8 @@ import {
   readTridentPhaseModelsWithRejected,
   writeTridentPhaseModels,
 } from '@neutronai/gateway/storage/owner-metadata.ts'
+import type { CodexAvailability } from '@neutronai/trident/codex-credential.ts'
+import { TRIDENT_PHASES } from '@neutronai/trident/phase-models.ts'
 
 const SCOPE = 'owner'
 let tmp: string
@@ -186,8 +188,17 @@ describe('the chain is actually connected — each link asserted separately', ()
     expect(start).toBeGreaterThan(-1)
     const block = src.slice(start, src.indexOf('\n    })', start))
     expect(block.includes('codexCredentialService.resolveActiveCodexHome')).toBe(true)
+    // ALL THREE PRECONDITIONS OF "CAN CODEX RUN HERE", via the ONE function that
+    // decides them (`codexExecutorAvailability` — credential, `codex` CLI, `perl`;
+    // exits 10, 11 and 3 respectively). Asserted as the call rather than as the
+    // conditions themselves precisely so the conditions live somewhere a test can
+    // drive with a real PATH — `trident/codex-credential.test.ts` does exactly that.
+    expect(block.includes('codexExecutorAvailability({')).toBe(true)
+    expect(block.includes('env,')).toBe(true)
+    // THE KIMI HALF IS UNTOUCHED BY THE BUILD MOVE, and it is asserted here so that
+    // stays true: the pane's answer and the trident launch's come from the one
+    // function, or a greyed row and a dispatching panelist disagree.
     expect(block.includes('kimi: kimiConfigured()')).toBe(true)
-    // …and the trident launch reads the very same function, so the two cannot drift.
     expect(src.includes('resolve_kimi_configured: kimiConfigured')).toBe(true)
   })
 
@@ -205,7 +216,12 @@ describe('the chain is actually connected — each link asserted separately', ()
 
 describe('the HTTP surface', () => {
   const auth = { resolve: async () => ({ user_id: 'owner', project_slug: SCOPE }) } as never
-  const surfaceFor = async (connections = { codex: true, kimi: true }) => {
+  const surfaceFor = async (
+    connections: { codex: CodexAvailability; kimi: boolean } = {
+      codex: { usable: true },
+      kimi: true,
+    },
+  ) => {
     const { createTridentPhaseModelsSurface } = await import(
       '@neutronai/gateway/http/trident-phase-models-surface.ts'
     )
@@ -234,9 +250,83 @@ describe('the HTTP surface', () => {
     expect(phases.every((p) => p.description.length > 20)).toBe(true)
     expect(json['efforts']).toContain('xhigh')
     expect(json['overrides']).toEqual({})
-    // The cross-model lanes are rows now, not an invisible part of the pipeline.
+    // Both cross-model review lanes are rows, not invisible parts of the pipeline.
     expect(phases.some((p) => p.key === 'review_codex')).toBe(true)
     expect(phases.some((p) => p.key === 'review_kimi')).toBe(true)
+  })
+
+  it('OMITS a follower phase — one step must not be two rows that disagree', async () => {
+    // `build_mechanical` is the build step under the planner's internal `[mechanical]`
+    // tag and takes `build`'s override when it has none of its own
+    // (`TridentPhase.follows`). Rendered, it would show its own `sonnet` default while
+    // the run dispatched the owner's codex tier — and "which of my two Build rows
+    // applies" is not a question the owner has any way to answer.
+    const s = await surfaceFor()
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const phases = json['phases'] as Array<{ key: string }>
+    expect(phases.some((p) => p.key === 'build_mechanical')).toBe(false)
+    // The filter must be the DECLARATION, not a hard-coded key: every phase the
+    // registry does not mark as a follower is still a row.
+    expect(phases.map((p) => p.key).sort()).toEqual(
+      TRIDENT_PHASES.filter((p) => p.follows === undefined)
+        .map((p) => p.key)
+        .sort(),
+    )
+    // …and the key it follows IS one of the rows, or the setting it inherits could
+    // never be made.
+    expect(phases.some((p) => p.key === 'build')).toBe(true)
+    // EVERY MAP IN THE PAYLOAD OMITS IT TOO, not just the row list. `defaults` keyed
+    // by a phase with no row hands the clients a value they cannot render and the run
+    // contradicts — and it is the same key inconsistency that let an override survive
+    // below.
+    expect(Object.keys(json['defaults'] as object)).toEqual(phases.map((p) => p.key))
+  })
+
+  it('a STORED follower override never reaches the client, and cannot be written', async () => {
+    // THE BLOCKER THIS PINS, end to end through the real storage. The pane round-trips
+    // whatever `overrides` it is sent: a `build_mechanical` entry stored by an older
+    // build came back on every GET, went back out on every PUT, and kept the
+    // `[mechanical]` half of the build dispatching on Anthropic after the owner moved
+    // Build to codex — invisibly, because the row it belongs to is not drawn.
+    //
+    // WRITTEN THE ONLY WAY IT CAN EXIST NOW: straight into the metadata row, which is
+    // exactly the shape of a value persisted before the rule.
+    await db.run(
+      `INSERT INTO instance_metadata (instance_slug, trident_phase_models) VALUES (?, ?)
+         ON CONFLICT(instance_slug) DO UPDATE SET trident_phase_models = excluded.trident_phase_models`,
+      [SCOPE, JSON.stringify({ build: { model: 'sol' }, build_mechanical: { model: 'sonnet' } })],
+    )
+    const s = await surfaceFor()
+    const json = (await (await s.handler(req('GET')))!.json()) as Record<string, unknown>
+    // The owner's real choice survives; the unrenderable one is gone from the payload.
+    expect(json['overrides']).toEqual({ build: { model: 'sol' } })
+    expect(JSON.stringify(json)).not.toContain('build_mechanical')
+
+    // …and a client that sends one back is refused whole, by name, rather than
+    // storing a pin no row can clear.
+    const res = await s.handler(req('PUT', { overrides: { build_mechanical: { model: 'sonnet' } } }))
+    expect(res!.status).toBe(400)
+    expect(await res!.text()).toContain('build_mechanical')
+    expect(readTridentPhaseModels(db, SCOPE)).toEqual({ build: { model: 'sol' } })
+  })
+
+  it('tells each row EVERY executor it can dispatch on, not just its default', async () => {
+    // The field the greying rule reads. `group` alone was enough only while every
+    // phase had exactly one executor; the build now has two, and a payload that sent
+    // only `group` would leave both clients greying an option the run can honour.
+    const s = await surfaceFor()
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const phases = json['phases'] as Array<{ key: string; group: string; groups: string[] }>
+    const build = phases.find((p) => p.key === 'build')!
+    expect(build.group).toBe('claude')
+    expect(build.groups).toEqual(['claude', 'codex'])
+    // A single-executor row still says exactly one thing, and always includes its
+    // own default: a row that omitted it could not offer the model it already runs.
+    expect(phases.find((p) => p.key === 'review_codex')!.groups).toEqual(['codex'])
+    expect(phases.find((p) => p.key === 'synthesis')!.groups).toEqual(['claude'])
+    for (const p of phases) expect(p.groups).toContain(p.group)
   })
 
   it('RESOLVES every tier, so a row can name the model it will actually use', async () => {
@@ -257,24 +347,82 @@ describe('the HTTP surface', () => {
     expect(fast['group']).toBe('claude')
   })
 
-  it('shows an unrunnable tier DISABLED WITH THE REASON, never omitted', async () => {
-    // The install with no Codex connection and no Kimi key. Dropping those options
-    // would leave the owner unable to account for a missing choice — which is how a
-    // whole capability stayed invisible for weeks (ISSUES #551).
-    const s = await surfaceFor({ codex: false, kimi: false })
+  it('says PER TIER whether picking it leaves the effort cell live', async () => {
+    // `effort_supported` on a PHASE answers for its default executor. That was the
+    // whole answer while every row had one; the build row has two, and a pane that
+    // asked only the phase kept a live effort dropdown after the owner moved the row
+    // to codex — then posted the effort alongside the model, and the server refused
+    // the entire save. The per-tier flag is the missing half, derived here so the
+    // rule is stated once rather than re-derived from `group` by each client.
+    const s = await surfaceFor()
     const res = await s.handler(req('GET'))
     const json = (await res!.json()) as Record<string, unknown>
     const tiers = json['model_tiers'] as Array<Record<string, unknown>>
-    expect(tiers.find((t) => t['tier'] === 'sol')).toMatchObject({
-      available: false,
-      unavailable_reason: 'needs a Codex connection',
+    const flag = (tier: string): unknown => tiers.find((t) => t['tier'] === tier)!['effort_supported']
+    // An Anthropic tier is dispatched as `agent({model, effort})` and reads it.
+    expect(flag('opus')).toBe(true)
+    expect(flag('fast')).toBe(true)
+    // A subprocess picks its own reasoning effort, whichever wrapper reaches it.
+    expect(flag('sol')).toBe(false)
+    expect(flag('terra')).toBe(false)
+    // Every tier carries the field — a missing one reads as `false` in a client and
+    // would silently disable a control that works.
+    for (const t of tiers) expect(typeof t['effort_supported']).toBe('boolean')
+    // The BUILD row keeps its phase-level answer, which is the pair the clients
+    // combine: true here, false on `sol`, and the cell is live only when both are.
+    const phases = json['phases'] as Array<Record<string, unknown>>
+    expect(phases.find((p) => p['key'] === 'build')!['effort_supported']).toBe(true)
+    expect(phases.find((p) => p['key'] === 'review_codex')!['effort_supported']).toBe(false)
+  })
+
+  it('shows an unrunnable tier DISABLED WITH THE REASON, never omitted', async () => {
+    // The install that cannot run codex — no credential, or no CLI. Dropping those
+    // options would leave the owner unable to account for a missing choice, which is
+    // how a whole capability stayed invisible for weeks (ISSUES #551).
+    const s = await surfaceFor({
+      codex: { usable: false, reason: 'needs a Codex connection' },
+      kimi: false,
     })
+    const res = await s.handler(req('GET'))
+    const json = (await res!.json()) as Record<string, unknown>
+    const tiers = json['model_tiers'] as Array<Record<string, unknown>>
+    for (const tier of ['sol', 'terra', 'luna']) {
+      expect(tiers.find((t) => t['tier'] === tier)).toMatchObject({
+        available: false,
+        unavailable_reason: 'needs a Codex connection',
+      })
+    }
+    // …and each credential answers for its OWN tiers: the reason names the thing to
+    // go and set up, so a shared string would send a Kimi owner to connect Codex.
     expect(tiers.find((t) => t['tier'] === 'k3')).toMatchObject({
       available: false,
       unavailable_reason: 'needs a Kimi key',
     })
     // The Claude tiers need nothing and stay selectable.
     expect(tiers.find((t) => t['tier'] === 'opus')!['available']).toBe(true)
+  })
+
+  it('the codex reason is the CALLER\'S, so a missing CLI does not read as a missing login', async () => {
+    // THE DEFECT THIS PINS. Codex needs a credential, the `codex` CLI and `perl`, and
+    // the wrapper hard-fails on each. The pane used to answer "needs a Codex
+    // connection" for all three, so an owner whose login was fine ran `codex login`,
+    // watched it succeed, and was exactly where they started. The surface must not own
+    // that sentence at all — it renders whichever one the availability check produced.
+    const s = await surfaceFor({
+      codex: { usable: false, reason: 'needs the Codex CLI installed on this machine' },
+      kimi: true,
+    })
+    const json = (await (await s.handler(req('GET')))!.json()) as Record<string, unknown>
+    const tiers = json['model_tiers'] as Array<Record<string, unknown>>
+    expect(tiers.find((t) => t['tier'] === 'sol')).toMatchObject({
+      available: false,
+      unavailable_reason: 'needs the Codex CLI installed on this machine',
+    })
+    // And no tier is ever unavailable without saying why — `available` is DERIVED from
+    // the reason, so the two cannot disagree.
+    for (const t of tiers) {
+      expect(t['available']).toBe(t['unavailable_reason'] === null)
+    }
   })
 
   it('hands back a REFUSED stored value so the row can show what was dropped', async () => {

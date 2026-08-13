@@ -443,7 +443,10 @@ import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-cred
 import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-connect-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
-import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import {
+  CodexCredentialService,
+  codexExecutorAvailability,
+} from '@neutronai/trident/codex-credential.ts'
 import { makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
@@ -3244,9 +3247,30 @@ export function buildOpenGraphComposer(
       // THE SAME RESOLVERS THE BUILD USES (`kimiConfigured` below is this exact
       // function). A pane that answered "available" from its own notion of
       // configured would grey the wrong option — or worse, offer a tier whose
-      // review then defers and blocks the merge for a reason the owner cannot see.
+      // build then never happens for a reason the owner cannot see.
+      //
+      // ALL THREE PRECONDITIONS OF "CAN CODEX RUN HERE", because the wrapper hard-fails
+      // on each of them and every failure looks the same downstream — a build that
+      // never happened: exit 10 with no credential, exit 11 with no `codex` on PATH,
+      // exit 3 `CODEX_BUILD_NO_PERL` with no `perl` (`trident/codex-build.sh` bounds
+      // every network call with `perl -e alarm`, which the `-slim` and Alpine base
+      // images do not ship). Each answer NAMES THE MISSING PIECE: an owner told "needs
+      // a Codex connection" on a box with a healthy login runs `codex login`, watches
+      // it succeed, and is exactly where they started.
+      //
+      // WHOSE PATH IS SCANNED. The wrapper is exec'd by the `claude` REPL child, not
+      // by this process — so the answer is only right if the child's PATH is this
+      // one. It is: the REPL substrate LAYERS its `env` option on top of `process.env`
+      // (`runtime/adapters/claude-code/index.ts:83-94`) and no caller in this repo
+      // puts `PATH` in that layer (`build-gbrain-memory.ts:752` is the only PATH
+      // override, and it is a different subprocess). A future caller that DID override
+      // it would have to update this answer with it — hence the note rather than a
+      // silent assumption.
       connections: () => ({
-        codex: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !== null,
+        codex: codexExecutorAvailability({
+          codexHome: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)),
+          env,
+        }),
         kimi: kimiConfigured(),
       }),
     })
