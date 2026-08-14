@@ -2938,7 +2938,13 @@ generation"), mobile `app/app/codegen.tsx`, both over
   - **The trailer is a FILE, and both shas are about THIS build.** It goes to
     `NEUTRON_CODEX_BUILD_TRAILER_FILE` (required; the bridge `cat`s exactly that) so a
     transcript narrating trailer-shaped lines cannot compete with the measurement on
-    one stream. `HEAD` is reported only when it is a commit that did not ALREADY exist
+    disk. The trailer is also the wrapper's sole completion signal: both its success
+    and failure branches write it, so an empty or missing trailer is a hard DEFERRED
+    failure meaning the wrapper was killed before it could report. The terminal result
+    names the trailer, stderr artifact and preserved worktree, including whether that
+    worktree holds uncommitted work; it never calls this state "produced nothing".
+    The trailer and transcript are not one stream. `HEAD` is reported only when it is
+    a commit that did not ALREADY exist
     — measured against three tips, the worktree HEAD at launch plus the local and
     remote tips of the target branch — so neither a build that edited without
     committing nor a re-entry that only ran `git switch` can hand back a sha it did
