@@ -2849,6 +2849,14 @@ generation"), mobile `app/app/codegen.tsx`, both over
   registry is threaded to the workflow as `args.modelTiers` (`trident/inner-loop.ts`
   `buildWorkflowArgs`), alongside the existing `args.models`, because the `.mjs` has
   no module resolution.
+- **The cross-model review lanes are routed phases.** The two owner-facing rows are
+  **Cross-model review one** and **Cross-model review two**. Their persisted keys remain
+  `review_codex` and `review_kimi` so existing saved choices keep their meaning, but
+  either slot can dispatch any non-Claude tier. `NONE` is an explicit empty slot: it
+  is not dispatched, retried, or treated as a failed review. A selected slot that
+  fails still blocks APPROVE deterministically. Setting both slots to NONE is allowed
+  and the settings surface warns that this deliberately leaves a single-family panel.
+
 - **The cross-model review lanes are routed phases.** `argus:codex` / `argus:kimi`
   (and their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
   `review_kimi` phases in `trident/phase-models.ts`, defaulting to `sol` and `k3` —

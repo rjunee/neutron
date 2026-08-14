@@ -241,6 +241,9 @@ describe('the workflow reads the argument this module produces', () => {
       'build',
       'build_mechanical',
       'review_adversarial',
+      'review_codex',
+      'review_kimi',
+      'review_rubric',
     ])
     for (const phase of declared) {
       // The route carrying this phase key must list the same groups.
@@ -342,13 +345,11 @@ describe('validation rejects loudly rather than dropping quietly', () => {
   })
 
   it('REJECTS a tier the phase cannot dispatch, and says which executor each is', () => {
-    // The executor is a capability, not a preference. `sol` runs as a codex
-    // subprocess and the rubric reviewer has only `agent({model})`, which resolves
-    // against Claude Code's endpoint — so it is refused.
-    const { config, errors, rejected } = parsePhaseModelConfig({ review_rubric: { model: 'sol' } })
+    // The executor is a capability, not a preference. Synthesis has no Kimi dispatch.
+    const { config, errors, rejected } = parsePhaseModelConfig({ synthesis: { model: 'k3' } })
     expect(config).toEqual({})
-    expect(errors[0]).toContain('sol')
-    expect(errors[0]).toContain('codex executor')
+    expect(errors[0]).toContain('k3')
+    expect(errors[0]).toContain('kimi executor')
     // The message names the executor this step DOES dispatch on, so the owner can
     // tell "wrong family" from "not wired yet".
     expect(errors[0]).toContain('claude')
@@ -362,14 +363,18 @@ describe('validation rejects loudly rather than dropping quietly', () => {
       expect(message).not.toContain('.sh')
     }
     // KEPT, not just dropped, so the pane can show it struck through.
-    expect(rejected['review_rubric']).toEqual({ model: 'sol' })
+    expect(rejected['synthesis']).toEqual({ model: 'k3' })
     // And the mirror: the codex review lane cannot be pointed at a Claude tier.
     expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
     // Within one executor it is allowed — that is the whole feature.
     expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
     expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
-    // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
-    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toHaveLength(1)
+    // Generic cross-model slots can reach either non-Claude executor.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_kimi: { model: 'sol' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_codex: { model: 'none' } }).config).toEqual({
+      review_codex: { model: 'none' },
+    })
     // …and the build's SECOND executor is codex, not "any CLI": a Kimi tier on the
     // build row is still refused, because nothing dispatches it there.
     expect(parsePhaseModelConfig({ build: { model: 'k3' } }).errors).toHaveLength(1)
@@ -389,9 +394,9 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(parsePhaseModelConfig({ build: { model: 'sonnet' } }).errors).toEqual([])
   })
 
-  it('ACCEPTS a codex tier on adversarial review but keeps rubric review on Claude', () => {
+  it('ACCEPTS a codex tier on both review rows that declare that dispatch', () => {
     expect(parsePhaseModelConfig({ review_adversarial: { model: 'terra' } }).errors).toEqual([])
-    expect(parsePhaseModelConfig({ review_rubric: { model: 'terra' } }).errors).toHaveLength(1)
+    expect(parsePhaseModelConfig({ review_rubric: { model: 'terra' } }).errors).toEqual([])
     expect(
       parsePhaseModelConfig({ review_adversarial: { model: 'terra', effort: 'max' } }).config,
     ).toEqual({ review_adversarial: { model: 'terra' } })

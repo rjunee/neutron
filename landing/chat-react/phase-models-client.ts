@@ -56,6 +56,7 @@ export interface PhaseDescriptor {
    * the control stays. Read it through {@link effortSettable}, never directly.
    */
   effort_supported?: boolean
+  allow_none?: boolean
   default: { model: string; effort: string }
 }
 
@@ -262,7 +263,10 @@ export function tierChoices(
   tiers: TierOption[],
 ): Array<{ tier: string; model_id: string; selectable: boolean; reason: string | null }> {
   const groups = phaseGroupsOf(phase)
-  return tiers.map((t) => {
+  return tiers.filter((t) => t.tier !== 'none' || phase.allow_none === true).map((t) => {
+    if (t.tier === 'none') {
+      return { tier: 'none', model_id: 'NONE — panel becomes single-family if both slots are empty', selectable: true, reason: null }
+    }
     if (!groups.includes(t.group)) {
       // #565 — SAY WHY, AND WHAT WOULD CHANGE IT. The old reason read `Codex steps
       // only`, naming a category the reader has never heard of and explaining

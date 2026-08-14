@@ -128,6 +128,8 @@ export interface TridentPhase {
    * the dispatch exists and is tested, not that it would be nice to have.
    */
   alsoRunsOn?: ReadonlyArray<TierGroup>
+  /** Whether this owner-facing review slot may be deliberately left empty. */
+  allowNone?: boolean
   /**
    * This phase takes another phase's setting when it has none of its own — and is
    * therefore NOT an owner-facing row.
@@ -210,6 +212,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
     description: 'Reviews the diff against the fixed criteria — correctness, security, test quality.',
     labels: [{ label: 'argus:claude' }],
     default: { tier: 'opus', effort: 'high' },
+    alsoRunsOn: ['codex'],
   },
   {
     key: 'review_adversarial',
@@ -223,23 +226,27 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
   },
   {
     key: 'review_codex',
-    label: 'Cross-model review (Codex)',
+    label: 'Cross-model review one',
     description:
-      'A second opinion from a GPT model, run as a Codex CLI subprocess — a different model family than the rest of the panel.',
+      'An independent non-Claude review slot. Choose a provider, or NONE to leave it deliberately empty.',
     labels: [{ label: 'argus:codex' }, { label: 'argus:codex-retry' }],
     // `sol` is the flagship GPT 5.6 tier and matches the wrapper's own standing pin,
     // so an install that never opens the pane dispatches exactly what it dispatched
     // before this phase existed. The effort below is INERT — a CLI chooses its own
     // reasoning effort, and no dispatch reads this value (see `phaseSupportsEffort`).
     default: { tier: 'sol', effort: 'high' },
+    alsoRunsOn: ['kimi'],
+    allowNone: true,
   },
   {
     key: 'review_kimi',
-    label: 'Cross-model review (Kimi)',
+    label: 'Cross-model review two',
     description:
-      'A second opinion from Kimi K3, run as a CLI subprocess — a third model family, so the panel is not two copies of one set of blind spots.',
+      'A second independent non-Claude review slot. Choose a provider, or NONE to leave it deliberately empty.',
     labels: [{ label: 'argus:kimi' }, { label: 'argus:kimi-retry' }],
     default: { tier: 'k3', effort: 'high' },
+    alsoRunsOn: ['codex'],
+    allowNone: true,
   },
   {
     key: 'synthesis',
@@ -537,6 +544,10 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
         // eslint-disable-next-line no-control-regex
         if (/[\u0000-\u001f\u007f]/.test(model)) {
           errors.push(`phase '${key}': 'model' contains control characters`)
+          continue
+        }
+        if (model === 'none' && phase.allowNone === true) {
+          entry.model = model
           continue
         }
         if (!isModelTier(model)) {

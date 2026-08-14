@@ -148,6 +148,7 @@ function vocabulary(connections: CrossModelConnections): object {
       // owner has chosen (see `effort_supported` on each tier below), because the
       // build's second executor is a CLI that picks its own reasoning effort.
       effort_supported: phaseSupportsEffort(p),
+      allow_none: p.allowNone === true,
       default: { model: p.default.tier, effort: p.default.effort },
     })),
     // THE TIERS, RESOLVED AS OF NOW. Each carries what it points at today
@@ -158,7 +159,9 @@ function vocabulary(connections: CrossModelConnections): object {
     // An UNAVAILABLE tier is still listed, with the reason. Dropping it would leave
     // the owner unable to account for a missing option, which is exactly how a
     // capability stays invisible for weeks (ISSUES #551).
-    model_tiers: modelTierRegistry().map((t) => {
+    model_tiers: [
+      { tier: 'none', provider: 'none', model_id: 'NONE', group: 'none', effort_supported: false, available: true, unavailable_reason: null },
+      ...modelTierRegistry().map((t) => {
       // THE REASON IS COMPUTED FIRST AND `available` IS DERIVED FROM IT, so a tier
       // cannot be marked unavailable without saying why. The other order — a boolean
       // plus a reason looked up beside it — is how "needs a Codex connection" outlived
@@ -190,7 +193,8 @@ function vocabulary(connections: CrossModelConnections): object {
         available,
         unavailable_reason: reason,
       }
-    }),
+      }),
+    ],
     efforts: [...EFFORTS],
   }
 }

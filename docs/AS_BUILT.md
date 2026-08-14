@@ -10848,3 +10848,18 @@ obsolete inner-publisher tests were removed instead of remaining skipped.
   assertions (17 pass, 2 fail), and `remove-quiet-turn-prompt-rule` failed the
   behavioral prompt assertion (0 pass, 1 fail). Both changes were restored before
   the green verification run.
+## 2026-08-14 — generic cross-model review slots (#566)
+
+The two provider-named review rows are now owner-filled slots: **Cross-model review
+one** and **Cross-model review two**. Either accepts a Codex or Kimi tier, and either
+accepts `NONE`. `NONE` is deliberately empty and contributes no deferred peer to the
+deterministic gate; a configured slot whose subprocess fails still contributes a
+deferred peer and bars APPROVE. Both slots may be empty, with explicit single-family
+copy in the pane. Existing stored values are safe because the repo-relative settings
+keys `review_codex` and `review_kimi` were intentionally retained: a previously pinned
+value is read unchanged, while only the row label and reachable executor set changed.
+
+`trident/phase-models.ts` now also makes the rubric row's Codex dispatch explicit with
+`alsoRunsOn`, matching the adversarial row and the real routing in
+`trident/inner-workflow.mjs`. The gateway vocabulary and both settings clients expose
+NONE only on the two slot rows.
