@@ -68,13 +68,38 @@ export const DOCTRINE_PRINCIPLES: readonly string[] = [
 ]
 
 /**
- * Build-routing heuristic (Part B, M-K): the live agent SELF-ROUTES a build
- * request — SIMPLE work inline with its own file tools; COMPLEX work through the
- * autonomous Forge→Argus→merge loop (`work_board_dispatch_build`) — WITHOUT the
- * owner ever typing a `/code` command. Phrased conditionally ("if you have the
- * work_board_dispatch_build tool") so it is a harmless no-op on a boot where the
- * trident dispatch tool is not on the surface (no LLM credential resolved), and
- * active guidance the moment it is.
+ * Build-routing doctrine: the agent SELF-ROUTES — simple work inline, complex work
+ * to the autonomous trident loop — AND MUST RE-ROUTE MID-BUILD when the work turns
+ * out to be bigger than it predicted.
+ *
+ * WHY THE ESCALATION HALF EXISTS. Asked to keep working on the Email Core, an agent
+ * judged it simple, built it INLINE, and stayed in one chat turn for **22 hours** —
+ * **seventeen self-review rounds**, 642 tool calls, surviving a `/compact`. The
+ * owner's verdict on the diagnosis is the design principle here: the simple-vs-
+ * complex permission *"is actually FINE. But building code that takes 21 review
+ * rounds is clearly NOT a 'simple change'"* (2026-08-12).
+ *
+ * That is the precise defect. The initial call was defensible on the information
+ * available; what was missing is that **nothing re-examined it once the evidence
+ * arrived.** By round three the work had already disproved the prediction, and the
+ * rule offered no way to act on that. So this is not a prohibition (an outright ban
+ * would also push trivial one-line fixes through a full review loop, which is worse
+ * for everyone) — it is a TRIPWIRE on a revisable judgement.
+ *
+ * Why escalating matters more than it looks: **an inline build silently opts out of
+ * every guardrail the dispatch path provides.** `maxRounds` exists only in the
+ * trident workflow (grep `open/` and `gateway/` — there is none), so inline work has
+ * no round cap, no review panel, no state file, no supervisor and no sweeper. From
+ * the outside it looks like work being reviewed; it is work reviewing itself. And
+ * the owner's own messages queue behind the held turn with no acknowledgement, so
+ * his chat, his Work Board and his typing indicator all read dead at once.
+ *
+ * The thresholds are deliberately coarse (more than two fix-test rounds, more than
+ * a handful of files, more than a few minutes). Any of them firing means the
+ * prediction was wrong, and being wrong is not a reason to push on.
+ *
+ * Still phrased conditionally on the tool being present, so it is a harmless no-op
+ * on a boot with no LLM credential resolved and active guidance the moment there is.
  */
 export const BUILD_ROUTING_DOCTRINE =
   'Build routing. When the owner asks you to BUILD something and you have the ' +
@@ -88,7 +113,16 @@ export const BUILD_ROUTING_DOCTRINE =
   'finish. A COMPLEX build (spans multiple files, touches a real project or shared code, ' +
   'warrants code review, or is large/risky) you route to the autonomous trident loop: call ' +
   '`work_board_dispatch_build` bound to that item — Forge builds, Argus reviews, and it merges ' +
-  'autonomously. When you route to trident, TELL the owner you are doing so and WHY ' +
+  'autonomously. **THAT SIMPLE-VS-COMPLEX CALL IS A PREDICTION, AND YOU MUST REVISE IT WHEN THE ' +
+  'WORK PROVES YOU WRONG.** While building inline, STOP and dispatch the moment ANY of these is ' +
+  'true: you have gone round the fix-test loop more than TWICE, you are touching more than a ' +
+  'handful of files, or you have been at it beyond a few minutes of wall-clock. Discovering that ' +
+  'the work is bigger than you thought is not a reason to push on — it is the signal to hand it ' +
+  'to trident, which has the round cap, the review panel and the supervision that an inline ' +
+  'build has none of. Say so plainly ("this is larger than it looked, dispatching it"), leave ' +
+  'what you have committed on a branch, and dispatch. A build that needed seventeen self-review ' +
+  'rounds was never a simple change; nothing noticed because nothing was watching for it. ' +
+  'When you dispatch, TELL the owner you are doing so and WHY ' +
   '(complexity/scope/review), and keep chatting; the result arrives later. If a build item is ' +
   'UNDERSPECIFIED (no design doc, a terse title) the dispatch is REJECTED — post ONE short ' +
   'clarifying question IN THE CHAT (platform? key features? a design reference?) and leave the ' +
