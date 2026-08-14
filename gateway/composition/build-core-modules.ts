@@ -554,6 +554,17 @@ export function buildCoreModules(
         if (tridentWiring.resolve_codex_home !== undefined) {
           orchestratorOpts.resolve_codex_home = tridentWiring.resolve_codex_home
         }
+        // The inner loop's GitHub READS: the store coordinates its per-command
+        // `gh` runner resolves the instance token from. Without these the probes
+        // fall back to bare `gh` — which on an unauthenticated box is exactly the
+        // 2026-08-14 failure (every readiness probe unreadable, every review
+        // deferred). Paths/handles only; the token is never wired through here.
+        if (tridentWiring.gh_data_dir !== undefined) {
+          orchestratorOpts.gh_data_dir = tridentWiring.gh_data_dir
+        }
+        if (tridentWiring.gh_owner_handle !== undefined) {
+          orchestratorOpts.gh_owner_handle = tridentWiring.gh_owner_handle
+        }
         // The KIMI K3 cross-model panelist. Absent → never runs (graceful).
         if (tridentWiring.resolve_kimi_configured !== undefined) {
           orchestratorOpts.resolve_kimi_configured = tridentWiring.resolve_kimi_configured

@@ -5929,6 +5929,19 @@ export function buildOpenGraphComposer(
               // Not connected → `githubProcessEnv(null)` is `{}` → byte-for-byte
               // today's behaviour, so an instance that never connects is unchanged.
               run_host: tridentHostRunner,
+              // …AND SO DOES EVERY GITHUB READ THE INNER LOOP MAKES. These are
+              // the store coordinates (data dir + frozen owner handle — never the
+              // token) that `trident/gh-authed.ts` resolves the credential from,
+              // per command, in its own process: the READ-side sibling of the
+              // `run_host` credential above, over the SAME `secretsStore`.
+              //
+              // Without them the inner workflow's readiness/CI/merge probes ran
+              // bare `gh` in a subagent Bash that inherits the trident-fire REPL's
+              // environment — which has no `GH_TOKEN`. Measured 2026-08-14: every
+              // probe answered "gh auth login", every review deferred, and every
+              // build died recorded as REQUEST_CHANGES for code nobody read.
+              gh_data_dir: owner_home,
+              gh_owner_handle: owner_handle,
               // M1 UX REDESIGN — the LIVE-PROGRESS fan. Fired by the tick loop for
               // every run whose observable progress advanced (a checkpoint crossing
               // building→reviewing→fixing→merging, a launch, or a terminal

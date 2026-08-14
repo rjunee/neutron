@@ -128,6 +128,20 @@ export interface BuildTridentOrchestratorOptions {
    *  blocker), and a build routed to codex stops and says so. */
   resolve_codex_home?: (run: TridentRun) => string | null
   /**
+   * The `SecretsStore` COORDINATES the inner workflow's credentialed-`gh` runner
+   * (`trident/gh-authed.ts`) resolves the instance GitHub token from: the owner's
+   * data dir (which holds the keyfile) and the frozen `owner_handle`. This is the
+   * READ-side sibling of the `run_host` credential — same store, resolved per
+   * command, never baked in at boot and never written to disk.
+   *
+   * COORDINATES, NOT A CREDENTIAL: they are threaded on into the workflow args (a
+   * launcher prompt), so only paths/handles may ride here. Both absent → the
+   * probes fall back to bare `gh`, i.e. the pre-2026-08-14 behaviour exactly.
+   */
+  gh_data_dir?: string | null
+  /** The frozen `owner_handle` the GitHub token is filed under — see `gh_data_dir`. */
+  gh_owner_handle?: string | null
+  /**
    * RB2 (b) — resolve the owner's recent reflection corrections/diary block for a
    * launching run, threaded into the inner workflow so the FORGE BUILDER (forge:build
    * + fix rounds) re-grounds on owner corrections (reflection was chat-only before
@@ -370,7 +384,7 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
 
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
-  result: Pick<InnerResult, 'round' | 'checkpoint'>,
+  result: Pick<InnerResult, 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause'>,
 ): string {
   // Prefer the round the INNER workflow reports (what actually happened) over the row's
   // copy, which a crash can leave behind at its launch value.
@@ -397,6 +411,20 @@ export function innerTerminalFailureReason(
   // THE OWNER'S RULE, VERBATIM: *"If it's a generic catchall make the error message
   // generic."* This is a catch-all. This is the generic message. Making it specific again
   // is a change that must come WITH the missing signal, not before it — see the SPEC entry.
+  //
+  // 2026-08-14 — THE MISSING SIGNAL NOW EXISTS, on exactly ONE path. The inner workflow
+  // emits an explicit `terminalCause` for infra-only stops: the probe's/lane's own words
+  // (`inner-workflow.mjs` `infraTerminalCause`, already redacted + capped), measured at the
+  // point where it was known rather than deduced here. Run 8417b277 is the case — an
+  // unauthenticated `gh` made the readiness probe say `gh auth login`, no review seat ever
+  // ran, and this function reported ten rounds' worth of review that never happened. So the
+  // specific message ships WITH that measured signal, and ONLY with it: the branch below is
+  // the one permitted specific message, gated on BOTH the block kind and a non-null cause.
+  // Everything else — every inferred cause, every result carrying no measurement — still
+  // gets the generic sentence above, for all the reasons R1/R2 record.
+  if (result.block_kind === 'infra-only' && result.terminal_cause !== null) {
+    return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${redactPushError(result.terminal_cause)}`
+  }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
 }
@@ -627,6 +655,11 @@ export function buildTridentOrchestrator(
         (opts.resolve_codex_home ? opts.resolve_codex_home(launchRun) : null) ??
         opts.codex_home ??
         null,
+      // The credentialed-`gh` runner's store coordinates, so the inner loop's
+      // GitHub READS carry the instance token the same way its writes do. Paths
+      // and a handle only; `gh-authed.ts` resolves the token itself, per command.
+      gh_data_dir: opts.gh_data_dir ?? null,
+      gh_owner_handle: opts.gh_owner_handle ?? null,
       // Whether the KIMI K3 cross-model panelist runs this launch. Resolved PER
       // LAUNCH (not captured at composition) for the same reason the codex home
       // is: a key added after boot must take effect on the next run, not the next

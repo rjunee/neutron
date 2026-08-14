@@ -23,6 +23,7 @@ import {
   buildSubstrateWorkflowFire,
   parseCheckpointFindings,
   parseInnerResult,
+  GH_AUTHED_SCRIPT_PATH,
   WORKFLOW_FIRE_TOOL_NAMES,
   type FireInnerWorkflow,
   type FireInnerWorkflowInput,
@@ -136,6 +137,8 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       pr_merged: false,
       publish_requested: false,
       publish_head: null,
+      block_kind: null,
+      terminal_cause: null,
     })
   })
   // A MERGE IS TERMINAL (#563). The flag the OUTER loop reads to finish a run
@@ -166,6 +169,45 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     const withoutRemaining = parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))
     expect(withoutRemaining?.remaining_tasks).toBeNull()
   })
+  // WHY IT STOPPED, AND WHY (#240 / run 8417b277). The workflow has always written
+  // `blockKind`, and this decoder has always dropped it — so the orchestrator wrote the
+  // generic round sentence for a build that never reached a review seat. `terminalCause`
+  // is the measured half: the probe's own words, already redacted upstream.
+  test("decodes blockKind + terminalCause — the infra-only stop's own explanation", () => {
+    const out = parseInnerResult(
+      JSON.stringify({
+        verdict: 'REQUEST_CHANGES',
+        round: 1,
+        checkpoint: 'argus-request-changes',
+        blockKind: 'infra-only',
+        terminalCause: 'REVIEW DEFERRED — PR readiness could not be read: gh auth login',
+      }),
+    )
+    expect(out?.block_kind).toBe('infra-only')
+    expect(out?.terminal_cause).toContain('gh auth login')
+    for (const kind of ['none', 'code', 'round-lost'] as const) {
+      expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', blockKind: kind }))?.block_kind).toBe(kind)
+    }
+  })
+  test('FAIL-CLOSED: an unrecognised blockKind or an empty cause decodes to null', () => {
+    // The orchestrator keys a SPECIFIC failure message off `infra-only` + a non-null
+    // cause, so anything it does not recognise must fall back to the generic sentence
+    // rather than be coerced toward the specific one.
+    for (const bogus of ['weird', 'INFRA-ONLY', '', 42, true, null, {}]) {
+      expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', blockKind: bogus }))?.block_kind).toBeNull()
+    }
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.block_kind).toBeNull()
+    for (const bogus of ['', '   ', 42, true, null, {}, []]) {
+      expect(
+        parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: bogus }))?.terminal_cause,
+      ).toBeNull()
+    }
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.terminal_cause).toBeNull()
+  })
+  test('a cause is clamped — it is persisted and then read in a chat row', () => {
+    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(400)}  ` }))
+    expect(out?.terminal_cause?.length).toBe(300)
+  })
   test('null/empty/garbage → null (still in flight)', () => {
     expect(parseInnerResult(null)).toBeNull()
     expect(parseInnerResult(undefined)).toBeNull()
@@ -186,6 +228,8 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       pr_merged: false,
       publish_requested: false,
       publish_head: null,
+      block_kind: null,
+      terminal_cause: null,
     })
   })
 })
@@ -359,6 +403,45 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     const firer = buildWorkflowFirer({ fire })
     await firer(input())
     expect(calls[0]!.prompt).toContain('"codexHome":null')
+  })
+
+  // THE INNER LOOP'S GITHUB READS — the credentialed-`gh` runner's path + store
+  // COORDINATES ride the args (paths and a handle), and the token never does.
+  test('args thread the credentialed-`gh` runner + the store coordinates it resolves the token from', () => {
+    const args = buildWorkflowArgs(
+      input({ gh_data_dir: '/home/owner/projects/acme', gh_owner_handle: 'acme' }),
+    )
+    expect(args['ghAuthedScript']).toBe(GH_AUTHED_SCRIPT_PATH)
+    expect(String(args['ghAuthedScript']).startsWith('/')).toBe(true)
+    expect(String(args['ghAuthedScript']).endsWith('trident/gh-authed.ts')).toBe(true)
+    expect(args['ghDataDir']).toBe('/home/owner/projects/acme')
+    expect(args['ghOwnerHandle']).toBe('acme')
+    // The ABSOLUTE bun binary: the probe runs in a subagent's Bash, whose PATH
+    // need not carry `bun`.
+    expect(args['bunBin']).toBe(process.execPath)
+  })
+
+  test('args carry null coordinates when GitHub is not wired → the probes fall back to bare `gh`', () => {
+    const args = buildWorkflowArgs(input())
+    expect(args['ghDataDir']).toBeNull()
+    expect(args['ghOwnerHandle']).toBeNull()
+    // The script path is always threaded; it is the coordinates that gate the
+    // fallback, so a legacy caller composes exactly the command it always did.
+    expect(args['ghAuthedScript']).toBe(GH_AUTHED_SCRIPT_PATH)
+  })
+
+  test('NO CREDENTIAL TRANSITS THE LAUNCHER PROMPT — the args JSON never mentions GH_TOKEN', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input({ gh_data_dir: '/home/owner/projects/acme', gh_owner_handle: 'acme' }))
+    const serialized = JSON.stringify(
+      buildWorkflowArgs(input({ gh_data_dir: '/home/owner/projects/acme', gh_owner_handle: 'acme' })),
+    )
+    expect(serialized).not.toContain('GH_TOKEN')
+    expect(serialized).not.toContain('ghp_')
+    // …and neither does the prompt those args are embedded in.
+    expect(calls[0]!.prompt).not.toContain('GH_TOKEN')
+    expect(calls[0]!.prompt).toContain('"ghOwnerHandle":"acme"')
   })
 
   // RB2 (b) — the owner's reflection corrections/diary reach the Forge builder (not
