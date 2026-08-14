@@ -484,7 +484,15 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     expect(SRC).toContain('const uniq = runId || slug')
     expect(SRC).toContain('/tmp/trident-codex-${uniq}.out')
     // Wired into the review panel only when a codex credential is configured.
-    expect(SRC).toContain('if (codexConfigured)')
+    // The literal `if (codexConfigured)` was GENERALISED into a per-slot route
+    // check when the cross-model seats became configurable slots: the guard is now
+    // `routeAvailable(route)`, which resolves `codexConfigured` for a codex route
+    // and `kimiConfigured` for a kimi one. Assert the PROPERTY — a peer only runs
+    // when its runtime is configured — rather than the old spelling, which would
+    // otherwise fail a refactor that strictly preserves the property it protects.
+    expect(SRC).toContain('const routeAvailable = (route) =>')
+    expect(SRC).toContain("route.group === 'codex' ? codexConfigured")
+    expect(SRC).toContain('routeAvailable(slotOneRoute)')
     expect(SRC).toContain("label: 'argus:codex'")
     expect(SRC).toContain('schema: CODEX_VERDICT_SCHEMA')
   })
@@ -1184,8 +1192,13 @@ describe('inner-workflow.mjs — panel completeness is derived in CODE, not read
         .join('\n')
       expect(code).not.toContain("codexStatus: 'not_connected' }")
       expect(code).not.toContain("kimiStatus: 'not_connected' }")
-      expect(SRC).toContain("crossModelPeerStatus(codexSlot, verdicts, 'codexStatus')")
-      expect(SRC).toContain("crossModelPeerStatus(kimiSlot, verdicts, 'kimiStatus')")
+      // The status key is now chosen from the SLOT'S ROUTE rather than hardcoded, because
+    // either slot may hold either provider. Same call, same guarantee — the key follows
+    // what the seat actually ran, which is the whole point of making the seats generic.
+    expect(SRC).toContain('crossModelPeerStatus(codexSlot, verdicts,')
+    expect(SRC).toContain("slotOneRoute.group === 'kimi' ? 'kimiStatus'")
+      expect(SRC).toContain('crossModelPeerStatus(kimiSlot, verdicts,')
+    expect(SRC).toContain("slotTwoRoute.group === 'kimi' ? 'kimiStatus'")
     })
 
     test('missingCore reaches the gate on BOTH the CI-pending and CI-settled branches', () => {
@@ -1473,7 +1486,10 @@ describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordinati
   })
 
   test('argus:codex external-peer launcher EXCLUDES reflection', () => {
-    expect(SRC).toContain('agent(codexReviewerPrompt(diffFile), {')
+    // The prompt is selected per route (`peerPrompt`) now that a slot can hold either
+    // provider; `codexReviewerPrompt` is still what a codex route resolves to.
+    expect(SRC).toContain("agent(peerPrompt('argus:codex', slotOneRoute), {")
+    expect(SRC).toContain('route.group === \'kimi\' ? kimiReviewerPrompt(diffFile) : codexReviewerPrompt(diffFile)')
     expect(SRC).not.toContain('reflectionGuidance}${codexReviewerPrompt')
   })
 
