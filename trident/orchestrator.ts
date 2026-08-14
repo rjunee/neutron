@@ -209,6 +209,39 @@ export interface BuildTridentOrchestratorOptions {
    */
   persist_refire_reset?: (run_id: string, patch: TridentRunUpdate) => Promise<void>
   /**
+   * CRASH RECOVERY CLAIM — atomically take ownership of a run whose LAUNCHER died
+   * (`subagent_status='crashed'`) so `step()` can RELAUNCH it as a continuation
+   * instead of reaping it. Wired to `TridentRunStore.beginCrashRecovery`: one
+   * conditional UPDATE that clears the crash latch, releases the sub-agent slot,
+   * nulls the tombstoned launcher generation, and spends one unit of the durable
+   * `crash_recoveries` budget. Returns the reloaded run, or null when the claim
+   * LOST (the row went terminal / was already claimed) — in which case this tick
+   * must do nothing and re-read next tick.
+   *
+   * WHY IT EXISTS. Measured 2026-08-14: three gateway boots (06:19:56, 06:26:51,
+   * 07:13:00) each killed a HEALTHY build ~90 s later, because the detached inner
+   * workflow lives in a warm `cc-trident-fire-*` REPL that dies with the gateway.
+   * Run `8ddca917` had already pushed its branch and opened PR #261 nine minutes
+   * before its launcher died, and was reaped `failed` anyway. A dead launcher is
+   * NOT a dead build.
+   *
+   * ABSENT → today's reap behaviour EXACTLY (byte-stable for existing callers and
+   * tests): a crashed row with no harvestable result still goes terminal.
+   */
+  begin_crash_recovery?: (run_id: string) => Promise<TridentRun | null>
+  /**
+   * How many launcher crashes on ONE run may be recovered by relaunching before
+   * the run is failed terminally. Default {@link DEFAULT_MAX_CRASH_RECOVERIES}.
+   *
+   * DELIBERATELY SEPARATE from `max_rounds`/`max_ralph_rounds`: a launcher crash is
+   * not the agent's failure and must not consume its fix rounds. The counter it
+   * bounds (`crash_recoveries`) is a DURABLE column rather than in-process state,
+   * because the cause being bounded is a gateway deploy loop (three restarts in
+   * 53 min) — every boot resets in-memory counters, so only a persisted budget can
+   * stop a restart loop from spinning builds forever.
+   */
+  max_crash_recoveries?: number
+  /**
    * How long a FIRED workflow may run with no terminal `inner_result` AND no
    * fresh checkpoint before it is reaped as stalled (the build runs detached, so
    * the tick loop owns build liveness). Measured from `last_advanced_at`, which
@@ -246,6 +279,16 @@ export interface BuildTridentOrchestratorOptions {
    */
   on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
 }
+
+/**
+ * Default crash-recovery budget: how many launcher crashes ONE run may recover
+ * from by relaunching as a continuation. 3 is sized off the measured cause — a
+ * deploy loop of three gateway restarts inside 53 minutes on 2026-08-14 — so a
+ * build survives an ordinary deploy burst, while a machine that cannot keep a
+ * launcher alive fails the run loudly instead of re-firing detached builds
+ * forever. Tune via `max_crash_recoveries` (exists chiefly for tests).
+ */
+export const DEFAULT_MAX_CRASH_RECOVERIES = 3
 
 /**
  * RC2 — did the OUTER loop genuinely HARVEST a result into this committed
@@ -625,6 +668,8 @@ export function buildTridentOrchestrator(
   const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
+  const beginCrashRecovery = opts.begin_crash_recovery
+  const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
 
   // This-process liveness: run ids whose workflow THIS process fired (and whose
   // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
@@ -1257,14 +1302,77 @@ export function buildTridentOrchestrator(
     // a fresh detached build. Every tick. Forever. Measured on this branch by a
     // reviewer's live probe: `fires=1..6`, `subagent_run_id` still null at the end.
     //
-    // A crashed launcher is a DEAD RUN whether or not we ever learned its subagent
-    // id, so it belongs on this side of the gate. Ordering is deliberately
-    // unchanged: the harvest still runs FIRST, so a workflow that wrote its terminal
-    // result and only then lost its launcher still harvests rather than being reaped.
+    // A crashed launcher belongs on this side of the gate whether or not we ever
+    // learned its subagent id. Ordering is deliberately unchanged: the harvest still
+    // runs FIRST, so a workflow that wrote its terminal result and only then lost its
+    // launcher still harvests rather than being reaped.
+    //
+    // A DEAD LAUNCHER IS NOT A DEAD BUILD — the position this code used to state
+    // ("a crashed launcher is a DEAD RUN") is the defect, not the fix. The build runs
+    // DETACHED; what died is the warm REPL supervising it, and the only thing that
+    // makes that fatal is this routing. Measured 2026-08-14: three gateway boots
+    // (a deploy loop — 06:19:56, 06:26:51, 07:13:00, three restarts in 53 min) each
+    // reaped a healthy build ~90 s later, one of them (`8ddca917`) NINE MINUTES after
+    // it had pushed its branch and opened PR #261 (+434/−17). The PUSHED BRANCH, the
+    // PR and `inner_checkpoint` are the durable truth and they all survived; so with
+    // `begin_crash_recovery` wired, a crashed launcher with nothing harvestable is
+    // RELAUNCHED as a continuation from that state (§1a-crash below) rather than
+    // reaped. Recovery is budget-bounded precisely BECAUSE the live cause is a deploy
+    // loop: it must not spin fresh detached builds forever.
     if (run.subagent_run_id !== null || run.subagent_status === 'crashed') {
       const result = parseInnerResult(run.inner_result)
       if (result !== null) {
         return applyResult(run, result)
+      }
+      // (1a-crash) RECOVER, DON'T REAP. The launcher died with no harvestable result,
+      //     but the run's continuation state (`branch`, `pr`, `inner_checkpoint`) is on
+      //     the row and `launch()` already folds all three, so the build can simply be
+      //     re-supervised. CLAIM it atomically first (`beginCrashRecovery` clears the
+      //     crash latch, releases the sub-agent slot, nulls the tombstoned launcher
+      //     generation and spends one unit of the DURABLE budget) — going through
+      //     `update()`/`saveIfActive` is impossible here by design: their crash veto
+      //     refuses non-crashed writes onto a latched row, and that veto stays.
+      //
+      //     `round`/`ralph_round` are untouched: a launcher crash is not the agent's
+      //     failure. `harvested_at` is never stamped on any recovery path — nothing was
+      //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
+      //     unchanged reap below, byte-stable for legacy callers.
+      if (run.subagent_status === 'crashed' && beginCrashRecovery !== undefined) {
+        if (run.crash_recoveries >= maxCrashRecoveries) {
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          // NOTE THE WORDING: this reason must NOT contain "exhausted" — `delivery.ts`
+          // pattern-matches that token into the review-unresolved class ("the reviewer
+          // still had blocking findings"), which would be a confident lie about a run
+          // whose reviewer may never have run. It carries the LATCHED crash reason too,
+          // so the measured cause (T2's gateway boot timestamps) survives onto the row.
+          const reaped = failedRun(
+            run,
+            `launcher crashed ${run.crash_recoveries + 1} time(s); crash-recovery budget ` +
+              `(${maxCrashRecoveries}) used up — not relaunching. Last crash: ` +
+              `${run.failure_reason ?? 'inner workflow child crashed'}`,
+            false,
+          )
+          reaped.subagent_status = 'crashed'
+          reaped.subagent_run_id = run.subagent_run_id
+          return {
+            run: reaped,
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (crash-recovery budget)`,
+          }
+        }
+        const claimed = await beginCrashRecovery(run.id)
+        if (claimed === null) {
+          // The claim LOST — the row went terminal (a cancel) or another tick took it.
+          // Do nothing: whoever won owns the row now.
+          return { run, changed: false, waiting: true, note: 'crash-recovery claim lost — re-read next tick' }
+        }
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        // CONTINUATION, not a restart: `launch()` folds `inner_checkpoint`/`pr`/`branch`
+        // so the workflow resumes on the pushed branch and reuses the PR.
+        return launch(claimed)
       }
       // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
       //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes

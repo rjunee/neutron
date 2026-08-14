@@ -360,6 +360,72 @@ describe('TridentRunStore', () => {
     expect(store.get(created.id)?.failure_reason).toBe('child exited before tick save')
   })
 
+  describe('beginCrashRecovery — the atomic claim that recovers a killed launcher', () => {
+    test('claims a crashed run: latch cleared, slot + dead generation released, budget spent', async () => {
+      let clock = '2026-08-14T07:13:00.000Z'
+      const store = new TridentRunStore(db, () => clock)
+      const run = await store.create({ slug: 'claim', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, {
+        subagent_status: 'running', subagent_run_id: 'wf-1', workflow_run_id: 'gen-dead',
+      })
+      await store.crashRunningByLauncher('gen-dead', 'pooled child exited')
+      clock = '2026-08-14T07:14:32.000Z'
+
+      const claimed = await store.beginCrashRecovery(run.id)
+
+      expect(claimed).not.toBeNull()
+      expect(claimed?.subagent_status).toBeNull()
+      expect(claimed?.subagent_run_id).toBeNull()
+      // Nulled so `launch()`'s `?? workflow_run_id` fallback cannot re-adopt a
+      // generation that already carries a durable crash tombstone.
+      expect(claimed?.workflow_run_id).toBeNull()
+      expect(claimed?.crash_recoveries).toBe(1)
+      expect(claimed?.last_advanced_at).toBe('2026-08-14T07:14:32.000Z')
+    })
+
+    test('a post-claim `running` save with a FRESH generation LANDS — the veto no longer blocks', async () => {
+      // The whole point of clearing the latch out-of-band: with it still set,
+      // `saveIfActive` vetoes every non-crashed write and the relaunch could never
+      // persist. Mutation killed: drop `subagent_status = NULL` from the claim.
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 'relaunch', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, { subagent_status: 'running', workflow_run_id: 'gen-dead' })
+      await store.crashRunningByLauncher('gen-dead', 'pooled child exited')
+      const claimed = (await store.beginCrashRecovery(run.id))!
+
+      const landed = await store.saveIfActive({
+        ...claimed, subagent_status: 'running', subagent_run_id: 'wf-2', workflow_run_id: 'gen-fresh',
+      })
+
+      expect(landed).toBe(true)
+      expect(store.get(run.id)?.subagent_status).toBe('running')
+    })
+
+    test('the claim LOSES on a terminal row and on a non-crashed row — no budget spent', async () => {
+      const store = new TridentRunStore(db)
+      // Terminal: a build cancelled between the crash latch and this tick.
+      const dead = await store.create({ slug: 'dead', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(dead.id, { subagent_status: 'running', workflow_run_id: 'gen-a' })
+      await store.crashRunningByLauncher('gen-a', 'pooled child exited')
+      await store.terminalTransition(dead.id, { phase: 'stopped' })
+      expect(await store.beginCrashRecovery(dead.id)).toBeNull()
+      expect(store.get(dead.id)?.crash_recoveries).toBe(0)
+      expect(store.get(dead.id)?.phase).toBe('stopped')
+
+      // Not crashed: a healthy in-flight run must never be reset by a stray claim
+      // (and a second tick racing the first loses cleanly, for the same reason).
+      const live = await store.create({ slug: 'live', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(live.id, { subagent_status: 'running', workflow_run_id: 'gen-b' })
+      expect(await store.beginCrashRecovery(live.id)).toBeNull()
+      expect(store.get(live.id)?.crash_recoveries).toBe(0)
+      expect(store.get(live.id)?.subagent_status).toBe('running')
+      expect(store.get(live.id)?.workflow_run_id).toBe('gen-b')
+
+      // A vanished row is not a claim either.
+      expect(await store.beginCrashRecovery('no-such-run')).toBeNull()
+    })
+  })
+
   describe('terminalTransition — atomic conditional terminal write (§F6a race guard)', () => {
     test('wins on a non-terminal run: flips the phase + reason and reports won', async () => {
       const store = new TridentRunStore(db)
