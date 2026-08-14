@@ -789,6 +789,24 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('failed card with kept #340 binding and NO run_progress (research/dispatch path): static cwb-dot-failed dot + Retry build control', async () => {
+    const rows = [item({ id: 'wf3', status: 'failed', linked_run_id: 'r-dead' })]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const dot = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-dot')
+    expect(dot!.className).toContain('cwb-dot-failed')
+    expect(dot!.className).not.toContain('cwb-dot-pulse')
+
+    // Mutation killed: reverting the failed-lane short-circuit derives the
+    // missing run_progress as running and hides this retry control.
+    const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
+    expect(playBtn).not.toBeNull()
+    expect(playBtn!.getAttribute('aria-label')).toBe('Retry build')
+    expect(playBtn!.textContent).toBe('↻')
+
+    await act(async () => root.unmount())
+  })
+
   it('runless non-inline in_progress card: static cwb-dot-build dot (no pulse) + Start build control (B)', async () => {
     // Fixture (B): status='in_progress', no binding, no run_progress, inline_active=false.
     // isLinkedRunning → false; dotState fallback: in_progress → cwb-dot-build, pulse=false.

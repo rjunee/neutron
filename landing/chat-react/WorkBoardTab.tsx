@@ -94,10 +94,15 @@ function statusLabel(status: WorkBoardStatus): string {
 
 const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled']
 
-/** True when the item is bound to a run that is still live (not terminal). */
+/**
+ * Durable `status='failed'` (detachRun #340) wins over missing run_progress.
+ * attachRun atomically sets in_progress with a fresh binding, so this cannot
+ * mask a live run; dead-without-terminal-write detection awaits #534.
+ */
 function isLinkedRunning(item: WorkBoardItem): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0
   if (!linked) return false
+  if (item.status === 'failed') return false
   const rp = item.run_progress
   return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label)
 }
