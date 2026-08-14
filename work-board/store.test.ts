@@ -693,6 +693,40 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(done?.pr_url).toBe('https://github.com/acme/widget/pull/101')
   })
 
+  test('a MANUAL re-open off done clears the PR (attachRun is not on that path)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'reopen me by hand' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'done', {
+      pr: 265,
+      pr_url: 'https://github.com/acme/widget/pull/265',
+    })
+    // The owner drags/advances the finished card back into the active lane. No
+    // run is dispatched, so nothing else would ever clear the old number.
+    const reopened = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(reopened?.status).toBe('upcoming')
+    expect(reopened?.completed_at).toBeNull()
+    expect(reopened?.pr).toBeNull()
+    expect(reopened?.pr_url).toBeNull()
+  })
+
+  test('re-queueing a failed card off the failed lane clears its PR with the stale link', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'requeue me by hand' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'failed', {
+      pr: 261,
+      pr_url: 'https://github.com/acme/widget/pull/261',
+    })
+    expect(store.get(SLUG, a.id)?.pr).toBe(261)
+    // The status-dot advance: nextStatus('failed') → 'upcoming'. The terminal
+    // link goes (#340 note above) and the failed attempt's PR goes with it.
+    const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(requeued?.linked_run_id).toBeNull()
+    expect(requeued?.pr).toBeNull()
+    expect(requeued?.pr_url).toBeNull()
+  })
+
   test('an unresolvable repo stores the number with a NULL url (plain-text render)', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'no remote' })
