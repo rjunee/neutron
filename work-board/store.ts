@@ -895,6 +895,12 @@ export class WorkBoardStore {
             )
             .get(project_slug)
           push('sort_order', max?.next ?? 1)
+          // ...and drop the durable PR provenance with it. `pr`/`pr_url` describe
+          // the run that FINISHED this card; a card re-opened by hand has not
+          // shipped, so the old `#NNN` must not ride along into the new attempt.
+          // `attachRun` clears these too, but a manual re-open never reaches it.
+          push('pr', null)
+          push('pr_url', null)
         } else if (current.status === 'failed') {
           // Re-queue OFF failed (nextStatus('failed') → 'upcoming', or a dismiss):
           // DETACH the terminal failed run so the card stops deriving the red dot
@@ -905,6 +911,12 @@ export class WorkBoardStore {
           // second advance strands it in_progress with a terminal link (no retry).
           // A genuine retry re-dispatches via attachRun (a fresh linked_run_id).
           push('linked_run_id', null)
+          // Same for the failed run's durable PR: once the card leaves the failed
+          // lane by hand it no longer describes that attempt, and a stale `#261`
+          // on a re-queued card is exactly the wrong-PR-on-the-card the durable
+          // column exists to prevent.
+          push('pr', null)
+          push('pr_url', null)
         }
         // active→active (e.g. upcoming→in_progress): no completed_at/sort_order change.
       }
