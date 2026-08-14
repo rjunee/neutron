@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { buildReflectionGuidance } from './reflection-guidance.ts'
+import { briefIntegrity } from './brief-parts.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -52,13 +53,17 @@ interface RunOpts {
    * would look covered while the planner never sees it.
    */
   ralph?: boolean
+  task?: string
+  briefParts?: unknown
+  codexBuild?: boolean
 }
 
 async function runWorkflow(
   reflectionGuidance: string,
   opts: RunOpts = {},
-): Promise<{ captured: Captured[]; result: Record<string, unknown> }> {
+): Promise<{ captured: Captured[]; result: Record<string, unknown>; logs: string[] }> {
   const captured: Captured[] = []
+  const logs: string[] = []
   let synthCount = 0
   const dead = new Set(opts.dead ?? [])
 
@@ -69,6 +74,9 @@ async function runWorkflow(
     // label, including a retry lane ('argus:codex-retry').
     if (dead.has(String(label))) return null
     if (label === 'forge:build' || String(label).startsWith('forge:fix-round-')) {
+      if (opts.codexBuild) {
+        return { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, branch: 'trident/test-run', commitSha: 'a'.repeat(40), prNumber: null, diffFile: '/tmp/x.diff', worktreePath: '/wt', testsPassed: true }
+      }
       return { prNumber: null, branch: 'trident/test-run', diffFile: '/tmp/x.diff', worktreePath: '/wt', commitSha: 'abc', testsPassed: true }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') {
@@ -107,17 +115,19 @@ async function runWorkflow(
   const parallel = async (fns: Array<() => Promise<unknown>>): Promise<unknown[]> =>
     Promise.all(fns.map((f) => f()))
   const phase = (): void => {}
-  const log = (): void => {}
+  const log = (...values: unknown[]): void => { logs.push(values.map(String).join(' ')) }
   const budget = { total: 0, spent: (): number => 0 }
 
-  const args = {
+  const args: Record<string, unknown> = {
     repoPath: '/repo',
-    task: 'build the feature',
+    task: opts.task ?? 'build the feature',
     baseBranch: 'main',
     slug: 'test-run',
     maxRounds: 3,
     ralph: opts.ralph === true,
-    mergeMode: 'local', // no PR path
+    // Codex-build cases use pr mode so the workflow stops at the durable publisher
+    // handoff after Forge; the task is not subsequently copied into reviewer prompts.
+    mergeMode: opts.codexBuild ? 'pr' : 'local',
     prNumber: null,
     branch: null,
     dbPath: null, // → checkpoint()/writeTerminalResult() no-op (no bash agent steps)
@@ -135,6 +145,11 @@ async function runWorkflow(
       k3: { model_id: 'kimi', transport: 'cli', env_var: 'KIMI_MODEL', group: 'kimi' },
     },
   }
+  if (opts.briefParts !== undefined) args.briefParts = opts.briefParts
+  if (opts.codexBuild) {
+    args.phaseModels = { build: { model: 'gpt' } }
+    args.modelTiers = { gpt: { model_id: 'gpt-5-codex', transport: 'cli', env_var: 'CODEX_BUILD_MODEL', group: 'codex' } }
+  }
 
   // Strip the single `export` so the module body is legal inside an AsyncFunction
   // (top-level return + await are legal in a function body).
@@ -144,8 +159,89 @@ async function runWorkflow(
   ) => (...a: unknown[]) => Promise<unknown>
   const fn = AsyncFunction('agent', 'parallel', 'phase', 'log', 'budget', 'args', body)
   const result = (await fn(agent, parallel, phase, log, budget, args)) as Record<string, unknown>
-  return { captured, result }
+  return { captured, result, logs }
 }
+
+const LARGE_TASK = [
+  ...Array.from({ length: 400 }, (_, i) => `${String(i).padStart(4, '0')} ${'task contract bytes '.repeat(4)}`),
+  `${'é'.repeat(5000)} TASKBYTES_MARKER_Q9`,
+].join('\n')
+
+const forgeBuildPrompt = (captured: Captured[]): string =>
+  captured.find((c) => c.label === 'forge:build')?.prompt ?? ''
+
+describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
+  const taskParts = (task = LARGE_TASK) => ({
+    taskFile: '/tmp/t.part',
+    taskIntegrity: briefIntegrity(task),
+    reflectionFile: null,
+    reflectionIntegrity: null,
+  })
+
+  test('a >30 KB task travels by path and is absent from every agent prompt', async () => {
+    expect(new TextEncoder().encode(LARGE_TASK).length).toBeGreaterThan(30_000)
+    const { captured } = await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: taskParts() })
+    for (const call of captured) expect(call.prompt).not.toContain('TASKBYTES_MARKER_Q9')
+    const prompt = forgeBuildPrompt(captured)
+    expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
+    expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
+    const a1 = prompt.indexOf('.brief.a1')
+    const task = prompt.indexOf('/tmp/t.part', a1)
+    const a2 = prompt.indexOf('.brief.a2', task)
+    expect(a1).toBeGreaterThan(-1)
+    expect(task).toBeGreaterThan(a1)
+    expect(a2).toBeGreaterThan(task)
+  })
+
+  test('whole-brief receipt is unchanged and fallback still carries the task', async () => {
+    const byPath = forgeBuildPrompt((await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: taskParts() })).captured)
+    const fallback = forgeBuildPrompt((await runWorkflow('', { codexBuild: true, task: LARGE_TASK })).captured)
+    const receipt = (prompt: string) => prompt.match(/NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY='([^']+)'/)?.[1]
+    expect(receipt(byPath)).toBe(receipt(fallback))
+    expect(fallback).toContain('TASKBYTES_MARKER_Q9')
+    expect(fallback).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
+  })
+
+  test('malformed manifest produces the byte-identical fallback prompt', async () => {
+    const malformed = forgeBuildPrompt((await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: 'garbage' })).captured)
+    const absent = forgeBuildPrompt((await runWorkflow('', { codexBuild: true, task: LARGE_TASK })).captured)
+    expect(malformed).toBe(absent)
+  })
+
+  test('args-transit receipt mismatch throws the named terminal error', async () => {
+    const { result, logs } = await runWorkflow('', {
+      codexBuild: true,
+      task: LARGE_TASK,
+      briefParts: { ...taskParts(), taskIntegrity: '1:00000000' },
+    })
+    const failure = `${JSON.stringify(result)} ${logs.join('\n')}`
+    expect(failure).toContain('CODEX_BUILD_BRIEF_ARGS_CORRUPT')
+    expect(failure).not.toContain('inner loop exhausted')
+  })
+
+  test('reflection guidance travels by path and missing reflection metadata fails closed', async () => {
+    const manifest = {
+      ...taskParts(),
+      reflectionFile: '/tmp/r.part',
+      reflectionIntegrity: briefIntegrity(GUIDANCE),
+    }
+    const { captured } = await runWorkflow(GUIDANCE, { codexBuild: true, task: LARGE_TASK, briefParts: manifest })
+    for (const call of captured) expect(call.prompt).not.toContain(REFLECT_MARKER)
+    const prompt = forgeBuildPrompt(captured)
+    const task = prompt.indexOf('/tmp/t.part')
+    const reflection = prompt.indexOf('/tmp/r.part', task)
+    const a2 = prompt.indexOf('.brief.a2', reflection)
+    expect(reflection).toBeGreaterThan(task)
+    expect(a2).toBeGreaterThan(reflection)
+
+    const { result, logs } = await runWorkflow(GUIDANCE, {
+      codexBuild: true,
+      task: LARGE_TASK,
+      briefParts: { ...manifest, reflectionFile: null },
+    })
+    expect(`${JSON.stringify(result)} ${logs.join('\n')}`).toContain('CODEX_BUILD_BRIEF_ARGS_CORRUPT')
+  })
+})
 
 const FORGE_LABELS = ['forge:build', 'forge:fix-round-2']
 const REVIEWER_LABELS = ['argus:claude', 'argus:adversarial', 'argus:synthesis', 'argus:codex']

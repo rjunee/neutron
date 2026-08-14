@@ -404,7 +404,10 @@ exit 1
     }
     env['NEUTRON_CODEX_BUILD_BRIEF_PARTS'] = partPaths.join('\n')
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = join(dir, 'build.brief')
-  } else if (brief !== null) {
+  } else if (typeof brief === 'string') {
+    // `!== null` let `undefined` through: the caller may omit the brief entirely, and
+    // `writeFileSync` would then be handed undefined. Narrowing on the type rather than
+    // on one of its two absent values covers both without a cast.
     const bf = join(dir, 'build.brief')
     writeFileSync(bf, brief)
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = bf

@@ -10913,3 +10913,13 @@ Mutation checks (each production guard was removed independently and restored):
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+## 2026-08-14 — launcher-held build brief segments travel by path
+
+Task and reflection brief segments now travel by path via the `briefParts` manifest
+and `NEUTRON_CODEX_BUILD_BRIEF_PARTS` (defect 2026-08-13, run `000cedc8`). Chunked
+transport remains for workflow-composed segments and as the whole-brief fallback.
+The receipt remains one `<bytes>:<fnv32>` measurement over the assembled whole, while
+args-transit corruption now fails closed with `CODEX_BUILD_BRIEF_ARGS_CORRUPT`.
+Coverage lives in `trident/inner-workflow-assembly.test.ts`; the unchanged fallback
+and wrapper corruption coverage remains in `trident/codex-brief-chunking.test.ts` and
+`trident/codex-build.test.ts`.

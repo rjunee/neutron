@@ -183,6 +183,11 @@ const {
   // resolve through MODELS, and the cross-model wrappers are invoked with NO env
   // override, i.e. exactly the command they were invoked with before this existed.
   modelTiers = null,
+  // The launcher's fire-time by-path manifest (trident/brief-parts.ts
+  // `writeBriefParts`) — {taskFile, taskIntegrity, reflectionFile,
+  // reflectionIntegrity}; absent/malformed → the fully-chunked transport,
+  // byte-identical to before this arg existed (defect 2026-08-13 run 000cedc8).
+  briefParts = null,
 } = normalizeWorkflowArgs(args)
 
 // Is a per-project codex credential configured for this run? Absent → skip the
@@ -988,9 +993,11 @@ HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from
  * a separate quoted heredoc appended with `>>`, sent as its own Bash call, and the
  * receipt is UNCHANGED — still one `<bytes>:<fnv32>` over the fully assembled file, so
  * a chunk that is dropped, reordered or reworded is refused exactly as before. This
- * narrows the window; it does not close it. The real fix is to stop routing the brief
- * through a model at all and pass it BY PATH the way the DIFF already is — that is a
- * carded design change for the review panel, not this.
+ * launcher-held segments (the task and reflection guidance — the two large ones) now
+ * travel BY PATH via the `briefParts` manifest and
+ * `NEUTRON_CODEX_BUILD_BRIEF_PARTS`. Chunked transport remains for the
+ * workflow-composed head/coda (mid-workflow content this fs-less script cannot write)
+ * and as the whole-brief fallback whenever the manifest is absent.
  *
  * AND IT GETS EXACTLY ONE RETRY. Reproducing several kilobytes verbatim is still a
  * MODEL doing a copy, so `CODEX_BUILD_BRIEF_CORRUPT` (exit 3) is a real, if unmeasured,
@@ -1094,9 +1101,49 @@ function chunkTextOnLines(text, maxBytes) {
   return segs.length > 0 ? segs : [{ text: '', mode: 'heredoc' }]
 }
 
+function codexBriefByPath(brief) {
+  if (
+    briefParts === null ||
+    typeof briefParts !== 'object' ||
+    Array.isArray(briefParts) ||
+    typeof briefParts.taskFile !== 'string' ||
+    briefParts.taskFile.length === 0 ||
+    typeof briefParts.taskIntegrity !== 'string' ||
+    briefParts.taskIntegrity.length === 0
+  ) return null
+
+  const full = `${brief}\n`
+  const coda = codexBuildCoda()
+  const suffix = task + reflectionGuidance + coda + '\n'
+  if (!full.endsWith(suffix)) return null
+
+  const taskActual = briefIntegrity(task)
+  if (taskActual !== briefParts.taskIntegrity) {
+    throw new Error(`CODEX_BUILD_BRIEF_ARGS_CORRUPT: the task text carried in the workflow args measures ${taskActual} but the launcher's receipt over the task it wrote to ${briefParts.taskFile} is ${briefParts.taskIntegrity}. The args crossed an agent and were altered in transit; refusing to compose a build brief from text nobody wrote. No build was attempted.`)
+  }
+  if (reflectionGuidance !== '') {
+    const reflectionActual = briefIntegrity(reflectionGuidance)
+    if (
+      typeof briefParts.reflectionFile !== 'string' ||
+      briefParts.reflectionFile.length === 0 ||
+      reflectionActual !== briefParts.reflectionIntegrity
+    ) {
+      throw new Error(`CODEX_BUILD_BRIEF_ARGS_CORRUPT: the reflection segment carried in the workflow args measures ${reflectionActual} but the launcher's receipt over the reflection segment it wrote to ${briefParts.reflectionFile} is ${briefParts.reflectionIntegrity}. The args crossed an agent and were altered in transit; refusing to compose a build brief from text nobody wrote. No build was attempted.`)
+    }
+  }
+  return {
+    head: full.slice(0, full.length - suffix.length),
+    tail: `${coda}\n`,
+    files: reflectionGuidance !== ''
+      ? [briefParts.taskFile, briefParts.reflectionFile]
+      : [briefParts.taskFile],
+  }
+}
+
 function codexBuildPrompt(slot, brief, route) {
   const uniq = runId || slug
   const briefFile = `/tmp/trident-codex-build-${uniq}-${slot}.brief`
+  const byPath = codexBriefByPath(brief)
   const outFile = `/tmp/trident-codex-build-${uniq}-${slot}.out`
   const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
   // THE TRAILER GETS ITS OWN FILE, and that is the only place the six values are read
@@ -1131,23 +1178,48 @@ function codexBuildPrompt(slot, brief, route) {
   // safe and a half-written file from an interrupted attempt cannot survive into the
   // next one.
   const briefChunks = chunkTextOnLines(`${brief}\n`, CODEX_BRIEF_CHUNK_BYTES)
-  const chunkBlocks = briefChunks
+  const renderChunks = (chunks, file, offset, total) => chunks
     .map((seg, i) => {
       const redirect = i === 0 ? '>' : '>>'
-      const head = `CALL ${i + 1} of ${briefChunks.length}:`
+      const call = offset + i + 1
+      const head = `CALL ${call} of ${total}:`
       if (seg.mode === 'raw') {
         // A fragment of an over-long line. `printf '%s'` appends the bytes and NOTHING
         // else — no newline, no interpretation of backslashes (which `echo` would
         // mangle). Single-quoted, so the one character needing care is `'` itself and
         // `shSingleQuote` already handles it.
-        return `${head}\nprintf '%s' ${shSingleQuote(seg.text)} ${redirect} ${shSingleQuote(briefFile)}`
+        return `${head}\nprintf '%s' ${shSingleQuote(seg.text)} ${redirect} ${shSingleQuote(file)}`
       }
       // Per-segment marker, still grown until it provably does not occur in THIS segment.
-      let m = `${marker}_P${i + 1}`
+      let m = `${marker}_P${call}`
       while (seg.text.includes(m)) m += '_X'
-      return `${head}\ncat ${redirect} ${shSingleQuote(briefFile)} <<'${m}'\n${seg.text}${m}`
+      return `${head}\ncat ${redirect} ${shSingleQuote(file)} <<'${m}'\n${seg.text}${m}`
     })
     .join('\n\n')
+  let chunkBlocks
+  let writeBriefInstructions
+  let partsEnv = ''
+  let runCommandNote = ''
+  let corruptInstructions
+  let partMissingInstructions = ''
+  if (byPath === null) {
+    chunkBlocks = renderChunks(briefChunks, briefFile, 0, briefChunks.length)
+    writeBriefInstructions = `FIRST write the brief to disk in ${briefChunks.length} SEPARATE Bash call(s), in the order given. Each block below is one call; pass each WHOLE block unchanged. Call 1 uses \`>\` (it truncates any earlier attempt); every later call uses \`>>\` (it appends). Do NOT merge them into one call, do NOT reorder them, do NOT skip one.
+THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command below carries the assembled file's byte count and checksum, and the wrapper REFUSES to build (exit 3) if what is on disk is not byte-for-byte what is written here. So copy each block exactly — never summarise, re-wrap, re-indent, or tidy it. It is split into pieces precisely BECAUSE a long copy goes wrong; keep each piece exact and the whole is exact.`
+    corruptInstructions = `RE-RUN ALL ${briefChunks.length} CHUNK CALL(S) FROM CALL 1 (it uses \`>\`, so it clears the bad file)`
+  } else {
+    const a1File = `${briefFile}.a1`
+    const a2File = `${briefFile}.a2`
+    const headChunks = chunkTextOnLines(byPath.head, CODEX_BRIEF_CHUNK_BYTES)
+    const tailChunks = chunkTextOnLines(byPath.tail, CODEX_BRIEF_CHUNK_BYTES)
+    const total = headChunks.length + tailChunks.length
+    chunkBlocks = `${renderChunks(headChunks, a1File, 0, total)}\n\n${renderChunks(tailChunks, a2File, headChunks.length, total)}`
+    writeBriefInstructions = `FIRST write the TWO workflow-composed brief SEGMENTS to disk in ${total} SEPARATE Bash call(s), in the order given; the large task text does NOT travel through you — it is already on disk at the part path(s) listed in the run command, written by the host. Do NOT read, rewrite, recreate or "fix" those part files; never write the task yourself. The wrapper assembles the full brief from the listed part files, in order, and REFUSES to build (exit 3) unless the assembled whole matches the byte count and checksum in the run command.`
+    partsEnv = ` NEUTRON_CODEX_BUILD_BRIEF_PARTS=${shSingleQuote([a1File, ...byPath.files, a2File].join('\n'))}`
+    runCommandNote = `\nThis command contains quoted newlines inside the PARTS value — pass the WHOLE block as ONE Bash call, unmodified.`
+    corruptInstructions = `RE-RUN ALL ${total} SEGMENT CALL(S) FROM CALL 1 (each file's first call uses \`>\`, so re-running clears both segment files)`
+    partMissingInstructions = `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_MISSING in ${errFile} → a HOST-written part file is missing or empty; no retry by you can fix it and you must NOT create the file yourself — report codexStatus='deferred'.`
+  }
   const diffFile = codexBuildDiffFile()
   // The model assignment, exactly as the review lane does it: the id belongs to the
   // subprocess, never to the wrapping agent. Empty when no registry was threaded,
@@ -1171,12 +1243,11 @@ function codexBuildPrompt(slot, brief, route) {
   return `You are the CODEX BUILD bridge for trident. The BUILD ITSELF runs in a codex subprocess; YOUR job is to launch it and report the six values its wrapper measures. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 DO NOT BUILD ANYTHING YOURSELF. Do not edit a file, do not run the tests, do not commit, and do not "finish the job" if the subprocess falls short — this phase was deliberately moved off Claude, and work you do here defeats that. Run the command, read the output, fill the schema.
 Work from your CURRENT WORKING DIRECTORY (your isolated worktree — do NOT \`cd\` anywhere).
-FIRST write the brief to disk in ${briefChunks.length} SEPARATE Bash call(s), in the order given. Each block below is one call; pass each WHOLE block unchanged. Call 1 uses \`>\` (it truncates any earlier attempt); every later call uses \`>>\` (it appends). Do NOT merge them into one call, do NOT reorder them, do NOT skip one.
-THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command below carries the assembled file's byte count and checksum, and the wrapper REFUSES to build (exit 3) if what is on disk is not byte-for-byte what is written here. So copy each block exactly — never summarise, re-wrap, re-indent, or tidy it. It is split into pieces precisely BECAUSE a long copy goes wrong; keep each piece exact and the whole is exact.
+${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)} NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &
+rm -f ${shSingleQuote(exitFile)}; nohup setsid sh -c 'status=$1; shift; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv} NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=${shSingleQuote(integrity)} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -1192,7 +1263,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
   testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
-- EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. RE-RUN ALL ${briefChunks.length} CHUNK CALL(S) FROM CALL 1 (it uses \`>\`, so it clears the bad file), copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.
+- EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. ${corruptInstructions}, copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.${partMissingInstructions}
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
 For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null and testsPassed as false, even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred', trailerComplete=false, wrapperExitCode=null, and report whether the current worktree has preserved work.`
