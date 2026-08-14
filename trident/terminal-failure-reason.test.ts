@@ -28,7 +28,7 @@
  * one — which is exactly what the owner asked for.
  */
 import { describe, expect, test } from 'bun:test'
-import { innerTerminalFailureReason } from './orchestrator.ts'
+import { innerTerminalFailureReason, publishFailureReason, redactPushError } from './orchestrator.ts'
 import { interpretFailure } from './delivery.ts'
 import type { TridentRun } from './store.ts'
 
@@ -196,5 +196,86 @@ describe('interpretFailure — an early stop must not be told as a review outcom
       expect(out.summary).not.toContain('Argus')
       expect(out.summary).not.toContain('checkpoint')
     }
+  })
+})
+
+/**
+ * A PUBLISH FAILURE MUST CARRY GIT'S WORDS — AND MUST NOT BECOME A DISCLOSURE SURFACE.
+ *
+ * Run `2aacf419` stored `outer publisher could not push branch <b>` and nothing else, while git's
+ * stderr had already said `! [rejected] … (non-fast-forward)`. Carrying that text is the fix; the
+ * risk it introduces is that a push error is EXACTLY where a credential surfaces, because git
+ * echoes the remote URL back verbatim. So the observability fix and the redaction are one change:
+ * shipping the first without the second trades a silent defect for a leaking one.
+ */
+describe('redactPushError — git may speak, the credential may not', () => {
+  test("a credential embedded in the remote URL never survives", () => {
+    const out = redactPushError(
+      "remote: Invalid username or password\nfatal: Authentication failed for 'https://x-access-token:ghp_AAAABBBBCCCCDDDDEEEEFFFF@github.test/o/r.git/'",
+    )
+    expect(out).not.toContain('ghp_AAAABBBBCCCCDDDDEEEEFFFF')
+    expect(out).toContain('***@')
+    // …and the DIAGNOSIS still survives, or the redaction has eaten the reason for carrying it.
+    expect(out).toContain('Authentication failed')
+  })
+
+  test('a credential that is NOT token-shaped is still redacted — the URL rule earns its place', () => {
+    // MUTATION-FOUND HOLE (2026-08-14). The first version of this block only used a `ghp_`
+    // fixture, so deleting the URL rule entirely left the suite GREEN — the token-shape rule
+    // happened to catch the same string, and even `toContain('***@')` still passed because the
+    // redacted token kept the `@`. The rule was untested while appearing tested.
+    // A basic-auth secret matches NO token shape, so only the URL rule can catch it.
+    const raw = "fatal: Authentication failed for 'https://neutron:hunter2-not-a-token@git.test/o/r.git/'"
+    const out = redactPushError(raw)
+    expect(raw).toContain('hunter2-not-a-token') // positive control: it IS in the input
+    expect(out).not.toContain('hunter2-not-a-token')
+    expect(out).toContain('***@')
+    expect(out).toContain('Authentication failed')
+  })
+
+  test('a bare token shape is redacted even without a URL around it', () => {
+    for (const shape of ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_']) {
+      const out = redactPushError(`error: token ${shape}ZZZZZZZZZZZZZZZZZZZZ rejected`)
+      expect(out).not.toContain(`${shape}ZZZZZZZZZZZZZZZZZZZZ`)
+      expect(out).toContain('***')
+    }
+  })
+
+  test('POSITIVE CONTROL — the assertion above can actually fail', () => {
+    // Without this, a redactor that returned '' would pass every test in this block while
+    // destroying the diagnosis. The secret must be findable in the INPUT.
+    const raw = 'fatal: could not read Password for https://x-access-token:ghp_SECRETSECRETSECRET@github.test'
+    expect(raw).toContain('ghp_SECRETSECRETSECRET')
+    expect(redactPushError(raw)).not.toContain('ghp_SECRETSECRETSECRET')
+  })
+
+  test('an ordinary rejection passes through intact — redaction is not censorship', () => {
+    const out = redactPushError('! [rejected]  feat-x -> feat-x (non-fast-forward)')
+    expect(out).toContain('non-fast-forward')
+  })
+
+  test('an unbounded paste is bounded — a reason is read in a chat row', () => {
+    expect(redactPushError('x'.repeat(5000)).length).toBeLessThanOrEqual(600)
+  })
+})
+
+describe('publishFailureReason — names the step, quotes the cause, invents nothing', () => {
+  test("git's own words reach the stored reason", () => {
+    const r = publishFailureReason('push', 'feat-x', '! [rejected] (non-fast-forward)')
+    expect(r).toContain('could not push branch feat-x')
+    expect(r).toContain('non-fast-forward')
+  })
+
+  test('silence stays silent rather than being filled in', () => {
+    // The #240 rule applied to this path: with nothing measured, assert nothing.
+    const r = publishFailureReason('push', 'feat-x', '   ')
+    expect(r).toBe('outer publisher could not push branch feat-x')
+    expect(r).not.toContain(':')
+  })
+
+  test('the step is named, so two publish failures are not one message', () => {
+    const a = publishFailureReason('push', 'feat-x', '')
+    const b = publishFailureReason('read the remote state of', 'feat-x', '')
+    expect(a).not.toBe(b)
   })
 })

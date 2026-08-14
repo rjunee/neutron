@@ -323,6 +323,48 @@ export async function computeDiffLineCount(
  * Exported because the defect was invisible while this was an inline template literal —
  * there was nothing a test could hold. Keep it reachable.
  */
+/**
+ * A PUBLISH FAILURE MUST CARRY GIT'S OWN WORDS — WITHOUT BECOMING A DISCLOSURE SURFACE.
+ *
+ * WHY THIS EXISTS. Run `2aacf419` (2026-08-14) was the first build ever to reach the publish
+ * step. It failed, and the stored reason was `outer publisher could not push branch <b>` — the
+ * branch name and nothing else. git's stderr had ALREADY said, in words,
+ * `! [rejected] ... (non-fast-forward)`. It was thrown away.
+ *
+ * That is the sibling of the defect fixed in #240 and it landed in brand-new code. #240 removed a
+ * message that ASSERTED a cause it never measured; this one MEASURED the cause and dropped it.
+ * Opposite mistakes, identical cost: the reader cannot act. Recovering that one line cost a DB
+ * read, a hand comparison of merge-bases, and a credentialed dry-run push.
+ *
+ * BUT stderr from a push is exactly where a credential can surface — a remote URL of the form
+ * `https://user:token@host/...` is echoed back verbatim by git. So the text is carried THROUGH
+ * this function or not at all. Redaction is not decoration here; without it, fixing an
+ * observability defect would open a disclosure one.
+ */
+export function redactPushError(text: string): string {
+  return (
+    text
+      // `https://x-access-token:<secret>@github.test/...` — git echoes the remote back on failure.
+      .replace(/(\w+:\/\/)[^/\s@]*:[^/\s@]*@/g, '$1***@')
+      // Bare GitHub token shapes, in case one reaches stderr by another route.
+      .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '$1***')
+      .trim()
+      // A reason is read by a human in a chat row; an unbounded paste is its own failure.
+      .slice(0, 600)
+  )
+}
+
+/**
+ * The reason for a failed publish step: what we were doing, and what git said about it.
+ * Nothing is inferred — the cause is quoted, not deduced.
+ */
+export function publishFailureReason(step: string, branch: string, stderr: string): string {
+  const said = redactPushError(stderr)
+  return said === ''
+    ? `outer publisher could not ${step} branch ${branch}`
+    : `outer publisher could not ${step} branch ${branch}: ${said}`
+}
+
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
   result: Pick<InnerResult, 'round' | 'checkpoint'>,
@@ -431,10 +473,45 @@ export function buildTridentOrchestrator(
       }
       return result
     }
-    const pushed = await runWithRetries(
-      ['git', '-C', run.repo_path, 'push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+    // THE BUILD REBASES ONTO CURRENT `main`, SO THE PUSH IS NOT A FAST-FORWARD.
+    //
+    // Measured on run `2aacf419` (2026-08-14): the build SUCCEEDED and the plain push here was
+    // refused `! [rejected] ... (non-fast-forward)`. Verified NOT a credential failure — a dry-run
+    // push with the real credential authenticated and got the same server-side refusal. A rebased
+    // branch is by definition not a fast-forward, so an ordinary push can never publish one; this
+    // stranded every card whose remote branch predated its rebase, which is most fix rounds.
+    //
+    // A LEASE, NOT A FORCE, AND THAT DISTINCTION IS THE WHOLE SAFETY PROPERTY. `--force-with-lease`
+    // pinned to the sha we OBSERVED means: replace the remote branch, but only if it still holds
+    // what we saw. A branch someone else genuinely advanced is refused rather than destroyed.
+    // A bare `--force` would publish the rebase and silently discard their commits.
+    //
+    // PINNED TO AN OBSERVATION, NOT TO THE REMOTE-TRACKING REF. The bare `--force-with-lease` form
+    // trusts `refs/remotes/origin/<b>`, which any concurrent `git fetch` can advance — at which
+    // point the lease certifies a state nobody ever looked at, and quietly degrades to `--force`.
+    // The explicit `<ref>:<sha>` form cannot be undermined that way.
+    const observed = await runWithRetries(
+      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
     )
-    if (!pushed.ok) throw new Error(`outer publisher could not push branch ${branch}`)
+    if (!observed.ok) {
+      throw new Error(publishFailureReason('read the remote state of', branch, observed.stderr))
+    }
+    // Empty is MEANINGFUL, not a missing value: to git an empty expectation asserts the ref does
+    // not exist, so a first push of a new card stays correct — and is still refused if the branch
+    // appeared underneath us between this read and the push.
+    const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
+    const pushed = await runWithRetries([
+      'git',
+      '-C',
+      run.repo_path,
+      'push',
+      `--force-with-lease=refs/heads/${branch}:${expected}`,
+      'origin',
+      `refs/heads/${branch}:refs/heads/${branch}`,
+    ])
+    // NOTE the lease is deliberately NOT re-observed between retries. Re-reading it would adopt
+    // whatever moved and turn the retry into the force this code exists to avoid.
+    if (!pushed.ok) throw new Error(publishFailureReason('push', branch, pushed.stderr))
 
     const witnessed = await runWithRetries(
       ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],

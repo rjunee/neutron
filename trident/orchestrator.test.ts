@@ -166,9 +166,13 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('done')
     const calls = h.hostCalls.map((c) => c.join(' '))
-    expect(calls).toContain('git -C /repo push origin refs/heads/feat-x:refs/heads/feat-x')
-    const pushAt = calls.findIndex((c) => c.includes(' push origin '))
-    const witnessAt = calls.findIndex((c) => c.includes('ls-remote --heads origin'))
+    expect(calls).toContain(
+      `git -C /repo push --force-with-lease=refs/heads/feat-x:${head} origin refs/heads/feat-x:refs/heads/feat-x`,
+    )
+    const pushAt = calls.findIndex((c) => c.includes(' push '))
+    // The WITNESS is the ls-remote AFTER the push. There is now also one BEFORE it (the lease
+    // observation), so `findIndex` would match the wrong call and assert nothing.
+    const witnessAt = calls.map((c) => c.includes('ls-remote --heads origin')).lastIndexOf(true)
     expect(witnessAt).toBeGreaterThan(pushAt)
     expect(h.inputs).toHaveLength(2)
     expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
@@ -208,6 +212,145 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.failure_reason).toContain('no longer points at')
     expect(h.hostCalls.some((c) => c.includes('push'))).toBe(false)
     expect(h.inputs).toHaveLength(1)
+  })
+
+  /**
+   * THE PUBLISHER MUST BE ABLE TO PUBLISH A REBASED BRANCH — WITH A LEASE, NEVER A FORCE.
+   *
+   * Run `2aacf419` (2026-08-14) was the first build to reach this step. It built successfully and
+   * then could not deliver: the build rebases onto current `main`, and an ordinary push may only
+   * ADD to the remote. A rebased branch is by definition not a fast-forward, so the push was
+   * refused and every card with a pre-existing remote branch was stranded.
+   *
+   * The pair below is the point. Proving only that a rebase now publishes would prove that
+   * `--force` works — trivially true, and catastrophic. The second test is what proves it is a
+   * LEASE: a remote that genuinely moved is still refused.
+   */
+  const failWith = (stderr: string): HostCommandResult => ({ ok: false, stdout: '', stderr, exit_code: 1 })
+
+  test('a rebased branch publishes, and the lease is pinned to the sha actually observed', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const preRebase = '2222222222222222222222222222222222222222'
+    let lsRemotes = 0
+    let fires = 0
+    const h = buildHarness({
+      // A SUCCESSFUL publish re-fires review, so the run only terminates on the second verdict.
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          // Before the push the remote still holds the PRE-REBASE tip; after it, the new one.
+          return ok(lsRemotes === 1 ? `${preRebase}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    // It got past publishing — on today's code this run dies at the push.
+    expect(final.failure_reason ?? '').not.toContain('could not push')
+    expect(calls.some((c) => c.includes(`--force-with-lease=refs/heads/feat-x:${preRebase}`))).toBe(true)
+    // The lease is pinned to what was OBSERVED. The bare form trusts the remote-tracking ref,
+    // which a concurrent fetch can advance — at which point it silently degrades to a force.
+    expect(calls.some((c) => /--force-with-lease(\s|$)/.test(c))).toBe(false)
+    // And the observation must PRECEDE the push, or it certifies nothing.
+    const observeAt = calls.findIndex((c) => c.includes('ls-remote --heads origin'))
+    const pushAt = calls.findIndex((c) => c.includes(' push '))
+    expect(observeAt).toBeGreaterThanOrEqual(0)
+    expect(pushAt).toBeGreaterThan(observeAt)
+  })
+
+  test('a remote that moved underneath is REFUSED — this is a lease, not a force', async () => {
+    // THE TEST THAT MAKES THE FEATURE MEAN SOMETHING. Delete it and a bare `--force` passes.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const theirs = '3333333333333333333333333333333333333333'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${theirs}\trefs/heads/feat-x`)
+        if (joined.includes(' push ')) {
+          return failWith('! [rejected]   feat-x -> feat-x (stale info)\nerror: failed to push some refs')
+        }
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('stale info')
+    // Their commits survive: we never opened a PR or advanced past the refusal.
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+    // NOTHING may reach for a bare force as a fallback when the lease refuses.
+    expect(calls.some((c) => /\s--force(\s|$)/.test(c))).toBe(false)
+  })
+
+  test('a first push of a new card still works — an absent remote branch leases the EMPTY value', async () => {
+    // Empty is meaningful to git ("this ref must not exist"), not a missing argument. Without
+    // this case the lease fix would regress every brand-new card in order to rescue rebased ones.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    let lsRemotes = 0
+    let fires = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head } }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? '' : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.failure_reason ?? '').not.toContain('could not push')
+    // Asserted against the ARGUMENT, not the joined string — a trailing-space match would pass
+    // for `…:<sha>` too and quietly stop testing the empty case.
+    expect(h.hostCalls.some((c) => c.includes('--force-with-lease=refs/heads/feat-x:'))).toBe(true)
+  })
+
+  test("a failed push reports git's own words instead of only the branch name", async () => {
+    // The sibling of #240, in brand-new code. #240 removed a message that ASSERTED a cause it
+    // never measured; this one MEASURED the cause and threw it away. Recovering that one line
+    // cost a DB read, a hand merge-base comparison and a credentialed dry-run push.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: head } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
+        if (joined.includes(' push ')) return failWith('! [rejected] feat-x -> feat-x (non-fast-forward)')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('non-fast-forward')
+    // …and it stays distinguishable from the OTHER publish failures by reading it alone.
+    expect(final.failure_reason).toContain('could not push')
+    expect(final.failure_reason).not.toContain('could not confirm')
   })
 
   test('an empty base-to-head diff terminates before review re-fire', async () => {
