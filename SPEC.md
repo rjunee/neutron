@@ -310,6 +310,21 @@ Each carries an acceptance criterion; all in `neutron-open`.
 - [ ] **Native-crash visibility for the mobile app.** App remote diagnostics (2026-07-27) covers JS errors
       only; a crash before the JS bundle runs produces nothing. Acceptance: a native process-start crash on
       the owner's device is diagnosable without a USB cable.
+- [ ] **A deploy request must resolve the ref against the REMOTE, not the host's frozen mirror**
+      (observed 2026-08-14, first real use of the host-deploy tool). `host_deploy_request` is wired and
+      `enabled: true`. Asked to deploy `origin/main` two minutes after a merge, it answered
+      `status: "up_to_date", target_sha: 9617a9e4` — truthfully, and uselessly: it resolved `origin/main`
+      inside the host checkout, and that checkout has **never fetched**. MEASURED: `.git/FETCH_HEAD` is
+      absent, its `origin/main` equals its own `HEAD` (`9617a9e4`), and `git cat-file -e` on the freshly
+      merged sha reports the object is unknown to it. So the ref the owner names and the ref the host
+      resolves are different things whenever anything has landed since the last deploy — which is exactly
+      when a deploy is wanted. THE FAILURE MODE IS THE DANGEROUS KIND: not an error, a confident
+      "already up to date", so the owner reasonably concludes the merge is live when it is not. That is the
+      same shape as the terminal-reason defect (#240) — a confidently-worded answer that stops the reader
+      looking further. Acceptance: the request FETCHES (or resolves against the remote) before comparing;
+      `up_to_date` is returned only when the target sha is genuinely reachable and deployed; and a stale or
+      unfetchable ref is named as such rather than reported as parity. A test pins that an unknown-to-the-host
+      sha can never produce `up_to_date`.
 - [ ] **A deploy must not kill the builds in flight — trident is presently its own worst enemy**
       (owner-directed 2026-08-13, from the forensics on run `bb3c8c8e`). The inner workflow is not its own
       process: it runs detached inside a WARM `claude` REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`,
