@@ -479,6 +479,7 @@ import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import {
   deriveProjectActivity,
+  scanItemsForRailSignals,
   truncatePreview,
   type ProjectActivity,
   type PreviewFrom,
@@ -2228,34 +2229,39 @@ export function buildOpenGraphComposer(
       live_runs: number
     } => {
       let liveRunCount = 0
+      let hasStalledLiveRun = false
       let hasInlineActive = false
       let hasFailedNotDone = false
-      let hasStalledLiveRun = false
       try {
         const scopeKey = workBoardScopeKey(project_slug, project_id)
         const nowMs = Date.now()
-        for (const item of workBoardStore.list(scopeKey)) {
-          if (item.inline_active) hasInlineActive = true
+        const items = workBoardStore.list(scopeKey)
+        // Item-level signals (pure, unit-tested via scanItemsForRailSignals):
+        // catches runless-but-failed items (cleared link / research/dispatch)
+        // AND still-bound terminal-failed runs. See open/project-rail.ts.
+        ;({ hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+          items,
+          (runId) => {
+            const run = boardRunStore.get(runId)
+            return run !== null && run.phase === 'failed'
+          },
+        ))
+        // Run-level signals: liveRunCount + hasStalledLiveRun require the full
+        // run row; computed here where the DB is available.
+        for (const item of items) {
           const runId = item.linked_run_id
           if (runId === null || runId.length === 0) continue
           const run = boardRunStore.get(runId)
           if (run === null) continue
-          if (isTerminalPhase(run.phase)) {
-            // A still-bound terminal run: `failed` on a not-done item = attention
-            // (the brief pre-reconcile window; a `done` run just completes it).
-            if (run.phase === 'failed' && item.status !== 'done') hasFailedNotDone = true
-            continue
-          }
+          if (isTerminalPhase(run.phase)) continue
           // Live (non-terminal) bound run.
           liveRunCount++
           if (deriveRunProgress(run, nowMs).stalled) hasStalledLiveRun = true
         }
-        // Durable failure signal — a failed build is detached from its item on
-        // terminal reconcile, so the bound-item check above only catches the brief
-        // pre-reconcile window. The run ROW persists: if this scope's MOST RECENT
-        // run is `failed` (not yet superseded by a fresh live/done run) AND the
-        // project still has an actionable (not-done) item, keep surfacing
-        // `attention` (Codex review [P2]).
+        // Secondary failure net: covers deleted items, re-bound retries, or a
+        // run-row read miss. If this scope's MOST RECENT run is `failed` (not
+        // superseded by a fresh live/done run) AND the project still has an
+        // actionable (not-done) item, keep surfacing `attention`.
         if (!hasFailedNotDone) {
           const latest = boardRunStore.latestByProjectScope(scopeKey)
           if (latest !== null && latest.phase === 'failed') {

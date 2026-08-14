@@ -11,43 +11,16 @@
  * activity precedence + the preview truncation are unit-testable in isolation.
  */
 
-/** The single per-project rail state. `attention` outranks `working`. */
-export type ProjectActivity = 'idle' | 'working' | 'attention'
-
-/** Who sent the previewed message, for the rail's `You: ` prefix. */
-export type PreviewFrom = 'user' | 'agent' | null
-
-/**
- * The observable signals that decide a project's activity. The composer collects
- * these from the project's Work-Board items + their bound runs + its live chat
- * turn; this function applies the precedence.
- */
-export interface ProjectActivitySignals {
-  /** A live chat turn is in progress for this project (composer-tracked). */
-  chatTurnInProgress: boolean
-  /** Count of the project's board items bound to a LIVE (non-terminal) run. */
-  liveRunCount: number
-  /** Any board item is `inline_active` (an inline agent action running). */
-  hasInlineActive: boolean
-  /** Any NOT-done board item whose bound run is `failed` (needs attention). */
-  hasFailedNotDone: boolean
-  /** Any live bound run has stalled past the display stall threshold. */
-  hasStalledLiveRun: boolean
-}
-
-/**
- * Derive a project's rail activity from its signals. Precedence (spec):
- *   attention  — a bound run failed on a not-done item, OR a live run stalled.
- *   working    — a live chat turn, OR any live run, OR an inline-active item.
- *   idle       — none of the above.
- * `attention` deliberately WINS over `working`: a failed/stalled build is more
- * important to surface than the fact that something is also running.
- */
-export function deriveProjectActivity(s: ProjectActivitySignals): ProjectActivity {
-  if (s.hasFailedNotDone || s.hasStalledLiveRun) return 'attention'
-  if (s.chatTurnInProgress || s.liveRunCount > 0 || s.hasInlineActive) return 'working'
-  return 'idle'
-}
+export type {
+  ProjectActivity,
+  PreviewFrom,
+  ProjectActivitySignals,
+  RailScanItem,
+} from '@neutronai/contracts/project-rail.ts'
+export {
+  deriveProjectActivity,
+  scanItemsForRailSignals,
+} from '@neutronai/contracts/project-rail.ts'
 
 /** Default rail-preview budget (chars) — the rail's second line is short. */
 export const PREVIEW_MAX_CHARS = 90
