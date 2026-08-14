@@ -991,6 +991,44 @@ describe('orchestrator — orphan recovery', () => {
     expect(h.inputs[0]!.resume_checkpoint).toBe('forge-done')
   })
 
+  test('the checkpoint travels WITH the commit it was recorded against + its findings', async () => {
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const head = 'a'.repeat(40)
+    await store.update(run.id, {
+      subagent_run_id: 'stale-id-from-prior-process',
+      subagent_status: 'running',
+      pr: 42,
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_head: head,
+      inner_checkpoint_findings: '[{"severity":"blocker","title":"boom","evidence":"a.ts:1"}]',
+    })
+
+    await runToTerminal(h, run.id)
+    expect(h.inputs).toHaveLength(1)
+    // Without the OID the workflow cannot tell whether the branch still holds the
+    // code that verdict was about, so it would have to rebuild — which is exactly
+    // what every relaunch did before this.
+    expect(h.inputs[0]!.resume_checkpoint_head).toBe(head)
+    expect(h.inputs[0]!.resume_findings).toContain('boom')
+  })
+
+  test('a row with a checkpoint but NO recorded OID threads null (old data cannot unlock the fast path)', async () => {
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, {
+      subagent_run_id: 'stale-id-from-prior-process',
+      subagent_status: 'running',
+      pr: 42,
+      inner_checkpoint: 'argus-approved',
+    })
+
+    await runToTerminal(h, run.id)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint_head ?? null).toBeNull()
+    expect(h.inputs[0]!.resume_findings ?? null).toBeNull()
+  })
+
   test("'wait' policy leaves the orphan untouched (no fire, no advance)", async () => {
     const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE' } }), on_orphaned_session: 'wait' })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })

@@ -116,6 +116,21 @@ const {
   dbPath,
   runId,
   resumeCheckpoint = null,
+  // MID-LOOP RESUME — the branch head OID the resumed checkpoint was RECORDED
+  // AGAINST (`code_trident_runs.inner_checkpoint_head`, written in the same
+  // UPDATE as the checkpoint name), threaded by the launcher. This is the ONLY
+  // input that can unlock a resume fast path, and the ONLY source `reviewedHead`
+  // may ever be set from on a resume — see `classifyResume`. Null/absent (a
+  // checkpoint written before the OID was recorded, or a launcher that does not
+  // thread it) → the prior work is treated as being about DIFFERENT code and the
+  // run rebuilds + re-reviews, exactly as it did before this existed.
+  resumeCheckpointHead = null,
+  // MID-LOOP RESUME — the synthesised findings the resumed `argus-request-changes`
+  // checkpoint was recorded with (`code_trident_runs.inner_checkpoint_findings`,
+  // already decoded to an array by the launcher). They are what a resumed fix
+  // round fixes; absent/empty → the run re-reviews instead of sending Forge in
+  // with nothing to act on. NEVER read for any other checkpoint.
+  resumeFindings = null,
   // Per-project Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
   // review. Threaded from the outer loop (resolved from NEUTRON_CODEX_HOME env /
   // per-project config; Part B populates it via the admin panel). ABSENT (null/'')
@@ -828,7 +843,6 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.
 4. ${forgePushStep(reenter)}
-   Any cross-model review is best-effort and must NEVER gate publication or make you yield your turn.
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
 6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
@@ -937,21 +951,21 @@ function briefIntegrity(text) {
  * ordered to push and open a PR anyway did exactly what the order implied: it wrote the
  * whole feature, could not deliver it, and the round came back indistinguishable from
  * one that produced nothing. So the contract is split at the publish boundary — the
- * build commits locally, and the durable outer loop publishes with its host-only
- * credential. Telling the build to attempt it anyway
+ * build commits locally, and the WRAPPER, which runs outside the sandbox where the
+ * credential lives, pushes and opens the PR. Telling the build to attempt it anyway
  * would burn tokens on a command that cannot succeed and end in a report of a PR that
  * does not exist.
  */
 function codexBuildCoda() {
   const publish = isPr
     ? `
-- STEP 4'S PUSH AND PR ARE NOT YOURS, and this REPLACES that step: COMMIT LOCALLY on ${forgeBranch} and stop there. Do NOT run \`git push\` and do NOT run \`gh\` at all. The durable outer loop publishes after this process tree exits, then independently measures \`origin\`. Your commit is the deliverable; publishing it is someone else's step.`
+- STEP 4'S PUSH AND PR ARE NOT YOURS, and this REPLACES that step: COMMIT LOCALLY on ${forgeBranch} and stop there. Do NOT run \`git push\` and do NOT run \`gh\` at all. You are running without a GitHub credential — that is deliberate, not an oversight to work around — so a push or a \`gh pr create\` from here cannot authenticate and will fail. The wrapper that launched you does both from OUTSIDE this sandbox after you exit, and then measures what actually landed. Your commit is the deliverable; publishing it is someone else's step.`
     : ''
   return `
 
 HOW TO REPORT (you are running as \`codex exec\` and nothing reads a report from you — this REPLACES steps 5 and 6 above):
 - There is nothing to "return via the schema" and no last-lines block to emit. Say what you did in plain prose and stop.
-- Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\` after you exit and reports the local commit to the durable outer loop. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
+- Your work is read back from the REPOSITORY, not from your report: the wrapper that launched you runs \`git rev-parse\`, \`git ls-remote\` and \`gh pr list\` after you exit and reports what it finds. So a commit you did not make is a commit that did not happen — no summary can substitute for it. Printing a NEUTRON_CODEX_BUILD_* line yourself changes nothing; the wrapper writes its measurements somewhere you are not.${publish}
 - Step 5's diff path is an EXAMPLE and this REPLACES it: write the branch diff to EXACTLY ${codexBuildDiffFile()}, which is the only path the wrapper looks at.
 - Stay on branch ${forgeBranch}. The wrapper looks for that branch by name; work landed on any other branch is invisible to the rest of the run.`
 }
@@ -1314,6 +1328,27 @@ ${plan.implementationPlan}
 // +%FT%TZ` — Date.now()/new Date() are not available in a workflow script).
 // UPDATE semantics are unchanged from the old inline SQL. No-ops when the
 // launcher did not thread a dbPath/runId (e.g. a dry source check).
+// A CHECKPOINT RECORDS WHICH COMMIT IT APPLIED TO, NOT JUST ITS OWN NAME.
+//
+// `opts.head` is the branch head OID this phase's work produced (Forge's reported
+// `commitSha`) or judged (the reviewed head), and it goes into the SAME
+// checkpoint.sh invocation as the name, so the pair is written by ONE atomic
+// UPDATE and can never drift apart. Without it a resumed run knows only that
+// *some* code reached this phase — which is why every resume before this had to
+// distrust the checkpoint and rebuild (and why `argus-approved` had to fail closed
+// at merge, #545). With it, `classifyResume` can compare the recorded OID to the
+// live head and trust the prior work ONLY when they are the same commit.
+//
+// The head field is written on EVERY checkpoint, INCLUDING as an empty string when
+// the phase could not report a sha. Writing it unconditionally is the point: a
+// skipped write would leave the PREVIOUS checkpoint's OID sitting next to the new
+// name, and a resume would then judge this phase against a commit that belongs to
+// an earlier one. Empty simply reads as "no recorded OID" → rebuild.
+//
+// `opts.findings` (the synthesised findings this checkpoint was recorded with) is
+// written the same way and for the same reason — always, so it is never stale —
+// through the temp-file + `readfile()` indirection `writeTerminalResult` uses, so
+// the JSON's own quotes cannot break the sqlite argument.
 async function checkpoint(name, opts) {
   if (!dbPath || !runId) return
   const o = opts || {}
@@ -1321,10 +1356,14 @@ async function checkpoint(name, opts) {
   if (o.pr !== undefined && o.pr !== null) fields.push(`pr ${Number(o.pr)}`)
   fields.push(`branch ${shSingleQuote(forgeBranch)}`)
   fields.push(`inner_checkpoint ${shSingleQuote(name)}`)
+  fields.push(`inner_checkpoint_head ${shSingleQuote(normalizeOid(o.head))}`)
+  const findingsTmp = `/tmp/trident-checkpoint-findings-${runId}.json`
+  fields.push(`inner_findings_file ${shSingleQuote(findingsTmp)}`)
   fields.push(`subagent_status running`)
+  const findingsJson = JSON.stringify(Array.isArray(o.findings) ? o.findings : [])
   await agent(
     `Checkpoint step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "checkpoint ${name} ok":
-bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${fields.join(' ')}`,
+printf '%s' ${shSingleQuote(findingsJson)} > ${shSingleQuote(findingsTmp)} && bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${fields.join(' ')}`,
     withModel({ label: `checkpoint:${name}`, phase: 'Build' }),
   )
 }
@@ -1848,6 +1887,107 @@ function roundLanded(headBefore, headAfter) {
   if (before.length === 0) return true
   if (after.length === 0) return false
   return after !== before
+}
+
+/** A FULL 40-hex OID, or ''. Anything shorter is refused rather than tolerated:
+ *  the outer merge pins on this value through `reviewedHeadOid` (merge.ts), which
+ *  applies the SAME `^[0-9a-f]{40}$` test and refuses an abbreviated sha, so a
+ *  resume that accepted one would unlock a fast path whose result cannot merge. */
+const FULL_OID = /^[0-9a-f]{40}$/
+function normalizeOid(value) {
+  const s = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return FULL_OID.test(s) ? s : ''
+}
+
+/**
+ * WHAT A RESUMED CHECKPOINT MAY UNLOCK — decided from the COMMIT it was recorded
+ * against, never from its name.
+ *
+ * THE PROBLEM. A lane's host process dies mid-loop (the shared account hits its
+ * session limit, the 429 ends the session). The branch and its pushed commits
+ * survive, so no code is lost — but the relaunched run rebuilt and re-reviewed
+ * from zero, re-paying for every review round already bought. Fifteen lanes died
+ * that way in three waves on 2026-08-12; several had completed round-1 review and
+ * one was at fix round 7.
+ *
+ * WHY THE CHECKPOINT NAME ALONE IS NOT ENOUGH, AND WHY DISTRUSTING IT WAS RIGHT.
+ * A verdict is about a COMMIT. Reviewers approved commit A; if anything pushed B
+ * into the crash window, "the last checkpoint said approved" is a claim about code
+ * no reviewer ever saw. Until `inner_checkpoint_head` existed the row recorded no
+ * OID at all, so a resumed run could not tell A from B — which is exactly why the
+ * only safe resume was to rebuild, and why the `argus-approved` shortcut recorded
+ * NO reviewed head and let the merge fail closed (#545).
+ *
+ * SO THE COMPARISON, NOT THE NAME, IS THE GATE:
+ *   • recorded OID == live head → the prior verdict is about EXACTLY this code;
+ *     skip forward to the next step and (only here) carry the RECORDED reviewed
+ *     OID as `reviewedHead`.
+ *   • recorded OID != live head → the verdict is about different code. RE-REVIEW.
+ *   • no recorded OID (a checkpoint written before it was recorded), a
+ *     not-full-OID value, or an unreadable live head → treated as MOVED. Old data
+ *     must not unlock the new fast path, and "could not tell" is never "unchanged".
+ *   • an UNKNOWN checkpoint name → rebuild. `ralph-task-built` lands here on
+ *     purpose: that iteration deliberately built one task and handed back for a
+ *     re-fire, so the next iteration must PLAN and BUILD the next task, not review.
+ *
+ * THE COMPARISON HAPPENS HERE, IN CODE, exactly like `roundLanded`: the agent is
+ * asked for one fact (the head sha) and this function decides what it means. And
+ * the live head is only ever an INPUT to the comparison — the value a fast path
+ * goes on to call `reviewedHead` is the RECORDED one, never the probe's answer.
+ * That distinction is the whole of #545: a probe can return a commit that was
+ * pushed after the review, and pinning the merge to it would certify unreviewed
+ * code with a safety label on it.
+ */
+function classifyResume(input) {
+  const name = typeof input.checkpoint === 'string' ? input.checkpoint.trim() : ''
+  if (name.length === 0) return { mode: 'rebuild', reason: 'no-checkpoint' }
+  // A merge is terminal even though its head branch may already be deleted and
+  // therefore cannot participate in the OID comparison used by other modes.
+  if (name === 'pr-merged') return { mode: 'merged', reason: 'already-merged' }
+  const recorded = normalizeOid(input.recordedHead)
+  if (recorded.length === 0) return { mode: 'rebuild', reason: 'no-recorded-head' }
+  const current = normalizeOid(input.currentHead)
+  if (current.length === 0) return { mode: 'rebuild', reason: 'head-unreadable' }
+  if (current !== recorded) return { mode: 'rebuild', reason: 'head-moved' }
+  // From here the recorded OID and the live head are the SAME commit, so the
+  // prior phase's outcome is about exactly the code this run is looking at.
+  if (name === 'argus-approved') return { mode: 'approved', reason: 'head-unchanged' }
+  if (/^outer-published:[0-9a-f]{40}:\d+:\d+$/.test(name)) {
+    return { mode: 'review', reason: 'outer-published-head-unchanged' }
+  }
+  if (name === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(name)) {
+    // A fix round with no findings is a Forge agent told to fix nothing, which is
+    // worse than paying for the review again — so missing findings re-review.
+    return input.hasFindings
+      ? { mode: 'fix', reason: 'head-unchanged' }
+      : { mode: 'review', reason: 'head-unchanged-no-findings' }
+  }
+  // `forge-done` = built but never judged; `fix-round-N` = fixed but never
+  // re-judged. Both mean the head in front of us has NO verdict → review it.
+  if (name === 'forge-done' && input.ralph === true) {
+    return { mode: 'rebuild', reason: 'ralph-progress-unknown' }
+  }
+  if (name === 'forge-done' || /^fix-round-\d+$/.test(name)) {
+    return { mode: 'review', reason: 'head-unchanged' }
+  }
+  return { mode: 'rebuild', reason: 'unknown-checkpoint' }
+}
+
+/**
+ * The round number a `fix-round-N` checkpoint encodes (0 for any other name).
+ *
+ * A resume that skips forward must also inherit the ROUND BUDGET already spent,
+ * or the cap stops bounding anything: a lane that crashed at fix round 7 would
+ * restart its counter at 1 and be handed a fresh `maxRounds` rounds, which is how
+ * a bounded loop becomes an unbounded one across crashes.
+ */
+function parseResumeRound(name, roundCap) {
+  const m = /^(?:fix-round-|argus-request-changes-round-)(\d+)$/.exec(
+    typeof name === 'string' ? name.trim() : '',
+  )
+  if (m === null) return 0
+  const n = Number(m[1])
+  return Number.isSafeInteger(n) && n > 0 && n <= roundCap ? n : 0
 }
 
 /**
@@ -2374,6 +2514,50 @@ ${cmd}`,
   return (res && typeof res.head === 'string' ? res.head : '').trim()
 }
 
+/** The one fact the resume-diff step returns: how big the diff it wrote is. */
+const RESUME_DIFF_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['bytes'],
+  properties: {
+    /** Size of the written diff in bytes, or 0 when the command produced none. */
+    bytes: { type: 'number' },
+  },
+}
+
+/**
+ * Regenerate the review diff for a resumed run, FROM THE RECORDED OID.
+ *
+ * A resume that skips the build has no Forge result, so it has no `diffFile`
+ * either — and the reviewers need one. The diff is therefore taken against the
+ * recorded commit BY OID (`git diff <base>..<oid>`), never against the branch
+ * NAME: the branch is a moving target, and a push landing between the head
+ * comparison and this command would silently swap the code under review while the
+ * run went on believing it had verified the head. Naming the OID makes those two
+ * steps talk about the same commit by construction — the same property
+ * `forge.commitSha` + `forge.diffFile` have because one agent reports both.
+ *
+ * An empty/failed diff returns '' and the caller falls back to a full rebuild: a
+ * resume that cannot show the reviewers the code must not pretend to review it.
+ */
+async function writeResumeDiff(headOid) {
+  const out = `/tmp/trident-${slug}-resume-${headOid.slice(0, 12)}.diff`
+  // In pr mode the recorded OID may not be in the local object store yet (the run
+  // that pushed it died on another process); fetch first, tolerating failure so
+  // local mode and an already-present object both still work.
+  const fetchStep = isPr
+    ? `(git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true) && `
+    : ''
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff ${shSingleQuote(baseBranch)}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
+  const res = await agent(
+    `Run EXACTLY this single Bash command and report the number it prints (the diff's size in bytes) via the schema. Report bytes=0 if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any other file.
+${cmd}`,
+    withModel({ label: 'resume-diff', phase: 'Build', schema: RESUME_DIFF_SCHEMA }),
+  )
+  const bytes = res && typeof res.bytes === 'number' && Number.isFinite(res.bytes) ? res.bytes : 0
+  return bytes > 0 ? out : ''
+}
+
 /**
  * Ask GitHub what the PR's checks are doing. One command, output reported verbatim.
  *
@@ -2437,7 +2621,11 @@ function reviewPreconditionDeferred(readiness) {
   }
 }
 
-async function runReviewRound(diffFile, round, prForReview) {
+async function runReviewRound(diffFile, round, prForReview, paidReview = null) {
+  // A matching recorded REQUEST_CHANGES checkpoint already paid for this panel.
+  // Its findings are the input to the next fix, so neither readiness nor review
+  // is dispatched again.
+  if (paidReview !== null) return paidReview
   const gated = await reviewWithPreconditions({
     probe: (attempt) => probeReviewReadiness(prForReview, round, attempt),
     spend: () => reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, prForReview)),
@@ -3037,13 +3225,44 @@ let pr = prNumber
 let lastReviewRecord = 'No review round completed.'
 
 try {
-  // IDEMPOTENT CRASH-RESUME (ISSUES #563): a prior process already established that
-  // this PR is MERGED. Re-entering the build would be the same waste one process
-  // later — worse, it would re-build onto a branch the merge deleted. Re-write the
-  // terminal result (the prior process may have crashed before the harvest) and
-  // stop. CHECKED FIRST because it is the strongest fact available: a merged PR
-  // cannot become unmerged, so no later phase can change this answer.
-  if (resumeCheckpoint === 'pr-merged') {
+  phase('Build')
+  log(`trident-v2 inner: slug=${slug} ralph=${ralph} maxRounds=${maxRounds} resume=${resumeCheckpoint} budget.total=${String(budget.total)} spent=${budget.spent()}`)
+
+  // ── MID-LOOP RESUME ─────────────────────────────────────────────────────────
+  // A relaunched run may skip forward past work a dead process already paid for —
+  // but ONLY over code the prior phase's outcome is actually about. The decision
+  // is `classifyResume`'s (read its docblock: the comparison, not the checkpoint
+  // name, is the gate); everything here is the plumbing that gives it the two
+  // facts it compares.
+  const checkpointText = resumeCheckpoint
+  const publishedResume = typeof checkpointText === 'string'
+    ? checkpointText.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
+    : null
+  // The outer publisher's encoded OID is the newer, independently witnessed
+  // record and takes precedence over the companion checkpoint column. It still
+  // must equal the live head in classifyResume before any fast path opens.
+  const recordedResumeHead = normalizeOid(publishedResume?.[1] ?? resumeCheckpointHead)
+  const resumeFindingsList = Array.isArray(resumeFindings) ? resumeFindings : []
+  // The head probe is skipped entirely when there is no recorded OID to compare
+  // it against — with nothing to compare, the answer is 'rebuild' whatever the
+  // branch head says, and the probe would only cost an agent.
+  const currentHeadAtResume =
+    resumeCheckpoint !== null && recordedResumeHead.length > 0 ? await readBranchHead('resume') : ''
+  const resumePlan = classifyResume({
+    checkpoint: resumeCheckpoint,
+    recordedHead: recordedResumeHead,
+    currentHead: currentHeadAtResume,
+    hasFindings: resumeFindingsList.length > 0,
+    ralph,
+  })
+  let resumeMode = resumePlan.mode
+  if (resumeCheckpoint !== null) {
+    log(
+      `trident-v2 resume: checkpoint=${resumeCheckpoint} recorded=${recordedResumeHead || '(none)'} head=${currentHeadAtResume || '(unread)'} → ${resumeMode} (${resumePlan.reason})`,
+    )
+  }
+
+  if (resumeMode === 'merged') {
     log(`trident-v2 resume: prior run recorded 'pr-merged' for ${forgeBranch} — the change already shipped; nothing to build, review or merge`)
     finalVerdict = 'APPROVE'
     const resumeMerged = mergedTerminalResult(pr, forgeBranch, 0)
@@ -3051,41 +3270,46 @@ try {
     return resumeMerged
   }
 
-  // IDEMPOTENT CRASH-RESUME (C2): a prior run already reached argus-approved —
-  // the PR is built + reviewed + approved; skip build+review entirely and let
-  // the OUTER loop merge. (Cleanup still runs in finally — idempotent.)
-  if (resumeCheckpoint === 'argus-approved') {
-    log(`trident-v2 resume: prior run reached 'argus-approved' for ${forgeBranch} — skipping build+review`)
+  // A prior run reached argus-approved AND the branch head is still the very
+  // commit that verdict was recorded against — the PR is built, reviewed and
+  // approved; skip build+review entirely and let the OUTER loop merge. (Cleanup
+  // still runs in finally — idempotent.)
+  if (resumeMode === 'approved') {
+    log(`trident-v2 resume: prior run reached 'argus-approved' for ${forgeBranch} at ${recordedResumeHead} (head unchanged) — skipping build+review`)
     finalVerdict = 'APPROVE'
-    // NO `reviewedHead` ON THIS PATH — DELIBERATELY, so the merge FAILS CLOSED (#545).
+    // `reviewedHead` HERE IS THE RECORDED OID, AND IT MAY ONLY EVER BE THAT (#545).
     //
-    // This shortcut runs precisely when the prior process reached 'argus-approved'
-    // but never got its terminal result harvested — so BY CONSTRUCTION there is no
-    // recorded reviewed OID anywhere: the only place one is written is the terminal
-    // result this resume is standing in for. Probing the head HERE and calling the
-    // answer `reviewedHead` would be a LIE with a safety label on it: reviewers
-    // approved commit A, someone pushes B into the crash window, resume reads B,
-    // and the outer merge pins to B and SUCCEEDS — shipping a commit no reviewer
-    // saw while `--match-head-commit` certifies it as reviewed. A pinned merge of
-    // an unreviewed commit is WORSE than an unpinned one, because the pin
-    // manufactures confidence nobody earned.
+    // This shortcut used to record NOTHING, so the merge failed closed — correctly,
+    // because the row carried no OID at all and the shortcut could therefore not
+    // tell whether the head in front of it was the approved commit. Probing the
+    // head and calling the answer `reviewedHead` would have been a lie with a
+    // safety label on it: reviewers approve commit A, someone pushes B into the
+    // crash window, resume reads B, and the outer merge pins to B and SUCCEEDS —
+    // shipping a commit no reviewer saw while `--match-head-commit` certifies it as
+    // reviewed. A pinned merge of an unreviewed commit is WORSE than an unpinned
+    // one, because the pin manufactures confidence nobody earned.
     //
-    // So this path records nothing. `reviewedHeadOid` returns null, `mergePr`
-    // refuses, and the run fails LOUDLY. That is the same fail-closed rule the
-    // rest of #545 follows: a merge we cannot prove was reviewed is a merge we do
-    // not make.
-    //
-    // HOW THAT RUN IS RECOVERED, precisely — the failure is loud and ONE-SHOT, not
-    // a silent gate that never fires again. The refusal puts the run in `failed`,
-    // which is TERMINAL, so it is never re-ticked or retried into a loop (and
-    // orphan redispatch is separately bounded to one per run per process). Note
-    // that recovery is a FRESH run, not a re-fire of this row: this row's
-    // `inner_checkpoint` is still 'argus-approved', so re-dispatching IT would
-    // re-enter this same shortcut and refuse again — correctly, since there is
-    // still no reviewed OID. A new run starts with a null checkpoint and so does
-    // a real build + review, which is the only thing that can legitimately
-    // produce one.
-    const resumeResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'APPROVE', round: 0, checkpoint: 'argus-approved' }
+    // What changed is NOT that rule — it is that the approving checkpoint now
+    // RECORDS the OID it approved (`inner_checkpoint_head`, written in the same
+    // atomic UPDATE as the checkpoint name). So this path can pin to a commit some
+    // reviewer demonstrably read. The value below comes from that record; the live
+    // probe only decided whether this branch was allowed to run at all, and if the
+    // head had moved `classifyResume` would have sent the run to rebuild +
+    // re-review instead. A resume can therefore still never produce an APPROVE for
+    // code that was not reviewed under that verdict — and `--match-head-commit`
+    // re-checks the same equality at merge time, so a push landing after this point
+    // still fails the merge LOUDLY rather than shipping.
+    const resumeResult = {
+      ok: true,
+      prNumber: pr,
+      branch: forgeBranch,
+      verdict: 'APPROVE',
+      round: 0,
+      checkpoint: 'argus-approved',
+      reviewedHead: recordedResumeHead,
+      remainingTasks: 0,
+      blockKind: 'none',
+    }
     // Re-write the terminal result so a re-fired run whose prior process crashed
     // BEFORE harvesting still surfaces a harvest-ready `inner_result` (idempotent
     // — the merge gate downstream is a no-op once the run is already terminal).
@@ -3093,44 +3317,88 @@ try {
     return resumeResult
   }
 
-  phase('Build')
-  log(`trident-v2 inner: slug=${slug} ralph=${ralph} maxRounds=${maxRounds} resume=${resumeCheckpoint} budget.total=${String(budget.total)} spent=${budget.spent()}`)
+  // A resume that skips the build has no Forge result and therefore no diff file;
+  // regenerate one from the RECORDED OID (never from the branch name — see
+  // `writeResumeDiff`). If that cannot be produced there is nothing to show the
+  // reviewers, so the run falls back to a full rebuild rather than reviewing air.
+  let resumeDiff = ''
+  if (resumeMode === 'review' || resumeMode === 'fix') {
+    resumeDiff = publishedResume !== null
+      ? `/tmp/trident-outer-published-${runId}.diff`
+      : await writeResumeDiff(recordedResumeHead)
+    if (resumeDiff.length === 0) {
+      log(`trident-v2 resume: could not regenerate a diff for ${recordedResumeHead} — falling back to a full rebuild`)
+      resumeMode = 'rebuild'
+    }
+  }
 
-  // REUSE an existing PR/branch from a prior crashed run — NEVER open a duplicate.
-  // (Step 1 + step 4 of the contract already encode the re-entry; this is the
-  // explicit reminder. Only meaningful in pr-mode — local mode has no PR.)
-  const reuseNote =
-    isPr && (pr !== null || resumeCheckpoint !== null)
-      ? `\n\nRESUME: the durable outer loop already owns PR #${pr ?? '?'} and branch ${forgeBranch}. Commit to that SAME local branch. Do NOT push and do NOT run \`gh\`; the outer loop reuses the PR.`
-      : ''
   // P-F2 — the Fable ORCHESTRATOR plans FIRST (once per Ralph iteration): it
   // regenerates the plan, picks the single top task, and emits its execution spec
   // + a complexity tag that ROUTES the executor (mechanical→Sonnet, reasoning→
   // Opus). Only in Ralph mode; a plain (non-ralph) task has no plan doc and
   // forge:build executes it directly (routed to Opus by the missing-tag default).
   let complexityTag = null
-  let ralphNote = ''
   // RALPH RE-FIRE (#362) — the count of tasks still UNCHECKED after the one this
   // iteration builds. >0 means the outer loop must re-fire a FRESH inner iteration
   // for the next task instead of merging after task 1 (the bug this fixes). Stays 0
   // for non-Ralph (single-task) runs, which never re-fire.
   let ralphRemaining = 0
-  const publishedResume = typeof resumeCheckpoint === 'string'
-    ? resumeCheckpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
-    : null
-  if (publishedResume !== null) round = Number(publishedResume[3])
-  if (ralph === true) {
-    if (publishedResume !== null) {
-      ralphRemaining = Number(publishedResume[2])
-    } else {
+  if (publishedResume !== null) {
+    round = Number(publishedResume[3])
+    ralphRemaining = Number(publishedResume[2])
+  }
+  // The diff the reviewers read, the branch head the did-this-round-land check
+  // baselines against, and the commit the merge is pinned to. Filled in by the
+  // build below, or by the resume that skipped it.
+  let diffFile = ''
+  let branchHead = ''
+  let reviewedHead = ''
+  let roundLostItsWork = null
+  let roundLostItsDiff = null
+
+  if (resumeMode === 'review' || resumeMode === 'fix') {
+    // ── SKIP THE BUILD ────────────────────────────────────────────────────────
+    // The recorded OID and the live branch head are the same commit, so the code
+    // a prior process built (`forge-done`) or fixed (`fix-round-N`) is exactly the
+    // code in front of this run. Re-Forging it would spend a whole build to
+    // re-derive a diff that already exists — the waste this resume exists to stop.
+    //
+    // In Ralph mode this ALSO skips `plan:fable`: the plan step exists to choose
+    // the next task to BUILD, and no build runs here. (A Ralph iteration that
+    // still owes tasks checkpoints `ralph-task-built`, which `classifyResume`
+    // deliberately sends to rebuild, so this path only ever picks up an iteration
+    // whose building was already done.)
+    diffFile = resumeDiff
+    branchHead = recordedResumeHead
+    // A RECORDED OID — the same rule as the build path: the commit named here is
+    // the one whose code was written out for the reviewers to read (the diff above
+    // was generated FROM this OID), never whatever a live probe happened to see.
+    reviewedHead = recordedResumeHead
+    // Inherit the round budget already spent, so a lane resumed at fix round 7
+    // gets the rounds it has left rather than a fresh allowance — a bounded loop
+    // must not become unbounded by crashing. Only `fix-round-N` carries a round in
+    // its name; `forge-done` starts at round 1, while a recorded
+    // `argus-request-changes-round-N` verdict retains the round that bought it.
+    round = Math.max(round, parseResumeRound(resumeCheckpoint, maxRounds))
+    log(`trident-v2 resume: skipping forge:build — reviewing recorded head ${recordedResumeHead} from round ${round} (diff ${diffFile})`)
+  } else {
+    // REUSE an existing PR/branch from a prior crashed run — NEVER open a duplicate.
+    // (Step 1 + step 4 of the contract already encode the re-entry; this is the
+    // explicit reminder. Only meaningful in pr-mode — local mode has no PR.)
+    const reuseNote =
+      isPr && (pr !== null || resumeCheckpoint !== null)
+        ? `\n\nRESUME: the durable outer loop already owns PR #${pr ?? '?'} and branch ${forgeBranch}. Commit to that SAME local branch. Do NOT push and do NOT run \`gh\`; the outer loop reuses the PR.`
+        : ''
+    let ralphNote = ''
+    if (ralph === true) {
       const plan = await agent(
-      planFablePrompt(resuming),
-      withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
+        planFablePrompt(resuming),
+        withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
       )
-    // NEVER continue Ralph without a plan (Codex [P2]). The old in-Forge
-    // RALPH_NOTE is gone, so a null plan (planner terminal error) would run
-    // forge:build with NO plan + NO one-task discipline — an unplanned build.
-    // Fail loudly; the catch{} persists a terminal failure result promptly.
+      // NEVER continue Ralph without a plan (Codex [P2]). The old in-Forge
+      // RALPH_NOTE is gone, so a null plan (planner terminal error) would run
+      // forge:build with NO plan + NO one-task discipline — an unplanned build.
+      // Fail loudly; the catch{} persists a terminal failure result promptly.
       if (!plan) {
         throw new Error('plan:fable returned null (planner terminal error) — refusing to run Forge without a plan in Ralph mode')
       }
@@ -3139,20 +3407,11 @@ try {
       ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
       log(`trident-v2 plan:fable → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
     }
-  }
 
-  // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
-  // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
-  // planner's complexity tag.
-  const forge = publishedResume !== null
-    ? {
-        commitSha: publishedResume[1],
-        diffFile: `/tmp/trident-outer-published-${runId}.diff`,
-        prNumber: pr,
-        branch: forgeBranch,
-        testsPassed: true,
-      }
-    : await forgeAgent(
+    // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
+    // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
+    // planner's complexity tag.
+    const forge = await forgeAgent(
       { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
       complexityTag,
       `${forgeBuildContract(resuming)}${ralphNote}${reuseNote}
@@ -3162,31 +3421,45 @@ ${task}${reflectionGuidance}`,
       'r1',
     )
 
-  if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
+    if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
+    if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
 
-  if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
+    const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
+    const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
+    diffFile = forgeDiff
+    // The baseline for the did-this-round-land check below. Round 1's own commit is
+    // the starting point; every fix round must move the branch past it.
+    branchHead = forgeSha
 
-  // C1 checkpoint — Forge done (PR + branch persisted).
-  if (publishedResume === null) await checkpoint('forge-done', { pr })
+    // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
+    // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
+    // (both are required FORGE_SCHEMA fields, so this is always populated on a
+    // healthy build). Carried out in the terminal result and passed to
+    // `--match-head-commit` at merge, so a head that moved fails LOUDLY instead of
+    // silently shipping code no reviewer saw (observed on PR #171: the head went
+    // clean → dirty mid-review).
+    //
+    // DELIBERATELY NOT A FRESH PROBE OF THE REMOTE HEAD. A commit pushed between
+    // Forge's push and the probe would be read back and recorded as `reviewedHead`,
+    // and the merge would then pin to it and SUCCEED — certifying as reviewed a
+    // commit whose code is not in the diff anyone read. That is the same lie the
+    // crash-resume shortcut was fixed to stop telling, and a pinned merge of an
+    // unreviewed commit is worse than an unpinned one because the pin manufactures
+    // confidence nobody earned. A sha that is merely STALE cannot mis-merge:
+    // `--match-head-commit` just REFUSES. Empty (Forge reported no sha) records
+    // nothing and the outer merge refuses too — fail-closed either way.
+    reviewedHead = branchHead
 
-  if (isPr && publishedResume === null) {
-    const publishHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
-    if (!/^[0-9a-f]{40}$/.test(publishHead)) {
-      throw new Error('forge:build completed without a full local commit OID for the outer publisher')
+    // C1 checkpoint — Forge done (PR + branch persisted), recorded against the
+    // commit Forge reported so a resume can tell whether this build is still the
+    // code on the branch.
+    await checkpoint('forge-done', { pr, head: branchHead })
+    if (isPr) {
+      if (!FULL_OID.test(branchHead)) throw new Error('forge:build completed without a full local commit OID for the outer publisher')
+      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: branchHead, remainingTasks: ralphRemaining }
+      await writeTerminalResult(publishResult)
+      return publishResult
     }
-    const publishResult = {
-      ok: true,
-      prNumber: null,
-      branch: forgeBranch,
-      verdict: 'REQUEST_CHANGES',
-      round,
-      checkpoint: 'forge-done',
-      publishRequested: true,
-      publishHead,
-      remainingTasks: ralphRemaining,
-    }
-    await writeTerminalResult(publishResult)
-    return publishResult
   }
 
   // ── A MERGE IS TERMINAL (ISSUES #563) ────────────────────────────────────────
@@ -3208,6 +3481,7 @@ ${task}${reflectionGuidance}`,
     return mergedResult
   }
 
+
   // ── RALPH RE-FIRE (#362) — build ONE task per fresh context ──────────────────
   // In Ralph mode with tasks still remaining after this one, the build is NOT
   // done: per the one-task-per-fresh-context discipline we must build the NEXT
@@ -3222,10 +3496,12 @@ ${task}${reflectionGuidance}`,
   // The intermediate result carries `remainingTasks` (the outer's re-fire signal)
   // and checkpoint 'ralph-task-built' — deliberately NOT 'argus-approved', so the
   // outer's merge provenance gate can never fire on an unreviewed intermediate,
-  // and a resume re-enters the branch (only 'argus-approved' short-circuits).
+  // and a resume re-enters the branch to PLAN + BUILD the next task
+  // (`classifyResume` sends this checkpoint name to rebuild however the head
+  // compares, because the next task is still unbuilt).
   if (ralph === true && ralphRemaining > 0) {
     log(`trident-v2 ralph: task built, ${ralphRemaining} task(s) remain → hand back to outer loop for re-fire`)
-    await checkpoint('ralph-task-built', { pr })
+    await checkpoint('ralph-task-built', { pr, head: branchHead })
     const refireResult = {
       ok: true,
       prNumber: pr,
@@ -3241,90 +3517,49 @@ ${task}${reflectionGuidance}`,
     return refireResult
   }
 
-  // ── ROUND 1 HAS TO HAVE LANDED SOMETHING, TOO ────────────────────────────────
-  // The fix loop already refuses to re-review a round that left no trace on the
-  // branch (`roundLanded`, below); round 1 had no equivalent, and a build that
-  // completes and produces NOTHING went straight into the review panel. Five
-  // reviewers then read an empty diff, find nothing wrong with it, and APPROVE —
-  // spending precisely the Anthropic quota this route exists to protect, on a
-  // change that does not exist. Only the outer merge's empty-`reviewedHead`
-  // refusal stopped it from shipping, and that is one gate too far down.
-  //
-  // Either fact missing is fatal, and for different reasons: with no sha the run
-  // can never merge (`reviewedHead` is empty and `--match-head-commit` has nothing
-  // to pin), and with no diff there is nothing for a reviewer to read. The codex
-  // wrapper reports both as EMPTY rather than wrong when it cannot establish them,
-  // which is what makes this check possible at all — and a Claude Forge run that
-  // returns the same emptiness is just as unbuilt, so the gate is on the shared
-  // path and not on the codex branch of it.
-  //
-  // PLACED HERE — AFTER the PR capture, the `forge-done` checkpoint and the Ralph
-  // re-fire — and each of those three is a deliberate ordering, not an accident:
-  //   • The PR number is captured FIRST so the error below can NAME the PR. A build
-  //     that opened a PR and reported no sha is the case an operator most needs the
-  //     number for, and throwing before `pr` was read left the terminal failure
-  //     unable to mention it at all.
-  //   • The checkpoint runs first so a resume re-enters the branch that exists.
-  //   • The Ralph re-fire runs first because THIS GATE GUARDS THE REVIEW PANEL, and
-  //     an intermediate Ralph task does not open one. A single task the planner
-  //     turned into a no-op is not a reason to abort a multi-task run — the outer
-  //     loop re-fires the next task, and the FINAL task still passes through here
-  //     before any reviewer is paid.
-  const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
-  const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
-  if (forgeSha === '' || forgeDiff === '') {
-    const missing = [forgeSha === '' ? 'commitSha' : null, forgeDiff === '' ? 'diffFile' : null]
-      .filter((m) => m !== null)
-      .join(' and ')
-    throw new Error(
-      `forge:build completed but produced no ${missing} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
-    )
+  // A completed final build must have both a commit to pin and a diff to review.
+  // Merge and Ralph re-fire are settled first: either can legitimately finish a
+  // build invocation without producing a reviewable diff.
+  if (resumeMode === 'rebuild') {
+    if (branchHead === '' || diffFile === '') {
+      const missing = [branchHead === '' ? 'commitSha' : null, diffFile === '' ? 'diffFile' : null]
+        .filter((m) => m !== null)
+        .join(' and ')
+      throw new Error(
+        `forge:build completed but produced no ${missing} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
+      )
+    }
+    await checkpoint('forge-done', { pr, head: branchHead })
   }
 
-  // REASSIGNED BY EACH FIX ROUND to that round's own reported path — see the fix
-  // loop. A single round-1 path reused for every panel is how a round that left no
-  // diff still got one reviewed.
-  let diffFile = forge.diffFile
-  // The baseline for the did-this-round-land check below. Round 1's own commit is
-  // the starting point; every fix round must move the branch past it.
-  let branchHead = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
-  let roundLostItsWork = null
-  // The round that committed but left no reviewable diff. Its own block kind and
-  // finding, because it is not the same fault as a round that never landed: the work
-  // IS on the branch, and telling the operator it was lost would send them recovering
-  // a worktree that has nothing they need.
-  let roundLostItsDiff = null
-
-  // THE COMMIT THE REVIEWERS ACTUALLY JUDGE (#545) IS THE ONE THE DIFF CAME FROM
-  // — `forge.commitSha`, reported by the SAME Forge run that wrote `diffFile`
-  // (both are required FORGE_SCHEMA fields, so this is always populated on a
-  // healthy build). Carried out in the terminal result and passed to
-  // `--match-head-commit` at merge, so a head that moved fails LOUDLY instead of
-  // silently shipping code no reviewer saw (observed on PR #171: the head went
-  // clean → dirty mid-review).
+  // First review + synthesis — UNLESS this is a resume whose recorded
+  // REQUEST_CHANGES verdict is about exactly the commit in front of us. Then the
+  // panel has already judged this code and said what is wrong with it; re-running
+  // it would buy the same four verdicts a second time, which is precisely the
+  // waste a mid-loop resume exists to stop. Seed the loop with the RECORDED
+  // findings instead and go straight to the fix round.
   //
-  // DELIBERATELY NOT A FRESH PROBE OF THE REMOTE HEAD. A commit pushed between
-  // Forge's push and the probe would be read back and recorded as `reviewedHead`,
-  // and the merge would then pin to it and SUCCEED — certifying as reviewed a
-  // commit whose code is not in the diff anyone read. That is the same lie the
-  // crash-resume shortcut was fixed to stop telling, and a pinned merge of an
-  // unreviewed commit is worse than an unpinned one because the pin manufactures
-  // confidence nobody earned. A sha that is merely STALE cannot mis-merge:
-  // `--match-head-commit` just REFUSES. Empty (Forge reported no sha) records
-  // nothing and the outer merge refuses too — fail-closed either way.
-  let reviewedHead = branchHead
-
-  // First review + synthesis.
-  let synthesis = await runReviewRound(diffFile, round, pr)
-  // CARRY THE PANEL'S OWN ACCOUNT OF ITSELF INTO THE RESULT. `reviewRecord` says which
-  // seats ran and which were deliberately NONE, and it was composed and then dropped:
-  // `lastReviewRecord` was declared and read at the terminal result but never assigned,
-  // so a run with every seat set to NONE reported the placeholder instead of saying that
-  // no review ran. That is the one case where the record matters most — a merge that
-  // leaned on build and CI alone must SAY so.
-  if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
-  finalVerdict = normalizeVerdict(synthesis.verdict)
-  await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
+  // This shortcut can only ever produce REQUEST_CHANGES, so it cannot ship
+  // anything: the fix round that follows re-reviews its own new head before any
+  // APPROVE is possible.
+  let synthesis
+  if (resumeMode === 'fix') {
+    log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
+    const paidReview = { verdict: 'REQUEST_CHANGES', findings: resumeFindingsList, blockKind: 'code' }
+    synthesis = await runReviewRound(diffFile, round, pr, paidReview)
+    finalVerdict = 'REQUEST_CHANGES'
+  } else {
+    synthesis = await runReviewRound(diffFile, round, pr)
+    if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
+    finalVerdict = normalizeVerdict(synthesis.verdict)
+    // The verdict is recorded against the commit the panel judged, and carries the
+    // findings a resumed fix round would act on.
+    await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : `argus-request-changes-round-${round}`, {
+      pr,
+      head: reviewedHead,
+      findings: synthesis.findings,
+    })
+  }
 
   // BOUNDED fix loop — re-Forge against the findings, re-review, re-synthesize,
   // until APPROVE or maxRounds.
@@ -3356,23 +3591,14 @@ TASK:
 ${task}${reflectionGuidance}`,
       `r${round}`,
     )
-    await checkpoint(`fix-round-${round}`, { pr })
+    await checkpoint(`fix-round-${round}`, {
+      pr,
+      head: typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : '',
+    })
     if (isPr) {
       const publishHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-      if (!/^[0-9a-f]{40}$/.test(publishHead)) {
-        throw new Error(`forge:fix-round-${round} completed without a full local commit OID for the outer publisher`)
-      }
-      const publishResult = {
-        ok: true,
-        prNumber: pr,
-        branch: forgeBranch,
-        verdict: 'REQUEST_CHANGES',
-        round,
-        checkpoint: `fix-round-${round}`,
-        publishRequested: true,
-        publishHead,
-        remainingTasks: ralphRemaining,
-      }
+      if (!FULL_OID.test(publishHead)) throw new Error(`forge:fix-round-${round} completed without a full local commit OID for the outer publisher`)
+      const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead, remainingTasks: ralphRemaining }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -3432,7 +3658,11 @@ ${task}${reflectionGuidance}`,
     synthesis = await runReviewRound(diffFile, round, pr)
     if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)
-    await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
+    await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : `argus-request-changes-round-${round}`, {
+      pr,
+      head: reviewedHead,
+      findings: synthesis.findings,
+    })
   }
 
   log(`trident-v2 inner DONE: verdict=${finalVerdict} round=${round} pr=${pr}`)

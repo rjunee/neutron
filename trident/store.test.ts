@@ -58,6 +58,51 @@ describe('TridentRunStore', () => {
     expect(got?.channel_kind).toBe('telegram')
   })
 
+  test('the checkpoint OID + findings start NULL and round-trip through update (0122)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'resume-columns',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'build the thing',
+    })
+    // A fresh run has no checkpoint, so it has no commit to be about either.
+    expect(run.inner_checkpoint_head).toBeNull()
+    expect(run.inner_checkpoint_findings).toBeNull()
+
+    const head = 'a'.repeat(40)
+    await store.update(run.id, {
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_head: head,
+      inner_checkpoint_findings: '[{"severity":"blocker"}]',
+    })
+    const got = store.get(run.id)
+    expect(got?.inner_checkpoint_head).toBe(head)
+    expect(got?.inner_checkpoint_findings).toBe('[{"severity":"blocker"}]')
+  })
+
+  test('save() leaves the checkpoint OID + findings alone (WORKFLOW-OWNED, like inner_result)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'resume-save', project_slug: 't1', repo_path: '/r', task: 't' })
+    const head = 'a'.repeat(40)
+    await store.update(run.id, {
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_head: head,
+      inner_checkpoint_findings: '[{"severity":"blocker"}]',
+    })
+
+    // An outer-loop snapshot whose in-memory copy carries stale nulls must not
+    // strip the OID off a checkpoint the detached workflow wrote — a name paired
+    // with a MISSING (or, worse, a stale) OID is exactly what a resume reads to
+    // decide whether prior review work may be trusted.
+    const stale = { ...store.get(run.id)!, inner_checkpoint_head: null, inner_checkpoint_findings: null }
+    await store.save(stale)
+
+    const got = store.get(run.id)
+    expect(got?.inner_checkpoint_head).toBe(head)
+    expect(got?.inner_checkpoint_findings).toBe('[{"severity":"blocker"}]')
+  })
+
   test('#317 create persists a non-telegram originating channel_kind', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({

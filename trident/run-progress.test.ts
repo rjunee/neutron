@@ -35,6 +35,8 @@ function run(over: Partial<TridentRun> = {}): TridentRun {
     failure_reason: null,
     workflow_run_id: 'wf-1',
     inner_checkpoint: null,
+    inner_checkpoint_head: null,
+    inner_checkpoint_findings: null,
     inner_verdict: null,
     inner_result: null,
     started_at: '2026-07-02T00:00:00Z',
@@ -70,6 +72,13 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     const p = deriveRunProgress(run({ round: 1, inner_checkpoint: 'argus-request-changes' }), T0)
     expect(p.step_label).toBe('fixing')
     expect(p.round).toBe(2)
+  })
+
+  test('a round-bearing request-changes checkpoint surfaces the following fix round', () => {
+    const p = deriveRunProgress(run({ round: 1, inner_checkpoint: 'argus-request-changes-round-7' }), T0)
+    expect(p.step_label).toBe('fixing')
+    expect(p.phase_label).toBe('building')
+    expect(p.round).toBe(8)
   })
 
   test('a first build (no checkpoint) stays round 1', () => {
