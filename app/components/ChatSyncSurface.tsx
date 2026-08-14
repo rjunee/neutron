@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   Linking,
   Platform,
   Pressable,
@@ -1133,6 +1134,37 @@ function SystemNoticePill({ text }: { text: string | null }): React.JSX.Element 
   );
 }
 
+/**
+ * One dot of the typing indicator, bouncing on a stagger.
+ *
+ * WHY ANIMATED AND NOT A GLYPH. The dots were the string `•••` — indistinguishable
+ * from a message that happens to contain three dots, and static while the agent
+ * works. Motion is the whole signal here: it is the difference between "the agent
+ * is thinking" and "the agent said '...'". The web client has animated dots; this
+ * brings the phone level with it.
+ *
+ * `useNativeDriver` keeps the loop off the JS thread, so the dots keep moving even
+ * while the transcript is doing work — which is exactly when they are on screen.
+ */
+function BouncingDot({ delay }: { delay: number }): React.JSX.Element {
+  const bounce = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.delay(delay),
+        Animated.timing(bounce, { toValue: -3, duration: 260, useNativeDriver: true }),
+        Animated.timing(bounce, { toValue: 0, duration: 260, useNativeDriver: true }),
+        // The tail delay is what makes it a WAVE rather than three dots pulsing
+        // together: each dot rests while the others take their turn.
+        Animated.delay(520 - delay),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [bounce, delay]);
+  return <Animated.Text style={[styles.typingDot, { transform: [{ translateY: bounce }] }]}>•</Animated.Text>;
+}
+
 function TypingIndicator({ label, onPress }: { label: string | null; onPress?: () => void }): React.JSX.Element {
   return (
     <View style={[styles.bubbleWrap, styles.agentWrap, styles.footerGap]}>
@@ -1143,9 +1175,12 @@ function TypingIndicator({ label, onPress }: { label: string | null; onPress?: (
           accessibilityRole={onPress === undefined ? undefined : 'button'}
           accessibilityLabel="Show activity"
           testID="chat-typing-indicator"
-          style={[styles.bubble, styles.agentBubble, styles.agentTail, styles.typingBubble]}
+          style={[styles.bubble, styles.agentBubble, styles.agentTail, styles.typingBubble, styles.typingRow]}
         >
-          <Text style={styles.typingText}>•••{label === null ? '' : ` ${label}`}</Text>
+          <BouncingDot delay={0} />
+          <BouncingDot delay={130} />
+          <BouncingDot delay={260} />
+          {label === null ? null : <Text style={styles.typingText}> {label}</Text>}
         </Pressable>
       </View>
     </View>
@@ -1358,7 +1393,15 @@ const styles = StyleSheet.create({
   chipSelf: { borderColor: THEME.accent, backgroundColor: THEME.surface },
   chipText: { ...TYPOGRAPHY.caption, color: THEME.text_primary },
   typingBubble: { paddingVertical: SPACING.xs },
-  typingText: { ...TYPOGRAPHY.h2, color: THEME.text_muted, letterSpacing: 2 },
+  typingRow: { flexDirection: 'row', alignItems: 'center' },
+  // The dots keep the old size — they are the signal. `h2` here is about the
+  // GLYPH, not emphasis.
+  typingDot: { ...TYPOGRAPHY.h2, color: THEME.text_muted, letterSpacing: 2 },
+  // THE LABEL IS ONE STEP BELOW CHAT BODY AND NOT BOLD. It was `h2` — 19px at
+  // weight 700, LARGER and heavier than the messages around it, which made a
+  // passing status word the loudest thing on screen. It annotates the dots; it
+  // does not compete with the conversation.
+  typingText: { ...TYPOGRAPHY.body_small, fontWeight: '400' as const, color: THEME.text_muted },
   emptyText: { ...TYPOGRAPHY.body, color: THEME.text_muted },
   // Footer rows sit at a sender-change distance from the last bubble — they are
   // the agent about to speak, so they read as a new turn.
