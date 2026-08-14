@@ -4002,6 +4002,10 @@ export function buildOpenGraphComposer(
               created_at: it.created_at,
               updated_at: it.updated_at,
               completed_at: it.completed_at,
+              // Durable PR provenance — survives the detach that kills
+              // `run_progress`, so a completed card can still say "Merged #265".
+              pr: it.pr,
+              pr_url: it.pr_url,
               ...(run_progress !== null ? { run_progress } : {}),
             }
           }),

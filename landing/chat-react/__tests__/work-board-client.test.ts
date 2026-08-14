@@ -201,7 +201,32 @@ describe('parseWorkBoardItems', () => {
       created_at: '',
       updated_at: '',
       completed_at: null,
+      // Durable PR provenance — absent on an older frame, never undefined.
+      pr: null,
+      pr_url: null,
     })
+  })
+
+  it('round-trips the durable pr/pr_url and rejects wrongly-typed ones', () => {
+    const out = parseWorkBoardItems([
+      {
+        id: 'a',
+        title: 'merged',
+        status: 'done',
+        pr: 265,
+        pr_url: 'https://github.com/acme/widget/pull/265',
+      },
+      // A number with no resolvable repo — the tag renders as plain text.
+      { id: 'b', title: 'no url', status: 'done', pr: 42 },
+      // Wrongly-typed values are dropped, not coerced (no "#265" from a string).
+      { id: 'c', title: 'junk', status: 'done', pr: '265', pr_url: 12 },
+    ])
+    expect(out.map((i) => i.pr)).toEqual([265, 42, null])
+    expect(out.map((i) => i.pr_url)).toEqual([
+      'https://github.com/acme/widget/pull/265',
+      null,
+      null,
+    ])
   })
 
   it('#379 — parses task_type (research kept; anything else → build)', () => {

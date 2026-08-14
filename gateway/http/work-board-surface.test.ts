@@ -203,6 +203,32 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(row?.run_progress?.pr).toBe(9)
   })
 
+  test('GET carries the DURABLE pr/pr_url of a completed (detached) card', async () => {
+    // The completed card has NO run binding — `run_progress` is impossible here,
+    // so the number can only come off the item's own columns (migration 0122).
+    const item = await store.create(SCOPE, { title: 'Merged one' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+    await store.detachRun(SCOPE, 'run-1', 'done', {
+      pr: 265,
+      pr_url: 'https://github.com/acme/widget/pull/265',
+    })
+    const { access } = fakeRunAccess({})
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+    const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as {
+      items: Array<{
+        id: string
+        pr?: number | null
+        pr_url?: string | null
+        run_progress?: unknown
+      }>
+    }
+    const row = body.items.find((i) => i.id === item.id)
+    expect(row?.run_progress).toBeUndefined()
+    expect(row?.pr).toBe(265)
+    expect(row?.pr_url).toBe('https://github.com/acme/widget/pull/265')
+  })
+
   test('GET omits run_progress on an unbound item', async () => {
     const item = await store.create(SCOPE, { title: 'Idle' })
     const { access } = fakeRunAccess({})

@@ -16,6 +16,8 @@ function item(partial: Partial<WorkBoardItem>): WorkBoardItem {
     created_at: '2026-06-29T00:00:00.000Z',
     updated_at: '2026-06-29T00:00:00.000Z',
     completed_at: null,
+    pr: null,
+    pr_url: null,
     ...partial,
   }
 }

@@ -587,6 +587,121 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(await store.detachRun(SLUG, 'ghost-run', 'done')).toBeNull()
   })
 
+  // ── Durable PR provenance (migration 0122) ───────────────────────────────
+  // The number has to be written by the SAME statement as the terminal status:
+  // the `done` branch NULLs `linked_run_id`, so once detach returns there is no
+  // run left to derive it from.
+
+  test('create() yields a PR-less card (pr/pr_url both NULL)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'fresh card' })
+    expect(a.pr).toBeNull()
+    expect(a.pr_url).toBeNull()
+    expect(store.get(SLUG, a.id)?.pr).toBeNull()
+    expect(store.get(SLUG, a.id)?.pr_url).toBeNull()
+  })
+
+  test('detachRun(done, pr_info) writes the PR DURABLY — it survives the detach', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'merge me' })
+    await store.attachRun(SLUG, a.id, 'run-pr')
+    const done = await store.detachRun(SLUG, 'run-pr', 'done', {
+      pr: 265,
+      pr_url: 'https://github.com/acme/widget/pull/265',
+    })
+    expect(done?.status).toBe('done')
+    expect(done?.linked_run_id).toBeNull()
+    expect(done?.completed_at).not.toBeNull()
+    // Re-read from the DB: the binding is gone and the number is still there.
+    const reread = store.get(SLUG, a.id)!
+    expect(reread.pr).toBe(265)
+    expect(reread.pr_url).toBe('https://github.com/acme/widget/pull/265')
+  })
+
+  test('detachRun(failed, pr_info) writes the PR too (a card can read "#261 Failed")', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'fail me with a PR' })
+    await store.attachRun(SLUG, a.id, 'run-fail-pr')
+    const failed = await store.detachRun(SLUG, 'run-fail-pr', 'failed', {
+      pr: 261,
+      pr_url: 'https://github.com/acme/widget/pull/261',
+    })
+    expect(failed?.status).toBe('failed')
+    expect(failed?.linked_run_id).toBe('run-fail-pr') // #340 — link KEPT.
+    expect(failed?.pr).toBe(261)
+    expect(failed?.pr_url).toBe('https://github.com/acme/widget/pull/261')
+  })
+
+  test('a null-PR pr_info leaves the columns UNTOUCHED (no erasing an earlier number)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'keep my number' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'failed', {
+      pr: 77,
+      pr_url: 'https://github.com/acme/widget/pull/77',
+    })
+    // The same run reconciling again with NO PR must not wipe what it wrote.
+    const done = await store.detachRun(SLUG, 'run-1', 'done', { pr: null, pr_url: null })
+    expect(done?.status).toBe('done')
+    expect(done?.linked_run_id).toBeNull()
+    expect(done?.pr).toBe(77)
+    expect(done?.pr_url).toBe('https://github.com/acme/widget/pull/77')
+  })
+
+  test('an ABSENT pr_info leaves the columns untouched (every pre-0122 caller)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'legacy caller' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'failed', {
+      pr: 88,
+      pr_url: 'https://github.com/acme/widget/pull/88',
+    })
+    const done = await store.detachRun(SLUG, 'run-1', 'done') // 3-arg form
+    expect(done?.status).toBe('done')
+    expect(done?.pr).toBe(88)
+    expect(done?.pr_url).toBe('https://github.com/acme/widget/pull/88')
+  })
+
+  test('a PR-less completed card keeps NULL columns (no "#null" for the client)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'inline work' })
+    await store.attachRun(SLUG, a.id, 'run-plain')
+    const done = await store.detachRun(SLUG, 'run-plain', 'done')
+    expect(done?.status).toBe('done')
+    expect(done?.pr).toBeNull()
+    expect(done?.pr_url).toBeNull()
+  })
+
+  test('attachRun CLEARS a stale PR — a retried card never wears the old number', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'retry me' })
+    await store.attachRun(SLUG, a.id, 'run-1')
+    await store.detachRun(SLUG, 'run-1', 'done', {
+      pr: 100,
+      pr_url: 'https://github.com/acme/widget/pull/100',
+    })
+    expect(store.get(SLUG, a.id)?.pr).toBe(100)
+    const rebound = await store.attachRun(SLUG, a.id, 'run-2')
+    expect(rebound?.pr).toBeNull()
+    expect(rebound?.pr_url).toBeNull()
+    // The new run's terminal reconcile writes the NEW number.
+    const done = await store.detachRun(SLUG, 'run-2', 'done', {
+      pr: 101,
+      pr_url: 'https://github.com/acme/widget/pull/101',
+    })
+    expect(done?.pr).toBe(101)
+    expect(done?.pr_url).toBe('https://github.com/acme/widget/pull/101')
+  })
+
+  test('an unresolvable repo stores the number with a NULL url (plain-text render)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'no remote' })
+    await store.attachRun(SLUG, a.id, 'run-noremote')
+    const done = await store.detachRun(SLUG, 'run-noremote', 'done', { pr: 42, pr_url: null })
+    expect(done?.pr).toBe(42)
+    expect(done?.pr_url).toBeNull()
+  })
+
   test('clearRun only clears when run_id is still the bound run (concurrent-safe)', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'shared item' })
