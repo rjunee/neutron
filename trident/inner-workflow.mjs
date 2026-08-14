@@ -397,7 +397,6 @@ const kimiReviewRoute = (route, modelId) => ({
 // The effort is the owner's when a config carries one and the phase's stated default
 // otherwise: these two rows have no live effort cell (their DEFAULT executor is a CLI,
 // which is what `phaseSupportsEffort` answers), so the common path is the default.
-const CLAUDE_SEAT_EFFORT = 'high'
 const claudeReviewRoute = (route, modelId, effort) => ({
   ...route,
   model: modelId,
@@ -480,6 +479,10 @@ const ROLE_MODEL = {
   'merge-probe': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
 }
 
+// Generic seats use the canonical rubric review effort when moved onto Claude;
+// deriving it keeps their default aligned with the existing Claude reviewer.
+const claudeSeatEffort = () => ROLE_MODEL['argus:claude'].effort
+
 // OWNER PHASE OVERRIDES, threaded in as `args.phaseModels` (phase key →
 // {model?, effort?}). `model` is either a TIER name — resolved through the same
 // registry-threaded MODELS map, so it follows a model upgrade — or a literal id.
@@ -552,12 +555,15 @@ function applyPhaseOverride(route, phaseKey) {
         // …AND THE OTHER DIRECTION: a CLI seat moved onto a Claude tier. The effort is
         // live again on this route, so it is honoured rather than logged away — the
         // reverse of the codex case below (see `claudeReviewRoute`).
+        if (override.effort !== undefined && !(typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort))) {
+          log(`trident.phase-override IGNORED phase=${phaseKey} reason=effort-not-in(${VALID_EFFORTS.join('|')})`)
+        }
         return claudeReviewRoute(
           route,
           tier.model_id,
           typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort)
             ? override.effort
-            : CLAUDE_SEAT_EFFORT,
+            : claudeSeatEffort(),
         )
       }
       if (override.effort !== undefined) {
@@ -2920,22 +2926,31 @@ function corePanelLine(letter, label, verdict) {
 
 // Which cross-model peers were configured but failed. Kept separate from the gate
 // so the mapping status → blocker text is readable and testable on its own.
-function deferredCrossModelPeers(statuses) {
+function deferredCrossModelPeers(statuses, routes) {
+  routes = routes || {}
   const out = []
   if (statuses.codex === 'deferred') {
-    out.push({
-      name: 'Codex',
-      title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
-      evidence:
-        'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
+    const family = routes.codex?.group || 'codex'
+    out.push(family === 'codex' ? {
+      name: 'Codex', title: 'Codex cross-model review DEFERRED — refusing to silently APPROVE',
+      evidence: 'codex was configured (CODEX_HOME set) but NO REVIEW HAPPENED: the auth precheck failed, the call failed/timed out, or the diff was EMPTY so there was nothing to review (CODEX_REVIEW_EMPTY_DIFF — the diff file failed to write or the base ref resolved wrong). Per the never-silent-downgrade rule a deferred cross-model review cannot be treated as an approval. Read the wrapper stderr for WHICH of those it was before re-running — an empty diff is NOT an auth problem.',
+    } : {
+      name: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'})`,
+      title: `Cross-model review 1 (${family === 'claude' ? 'Claude' : 'Kimi K3'}) DEFERRED — refusing to silently APPROVE`,
+      evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
   if (statuses.kimi === 'deferred') {
-    out.push({
+    const family = routes.kimi?.group || 'kimi'
+    out.push(family === 'kimi' ? {
       name: 'Kimi K3',
       title: 'Kimi K3 cross-model review DEFERRED — refusing to silently APPROVE',
       evidence:
         'a Kimi API key was configured but the review call failed, timed out, or returned no answer text (the thinking-budget case). A deferred cross-model review cannot be treated as an approval, and there is deliberately NO fallback to a Claude-family reviewer — that would restore the single-family panel this peer exists to break.',
+    } : {
+      name: `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'})`,
+      title: `Cross-model review 2 (${family === 'claude' ? 'Claude' : 'Codex'}) DEFERRED — refusing to silently APPROVE`,
+      evidence: `The explicitly selected ${family} reviewer was dispatched but failed or returned no usable verdict. It was not replaced by another model family; the incomplete panel cannot APPROVE.`,
     })
   }
   return out
@@ -3179,8 +3194,8 @@ TASK: ${task}`
       ),
     )
   }
-  const enabledPanelFamilies = [routeModel('forge:build', 'reasoning'), rubricRoute, adversarialRoute, slotOneRoute, slotTwoRoute]
-    .filter((route) => !route.disabled)
+  const enabledPanelFamilies = [rubricRoute, adversarialRoute, slotOneRoute, slotTwoRoute]
+    .filter((route) => !route.disabled && routeAvailable(route))
     .map((route) => route.group || 'claude')
   if (enabledPanelFamilies.length > 1 && new Set(enabledPanelFamilies).size === 1) {
     log(`trident.panel-single-family WARNING family=${enabledPanelFamilies[0]} seats=${enabledPanelFamilies.length} configuration-accepted=true`)
@@ -3203,17 +3218,18 @@ TASK: ${task}`
     verdicts,
     slots: [
       ...coreSeats,
-      { name: 'codex', slot: codexSlot, statusKey: slotOneRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
-      { name: 'kimi', slot: kimiSlot, statusKey: slotTwoRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
+      { name: 'argus:codex', slot: codexSlot, statusKey: slotOneRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
+      { name: 'argus:kimi', slot: kimiSlot, statusKey: slotTwoRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
     ],
     attempts: LANE_RETRY_ATTEMPTS,
     log,
     invoke: async (name) => {
       const core = coreSeats.find((s) => s.name === name)
       if (core) return await reviewers[core.slot]()
-      const label = name === 'codex' ? 'argus:codex-retry' : 'argus:kimi-retry'
-      const route = name === 'codex' ? slotOneRoute : slotTwoRoute
-      return await agent(peerPrompt(label, route, name === 'codex' ? 1 : 2), peerAgentOpts({ label, phase: 'Review', schema: peerSchema(route) }, route))
+      const first = name === 'argus:codex'
+      const label = first ? 'argus:codex-retry' : 'argus:kimi-retry'
+      const route = first ? slotOneRoute : slotTwoRoute
+      return await agent(peerPrompt(label, route, first ? 1 : 2), peerAgentOpts({ label, phase: 'Review', schema: peerSchema(route) }, route))
     },
   })
   // POSITIONAL INDEXING WAS A LATENT BUG. This read `verdicts[2]` for codex,
@@ -3304,7 +3320,10 @@ ${kimiPanelLine}`,
   // anything it lets through. See enforceSeverityGate for why the ordering is the
   // load-bearing part rather than an implementation detail.
   const severityGated = enforceSeverityGate(synthesisRaw)
-  const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus })
+  const deferred = deferredCrossModelPeers({ codex: codexStatus, kimi: kimiStatus }, {
+    codex: slotOneRoute,
+    kimi: slotTwoRoute,
+  })
   // THE CI GATE, folded into the SAME gate rather than added beside it.
   //
   // A red build is a CODE blocker: it joins the findings so the fix loop re-Forges

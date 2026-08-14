@@ -396,8 +396,7 @@ export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean 
  *
  * Only for `agent` transport. A `cli` lane's reasoning effort is the CLI's own
  * setting, which the wrapper does not expose — so the pane renders that cell disabled
- * with the reason instead of offering a dropdown that changes nothing. (A phase's
- * stored `default.effort` is inert for those rows and never reaches a dispatch.)
+ * and config parsing drops a stale effort paired with a newly selected CLI tier.
  *
  * THIS ANSWERS FOR THE PHASE'S DEFAULT TIER — "could this row ever have an effort
  * control", not "does it have one right now". A phase with a second executor

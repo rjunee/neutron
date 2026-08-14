@@ -11023,3 +11023,19 @@ args-transit corruption now fails closed with `CODEX_BUILD_BRIEF_ARGS_CORRUPT`.
 Coverage lives in `trident/inner-workflow-assembly.test.ts`; the unchanged fallback
 and wrapper corruption coverage remains in `trident/codex-brief-chunking.test.ts` and
 `trident/codex-build.test.ts`.
+
+## 2026-08-14 — any tier in either cross-model review seat
+
+`trident/phase-models.ts` and `trident/inner-workflow.mjs` now dispatch `none`,
+Claude, Codex, and Kimi tiers from either generic review seat. An explicitly selected
+Claude tier uses the reviewer prompt, verdict schema, chosen model, and effort; an
+unavailable CLI remains `not_connected` and never falls back to Claude. Deferred
+retry and blocker diagnostics follow the selected route family instead of the seat's
+historical name. The single-family warning counts only review seats that can actually
+dispatch and does not count the build route.
+
+`trident/__tests__/cross-model-dispatch.test.ts` executes the production launcher and
+real workflow for every declared group, GPT-build/Opus-review, configured but
+unavailable Codex CLI behavior, Claude retry success and exhaustion, and same-family
+warning semantics. Mutation checks made each corresponding guard red before the
+production behavior was restored.

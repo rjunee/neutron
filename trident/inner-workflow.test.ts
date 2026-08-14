@@ -645,7 +645,7 @@ function loadRealGate(): {
     verdict: string
     findings: Array<{ kind?: string; title?: string; severity?: string; evidence?: string }>
   } | null
-  deferredCrossModelPeers: (statuses: unknown) => Peer[]
+  deferredCrossModelPeers: (statuses: unknown, routes?: unknown) => Peer[]
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
   coreSeats: Array<{ slot: number; name: string; letter: string; panelLabel: string }>
@@ -923,6 +923,17 @@ describe('inner-workflow.mjs — cross-model gate behavior (never-silent-downgra
     const { deferredCrossModelPeers } = gate()
     const peers = deferredCrossModelPeers({ codex: 'connected', kimi: 'deferred' })
     expect(peers[0]!.evidence).toContain('NO fallback to a Claude-family')
+  })
+
+  test('deferred diagnostics follow the selected route family, not the legacy slot name', () => {
+    const { deferredCrossModelPeers } = gate()
+    const [peer] = deferredCrossModelPeers(
+      { codex: 'deferred', kimi: 'connected' },
+      { codex: { group: 'claude' }, kimi: { group: 'kimi' } },
+    )
+    expect(peer!.name).toBe('Cross-model review 1 (Claude)')
+    expect(peer!.title).toContain('Cross-model review 1 (Claude) DEFERRED')
+    expect(peer!.evidence).not.toContain('CODEX_HOME')
   })
 })
 

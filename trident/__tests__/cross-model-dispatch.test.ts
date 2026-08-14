@@ -99,6 +99,12 @@ async function runWorkflow(
     deferredAdversarial?: boolean
     /** Make the first generic Claude seat attempt fail so its retry route is exercised. */
     deferredClaudeSeatOnce?: boolean
+    /** Make every generic Claude-seat attempt fail, including its bounded retry. */
+    deferredClaudeSeat?: boolean
+    /** Simulate a configured Codex wrapper reporting that its CLI is unavailable. */
+    unavailableCodexCli?: boolean
+    /** Optional model marker used by dispatch-focused cases. */
+    model?: string
     /** Simulate a wrapper death before either trailer-writing branch. */
     missingBuildTrailer?: boolean
     /** The preserved build worktree contains changes after that death. */
@@ -177,11 +183,14 @@ async function runWorkflow(
     }
     if (label === 'argus:codex' || label === 'argus:codex-retry') {
       if (o?.['model'] !== undefined) {
-        if (opts.deferredClaudeSeatOnce === true && !deferredClaudeSeat) {
+        if (opts.deferredClaudeSeat === true || (opts.deferredClaudeSeatOnce === true && !deferredClaudeSeat)) {
           deferredClaudeSeat = true
           return null
         }
         return { verdict: 'APPROVE', findings: [] }
+      }
+      if (opts.unavailableCodexCli === true) {
+        return { verdict: 'COMMENT', findings: [], codexStatus: 'not_connected', codexTruncated: false }
       }
       return { verdict: 'APPROVE', findings: [], codexStatus: 'connected', codexTruncated: false }
     }
@@ -363,10 +372,11 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
             dispatched: false,
           })
         } else if (group === 'claude') {
-          expect({ phase, group, model: seat?.opts['model'], cli: seat?.prompt.includes('REVIEW bridge') }).toEqual({
+          expect({ phase, group, model: seat?.opts['model'], effort: seat?.opts['effort'], cli: seat?.prompt.includes('REVIEW bridge') }).toEqual({
             phase,
             group,
             model: getBestModel(),
+            effort: 'high',
             cli: false,
           })
         } else {
@@ -435,11 +445,12 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     expect(logs.some((line) => line.includes('panel-single-family'))).toBe(false)
   })
 
-  test('a CLI seat with no credential stays absent and never becomes a Claude reviewer', async () => {
+  test('a configured Codex seat whose CLI is unavailable never falls back to Claude', async () => {
     const args = productionArgs({ review_codex: { model: 'sol' } })
-    args['codexHome'] = null
-    const { captured } = await runWorkflow(args)
-    expect(captured.some((c) => c.label === 'argus:codex')).toBe(false)
+    const { captured } = await runWorkflow(args, { unavailableCodexCli: true })
+    const seat = captured.find((c) => c.label === 'argus:codex')!
+    expect(seat.prompt).toContain('CODEX CROSS-MODEL REVIEW bridge')
+    expect(seat.opts['model']).toBeUndefined()
     expect(captured.some((c) => c.label === 'argus:codex-retry')).toBe(false)
   })
 
@@ -455,13 +466,24 @@ describe('AN OVERRIDE REACHES THE DISPATCH', () => {
     expect(retry.prompt).not.toContain('CODEX CROSS-MODEL REVIEW bridge')
   })
 
+  test('a Claude seat that exhausts its retry is blocked as Claude, not misreported as Codex', async () => {
+    const { result, logs } = await runWorkflow(
+      productionArgs({ review_codex: { model: 'opus' } }),
+      { deferredClaudeSeat: true },
+    )
+    expect(result['verdict']).toBe('REQUEST_CHANGES')
+    expect(result['blockKind']).toBe('infra-only')
+    expect(logs.some((line) => line.includes('trident.lane-retry argus:codex'))).toBe(true)
+    expect(logs.some((line) => line.includes('trident.lane-retry codex '))).toBe(false)
+  })
+
   test('a deliberately same-family review panel is warned about, never refused', async () => {
     const { captured, logs } = await runWorkflow(
       productionArgs({ review_codex: { model: 'opus' }, review_kimi: { model: 'sonnet' } }),
     )
     expect(captured.some((c) => c.label === 'argus:codex')).toBe(true)
     expect(captured.some((c) => c.label === 'argus:kimi')).toBe(true)
-    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=5 configuration-accepted=true'))).toBe(true)
+    expect(logs.some((line) => line.includes('trident.panel-single-family WARNING family=claude seats=4 configuration-accepted=true'))).toBe(true)
   })
 })
 
