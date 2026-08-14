@@ -2,6 +2,57 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-14 — a shelved Work Board card is not a shipped one
+
+Migration `0122_work_board_items_archived_status.sql` widens the `work_board_items`
+status CHECK to a fifth lane, `archived` — owner-facing "Shelved". SQLite cannot
+alter a CHECK on a STRICT table, so the migration copies 0097's rebuild
+(CREATE new → INSERT SELECT → DROP → RENAME → recreate both indexes), carrying
+0105's `task_type` column forward unchanged; the regenerated
+`migrations/expected-schema.txt` differs only in that CHECK and the rebuild's
+formatting.
+
+The lane exists because `done` was the only lever for taking a card off the board.
+Asked on 2026-08-14 to drop four deprioritised email cards, the agent had to mark
+them done, and four unshipped items read as shipped. `archived` splits the two
+claims apart: done means it happened and stamps `completed_at`; archived means it
+is parked and stamps nothing. `WorkBoardStore.listActive`, `listAllActive`, and
+`reorder`'s lane query all move from `status != 'done'` to
+`status NOT IN ('done','archived')`, which also removes shelved cards from the
+per-turn prompt fragment (it rides `listActive`). A new `listArchived` orders by
+`updated_at`, and `list()` returns active → archived → completed so both clients
+can bucket three ways off one snapshot.
+
+Shelving is refused while the card's bound run is live. A shelf-write asserts the
+work is parked, which is false while the build is still running, so `update()`
+throws `WorkBoardRunStillLiveError` before any write — the same guard, and the
+same reasoning, as `complete()`. The refusal is an answer rather than a crash on
+every surface: `work_board_update` returns `{ok:false}` carrying the message, and
+PATCH returns 409 `run_still_live`. `archived` is client-writable in both the
+agent tool's `STATUS_VALUES` and the HTTP `VALID_STATUSES`; `failed` deliberately
+stays out of both, since only the terminal reconcile writes it.
+
+Both clients render shelved cards in their own collapsed "Shelved · N" section,
+separate from Done. `splitBoard` returns a third bucket rather than folding
+archived into either neighbour — folding it into `completed` would report parked
+work as progress, and the old `status !== 'done'` bucketing would have resurrected
+it in the active lane the server had already excluded it from. Shelved rows carry
+the neutral upcoming dot and no "Merged · <date>" line, because there is no
+`completed_at` to show. Advancing a shelved card un-shelves it: `nextStatus`
+returns `upcoming`, and the store re-appends it to the end of the active lane so
+its stale `sort_order` cannot collide with the renumbered lane. The project rail's
+attention scan and the composer's open-item probe both exclude archived, so a card
+the owner already parked cannot hold the rail red.
+
+Acceptance (b) is pinned mutant-red in `work-board/store.test.ts`: widening
+`listCompleted` to `status IN ('done','archived')` turns three tests RED, and
+stamping `completed_at` on the archive transition turns three RED. The refusal is
+pinned at all three layers (`store.test.ts`, `agent-tool.test.ts`,
+`work-board-surface.test.ts`), the surface test still asserts `status:'failed'` is
+a 400, and `app/__tests__/work-board-helpers.test.ts` asserts an archived item
+lands in neither `active` nor `completed` and leaves the Done count at its
+pre-shelving value.
+
 ## 2026-08-14 — review-round readiness is checked before reviewer spend
 
 `trident/inner-workflow.mjs` now refuses to dispatch a review panel when GitHub

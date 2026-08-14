@@ -1,8 +1,10 @@
 /**
  * @neutronai/app — project-scoped WORK BOARD tab (Work Board Phase 1b).
  *
- * The live work-tracker tab: active+next at the top as flat one-line rows, the
- * completed history collapsed at the bottom. The owner can add / edit / advance
+ * The live work-tracker tab: active+next at the top as flat one-line rows, then
+ * two collapsed sections at the bottom — Shelved (`status='archived'`: parked,
+ * NOT shipped, and counted as progress nowhere) and the Done history. The owner
+ * can add / edit / advance
  * status / reorder / delete — every action hits the SAME canonical
  * `WorkBoardStore` the agent's `work_board_*` tools use (Phase 1a), so a human
  * write fires the same live push the agent's does.
@@ -137,6 +139,8 @@ function WorkBoardBody({
   const [listError, setListError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [completedOpen, setCompletedOpen] = useState(false);
+  // Separate open-state: Shelved and Done are two independent collapsed sections.
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -316,7 +320,11 @@ function WorkBoardBody({
     [router, railId],
   );
 
-  const { active, completed } = splitBoard(items);
+  // Three-way: `archived` (SHELVED) is its own bucket — it is neither active
+  // (the server already excluded it from the active lane, and re-adding it here
+  // would make it drag-reorderable again) nor completed (it never counts as
+  // progress).
+  const { active, archived, completed } = splitBoard(items);
   const indicator = workActivityIndicator(activityState);
 
   return (
@@ -348,7 +356,7 @@ function WorkBoardBody({
             <Text style={styles.retryBtnText}>Retry</Text>
           </Pressable>
         </View>
-      ) : active.length === 0 && completed.length === 0 ? (
+      ) : active.length === 0 && archived.length === 0 && completed.length === 0 ? (
         <View style={[styles.centered, styles.grow]} testID="workboard-empty">
           <Text style={styles.empty}>
             No work tracked yet. Ask Neutron to start something, or add an item.
@@ -390,6 +398,38 @@ function WorkBoardBody({
               onOpenDoc={openDoc(it.design_doc_ref)}
             />
           ))}
+
+          {archived.length > 0 ? (
+            <View style={styles.completed}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded: archivedOpen }}
+                accessibilityLabel={`Shelved, ${archived.length} items`}
+                onPress={() => setArchivedOpen((v) => !v)}
+                style={styles.completedToggle}
+                testID="workboard-archived-toggle"
+              >
+                <Text style={styles.completedToggleText}>
+                  {archivedOpen ? '▾' : '▸'}  Shelved · {archived.length}
+                </Text>
+              </Pressable>
+              {archivedOpen ? (
+                <View style={styles.completedList}>
+                  {archived.map((it) => (
+                    <WorkBoardCompletedRow
+                      key={it.id}
+                      item={it}
+                      variant="archived"
+                      busy={busyId === it.id}
+                      onDelete={() =>
+                        runMutation(it.id, client.delete(projectId, it.id))
+                      }
+                    />
+                  ))}
+                </View>
+              ) : null}
+            </View>
+          ) : null}
 
           {completed.length > 0 ? (
             <View style={styles.completed}>

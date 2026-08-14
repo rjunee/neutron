@@ -1467,7 +1467,7 @@ CREATE TABLE "work_board_items" (
     project_slug    TEXT NOT NULL,
     title           TEXT NOT NULL,                  -- ONE line (stripped + capped at the store)
     status          TEXT NOT NULL DEFAULT 'upcoming'
-                        CHECK (status IN ('upcoming', 'in_progress', 'done', 'failed')),
+                        CHECK (status IN ('upcoming', 'in_progress', 'done', 'failed', 'archived')),
     sort_order      INTEGER NOT NULL,
     design_doc_ref  TEXT,
     inline_active   INTEGER NOT NULL DEFAULT 0
@@ -1475,9 +1475,10 @@ CREATE TABLE "work_board_items" (
     linked_run_id   TEXT,
     created_at      TEXT NOT NULL,                  -- ISO-8601 UTC
     updated_at      TEXT NOT NULL,                  -- ISO-8601 UTC
-    completed_at    TEXT                            -- ISO-8601 UTC; NULL until status='done'
-, task_type TEXT NOT NULL DEFAULT 'build'
-        CHECK (task_type IN ('build', 'research'))) STRICT
+    completed_at    TEXT,                           -- ISO-8601 UTC; NULL until status='done' (NEVER stamped for 'archived')
+    task_type       TEXT NOT NULL DEFAULT 'build'   -- 0105 — the ▶ routing discriminator
+                        CHECK (task_type IN ('build', 'research'))
+) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

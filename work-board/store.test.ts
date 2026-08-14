@@ -10,6 +10,7 @@ import {
   validateDesignDocRef,
   workBoardProjectIdForKey,
   workBoardScopeKey,
+  WorkBoardRunStillLiveError,
   WorkBoardStore,
   WorkBoardValidationError,
 } from './store.ts'
@@ -327,6 +328,141 @@ describe('WorkBoardStore', () => {
     expect(validateDesignDocRef('https://x.com')).toBe('https://x.com')
     expect(() => validateDesignDocRef('ftp://x')).toThrow(WorkBoardValidationError)
     expect(sanitizeTitle('a\n\nb   c')).toBe('a b c')
+  })
+})
+
+/**
+ * The SHELVED lane (migration 0122). Acceptance (b) of the removal card: a
+ * deprioritised card must be counted as completed NOWHERE, so `done` and
+ * `archived` stop sharing one word.
+ *
+ * These are the mutant-red pins. A mutant that buckets archived with done
+ * (e.g. `listCompleted` widened to `status IN ('done','archived')`, or `list()`
+ * folding the two), or that stamps `completed_at` on the archive transition,
+ * FAILS here.
+ */
+describe('WorkBoardStore — the SHELVED lane (status=archived)', () => {
+  test('→archived leaves the active lane, clears inline_active, and NEVER stamps completed_at', async () => {
+    const store = new WorkBoardStore(db, { now: () => '2026-08-14T00:00:00.000Z' })
+    const a = await store.create(SLUG, { title: 'deprioritised email card' })
+    await store.create(SLUG, { title: 'still active' })
+    await store.update(SLUG, a.id, { inline_active: true })
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(true)
+
+    const shelved = await store.update(SLUG, a.id, { status: 'archived' })
+    expect(shelved?.status).toBe('archived')
+    // (iii) shelved ≠ shipped — no completion datestamp, ever.
+    expect(shelved?.completed_at).toBeNull()
+    // A shelved card can never still claim live inline work.
+    expect(shelved?.inline_active).toBe(false)
+
+    // (i) gone from every ACTIVE surface (this is also what drops it from the
+    // per-turn prompt fragment, which rides listActive).
+    expect(store.listActive(SLUG).map((i) => i.id)).not.toContain(a.id)
+    expect(store.listAllActive().map((i) => i.id)).not.toContain(a.id)
+    // (ii) present in NO completed list — not the history, not the count.
+    expect(store.listCompleted(SLUG).map((i) => i.id)).not.toContain(a.id)
+    expect(store.listCompleted(SLUG)).toHaveLength(0)
+    // (iv) still on the board, in its own bucket.
+    expect(store.listArchived(SLUG).map((i) => i.id)).toEqual([a.id])
+    expect(store.list(SLUG).map((i) => i.id)).toContain(a.id)
+  })
+
+  test('list() orders active → archived → completed', async () => {
+    const store = new WorkBoardStore(db)
+    const active = await store.create(SLUG, { title: 'active' })
+    const shelved = await store.create(SLUG, { title: 'shelved' })
+    const done = await store.create(SLUG, { title: 'done' })
+    await store.update(SLUG, shelved.id, { status: 'archived' })
+    await store.complete(SLUG, done.id)
+    expect(store.list(SLUG).map((i) => i.id)).toEqual([active.id, shelved.id, done.id])
+  })
+
+  test('shelving a DONE card nulls completed_at (it stops counting as progress)', async () => {
+    const store = new WorkBoardStore(db, { now: () => '2026-08-14T00:00:00.000Z' })
+    const a = await store.create(SLUG, { title: 'was marked done by mistake' })
+    await store.complete(SLUG, a.id)
+    expect(store.get(SLUG, a.id)?.completed_at).not.toBeNull()
+
+    const shelved = await store.update(SLUG, a.id, { status: 'archived' })
+    expect(shelved?.status).toBe('archived')
+    expect(shelved?.completed_at).toBeNull()
+    expect(store.listCompleted(SLUG)).toHaveLength(0)
+    expect(store.listArchived(SLUG).map((i) => i.id)).toEqual([a.id])
+  })
+
+  test('un-shelving re-appends to the END of the active lane', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'first' }) // sort_order 1
+    await store.create(SLUG, { title: 'second' }) // sort_order 2
+    const c = await store.create(SLUG, { title: 'third' }) // sort_order 3
+    await store.update(SLUG, a.id, { status: 'archived' })
+
+    const back = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(back?.status).toBe('upcoming')
+    // Its stale sort_order (1) must not collide with the renumbered active lane.
+    expect(back?.sort_order).toBe(c.sort_order + 1)
+    expect(store.listActive(SLUG).map((i) => i.id).at(-1)).toBe(a.id)
+    expect(store.listArchived(SLUG)).toHaveLength(0)
+  })
+
+  test('reorder ignores an archived row (it is not in the active lane)', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'a' })
+    const b = await store.create(SLUG, { title: 'b' })
+    const c = await store.create(SLUG, { title: 'c' })
+    await store.update(SLUG, b.id, { status: 'archived' })
+
+    // Moving the archived row is a no-op…
+    await store.reorder(SLUG, b.id, { before: a.id })
+    expect(store.listActive(SLUG).map((i) => i.id)).toEqual([a.id, c.id])
+    expect(store.get(SLUG, b.id)?.status).toBe('archived')
+    // …and the archived row is not a reorder TARGET either — the lane renumbers
+    // to a clean 1..N over the two active rows only.
+    await store.reorder(SLUG, c.id, { before: a.id })
+    expect(store.listActive(SLUG).map((i) => [i.id, i.sort_order])).toEqual([
+      [c.id, 1],
+      [a.id, 2],
+    ])
+  })
+
+  test('archiving a card whose bound run is LIVE is REFUSED', async () => {
+    const live = new WorkBoardStore(db, { isRunLive: () => true })
+    const a = await live.create(SLUG, { title: 'building right now' })
+    await live.attachRun(SLUG, a.id, 'run-live')
+
+    let caught: unknown = null
+    try {
+      await live.update(SLUG, a.id, { status: 'archived' })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(WorkBoardRunStillLiveError)
+    expect((caught as WorkBoardRunStillLiveError).run_id).toBe('run-live')
+    // The refusal happened BEFORE any write — the card is untouched.
+    expect(live.get(SLUG, a.id)?.status).toBe('in_progress')
+    expect(live.listArchived(SLUG)).toHaveLength(0)
+  })
+
+  test('archiving the same card succeeds once its run is no longer live', async () => {
+    const dead = new WorkBoardStore(db, { isRunLive: () => false })
+    const a = await dead.create(SLUG, { title: 'its build already ended' })
+    await dead.attachRun(SLUG, a.id, 'run-over')
+    const shelved = await dead.update(SLUG, a.id, { status: 'archived' })
+    expect(shelved?.status).toBe('archived')
+    expect(shelved?.completed_at).toBeNull()
+    expect(dead.listArchived(SLUG).map((i) => i.id)).toEqual([a.id])
+  })
+
+  test('the live-run guard covers ONLY the →archived transition', async () => {
+    const live = new WorkBoardStore(db, { isRunLive: () => true })
+    const a = await live.create(SLUG, { title: 'building right now' })
+    await live.attachRun(SLUG, a.id, 'run-live')
+    // A title edit, and a status move that is not a shelving, still go through.
+    const renamed = await live.update(SLUG, a.id, { title: 'renamed mid-build' })
+    expect(renamed?.title).toBe('renamed mid-build')
+    const requeued = await live.update(SLUG, a.id, { status: 'upcoming' })
+    expect(requeued?.status).toBe('upcoming')
   })
 })
 

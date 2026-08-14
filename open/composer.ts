@@ -2266,9 +2266,12 @@ export function buildOpenGraphComposer(
         if (!hasFailedNotDone) {
           const latest = boardRunStore.latestByProjectScope(scopeKey)
           if (latest !== null && latest.phase === 'failed') {
+            // An ACTIONABLE item: neither done nor SHELVED. A shelved card
+            // (`status='archived'`, migration 0122) is parked off the active
+            // lane, so it must not keep the rail in `attention` forever.
             const hasOpenItem = workBoardStore
               .list(scopeKey)
-              .some((it) => it.status !== 'done')
+              .some((it) => it.status !== 'done' && it.status !== 'archived')
             if (hasOpenItem) hasFailedNotDone = true
           }
         }

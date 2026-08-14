@@ -42,7 +42,9 @@ import {
 
 /* ─── wire types (mirror work-board/store.ts) ─── */
 
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed'
+/** `archived` = SHELVED (migration 0122): deprioritised, off the active lane,
+ *  and NEVER counted as completed — it is not a quieter `done`. */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived'
 
 /** #379 — the ▶ routing kind ('build' → Trident, 'research' → Atlas). */
 export type WorkBoardTaskType = 'build' | 'research'

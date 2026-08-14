@@ -104,8 +104,12 @@ export function scanItemsForRailSignals(
     }
     const runId = item.linked_run_id
     if (runId === null || runId.length === 0) continue
-    // Still-bound terminal-failed run on a not-done item → attention.
-    if (isRunTerminalFailed(runId) && item.status !== 'done') {
+    // Still-bound terminal-failed run on an item that is neither done nor
+    // SHELVED → attention. A shelved card (`status='archived'`, migration 0122)
+    // is explicitly parked, so it must not hold the rail red: a still-bound
+    // stale failed run on a card the owner already took off the board is not
+    // something to draw their attention to.
+    if (isRunTerminalFailed(runId) && item.status !== 'done' && item.status !== 'archived') {
       hasFailedNotDone = true
     }
   }

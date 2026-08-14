@@ -573,3 +573,67 @@ describe('work_board_remove', () => {
     expect(h.events).toEqual([])
   })
 })
+
+/**
+ * The SHELVED lane on the AGENT surface (migration 0122). This is the lever that
+ * exists so the agent asked to take four deprioritised cards off the board no
+ * longer has to mark them `done` — the misreport of 2026-08-14.
+ */
+describe('work_board_update — the SHELVED lane (status=archived)', () => {
+  test("the schemas advertise 'archived' but NEVER 'failed'", () => {
+    for (const name of [WORK_BOARD_ADD_TOOL, WORK_BOARD_UPDATE_TOOL]) {
+      const schema = registry.get(name)!.input_schema as {
+        properties: { status: { enum: string[]; description: string } }
+      }
+      expect(schema.properties.status.enum).toContain('archived')
+      // 'failed' is run-driven (terminal reconcile only) — not client-writable.
+      expect(schema.properties.status.enum).not.toContain('failed')
+      // The model is told archived ≠ shipped.
+      expect(schema.properties.status.description).toContain('archived')
+    }
+  })
+
+  test("status:'archived' shelves the card — and work_board_list shows it NOT done", async () => {
+    const add = registry.get(WORK_BOARD_ADD_TOOL)!
+    const update = registry.get(WORK_BOARD_UPDATE_TOOL)!
+    const created = (await add.handler({ title: 'deprioritised email card' }, ctx('owner'))) as {
+      item: { id: string }
+    }
+    const id = created.item.id
+
+    const res = (await update.handler({ id, status: 'archived' }, ctx('owner'))) as {
+      ok: boolean
+      item?: { status: string; completed_at: string | null }
+    }
+    expect(res.ok).toBe(true)
+    expect(res.item?.status).toBe('archived')
+    // Acceptance (b): it is counted as completed NOWHERE.
+    expect(res.item?.completed_at).toBeNull()
+
+    const listed = (await registry.get(WORK_BOARD_LIST_TOOL)!.handler({}, ctx('owner'))) as {
+      items: Array<{ id: string; status: string; completed_at: string | null }>
+    }
+    const row = listed.items.find((i) => i.id === id)
+    expect(row).toBeDefined()
+    expect(row!.status).toBe('archived')
+    expect(listed.items.filter((i) => i.status === 'done')).toEqual([])
+  })
+
+  test('shelving a card whose build is LIVE is a REFUSAL result, not a throw', async () => {
+    const reg = new ToolRegistry()
+    const liveStore = new WorkBoardStore(db, { isRunLive: () => true })
+    registerWorkBoardToolSurface(reg, liveStore)
+    const item = await liveStore.create('owner', { title: 'building right now' })
+    await liveStore.attachRun('owner', item.id, 'run-live')
+
+    const res = (await reg.get(WORK_BOARD_UPDATE_TOOL)!.handler(
+      { id: item.id, status: 'archived' },
+      ctx('owner'),
+    )) as { ok: boolean; error?: string }
+    expect(res.ok).toBe(false)
+    expect(res.error).toContain('run-live')
+    expect(res.error).toContain('still running')
+    // Nothing was written.
+    expect(liveStore.get('owner', item.id)?.status).toBe('in_progress')
+  })
+})

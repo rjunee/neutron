@@ -819,3 +819,53 @@ describe('work-board HTTP surface — per-project scoping (Bug 3)', () => {
     expect(projBody.items).toEqual([])
   })
 })
+
+/**
+ * The SHELVED lane over HTTP (migration 0122). 'archived' is client-writable —
+ * it is the deprioritise lever — while 'failed' stays run-driven-only.
+ */
+describe('work-board HTTP surface — the SHELVED lane (status=archived)', () => {
+  const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  test("PATCH status:'archived' → 200, off the active lane, completed_at null", async () => {
+    const a = await store.create(SCOPE, { title: 'deprioritised card' })
+    const res = await surface.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { status: 'archived' }),
+    )
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { ok: boolean; item: { status: string; completed_at: string | null } }
+    expect(body.item.status).toBe('archived')
+    expect(body.item.completed_at).toBeNull()
+    expect(store.listActive(SCOPE)).toHaveLength(0)
+    expect(store.listCompleted(SCOPE)).toHaveLength(0)
+    expect(store.listArchived(SCOPE).map((i) => i.id)).toEqual([a.id])
+  })
+
+  test("PATCH status:'failed' is still 400 invalid_status (run-driven only)", async () => {
+    const a = await store.create(SCOPE, { title: 'not yours to write' })
+    const res = await surface.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { status: 'failed' }),
+    )
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { ok: boolean; code: string }
+    expect(body.code).toBe('invalid_status')
+  })
+
+  test('PATCH archived on a LIVE-run card → 409 run_still_live (not a 500)', async () => {
+    const liveStore = new WorkBoardStore(db, { isRunLive: () => true })
+    const liveSurface = createWorkBoardSurface({ store: liveStore, auth })
+    const a = await liveStore.create(SCOPE, { title: 'building right now' })
+    await liveStore.attachRun(SCOPE, a.id, 'run-live')
+
+    const res = await liveSurface.handler(
+      req('PATCH', `/api/app/projects/proj1/work-board/${a.id}`, { status: 'archived' }),
+    )
+    expect(res?.status).toBe(409)
+    const body = (await res!.json()) as { ok: boolean; code: string; message: string }
+    expect(body.ok).toBe(false)
+    expect(body.code).toBe('run_still_live')
+    expect(body.message).toContain('run-live')
+    // Nothing was written.
+    expect(liveStore.get(SCOPE, a.id)?.status).toBe('in_progress')
+  })
+})

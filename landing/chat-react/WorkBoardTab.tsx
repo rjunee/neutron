@@ -2,8 +2,10 @@
  * landing/chat-react — web WORK tab content (M1 UX redesign).
  *
  * The live work-tracking view for the web project shell: the project's board —
- * what's in progress / next at the top, the completed history collapsed at the
- * bottom — rendered as the builtin `work_board` tab (user-facing label "Work")
+ * what's in progress / next at the top, then two collapsed sections at the
+ * bottom, "Shelved · N" (`status='archived'` — deprioritised, NEVER counted as
+ * done) and the "Done · N" history — rendered as the builtin `work_board` tab
+ * (user-facing label "Work")
  * inside `ProjectShell`, the sibling of `DocumentsTab`.
  *
  * ── Distinct from Tasks ─────────────────────────────────────────────────────
@@ -28,7 +30,8 @@
  * (#344).
  *
  * ── Order is the engine's ───────────────────────────────────────────────────
- * The store returns active+next first (by `sort_order`) then completed
+ * The store returns active+next first (by `sort_order`), then SHELVED
+ * (`status='archived'`), then completed
  * (reverse-chron). The tab NEVER re-sorts — it splits the snapshot by status and
  * renders each lane in the order the server gave. A live `work_board_changed`
  * frame carries the SAME full snapshot, so applying it is a drop-in replacement
@@ -76,11 +79,13 @@ export interface WorkBoardLiveSource {
 }
 
 /** Cycle an item's status forward: upcoming → in_progress → done. A failed item
- *  re-queues to upcoming on manual advance (the primary action is the ▶/↻ retry). */
+ *  re-queues to upcoming on manual advance (the primary action is the ▶/↻ retry),
+ *  and so does a SHELVED (archived) item — advancing it un-shelves it. */
 function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'upcoming') return 'in_progress'
   if (status === 'in_progress') return 'done'
   if (status === 'failed') return 'upcoming'
+  if (status === 'archived') return 'upcoming'
   return 'done'
 }
 
@@ -89,6 +94,7 @@ function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress'
   if (status === 'done') return 'Done'
   if (status === 'failed') return 'Failed'
+  if (status === 'archived') return 'Shelved'
   return 'Upcoming'
 }
 
@@ -325,6 +331,8 @@ export function WorkBoardTab({
   const [listError, setListError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [completedOpen, setCompletedOpen] = useState(false)
+  // Separate open-state: Shelved and Done are two independent collapsed sections.
+  const [archivedOpen, setArchivedOpen] = useState(false)
 
   // Add composer (bottom of the active items, above Done — #344).
   const [newTitle, setNewTitle] = useState('')
@@ -598,7 +606,12 @@ export function WorkBoardTab({
     [removeItem],
   )
 
-  const active = items.filter((it) => it.status !== 'done')
+  // Three-way bucketing. `archived` (SHELVED) must be excluded from BOTH: a bare
+  // `status !== 'done'` would resurrect it in the active lane the server already
+  // excluded (and make it drag-reorderable), and folding it into `completed`
+  // would report parked work in the Done count as shipped progress.
+  const active = items.filter((it) => it.status !== 'done' && it.status !== 'archived')
+  const archived = items.filter((it) => it.status === 'archived')
   const completed = items.filter((it) => it.status === 'done')
 
   // Drag-to-reorder — persist via the existing reorder route. Dropping the
@@ -682,7 +695,7 @@ export function WorkBoardTab({
           <div className="cwb-empty">Loading…</div>
         ) : listError !== null ? (
           <div className="cwb-empty">{listError}</div>
-        ) : active.length === 0 && completed.length === 0 ? (
+        ) : active.length === 0 && archived.length === 0 && completed.length === 0 ? (
           <>
             <div className="cwb-empty cwb-empty-zero">
               No work tracked yet. Ask Neutron to start something, or add an item.
@@ -738,6 +751,57 @@ export function WorkBoardTab({
 
             {/* #344 — add box at the bottom of active items, ABOVE Done. */}
             {addForm}
+
+            {/* SHELVED — its own collapsed section, reusing the Done section's
+                styles. It sits ABOVE Done and is counted separately: an archived
+                card is parked, not shipped, so it never enters `Done · N`. Rows
+                carry the neutral upcoming dot and NO "Merged · <date>" line
+                (there is no completed_at to show). */}
+            {archived.length > 0 ? (
+              <div className="cwb-completed">
+                <button
+                  type="button"
+                  className="cwb-completed-toggle"
+                  aria-expanded={archivedOpen}
+                  onClick={() => setArchivedOpen((v) => !v)}
+                >
+                  <span className="cwb-completed-caret">{archivedOpen ? '▾' : '▸'}</span>
+                  Shelved · {archived.length}
+                </button>
+                {archivedOpen ? (
+                  <ul className="cwb-ul cwb-completed-ul" aria-label="Shelved">
+                    {archived.map((it) => (
+                      <li key={it.id} className="cwb-row cwb-row-done">
+                        <div className="cwb-row-line1">
+                          <span className="cwb-dot cwb-dot-upcoming" aria-label="Shelved" />
+                          <span className="cwb-title" title={it.title}>
+                            {it.title}
+                          </span>
+                          {confirmDelete?.id === it.id ? (
+                            <InlineConfirm
+                              running={false}
+                              onConfirm={() => confirmRemove(it)}
+                              onCancel={cancelRemove}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              className="cwb-btn cwb-btn-icon"
+                              onClick={() => requestRemove(it)}
+                              disabled={busyId === it.id}
+                              title="Delete item"
+                              aria-label="Delete item"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
 
             {completed.length > 0 ? (
               <div className="cwb-completed">

@@ -178,7 +178,11 @@ const WORK_BOARD_PATH_RE =
   /^\/api\/app\/projects\/([^/]+)\/work-board(?:\/([^/]+))?(?:\/([a-z]+))?$/
 
 const MAX_ITEM_ID_LEN = 128
-const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+// 'archived' (SHELVED) is client-writable — it is the deprioritise lane, and the
+// whole point is that taking a card off the board no longer requires claiming it
+// shipped. 'failed' stays OUT: it is run-driven, written only by the terminal
+// reconcile, so a client PATCH of it is still a 400.
+const VALID_STATUSES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done', 'archived']
 const VALID_TASK_TYPES: WorkBoardTaskType[] = ['build', 'research']
 
 export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoardSurface {
@@ -472,6 +476,13 @@ async function handleUpdate(
     const item = await store.update(project_slug, item_id, patch)
     return jsonOk({ item, project_id })
   } catch (err) {
+    // 409, not 500: the store REFUSES to SHELVE (status:'archived') an item whose
+    // build is still live, and that is a legitimate answer about state rather
+    // than a fault — the same rule handleComplete applies to 'done'. The client
+    // shows the message.
+    if (err instanceof WorkBoardRunStillLiveError) {
+      return jsonError(409, 'run_still_live', err.message)
+    }
     return mapWriteError(err)
   }
 }

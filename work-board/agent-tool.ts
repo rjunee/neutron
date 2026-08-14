@@ -52,12 +52,20 @@ export const WORK_BOARD_COMPLETE_TOOL = 'work_board_complete'
 export const WORK_BOARD_REORDER_TOOL = 'work_board_reorder'
 export const WORK_BOARD_REMOVE_TOOL = 'work_board_remove'
 
-const STATUS_VALUES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+// 'failed' is deliberately ABSENT: it is run-driven (only the terminal reconcile
+// writes it), so it is not client-writable. 'archived' IS here — it is the
+// deprioritise lever.
+const STATUS_VALUES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done', 'archived']
 
 const statusProp = {
   type: 'string',
   enum: STATUS_VALUES,
-  description: "Lane: 'upcoming' (backlog) | 'in_progress' (active) | 'done' (completed).",
+  description:
+    "Lane: 'upcoming' (backlog) | 'in_progress' (active) | 'done' (SHIPPED — it happened) | " +
+    "'archived' (SHELVED — deprioritised and taken off the active board WITHOUT shipping). " +
+    "'archived' is not a quieter 'done': use it, never 'done'/work_board_complete, for anything " +
+    'dropped, parked, or superseded, so the board never reports unshipped work as completed. ' +
+    'A shelved card keeps its history and can be un-shelved back to upcoming.',
 }
 
 const designDocRefProp = {
@@ -285,11 +293,12 @@ export function registerWorkBoardToolSurface(
   registry.register({
     name: WORK_BOARD_UPDATE_TOOL,
     description:
-      'Update a Work Board item by id: change its title, move its status (upcoming/in_progress/done), ' +
-      'set/replace its design_doc_ref, or flag inline_active when YOU are working the item INLINE in ' +
-      'this topic (shows a caret › on the board; a bound sub-agent shows a fork ⑂ instead — that is ' +
-      'set automatically when a build is dispatched). Clear inline_active when you stop. Re-opening ' +
-      'off done clears the completion datestamp.',
+      'Update a Work Board item by id: change its title, move its status ' +
+      '(upcoming/in_progress/done/archived), set/replace its design_doc_ref, or flag inline_active ' +
+      'when YOU are working the item INLINE in this topic (shows a caret › on the board; a bound ' +
+      'sub-agent shows a fork ⑂ instead — that is set automatically when a build is dispatched). ' +
+      'Clear inline_active when you stop. Re-opening off done clears the completion datestamp. ' +
+      "To DEPRIORITISE a card, set status:'archived' (shelved) — never 'done', which claims it shipped.",
     input_schema: {
       type: 'object',
       properties: {
@@ -347,6 +356,13 @@ export function registerWorkBoardToolSurface(
         }
         return ok(item)
       } catch (err) {
+        // A refusal is an ANSWER, not a crash: the store throws when a card is
+        // SHELVED (status:'archived') while its build is still live (see
+        // WorkBoardRunStillLiveError). Surface its message so the agent learns
+        // why and stops, rather than seeing a tool error and retrying.
+        if (err instanceof WorkBoardRunStillLiveError) {
+          return { ok: false, error: err.message }
+        }
         return asErrorResult(err)
       }
     },
