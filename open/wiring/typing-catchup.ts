@@ -1,21 +1,26 @@
 import type { AppWsOutboundAgentTyping } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 
-/** Send current typing state to one newly-opened socket without changing it. */
-export function sendTypingCatchUp(input: {
+/** Read the live-turn state shared by reconnect catch-up and the project rail. */
+export function turnIsActive(active: ReadonlySet<string>, key: string): boolean {
+  return active.has(key)
+}
+
+/** Send the current turn snapshot to one newly-opened socket without changing it. */
+export function sendTurnStateSnapshot(input: {
   active: ReadonlySet<string>
   key: string
   project_id?: string
   now: () => number
   send: (env: AppWsOutboundAgentTyping) => void
 }): boolean {
-  if (!input.active.has(input.key)) return false
+  const active = turnIsActive(input.active, input.key)
   const env: AppWsOutboundAgentTyping = {
     v: 1,
     type: 'agent_typing',
-    state: 'start',
+    state: active ? 'start' : 'end',
     ts: input.now(),
   }
   if (input.project_id !== undefined && input.project_id.length > 0) env.project_id = input.project_id
   input.send(env)
-  return true
+  return active
 }

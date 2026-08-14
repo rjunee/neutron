@@ -84,7 +84,7 @@ import {
   type AppWsOutboundImportProgress,
   type AppWsOutboundOnboardingCompleted,
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
-import { sendTypingCatchUp } from './typing-catchup.ts'
+import { sendTurnStateSnapshot } from './typing-catchup.ts'
 import {
   buildProjectDocReader,
   buildDeterministicProjectOpening,
@@ -1152,13 +1152,15 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
     // live-agent runner); a fresh process re-seeds, which only repaints the
     // opening question — acceptable and idempotent enough for the loader.
     on_session_open: async ({ user_id, channel_topic_id, project_id, send }) => {
-      // Typing is level-triggered for a newly-arrived socket. The rail and these
-      // dots read the SAME live-turn set; this direct send is deliberately not a
+      // Turn state is a level-triggered snapshot for a newly-arrived socket. The
+      // rail and these dots read the SAME live-turn set; an explicit `end` makes
+      // a client discard a stale in-flight belief after a missed terminal edge.
+      // This direct send is deliberately not a
       // refcount transition, timer re-arm, durable adapter send, or topic fan-out.
       // JavaScript runs this check+send atomically. The socket was registered
       // before this hook, so an end after this block reaches it; an end before it
-      // removes the key and suppresses this catch-up start.
-      sendTypingCatchUp({
+      // removes the key and makes this snapshot an `end`.
+      sendTurnStateSnapshot({
         active: activeChatProjects,
         key: railChatKey(project_id),
         ...(project_id !== undefined ? { project_id } : {}),

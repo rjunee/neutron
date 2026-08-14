@@ -1607,6 +1607,14 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    AND every live `app:<user>:<project>` topic (via `appWsRegistry.topics()`),
 >    else creating a project from inside a project would only show up after a
 >    reload (the #132 → this-fix bug).
+>
+>    **Turn-state reconnect snapshot (#570).** On every socket open,
+>    `open/wiring/app-ws.ts` reads the same live-turn set used by the project
+>    rail and sends an explicit `agent_typing` `start` or `end` to that socket.
+>    Clients adopt that level-triggered answer instead of inferring a turn from
+>    remembered start/end edges. A terminal outcome missed during a disconnect
+>    therefore returns as `end`, while a legitimately running turn returns as
+>    `start`; neither outcome depends on a guessed client timeout.
 > 2. **Persistent rail + tab layout.** `TopicRail` is lifted OUT of `ChatApp`
 >    (which is now just the Chat-tab body) to a persistent left column in
 >    `ProjectShell`; the `TabBar` renders in the content pane for BOTH views.

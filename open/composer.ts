@@ -484,6 +484,7 @@ import {
   type ProjectActivity,
   type PreviewFrom,
 } from './project-rail.ts'
+import { turnIsActive } from './wiring/typing-catchup.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
 import {
   dispatchBoardBoundBuild,
@@ -2275,7 +2276,7 @@ export function buildOpenGraphComposer(
         // Board/run read failure → treat as no board signal (idle unless chat).
       }
       const activity = deriveProjectActivity({
-        chatTurnInProgress: activeChatProjects.has(railChatKey(project_id)),
+        chatTurnInProgress: turnIsActive(activeChatProjects, railChatKey(project_id)),
         liveRunCount,
         hasInlineActive,
         hasFailedNotDone,

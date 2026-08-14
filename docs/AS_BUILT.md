@@ -10857,6 +10857,35 @@ detached child. It also pins the killed-wrapper message and artifact paths, the
 uncommitted-work recovery message, the existing failed-trailer mapping, and the happy
 path reaching review.
 
+## 2026-08-14 — turn state is resynchronised on reconnect
+
+Rebuilt on current `main` 2026-08-14. Two assertions in
+`open/__tests__/open-app-ws-durable-chatlog.test.ts` demanded that a connecting
+socket receive NO `agent_typing` frame at all. That was correct only while
+silence was the sole way to avoid a spurious indicator — and silence is exactly
+what strands a client that missed the real `end` while disconnected, because
+nothing ever contradicts its stale belief. Both now assert the property instead
+of the old spelling: no `start` for a quiet topic, and typing still never
+durable (the row count off `app_chat_messages` is untouched and remains the real
+guard). Mutation-checked: making an idle topic announce `start` fails the first;
+dropping the snapshot send fails both this suite and `typing-refcount`.
+
+The chat transport now sends every newly connected socket an explicit live-turn
+snapshot. `open/wiring/app-ws.ts` reads the same `activeChatProjects` set used by
+the project rail through `open/wiring/typing-catchup.ts`, then sends
+`agent_typing:start` when that topic is live or `agent_typing:end` when it is
+idle. The explicit idle answer is the terminal record for a client that missed a
+failure, completion, or kill while disconnected: the web and mobile clients
+already adopt those frames, so the stale running belief is cleared immediately
+without a timeout. A reconnect during a real turn continues to receive `start`.
+
+Coverage in `open/__tests__/typing-refcount.test.ts` pins both server answers and
+their shared derivation with the rail. The client-level regression in
+`landing/chat-react/__tests__/controller.test.ts` begins with an optimistic
+running belief, reconnects, applies the idle snapshot, and proves another send is
+accepted; its paired test preserves a genuinely running reconnect.
+
+
 ## 2026-08-13 — model rows describe dispatch capability, and review seats can be off
 
 `trident/phase-models.ts` now declares the complete executor set on every phase rather
