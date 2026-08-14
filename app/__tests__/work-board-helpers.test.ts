@@ -27,7 +27,7 @@ import { railDotKind } from '../lib/project-rail-view';
 import {
   deriveProjectActivity,
   scanItemsForRailSignals,
-} from '../../open/project-rail.ts';
+} from '@neutronai/contracts/project-rail.ts';
 import type { RunProgress, WorkBoardItem } from '../lib/work-board-client';
 
 function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
