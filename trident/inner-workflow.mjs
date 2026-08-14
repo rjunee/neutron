@@ -381,6 +381,32 @@ const kimiReviewRoute = (route, modelId) => ({
   envVar: 'KIMI_MODEL',
 })
 
+// ── A CLI SEAT MOVED ONTO CLAUDE ─────────────────────────────────────────────
+// The owner assigned a Claude tier to a cross-model review seat (the case the whole
+// point of a "put any model in any slot" pane): with the BUILD on GPT, Opus on a
+// review seat is the cross-family panel, not a violation of it. The route stops being
+// a subprocess launcher and becomes an ordinary `agent({model})` dispatch, so it
+// carries an EFFORT again and NO env knob — a leftover `envVar` here would put a
+// Claude id on a wrapper's command line.
+//
+// THIS IS NOT THE BANNED FALLBACK. `trident/kimi-review.ts` forbids a seat quietly
+// becoming a Claude reviewer when its CLI is unavailable; nothing here is reached by a
+// failure — only by the owner's stored choice, which is logged, panel-labelled and
+// recorded in the verdict.
+//
+// The effort is the owner's when a config carries one and the phase's stated default
+// otherwise: these two rows have no live effort cell (their DEFAULT executor is a CLI,
+// which is what `phaseSupportsEffort` answers), so the common path is the default.
+const CLAUDE_SEAT_EFFORT = 'high'
+const claudeReviewRoute = (route, modelId, effort) => ({
+  ...route,
+  model: modelId,
+  effort,
+  transport: 'agent',
+  group: 'claude',
+  envVar: null,
+})
+
 // forge:* routes BY the planner's complexity tag: '[mechanical]' (boilerplate,
 // tests, a single-file edit) → cheap Sonnet executor; '[reasoning]' / missing /
 // ambiguous → Opus (bias to Opus — Argus + Codex are the backstop).
@@ -421,10 +447,19 @@ const ROLE_MODEL = {
   // the owner picks a tier and the resolved id reaches the subprocess — the model is
   // NOT handed to agent() (that resolves against Claude Code's endpoint and cannot
   // reach a GPT/Kimi model; see the `modelTiers` arg). The thin Claude agent wrapping
-  // each still runs on the launcher default: its whole job is to run one command and
-  // map an exit code.
-  'argus:codex': { ...cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'codex', 'kimi'] },
-  'argus:kimi': { ...cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }), dispatchGroups: ['none', 'codex', 'kimi'] },
+  // each still runs on the launcher default WHILE THE SEAT IS ON A CLI TIER: its whole
+  // job there is to run one command and map an exit code.
+  //
+  // …AND A CLAUDE TIER IS ONE OF THE CHOICES. `claude` is in `dispatchGroups` because
+  // the dispatch exists: the seat then reviews with a real reviewer prompt on the
+  // CHOSEN tier through `agent({model})` (see `claudePeerPrompt` / the panel below),
+  // rather than shelling out. That is the owner ASSIGNING a family to a seat, which is
+  // a different thing from the banned SILENT fallback to Claude when a CLI fails — the
+  // seats never substitute for one another (`routeAvailable`), they only run what was
+  // chosen. The list must match `trident/phase-models.ts`; both are walked by
+  // `__tests__/cross-model-dispatch.test.ts`.
+  'argus:codex': { ...cliRoute({ tier: 'sol', phaseKey: 'review_codex', group: 'codex' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi'] },
+  'argus:kimi': { ...cliRoute({ tier: 'k3', phaseKey: 'review_kimi', group: 'kimi' }), dispatchGroups: ['none', 'claude', 'codex', 'kimi'] },
   'checkpoint': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   'terminal-result': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
   'cleanup:worktree': { model: MODELS.fast, effort: 'low', phaseKey: 'bookkeeping', dispatchGroups: ['claude'] },
@@ -502,13 +537,29 @@ function applyPhaseOverride(route, phaseKey) {
     } else if (tier.group === 'none' && dispatchGroups.includes('none')) {
       return { ...route, disabled: true, model: null, effort: null }
     } else if (tier.group !== group && dispatchGroups.includes(tier.group)) {
-      // THE BUILD MOVES TO THE CODEX EXECUTOR. The whole route changes, not just the
+      // THE STEP MOVES TO ANOTHER EXECUTOR. The whole route changes, not just the
       // id: the dispatch stops being an `agent()` call and becomes the codex build
       // wrapper, which is the difference between "the build runs on GPT" and "we
       // asked Claude Code's endpoint for a GPT id".
+      //
+      // The line NAMES THE EXECUTOR IT MOVED TO. It used to say `executor=codex`
+      // unconditionally, which was already wrong for a seat moved to Kimi and would
+      // read as an outright lie for one moved to Claude.
       log(
-        `trident.phase-override phase=${phaseKey} executor=codex tier=${requested} model=${tier.model_id}`,
+        `trident.phase-override phase=${phaseKey} executor=${tier.group} tier=${requested} model=${tier.model_id}`,
       )
+      if (tier.group === 'claude') {
+        // …AND THE OTHER DIRECTION: a CLI seat moved onto a Claude tier. The effort is
+        // live again on this route, so it is honoured rather than logged away — the
+        // reverse of the codex case below (see `claudeReviewRoute`).
+        return claudeReviewRoute(
+          route,
+          tier.model_id,
+          typeof override.effort === 'string' && VALID_EFFORTS.includes(override.effort)
+            ? override.effort
+            : CLAUDE_SEAT_EFFORT,
+        )
+      }
       if (override.effort !== undefined) {
         // The step HAD an effort control while it ran on Claude; on the codex
         // executor it does not. Said out loud rather than dropped, because a stored
