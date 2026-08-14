@@ -2347,23 +2347,55 @@ const REVIEW_REQUIRED_CHECKS = Object.freeze(['test', 'lint', 'typecheck'])
 const REVIEW_READINESS_ATTEMPTS = 3
 const REVIEW_READINESS_RETRY_MS = 15000
 
+// MEASURE THE CAUSE, AND HAVING MEASURED IT, DO NOT THROW IT AWAY (#240). Run
+// 8417b277 held `To get started with GitHub CLI, please run: gh auth login` in the
+// probe's `raw` and discarded it, so the stored reason blamed the review rounds for a
+// build no review seat ever judged.
+//
+// Mirror redactPushError's two patterns (trident/orchestrator.ts:358) locally — this
+// file cannot import TS. A probe's raw output is where an echoed remote URL or token
+// would surface; the text is carried through this or not at all.
+function redactProbeText(text) {
+  return String(text)
+    .replace(/(\w+:\/\/)[^/\s@]+@/g, '$1***@')
+    .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '$1***')
+}
+// The first non-empty line(s) of what the probe actually said, redacted + capped.
+// '' when there is nothing usable (caller then keeps its bare generic reason).
+function probeCause(raw) {
+  const lines = String(raw || '').split('\n').map((l) => l.trim()).filter((l) => l.length > 0)
+  if (lines.length === 0) return ''
+  return redactProbeText(lines.slice(0, 2).join(' ')).slice(0, 200)
+}
+
 /** Classify the fixed `gh pr view` readiness probe before any review seat runs. */
 function classifyReviewReadiness(probe) {
+  // No probe object at all → there is no `raw` to quote, so the bare sentence stands.
   if (probe === null || typeof probe !== 'object') return { status: 'unknown', reason: 'PR readiness could not be read' }
   const raw = typeof probe.raw === 'string' ? probe.raw : ''
   const exit = typeof probe.exit_code === 'number' ? probe.exit_code : -1
-  if (exit !== 0) return { status: 'unknown', reason: 'PR readiness could not be read' }
+  // Every unreadable branch below QUOTES the probe instead of summarising it: the
+  // difference between "could not be read" and "run: gh auth login" is the difference
+  // between a mystery and a repair. Redacted + capped at the source.
+  const unreadable = () => {
+    const cause = probeCause(raw)
+    return {
+      status: 'unknown',
+      reason: cause === '' ? 'PR readiness could not be read' : 'PR readiness could not be read: ' + cause,
+    }
+  }
+  if (exit !== 0) return unreadable()
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
-  if (start < 0 || end <= start) return { status: 'unknown', reason: 'PR readiness could not be read' }
+  if (start < 0 || end <= start) return unreadable()
   let parsed
   try {
     parsed = JSON.parse(raw.slice(start, end + 1))
   } catch {
-    return { status: 'unknown', reason: 'PR readiness could not be read' }
+    return unreadable()
   }
   if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.statusCheckRollup)) {
-    return { status: 'unknown', reason: 'PR readiness could not be read' }
+    return unreadable()
   }
   const mergeable = typeof parsed.mergeable === 'string' ? parsed.mergeable.toUpperCase() : ''
   if (mergeable === 'CONFLICTING') {
@@ -2428,7 +2460,9 @@ async function reviewWithPreconditions({ probe, spend, wait, attempts = REVIEW_R
  * wait for, and blocking it would deadlock every self-hoster who has not set up CI.
  */
 function classifyCi(probe) {
-  if (probe === null || typeof probe !== 'object') return { status: 'unknown', failing: [] }
+  // `cause` on the unknown branches is the probe's OWN words (redacted + capped) —
+  // `ciDeferredPeer` quotes it so "could not tell" names what it could not tell.
+  if (probe === null || typeof probe !== 'object') return { status: 'unknown', failing: [], cause: '' }
   const raw = typeof probe.raw === 'string' ? probe.raw : ''
   const exit = typeof probe.exit_code === 'number' ? probe.exit_code : -1
   // `gh pr checks` exits 8 when checks are still pending and 1 when some failed, so a
@@ -2443,15 +2477,15 @@ function classifyCi(probe) {
     // merge. `gh` prints `[]` for a repo with no checks, so the genuine no-checks case
     // is already covered below — this branch only ever sees output we did not
     // understand, and the honest answer to that is "could not tell".
-    return { status: 'unknown', failing: [] }
+    return { status: 'unknown', failing: [], cause: probeCause(raw) }
   }
   let rows
   try {
     rows = JSON.parse(raw.slice(start, end + 1))
   } catch {
-    return { status: 'unknown', failing: [] }
+    return { status: 'unknown', failing: [], cause: probeCause(raw) }
   }
-  if (!Array.isArray(rows)) return { status: 'unknown', failing: [] }
+  if (!Array.isArray(rows)) return { status: 'unknown', failing: [], cause: probeCause(raw) }
   if (rows.length === 0) return { status: 'none', failing: [] }
   const failing = []
   let pending = 0
@@ -2513,10 +2547,12 @@ function ciDeferredPeer(ci) {
         'the checks report.',
     }
   }
+  const said = typeof ci.cause === 'string' && ci.cause !== '' ? `the probe said: "${ci.cause}". ` : ''
   return {
     name: 'CI',
     title: 'CI status UNREADABLE — refusing to silently APPROVE',
     evidence:
+      said +
       'the PR check status could not be read (gh missing, unauthenticated, or an unparseable ' +
       'reply). "Could not tell" is not "passed", so this does not APPROVE — restore the ability ' +
       'to read checks and re-run.',
@@ -2569,6 +2605,20 @@ function roundLeftNoDiffFinding(round) {
       'which is an APPROVE of a diff no one saw rather than of a change no one made. Regenerate the ' +
       'branch diff (`git diff <base>..HEAD`) and re-review; no work needs recovering.',
   }
+}
+
+// The one-line measured cause of an infra-only stop — the LANE finding's own title,
+// which quotes the probe (reviewPreconditionDeferred / synthesisUnavailable / the
+// cross-model gate all stamp kind: LANE_FINDING_KIND). '' when none exists.
+//
+// This is the signal `innerTerminalFailureReason` (trident/orchestrator.ts) has been
+// waiting for: it has always refused to INFER a cause from (round, checkpoint), and
+// rightly — so the cause must be measured HERE, where it is known, or nowhere.
+function infraTerminalCause(synthesis) {
+  const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : []
+  const lane = findings.find((f) => f && f.kind === LANE_FINDING_KIND && typeof f.title === 'string' && f.title !== '')
+  const any = lane || findings.find((f) => f && typeof f.title === 'string' && f.title !== '')
+  return any ? redactProbeText(any.title).slice(0, 300) : ''
 }
 
 /**
@@ -3789,7 +3839,20 @@ ${task}${reflectionGuidance}`,
     })
   }
 
-  log(`trident-v2 inner DONE: verdict=${finalVerdict} round=${round} pr=${pr}`)
+  // The MEASURED cause of an infra-only stop, computed once: it goes into the audit
+  // log AND the terminal result, and the two must not be able to disagree. Already
+  // redacted by `infraTerminalCause`, so it is safe to print.
+  const terminalCause = infraTerminalCause(synthesis)
+  const isInfraOnlyStop =
+    roundLostItsWork === null &&
+    roundLostItsDiff === null &&
+    finalVerdict !== 'APPROVE' &&
+    synthesis.blockKind === 'infra-only' &&
+    terminalCause !== ''
+  log(
+    `trident-v2 inner DONE: verdict=${finalVerdict} round=${round} pr=${pr}` +
+      (isInfraOnlyStop ? ` cause=${terminalCause}` : ''),
+  )
   // The inner workflow RETURNS {PR#, verdict}; the OUTER/human layer does the
   // irreversible merge (merge.ts stays outer — defense in depth). In the Phase-2a
   // EXEC model the launching turn has already settled, so the return value is NOT
@@ -3832,6 +3895,12 @@ ${task}${reflectionGuidance}`,
         : finalVerdict === 'APPROVE'
           ? 'none'
           : synthesis.blockKind || 'code',
+    // THE MEASURED CAUSE, present ONLY for an infra-only stop that actually measured
+    // one. `blockKind` says the code was never judged; this says WHY, in the probe's
+    // own words (redacted + capped). The outer loop's failure reason has been generic
+    // for want of exactly this field — and it stays generic wherever it is absent,
+    // because a specific message must ship WITH the measured signal, never before it.
+    ...(isInfraOnlyStop ? { terminalCause } : {}),
     // Present ONLY when a fix round left no trace on the branch, so the operator
     // is told which round to recover rather than being handed stale findings.
     ...(roundLostItsWork !== null

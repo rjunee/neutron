@@ -176,6 +176,18 @@ export interface InnerResult {
    * successful run as `merge failed`.
    */
   pr_merged: boolean
+  /**
+   * WHY the run is blocked, verbatim from the workflow ('none'|'code'|'infra-only'|'round-lost').
+   * 'infra-only' means NO review seat ever judged the code — the stop says nothing about the
+   * diff. null on legacy rows / any other value.
+   */
+  block_kind: 'none' | 'code' | 'infra-only' | 'round-lost' | null
+  /**
+   * The MEASURED cause of an infra-only stop — the probe's/lane's own words, already
+   * redacted by the workflow. null when absent/empty/not a string; the reason then stays
+   * generic, which is the whole point (never assert a cause that was not measured).
+   */
+  terminal_cause: string | null
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
   publish_requested?: boolean
   /** Local commit measured by the inner build; the outer publisher verifies it independently. */
@@ -515,6 +527,22 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     publish_head: typeof p.publishHead === 'string' && /^[0-9a-f]{40}$/.test(p.publishHead)
       ? p.publishHead
       : null,
+    // WHY IT STOPPED — parsed FAIL-CLOSED: only the four strings the workflow writes
+    // decode, anything else is null. The orchestrator keys a specific failure reason off
+    // 'infra-only', so an unrecognised value must never be read as one.
+    block_kind:
+      p.blockKind === 'none' ||
+      p.blockKind === 'code' ||
+      p.blockKind === 'infra-only' ||
+      p.blockKind === 'round-lost'
+        ? p.blockKind
+        : null,
+    // THE MEASURED CAUSE (#240). Empty/absent/non-string → null, so the reason falls back
+    // to the generic sentence rather than to an empty quotation.
+    terminal_cause:
+      typeof p.terminalCause === 'string' && p.terminalCause.trim() !== ''
+        ? p.terminalCause.trim().slice(0, 300)
+        : null,
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)

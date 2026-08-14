@@ -384,7 +384,7 @@ export function publishFailureReason(step: string, branch: string, stderr: strin
 
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
-  result: Pick<InnerResult, 'round' | 'checkpoint'>,
+  result: Pick<InnerResult, 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause'>,
 ): string {
   // Prefer the round the INNER workflow reports (what actually happened) over the row's
   // copy, which a crash can leave behind at its launch value.
@@ -411,6 +411,20 @@ export function innerTerminalFailureReason(
   // THE OWNER'S RULE, VERBATIM: *"If it's a generic catchall make the error message
   // generic."* This is a catch-all. This is the generic message. Making it specific again
   // is a change that must come WITH the missing signal, not before it — see the SPEC entry.
+  //
+  // 2026-08-14 — THE MISSING SIGNAL NOW EXISTS, on exactly ONE path. The inner workflow
+  // emits an explicit `terminalCause` for infra-only stops: the probe's/lane's own words
+  // (`inner-workflow.mjs` `infraTerminalCause`, already redacted + capped), measured at the
+  // point where it was known rather than deduced here. Run 8417b277 is the case — an
+  // unauthenticated `gh` made the readiness probe say `gh auth login`, no review seat ever
+  // ran, and this function reported ten rounds' worth of review that never happened. So the
+  // specific message ships WITH that measured signal, and ONLY with it: the branch below is
+  // the one permitted specific message, gated on BOTH the block kind and a non-null cause.
+  // Everything else — every inferred cause, every result carrying no measurement — still
+  // gets the generic sentence above, for all the reasons R1/R2 record.
+  if (result.block_kind === 'infra-only' && result.terminal_cause !== null) {
+    return `review never ran (infra-only) at round ${reported} of ${ceiling}: ${redactPushError(result.terminal_cause)}`
+  }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
 }

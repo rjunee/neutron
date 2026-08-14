@@ -137,6 +137,8 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       pr_merged: false,
       publish_requested: false,
       publish_head: null,
+      block_kind: null,
+      terminal_cause: null,
     })
   })
   // A MERGE IS TERMINAL (#563). The flag the OUTER loop reads to finish a run
@@ -167,6 +169,45 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     const withoutRemaining = parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))
     expect(withoutRemaining?.remaining_tasks).toBeNull()
   })
+  // WHY IT STOPPED, AND WHY (#240 / run 8417b277). The workflow has always written
+  // `blockKind`, and this decoder has always dropped it — so the orchestrator wrote the
+  // generic round sentence for a build that never reached a review seat. `terminalCause`
+  // is the measured half: the probe's own words, already redacted upstream.
+  test("decodes blockKind + terminalCause — the infra-only stop's own explanation", () => {
+    const out = parseInnerResult(
+      JSON.stringify({
+        verdict: 'REQUEST_CHANGES',
+        round: 1,
+        checkpoint: 'argus-request-changes',
+        blockKind: 'infra-only',
+        terminalCause: 'REVIEW DEFERRED — PR readiness could not be read: gh auth login',
+      }),
+    )
+    expect(out?.block_kind).toBe('infra-only')
+    expect(out?.terminal_cause).toContain('gh auth login')
+    for (const kind of ['none', 'code', 'round-lost'] as const) {
+      expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', blockKind: kind }))?.block_kind).toBe(kind)
+    }
+  })
+  test('FAIL-CLOSED: an unrecognised blockKind or an empty cause decodes to null', () => {
+    // The orchestrator keys a SPECIFIC failure message off `infra-only` + a non-null
+    // cause, so anything it does not recognise must fall back to the generic sentence
+    // rather than be coerced toward the specific one.
+    for (const bogus of ['weird', 'INFRA-ONLY', '', 42, true, null, {}]) {
+      expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', blockKind: bogus }))?.block_kind).toBeNull()
+    }
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.block_kind).toBeNull()
+    for (const bogus of ['', '   ', 42, true, null, {}, []]) {
+      expect(
+        parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: bogus }))?.terminal_cause,
+      ).toBeNull()
+    }
+    expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE' }))?.terminal_cause).toBeNull()
+  })
+  test('a cause is clamped — it is persisted and then read in a chat row', () => {
+    const out = parseInnerResult(JSON.stringify({ verdict: 'APPROVE', terminalCause: `  ${'y'.repeat(400)}  ` }))
+    expect(out?.terminal_cause?.length).toBe(300)
+  })
   test('null/empty/garbage → null (still in flight)', () => {
     expect(parseInnerResult(null)).toBeNull()
     expect(parseInnerResult(undefined)).toBeNull()
@@ -187,6 +228,8 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       pr_merged: false,
       publish_requested: false,
       publish_head: null,
+      block_kind: null,
+      terminal_cause: null,
     })
   })
 })

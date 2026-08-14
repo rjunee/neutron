@@ -20,12 +20,20 @@
  * These assert the SHAPE, not one wording, so the next early-exit path added upstream
  * cannot silently inherit the wrong sentence the way `inner-error` did.
  *
- * WHY NOTHING HERE ASSERTS A SPECIFIC CAUSE. Two Codex review rounds killed two attempts to
- * deduce one from `(round, checkpoint)`. The checkpoint records the PHASE reached, not the
- * TERMINAL CAUSE: `argus-request-changes` is written for genuine exhaustion, a round-lost
- * fix, a fix that left no diff, AND an infra-only synthesis stop. No terminal cause is
- * emitted anywhere in the pipeline. Until one is (SPEC), the honest message is the generic
- * one — which is exactly what the owner asked for.
+ * WHY ALMOST NOTHING HERE ASSERTS A SPECIFIC CAUSE. Two Codex review rounds killed two
+ * attempts to DEDUCE one from `(round, checkpoint)`. The checkpoint records the PHASE
+ * reached, not the TERMINAL CAUSE: `argus-request-changes` is written for genuine
+ * exhaustion, a round-lost fix, a fix that left no diff, AND an infra-only synthesis stop.
+ *
+ * 2026-08-14 — THE MISSING SIGNAL NOW EXISTS, on exactly ONE path, and the paragraph that
+ * used to stand here ("No terminal cause is emitted anywhere in the pipeline") is no longer
+ * true. Run `8417b277` stopped because an unauthenticated `gh` made the readiness probe
+ * answer `gh auth login`; no review seat ever ran, and this function reported ten rounds of
+ * review that never happened. The inner workflow now MEASURES that cause where it is known
+ * and emits it as `terminalCause` beside `blockKind: 'infra-only'`. So there is now one
+ * specific message — and it is gated on BOTH of those arriving. Everything else, including
+ * an infra-only stop that measured nothing, still gets the generic sentence. The rule is
+ * unchanged; only the supply of measurements changed.
  */
 import { describe, expect, test } from 'bun:test'
 import { innerTerminalFailureReason, publishFailureReason, redactPushError } from './orchestrator.ts'
@@ -62,6 +70,8 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     const reason = innerTerminalFailureReason(run({ inner_checkpoint: 'inner-error' }), {
       round: 1,
       checkpoint: 'inner-error',
+      block_kind: null,
+      terminal_cause: null,
     })
     expect(reason).not.toContain('exhausted')
     // …and it must not smuggle the ceiling in as if it were the count.
@@ -77,10 +87,15 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     // is still an INFERENCE, and it is wrong: `argus-request-changes` is written for several
     // distinct exits — genuine exhaustion, a round-lost fix, a fix that left no diff, an
     // infra-only synthesis stop. The checkpoint records the PHASE, not the TERMINAL CAUSE,
-    // and no terminal cause is emitted anywhere. So the message states what was measured and
-    // stops. This is the owner's rule applied literally: a generic catch-all gets a generic
-    // message.
-    const reason = innerTerminalFailureReason(run({ round: 10 }), { round: 10, checkpoint: 'argus-request-changes' })
+    // and this result carries no measured cause of its own (see the infra-only describe
+    // below for the one path that does). So the message states what was measured and stops.
+    // This is the owner's rule applied literally: a generic catch-all gets a generic message.
+    const reason = innerTerminalFailureReason(run({ round: 10 }), {
+      round: 10,
+      checkpoint: 'argus-request-changes',
+      block_kind: null,
+      terminal_cause: null,
+    })
     expect(reason).not.toContain('exhausted')
     expect(reason).toContain('round 10 of 10')
   })
@@ -90,10 +105,10 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     // terminal reason may contain a number that was never measured. `max_rounds` appearing
     // as a COUNT is the specific lie — it is the ceiling, and it was printed as the tally.
     const cases = [
-      { round: 1, checkpoint: 'inner-error' },        // CODEX_HOME / brief / push credential
-      { round: 10, checkpoint: 'argus-request-changes' }, // ten real rounds
-      { round: 2, checkpoint: 'argus-request-changes' },  // a lost fix round
-      { round: 10, checkpoint: 'inner-error' },        // a throw DURING the last round
+      { round: 1, checkpoint: 'inner-error', block_kind: null, terminal_cause: null },        // CODEX_HOME / brief / push credential
+      { round: 10, checkpoint: 'argus-request-changes', block_kind: null, terminal_cause: null }, // ten real rounds
+      { round: 2, checkpoint: 'argus-request-changes', block_kind: null, terminal_cause: null },  // a lost fix round
+      { round: 10, checkpoint: 'inner-error', block_kind: null, terminal_cause: null },        // a throw DURING the last round
     ]
     for (const c of cases) {
       const reason = innerTerminalFailureReason(run({ round: c.round }), c)
@@ -113,6 +128,8 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     const reason = innerTerminalFailureReason(run({ round: 10, inner_checkpoint: null }), {
       round: 2,
       checkpoint: 'inner-error',
+      block_kind: null,
+      terminal_cause: null,
     })
     expect(reason).toContain('round 2 of 10')
     expect(reason).not.toContain('exhausted')
@@ -129,6 +146,8 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
     const reason = innerTerminalFailureReason(run({ round: 10, inner_checkpoint: 'inner-error' }), {
       round: 10,
       checkpoint: 'inner-error',
+      block_kind: null,
+      terminal_cause: null,
     })
     expect(reason).not.toContain('exhausted')
     expect(reason).toContain('round 10 of 10')
@@ -140,21 +159,120 @@ describe('innerTerminalFailureReason — it reports what was measured and infers
 
   test('past the ceiling claims nothing either', () => {
     // Guards against a future "well, BEYOND the ceiling must mean exhausted" shortcut.
-    const reason = innerTerminalFailureReason(run({ round: 11 }), { round: 11, checkpoint: 'inner-error' })
+    const reason = innerTerminalFailureReason(run({ round: 11 }), {
+      round: 11,
+      checkpoint: 'inner-error',
+      block_kind: null,
+      terminal_cause: null,
+    })
     expect(reason).not.toContain('exhausted')
   })
 
   test('no checkpoint at all → still true, just less specific', () => {
     // Nothing is invented to fill the gap. This is the "generic" half of the owner's rule.
-    const reason = innerTerminalFailureReason(run({ inner_checkpoint: null }), { round: 3, checkpoint: null })
+    const reason = innerTerminalFailureReason(run({ inner_checkpoint: null }), {
+      round: 3,
+      checkpoint: null,
+      block_kind: null,
+      terminal_cause: null,
+    })
     expect(reason).toContain('round 3 of 10')
     expect(reason).not.toContain('checkpoint')
     expect(reason).not.toContain('exhausted')
   })
 
   test('a nonsense round from the workflow falls back to the row rather than printing it', () => {
-    const reason = innerTerminalFailureReason(run({ round: 4 }), { round: 0, checkpoint: 'inner-error' })
+    const reason = innerTerminalFailureReason(run({ round: 4 }), {
+      round: 0,
+      checkpoint: 'inner-error',
+      block_kind: null,
+      terminal_cause: null,
+    })
     expect(reason).toContain('round 4 of 10')
+  })
+})
+
+/**
+ * THE ONE SPECIFIC MESSAGE — and what it is gated on.
+ *
+ * MEASURED, run `8417b277` (2026-08-14). The inner loop's `gh` had no credential, so the
+ * PR-readiness probe answered `To get started with GitHub CLI, please run: gh auth login`,
+ * `reviewPreconditionDeferred` turned that into `{verdict:'REQUEST_CHANGES',
+ * blockKind:'infra-only'}`, and the row read *"inner workflow ended at round 1 of 10 …
+ * without Argus APPROVE"* — a review verdict for a build no reviewer ever saw. The run
+ * KNEW both facts and threw them away.
+ *
+ * So: a specific message, shipping WITH the measurement and only with it. `block_kind`
+ * alone is not enough (a stop can be infra-only and have measured nothing), and a cause
+ * alone is not enough (a code rejection's finding title is not a lane failure). Both, or
+ * the generic sentence.
+ */
+describe('innerTerminalFailureReason — an infra-only stop names the cause it measured', () => {
+  const infraOnly = (cause: string | null) => ({
+    round: 1,
+    checkpoint: 'argus-request-changes',
+    block_kind: 'infra-only' as const,
+    terminal_cause: cause,
+  })
+  const GENERIC = "inner workflow ended at round 1 of 10 at checkpoint 'argus-request-changes' without Argus APPROVE"
+
+  test('HEADLINE: run 8417b277 stores the probe\'s own words, not the round sentence', () => {
+    const reason = innerTerminalFailureReason(
+      run({ round: 1, inner_checkpoint: 'argus-request-changes' }),
+      infraOnly('REVIEW DEFERRED — PR readiness could not be read: To get started with GitHub CLI, please run: gh auth login'),
+    )
+    expect(reason.startsWith('review never ran (infra-only) at round 1 of 10')).toBe(true)
+    // The repair is IN the stored reason — this is the whole of acceptance (d).
+    expect(reason).toContain('gh auth login')
+    // …and it no longer blames the review rounds for a review that never happened.
+    expect(reason).not.toContain('without Argus APPROVE')
+    expect(reason).not.toContain('exhausted')
+  })
+
+  test('infra-only with NO measured cause is still the generic sentence, verbatim', () => {
+    // A legacy row, or a stop whose synthesis carried no titled finding. Nothing was
+    // measured, so nothing is asserted — the rule this file exists for, unchanged.
+    expect(innerTerminalFailureReason(run({ round: 1 }), infraOnly(null))).toBe(GENERIC)
+  })
+
+  test('a cause WITHOUT infra-only is still the generic sentence — the pair gates together', () => {
+    // A code rejection carries findings too. Their titles describe the DIFF, and quoting
+    // one as the terminal cause would re-invent the inference this function refuses to make.
+    for (const kind of ['code', 'round-lost', 'none', null] as const) {
+      expect(
+        innerTerminalFailureReason(run({ round: 1 }), {
+          round: 1,
+          checkpoint: 'argus-request-changes',
+          block_kind: kind,
+          terminal_cause: 'CI FAILING: test',
+        }),
+      ).toBe(GENERIC)
+    }
+  })
+
+  test('the ROUND is still the measured one, and the ceiling is still the ceiling', () => {
+    const reason = innerTerminalFailureReason(run({ round: 10, max_rounds: 4 }), {
+      ...infraOnly('REVIEW DEFERRED — gh auth login'),
+      round: 3,
+    })
+    expect(reason).toContain('at round 3 of 4')
+  })
+
+  test('a credential in the measured cause never reaches the persisted reason', () => {
+    // Belt-and-braces: the workflow redacts at the source, and this redacts again, because
+    // this string is what gets WRITTEN TO THE DATABASE and shown in a chat row.
+    const cause = "REVIEW DEFERRED — could not read Password for 'https://x-access-token:ghp_abc123@github.com/o/r'"
+    expect(cause).toContain('ghp_abc123') // positive control
+    const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly(cause))
+    expect(reason).not.toContain('ghp_abc123')
+    expect(reason).toContain('***@')
+    expect(reason).toContain('could not read Password')
+  })
+
+  test('it does not read as a review outcome to the owner', () => {
+    // The misclassification the whole card is about: nobody rejected this work.
+    const reason = innerTerminalFailureReason(run({ round: 1 }), infraOnly('REVIEW DEFERRED — gh auth login'))
+    expect(interpretFailure(run({ failure_reason: reason })).klass).not.toBe('review-unresolved')
   })
 })
 

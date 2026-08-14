@@ -302,17 +302,27 @@ function loadReadiness(source = SRC): {
     wait: () => Promise<void>
     attempts?: number
   }) => Promise<{ deferred: boolean; readiness: Readiness; value: unknown }>
+  probeCause: (raw: unknown) => string
+  redactProbeText: (text: unknown) => string
 } {
+  // The preamble carries the consts AND the two redaction/excerpt helpers
+  // `classifyReviewReadiness` closes over — they sit between the consts and the
+  // classifier's doc comment, so this one slice is still the whole environment.
   const required = source.slice(
     source.indexOf('const REVIEW_REQUIRED_CHECKS'),
     source.indexOf('/** Classify the fixed', source.indexOf('const REVIEW_REQUIRED_CHECKS')),
   )
+  // …and if a refactor ever moves them out of that slice, say so HERE rather than
+  // letting `new Function` throw a bare ReferenceError from inside a test.
+  if (!required.includes('function probeCause(') || !required.includes('function redactProbeText(')) {
+    throw new Error('probeCause/redactProbeText are no longer in the readiness preamble slice')
+  }
   const classifyAt = source.indexOf('function classifyReviewReadiness(')
   const classifySource = source.slice(classifyAt, source.indexOf('/**\n * Retry only readiness', classifyAt))
   const reviewAt = source.indexOf('async function reviewWithPreconditions(')
   const reviewSource = source.slice(reviewAt, source.indexOf('/**\n * CI findings', reviewAt))
   const factory = new Function(
-    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, reviewWithPreconditions }`,
+    `${required}\n${classifySource}\n${reviewSource}\nreturn { classifyReviewReadiness, reviewWithPreconditions, probeCause, redactProbeText }`,
   ) as () => ReturnType<typeof loadReadiness>
   return factory()
 }
@@ -384,5 +394,202 @@ describe('review-round preconditions — refuse before spending', () => {
     expect(() => expect(loadReadiness(absentPassedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1))).status).toBe('absent')).toThrow()
     const absentFailedMutant = SRC.replace("return { status: 'absent', reason: `required check ${name} has not run` }", "return { status: 'failed', reason: '', failed: [name] }")
     expect(() => expect(loadReadiness(absentFailedMutant).classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS').slice(1))).status).toBe('absent')).toThrow()
+  })
+})
+
+/**
+ * THE PROBE'S OWN WORDS SURVIVE THE CLASSIFIER.
+ *
+ * MEASURED, run `8417b277` (2026-08-14). The readiness probe held, verbatim:
+ *
+ *   raw[0]=To get started with GitHub CLI, please run:  gh auth login
+ *
+ * `classifyReviewReadiness` mapped that to `{status:'unknown', reason:'PR readiness could
+ * not be read'}` and DROPPED `raw`. The build then died as REQUEST_CHANGES with a stored
+ * reason blaming ten review rounds that never ran. #240's rule, applied here: measure the
+ * cause, and having measured it, do not throw it away.
+ *
+ * The risk this opens is the same one `redactPushError` exists for — a probe's raw output
+ * is exactly where an echoed remote URL or token surfaces — so carrying the text and
+ * redacting it are ONE change.
+ */
+describe('classifyReviewReadiness — an unreadable probe quotes what it could not read', () => {
+  test("HEADLINE: the gh-auth message reaches the reason instead of being discarded", () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    const out = classifyReviewReadiness({
+      raw: 'To get started with GitHub CLI, please run:\n  gh auth login',
+      exit_code: 1,
+    })
+    expect(out.status).toBe('unknown')
+    expect(out.reason).toContain('PR readiness could not be read')
+    // The whole point: the repair is now IN the sentence a human reads.
+    expect(out.reason).toContain('gh auth login')
+  })
+
+  test('every unreadable branch quotes the probe, not just the non-zero exit', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    // exit 0 with no braces at all, exit 0 with unparseable braces, and exit 0 with the
+    // wrong shape — three distinct returns that all used to say the same nine words.
+    for (const raw of ['gh: something odd happened', '{not json at all', '{"mergeable":"MERGEABLE"}']) {
+      const out = classifyReviewReadiness({ raw, exit_code: 0 })
+      expect(out.status).toBe('unknown')
+      expect(out.reason.startsWith('PR readiness could not be read: ')).toBe(true)
+      expect(out.reason).toContain(raw.split('\n')[0]!.slice(0, 20))
+    }
+  })
+
+  test('a credential echoed by the probe never reaches the reason', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    const raw = "fatal: could not read Password for 'https://x-access-token:ghp_abc123SECRET@github.com/o/r'"
+    expect(raw).toContain('ghp_abc123SECRET') // positive control: it IS in the input
+    const out = classifyReviewReadiness({ raw, exit_code: 1 })
+    expect(out.reason).not.toContain('ghp_abc123SECRET')
+    expect(out.reason).toContain('***@')
+    // …and the diagnosis survives, or redaction has eaten the reason for carrying it.
+    expect(out.reason).toContain('could not read Password')
+  })
+
+  test('nothing measured → nothing asserted: the bare sentence, exactly as before', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    for (const probe of [{ raw: '', exit_code: 1 }, { raw: '   \n\n  ', exit_code: 1 }, { exit_code: 1 }]) {
+      expect(classifyReviewReadiness(probe).reason).toBe('PR readiness could not be read')
+    }
+    // …and a probe that is not an object at all has no `raw` to quote.
+    expect(classifyReviewReadiness(null).reason).toBe('PR readiness could not be read')
+    expect(classifyReviewReadiness(undefined).reason).toBe('PR readiness could not be read')
+  })
+
+  test('an unbounded paste is bounded — this reason ends up in a chat row', () => {
+    const { classifyReviewReadiness } = loadReadiness()
+    const out = classifyReviewReadiness({ raw: 'x'.repeat(500), exit_code: 1 })
+    expect(out.reason.length).toBeLessThanOrEqual(250)
+    expect(out.reason).toContain('PR readiness could not be read')
+  })
+
+  test('the readable states are untouched — conflicting/pending/absent/passed/failed', () => {
+    // The enrichment must not have leaked into any branch that DID read the probe.
+    const { classifyReviewReadiness } = loadReadiness()
+    expect(classifyReviewReadiness(readinessProbe('CONFLICTING', completedChecks('SUCCESS'))).reason).toBe(
+      'PR is conflicting with base',
+    )
+    expect(classifyReviewReadiness(readinessProbe('UNKNOWN', completedChecks('SUCCESS'))).reason).toBe(
+      'PR mergeability is still being calculated',
+    )
+    expect(classifyReviewReadiness(readinessProbe('MERGEABLE', completedChecks('SUCCESS'))).status).toBe('passed')
+  })
+
+  test('MUTANT: dropping the excerpt goes RED', () => {
+    const mutant = SRC.replace(
+      "reason: cause === '' ? 'PR readiness could not be read' : 'PR readiness could not be read: ' + cause,",
+      "reason: 'PR readiness could not be read',",
+    )
+    expect(mutant).not.toBe(SRC) // positive control: the replacement matched
+    expect(() =>
+      expect(
+        loadReadiness(mutant).classifyReviewReadiness({ raw: 'gh auth login', exit_code: 1 }).reason,
+      ).toContain('gh auth login'),
+    ).toThrow()
+  })
+})
+
+/**
+ * `ciDeferredPeer` — "could not tell" now says WHAT it could not tell.
+ */
+describe('the deferred-CI peer quotes the probe', () => {
+  test('an unreadable CI probe carries the probe words into the peer evidence', () => {
+    const { classifyCi, ciDeferredPeer } = loadReal()
+    const peer = ciDeferredPeer(classifyCi({ raw: 'gh: To get started, run: gh auth login', exit_code: 127 }))
+    expect(peer.evidence).toContain('gh auth login')
+    // The existing sentence is kept AFTER the quotation, not replaced by it.
+    expect(peer.evidence).toContain('could not be read')
+  })
+
+  test('a PENDING peer is unchanged — there is no probe complaint to quote', () => {
+    const { classifyCi, ciDeferredPeer } = loadReal()
+    const peer = ciDeferredPeer(
+      classifyCi({ raw: JSON.stringify([{ name: 'a', state: 'IN_PROGRESS' }]), exit_code: 8 }),
+    )
+    expect(peer.evidence.startsWith('the PR checks had not finished')).toBe(true)
+  })
+})
+
+/**
+ * `infraTerminalCause` — the one line the terminal result carries out of the workflow.
+ *
+ * The orchestrator has always REFUSED to infer a cause from `(round, checkpoint)`, twice
+ * on Codex's insistence and twice correctly. So the cause has to be measured where it is
+ * known — here — or the stored reason stays generic forever.
+ */
+describe('infraTerminalCause — the LANE finding is the measured cause', () => {
+  function loadTerminalCause(source = SRC): (synthesis: unknown) => string {
+    const kind = source.slice(source.indexOf('const LANE_FINDING_KIND'), source.indexOf('\n', source.indexOf('const LANE_FINDING_KIND')))
+    const factory = new Function(
+      `${kind}\n${grab('redactProbeText')}\n${grab('infraTerminalCause')}\nreturn infraTerminalCause`,
+    ) as () => (synthesis: unknown) => string
+    return factory()
+  }
+
+  test('HEADLINE: the deferral title — which quotes the probe — is what comes out', () => {
+    const infraTerminalCause = loadTerminalCause()
+    const title = 'REVIEW DEFERRED — PR readiness could not be read: gh auth login'
+    expect(
+      infraTerminalCause({ findings: [{ severity: 'blocker', kind: 'lane', title }] }),
+    ).toBe(title)
+  })
+
+  test('the LANE finding wins over an ordinary one, wherever it sits', () => {
+    const infraTerminalCause = loadTerminalCause()
+    expect(
+      infraTerminalCause({
+        findings: [
+          { severity: 'blocker', title: 'CI FAILING: test' },
+          { severity: 'blocker', kind: 'lane', title: 'REVIEW DEFERRED — no seat ran' },
+        ],
+      }),
+    ).toBe('REVIEW DEFERRED — no seat ran')
+  })
+
+  test('no lane finding → the first titled finding; no findings → empty', () => {
+    const infraTerminalCause = loadTerminalCause()
+    expect(infraTerminalCause({ findings: [{ severity: 'blocker', title: 'CI FAILING: test' }] })).toBe(
+      'CI FAILING: test',
+    )
+    expect(infraTerminalCause({ findings: [] })).toBe('')
+    expect(infraTerminalCause({})).toBe('')
+    expect(infraTerminalCause(null)).toBe('')
+    expect(infraTerminalCause({ findings: [{ severity: 'blocker' }, null, { title: '' }] })).toBe('')
+  })
+
+  test('a credential in a finding title is redacted, and the line is bounded', () => {
+    const infraTerminalCause = loadTerminalCause()
+    const out = infraTerminalCause({
+      findings: [{ kind: 'lane', title: 'REVIEW DEFERRED — https://x:ghp_abc123@github.com/o/r ' + 'y'.repeat(500) }],
+    })
+    expect(out).not.toContain('ghp_abc123')
+    expect(out).toContain('***@')
+    expect(out.length).toBeLessThanOrEqual(300)
+  })
+})
+
+/**
+ * WIRING — the terminal result actually carries the cause, and only where it should.
+ * Source assertions, because the terminal literal lives inside the workflow body and
+ * cannot be evaluated in isolation.
+ */
+describe('the terminal result emits terminalCause for infra-only stops only', () => {
+  test('the gate is BOTH infra-only AND a non-empty measured cause', () => {
+    const gate = SRC.slice(SRC.indexOf('const isInfraOnlyStop ='), SRC.indexOf('log(', SRC.indexOf('const isInfraOnlyStop =')))
+    expect(gate).toContain("synthesis.blockKind === 'infra-only'")
+    expect(gate).toContain("terminalCause !== ''")
+    expect(gate).toContain('roundLostItsWork === null')
+    expect(gate).toContain("finalVerdict !== 'APPROVE'")
+    expect(SRC).toContain('...(isInfraOnlyStop ? { terminalCause } : {}),')
+  })
+
+  test('the THROWN-workflow failure result does NOT invent one', () => {
+    // A crash is not a measured infra-only stop; giving it a cause would re-create the
+    // exact defect (a specific message without the measurement behind it).
+    const failure = SRC.slice(SRC.indexOf('const failureResult = {'), SRC.indexOf('\n  }', SRC.indexOf('const failureResult = {')))
+    expect(failure).not.toContain('terminalCause')
   })
 })
