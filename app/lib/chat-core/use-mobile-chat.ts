@@ -609,6 +609,17 @@ export function useMobileChat(railId: string): UseMobileChatResult {
 
 /** Text shown beside mobile's dots. Generic status rows carry meaning in detail. */
 export function activityLabel(row: Pick<ActivityRow, 'kind' | 'label' | 'detail'>): string | null {
+  // KEEPALIVE IS NOT AN ACTIVITY. `activity-inspector.ts` emits
+  // `{ kind: 'keepalive', label: 'alive' }` as the "this session is breathing"
+  // tick — it says the socket is up, not that anything is happening. Rendering
+  // it replaces whatever the agent was ACTUALLY doing with the word "alive",
+  // and because the ticks keep coming it wins every race: the useful label
+  // appears for an instant and is then overwritten by noise.
+  //
+  // Returning null here is what makes the label STICK: the caller only stores a
+  // row when this returns non-null (`use-mobile-chat` onFrame), so a keepalive
+  // now leaves the last real activity in place instead of clobbering it.
+  if (row.kind === 'keepalive') return null;
   const text = row.label === row.kind && row.detail !== undefined ? row.detail : row.label;
   return text.trim().length > 0 ? text : null;
 }
