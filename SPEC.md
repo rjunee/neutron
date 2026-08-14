@@ -328,6 +328,18 @@ Each carries an acceptance criterion; all in `neutron-open`.
       included, not a bare row delete), AND a deprioritise/archive lane exists that is distinct from
       `done` — so "shipped" and "shelved" stop sharing one word. A test pins that removing an item with a
       live run cancels that run first.
+      REMOVAL MUST ALSO DECIDE WHAT HAPPENS TO THE CARD'S PLAN DOC (owner-asked 2026-08-14: *"how do we
+      fix this orphan problem? We should probably just delete the plan with the card, or move it to a
+      'cancelled' folder or something"*). Today removal leaves the doc in `plans/` with nothing pointing at
+      it — it is neither findable from the board nor obviously dead. **Deleting it with the card is the
+      wrong default, and there is a live counter-example:** the card removed on 2026-08-14 was the Forge
+      publish card, whose doc holds the three costed designs, the measurements and the acceptance criteria
+      the owner is building from RIGHT NOW in another session. Deleting on removal would have destroyed the
+      spec for work in progress. THE DISPOSITION MUST FOLLOW THE REASON, and only the remover knows it:
+      shipped, cancelled, and moved-elsewhere are three different fates. Acceptance (third part): removal
+      takes a reason; the doc is MOVED to a disposition-named folder rather than deleted or left in place;
+      the moved doc stays readable in the Documents tab; and no path silently destroys a plan doc — a
+      deliberate delete is allowed, an implicit one is not.
 - [ ] **A card's plan doc is the single source of its spec, and it is written to a place nothing
       version-controls, reviews, or backs up** (owner-reported 2026-08-14, on discovering the P2–P4 note:
       *"plan docs here in this project are not actually written to the repo itself"*). `work-board/spec-doc.ts`
@@ -399,6 +411,30 @@ Each carries an acceptance criterion; all in `neutron-open`.
       `.git` or Phase 2's `.project-backup/` (three repos over one tree is one too many); whether the master
       backup remote is per-project or one owner-level remote holding every vault; and whether a code repo
       lives inside the project folder as today (`<project>/code/`) or beside it with a declared link.
+- [ ] **The live agent turn does not know the owner's timezone, so the agent narrates the HOST's clock as
+      if it were the owner's** (owner-reported 2026-08-14: *"you need to figure out how to set my timezone
+      properly"*). The zone IS captured — onboarding takes the browser's IANA zone from the `?tz=`
+      WS-upgrade param (#306) and stores it on `instance_metadata.timezone`; the onboarding preamble even
+      FORBIDS asking for it, on the grounds that it is already known. `reminders/tick.ts` then resolves it
+      correctly for cron-cadence wall-clock work (#40) — so a daily 9am reminder does fire at the owner's
+      9am. **The live turn is the one path that never reads it.** `gateway/wiring/build-live-agent-turn.ts`
+      contains no reference to a timezone and nothing in the live-turn path touches `instance_metadata`.
+      The host runs UTC, so every `Date.now()`, every shell `date`, and the injected current-date line are
+      all UTC — and the agent, having nothing to convert with, repeats them as the owner's wall clock.
+      OBSERVED: on 2026-08-14 the agent was told "today" was a date the owner had not reached yet, and
+      narrated a whole evening's work in host time — *"since midnight"*, *"at 4am"* — for an owner whose
+      clock read mid-evening the PREVIOUS day. Not an error message; a confident, wrong frame that also
+      shifts every relative deadline the agent offers. Note the second-order cost: the agent is told to
+      never ask for the timezone BECAUSE it is already known, so the one recovery it could improvise is
+      also closed off.
+      SECOND, SMALLER GAP, same root: the captured zone is supposed to be stamped into `USER.md` by
+      persona-gen precisely so the agent has it without asking. On this instance it was NOT there and had
+      to be written by hand — so whatever writes it either never ran for this owner or does not run for an
+      owner who predates the feature. Acceptance: the live agent turn receives the owner's IANA zone AND
+      the current time in it — not a bare date; a time or date stated to the owner is in the owner's zone
+      unless explicitly labelled otherwise; the `USER.md` stamp is verified for EXISTING owners, not only
+      new ones; and a test pins the case that actually bites, an owner whose local DATE differs from the
+      host's at the moment of the turn.
 - [ ] **A deploy request must resolve the ref against the REMOTE, not the host's frozen mirror**
       (observed 2026-08-14, first real use of the host-deploy tool). `host_deploy_request` is wired and
       `enabled: true`. Asked to deploy `origin/main` two minutes after a merge, it answered
