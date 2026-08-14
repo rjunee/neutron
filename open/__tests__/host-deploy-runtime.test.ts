@@ -53,6 +53,43 @@ afterEach(() => {
 })
 
 describe('createHostDeployGit — the read-only view of the host checkout', () => {
+  test('a remote target is fetched, while HEAD and local targets never use the network', async () => {
+    // `timeout_ms` is recorded as `number | undefined` rather than optional: the test
+    // ASSERTS on the absence of a timeout for local reads, so the key must always be
+    // present and explicitly undefined. Under `exactOptionalPropertyTypes` an optional
+    // key and a key holding `undefined` are different types, and only the latter can
+    // carry "this call passed no timeout" as an observation.
+    const calls: Array<{ args: string[]; timeout_ms: number | undefined }> = []
+    const localSha = 'a'.repeat(40)
+    const remoteSha = 'b'.repeat(40)
+    const g = createHostDeployGit({
+      repo_dir: repo,
+      remote_timeout_ms: 1_234,
+      exec: async (args, opts) => {
+        calls.push({ args, timeout_ms: opts?.timeout_ms })
+        if (args[0] === 'remote') return { stdout: 'origin\n', stderr: '' }
+        if (args[0] === 'fetch') return { stdout: '', stderr: '' }
+        const named = args.at(-1)
+        return { stdout: named?.includes('refs/remotes/origin/main') ? `${remoteSha}\n` : `${localSha}\n`, stderr: '' }
+      },
+    })
+
+    expect(await g.resolveTarget('origin/main')).toBe(remoteSha)
+    expect(await g.revParse('HEAD')).toBe(localSha)
+    expect(await g.resolveTarget('release')).toBe(localSha)
+    expect(await g.resolveTarget(localSha)).toBe(localSha)
+
+    expect(calls.filter(({ args }) => args[0] === 'fetch')).toEqual([
+      {
+        args: ['fetch', '--no-tags', '--force', 'origin', 'refs/heads/main:refs/remotes/origin/main'],
+        timeout_ms: 1_234,
+      },
+    ])
+    expect(calls.filter(({ args }) => args[0] === 'rev-parse').map(({ args }) => args.at(-1))).toContain(
+      'HEAD^{commit}',
+    )
+  })
+
   test('resolves HEAD and a named ref, and lists the commits between them', async () => {
     const base = commit('a.txt', 'base: the sha the host runs')
     git('branch', 'deployed')

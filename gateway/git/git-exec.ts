@@ -41,6 +41,7 @@ export interface GitExecResult {
 export interface GitExecOptions {
   allowNonZero?: boolean
   cwd?: string
+  timeout_ms?: number
 }
 
 /** Bound `git` runner — the binary is fixed at creation time. */
@@ -78,7 +79,7 @@ export function createGitExec(gitBinary: string): GitExecFn {
   ): Promise<GitExecResult> {
     try {
       const execOpts: Parameters<typeof execFileAsync>[2] = {
-        timeout: GIT_EXEC_TIMEOUT_MS,
+        timeout: opts.timeout_ms ?? GIT_EXEC_TIMEOUT_MS,
         maxBuffer: 16 * 1024 * 1024,
         encoding: 'utf8',
       }

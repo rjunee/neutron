@@ -5,10 +5,10 @@
  * two narrow seams so every guard in it is testable without a repo or a network.
  * This module supplies the production implementations of those seams:
  *
- *   - {@link createHostDeployGit} — a READ-ONLY view of the checkout the host
- *     runs, over the shared `execFile` git wrapper (`gateway/git/git-exec.ts`).
- *     There is no fetch, no checkout, no write: the instance describes what
- *     would deploy, it does not deploy.
+ *   - {@link createHostDeployGit} — a view of the checkout the host runs, over
+ *     the shared, bounded `execFile` git wrapper (`gateway/git/git-exec.ts`). A
+ *     remote target is fetched so its objects can be rendered in the approval;
+ *     no operation changes the working tree, HEAD, or deployed state.
  *   - {@link createHostDeployDispatch} — the ONE authenticated call to the
  *     configured control-plane endpoint. The credential goes in the
  *     `Authorization` header and NOWHERE else — not the body, not the URL, not
@@ -27,6 +27,7 @@ import { createGitExec, errStdout, type GitExecFn } from '@neutronai/gateway/git
 import {
   HOST_DEPLOY_CALL_TIMEOUT_MS,
   HOST_DEPLOY_DETAIL_CAP,
+  HOST_DEPLOY_REMOTE_TIMEOUT_MS,
   scrubHostDeploySecrets,
   type HostDeployCommit,
   type HostDeployCommitRange,
@@ -43,34 +44,60 @@ export function createHostDeployGit(opts: {
   repo_dir: string
   git_binary?: string
   exec?: GitExecFn
+  remote_timeout_ms?: number
 }): HostDeployGit {
   const { repo_dir } = opts
+  const remote_timeout_ms = opts.remote_timeout_ms ?? HOST_DEPLOY_REMOTE_TIMEOUT_MS
   const gitExec = opts.exec ?? createGitExec(opts.git_binary ?? 'git')
 
+  async function revParse(ref: string): Promise<string | null> {
+    // `--verify --quiet` exits 1 with empty stdout for an unknown ref;
+    // `^{commit}` makes an annotated tag resolve to the commit it points at,
+    // so the sha the approval binds to is the sha that would be deployed.
+    //
+    // NOT `allowNonZero` — that flag routes through `isExecChildError`, which
+    // is `err instanceof Error` (`gateway/git/git-exec.ts:135`) and therefore
+    // swallows a MISSING git binary, a timeout and a maxBuffer overrun into
+    // the same empty stdout an unknown ref produces. Under it a broken
+    // checkout was indistinguishable from "this ref does not exist" (Argus r1
+    // major). Only the one exit status `--quiet` documents becomes null; every
+    // other failure propagates and the service refuses.
+    let stdout: string
+    try {
+      ;({ stdout } = await gitExec(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
+        cwd: repo_dir,
+      }))
+    } catch (err) {
+      if (isUnknownRefExit(err)) return null
+      throw err
+    }
+    const sha = stdout.trim()
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null
+  }
+
   return {
-    async revParse(ref: string): Promise<string | null> {
-      // `--verify --quiet` exits 1 with empty stdout for an unknown ref;
-      // `^{commit}` makes an annotated tag resolve to the commit it points at,
-      // so the sha the approval binds to is the sha that would be deployed.
-      //
-      // NOT `allowNonZero` — that flag routes through `isExecChildError`, which
-      // is `err instanceof Error` (`gateway/git/git-exec.ts:135`) and therefore
-      // swallows a MISSING git binary, a timeout and a maxBuffer overrun into
-      // the same empty stdout an unknown ref produces. Under it a broken
-      // checkout was indistinguishable from "this ref does not exist" (Argus r1
-      // major). Only the one exit status `--quiet` documents becomes null; every
-      // other failure propagates and the service refuses.
-      let stdout: string
-      try {
-        ;({ stdout } = await gitExec(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
-          cwd: repo_dir,
-        }))
-      } catch (err) {
-        if (isUnknownRefExit(err)) return null
-        throw err
+    revParse,
+
+    async resolveTarget(ref: string): Promise<string | null> {
+      const remotes = (await gitExec(['remote'], { cwd: repo_dir })).stdout
+        .split('\n')
+        .map((remote) => remote.trim())
+        .filter((remote) => remote.length > 0)
+      const parts = ref.split('/')
+      const explicit = parts[0] === 'refs' && parts[1] === 'remotes'
+      const remote = explicit ? parts[2] : parts[0]
+      const branch = explicit ? parts.slice(3).join('/') : parts.slice(1).join('/')
+      if (remote !== undefined && branch.length > 0 && remotes.includes(remote)) {
+        // Fetch, rather than ls-remote, because the approval must render the
+        // actual commits. `--force` keeps a rewritten remote branch truthful;
+        // the destination is metadata only and cannot move HEAD or the tree.
+        await gitExec(
+          ['fetch', '--no-tags', '--force', remote, `refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
+          { cwd: repo_dir, timeout_ms: remote_timeout_ms },
+        )
+        return revParse(`refs/remotes/${remote}/${branch}`)
       }
-      const sha = stdout.trim()
-      return /^[0-9a-f]{40}$/.test(sha) ? sha : null
+      return revParse(ref)
     },
 
     async commitsBetween(from: string, to: string, limit: number): Promise<HostDeployCommitRange> {

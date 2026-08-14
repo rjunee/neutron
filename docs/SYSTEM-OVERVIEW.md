@@ -4315,10 +4315,14 @@ indistinguishable from "deploys land on their own and just lag".
 1. **REQUEST** — the agent calls `host_deploy_request` (`gateway/wiring/host-deploy-tool.ts`,
    registered into the same `neutron` tools registry the tools-bridge advertises, so
    the REPL sees `mcp__neutron__host_deploy_request`). The service
-   (`open/host-deploy.ts`) resolves, READ-ONLY, what would be deployed: the sha the
-   host runs now (`HEAD`), the target sha for the named ref, and the commits between
-   them (`open/host-deploy-runtime.ts`, over the shared `gateway/git/git-exec.ts`
-   wrapper — no fetch, no checkout, no write). It then mints a `prompt-user`
+   (`open/host-deploy.ts`) resolves what would be deployed: the sha the host runs
+   now (`HEAD`), the target sha for the named ref, and the commits between them.
+   A remote-tracking ref is fetched from its remote with a bounded timeout so the
+   target is current and its objects are available for the approval commit list;
+   a local ref or raw sha is resolved locally (`open/host-deploy-runtime.ts`, over
+   the shared `gateway/git/git-exec.ts` wrapper). READ-ONLY here means the instance
+   cannot change what the host runs: neither the working tree, `HEAD`, nor deployed
+   state is mutated. It then mints a `prompt-user`
    `tool_approvals` row (`tools/approval.ts`, migration 0004) and emits a
    CODE-rendered Approve/Deny prompt through the SAME durable `deliver` seam ritual
    approvals ride. It returns `pending_approval`. **Nothing is dispatched.**

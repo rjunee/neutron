@@ -10862,3 +10862,37 @@ was added; the change makes the existing view boundary legible.
 Mutation checks: `scope-omitted` failed 1 test, `core-slots-emptied` failed 2
 tests, and `plaintext-added-to-response` failed 1 test. Each mutant was removed
 after its expected red run.
+## 2026-08-14 — host deploy resolves remote refs against the remote
+
+`open/host-deploy.ts:544` now resolves a deploy target through a distinct
+remote-aware seam while reading the current pin from local `HEAD`. The production
+implementation in `open/host-deploy-runtime.ts:81` recognizes configured
+remote-tracking names, performs a bounded fetch into the matching tracking ref,
+and then resolves the fetched commit. Fetch was chosen over `ls-remote` because
+the approval at `open/host-deploy.ts:573` must render the commits the owner is
+approving; a remote sha without its objects cannot satisfy that contract. Local
+branches, `HEAD`, and raw shas still use local `rev-parse` without a fetch.
+
+The fetch changes Git objects and tracking metadata only. It cannot mutate the
+working tree, `HEAD`, or deployed state, which is the read-only boundary described
+in `docs/SYSTEM-OVERVIEW.md`. A fetch timeout, authentication error, or unreachable
+remote propagates to the existing `refused` result and can never become the benign
+`up_to_date` answer. Request and approval-time resolution both pin a full 40-hex
+commit, and the dispatch continues to send that approved sha.
+
+Positive control, written and run before the production change: a real bare remote
+was advanced after cloning the pinned host checkout. The new request test was RED
+because it received `up_to_date`; the unchanged suite had 49 passes. After the
+change, the focused host-deploy suites pass 66 tests, including the fetched commit
+subject in the approval, local/no-fetch resolution, explicit timeout propagation,
+remote failure from both stale-local states, and full-sha dispatch.
+
+Mutation checks (each production guard was removed independently and restored):
+
+| Mutant | Result |
+| --- | --- |
+| M1 `remote-target-resolution`: target uses local `revParse` | RED — remote-ahead request returned `up_to_date` |
+| M2 `remote-ref-fetch`: skip the fetch | RED — remote-ahead request returned `up_to_date` and fetch-call assertion failed |
+| M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
+| M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
+| M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
