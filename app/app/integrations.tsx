@@ -256,6 +256,12 @@ export default function IntegrationsScreen() {
   }, []);
 
   const handleOpenGitHub = useCallback(async (uri: string) => {
+    // CLEARED ON EVERY ATTEMPT. While a code is on screen there is no Connect
+    // control to press, and Connect is the only other thing that clears this
+    // banner — so without the reset a single failed hand-off would leave "cannot
+    // open URL" under a code that is still perfectly good, for the whole life of
+    // the flow, including after a later tap succeeded.
+    setGithubError(null);
     try {
       await Linking.openURL(uri);
     } catch (err) {
@@ -685,7 +691,17 @@ export default function IntegrationsScreen() {
                       : 'Not connected — builds cannot push or open pull requests'}
               </Text>
             </View>
-            {github !== null && github.status === 'not_connected' ? (
+            {/* A NEGATIVE gate, matching the status line above and the web
+                sibling's else-branch. The status arrives off the wire and is
+                only CAST to the three-state union, so a status this build has
+                never heard of reaches here as a string: a positive
+                `=== 'not_connected'` test would then render a row with no
+                control at all and no way for the owner to leave it, while the
+                line above already reads "Not connected". Anything that is not
+                connected and not mid-flow offers Connect. */}
+            {github !== null &&
+            github.status !== 'connected' &&
+            github.status !== 'awaiting_owner' ? (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Connect GitHub"

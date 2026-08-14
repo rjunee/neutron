@@ -83,6 +83,11 @@ const VERIFICATION_URI = 'https://github.example.com/login/device'
 interface Sent {
   url: string
   method: string
+  /** The bearer this request carried. Recorded so a read made by a REBUILT
+   *  client (a rotated token) is distinguishable from one the existing poll
+   *  would have made anyway — otherwise "a request went out" proves nothing
+   *  about WHICH code path sent it. */
+  token: string | null
 }
 let sent: Sent[] = []
 /** What GET answers. Mutated by the POST handler and by individual tests. */
@@ -96,25 +101,33 @@ let networkDown = false
 
 function fetchImpl(url: string, init?: RequestInit): Promise<Response> {
   const method = init?.method ?? 'GET'
-  sent.push({ url, method })
+  const headers = (init?.headers ?? {}) as Record<string, string>
+  sent.push({ url, method, token: headers['authorization'] ?? null })
   if (networkDown) return Promise.reject(new Error('server unreachable'))
   const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), {
       status,
       headers: { 'content-type': 'application/json' },
     })
+  // The ENVELOPE is the gateway's, not a convenient bare payload: every
+  // `gateway/http` surface answers `{ ok: true, ... }` on success and
+  // `{ ok: false, code, message }` on failure (`surface-kit.ts`). A fixture that
+  // drops it is not the wire, and a client that started reading `ok` would be
+  // tested against a shape no server sends.
   if (url.endsWith('/api/app/github-auth')) {
     if (method === 'POST') {
-      if (startFailure !== null) return Promise.resolve(json(startFailure.body, startFailure.status))
+      if (startFailure !== null) {
+        return Promise.resolve(json({ ok: false, ...startFailure.body }, startFailure.status))
+      }
       state = {
         status: 'awaiting_owner',
         user_code: USER_CODE,
         verification_uri: VERIFICATION_URI,
         expires_in_seconds: 900,
       }
-      return Promise.resolve(json({ ...state, ...extraOnStart }))
+      return Promise.resolve(json({ ok: true, ...state, ...extraOnStart }))
     }
-    return Promise.resolve(json(state))
+    return Promise.resolve(json({ ok: true, ...state }))
   }
   // Everything else the tab loads on mount, answered as a fresh install would.
   if (url.endsWith('/api/cores/integrations')) {
@@ -130,9 +143,19 @@ function fetchImpl(url: string, init?: RequestInit): Promise<Response> {
 let copied: string[] = []
 
 let mounted: { unmount(): Promise<void>; root: HTMLElement } | null = null
+/** Re-render the MOUNTED tab with a changed config — set by `mountTab`. */
+let rerenderTab: (patch: Record<string, unknown>) => Promise<void> = async () => {
+  throw new Error('nothing is mounted')
+}
+
+/** The interval the MOUNTED tab polls at. Set by `mountTab`, read by `pollTicks`
+ *  so a test that needs a poll to be quiet can raise it without the tick helper
+ *  silently waiting less than one interval. */
+let activePollMs = 5
 
 /** Mount the REAL Admin/Integrations tab and let its mount-time reads settle. */
 async function mountTab(pollMs = 5): Promise<HTMLElement> {
+  activePollMs = pollMs
   const { createRoot } = await import('react-dom/client')
   const { act } = await import('react')
   const { IntegrationsTab } = await import('../IntegrationsTab.tsx')
@@ -141,21 +164,25 @@ async function mountTab(pollMs = 5): Promise<HTMLElement> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
-  await act(async () => {
-    root.render(
-      React.createElement(IntegrationsTab, {
-        config: config as never,
-        fetchImpl,
-        githubPollMs: pollMs,
-        navigate: () => {},
-        confirmImpl: () => true,
-      }),
-    )
-  })
-  await act(async () => {
-    await tick()
-    await tick()
-  })
+  const render = async (patch: Record<string, unknown> = {}): Promise<void> => {
+    await act(async () => {
+      root.render(
+        React.createElement(IntegrationsTab, {
+          config: { ...config, ...patch } as never,
+          fetchImpl,
+          githubPollMs: pollMs,
+          navigate: () => {},
+          confirmImpl: () => true,
+        }),
+      )
+    })
+    await act(async () => {
+      await tick()
+      await tick()
+    })
+  }
+  rerenderTab = render
+  await render()
   mounted = {
     root: container,
     async unmount(): Promise<void> {
@@ -204,12 +231,16 @@ async function click(root: HTMLElement, sel: string): Promise<void> {
   })
 }
 
-/** Let `n` poll intervals elapse (the tab is mounted with a 5ms interval). */
+/** How many requests the tab has made to the GitHub surface so far. */
+const githubReqCount = (): number =>
+  sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length
+
+/** Let `n` poll intervals elapse, at whatever interval this tab was mounted with. */
 async function pollTicks(n: number): Promise<void> {
   const { act } = await import('react')
   for (let i = 0; i < n; i++) {
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 12))
+      await new Promise((r) => setTimeout(r, activePollMs + 7))
     })
   }
 }
@@ -280,11 +311,17 @@ describe('GitHub — the owner can start the flow from the web', () => {
   it('STOPS polling once connected — a settled flow must not hammer the server', async () => {
     const root = await mountTab()
     await click(root, 'button.cint-github-connect')
+    // A poll must be RUNNING first. Without this the test certifies a tab whose
+    // poll effect never armed: the request count would be flat for the trivial
+    // reason that nothing was ever polling.
+    const beforeIdle = githubReqCount()
+    await pollTicks(3)
+    expect(githubReqCount()).toBeGreaterThan(beforeIdle)
     state = { status: 'connected' }
     await pollTicks(3)
-    const settled = sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length
+    const settled = githubReqCount()
     await pollTicks(5)
-    expect(sent.filter((s) => s.url.endsWith('/api/app/github-auth')).length).toBe(settled)
+    expect(githubReqCount()).toBe(settled)
   })
 
   it('a DROPPED poll keeps the code on screen instead of blanking the flow', async () => {
@@ -310,6 +347,73 @@ describe('GitHub — the owner can start the flow from the web', () => {
     expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
       'connected',
     )
+  })
+
+  it('a failed MOUNT-READ mid-flow keeps the code, the way a dropped poll does', async () => {
+    // The status read is not a mount-only event: it re-fires whenever the client
+    // is rebuilt, and the token rotating under a long-lived tab is enough to do
+    // that. If a failed read blanked `awaiting_owner`, a token refresh landing
+    // on a flaky moment would take the owner's live code away and tear down the
+    // poll — the same defect as a dropped poll, one layer up, and the mobile
+    // screen's comment claims this surface follows the same rule.
+    //
+    // MOUNTED WITH A POLL INTERVAL LONGER THAN THIS TEST'S WHOLE TIMELINE, on
+    // purpose. The poll effect lists the client in its deps, so rebuilding the
+    // client RE-ARMS the poll with the rotated bearer too — at the 5ms default a
+    // tick fires inside the rerender and "a request carried the rotated token"
+    // is satisfied by the poll alone, which would leave the mount-read guard
+    // deletable with this file still green. At 400ms no tick can fire before the
+    // count is taken, so the request below can ONLY be the mount read.
+    const root = await mountTab(400)
+    await click(root, 'button.cint-github-connect')
+    expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
+
+    networkDown = true
+    const before = sent.length
+    await rerenderTab({ token: 'dev:owner-rotated' })
+    // EXACTLY ONE GitHub read in that window, and it is the rebuilt client's:
+    // the re-read really went out, it failed (`networkDown`), and no poll tick
+    // is hiding inside the count.
+    const afterRotate = sent.slice(before).filter((s) => s.url.endsWith('/api/app/github-auth'))
+    expect(afterRotate.map((s) => s.token)).toEqual(['Bearer dev:owner-rotated'])
+
+    expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'awaiting_owner',
+    )
+    // …and the poll survived the failed re-read, so the flow still finishes on
+    // the next good tick (two 400ms intervals — slow, but the price of a window
+    // in which the assertion above cannot be satisfied by a poll).
+    networkDown = false
+    state = { status: 'connected' }
+    await pollTicks(2)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'connected',
+    )
+  })
+
+  it('an EXPIRED code is not a dead end — the next good read puts Connect back', async () => {
+    // The escape hatch for the rule above. `awaiting_owner` surviving a failed
+    // read plus a Connect control gated OFF while a code is live could strand a
+    // screen on a code that is no longer good — so the release valve has to be
+    // asserted, not argued. The gateway drops a pending grant once it expires
+    // (`github-connect-surface.ts` § `expires_at_ms <= now()`) and answers
+    // `not_connected`; the very poll armed by `awaiting_owner` is what carries
+    // that answer back, with no reload and no Refresh.
+    const root = await mountTab()
+    await click(root, 'button.cint-github-connect')
+    expect(q(root, '.cint-device-code')?.textContent).toBe(USER_CODE)
+    expect(q(root, 'button.cint-github-connect')).toBeNull()
+
+    // The grant expires at GitHub; the gateway forgets it.
+    state = { status: 'not_connected' }
+    await pollTicks(3)
+    expect(root.querySelector('[data-github-status]')?.getAttribute('data-github-status')).toBe(
+      'not_connected',
+    )
+    expect(q(root, '.cint-device-code')).toBeNull()
+    // A control the owner can actually press, back on screen.
+    expect(q(root, 'button.cint-github-connect')).not.toBeNull()
   })
 
   it('an ALREADY-CONNECTED account renders as connected, with no code and no Connect', async () => {

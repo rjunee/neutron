@@ -11,6 +11,7 @@ import {
   DOCTRINE_PRINCIPLES,
   MISSING_CREDENTIAL_DOCTRINE,
   buildOperatingDoctrineFragment,
+  type OperatingDoctrineInput,
 } from '../operating-doctrine.ts'
 
 describe('operating-doctrine — principle set', () => {
@@ -122,7 +123,11 @@ describe('operating-doctrine — principle set', () => {
       // The remedy is a PLACE the owner can get to, named concretely enough to
       // act on — not "connect your account somewhere".
       expect(frag).toContain('Integrations')
-      expect(frag).toContain('Connect GitHub')
+      // Named as a control IN A ROW, not by one surface's button text: the web
+      // button reads "Connect GitHub" and the phone's reads "Connect", so
+      // quoting either as THE label sends half the owners looking for words that
+      // are not on the screen in front of them.
+      expect(frag).toContain('Connect control in the GitHub row')
       // And the specific failure the owner hit: a push / PR with no token.
       expect(frag.toLowerCase()).toContain('git push')
       expect(frag.toLowerCase()).toContain('pull request')
@@ -132,19 +137,41 @@ describe('operating-doctrine — principle set', () => {
     }
   })
 
-  test('the remedy rule is UNCONDITIONAL — it does not branch on deployment shape', () => {
-    const frag = buildOperatingDoctrineFragment({ scope: 'general' })
-    // Naming the in-product surface is the right answer in EVERY deployment, so a
-    // branch would be longer AND wrong somewhere. The literals below are the words
-    // this repo does not carry, in prose or in code; this array is the one place
-    // they are permitted to appear, because guarding against them requires naming
-    // them exactly once.
-    for (const banned of ['self-host', 'hosted', 'tenan', 'instances']) {
-      expect(frag.toLowerCase()).not.toContain(banned)
+  test('the remedy rule is the SAME STRING for every input, and carries no deployment vocabulary', () => {
+    // Named for what it actually checks. The old name promised an unconditional
+    // RULE while the body only searched for four words, so a rule that really did
+    // branch — in neutral wording, or on any input other than the one scope this
+    // built — stayed green. Both halves are now here.
+    //
+    // STRUCTURAL half: the remedy is emitted as a WHOLE PARAGRAPH equal to the
+    // exported constant, for every input shape the builder accepts.
+    //
+    // Equality, not `toContain`. `toContain` is superset-tolerant: a branch that
+    // APPENDS to the rule on one scope ("…, or, if you are running it yourself,
+    // export the token") still contains the constant, so the search passes on the
+    // exact input that was supposed to red. The fragment separates blocks with a
+    // blank line and the constant is one unbroken line, so it must appear as its
+    // own element of the split — nothing added, nothing branched.
+    const inputs: OperatingDoctrineInput[] = [
+      { scope: 'general' },
+      { scope: 'project' },
+      { scope: 'project', project_id: 'gondor' },
+      { scope: 'project', project_id: 'minas-tirith' },
+    ]
+    // VOCABULARY half: naming the in-product surface is the right answer in EVERY
+    // deployment, so a branch would be longer AND wrong somewhere. The literals
+    // below are the words this repo does not carry, in prose or in code; this
+    // array is the one place they are permitted to appear, because guarding
+    // against them requires naming them exactly once. Checked per input, not on
+    // one scope: `weightingTail` branches on `scope`, so a scope-conditional
+    // remedy is exactly the shape a single-scope sweep cannot see.
+    for (const input of inputs) {
+      const frag = buildOperatingDoctrineFragment(input)
+      expect(frag.split('\n\n')).toContain(MISSING_CREDENTIAL_DOCTRINE)
+      for (const banned of ['self-host', 'hosted', 'tenan', 'instances', 'depending on']) {
+        expect(frag.toLowerCase()).not.toContain(banned)
+      }
     }
-    // Positive control: the assertion above is only meaningful if the rule under
-    // test is actually in the string being searched.
-    expect(frag).toContain(MISSING_CREDENTIAL_DOCTRINE)
   })
 
   test('the principle body is byte-identical across surfaces (consistency)', () => {
