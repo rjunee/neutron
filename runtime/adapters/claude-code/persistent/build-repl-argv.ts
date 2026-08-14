@@ -72,9 +72,10 @@ export interface BuildReplArgvInput {
    * `reply` tool is a development-channel tool, exempt from the permission gate).
    */
   allowedMcpTools?: ReadonlyArray<string>
-  /** Token budget to pass when the installed CLI advertises `--autocompact`. */
-  autocompactTokens?: number
 }
+
+/** Required upstream context budget for every persistent REPL child. */
+export const REPL_AUTOCOMPACT_TOKENS = 300_000
 
 /** Build the interactive `claude` argv as a plain string array (no shell, no
  *  tmux). The `PtyHost` spawns this directly with `cwd` + scrubbed `env`. */
@@ -112,9 +113,7 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   if (input.addDir !== undefined) {
     argv.push('--add-dir', input.addDir)
   }
-  if (input.autocompactTokens !== undefined) {
-    argv.push('--autocompact', String(input.autocompactTokens))
-  }
+  argv.push('--autocompact', String(REPL_AUTOCOMPACT_TOKENS))
   // Model LAST so nothing shadows it (Nova invariant).
   argv.push('--model', input.model)
   return argv

@@ -6,9 +6,11 @@ const prompt = readFileSync(join(import.meta.dir, '..', 'repl-agent-base.md'), '
 
 describe('persistent REPL agent base prompt', () => {
   it('forbids full-buffering consumers because they hide turn activity', () => {
-    expect(prompt).toMatch(/while.{0,80}producer is still running.{0,120}never route/is)
-    expect(prompt).toMatch(/full-buffering consumer[\s\S]{0,300}inactivity timeout/i)
-    expect(prompt).toMatch(/stream through `tee`|background and poll/i)
-    expect(prompt).toMatch(/after exit[\s\S]{0,80}`tail -20` is safe/i)
+    const rule = prompt.match(/## Long-running commands must emit progress([\s\S]*)/)?.[1] ?? ''
+    expect(rule).toContain('full-buffering consumer')
+    expect(rule).toMatch(/waits? for EOF|complete output/i)
+    expect(rule).toContain('inactivity timeout')
+    expect(rule).toMatch(/tee|poll/i)
+    expect(rule).toMatch(/early-exit[\s\S]*terminate its producer/i)
   })
 })
