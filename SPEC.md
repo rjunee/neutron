@@ -303,6 +303,36 @@ tracked GitHub issues, not private memory.
 
 Each carries an acceptance criterion; all in `neutron-open`.
 
+- [ ] **The outer publisher cannot publish a REBASED branch — so design A's publish step fails on
+      every card that already has a remote branch** (measured 2026-08-14, run `2aacf419`, the first
+      build ever to reach the publish rung). The build SUCCEEDED — checkpoint `forge-done`, a real new
+      commit — and then: `publish failed: outer publisher could not push branch …`.
+      **This is NOT a credential failure, and that distinction is the whole point.** A dry-run push
+      with the real credential authenticated fine and was refused by the server:
+      `! [rejected] … (non-fast-forward)`. So the credential path design A introduced works.
+      The cause is mechanical: `trident/orchestrator.ts` pushes with
+      `git push origin refs/heads/<b>:refs/heads/<b>` and no lease, while the build rebases the branch
+      onto current `main`. Verified: the local branch contains post-A `main`, the remote branch does
+      not. **A rebased branch is by definition not a fast-forward**, so this push can never succeed —
+      not for this card, but for ANY card whose remote branch predates its rebase. Every fix round on
+      an existing PR is affected, which is most of them.
+      Acceptance: a rebased fix round publishes. The fix must NOT be a bare `--force` — use a lease, so
+      a branch someone else genuinely advanced is REFUSED rather than overwritten. Assert both
+      directions: the rebase publishes, AND a remote that moved underneath is still refused. A test
+      that only proves the first is asserting that force-push works, not that the lease does.
+- [ ] **A publish failure throws away the evidence it just measured.** `trident/orchestrator.ts`:
+      `if (!pushed.ok) throw new Error(\`outer publisher could not push branch ${branch}\`)` — git's
+      stderr had already said exactly why, in words, with hints. It is discarded.
+      This is the sibling of the defect fixed in #240 and it landed in brand-new code. #240 removed a
+      message that ASSERTED a cause it never measured; this one MEASURES the cause and then drops it.
+      Opposite mistakes, identical cost: a human reads the reason and still cannot act.
+      Cost, measured rather than supposed: diagnosing the entry above took a DB read, a hand comparison
+      of merge-bases, and a dry-run push with the owner's credential to rule out authentication — all
+      to recover text the publisher was already holding.
+      Acceptance: a publish failure's stored reason carries git's own stderr, and a non-fast-forward
+      rejection is distinguishable from an auth failure by reading the reason alone. **And it must not
+      become a disclosure surface** — assert the stored reason never contains credential material, with
+      a positive control proving that assertion can fail.
 - [ ] Wire `ProjectBackupScheduler` (dormant loop today) — a scheduled per-project backup fires on its interval. (D-7)
       Do NOT resolve this one alone: see the code-repo-vs-vault entry below. Wiring the scheduler without
       deciding the model would start snapshotting trees that contain nested code repos and live SQLite.
