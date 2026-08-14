@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -145,24 +145,48 @@ function appendPromptValue(argv: string[]): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined
 }
 
+function fakeClaudeHelp(help: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'neutron-claude-help-'))
+  tempDirs.push(dir)
+  const bin = join(dir, 'claude')
+  writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' '${help}'\n`)
+  chmodSync(bin, 0o700)
+  return bin
+}
+
 // ---------------------------------------------------------------------------
 // 1. The spawned REPL argv carries the prompt file end-to-end.
 // ---------------------------------------------------------------------------
 
 describe('persistent REPL — --append-system-prompt-file reaches the spawned argv', () => {
-  it('passes the exact autocompact budget to the spawned child', async () => {
+  it('passes the exact autocompact budget to a child whose CLI supports it', async () => {
     const { host, argvs } = makeCapturingHost()
     const sub = createPersistentReplSubstrate(
       opts(host, {
         user_id: 'u-autocompact',
         project_id: 'default',
         credential_identity: 'cred-1',
+        claude_bin: fakeClaudeHelp('Usage: claude [options] --autocompact <tokens>'),
       }),
     )
     await drain(sub.start(spec('hi')))
     const flag = argvs[0]!.indexOf('--autocompact')
     expect(flag).toBeGreaterThanOrEqual(0)
     expect(argvs[0]![flag + 1]).toBe('300000')
+  })
+
+  it('does not pass autocompact to a child whose CLI rejects it', async () => {
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(
+      opts(host, {
+        user_id: 'u-no-autocompact',
+        project_id: 'default',
+        credential_identity: 'cred-1',
+        claude_bin: fakeClaudeHelp('Usage: claude [options]'),
+      }),
+    )
+    await drain(sub.start(spec('hi')))
+    expect(argvs[0]).not.toContain('--autocompact')
   })
 
   it('a ritual caller spawns the REPL with its executor prompt file (not the chat default)', async () => {

@@ -10829,9 +10829,9 @@ obsolete inner-publisher tests were removed instead of remaining skipped.
   `runtime/adapters/claude-code/persistent/repl-agent-base.md` for
   `full-buffering|output-suffix|tail -20|inactivity timeout` and found no match;
   `AskUserQuestion` in the same input was the positive control.
-- `runtime/adapters/claude-code/persistent/build-repl-argv.ts` requires
-  `--autocompact 300000` in every spawned REPL argv. An incompatible CLI therefore
-  fails loudly at startup instead of silently falling back to its default policy.
+- `runtime/adapters/claude-code/persistent/autocompact-support.ts` probes the
+  configured CLI's help, and `runtime/adapters/claude-code/persistent/spawn.ts`
+  passes `--autocompact 300000` only when the installed CLI advertises the option.
   This is the upstream token budget; the unchanged 5 MB/10 MB post-compact JSONL
   watchdog remains the downstream byte backstop that protects `--resume`.
 - `runtime/adapters/claude-code/persistent/repl-agent-base.md`, the prompt appended to
@@ -10844,7 +10844,7 @@ obsolete inner-publisher tests were removed instead of remaining skipped.
   rule in `runtime/adapters/claude-code/persistent/__tests__/build-repl-argv.test.ts`,
   `runtime/adapters/claude-code/persistent/__tests__/append-system-prompt-wiring.test.ts`,
   and `runtime/adapters/claude-code/persistent/__tests__/repl-agent-base.test.ts`.
-- Mutation results: `remove-autocompact-argv` failed the exact spawned-argv
-  assertions (17 pass, 2 fail), and `remove-quiet-turn-prompt-rule` failed the
-  behavioral prompt assertion (0 pass, 1 fail). Both changes were restored before
+- Mutation results: `unconditional-autocompact` failed the unsupported-CLI spawned-
+  argv assertion (5 pass, 1 fail), and `remove-quiet-turn-prompt-rule` failed the
+  behavioral prompt assertion (0 pass, 1 fail). Both guards were restored before
   the green verification run.
