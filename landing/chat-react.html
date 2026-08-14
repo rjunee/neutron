@@ -856,6 +856,9 @@
   .cwb-tag-failed { color: var(--phase-failed-fg); background: var(--phase-failed-bg); }
   /* round N — muted, next to the tag. No elapsed-minutes timer (M1: dropped). */
   .cwb-round { flex: 0 0 auto; font-size: 0.7333rem; color: var(--muted); white-space: nowrap; }
+  /* #NNN PR tag — muted, not blue; matches the round text's scale. */
+  .cwb-pr { flex: 0 0 auto; font-size: 0.7333rem; font-weight: 600; color: var(--muted); text-decoration: none; white-space: nowrap; }
+  a.cwb-pr:hover { text-decoration: underline; }
   /* failure-reason one-liner (#340) — muted, single-line, truncates; full text on hover. */
   .cwb-fail-reason { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--phase-failed-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Recovered brief-integrity alert — persistent but de-emphasized; full text on hover. */

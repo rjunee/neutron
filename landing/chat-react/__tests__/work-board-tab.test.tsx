@@ -199,6 +199,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           stalled: false,
           stalled_ms: null,
           pr: null,
+          pr_url: null,
           verdict: null,
           failure_reason: null,
         },
@@ -238,6 +239,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           stalled: false,
           stalled_ms: null,
           pr: null,
+          pr_url: null,
           verdict: null,
           failure_reason: null,
         },
@@ -403,6 +405,7 @@ describe('WorkBoardTab (happy-dom)', () => {
       stalled: false,
       stalled_ms: null,
       pr: null,
+      pr_url: null,
       verdict: null,
       failure_reason: null,
     } as unknown as RunProgress
@@ -437,6 +440,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           stalled: false,
           stalled_ms: null,
           pr: null,
+          pr_url: null,
           verdict: null,
           failure_reason: 'tests failed',
         },
@@ -457,6 +461,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           stalled: false,
           stalled_ms: null,
           pr: 123,
+          pr_url: null,
           verdict: 'APPROVE',
           failure_reason: null,
         },
@@ -489,6 +494,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           stalled: false,
           stalled_ms: null,
           pr: null,
+          pr_url: null,
           verdict: null,
           failure_reason: null,
         },
@@ -531,6 +537,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           stalled: false,
           stalled_ms: null,
           pr: null,
+          pr_url: null,
           verdict: null,
           failure_reason: null,
         },
@@ -683,6 +690,7 @@ describe('WorkBoardTab (happy-dom)', () => {
           stalled: false,
           stalled_ms: null,
           pr: null,
+          pr_url: null,
           verdict: null,
           failure_reason: 'tests failed',
         },
@@ -902,6 +910,7 @@ describe('WorkBoardTab (happy-dom)', () => {
       stalled: false,
       stalled_ms: null,
       pr: null,
+      pr_url: null,
       verdict: null,
       failure_reason: 'tests failed',
     }
@@ -1130,5 +1139,197 @@ describe('WorkBoardTab (happy-dom)', () => {
       expect(board.calls.filter((c) => c.startsWith('GET')).length).toBe(before)
       await board.unmount()
     })
+  })
+
+  it('renders the live #NNN PR tag first, clickable, ahead of the step tag + round (T3-a/d)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'Building row',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          step_label: 'building',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: 265,
+          pr_url: 'https://github.com/acme/widgets/pull/265',
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const meta = container.querySelector('.cwb-row-meta') as HTMLElement
+    expect(meta).not.toBeNull()
+
+    const prTag = meta.querySelector('a.cwb-pr') as HTMLAnchorElement
+    expect(prTag).not.toBeNull()
+    expect(prTag.getAttribute('href')).toBe('https://github.com/acme/widgets/pull/265')
+    expect(prTag.getAttribute('target')).toBe('_blank')
+    expect(prTag.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(prTag.textContent).toBe('#265')
+
+    // Order: #NNN precedes the step tag.
+    expect(meta.textContent!.startsWith('#265')).toBe(true)
+    expect((meta.children[0] as HTMLElement).className).toContain('cwb-pr')
+    const tag = meta.querySelector('.cwb-tag')
+    expect(tag).not.toBeNull()
+    expect(tag!.textContent).toBe('Building')
+
+    await act(async () => root.unmount())
+  })
+
+  it('a live card with no PR renders no tag and no placeholder (T3-b)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'No PR row',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          step_label: 'building',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          pr_url: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-pr')).toBeNull()
+    const meta = container.querySelector('.cwb-row-meta') as HTMLElement
+    expect(meta.textContent ?? '').not.toContain('#')
+
+    await act(async () => root.unmount())
+  })
+
+  it('a completed card renders "Merged #NNN · date" from the DURABLE item fields, no run_progress attached (T3-c render half)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'Detached done row',
+        status: 'done',
+        linked_run_id: null,
+        completed_at: '2026-06-22T10:00:00Z',
+        pr: 265,
+        pr_url: 'https://github.com/acme/widgets/pull/265',
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const toggle = container.querySelector('.cwb-completed-toggle') as HTMLButtonElement
+    await act(async () => {
+      toggle.click()
+      await tick()
+    })
+
+    const date = container.querySelector('.cwb-completed-ul .cwb-date') as HTMLElement
+    expect(date).not.toBeNull()
+    expect(date.textContent).toBe('Merged #265 · Jun 22')
+
+    const prTag = date.querySelector('a.cwb-pr') as HTMLAnchorElement
+    expect(prTag).not.toBeNull()
+    expect(prTag.getAttribute('href')).toBe('https://github.com/acme/widgets/pull/265')
+    expect(prTag.getAttribute('target')).toBe('_blank')
+    expect(prTag.getAttribute('rel')).toBe('noopener noreferrer')
+
+    await act(async () => root.unmount())
+  })
+
+  it('a completed card with no PR renders byte-identical "Merged · date" (T3-d)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'Plain done row',
+        status: 'done',
+        linked_run_id: null,
+        completed_at: '2026-06-22T10:00:00Z',
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const toggle = container.querySelector('.cwb-completed-toggle') as HTMLButtonElement
+    await act(async () => {
+      toggle.click()
+      await tick()
+    })
+
+    const date = container.querySelector('.cwb-completed-ul .cwb-date') as HTMLElement
+    expect(date).not.toBeNull()
+    expect(date.textContent).toBe('Merged · Jun 22')
+    expect(date.querySelector('.cwb-pr')).toBeNull()
+
+    await act(async () => root.unmount())
+  })
+
+  it('renders the PR tag as plain text (no href) when the URL could not be resolved (T3-e)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'No URL row',
+        status: 'in_progress',
+        linked_run_id: 'run_1',
+        run_progress: {
+          run_id: 'run_1',
+          phase_label: 'building',
+          step_label: 'building',
+          round: 1,
+          started_at: '2026-07-02T00:00:00Z',
+          last_advanced_at: '2026-07-02T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: 261,
+          pr_url: null,
+          verdict: null,
+          failure_reason: null,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const prTag = container.querySelector('.cwb-pr') as HTMLElement
+    expect(prTag).not.toBeNull()
+    expect(prTag.tagName).toBe('SPAN')
+    expect(prTag.hasAttribute('href')).toBe(false)
+    expect(prTag.textContent).toBe('#261')
+
+    await act(async () => root.unmount())
+  })
+
+  it('a detached terminal (failed) card with a durable PR still gets its meta line (T3-f, gate-widening guard)', async () => {
+    const rows = [
+      item({
+        id: 'a',
+        title: 'Detached failed row',
+        status: 'failed',
+        linked_run_id: null,
+        pr: 261,
+        pr_url: null,
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    const meta = container.querySelector('.cwb-ul:not(.cwb-completed-ul) .cwb-row-meta')
+    expect(meta).not.toBeNull()
+    const prTag = meta!.querySelector('.cwb-pr') as HTMLElement
+    expect(prTag).not.toBeNull()
+    expect(prTag.tagName).toBe('SPAN')
+    expect(prTag.textContent).toBe('#261')
+
+    await act(async () => root.unmount())
   })
 })
