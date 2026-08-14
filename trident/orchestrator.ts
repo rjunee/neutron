@@ -344,8 +344,11 @@ export async function computeDiffLineCount(
 export function redactPushError(text: string): string {
   return (
     text
-      // `https://x-access-token:<secret>@github.test/...` — git echoes the remote back on failure.
-      .replace(/(\w+:\/\/)[^/\s@]*:[^/\s@]*@/g, '$1***@')
+      // ANY userinfo before the `@`, not just `user:password` — git echoes the remote back on
+      // failure. CODEX REVIEW [P1 Security]: the first cut required a colon, so the extremely
+      // common single-value form `https://<token>@host/...` sailed straight through into a
+      // PERSISTED failure reason. A token needs no password half to be a token.
+      .replace(/(\w+:\/\/)[^/\s@]+@/g, '$1***@')
       // Bare GitHub token shapes, in case one reaches stderr by another route.
       .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '$1***')
       .trim()

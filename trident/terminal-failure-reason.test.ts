@@ -233,6 +233,18 @@ describe('redactPushError — git may speak, the credential may not', () => {
     expect(out).toContain('Authentication failed')
   })
 
+  test('USERNAME-ONLY userinfo is redacted — a token needs no password half', () => {
+    // CODEX REVIEW [P1 Security], found by the reviewer running the exported function rather than
+    // reading the regex. `https://<token>@host` is the single most common way a credential ends
+    // up in a remote URL, and the first cut required a colon, so it reached a PERSISTED reason.
+    const raw = "fatal: Authentication failed for 'https://super-secret-value@git.test/o/r.git/'"
+    expect(raw).toContain('super-secret-value') // positive control
+    const out = redactPushError(raw)
+    expect(out).not.toContain('super-secret-value')
+    expect(out).toContain('***@')
+    expect(out).toContain('Authentication failed')
+  })
+
   test('a bare token shape is redacted even without a URL around it', () => {
     for (const shape of ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_']) {
       const out = redactPushError(`error: token ${shape}ZZZZZZZZZZZZZZZZZZZZ rejected`)
