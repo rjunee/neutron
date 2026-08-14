@@ -2003,6 +2003,11 @@ export function buildOpenGraphComposer(
     // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
+    const tridentHostRunner = makeLazyCredentialedHostRunner(async () =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
+    )
+    const resolveTridentMergeMode = (repoPath: string) =>
+      detectMergeMode(repoPath, defaultGitModeProbe(tridentHostRunner))
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
         // No credential → no substrate → the tick loop can never advance a run
@@ -2023,6 +2028,7 @@ export function buildOpenGraphComposer(
           // `<home>/Projects/<project_slug>/code` under it (git-init-ing on first
           // use), so a project with no repo yet still builds.
           repo_path: owner_home,
+          resolveMergeMode: resolveTridentMergeMode,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -3811,11 +3817,6 @@ export function buildOpenGraphComposer(
       resolve_chat_id: (projectId) => tridentDeliveryChatId(projectId),
       post: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
     })
-    const tridentHostRunner = makeLazyCredentialedHostRunner(async () =>
-      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
-    )
-    const resolveTridentMergeMode = (repoPath: string) =>
-      detectMergeMode(repoPath, defaultGitModeProbe(tridentHostRunner))
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
     // its title) and dispatches a board-bound build through the SAME chokepoint
     // (`dispatchBoardBoundBuild`: required-item + ask-before-acting gate +

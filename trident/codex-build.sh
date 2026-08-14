@@ -59,20 +59,19 @@
 # schema-shaped answer is still the MODEL's claim about its own work, and the failing
 # case is exactly the one where the model believes it committed. A schema constrains
 # the SHAPE of a wrong answer, not its truth. So this script does not ask. After codex
-# exits it MEASURES the facts with git and gh and writes them itself:
+# exits it MEASURES the inner-tree facts with git and writes them itself:
 #
 #   NEUTRON_CODEX_BUILD_BRANCH=      `git rev-parse --abbrev-ref HEAD`
 #   NEUTRON_CODEX_BUILD_HEAD=        the commit THIS RUN produced (see below)
-#   NEUTRON_CODEX_BUILD_REMOTE_HEAD= that same commit, confirmed pushed, or empty
-#   NEUTRON_CODEX_BUILD_PR=          `gh pr list --head` — the PR number, or empty
+#   NEUTRON_CODEX_BUILD_REMOTE_HEAD= empty; the outer publisher owns this witness
+#   NEUTRON_CODEX_BUILD_PR=          empty; the outer publisher owns the PR
 #   NEUTRON_CODEX_BUILD_DIFF=        the diff file path, or empty if it is missing
 #                                    or empty
 #   NEUTRON_CODEX_BUILD_WORKTREE=    `pwd`
 #
-# The last four are measured AFTER this script has published (see THE PUBLISH
-# BOUNDARY below), and they are still measurements: the push and the `gh pr create`
-# happen here, and then `git ls-remote` and `gh pr list` are asked what is actually
-# on GitHub. What this script did is not evidence of what landed.
+# Publishing happens only after this process exits. The durable outer loop pushes,
+# independently measures origin, creates or reuses the PR, and materializes the diff
+# reviewers receive. This trailer never claims that a local commit reached GitHub.
 #
 # Every one of them is EMPTY rather than wrong when it cannot be established, and
 # the bridge that reads them passes the empty value straight through. An empty sha
@@ -161,14 +160,12 @@
 #     at `<repo>/.git/worktrees/<name>` (so the first `git commit` writes out of tree),
 #     and it writes its branch diff to a path under /tmp. `--add-dir` — a real flag on
 #     this CLI — can widen the write set to cover both.
-#   • What `--add-dir` cannot grant is NETWORK, which `workspace-write` denies. Steps 3
-#     and 4 of the Forge contract are `git push` and `gh pr create`, and a build that
-#     installs a dependency needs it too.
+#   • What `--add-dir` cannot grant is NETWORK, which dependency installation may need.
 #
 # So the narrow policy would have to be re-widened along both axes, one flag at a time,
 # to arrive at the same reach with more moving parts and more ways to be subtly wrong.
 #
-# A build that cannot commit, push or open a PR is not a build; it produces no sha
+# A build that cannot commit is not a build; it produces no sha
 # and the run stops at the trailer above. The blast radius is bounded by the same
 # thing that bounds the Claude builder, which runs with the same powers: an isolated
 # git worktree on its own branch, a review panel that reads the diff, and a merge
@@ -270,8 +267,8 @@
 #   the tests until they pass, COMMITS LOCALLY, and writes the branch diff. It is told
 #   not to push and not to open a PR (`codexBuildCoda` in `trident/inner-workflow.mjs`).
 #
-#   THE HOST (this script, outside the sandbox) pushes the branch and opens the PR, and
-#   then MEASURES what landed. `publish()` below is that step.
+#   THE DURABLE OUTER LOOP pushes the branch, opens or reuses the PR, and independently
+#   measures what landed after this script and the entire inner workflow have exited.
 #
 # Nothing sensitive crosses into the GPT sandbox to make this work — the movement is the
 # other way: the two names `gh` reads are now stripped from the codex process on top of
@@ -286,12 +283,9 @@
 # on the remote; the remote saying so is (#545: a verdict may not land on a base the
 # review never saw).
 #
-# ── THE PRECHECK NOW ASKS ABOUT THE HOST, AND STILL ASKS EARLY ───────────────
-# The question "can the push authenticate" did not disappear with the split, it changed
-# subject: it is now about THIS process, which is the one that will run the commands. It
-# is still asked BEFORE codex is launched, because the value of asking is that a run
-# that cannot deliver costs a round and no tokens instead of a full build reported as
-# "produced no commitSha — nothing was built".
+# ── PUBLISH CAPABILITY IS AN OUTER PRE-LAUNCH GATE ───────────────────────────
+# Run creation asks the credentialed outer publisher whether it can authenticate.
+# This script performs no GitHub capability probe and receives no GitHub credential.
 #
 # Two capabilities are needed and both are probed, because half of one is what produced
 # the incident above:

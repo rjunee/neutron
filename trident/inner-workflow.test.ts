@@ -264,8 +264,9 @@ describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
   })
 
   test('an existing PR is REUSED, never duplicated', () => {
-    expect(SRC).toContain('gh pr list --head')
-    expect(SRC).toContain('NEVER open a duplicate PR')
+    expect(SRC).toContain('outer loop reuses the PR')
+    expect(SRC).toContain('Do NOT push and do NOT run')
+    expect(SRC).toContain('outer loop already owns PR')
   })
 })
 

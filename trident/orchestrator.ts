@@ -424,15 +424,20 @@ export function buildTridentOrchestrator(
     if (!local.ok || local.stdout.trim() !== requestedHead) {
       throw new Error(`outer publisher refused: branch ${branch} no longer points at the commit produced by the build`)
     }
-    const pushed = await opts.run_host(
+    const runWithRetries = async (command: string[], attempts = 3) => {
+      let result = await opts.run_host(command, run.repo_path)
+      for (let attempt = 1; !result.ok && attempt < attempts; attempt++) {
+        result = await opts.run_host(command, run.repo_path)
+      }
+      return result
+    }
+    const pushed = await runWithRetries(
       ['git', '-C', run.repo_path, 'push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
-      run.repo_path,
     )
     if (!pushed.ok) throw new Error(`outer publisher could not push branch ${branch}`)
 
-    const witnessed = await opts.run_host(
+    const witnessed = await runWithRetries(
       ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
-      run.repo_path,
     )
     const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
     if (remoteHead !== requestedHead) {
@@ -442,9 +447,8 @@ export function buildTridentOrchestrator(
     let pr = await detectExistingPr({ ...run, branch })
     if (pr === null) {
       const base = await resolveBase(run)
-      const created = await opts.run_host(
+      const created = await runWithRetries(
         ['gh', 'pr', 'create', '--head', branch, '--base', base, '--fill'],
-        run.repo_path,
       )
       if (!created.ok) throw new Error(`outer publisher could not open a PR for branch ${branch}`)
       pr = await detectExistingPr({ ...run, branch })
@@ -453,6 +457,13 @@ export function buildTridentOrchestrator(
 
     const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
     const base = await resolveBase(run)
+    const changed = await opts.run_host(
+      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${requestedHead}`],
+      run.repo_path,
+    )
+    if (!changed.ok || changed.stdout.trim() === '') {
+      throw new Error('outer publisher refused to dispatch reviewers for an empty diff')
+    }
     const diff = await opts.run_host(
       ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${requestedHead}`],
       run.repo_path,
@@ -688,6 +699,24 @@ export function buildTridentOrchestrator(
     fired.delete(run.id)
     redispatched.delete(run.id)
 
+    // A merged PR is terminal even if the inner process was about to request a
+    // publish. Do not recreate its deleted branch or open a replacement PR.
+    if (result.pr_merged) {
+      const mergedRun: TridentRun = {
+        ...run,
+        harvested_at: nowMs(),
+        phase: 'done',
+        pr: result.pr_number ?? run.pr,
+        branch: result.branch ?? run.branch,
+        inner_checkpoint: result.checkpoint ?? 'pr-merged',
+        inner_verdict: 'APPROVE',
+        subagent_status: 'completed',
+        failure_reason: null,
+        last_advanced_at: now(),
+      }
+      return { run: mergedRun, changed: true, waiting: false, note: `PR #${mergedRun.pr ?? '?'} already merged → done (no publish)` }
+    }
+
     if (result.publish_requested) {
       if (result.publish_head === null || result.publish_head === undefined) {
         return {
@@ -699,7 +728,7 @@ export function buildTridentOrchestrator(
       }
       try {
         const published = await publishBuiltCommit(run, result.publish_head)
-        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}`
+        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}`
         const resetPatch: TridentRunUpdate = {
           inner_result: null,
           subagent_run_id: null,

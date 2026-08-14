@@ -10786,3 +10786,19 @@ Mode detection now asks whether that publisher can authenticate (`gh auth status
 not whether `gh` is merely installed. A GitHub origin with an incapable publisher is a
 loud dispatch error rather than a silent downgrade to local mode. Repositories without
 a GitHub origin retain the existing local behavior.
+
+### Argus round-two hardening
+
+The publish checkpoint now carries the review round and Ralph remaining-task count
+(`trident/inner-workflow.mjs`), so an outer re-fire cannot reset a non-converging fix
+loop to round one or terminate a multi-task run early. Before review resumes,
+`trident/orchestrator.ts` verifies branch provenance, retries push and origin witness
+operations, refuses an empty base-to-head diff, and treats an already-merged PR as
+terminal. The shared host runner bounds each child command to 60 seconds
+(`trident/git-mode.ts`).
+
+The credential-absence proof is live rather than skipped: `trident/codex-build.test.ts`
+injects both GitHub token names, proves the captured child environment is populated
+with positive controls, and asserts neither secret reached the Codex process. Its
+command-absence guard matches wrapped commands as well as line-leading commands. The
+obsolete inner-publisher tests were removed instead of remaining skipped.

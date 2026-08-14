@@ -125,7 +125,12 @@ async function runWorkflow(script: Script): Promise<RunOut> {
     branch: null,
     dbPath: null,
     runId: null,
-    resumeCheckpoint: null,
+    // PR-mode review starts only after the outer publisher has pushed and
+    // witnessed the commit. This harness exercises reviewer death, so enter at
+    // that durable handoff instead of stopping at the preceding publish request.
+    resumeCheckpoint: script.pr === true
+      ? 'outer-published:0123456789abcdef0123456789abcdef01234567:0:1'
+      : null,
     // No cross-model credential: the only incompleteness in these runs is the seat
     // this test kills, so nothing else can explain a block.
     codexHome: null,

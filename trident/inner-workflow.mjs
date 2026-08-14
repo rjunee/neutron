@@ -815,6 +815,7 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.
 4. ${forgePushStep(reenter)}
+   Any cross-model review is best-effort and must NEVER gate publication or make you yield your turn.
 5. Write the branch diff to a file (e.g. \`git diff ${baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.
 6. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
@@ -2950,7 +2951,7 @@ try {
   // explicit reminder. Only meaningful in pr-mode — local mode has no PR.)
   const reuseNote =
     isPr && (pr !== null || resumeCheckpoint !== null)
-      ? `\n\nRESUME: a prior run already opened PR #${pr ?? '?'} on branch ${forgeBranch}. REUSE it — confirm with \`gh pr list --head ${forgeBranch}\` and push to the SAME branch. NEVER open a duplicate PR.`
+      ? `\n\nRESUME: the durable outer loop already owns PR #${pr ?? '?'} and branch ${forgeBranch}. Commit to that SAME local branch. Do NOT push and do NOT run \`gh\`; the outer loop reuses the PR.`
       : ''
   // P-F2 — the Fable ORCHESTRATOR plans FIRST (once per Ralph iteration): it
   // regenerates the plan, picks the single top task, and emits its execution spec
@@ -2965,8 +2966,9 @@ try {
   // for non-Ralph (single-task) runs, which never re-fire.
   let ralphRemaining = 0
   const publishedResume = typeof resumeCheckpoint === 'string'
-    ? resumeCheckpoint.match(/^outer-published:([0-9a-f]{40}):(\d+)$/)
+    ? resumeCheckpoint.match(/^outer-published:([0-9a-f]{40}):(\d+):(\d+)$/)
     : null
+  if (publishedResume !== null) round = Number(publishedResume[3])
   if (ralph === true) {
     if (publishedResume !== null) {
       ralphRemaining = Number(publishedResume[2])
@@ -3212,6 +3214,7 @@ ${task}${reflectionGuidance}`,
         checkpoint: `fix-round-${round}`,
         publishRequested: true,
         publishHead,
+        remainingTasks: ralphRemaining,
       }
       await writeTerminalResult(publishResult)
       return publishResult
