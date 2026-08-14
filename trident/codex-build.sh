@@ -20,6 +20,12 @@
 #                                       SAME text the Claude builder gets, plus a coda
 #                                       about how to report — so the two builders
 #                                       cannot drift into building different things.
+#   in  NEUTRON_CODEX_BUILD_BRIEF_PARTS optional newline-separated ORDERED list of
+#                                       absolute part-file paths. When set, this script
+#                                       concatenates them (part 1 first) into the brief
+#                                       file before checking integrity. When unset, the
+#                                       brief file must already exist (the chunked
+#                                       bridge-agent fallback).
 #   in  NEUTRON_CODEX_BUILD_DIFF_FILE   where the brief told the build to write the
 #                                       branch diff, so this script can report whether
 #                                       it actually appeared.
@@ -95,6 +101,9 @@
 # hands over `<bytes>:<fnv32>` for what it composed and this script recomputes both
 # from the file before spending a token; a mismatch is DEFERRED (exit 3), never a
 # build against an approximation of the brief.
+# Parts written directly by the host process never transit a model. The receipt is
+# still taken once over the assembled whole, so a dropped, reordered, truncated or
+# altered part is refused exactly as a bad agent copy is.
 #
 # FNV-1a/32 OVER THE BYTES, NOT SHA-256, and the reason is the composing side: the
 # workflow script runs with no imports and no host API it is promised (see the
@@ -638,6 +647,25 @@ fi
 # An empty brief would hand codex a blank prompt and let it invent a task inside a
 # real worktree with full write access. Refuse, loudly.
 BRIEF_FILE="${NEUTRON_CODEX_BUILD_BRIEF_FILE:-}"
+BRIEF_PARTS="${NEUTRON_CODEX_BUILD_BRIEF_PARTS:-}"
+if [ -n "$BRIEF_PARTS" ]; then
+  if [ -z "$BRIEF_FILE" ]; then
+    echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_PARTS is set but NEUTRON_CODEX_BUILD_BRIEF_FILE is unset — there is nowhere to assemble the brief. DEFERRED." >&2
+    exit 3
+  fi
+  if ! : > "$BRIEF_FILE" 2>/dev/null; then
+    echo "CODEX_BUILD_BRIEF_UNWRITABLE: cannot write NEUTRON_CODEX_BUILD_BRIEF_FILE=$BRIEF_FILE to assemble the brief parts. DEFERRED." >&2
+    exit 3
+  fi
+  while IFS= read -r part; do
+    [ -z "$part" ] && continue
+    if [ ! -s "$part" ]; then
+      echo "CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED." >&2
+      exit 3
+    fi
+    cat "$part" >> "$BRIEF_FILE"
+  done <<< "$BRIEF_PARTS"
+fi
 if [ -z "$BRIEF_FILE" ] || [ ! -s "$BRIEF_FILE" ]; then
   echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_FILE is unset, missing or empty — there is no build brief to run. DEFERRED." >&2
   exit 3
