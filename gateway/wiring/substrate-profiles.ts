@@ -249,4 +249,3 @@ export const PROFILE_WARM_FIRE: SubstrateProfile = {
   // immortal, and far above any plausible silent-thinking stretch.
   turn_inactivity_ms: 30 * 60_000,
 }
-

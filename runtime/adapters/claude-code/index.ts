@@ -112,7 +112,7 @@ export interface ClaudeCodeSubstrateOptions {
   claude_config_dir?: string
   /**
    * Per-substrate INACTIVITY window (ms) → `PersistentReplSubstrateOptions.
-   * turnTimeoutMs`. Absent ⇒ the pool's `DEFAULT_TURN_INACTIVITY_MS` (90s).
+   * turnTimeoutMs`. Absent ⇒ the pool's `DEFAULT_TURN_INACTIVITY_MS` (30min).
    *
    * Exists for a substrate that HOSTS DETACHED WORK, where the default's liveness
    * signal — PTY bytes from the child — is the wrong measure: a reasoning-heavy

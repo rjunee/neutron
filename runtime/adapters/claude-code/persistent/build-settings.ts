@@ -22,6 +22,8 @@ export const ENFORCE_REPLY_HOOK_PATH = join(HERE, 'hooks', 'enforce-reply.ts')
 export const TODO_SYNC_HOOK_PATH = join(HERE, 'hooks', 'todo-sync.ts')
 /** Absolute path to the Activity Inspector's Pre/PostToolUse tool tap. */
 export const ACTIVITY_TAP_HOOK_PATH = join(HERE, 'hooks', 'activity-tap.ts')
+/** Absolute path to the chat Bash pipeline safety guard. */
+export const PIPELINE_GUARD_HOOK_PATH = join(HERE, 'hooks', 'pipeline-guard.ts')
 
 /**
  * Claude Code `permissions` block for a per-session `--settings` file (task 6,
@@ -97,6 +99,8 @@ export interface BuildSettingsInput {
    * is emitted (byte-identical to today for every REPL that doesn't opt in — the
    * disposable Trident build REPLs and the untrusted history-import REPL). */
   activityTap?: ActivityTapHookConfig
+  /** Wire the Bash pipeline guard for the owner's conversational REPL. */
+  pipelineGuard?: { hookPath?: string }
   /**
    * Optional CC `permissions` block written ALONGSIDE the Stop hook (task 6).
    * When provided, a `permissions` key is emitted into the settings JSON with
@@ -116,6 +120,12 @@ export function buildSettings(input: BuildSettingsInput): string {
   const bunBin = input.bunBin ?? 'bun'
   const hooks: Record<string, unknown> = {
     Stop: [{ matcher: '', hooks: [{ type: 'command', command: `${bunBin} ${hookPath}` }] }],
+  }
+  if (input.pipelineGuard !== undefined) {
+    const guardPath = input.pipelineGuard.hookPath ?? PIPELINE_GUARD_HOOK_PATH
+    hooks['PreToolUse'] = [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: `${bunBin} ${guardPath}` }] },
+    ]
   }
   // WAVE 3.5 task B — the TodoWrite→Work Board PostToolUse hook. Its command bakes
   // SINK_PORT/SINK_TOKEN/SESSION_ID as an env prefix so the hook subprocess can
@@ -145,7 +155,9 @@ export function buildSettings(input: BuildSettingsInput): string {
     const base = `SINK_PORT=${a.sinkPort} SINK_TOKEN=${a.sinkToken} SESSION_ID=${a.sessionId}`
     const cmd = (phase: 'pre' | 'post'): string =>
       `${base} TAP_PHASE=${phase} ${bunBin} ${tapPath}`
+    const pre = Array.isArray(hooks['PreToolUse']) ? (hooks['PreToolUse'] as unknown[]) : []
     hooks['PreToolUse'] = [
+      ...pre,
       { matcher: '', hooks: [{ type: 'command', command: cmd('pre') }] },
     ]
     const post = Array.isArray(hooks['PostToolUse']) ? (hooks['PostToolUse'] as unknown[]) : []
