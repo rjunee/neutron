@@ -145,6 +145,19 @@ export interface WorkBoardSurfaceOptions {
    *  behavior. Total (never rejects); an explicit task_type always short-circuits
    *  it. */
   classify_task_type?: (title: string) => Promise<WorkBoardTaskType>
+  /**
+   * DERIVED inline activity. With this wired, the wire field `inline_active` on
+   * every item-bearing response is EVIDENCE-DERIVED truth; the stored column is
+   * only a hint (where they disagree, the evidence wins — a crashed session's
+   * stuck flag reads not-active, and a live inline edit reads active with no
+   * `work_board_update` anywhere in the path).
+   *
+   * BATCH shape on purpose (acceptance e): the composer does ONE O(1) evidence
+   * read per RESPONSE, never one per row. Absent ⇒ raw stored-flag passthrough —
+   * degraded, not broken. Display-only: it never gates, denies or delays a route,
+   * and it never writes to the store.
+   */
+  derive_inline_active?: (items: WorkBoardItem[], project_id: string) => WorkBoardItem[]
 }
 
 export interface WorkBoardSurface {
@@ -171,6 +184,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
   const startResearch = opts.start_research
   const cancelDispatch = opts.cancel_dispatch
   const classifyTaskType = opts.classify_task_type
+  const deriveInline = opts.derive_inline_active
 
   /**
    * Attach each bound item's live run progress (item 1) so the HTTP GET carries
@@ -216,15 +230,27 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
       // so project A and project B are distinct boards; the URL `project_id` is
       // echoed back to the client verbatim.
       const scope = workBoardScopeKey(resolved.project_slug, project_id)
+      // Derived inline activity: the wire `inline_active` on every item-bearing
+      // response below is the EVIDENCE-derived value, not the stored hint. One
+      // batch call per response (one O(1) evidence read, never per row); an
+      // unwired dep is an identity passthrough of the raw flag.
+      const derive = (items: WorkBoardItem[]): WorkBoardItem[] =>
+        deriveInline !== undefined ? deriveInline(items, project_id) : items
+      // Nullable because `store.update`/`store.complete` echo `null` for a row
+      // that vanished mid-write; a null echo stays null (no shape change).
+      const deriveOne = (item: WorkBoardItem | null): WorkBoardItem | null =>
+        item === null ? null : (derive([item])[0] ?? item)
       const method = req.method
 
       // Bare collection path: `/work-board`.
       if (raw_item_id === '') {
         if (method === 'GET') {
-          return jsonOk({ items: withRunProgress(store.list(scope)), project_id })
+          // Derive FIRST, then attach run progress — `run_progress` rides on the
+          // already-derived rows.
+          return jsonOk({ items: withRunProgress(derive(store.list(scope))), project_id })
         }
         if (method === 'POST') {
-          return handleCreate(req, store, scope, project_id, createCard, classifyTaskType)
+          return handleCreate(req, store, scope, project_id, createCard, classifyTaskType, deriveOne)
         }
         return jsonError(405, 'method_not_allowed', `method '${method}' not allowed on /work-board`)
       }
@@ -237,7 +263,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
 
       if (action === '') {
         if (method === 'PATCH') {
-          return handleUpdate(req, store, scope, project_id, item_id)
+          return handleUpdate(req, store, scope, project_id, item_id, deriveOne)
         }
         if (method === 'DELETE') {
           return handleDelete(store, scope, project_id, item_id, trident_runs, cancelDispatch)
@@ -252,10 +278,10 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
         return handleStart(store, scope, project_id, item_id, trident_runs, startBuild, startResearch)
       }
       if (action === 'complete' && method === 'POST') {
-        return handleComplete(store, scope, project_id, item_id)
+        return handleComplete(store, scope, project_id, item_id, deriveOne)
       }
       if (action === 'reorder' && method === 'POST') {
-        return handleReorder(req, store, scope, project_id, item_id)
+        return handleReorder(req, store, scope, project_id, item_id, derive)
       }
       return jsonError(
         405,
@@ -276,6 +302,8 @@ async function handleCreate(
   project_id: string,
   createCard: WorkBoardCreateCardFn | undefined,
   classifyTaskType: ((title: string) => Promise<WorkBoardTaskType>) | undefined,
+  /** Derived-inline-activity mapper from the handler closure (identity when unwired). */
+  deriveOne: (item: WorkBoardItem | null) => WorkBoardItem | null,
 ): Promise<Response> {
   const body = await readJsonBody(req)
   if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
@@ -333,7 +361,7 @@ async function handleCreate(
             ...(task_type !== null ? { task_type } : {}),
             ...(design_doc_ref !== null ? { design_doc_ref } : {}),
           })
-    return jsonOk({ item, project_id }, 201)
+    return jsonOk({ item: deriveOne(item), project_id }, 201)
   } catch (err) {
     return mapWriteError(err)
   }
@@ -410,6 +438,8 @@ async function handleUpdate(
   project_slug: string,
   project_id: string,
   item_id: string,
+  /** Derived-inline-activity mapper from the handler closure (identity when unwired). */
+  deriveOne: (item: WorkBoardItem | null) => WorkBoardItem | null,
 ): Promise<Response> {
   const owned = store.get(project_slug, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
@@ -440,7 +470,7 @@ async function handleUpdate(
   }
   try {
     const item = await store.update(project_slug, item_id, patch)
-    return jsonOk({ item, project_id })
+    return jsonOk({ item: deriveOne(item), project_id })
   } catch (err) {
     return mapWriteError(err)
   }
@@ -451,6 +481,8 @@ async function handleComplete(
   project_slug: string,
   project_id: string,
   item_id: string,
+  /** Derived-inline-activity mapper from the handler closure (identity when unwired). */
+  deriveOne: (item: WorkBoardItem | null) => WorkBoardItem | null,
 ): Promise<Response> {
   const owned = store.get(project_slug, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
@@ -461,7 +493,7 @@ async function handleComplete(
   // finished (2026-08-11). The client shows the message.
   try {
     const item = await store.complete(project_slug, item_id)
-    return jsonOk({ item, project_id })
+    return jsonOk({ item: deriveOne(item), project_id })
   } catch (err) {
     if (err instanceof WorkBoardRunStillLiveError) {
       return jsonError(409, 'run_still_live', err.message)
@@ -476,6 +508,8 @@ async function handleReorder(
   project_slug: string,
   project_id: string,
   item_id: string,
+  /** Derived-inline-activity mapper from the handler closure (identity when unwired). */
+  derive: (items: WorkBoardItem[]) => WorkBoardItem[],
 ): Promise<Response> {
   const owned = store.get(project_slug, item_id)
   if (owned === null) return jsonError(404, 'item_not_found', `item_id=${item_id}`)
@@ -490,7 +524,7 @@ async function handleReorder(
     ...(before !== null ? { before } : {}),
     ...(after !== null ? { after } : {}),
   })
-  return jsonOk({ items: store.list(project_slug), project_id })
+  return jsonOk({ items: derive(store.list(project_slug)), project_id })
 }
 
 async function handleDelete(

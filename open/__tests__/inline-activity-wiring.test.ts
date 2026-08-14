@@ -15,7 +15,7 @@ import {
   INLINE_EVIDENCE_WINDOW_MS,
   withDerivedInlineActive,
   type InlineEvidenceReader,
-} from '../../work-board/inline-activity.ts'
+} from '@neutronai/work-board/inline-activity.ts'
 
 describe('inline activity wiring — real inspector evidence', () => {
   test('real taps activate, expire without latching, and remain scope-isolated', () => {
@@ -57,13 +57,16 @@ describe('inline activity wiring — real inspector evidence', () => {
 })
 
 describe('inline activity wiring — composer source mutant pin', () => {
-  test('both read boundaries and the late binding remain wired', () => {
+  test('all three read boundaries and the late binding remain wired', () => {
     // Cheapest honest pin: both closures require a full gateway boot to execute.
     const src = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '..', 'composer.ts'),
       'utf8',
     )
-    expect((src.match(/withDerivedInlineActive\(/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    // Rail extras + the WS frame + the HTTP surface dep (T3) = three call sites.
+    expect((src.match(/withDerivedInlineActive\(/g) ?? []).length).toBeGreaterThanOrEqual(3)
     expect(src.includes('inlineEvidenceReader.lastRealActivityAt =')).toBe(true)
+    // Deleting the HTTP surface's dep wiring turns this red.
+    expect(src.includes('derive_inline_active:')).toBe(true)
   })
 })

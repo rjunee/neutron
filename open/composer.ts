@@ -3985,6 +3985,16 @@ export function buildOpenGraphComposer(
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
+      // Derived inline activity — the wire `inline_active` on every item-bearing
+      // HTTP response becomes evidence truth, the stored column stays a hint.
+      // The closure DEREFS the late-bound holder at CALL time, so the
+      // construction order (this surface is built before the ActivityInspector)
+      // is safe; an unset holder reads evidence 0 ⇒ not active (fail-soft, and
+      // the correct post-crash semantics). `inspectorScopeKey('general') ===
+      // 'general'` matches the tap's General scope, so the URL project_id feeds
+      // straight through. Display-only: it gates nothing.
+      derive_inline_active: (items, project_id) =>
+        withDerivedInlineActive(items, inlineEvidenceReader, inspectorScopeKey(project_id), Date.now()),
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
       // The board scope and the DOCS project id are separate arguments on purpose:
       // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a
