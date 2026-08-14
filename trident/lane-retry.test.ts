@@ -566,6 +566,10 @@ describe('retryDeferredPeers — a dead CORE seat is retried, not written off', 
     expect(at).toBeGreaterThan(-1)
     const slots = SRC.slice(at, at + 400)
     expect(slots).toContain('...coreSeats,')
-    expect(slots).toContain("{ name: 'codex', slot: codexSlot, statusKey: 'codexStatus' }")
+    // The status key is derived from the slot's ROUTE now that either slot can hold either
+    // provider, so the old hardcoded spelling no longer appears. The property this protects
+    // is that the retry is told WHICH peer it is retrying — assert that, not the literal.
+    expect(slots).toContain("{ name: 'codex', slot: codexSlot, statusKey:")
+    expect(slots).toContain("slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus'")
   })
 })

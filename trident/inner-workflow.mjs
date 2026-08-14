@@ -3316,6 +3316,13 @@ ${task}${reflectionGuidance}`,
 
   // First review + synthesis.
   let synthesis = await runReviewRound(diffFile, round, pr)
+  // CARRY THE PANEL'S OWN ACCOUNT OF ITSELF INTO THE RESULT. `reviewRecord` says which
+  // seats ran and which were deliberately NONE, and it was composed and then dropped:
+  // `lastReviewRecord` was declared and read at the terminal result but never assigned,
+  // so a run with every seat set to NONE reported the placeholder instead of saying that
+  // no review ran. That is the one case where the record matters most — a merge that
+  // leaned on build and CI alone must SAY so.
+  if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
   finalVerdict = normalizeVerdict(synthesis.verdict)
   await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
 
@@ -3423,6 +3430,7 @@ ${task}${reflectionGuidance}`,
     // upcoming review never sees. Empty → fail-closed, same as round 1.
     reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
     synthesis = await runReviewRound(diffFile, round, pr)
+    if (typeof synthesis?.reviewRecord === 'string') lastReviewRecord = synthesis.reviewRecord
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
   }
