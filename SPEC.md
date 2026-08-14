@@ -506,6 +506,20 @@ Each carries an acceptance criterion; all in `neutron-open`.
       `up_to_date` is returned only when the target sha is genuinely reachable and deployed; and a stale or
       unfetchable ref is named as such rather than reported as parity. A test pins that an unknown-to-the-host
       sha can never produce `up_to_date`.
+      - ✅ **RESOLVED, in two halves, and the second half is the interesting one.** #245 made the request
+        FETCH before comparing, which is the right fix — **and it moved the failure rather than ending it.**
+        A fetch always writes `FETCH_HEAD`, and this service is deliberately unprivileged in the host
+        checkout, so the very next real deploy refused with *"could not read the host checkout to work out
+        what would deploy … Permission denied"*. The owner reported it three times before the cause was
+        measured. 📌 **THE LESSON, worth more than the fix: when a privilege boundary is drawn, EVERY step
+        that needs the privilege has to move — not just the obviously dangerous one.** The deploy itself was
+        moved across on day one; the innocuous-looking read ("what does this ref point at?") had a hidden
+        WRITE inside it and stayed behind, and nothing noticed until a deploy was actually attempted, because
+        every test that exercised it ran as a user who could write. **`createHostDeployRemoteGit` now asks the
+        control plane** (`open/host-deploy-runtime.ts`), and the local git view is DELETED rather than kept
+        beside it. ⛔ Rejected: widening permissions on the host git directory (that IS the boundary), and a
+        locally-owned mirror (the preview would then describe a checkout that is not the one deploying — this
+        very defect, one level down).
 - [ ] **A deploy must not kill the builds in flight — trident is presently its own worst enemy**
       (owner-directed 2026-08-13, from the forensics on run `bb3c8c8e`). The inner workflow is not its own
       process: it runs detached inside a WARM `claude` REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`,
