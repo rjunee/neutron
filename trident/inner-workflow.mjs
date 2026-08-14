@@ -1987,6 +1987,18 @@ function normalizeOid(value) {
   return FULL_OID.test(s) ? s : ''
 }
 
+/** A plausible OID CLAIM from the build agent (7–40 hex, either case), trimmed —
+ *  else null. The outer publisher resolves the REAL head with `rev-parse --verify`
+ *  on the branch this workflow NAMES; this value is only a cross-check there, so an
+ *  abbreviated sha is carried verbatim and a missing one is NOT an error — a thrown
+ *  handoff here is how run 3d2696c3 discarded a finished, committed build
+ *  (defect 2026-08-14). Mirrors the `publish_head` decode in inner-loop.ts. */
+const OID_CLAIM = /^[0-9a-fA-F]{7,40}$/
+function oidClaim(value) {
+  const s = typeof value === 'string' ? value.trim() : ''
+  return OID_CLAIM.test(s) ? s : null
+}
+
 /**
  * WHAT A RESUMED CHECKPOINT MAY UNLOCK — decided from the COMMIT it was recorded
  * against, never from its name.
@@ -3629,8 +3641,12 @@ ${task}${reflectionGuidance}`,
     // code on the branch.
     await checkpoint('forge-done', { pr, head: branchHead })
     if (isPr) {
-      if (!FULL_OID.test(branchHead)) throw new Error('forge:build completed without a full local commit OID for the outer publisher')
-      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: branchHead, remainingTasks: ralphRemaining }
+      // NO THROW ON SHA SHAPE. What this handoff actually carries is the BRANCH
+      // NAME (`branch: forgeBranch`) — a value no model can plausibly mangle —
+      // which the outer publisher `rev-parse --verify`s to get the real head.
+      // `publishHead` is a best-effort CROSS-CHECK only, so a missing or
+      // abbreviated claim must never discard a build that is already committed.
+      const publishResult = { ok: true, prNumber: null, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: 'forge-done', publishRequested: true, publishHead: oidClaim(branchHead), remainingTasks: ralphRemaining }
       await writeTerminalResult(publishResult)
       return publishResult
     }
@@ -3770,8 +3786,9 @@ ${task}${reflectionGuidance}`,
       head: typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : '',
     })
     if (isPr) {
-      const publishHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-      if (!FULL_OID.test(publishHead)) throw new Error(`forge:fix-round-${round} completed without a full local commit OID for the outer publisher`)
+      // Best-effort claim, same as the build handoff: the branch name is the
+      // handoff, `publishHead` is only a cross-check for the publisher.
+      const publishHead = oidClaim(fix?.commitSha)
       const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead, remainingTasks: ralphRemaining }
       await writeTerminalResult(publishResult)
       return publishResult
