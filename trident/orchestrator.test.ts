@@ -393,6 +393,48 @@ describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', ()
     expect(final.inner_verdict).toBe('REQUEST_CHANGES')
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
   })
+
+  // CODEX REVIEW, ROUND 3 [P1] — it caught the exact trap I had criticised elsewhere. The
+  // assertion above passes on BOTH the old lying message and the new one (they share
+  // "without Argus APPROVE"), and every unit test for the new reason calls the exported
+  // helper DIRECTLY — so reverting the orchestrator's call site to the old hardcoded
+  // template would have left the whole suite green. A test that cannot fail on the bug it
+  // names is not a test. These two drive the REAL orchestrator, through the seam that
+  // actually writes the row.
+  test('a round-1 inner-error fails with a MEASURED reason, not the round ceiling', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', round: 1, prNumber: 7, branch: 'feat-x', checkpoint: 'inner-error' },
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    // THE DEFECT: three runs on 2026-08-13 ended exactly here and every one of them
+    // claimed the round budget ran out.
+    expect(final.failure_reason).not.toContain('exhausted')
+    expect(final.failure_reason).not.toMatch(/\b10 round\(s\)/)
+    expect(final.failure_reason).toContain('round 1 of')
+    expect(final.failure_reason).toContain('inner-error')
+  })
+
+  test('the persisted checkpoint agrees with the reason that names it', async () => {
+    // CODEX ROUND 3 [P2]. The row could carry a stale checkpoint while the terminal result
+    // reported another; the reason read one field and the structured column read the other.
+    // Two answers to one question — the shape of this whole defect.
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', round: 2, prNumber: 7, branch: 'feat-x', checkpoint: 'inner-error' },
+        argusCheckpoint: 'forge-built',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.inner_checkpoint).toBe('inner-error')
+    expect(final.failure_reason).toContain('inner-error')
+  })
 })
 
 describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per task, merges once at 0', () => {

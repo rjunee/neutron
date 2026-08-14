@@ -297,6 +297,65 @@ export async function computeDiffLineCount(
  * `no_advance_hang_ms`.
  */
 
+/**
+ * THE TERMINAL REASON FOR A RUN THAT ENDED WITHOUT AN APPROVE.
+ *
+ * WHY THIS EXISTS. The branch that calls this is a CATCH-ALL: everything that is not a
+ * merge-eligible APPROVE and not the provenance reject lands in it. It used to write one
+ * hardcoded sentence — `inner loop exhausted ${run.max_rounds} round(s) without Argus
+ * APPROVE` — interpolating the CONFIGURED CEILING, which is not a measurement of anything.
+ * On 2026-08-13 four runs with four different causes (ten real review rounds; `CODEX_HOME`
+ * unresolved; a truncated build brief; a missing push credential) all reported "exhausted
+ * 10 round(s)". Three of them ended at ROUND 1 having never run a reviewer. Each time the
+ * sentence read as a diagnosis, so the next person looked at review quality instead of the
+ * build — it cost the owner an hour, then another.
+ *
+ * THE RULE (owner, 2026-08-13, verbatim): *"If it's a generic catchall make the error
+ * message generic."* Generalised: A MESSAGE MUST NOT ASSERT A CAUSE IT DID NOT MEASURE.
+ * Only ONE shape may claim exhaustion — the rounds actually ran out. Everything else says
+ * what IS known (the round reached, the ceiling, the last checkpoint) and claims nothing
+ * more. Generic-and-true beats specific-and-wrong; a confidently-worded default is the
+ * failure mode, because it stops the reader looking further.
+ *
+ * `result.round` and `result.checkpoint` were ALWAYS in scope at the call site. Nothing
+ * needed to be plumbed; they simply were not read.
+ *
+ * Exported because the defect was invisible while this was an inline template literal —
+ * there was nothing a test could hold. Keep it reachable.
+ */
+export function innerTerminalFailureReason(
+  run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
+  result: Pick<InnerResult, 'round' | 'checkpoint'>,
+): string {
+  // Prefer the round the INNER workflow reports (what actually happened) over the row's
+  // copy, which a crash can leave behind at its launch value.
+  const reported = Number.isFinite(result.round) && result.round > 0 ? result.round : run.round
+  const ceiling = run.max_rounds
+  const checkpoint = result.checkpoint ?? run.inner_checkpoint ?? null
+  // NO CAUSE IS INFERRED HERE — and that is the whole design, arrived at by being wrong
+  // twice. Two Codex review rounds killed two attempts to deduce one:
+  //
+  //  R1: `reported >= ceiling` was read as "the budget ran out". It is not — the catch
+  //      path writes the round it was ON, so a throw DURING round 10 arrives as
+  //      `{ round: 10, checkpoint: 'inner-error' }`.
+  //  R2: adding "…and the checkpoint is not `inner-error`" was ALSO not enough.
+  //      `argus-request-changes` is written for SEVERAL distinct exits — genuine
+  //      exhaustion, a round-lost fix (`inner-workflow.mjs` ~3174), a fix that left no
+  //      diff (~3197), an `infra-only` synthesis stop (~3134). The checkpoint records the
+  //      PHASE, never the TERMINAL CAUSE.
+  //
+  // The signal that would make a specific message honest — an explicit terminal cause
+  // emitted by the inner workflow — DOES NOT EXIST. Inventing it here by inference is how
+  // this line became wrong for four different failures in one night. So this reports only
+  // what was measured: how far it got, and the last phase it recorded. Nothing about why.
+  //
+  // THE OWNER'S RULE, VERBATIM: *"If it's a generic catchall make the error message
+  // generic."* This is a catch-all. This is the generic message. Making it specific again
+  // is a change that must come WITH the missing signal, not before it — see the SPEC entry.
+  const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
+  return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
+}
+
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
@@ -708,15 +767,24 @@ export function buildTridentOrchestrator(
       return { run: failed, changed: true, waiting: false, note: 'APPROVE rejected (provenance gate) → failed' }
     }
 
-    // REQUEST_CHANGES / null — the inner loop exhausted maxRounds without an APPROVE.
+    // REQUEST_CHANGES / null — the inner loop ended without an APPROVE. This is a
+    // CATCH-ALL over several distinct causes, so the reason is MEASURED rather than
+    // assumed; see `innerTerminalFailureReason` for what that cost when it was not.
     const failed: TridentRun = {
-      ...failedRun(run, `inner loop exhausted ${run.max_rounds} round(s) without Argus APPROVE`, true),
+      ...failedRun(run, innerTerminalFailureReason(run, result), true),
       pr,
       branch,
-      inner_checkpoint: run.inner_checkpoint ?? result.checkpoint ?? 'argus-request-changes',
+      // CODEX REVIEW, ROUND 3 [P2] — the row must not contradict its own reason. This used
+      // to prefer `run.inner_checkpoint` (the row's, possibly STALE, copy) while the reason
+      // prefers `result.checkpoint` (what the terminal result actually reported), so a run
+      // with `inner_checkpoint='forge-built'` and a result of `inner-error` produced a reason
+      // naming `inner-error` beside a structured field saying `forge-built`. Two answers to
+      // one question is the shape of this whole defect; the terminal result is authoritative
+      // on how it ended, so BOTH read it the same way and in the same order.
+      inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
       inner_verdict: 'REQUEST_CHANGES',
     }
-    return { run: failed, changed: true, waiting: false, note: 'inner loop REQUEST_CHANGES (max rounds) → failed' }
+    return { run: failed, changed: true, waiting: false, note: 'inner loop ended without APPROVE → failed' }
   }
 
   /** Elapsed ms since the run last advanced (checkpoint / launch). Conservative
