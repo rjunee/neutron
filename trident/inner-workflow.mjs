@@ -2098,6 +2098,82 @@ const CI_FAILED_STATES = new Set([
 /** States meaning the check has not finished yet. */
 const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'])
 
+// These are the repository jobs that establish that the change was actually
+// exercised. Reading names is intentional: counting successful rows made a PR
+// with only CodeQL look healthy when the conflicting branch had prevented the
+// workflow containing these jobs from starting at all.
+const REVIEW_REQUIRED_CHECKS = Object.freeze(['test', 'lint', 'typecheck'])
+const REVIEW_READINESS_ATTEMPTS = 3
+const REVIEW_READINESS_RETRY_MS = 15000
+
+/** Classify the fixed `gh pr view` readiness probe before any review seat runs. */
+function classifyReviewReadiness(probe) {
+  if (probe === null || typeof probe !== 'object') return { status: 'unknown', reason: 'PR readiness could not be read' }
+  const raw = typeof probe.raw === 'string' ? probe.raw : ''
+  const exit = typeof probe.exit_code === 'number' ? probe.exit_code : -1
+  if (exit !== 0) return { status: 'unknown', reason: 'PR readiness could not be read' }
+  const start = raw.indexOf('{')
+  const end = raw.lastIndexOf('}')
+  if (start < 0 || end <= start) return { status: 'unknown', reason: 'PR readiness could not be read' }
+  let parsed
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1))
+  } catch {
+    return { status: 'unknown', reason: 'PR readiness could not be read' }
+  }
+  if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.statusCheckRollup)) {
+    return { status: 'unknown', reason: 'PR readiness could not be read' }
+  }
+  const mergeable = typeof parsed.mergeable === 'string' ? parsed.mergeable.toUpperCase() : ''
+  if (mergeable === 'CONFLICTING') {
+    return { status: 'conflicting', reason: 'PR is conflicting with base' }
+  }
+  if (mergeable !== 'MERGEABLE') {
+    return { status: 'pending', reason: 'PR mergeability is still being calculated' }
+  }
+  const byName = new Map()
+  for (const row of parsed.statusCheckRollup) {
+    const name = row && typeof row.name === 'string' ? row.name : ''
+    if (REVIEW_REQUIRED_CHECKS.includes(name)) byName.set(name, row)
+  }
+  for (const name of REVIEW_REQUIRED_CHECKS) {
+    if (!byName.has(name)) return { status: 'absent', reason: `required check ${name} has not run` }
+  }
+  for (const name of REVIEW_REQUIRED_CHECKS) {
+    const row = byName.get(name)
+    const status = row && typeof row.status === 'string' ? row.status.toUpperCase() : ''
+    const conclusion = row && typeof row.conclusion === 'string' ? row.conclusion.toUpperCase() : ''
+    if (conclusion === 'SKIPPED') {
+      return { status: 'absent', reason: `required check ${name} has not run (reported SKIPPED)` }
+    }
+    if (status !== 'COMPLETED' || conclusion === '') {
+      return { status: 'pending', reason: `required check ${name} is still running` }
+    }
+  }
+  const failed = REVIEW_REQUIRED_CHECKS.filter((name) => {
+    const conclusion = String(byName.get(name)?.conclusion || '').toUpperCase()
+    return conclusion !== 'SUCCESS' && conclusion !== 'NEUTRAL'
+  })
+  return { status: failed.length > 0 ? 'failed' : 'passed', reason: '', failed }
+}
+
+/**
+ * Retry only readiness, never the review round. `spend` is unreachable until the
+ * PR is mergeable and every named check has produced a terminal result.
+ */
+async function reviewWithPreconditions({ probe, spend, wait, attempts = REVIEW_READINESS_ATTEMPTS }) {
+  let readiness = { status: 'unknown', reason: 'PR readiness could not be read' }
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    readiness = await probe(attempt)
+    if (readiness.status === 'passed' || readiness.status === 'failed') {
+      return { deferred: false, readiness, value: await spend() }
+    }
+    if (readiness.status === 'conflicting' || readiness.status === 'unknown') break
+    if (attempt < attempts) await wait()
+  }
+  return { deferred: true, readiness, value: null }
+}
+
 /**
  * Turn one probe result into a verdict. PURE, so every branch is unit-testable
  * without a network, a PR, or an agent.
@@ -2308,6 +2384,55 @@ ${cmd}`,
     ),
   )
   return classifyCi(res)
+}
+
+/** Read mergeability and the NAMES of checks that ran, before dispatching review. */
+async function probeReviewReadiness(prForReview, round, attempt) {
+  if (!isPr || prForReview === null || prForReview === undefined) {
+    return { status: 'passed', reason: '', failed: [] }
+  }
+  const cmd = `cd ${shSingleQuote(repoPath)} && gh pr view ${String(prForReview)} --json mergeable,statusCheckRollup 2>&1; echo "___EXIT=$?"`
+  const res = await seatAttempt(`review-readiness-r${round}-attempt-${attempt}`, () =>
+    agent(
+      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret mergeability or checks, do NOT run anything else, do NOT modify any file.\n${cmd}`,
+      withModel({ label: `review-readiness-r${round}-${attempt}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+    ),
+  )
+  return classifyReviewReadiness(res)
+}
+
+function reviewPreconditionDeferred(readiness) {
+  return {
+    verdict: 'REQUEST_CHANGES',
+    blockKind: 'infra-only',
+    findings: [
+      {
+        severity: 'blocker',
+        kind: LANE_FINDING_KIND,
+        title: `REVIEW DEFERRED — ${readiness.reason}`,
+        evidence:
+          `${readiness.reason}. No review seat was dispatched and no review round was consumed. ` +
+          (readiness.status === 'conflicting'
+            ? 'Update the branch against its base and resolve the conflict, then re-run.'
+            : readiness.status === 'absent'
+              ? 'Wait for or restore that workflow job, then re-run once it appears.'
+              : readiness.status === 'pending'
+                ? 'The readiness probe retried without incrementing the round; re-run after the check completes.'
+                : 'Restore access to the PR readiness data, then re-run.'),
+      },
+    ],
+  }
+}
+
+async function runReviewRound(diffFile, round, prForReview) {
+  const gated = await reviewWithPreconditions({
+    probe: (attempt) => probeReviewReadiness(prForReview, round, attempt),
+    spend: () => reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, prForReview)),
+    wait: () => new Promise((resolve) => setTimeout(resolve, REVIEW_READINESS_RETRY_MS)),
+  })
+  if (!gated.deferred) return gated.value
+  log(`trident-v2 review deferred: round=${round} reason=${gated.readiness.reason}`)
+  return reviewPreconditionDeferred(gated.readiness)
 }
 
 /**
@@ -3165,7 +3290,7 @@ ${task}${reflectionGuidance}`,
   let reviewedHead = branchHead
 
   // First review + synthesis.
-  let synthesis = await reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, pr))
+  let synthesis = await runReviewRound(diffFile, round, pr)
   finalVerdict = normalizeVerdict(synthesis.verdict)
   await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
 
@@ -3272,7 +3397,7 @@ ${task}${reflectionGuidance}`,
     // recording that push as `reviewedHead` would pin the merge to code the
     // upcoming review never sees. Empty → fail-closed, same as round 1.
     reviewedHead = typeof fix?.commitSha === 'string' ? fix.commitSha.trim() : ''
-    synthesis = await reviewRoundOrInfraBlock(() => reviewAndSynthesize(diffFile, round, pr))
+    synthesis = await runReviewRound(diffFile, round, pr)
     finalVerdict = normalizeVerdict(synthesis.verdict)
     await checkpoint(finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes', { pr })
   }

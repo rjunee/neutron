@@ -242,7 +242,7 @@ function toolFarm(dir: string): string {
   const farm = join(dir, 'toolbin')
   mkdirSync(farm, { recursive: true })
   for (const tool of [
-    'sh', 'env', 'git', 'perl', 'awk', 'grep', 'sed', 'rm', 'head', 'cat', 'sleep',
+    'sh', 'bash', 'env', 'git', 'perl', 'awk', 'grep', 'sed', 'rm', 'head', 'cat', 'sleep',
     'chmod', 'mkdir', 'ls', 'tr', 'wc', 'date', 'uname', 'dirname', 'basename', 'mktemp',
   ]) {
     const found = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' })

@@ -259,6 +259,7 @@ export const TRIDENT_PHASES: ReadonlyArray<TridentPhase> = Object.freeze([
       { label: 'cleanup:worktree' },
       { label: 'head-probe-round-', dynamic: true },
       { label: 'ci-probe-round-', dynamic: true },
+      { label: 'review-readiness-r', dynamic: true },
       { label: 'merge-probe-round-', dynamic: true },
     ],
     default: { tier: 'fast', effort: 'low' },

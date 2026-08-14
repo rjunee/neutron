@@ -344,7 +344,7 @@ describe('every call site is guarded', () => {
   // loop body is top-level script and cannot be invoked in isolation.
   test('BOTH reads of `synthesis.verdict` are fed by a guarded assignment', () => {
     const reads = SRC.split('\n').filter((l) => l.includes('normalizeVerdict(synthesis.verdict)'))
-    const guarded = SRC.split('\n').filter((l) => l.includes('reviewRoundOrInfraBlock(() => reviewAndSynthesize('))
+    const guarded = SRC.split('\n').filter((l) => l.includes('runReviewRound(diffFile, round, pr)'))
     expect(reads).toHaveLength(2)
     expect(guarded).toHaveLength(2)
   })
@@ -353,7 +353,7 @@ describe('every call site is guarded', () => {
     const assigns = SRC.split('\n').filter((l) => /^\s*(let )?synthesis\s*=/.test(l))
     expect(assigns.length).toBeGreaterThan(0) // the filter can find these lines at all
     for (const line of assigns) {
-      expect(line).toContain('reviewRoundOrInfraBlock(')
+      expect(line).toContain('runReviewRound(')
     }
   })
 
@@ -368,7 +368,7 @@ describe('every call site is guarded', () => {
         !l.includes('async function reviewAndSynthesize') &&
         !/^\s*(\/\/|\*)/.test(l), // prose ABOUT the call is not a call
     )
-    expect(calls.length).toBe(2) // round 1 and the in-loop re-review, and nothing else
+    expect(calls.length).toBe(1) // one callback inside runReviewRound; both call sites use that wrapper
     for (const line of calls) {
       expect(line).toContain('() => reviewAndSynthesize(')
     }

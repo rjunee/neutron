@@ -146,7 +146,7 @@ describe('the loop honours the gate', () => {
     // left the ordering it checks completely intact. Three source-shape assertions
     // have now broken that way, which is the argument for pinning the construct
     // rather than its spelling.
-    const reReviewAt = SRC.lastIndexOf('reviewAndSynthesize(diffFile, round, pr)')
+    const reReviewAt = SRC.lastIndexOf('runReviewRound(diffFile, round, pr)')
     expect(probeAt).toBeGreaterThan(-1)
     expect(reReviewAt).toBeGreaterThan(probeAt)
   })
