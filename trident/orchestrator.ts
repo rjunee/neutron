@@ -487,7 +487,12 @@ export async function rebaseOntoObservedBase(
       : await run_host(['git', '-C', repoPath, 'diff', `refs/heads/${base}..refs/heads/${branch}`], repoPath)
   if (!patch.ok) throw new Error(publishFailureReason('read the diff of', branch, patch.stderr))
   if (patch.stdout.trim() === '') throw new Error('outer publisher refused to rebase an empty diff')
-  writeFileSync(diffFile, patch.stdout)
+  // RESTORE THE TRAILING NEWLINE. `spawnCapture` TRIMS command output, which is harmless for every
+  // other reader — and fatal here: a patch whose last hunk line lost its newline is not a patch,
+  // and `git apply` rejects the whole thing with `corrupt patch at line N` (exit 128). That is
+  // indistinguishable, upstream, from a genuine conflict, so EVERY rebase would have been reported
+  // as an attention state. Caught by the real-git suite; the stubbed host never wrote a file.
+  writeFileSync(diffFile, patch.stdout.endsWith('\n') ? patch.stdout : `${patch.stdout}\n`)
 
   // (f) Replay in an ISOLATED worktree. NEVER the shared working tree: a failed apply there would
   //     poison every other lane's build.
