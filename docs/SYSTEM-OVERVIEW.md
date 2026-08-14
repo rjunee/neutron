@@ -2629,8 +2629,11 @@ credentials UI, project rename + **emoji edit** (a real editable control since
 the rail-redesign sprint — PATCH `{ emoji }` to the settings surface, mirroring
 the name rename), and a display-only, M2-gated collaborators scaffold.
 
-**Credential model.** A credential is a static, long-lived service token (Meta
-Ads, Google Ads, Apify, …) set at **per-project** or **global** scope.
+**Credential model.** A credential is a static, long-lived named value set at
+**per-project** or **global** scope. The owner supplies both the service name and
+value, so a fresh install shows an empty list rather than product-defined empty
+slots. Values are write-only: POST accepts plaintext, while POST and GET responses
+carry metadata only and never render the value back.
 Resolution is **per-project → global → unset** (`ProjectCredentialStore.resolve`)
 so a single-owner install that only sets global tokens keeps working and a
 project can override a service with its own token. Storage is a NEW table
@@ -4362,16 +4365,19 @@ permission.
 
 **No control plane configured → VISIBLE and DISABLED, with the reason.** A
 self-hoster has no endpoint to call. Both tools still register and still answer:
-`host_deploy_status` reports `enabled:false` and names `NEUTRON_HOST_DEPLOY_URL` /
-`NEUTRON_HOST_DEPLOY_TOKEN` as what would enable it. No default endpoint is ever
+`host_deploy_status` reports `enabled:false` and points to Settings → Integrations,
+where the owner can add the generic names `host_deploy_url` and `host_deploy_token`.
+Those rows exist only when an owner adds them. No default endpoint is ever
 fabricated. An option that silently disappears is how a missing capability stays
 invisible for weeks — the rule the model-tier pane follows.
 
-**The endpoint and credential are instance configuration resolved at CALL time**,
+**The endpoint and credential resolve from `ProjectCredentialStore` at CALL time**,
 never captured at composition time (a credential read at composition time is a
-credential that is never there — Decisions Log 2026-08-07). Neither ever enters a
-prompt, a log line or a chat message: the credential rides an `Authorization`
-header and nothing else, and everything the control plane says is run through
+credential that is never there — Decisions Log 2026-08-07). The URL uses the same
+named-value store because that avoids adding a product-specific setting slot; it is
+ordinary configuration, not a secret, and remains visible in useful diagnostics.
+The token never enters a prompt, log line or chat message: it rides an `Authorization`
+header and everything the control plane says is run through
 `scrubHostDeploySecrets` before it is shown or logged — **scrubbed first, then
 truncated**, because the scrubber matches the whole secret and a value cut by the
 length cap would otherwise leave a real prefix of itself behind. A credential too

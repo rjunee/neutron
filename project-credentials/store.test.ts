@@ -88,6 +88,21 @@ describe('ProjectCredentialStore — migration + basic CRUD', () => {
     expect(crypto.decryptEnvelope(raw!.ciphertext)).toBe('PLAINTEXT_NEEDLE')
   })
 
+  test('a named credential resolves after the database is reopened', async () => {
+    const secret = 'restart-secret-value-123'
+    await newStore().set(OWNER, {
+      service: 'custom_build',
+      plaintext: secret,
+      scope: 'global',
+    })
+
+    db.close()
+    db = ProjectDb.open(join(tmp, 'project.db'))
+    crypto = new SecretsStore({ data_dir: tmp, db })
+
+    expect(newStore().resolve(OWNER, undefined, 'custom_build')?.plaintext).toBe(secret)
+  })
+
   test('set is an upsert — re-setting the same key overwrites in place', async () => {
     const store = newStore()
     const first = await store.set(OWNER, {

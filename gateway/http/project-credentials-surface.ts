@@ -58,6 +58,7 @@ import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import {
   ProjectCredentialValidationError,
+  PROJECT_CREDENTIAL_MIN_SECRET_CHARS,
   type CredentialScope,
   type ProjectCredentialStore,
 } from '@neutronai/project-credentials/store.ts'
@@ -257,6 +258,18 @@ async function handleSet(
   }
   // A `token` alias is accepted alongside `plaintext` for a friendlier client.
   const rawToken = fields['plaintext'] ?? fields['token']
+  const rawService = fields['service']
+  if (
+    typeof rawService === 'string' &&
+    /^[a-z0-9_.-]{1,128}$/.test(rawService.trim().toLowerCase()) &&
+    (typeof rawToken !== 'string' || rawToken.length < PROJECT_CREDENTIAL_MIN_SECRET_CHARS)
+  ) {
+    return jsonError(
+      400,
+      'invalid_token',
+      `token must be at least ${PROJECT_CREDENTIAL_MIN_SECRET_CHARS} characters`,
+    )
+  }
   try {
     const credential = await store.set(owner_slug, {
       service: fields['service'] as string,

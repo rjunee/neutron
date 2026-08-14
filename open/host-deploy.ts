@@ -49,18 +49,19 @@
  *     one sentence, not as a crash.
  *  6. NO CONTROL PLANE CONFIGURED → VISIBLE AND DISABLED WITH A REASON. A
  *     self-hoster has no endpoint to call; the capability still answers, naming
- *     the env vars that would enable it. It is never hidden and never invents a
+ *     the Settings fields that would enable it. It is never hidden and never invents a
  *     default endpoint.
  *  7. THE ENDPOINT AND CREDENTIAL ARE RESOLVED AT CALL TIME, never captured at
  *     composition time — a credential read at composition time is a credential
  *     that is never there (Decisions Log 2026-08-07). Neither ever enters a
- *     prompt, a log line or a chat message: everything the control plane says is
- *     run through {@link scrubHostDeploySecrets} before it is shown or logged.
+ *     prompt. The credential is scrubbed from every control-plane detail before
+ *     it is shown or logged; the non-secret URL remains useful diagnostic context.
  */
 
 import type { ButtonOption } from '@neutronai/channels/button-primitive.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { ApprovalManager } from '@neutronai/tools/approval.ts'
+import { PROJECT_CREDENTIAL_MIN_SECRET_CHARS } from '@neutronai/project-credentials/store.ts'
 // The opaque approval-token codec, reused verbatim from the ritual approval
 // surface (`reminders/ritual-registration.ts:110-137`) rather than re-derived:
 // it is a STRICT inverse pair (a malformed/forged token can never decode to a
@@ -105,11 +106,9 @@ export const HOST_DEPLOY_COMMIT_RENDER_CAP = 40
 /** Longest commit subject rendered; longer ones are elided with a `…`. */
 export const HOST_DEPLOY_SUBJECT_CAP = 120
 
-/** The instance-configuration env var naming the control-plane endpoint. */
-export const HOST_DEPLOY_URL_ENV = 'NEUTRON_HOST_DEPLOY_URL' as const
-
-/** The instance-configuration env var carrying the endpoint credential. */
-export const HOST_DEPLOY_TOKEN_ENV = 'NEUTRON_HOST_DEPLOY_TOKEN' as const
+/** Generic named-key entries consumed by this capability. They appear only after an owner adds them. */
+export const HOST_DEPLOY_URL_SERVICE = 'host_deploy_url' as const
+export const HOST_DEPLOY_TOKEN_SERVICE = 'host_deploy_token' as const
 
 /** Hard ceiling on the ONE authenticated control-plane call. */
 export const HOST_DEPLOY_CALL_TIMEOUT_MS = 30_000
@@ -120,14 +119,14 @@ export const HOST_DEPLOY_DETAIL_CAP = 400
 /**
  * Shortest credential {@link resolveHostDeployConfig} will accept, and the floor
  * {@link scrubHostDeploySecrets} redacts down to. ONE constant on purpose: when
- * the config minimum sat below the scrubber's floor, a 5-character
- * `NEUTRON_HOST_DEPLOY_TOKEN` was accepted as a live credential and then printed
+ * the config minimum sat below the scrubber's floor, a short deploy token was
+ * accepted as a live credential and then printed
  * verbatim into the owner's chat and the log, because the scrubber skipped it as
  * "too short to be a secret" (Argus r1 major). Whatever the scrubber refuses to
  * hide, the config must refuse to accept. A credential this short is not a
  * credential anyway, so rejecting it costs nothing real.
  */
-export const HOST_DEPLOY_MIN_SECRET_CHARS = 16
+export const HOST_DEPLOY_MIN_SECRET_CHARS = PROJECT_CREDENTIAL_MIN_SECRET_CHARS
 
 /**
  * How long a pending host-deploy grant stays tappable. Mirrors
@@ -261,25 +260,28 @@ export type HostDeployRequestResult =
 
 // ── Configuration (CALL TIME) ────────────────────────────────────────────────
 
-export type EnvBag = Record<string, string | undefined>
+export interface HostDeployNamedValues {
+  url?: string | null
+  token?: string | null
+}
 
 /**
- * Resolve the control-plane endpoint from the process environment. Called on
+ * Resolve the control-plane endpoint from generic named values. Called on
  * EVERY request/approve — never memoized, never captured at composition time
  * (Decisions Log 2026-08-07: a credential read at composition time is a
  * credential that is never there). BOTH the URL and the credential are
  * required; there is NO default endpoint, because inventing one would point a
  * self-hoster's deploy at somebody else's control plane.
  */
-export function resolveHostDeployConfig(env: EnvBag): HostDeployConfigState {
-  const url = (env[HOST_DEPLOY_URL_ENV] ?? '').trim()
-  const token = (env[HOST_DEPLOY_TOKEN_ENV] ?? '').trim()
+export function resolveHostDeployConfig(values: HostDeployNamedValues): HostDeployConfigState {
+  const url = (values.url ?? '').trim()
+  const token = (values.token ?? '').trim()
   if (url.length === 0) {
     return {
       configured: false,
       reason:
         `No host-deploy endpoint is configured on this instance, so it cannot ask anything to deploy. ` +
-        `Set ${HOST_DEPLOY_URL_ENV} and ${HOST_DEPLOY_TOKEN_ENV} to enable it. ` +
+        `Add ${HOST_DEPLOY_URL_SERVICE} and ${HOST_DEPLOY_TOKEN_SERVICE} in Settings → Integrations to enable it. ` +
         `A self-hosted box has no endpoint to call — deploy it the way you always have.`,
     }
   }
@@ -287,15 +289,15 @@ export function resolveHostDeployConfig(env: EnvBag): HostDeployConfigState {
     return {
       configured: false,
       reason:
-        `${HOST_DEPLOY_URL_ENV} is set but ${HOST_DEPLOY_TOKEN_ENV} is empty, so a deploy request could not be ` +
-        `authenticated. Set ${HOST_DEPLOY_TOKEN_ENV} to enable it.`,
+        `${HOST_DEPLOY_URL_SERVICE} exists but ${HOST_DEPLOY_TOKEN_SERVICE} is missing, so a deploy request could not be ` +
+        `authenticated. Add it in Settings → Integrations to enable it.`,
     }
   }
   if (!/^https:\/\//i.test(url)) {
     return {
       configured: false,
       reason:
-        `${HOST_DEPLOY_URL_ENV} must be an https:// URL — the deploy credential is sent on that call, ` +
+        `${HOST_DEPLOY_URL_SERVICE} must be an https:// URL — the deploy credential is sent on that call, ` +
         `so a plaintext endpoint is refused.`,
     }
   }
@@ -308,9 +310,9 @@ export function resolveHostDeployConfig(env: EnvBag): HostDeployConfigState {
     return {
       configured: false,
       reason:
-        `${HOST_DEPLOY_TOKEN_ENV} is shorter than ${HOST_DEPLOY_MIN_SECRET_CHARS} characters, which is too ` +
+        `${HOST_DEPLOY_TOKEN_SERVICE} is shorter than ${HOST_DEPLOY_MIN_SECRET_CHARS} characters, which is too ` +
         `short to be treated as a credential — a value that short cannot be reliably kept out of an error ` +
-        `message. Set a longer ${HOST_DEPLOY_TOKEN_ENV} to enable it.`,
+        `message. Save a longer value in Settings → Integrations to enable it.`,
     }
   }
   return { configured: true, endpoint: { url, token } }
@@ -836,7 +838,9 @@ export function createHostDeployService(
     if (!cfg.configured) {
       return { body: `Approved, but nothing was deployed: ${cfg.reason}` }
     }
-    const secrets = [cfg.endpoint.token, cfg.endpoint.url]
+    // The URL is ordinary configuration and useful diagnostic context. Only the
+    // credential is secret; treating the URL as one makes real failures opaque.
+    const secrets = [cfg.endpoint.token]
 
     // ── (f) THE ONE authenticated call.
     let result: HostDeployDispatchResult

@@ -32,7 +32,7 @@ const CTX = {
 }
 
 const DISABLED_REASON =
-  'No host-deploy endpoint is configured on this instance. Set NEUTRON_HOST_DEPLOY_URL.'
+  'No host-deploy endpoint is configured. Add its named values in Settings → Integrations.'
 
 function stub(
   overrides: Partial<HostDeployToolService> = {},
