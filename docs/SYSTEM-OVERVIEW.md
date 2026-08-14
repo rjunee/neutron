@@ -5767,6 +5767,12 @@ indicator. No feature flags — one live path.
 > fresh onboarding renders + advances over the single socket; Documents + Admin
 > tabs render.
 
+The integrations status endpoint and its rendered Admin view cover bundled Core
+credential slots only. Credentials used by non-Core features can live in the
+same `SecretsStore` but are deliberately not enumerated by this view; the JSON
+payload carries a `scope` description and the web client renders it so an absent
+row cannot be interpreted as proof that no credential is connected.
+
 ## Message reactions (Track B Phase 4, slice 3) — `@neutronai/chat-core` + app-ws
 
 Per-message emoji reactions across the web + mobile chat stack, MIRRORING the

@@ -114,7 +114,15 @@ export function createCoresIntegrationsSurface(
           secretsStore,
           project_slug,
         })
-        return jsonResponse(200, { ok: true, ...status })
+        return jsonResponse(200, {
+          ok: true,
+          scope: {
+            kind: 'cores',
+            description:
+              'This list covers bundled Core credential slots only. Other connected credentials are not included.',
+          },
+          ...status,
+        })
       }
 
       // `<label>` is a manifest-declared `byo_api_key` slot (e.g. `tavily`).
@@ -209,4 +217,3 @@ function integrationsErrorResponse(err: unknown): Response {
   }
   throw err
 }
-
