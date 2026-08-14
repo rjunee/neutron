@@ -326,6 +326,28 @@ Each carries an acceptance criterion; all in `neutron-open`.
       included, not a bare row delete), AND a deprioritise/archive lane exists that is distinct from
       `done` — so "shipped" and "shelved" stop sharing one word. A test pins that removing an item with a
       live run cancels that run first.
+- [ ] **A card's plan doc is the single source of its spec, and it is written to a place nothing
+      version-controls, reviews, or backs up** (owner-reported 2026-08-14, on discovering the P2–P4 note:
+      *"plan docs here in this project are not actually written to the repo itself"*). `work-board/spec-doc.ts`
+      writes each card's full ask to `Projects/<id>/docs/plans/<slug>.md` via `DocStore`, and the card stores
+      `neutron-docs:plans/<slug>.md`. **The LOCATION is correct and Ryan-locked (2026-07-02)** — it must stay
+      user-visible in the Documents tab; this entry does NOT propose moving it. The gap is that the write ends
+      there. MEASURED on this instance: 12 plan docs on disk; the project vault at `Projects/neutron-open/` IS
+      a git repo whose own `CLAUDE.md` states *"every meaningful change commits to this project's own git
+      repo"*; **2 of the 12 are tracked — both committed by hand by the agent — and the repo has NO remote and
+      2 commits total.** So ten specs, including every card currently on the board, exist as untracked files
+      on one volume. THREE CONSEQUENCES, in order of cost: (1) the doc is the input `▶ start` feeds to trident
+      as the run's `task`, so losing or silently editing it changes what gets built with no diff and no
+      history; (2) the PR that implements a card carries no copy of the spec it was built against, so a
+      reviewer on GitHub — human or Argus — cannot see the acceptance criteria they are judging against; (3)
+      the code repo and the spec that drives it can drift apart with nothing to detect it. Note the coupling
+      to *"the build brief must not be retyped by a model — pass it by PATH"*: that card's premise is handing
+      the brief over as a path, and today that path resolves outside the repo the build works in. Acceptance:
+      a plan doc lands somewhere durable and versioned — committed by the writer, not by hand — WITHOUT
+      leaving the Documents tab; a doc's history is inspectable; and the spec a build ran against is
+      recoverable after the fact from the record, not from a live file. Whether that is auto-committing the
+      vault repo, mirroring into the code repo alongside the PR, or snapshotting the doc bytes onto the run is
+      the design question — do not pick it here.
 - [ ] **A deploy request must resolve the ref against the REMOTE, not the host's frozen mirror**
       (observed 2026-08-14, first real use of the host-deploy tool). `host_deploy_request` is wired and
       `enabled: true`. Asked to deploy `origin/main` two minutes after a merge, it answered
@@ -616,6 +638,9 @@ against one of those or be deleted.
 > `design_doc_ref` of the form `neutron-docs:plans/<slug>.md`, which resolves in the
 > app's Documents tab. Do not look for them under this repo's `docs/plans/`; they
 > are not there, and concluding "no plan doc exists" is how a duplicate gets written.
+> That split is a KNOWN DEFECT, not a settled design — see the backlog entry on plan
+> docs landing somewhere nothing version-controls or backs up. Until it is fixed,
+> these four specs survive only as untracked files on one volume.
 >
 > | Step | Card | `design_doc_ref` slug |
 > |---|---|---|
