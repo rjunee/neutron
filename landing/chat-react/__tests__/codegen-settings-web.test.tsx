@@ -92,7 +92,7 @@ const CODEX = {
   label: 'Cross-model review (Codex)',
   description: 'A second opinion from a GPT model, run through the Codex CLI.',
   group: 'codex',
-  groups: ['codex'],
+  groups: ['none', 'claude', 'codex', 'kimi'],
   effort_supported: false,
   default: { model: 'sol', effort: 'high' },
 }
@@ -299,7 +299,7 @@ describe('the display + edit rules', () => {
     const choices = tierChoices(CODEX, TIERS)
     expect(choices).toHaveLength(TIERS.length)
     expect(choices.find((c) => c.tier === 'terra')!.selectable).toBe(true)
-    expect(choices.find((c) => c.tier === 'opus')!.reason).toContain('Claude is not wired for this step yet')
+    expect(choices.find((c) => c.tier === 'opus')!.selectable).toBe(true)
     expect(rejectedModel(BUILD, { build: { model: 'gone-tier' } })).toBe('gone-tier')
   })
 

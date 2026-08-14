@@ -1490,8 +1490,8 @@ describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordinati
   test('argus:codex external-peer launcher EXCLUDES reflection', () => {
     // The prompt is selected per route (`peerPrompt`) now that a slot can hold either
     // provider; `codexReviewerPrompt` is still what a codex route resolves to.
-    expect(SRC).toContain("agent(peerPrompt('argus:codex', slotOneRoute), {")
-    expect(SRC).toContain('route.group === \'kimi\' ? kimiReviewerPrompt(diffFile) : codexReviewerPrompt(diffFile)')
+    expect(SRC).toContain("agent(peerPrompt('argus:codex', slotOneRoute, 1), peerAgentOpts({ label: 'argus:codex'")
+    expect(SRC).toContain("route.group === 'kimi' ? kimiReviewerPrompt(diffFile, cliOpts) : codexReviewerPrompt(diffFile, cliOpts)")
     expect(SRC).not.toContain('reflectionGuidance}${codexReviewerPrompt')
   })
 

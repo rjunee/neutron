@@ -695,7 +695,7 @@ function logCrossModelSpawn(label, fallback) {
   const route = routeModel(label)
   const overridden = route.phaseKey !== null && phaseOverrideFor(route.phaseKey) !== undefined
   log(
-    `trident.agent label=${label} model=${route.model || fallback} effort=n/a transport=cli phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}`,
+    `trident.agent label=${label} model=${route.model || fallback} effort=${route.transport === 'cli' ? 'n/a' : route.effort} transport=${route.transport} phase=${route.phaseKey ?? 'unrouted'}${overridden ? ' override=owner' : ''}`,
   )
 }
 
@@ -705,9 +705,7 @@ function logCrossModelSpawn(label, fallback) {
 // of this file and executed on its own — which is exactly how the codex bridge's
 // truncation-readback test proves the SHIPPED command, rather than a retyped copy of
 // it (`inner-workflow.test.ts`). A closure value it can pass in keeps that possible.
-const CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:codex')
 const ADVERSARIAL_CODEX_ENV_PREFIX = crossModelEnvPrefix('argus:adversarial')
-const KIMI_ENV_PREFIX = crossModelEnvPrefix('argus:kimi')
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -2821,6 +2819,7 @@ function crossModelPeerStatus(slot, verdicts, statusKey) {
   if (slot === null || slot === undefined) return 'not_connected'
   const verdict = verdicts[slot]
   const status = verdict && typeof verdict[statusKey] === 'string' ? verdict[statusKey] : ''
+  if (statusKey === CORE_SEAT_STATUS_KEY) return status.length > 0 ? 'connected' : 'deferred'
   return status.length > 0 ? status : 'deferred'
 }
 
@@ -2996,17 +2995,17 @@ function codexReviewerPrompt(diffFile) {
   // runId (uuid) — matching writeTerminalResult's /tmp/trident-terminal-${runId}
   // — falling back to slug only for a dry source check with no runId (Codex [P2]).
   const uniq = runId || slug
-  const lane = opts.adversarial === true ? 'adversarial' : 'cross-model'
-  const outFile = opts.adversarial === true
+  const lane = opts.adversarial === true ? 'adversarial' : opts.lane || 'cross-model'
+  const outFile = opts.adversarial === true || opts.lane
     ? `/tmp/trident-codex-${lane}-${uniq}.out`
     : `/tmp/trident-codex-${uniq}.out`
-  const errFile = opts.adversarial === true
+  const errFile = opts.adversarial === true || opts.lane
     ? `/tmp/trident-codex-${lane}-${uniq}.err`
     : `/tmp/trident-codex-${uniq}.err`
   const script = `${repoPath}/trident/codex-review.sh`
   const envPrefix = opts.adversarial === true
     ? `${ADVERSARIAL_CODEX_ENV_PREFIX}NEUTRON_CODEX_REVIEW_RUBRIC=${shSingleQuote(`You are ARGUS-ADVERSARIAL (independent, read-only). Independently try to REFUTE the change: hunt NaN/overflow/off-by-one edges, hidden invariants, and untested boundaries. Evidence-gate EVERY claim (file:line or a concrete repro). Do not substitute the generic second-opinion rubric.`)} `
-    : CODEX_ENV_PREFIX
+    : opts.envPrefix || ''
   // Codex reviews the SAME diff FILE Forge wrote (as the other reviewers do), NOT
   // `git diff` in repoPath — repoPath is still on the base branch (Forge builds in
   // an isolated worktree), so a git-diff there would be empty/stale and codex
@@ -3034,16 +3033,18 @@ Return via the schema. NEVER exit silently — if the command itself could not r
 // SYNCHRONOUSLY to a CLI, map its EXIT CODE to a schema result. The CLI reads
 // KIMI_API_KEY from its OWN environment, so the credential never appears here.
 function kimiReviewerPrompt(diffFile) {
+  const opts = arguments[1] || {}
   const uniq = runId || slug
-  const outFile = `/tmp/trident-kimi-${uniq}.out`
-  const errFile = `/tmp/trident-kimi-${uniq}.err`
+  const lane = opts.lane || 'cross-model'
+  const outFile = `/tmp/trident-kimi-${lane}-${uniq}.out`
+  const errFile = `/tmp/trident-kimi-${lane}-${uniq}.err`
   const cli = `${repoPath}/trident/kimi-review-cli.ts`
   // Reviews the SAME diff FILE Forge wrote, for the same reason codex does:
   // repoPath is still on the base branch, so a `git diff` there would be empty
   // and the reviewer could approve without having reviewed the change.
   return `You are the KIMI K3 CROSS-MODEL REVIEW bridge for trident (read-only, an INDEPENDENT reviewer from a DIFFERENT MODEL FAMILY than Claude). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${KIMI_ENV_PREFIX}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
+  ${opts.envPrefix || ''}bun run ${shSingleQuote(cli)} ${shSingleQuote(diffFile)} ${shSingleQuote(task)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "KIMI_EXIT=$?"
 Read the KIMI_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → kimiStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - EXIT 10 → kimiStatus='not_connected' (no API key configured). Return verdict='COMMENT', findings=[]. This is the GRACEFUL path — do NOT invent findings.
@@ -3130,55 +3131,59 @@ TASK: ${task}`,
   let kimiSlot = null
   const slotOneRoute = routeModel('argus:codex')
   const slotTwoRoute = routeModel('argus:kimi')
-  const routeAvailable = (route) => route.group === 'codex' ? codexConfigured : route.group === 'kimi' ? kimiConfigured : false
-  const peerPrompt = (label, route) => route.group === 'kimi' ? kimiReviewerPrompt(diffFile) : codexReviewerPrompt(diffFile)
-  const peerSchema = (route) => route.group === 'kimi' ? KIMI_VERDICT_SCHEMA : CODEX_VERDICT_SCHEMA
+  const routeAvailable = (route) => !route.group || route.group === 'claude' || (route.group === 'codex' ? codexConfigured : route.group === 'kimi' ? kimiConfigured : false)
+  const claudePeerPrompt = (slot) => `${ARGUS_RUBRIC}
+You are Cross-model review ${slot}, an independent, read-only reviewer. Review the diff at ${diffFile} for the TASK below. Apply the rubric adversarially, evidence-gate every claim with file:line or a concrete reproduction, and return your verdict + findings. Do NOT modify files.
+TASK: ${task}`
+  const peerPrompt = (label, route, slot) => {
+    if (route.group === 'claude') return claudePeerPrompt(slot)
+    const cliOpts = { lane: `seat-${slot}`, envPrefix: crossModelEnvPrefix(label) }
+    return route.group === 'kimi' ? kimiReviewerPrompt(diffFile, cliOpts) : codexReviewerPrompt(diffFile, cliOpts)
+  }
+  const peerSchema = (route) => route.group === 'claude' ? VERDICT_SCHEMA : route.group === 'kimi' ? KIMI_VERDICT_SCHEMA : CODEX_VERDICT_SCHEMA
+  const peerAgentOpts = (opts, route) => {
+    return route.group === 'claude' ? withModel(opts) : opts
+  }
   if (slotOneRoute.disabled) offSeats.push('Cross-model review 1')
   if (slotTwoRoute.disabled) offSeats.push('Cross-model review 2')
   if (!slotOneRoute.disabled && routeAvailable(slotOneRoute)) {
-    // argus:codex runs on the CODEX runtime (an independent GPT-5 peer), not a
-    // Claude model — the thin claude agent just shells out to codex-review.sh, so
-    // it keeps the launcher-default model. Log it as `model=codex-runtime` so the
-    // per-run tally still counts the cross-model reviewer ("C on Codex").
+    // On a CLI route the thin Claude agent only shells out, so it keeps the launcher
+    // default. On an explicitly selected Claude route, the seat itself reviews and
+    // `withModel` applies the chosen tier below.
     // RB2 (b) — DELIBERATELY no `reflectionGuidance` here (two reasons): this thin
     // launcher only invokes the external codex CLI, whose GPT-5 review sees ONLY the
     // raw git diff (never this claude prompt text), so injecting owner corrections
     // would be inert; AND argus:codex is part of the independent MERGE GATE, which
     // must never carry the untrusted reflection block (see the trust-boundary note
     // above the reviewers array).
-    logCrossModelSpawn('argus:codex', 'codex-runtime')
+    if (slotOneRoute.group !== 'claude') logCrossModelSpawn('argus:codex', 'codex-runtime')
     codexSlot = reviewers.length
     reviewers.push(() =>
       seatAttempt('argus:codex', () =>
-        agent(peerPrompt('argus:codex', slotOneRoute), {
-          label: 'argus:codex',
-          phase: 'Review',
-          schema: peerSchema(slotOneRoute),
-        }),
+        agent(peerPrompt('argus:codex', slotOneRoute, 1), peerAgentOpts({ label: 'argus:codex', phase: 'Review', schema: peerSchema(slotOneRoute) }, slotOneRoute)),
       ),
     )
   }
-  // argus:kimi runs on the KIMI K3 runtime — a DIFFERENT MODEL FAMILY, which is
-  // the entire point: two Claude reviewers plus codex still leaves two of three
-  // sharing a family, so K3's DISAGREEMENTS are what this panelist is for. The
-  // thin claude agent only shells out to the CLI, so it keeps the launcher-default
-  // model; log it as `model=kimi-runtime` for the per-run tally.
+  // The same route-dependent dispatch applies to seat 2: Kimi/Codex choices use the
+  // corresponding CLI bridge, while an explicit Claude choice reviews in the agent.
   // RB2 (b) — DELIBERATELY no `reflectionGuidance`, for both reasons that exclude
   // argus:codex: K3 sees only the diff file (never this prompt text), so injecting
   // owner corrections would be inert; and this is part of the independent MERGE
   // GATE, which must never carry the untrusted reflection block.
   if (!slotTwoRoute.disabled && routeAvailable(slotTwoRoute)) {
-    logCrossModelSpawn('argus:kimi', 'kimi-runtime')
+    if (slotTwoRoute.group !== 'claude') logCrossModelSpawn('argus:kimi', 'kimi-runtime')
     kimiSlot = reviewers.length
     reviewers.push(() =>
       seatAttempt('argus:kimi', () =>
-        agent(peerPrompt('argus:kimi', slotTwoRoute), {
-          label: 'argus:kimi',
-          phase: 'Review',
-          schema: peerSchema(slotTwoRoute),
-        }),
+        agent(peerPrompt('argus:kimi', slotTwoRoute, 2), peerAgentOpts({ label: 'argus:kimi', phase: 'Review', schema: peerSchema(slotTwoRoute) }, slotTwoRoute)),
       ),
     )
+  }
+  const enabledPanelFamilies = [routeModel('forge:build', 'reasoning'), rubricRoute, adversarialRoute, slotOneRoute, slotTwoRoute]
+    .filter((route) => !route.disabled)
+    .map((route) => route.group || 'claude')
+  if (enabledPanelFamilies.length > 1 && new Set(enabledPanelFamilies).size === 1) {
+    log(`trident.panel-single-family WARNING family=${enabledPanelFamilies[0]} seats=${enabledPanelFamilies.length} configuration-accepted=true`)
   }
   let verdicts = await parallel(reviewers)
   // Retry ONLY a cross-model lane that came back `deferred`, before any of this is
@@ -3198,8 +3203,8 @@ TASK: ${task}`,
     verdicts,
     slots: [
       ...coreSeats,
-      { name: 'codex', slot: codexSlot, statusKey: slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
-      { name: 'kimi', slot: kimiSlot, statusKey: slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
+      { name: 'codex', slot: codexSlot, statusKey: slotOneRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
+      { name: 'kimi', slot: kimiSlot, statusKey: slotTwoRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus' },
     ],
     attempts: LANE_RETRY_ATTEMPTS,
     log,
@@ -3208,7 +3213,7 @@ TASK: ${task}`,
       if (core) return await reviewers[core.slot]()
       const label = name === 'codex' ? 'argus:codex-retry' : 'argus:kimi-retry'
       const route = name === 'codex' ? slotOneRoute : slotTwoRoute
-      return await agent(peerPrompt(label, route), { label, phase: 'Review', schema: peerSchema(route) })
+      return await agent(peerPrompt(label, route, name === 'codex' ? 1 : 2), peerAgentOpts({ label, phase: 'Review', schema: peerSchema(route) }, route))
     },
   })
   // POSITIONAL INDEXING WAS A LATENT BUG. This read `verdicts[2]` for codex,
@@ -3229,8 +3234,8 @@ TASK: ${task}`,
   // default applied to a missing verdict, which is how a crashed reviewer used to read
   // as one that was never set up. See `crossModelPeerStatus` / `missingCoreReviewers`.
   const missingCore = missingCoreReviewers(verdicts, coreSeats)
-  const codexStatus = crossModelPeerStatus(codexSlot, verdicts, slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
-  const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
+  const codexStatus = crossModelPeerStatus(codexSlot, verdicts, slotOneRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
+  const kimiStatus = crossModelPeerStatus(kimiSlot, verdicts, slotTwoRoute.group === 'claude' ? CORE_SEAT_STATUS_KEY : slotTwoRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus')
   // Only read for the 'connected' panel line, where the verdict is present by
   // definition — a status of 'connected' can only come off a real verdict object.
   const codexReview = codexSlot === null ? null : verdicts[codexSlot]

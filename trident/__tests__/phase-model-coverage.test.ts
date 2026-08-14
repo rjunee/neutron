@@ -348,8 +348,13 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     }
     // KEPT, not just dropped, so the pane can show it struck through.
     expect(rejected['review_rubric']).toEqual({ model: 'sol' })
-    // And the mirror: the codex review lane cannot be pointed at a Claude tier.
-    expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toHaveLength(1)
+    // Generic review seats can be pointed at Claude explicitly. This is an owner
+    // choice, not a CLI failure silently falling back to another family.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_codex: { model: 'opus', effort: 'max' } })).toMatchObject({
+      config: { review_codex: { model: 'opus', effort: 'max' } },
+      errors: [],
+    })
     // Within one executor it is allowed — that is the whole feature.
     expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
     expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
@@ -382,7 +387,7 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     ).toEqual({ review_adversarial: { model: 'terra' } })
   })
 
-  it('offers NONE on every review row and every non-Claude tier on either generic slot', () => {
+  it('offers NONE on every review row and every tier on either generic slot', () => {
     const reviewRows = TRIDENT_PHASES.filter((phase) => phase.key.startsWith('review_'))
     expect(reviewRows).toHaveLength(4)
     for (const phase of reviewRows) {
@@ -390,7 +395,7 @@ describe('validation rejects loudly rather than dropping quietly', () => {
       expect(parsePhaseModelConfig({ [phase.key]: { model: 'none' } }).errors).toEqual([])
     }
     for (const key of ['review_codex', 'review_kimi']) {
-      for (const tier of ['sol', 'terra', 'luna', 'k3']) {
+      for (const tier of MODEL_TIERS) {
         expect(parsePhaseModelConfig({ [key]: { model: tier } }).errors).toEqual([])
       }
     }

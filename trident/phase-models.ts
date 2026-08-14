@@ -407,7 +407,7 @@ export function phaseAcceptsTier(phase: TridentPhase, tier: ModelTier): boolean 
  * effort when the chosen tier cannot use it.
  */
 export function phaseSupportsEffort(phase: TridentPhase): boolean {
-  return phaseTransport(phase) === 'agent'
+  return phaseGroups(phase).includes('claude')
 }
 
 const PHASE_KEYS: ReadonlySet<string> = new Set(TRIDENT_PHASES.map((p) => p.key))
@@ -603,7 +603,11 @@ export function parsePhaseModelConfig(raw: unknown): ParsedPhaseModelConfig {
           )
           continue
         }
-        if (!phaseSupportsEffort(phase)) {
+        const requestedModel = (value as Record<string, unknown>)['model']
+        const selectedTier = typeof requestedModel === 'string' && isModelTier(requestedModel)
+          ? modelTier(requestedModel)
+          : modelTier(phase.default.tier)
+        if (!phaseSupportsEffort(phase) || (requestedModel === undefined && (selectedTier?.transport === 'cli' || selectedTier?.group === 'none'))) {
           // Storing an effort no dispatch reads would be a control the owner sets and
           // nothing honours — the exact shape this module exists to prevent.
           errors.push(
