@@ -114,7 +114,7 @@ export interface SubstrateProfile {
   /**
    * Per-profile INACTIVITY window (ms), threaded to
    * `ClaudeCodeSubstrateOptions.turnTimeoutMs`. Absent ⇒ the pool's
-   * `DEFAULT_TURN_INACTIVITY_MS` (30min).
+   * `DEFAULT_TURN_INACTIVITY_MS` (90s).
    *
    * APPLIED, not reserved — unlike the fields above. It exists because the
    * default measures liveness as PTY BYTES, and one profile hosts work that is

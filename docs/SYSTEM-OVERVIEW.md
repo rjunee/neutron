@@ -2296,8 +2296,9 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >   window, deliberately below `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min, additive
 >   `AgentSpec.turn_absolute_ceiling_ms`), which remains the hard backstop so a
 >   live-but-livelocked child can't run forever. A delayed Retry tap is suppressed
->   once the original turn completed, so widening freeze detection cannot redo
->   finished work.
+>   once the original turn completed and receives an explicit acknowledgement, so
+>   widening freeze detection cannot redo finished work or create a dead control.
+>   Profile-less internal calls retain the 90-second substrate default.
 >   `AgentSpec.turn_timeout_ms` is REPURPOSED from "wall-clock budget" to "inactivity
 >   window" (the substrate reads it exactly the same way; only the semantics of the
 >   number changed). The composer sends the 30-minute window for every chat turn; its
@@ -2319,13 +2320,11 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >   the latter keeps the actionable `FAILURE_BODY`, so a slow turn is never
 >   misdiagnosed as a broken setup again.
 > - **Chat pipelines cannot hide activity.** The conversational REPL's generated
->   settings wire a Bash `PreToolUse` guard. A command that pipes into `tail` or
->   `sort` is refused with the offending consumer named; streaming pipelines remain
->   allowed. Long output must be redirected to a log and inspected by a separate
+>   settings wire a Bash `PreToolUse` guard. A command that pipes into a
+>   full-buffering consumer is refused with the offending consumer named; streaming
+>   pipelines, including `tail -f`, remain allowed. Long output must be redirected to a log and inspected by a separate
 >   call, so a full-buffering consumer cannot conceal child activity from the
 >   inactivity watchdog.
-> - **Earlier compaction.** Every spawned REPL child receives
->   `--autocompact 300000`; the assertion is against the argv passed to the child.
 
 > **Onboarding reliability — opening recovery, empty-project loader, deterministic
 > archetype step, larger cold budget (#136+#138 fresh-install verify, 2026-06-30).**

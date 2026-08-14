@@ -5,13 +5,51 @@ interface HookInput {
   tool_input?: { command?: unknown }
 }
 
-const FULL_BUFFERING_CONSUMERS = ['tail', 'sort'] as const
+const FULL_BUFFERING_CONSUMERS = new Set(['tail', 'sort', 'wc', 'less', 'tac', 'sponge'])
+
+function pipelineSegments(command: string): string[] {
+  const segments: string[] = []
+  let quote: "'" | '"' | undefined
+  let escaped = false
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i]!
+    if (escaped) { escaped = false; continue }
+    if (char === '\\' && quote !== "'") { escaped = true; continue }
+    if (quote !== undefined) { if (char === quote) quote = undefined; continue }
+    if (char === "'" || char === '"') { quote = char; continue }
+    if (char === '|' && command[i - 1] !== '|') {
+      let start = i + 1
+      if (command[start] === '&') start += 1
+      let end = start
+      let innerQuote: "'" | '"' | undefined
+      for (; end < command.length; end += 1) {
+        const next = command[end]!
+        if (innerQuote !== undefined) { if (next === innerQuote) innerQuote = undefined; continue }
+        if (next === "'" || next === '"') { innerQuote = next; continue }
+        if (next === '|' || next === ';' || next === '\n') break
+      }
+      segments.push(command.slice(start, end))
+    }
+  }
+  return segments
+}
+
+function shellWords(segment: string): string[] {
+  return segment.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((word) => word.replace(/^(['"])(.*)\1$/, '$2')) ?? []
+}
 
 /** Return the first full-buffering command receiving a pipe, if any. */
 export function findBufferedPipelineConsumer(command: string): string | undefined {
-  for (const consumer of FULL_BUFFERING_CONSUMERS) {
-    const pattern = new RegExp(String.raw`(?:^|[^|])\|\s*(?:command\s+)?${consumer}(?:\s|$)`, 'm')
-    if (pattern.test(command)) return consumer
+  for (const segment of pipelineSegments(command)) {
+    const words = shellWords(segment)
+    while (words[0] === 'command' || words[0] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0] ?? '')) words.shift()
+    const executable = (words.shift() ?? '').replace(/^\\/, '').split('/').at(-1) ?? ''
+    if (FULL_BUFFERING_CONSUMERS.has(executable)) {
+      if (executable === 'tail' && words.some((word) => word === '-f' || word === '--follow' || /^-[^-]*f/.test(word))) continue
+      return executable
+    }
+    if (executable === 'jq' && words.some((word) => word === '-s' || word === '--slurp' || /^-[^-]*s/.test(word))) return 'jq -s'
+    if (executable === 'column' && words.some((word) => word === '-t' || word === '--table' || /^-[^-]*t/.test(word))) return 'column -t'
   }
   return undefined
 }

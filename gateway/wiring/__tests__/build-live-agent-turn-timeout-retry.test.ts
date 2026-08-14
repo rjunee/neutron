@@ -213,11 +213,12 @@ describe('build-live-agent-turn — freeze-timeout auto-retry + Retry affordance
     const run = makeRunner(makeSeqSubstrate([{ reply: 'completed once' }], specs))
     await run(makeTurn({ sent, user_text: 'finish the build' }))
 
-    const result = await run(makeTurn({ sent, user_text: RETRY_TURN_VALUE }))
+    const result = await run(makeTurn({ sent, user_text: RETRY_TURN_VALUE, button_prompt_id: 'stale-retry' }))
 
     expect(result.outcome).toBe('replied')
     expect(specs).toHaveLength(1)
-    expect(sent.filter((e) => e.type === 'agent_message')).toHaveLength(1)
+    expect(sent.filter((e) => e.type === 'agent_message')).toHaveLength(2)
+    expect(sent.at(-1)).toMatchObject({ type: 'agent_message', body: 'That turn already finished.' })
   })
 
   test('a Retry tap with no recorded message falls back to a gentle re-prompt (never echoes the sentinel)', async () => {

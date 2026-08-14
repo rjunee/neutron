@@ -10607,21 +10607,23 @@ Chat dispatch now uses a 30-minute inactivity window in
 `gateway/wiring/build-live-agent-turn.ts:96`, matching the warm-fire profile while
 remaining below the 45-minute absolute ceiling in
 `runtime/adapters/claude-code/persistent/signatures.ts:68`. The substrate default
-matches at `runtime/adapters/claude-code/persistent/signatures.ts:60`. A completed
-turn is recorded before delivery; a delayed Retry tap is acknowledged without a
-second substrate dispatch, preserving completed work.
+remains 90 seconds at `runtime/adapters/claude-code/persistent/signatures.ts:60`,
+so profile-less internal calls retain their existing wedge-detection latency. A
+completed turn is recorded before delivery; a delayed Retry button tap receives
+an explicit acknowledgement without a second substrate dispatch.
 
 The owner's conversational REPL settings now attach the Bash `PreToolUse` guard in
-`runtime/adapters/claude-code/persistent/spawn.ts:141`. The guard at
-`runtime/adapters/claude-code/persistent/hooks/pipeline-guard.ts:10` refuses a pipe
-into `tail` or `sort`, names the offending consumer, and permits streaming
-pipelines. This prevents a full-buffering command from hiding all child output
-until EOF from the activity watchdog.
+`runtime/adapters/claude-code/persistent/spawn.ts:144`. The guard at
+`runtime/adapters/claude-code/persistent/hooks/pipeline-guard.ts:10` parses pipeline
+segments and refuses full-buffering consumers including `sort`, `wc`, `less`,
+`tac`, `sponge`, `jq -s`, `column -t`, and non-following `tail`. It handles command
+wrappers and absolute paths without treating a pipe inside quoted text as syntax;
+streaming `tail -f` remains allowed.
 
-Every persistent REPL argv now carries `--autocompact 300000` at
-`runtime/adapters/claude-code/persistent/build-repl-argv.ts:115`. Claude Code
-2.1.198 does not print this hidden option in `--help`; the installed binary itself
-contains the exact `--autocompact` option and accepts the option/value probe.
+Autocompaction was not wired. The required preflight against Claude Code 2.1.198
+returned exit 1 with `unknown option '--autocompact'`; passing it would make every
+persistent child fail at spawn. Earlier compaction therefore remains unverified
+and requires a supported CLI/config surface before implementation.
 
 Typing required no new implementation: `open/wiring/app-ws.ts:709` maintains the
 active-turn set at the same start/end seam that emits typing, and
@@ -10638,7 +10640,7 @@ test was run, and the source was restored immediately):
 | absolute-ceiling branch disabled | RED — livelock test remained unsettled past its bound |
 | completed-work Retry suppression disabled | RED — second dispatch observed |
 | full-buffering pipeline detector removed | RED — `tail` and `sort` refusals failed |
-| `--autocompact 300000` removed | RED — spawned argv assertion failed |
+| conversational spawn guard wiring removed | RED — generated settings lacked the Bash hook |
 
 ## 2026-08-13 — typing catches up on connect and explains the live step
 

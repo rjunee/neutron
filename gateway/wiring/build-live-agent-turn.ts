@@ -1077,10 +1077,15 @@ export function buildLiveAgentTurn(
     const attemptId = randomUUID()
     if (turn.user_text === RETRY_TURN_VALUE) {
       const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
-      if (completedUserText.get(topicKey) === recovered) {
+      if (turn.button_prompt_id !== undefined && completedUserText.get(topicKey) === recovered) {
         moduleLog.info('retry_tap_already_completed', {
           project: turn.project_slug,
           topic: turn.topic_id,
+        })
+        sendSafe(turn.send, {
+          type: 'agent_message',
+          body: 'That turn already finished.',
+          topic_id: turn.topic_id,
         })
         return { outcome: 'replied', reply_prompt_id: null }
       }
@@ -1524,10 +1529,9 @@ export function buildLiveAgentTurn(
     // substrate's watchdog starts.
     // Build the AgentSpec PER ATTEMPT so a race-recomposed cold prompt (and its
     // larger inactivity budget) actually reaches the substrate: `prompt` and
-    // `effectiveCold` are read at CALL time, after the per-attempt dispatch-time
-    // recheck may have flipped them. A COLD first turn / onboarding turn gets the
-    // larger idle window (heavier initial processing); warm steady-state stays
-    // snappy.
+    // `effectiveCold` is read at CALL time after the per-attempt dispatch-time
+    // recheck may have flipped it. All chat turns use the fire-sized inactivity
+    // window; cold-spawn remains bounded by the separate absolute ceiling.
     const buildSpec = (): AgentSpec => {
       const s: AgentSpec = {
         prompt,

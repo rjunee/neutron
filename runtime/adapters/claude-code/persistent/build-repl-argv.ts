@@ -110,9 +110,6 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   if (input.addDir !== undefined) {
     argv.push('--add-dir', input.addDir)
   }
-  // Hidden in Claude Code 2.1.198's help but present in the installed binary.
-  // Compact before the default million-token context grows unwieldy.
-  argv.push('--autocompact', '300000')
   // Model LAST so nothing shadows it (Nova invariant).
   argv.push('--model', input.model)
   return argv

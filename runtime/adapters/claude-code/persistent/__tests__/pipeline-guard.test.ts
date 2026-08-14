@@ -27,5 +27,15 @@ describe('chat Bash pipeline guard', () => {
   test('allows a streaming pipeline', async () => {
     expect(findBufferedPipelineConsumer('printf data | grep data')).toBeUndefined()
     expect((await invoke('printf data | grep data')).code).toBe(0)
+    expect((await invoke('printf data | tail -f')).code).toBe(0)
+    expect((await invoke('git commit -m "log | tail is mentioned"')).code).toBe(0)
+  })
+
+  test('cannot bypass the guard with paths, wrappers, separators, or alternate pipe syntax', () => {
+    for (const command of [
+      'run | /usr/bin/tail -n 2', 'run | env tail -20', 'run | \\tail',
+      'run | tail; echo done', 'run | tail|head', 'run |& tail', "run | 'tail' -n 5",
+      'run | wc -l', 'run | less', 'run | jq -s .', 'run | column -t', 'run | tac', 'run | sponge out',
+    ]) expect(findBufferedPipelineConsumer(command), command).toBeDefined()
   })
 })
