@@ -6,9 +6,9 @@ const prompt = readFileSync(join(import.meta.dir, '..', 'repl-agent-base.md'), '
 
 describe('persistent REPL agent base prompt', () => {
   it('forbids full-buffering consumers because they hide turn activity', () => {
-    expect(prompt).toContain('Never route a command started by a chat turn through a full-buffering consumer')
-    expect(prompt).toContain('inactivity timeout can kill a')
-    expect(prompt).toContain('healthy but apparently silent turn')
-    expect(prompt).toContain('early-exit prefix filter is safe')
+    expect(prompt).toMatch(/while.{0,80}producer is still running.{0,120}never route/is)
+    expect(prompt).toMatch(/full-buffering consumer[\s\S]{0,300}inactivity timeout/i)
+    expect(prompt).toMatch(/stream through `tee`|background and poll/i)
+    expect(prompt).toMatch(/after exit[\s\S]{0,80}`tail -20` is safe/i)
   })
 })

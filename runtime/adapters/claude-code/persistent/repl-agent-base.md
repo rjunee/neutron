@@ -44,10 +44,11 @@ answer in their next message.
 
 ## Long-running commands must emit progress
 
-**Never route a command started by a chat turn through a full-buffering consumer,**
-including an output-suffix filter, a sorter or counter that waits for EOF, or
-command substitution that captures the complete output. A full-buffering consumer
-withholds activity until the child exits, so the inactivity timeout can kill a
-healthy but apparently silent turn. Stream output directly or redirect it to a log
-and inspect bounded portions in separate commands after the producer exits; an
-early-exit prefix filter is safe because it does not wait for the full run.
+**While its producer is still running, never route a command started by a chat turn
+through a full-buffering consumer**, including `| tail -20`, a sorter or counter
+that waits for EOF, or command substitution that captures the complete output.
+It withholds activity until the producer exits, so the inactivity timeout can kill
+a healthy but apparently silent turn. Stream through `tee` so progress remains
+visible, or run the producer in the background and poll its log until it exits;
+after exit, bounded inspection such as `tail -20` is safe. An early-exit prefix
+filter is also safe because it does not wait for the full run.

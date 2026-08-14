@@ -72,6 +72,8 @@ export interface BuildReplArgvInput {
    * `reply` tool is a development-channel tool, exempt from the permission gate).
    */
   allowedMcpTools?: ReadonlyArray<string>
+  /** Token budget to pass when the installed CLI advertises `--autocompact`. */
+  autocompactTokens?: number
 }
 
 /** Build the interactive `claude` argv as a plain string array (no shell, no
@@ -110,9 +112,9 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   if (input.addDir !== undefined) {
     argv.push('--add-dir', input.addDir)
   }
-  // Compact upstream at 300k tokens; the byte watchdog remains the downstream
-  // post-compact JSONL backstop for resume safety.
-  argv.push('--autocompact', '300000')
+  if (input.autocompactTokens !== undefined) {
+    argv.push('--autocompact', String(input.autocompactTokens))
+  }
   // Model LAST so nothing shadows it (Nova invariant).
   argv.push('--model', input.model)
   return argv

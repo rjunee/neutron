@@ -58,10 +58,14 @@ describe('buildReplArgv', () => {
   })
 
   it('sets the REPL child autocompact budget to 300000 tokens', () => {
-    const argv = buildReplArgv({ ...base, resume: false })
+    const argv = buildReplArgv({ ...base, resume: false, autocompactTokens: 300000 })
     const i = argv.indexOf('--autocompact')
     expect(i).toBeGreaterThanOrEqual(0)
     expect(argv[i + 1]).toBe('300000')
+  })
+
+  it('omits autocompact when the installed CLI does not support it', () => {
+    expect(buildReplArgv({ ...base, resume: false })).not.toContain('--autocompact')
   })
 
   it('appends --dangerously-skip-permissions only when requested', () => {
