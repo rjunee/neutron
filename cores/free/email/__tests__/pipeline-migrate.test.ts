@@ -12,9 +12,12 @@ import { describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { applyCoreMigrations, loadCoreMigrations } from '../src/pipeline/migrate.ts'
+
+const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations-pipeline')
 
 function withDir(files: Record<string, string>, run: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'email-migrate-'))
@@ -27,6 +30,20 @@ function withDir(files: Record<string, string>, run: (dir: string) => void): voi
 }
 
 describe('the Core applies its own sidecar migrations', () => {
+  test('the complete checked-in migration chain applies to a fresh database', () => {
+    const db = new Database(':memory:')
+    try {
+      expect(applyCoreMigrations(db, MIGRATIONS_DIR).applied).toEqual([1, 2, 3])
+      expect(
+        db.query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        ).all().map((row) => row.name),
+      ).toEqual(expect.arrayContaining(['account_settings', 'emails', 'sender_rules']))
+    } finally {
+      db.close()
+    }
+  })
+
   test('a COMMENT-ONLY header is not mistaken for a pragma preamble', () => {
     // THE BUG THIS CAUGHT. SQLite rejects an exec of nothing but comments, and
     // two of this Core's three real migrations open with a header comment and
