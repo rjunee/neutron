@@ -80,6 +80,12 @@ interface RunOpts {
   codexLoginExit?: number | null
   /** The brief handed in. `null` → no brief file at all. */
   brief?: string | null
+  /** Raw brief parts written to disk and handed to the wrapper as an ordered manifest. */
+  briefParts?: string[]
+  /** Replace this part's manifest entry with a path that does not exist. */
+  missingBriefPartIndex?: number
+  /** Insert a blank manifest line after this part index. */
+  blankBriefPartLineAfter?: number
   /**
    * The receipt handed in for that brief. Undefined → the one the WORKFLOW would
    * compute (the production case); `null` → none at all; a string → a wrong one.
@@ -384,8 +390,24 @@ exit 1
     ...(opts.env ?? {}),
   }
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
-  const brief = opts.brief === undefined ? DEFAULT_BRIEF : opts.brief
-  if (brief !== null) {
+  const brief = opts.briefParts === undefined
+    ? (opts.brief === undefined ? DEFAULT_BRIEF : opts.brief)
+    : undefined
+  if (opts.briefParts !== undefined) {
+    const partPaths = opts.briefParts.map((part, i) => {
+      const partPath = join(dir, `brief-part-${i}.txt`)
+      writeFileSync(partPath, part)
+      return opts.missingBriefPartIndex === i ? join(dir, `missing-brief-part-${i}.txt`) : partPath
+    })
+    if (opts.blankBriefPartLineAfter !== undefined) {
+      partPaths.splice(opts.blankBriefPartLineAfter + 1, 0, '')
+    }
+    env['NEUTRON_CODEX_BUILD_BRIEF_PARTS'] = partPaths.join('\n')
+    env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = join(dir, 'build.brief')
+  } else if (typeof brief === 'string') {
+    // `!== null` let `undefined` through: the caller may omit the brief entirely, and
+    // `writeFileSync` would then be handed undefined. Narrowing on the type rather than
+    // on one of its two absent values covers both without a cast.
     const bf = join(dir, 'build.brief')
     writeFileSync(bf, brief)
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = bf
@@ -393,8 +415,9 @@ exit 1
   // THE RECEIPT THE WORKFLOW WOULD HAVE SENT, computed by the workflow's own function
   // — so the default path here is the production path, and the wrapper's perl
   // recomputation is checked against the JS one on every single case in this file.
-  const integrity =
-    opts.integrity === undefined ? briefIntegrity(brief ?? '') : opts.integrity
+  const integrity = opts.integrity === undefined
+    ? briefIntegrity(opts.briefParts?.join('') ?? brief ?? '')
+    : opts.integrity
   if (integrity !== null) env['NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY'] = integrity
   const diff = opts.diff === undefined ? 'diff --git a/x b/x\n+change\n' : opts.diff
   const diffFile = join(dir, 'branch.diff')
@@ -465,6 +488,8 @@ const NARRATE =
 const WRITE_DIFF = 'printf "diff --git a/x b/x\\n+change\\n" > "$NEUTRON_CODEX_BUILD_DIFF_FILE"'
 /** A build that COMMITS and writes its diff, which is what a real one does. */
 const FAKE_BUILD = `cat >/dev/null; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'; ${WRITE_DIFF}`
+/** FAKE_BUILD with the mock-codex stdin recording seam preserved. */
+const RECORDING_FAKE_BUILD = `cat > "$HOME/codex-stdin.txt"; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'; ${WRITE_DIFF}`
 /** A build that commits but never writes a diff — the stale-diff hazard. */
 const FAKE_BUILD_NO_DIFF = `cat >/dev/null; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'`
 /** A build that RUNS and edits but never commits — the case that must report nothing. */
@@ -804,6 +829,76 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     })
     expect(status).toBe(5)
     expect(stderr).toContain('CODEX_BUILD_CALL_FAILED')
+  })
+})
+
+describe('codex build brief — assembled from parts on disk (by-path transport)', () => {
+  const success = (briefParts: string[], extra: Partial<RunOpts> = {}): RunResult => run({
+    authed: true,
+    codexLoginExit: 0,
+    briefParts,
+    env: { NEUTRON_CODEX_BUILD_EXEC_CMD: RECORDING_FAKE_BUILD },
+    ...extra,
+  })
+
+  test('a >30 KB brief assembled by path reaches codex byte-identical', () => {
+    const parts = [
+      `FORGE contract\n\nBuild the \`parser\`; don't alter blank lines.\n${'head detail\n'.repeat(170)}`,
+      `Очень длинная строка 🚀 ${'x'.repeat(31_000)} emoji ✅ and Cyrillic конец`,
+      '\nCODA: test, commit, and stop.\n',
+    ]
+    expect(Buffer.byteLength(parts.join(''))).toBeGreaterThan(30_000)
+    // These bytes were written by fs calls, the exact transport T2 gives the launcher;
+    // no agent or model retypes any part on its way to codex stdin.
+    const res = success(parts)
+    expect(res.status).toBe(0)
+    expect(res.codexStdin).toBe(parts.join(''))
+  })
+
+  test('a corrupted part is refused by the unchanged whole-brief receipt', () => {
+    const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
+    const corrupted = [...intended]
+    corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
+    const res = success(corrupted, { integrity: briefIntegrity(intended.join('')) })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(res.codexArgv).toBe('')
+  })
+
+  test('a missing part refuses before codex is invoked', () => {
+    const res = success(['head\n', 'middle\n', 'coda\n'], { missingBriefPartIndex: 1 })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_MISSING')
+    expect(res.codexArgv).toBe('')
+  })
+
+  test('an empty part refuses before codex is invoked', () => {
+    const res = success(['head\n', '', 'coda\n'])
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_MISSING')
+    expect(res.codexArgv).toBe('')
+  })
+
+  test('part order is enforced by the whole-brief receipt', () => {
+    const intended = ['first\n', 'second\n']
+    const res = success([...intended].reverse(), { integrity: briefIntegrity(intended.join('')) })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_CORRUPT')
+    expect(res.codexArgv).toBe('')
+  })
+
+  test('the legacy pre-written brief path builds exactly as before', () => {
+    const brief = 'Legacy single-file brief.\n'
+    const res = run({ authed: true, codexLoginExit: 0, brief })
+    expect(res.status).toBe(0)
+    expect(res.codexStdin).toBe(brief)
+  })
+
+  test('blank lines in the part manifest are skipped', () => {
+    const parts = ['head\n', 'middle\n', 'coda\n']
+    const res = success(parts, { blankBriefPartLineAfter: 0 })
+    expect(res.status).toBe(0)
+    expect(res.codexStdin).toBe(parts.join(''))
   })
 })
 

@@ -20,6 +20,12 @@
 #                                       SAME text the Claude builder gets, plus a coda
 #                                       about how to report — so the two builders
 #                                       cannot drift into building different things.
+#   in  NEUTRON_CODEX_BUILD_BRIEF_PARTS optional newline-separated ORDERED list of
+#                                       absolute part-file paths. When set, this script
+#                                       concatenates them (part 1 first) into the brief
+#                                       file before checking integrity. When unset, the
+#                                       brief file must already exist (the chunked
+#                                       bridge-agent fallback).
 #   in  NEUTRON_CODEX_BUILD_DIFF_FILE   where the brief told the build to write the
 #                                       branch diff, so this script can report whether
 #                                       it actually appeared.
@@ -27,7 +33,7 @@
 #                                       — see below for why it is not stdout.
 #   in  NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY `<bytes>:<fnv32>` for the brief AS THE
 #                                       WORKFLOW COMPOSED IT. Required — see THE
-#                                       BRIEF ARRIVES THROUGH AN LLM below.
+#                                       BRIEF TRANSPORT IS RECEIPT-CHECKED below.
 #   in  CODEX_HOME                      the per-project subscription credential dir.
 #   in  CODEX_BUILD_MODEL               which GPT tier to build on. A DIFFERENT knob
 #                                       from the reviewer's `CODEX_REVIEW_MODEL` on
@@ -87,14 +93,19 @@
 # "EMPTY rather than wrong" rule applied to the one field that decides where the work
 # lives. The measured branch name is still reported, so the failure names itself.
 #
-# ── THE BRIEF ARRIVES THROUGH AN LLM, SO IT IS COUNTED ───────────────────────
+# ── BRIEF TRANSPORT IS RECEIPT-CHECKED ──────────────────────────────────────
 # The workflow cannot exec anything; it reaches a shell only through a thin bridge
-# agent, and that agent has to reproduce the whole brief in a heredoc. A model that
-# truncates or paraphrases it produces a REAL sha for a contract nobody wrote — and
+# agent. Workflow-composed segments (or, absent a parts manifest, the whole brief)
+# arrive through that bridge, while host-written parts arrive by path. A model that
+# truncates or paraphrases its segments produces a REAL sha for a contract nobody
+# wrote — and
 # every check downstream is about the repository, not about the text. So the workflow
 # hands over `<bytes>:<fnv32>` for what it composed and this script recomputes both
 # from the file before spending a token; a mismatch is DEFERRED (exit 3), never a
 # build against an approximation of the brief.
+# Parts written directly by the host process never transit a model. The receipt is
+# still taken once over the assembled whole, so a dropped, reordered, truncated or
+# altered part is refused exactly as a bad agent copy is.
 #
 # FNV-1a/32 OVER THE BYTES, NOT SHA-256, and the reason is the composing side: the
 # workflow script runs with no imports and no host API it is promised (see the
@@ -638,15 +649,35 @@ fi
 # An empty brief would hand codex a blank prompt and let it invent a task inside a
 # real worktree with full write access. Refuse, loudly.
 BRIEF_FILE="${NEUTRON_CODEX_BUILD_BRIEF_FILE:-}"
+BRIEF_PARTS="${NEUTRON_CODEX_BUILD_BRIEF_PARTS:-}"
+if [ -n "$BRIEF_PARTS" ]; then
+  if [ -z "$BRIEF_FILE" ]; then
+    echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_PARTS is set but NEUTRON_CODEX_BUILD_BRIEF_FILE is unset — there is nowhere to assemble the brief. DEFERRED." >&2
+    exit 3
+  fi
+  if ! : > "$BRIEF_FILE" 2>/dev/null; then
+    echo "CODEX_BUILD_BRIEF_UNWRITABLE: cannot write NEUTRON_CODEX_BUILD_BRIEF_FILE=$BRIEF_FILE to assemble the brief parts. DEFERRED." >&2
+    exit 3
+  fi
+  while IFS= read -r part; do
+    [ -z "$part" ] && continue
+    if [ ! -s "$part" ]; then
+      echo "CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED." >&2
+      exit 3
+    fi
+    cat "$part" >> "$BRIEF_FILE"
+  done <<< "$BRIEF_PARTS"
+fi
 if [ -z "$BRIEF_FILE" ] || [ ! -s "$BRIEF_FILE" ]; then
   echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_FILE is unset, missing or empty — there is no build brief to run. DEFERRED." >&2
   exit 3
 fi
 
 # ── DEFERRED: the brief did not survive the trip ──────────────────────────────
-# NON-EMPTY IS NOT INTACT. The brief reaches this file by way of a bridge agent that
-# had to reproduce it in a heredoc (header: THE BRIEF ARRIVES THROUGH AN LLM), and a
-# truncated or reworded one still spends a full build and comes back with a real sha
+# NON-EMPTY IS NOT INTACT. Workflow-composed segments (or, absent a parts manifest,
+# the whole brief) reach this file through a bridge agent, while host-written parts
+# arrive by path. The receipt covers the assembled whole either way; a truncated or
+# reworded segment still spends a full build and comes back with a real sha
 # for a contract nobody wrote — a failure no gate downstream can see, because they all
 # ask about the repository. So the composing side hands over `<bytes>:<fnv32>` and this
 # recomputes both from the file. Required, not optional-with-a-skip: an unset value
