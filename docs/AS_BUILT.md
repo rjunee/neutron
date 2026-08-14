@@ -10663,3 +10663,20 @@ tapped through `app/lib/activity-inspector-opener.tsx:3`. Shell PreToolUse rows 
 the conservative command reducer in `open/activity-inspector.ts:620`: prefixes and
 control headers are skipped, scripts surface their filename, and command families
 carry their informative verb. Ambiguous input falls back to the tool name.
+
+## 2026-08-14 — web typing opens the scoped activity inspector
+
+`landing/chat-react/ProjectShell.tsx` now threads its existing inspector opener
+through `landing/chat-react/ChatApp.tsx`. The live-turn indicator is a real button;
+tapping it opens the inspector for the mounted conversation's project, matching the
+native gesture. `landing/chat-react/__tests__/component.test.tsx` presses that
+control and asserts the General scope, while
+`app/__tests__/chat-core-render-model.test.ts` proves a five-minute tool-only turn
+with no streamed text remains visibly typing.
+
+The early-clear mechanism was overlapping turn edges, not the fail-safe: a nested
+turn's quick `end` could clear the outer turn. `open/wiring/typing-refcount.ts`
+suppresses nested edges and rejects stale timer callbacks; its fail-safe remains at
+46 minutes, beyond the live turn's 45-minute ceiling, and still synthesises `end`
+when the genuine edge is lost. Connect catch-up stays a direct per-socket send in
+`open/wiring/typing-catchup.ts`, so it is neither durable nor broadcast.
