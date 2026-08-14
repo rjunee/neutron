@@ -10770,3 +10770,19 @@ suppresses nested edges and rejects stale timer callbacks; its fail-safe remains
 46 minutes, beyond the live turn's 45-minute ceiling, and still synthesises `end`
 when the genuine edge is lost. Connect catch-up stays a direct per-socket send in
 `open/wiring/typing-catchup.ts`, so it is neither durable nor broadcast.
+## 2026-08-14 — pr-mode publishing belongs to the durable outer loop
+
+The inner build process now ends at a local commit. `trident/codex-build.sh` has no
+`git push`, `gh pr create`, `git credential fill`, or `gh auth status` execution path;
+it reports the local commit and leaves `REMOTE_HEAD` and the PR number empty.
+`trident/inner-workflow.mjs` persists a `publishRequested` handoff and stops before
+review. `trident/orchestrator.ts` verifies the local branch, pushes the explicit ref,
+re-measures `origin` with `git ls-remote`, creates or reuses the PR, materializes the
+review diff, and re-fires from an `outer-published:<sha>` checkpoint. The credentialed
+runner is composed in `open/composer.ts`; no credential-bearing variable is added to
+the wrapper invocation.
+
+Mode detection now asks whether that publisher can authenticate (`gh auth status`),
+not whether `gh` is merely installed. A GitHub origin with an incapable publisher is a
+loud dispatch error rather than a silent downgrade to local mode. Repositories without
+a GitHub origin retain the existing local behavior.

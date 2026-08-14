@@ -109,6 +109,8 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: 'argus-approved',
       remaining_tasks: 0,
       pr_merged: false,
+      publish_requested: false,
+      publish_head: null,
     })
   })
   // A MERGE IS TERMINAL (#563). The flag the OUTER loop reads to finish a run
@@ -157,6 +159,8 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       checkpoint: null,
       remaining_tasks: null,
       pr_merged: false,
+      publish_requested: false,
+      publish_head: null,
     })
   })
 })

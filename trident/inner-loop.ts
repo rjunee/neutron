@@ -142,6 +142,10 @@ export interface InnerResult {
    * successful run as `merge failed`.
    */
   pr_merged: boolean
+  /** The inner workflow produced a commit and is asking the outer loop to publish it. */
+  publish_requested?: boolean
+  /** Local commit measured by the inner build; the outer publisher verifies it independently. */
+  publish_head?: string | null
 }
 
 /** The terminal outcome of FIRING the workflow (NOT the build result). */
@@ -432,6 +436,10 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // workflow writes, and this flag SKIPS the merge — so an accidental true would
     // silently strand an unmerged PR as "done".
     pr_merged: p.prMerged === true,
+    publish_requested: p.publishRequested === true,
+    publish_head: typeof p.publishHead === 'string' && /^[0-9a-f]{40}$/.test(p.publishHead)
+      ? p.publishHead
+      : null,
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)

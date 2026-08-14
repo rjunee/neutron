@@ -417,6 +417,50 @@ export function buildTridentOrchestrator(
     return null
   }
 
+  async function publishBuiltCommit(run: TridentRun, requestedHead: string): Promise<{ pr: number; head: string }> {
+    if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
+    const branch = run.branch ?? `trident/${run.slug}`
+    const local = await opts.run_host(['git', '-C', run.repo_path, 'rev-parse', `refs/heads/${branch}`], run.repo_path)
+    if (!local.ok || local.stdout.trim() !== requestedHead) {
+      throw new Error(`outer publisher refused: branch ${branch} no longer points at the commit produced by the build`)
+    }
+    const pushed = await opts.run_host(
+      ['git', '-C', run.repo_path, 'push', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+      run.repo_path,
+    )
+    if (!pushed.ok) throw new Error(`outer publisher could not push branch ${branch}`)
+
+    const witnessed = await opts.run_host(
+      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+      run.repo_path,
+    )
+    const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
+    if (remoteHead !== requestedHead) {
+      throw new Error(`outer publisher could not confirm commit ${requestedHead} on origin`)
+    }
+
+    let pr = await detectExistingPr({ ...run, branch })
+    if (pr === null) {
+      const base = await resolveBase(run)
+      const created = await opts.run_host(
+        ['gh', 'pr', 'create', '--head', branch, '--base', base, '--fill'],
+        run.repo_path,
+      )
+      if (!created.ok) throw new Error(`outer publisher could not open a PR for branch ${branch}`)
+      pr = await detectExistingPr({ ...run, branch })
+    }
+    if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
+
+    const diffFile = `/tmp/trident-outer-published-${run.id}.diff`
+    const base = await resolveBase(run)
+    const diff = await opts.run_host(
+      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${requestedHead}`],
+      run.repo_path,
+    )
+    if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
+    return { pr, head: requestedHead }
+  }
+
   function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {
     return {
       ...run,
@@ -643,6 +687,45 @@ export function buildTridentOrchestrator(
   async function applyResult(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
+
+    if (result.publish_requested) {
+      if (result.publish_head === null || result.publish_head === undefined) {
+        return {
+          run: failedRun(run, 'inner workflow requested outer publishing without a full commit OID', true),
+          changed: true,
+          waiting: false,
+          note: 'publish handoff → failed (missing commit OID)',
+        }
+      }
+      try {
+        const published = await publishBuiltCommit(run, result.publish_head)
+        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}`
+        const resetPatch: TridentRunUpdate = {
+          inner_result: null,
+          subagent_run_id: null,
+          subagent_status: null,
+          inner_checkpoint: checkpoint,
+          inner_verdict: null,
+          pr: published.pr,
+          branch: result.branch ?? run.branch,
+        }
+        await persistRefireReset(run.id, resetPatch)
+        return {
+          run: { ...run, ...resetPatch, last_advanced_at: now() },
+          changed: true,
+          waiting: false,
+          note: `outer publisher confirmed ${published.head} and PR #${published.pr} → re-fire review`,
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        return {
+          run: failedRun(run, `publish failed: ${reason}`, true),
+          changed: true,
+          waiting: false,
+          note: `publish handoff → failed (${reason})`,
+        }
+      }
+    }
 
     // A MERGE IS TERMINAL (ISSUES #563) — checked before EVERY other branch,
     // including the Ralph re-fire, because a merged PR outranks every other reading

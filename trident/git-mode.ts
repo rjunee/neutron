@@ -32,8 +32,8 @@ export interface HostCommandResult {
 export interface GitModeProbe {
   /** Whether `repoPath` has an `origin` remote pointing at GitHub. */
   hasGithubOrigin(repoPath: string): Promise<boolean>
-  /** Whether the `gh` CLI is installed + on PATH. */
-  ghAvailable(): Promise<boolean>
+  /** Whether the outer publisher can authenticate to GitHub. */
+  publisherAvailable(): Promise<boolean>
 }
 
 /**
@@ -47,15 +47,24 @@ export async function detectMergeMode(
   repoPath: string,
   probe: GitModeProbe,
 ): Promise<MergeMode> {
+  let hasOrigin: boolean
   try {
-    const [hasOrigin, hasGh] = await Promise.all([
-      probe.hasGithubOrigin(repoPath),
-      probe.ghAvailable(),
-    ])
-    return hasOrigin && hasGh ? 'pr' : 'local'
+    hasOrigin = await probe.hasGithubOrigin(repoPath)
   } catch {
     return 'local'
   }
+  if (!hasOrigin) return 'local'
+  let canPublish = false
+  try {
+    canPublish = await probe.publisherAvailable()
+  } catch {
+    // A GitHub-backed run must fail loudly below. Treating a broken capability
+    // probe as permission to merge locally would silently remove the PR gate.
+  }
+  if (!canPublish) {
+    throw new Error('GitHub origin detected but the outer publisher cannot authenticate; refusing to silently weaken the PR merge gate')
+  }
+  return 'pr'
 }
 
 /** True when the URL is a GitHub remote (https or ssh form). */
@@ -79,8 +88,8 @@ export function defaultGitModeProbe(
       const res = await run(['git', '-C', repoPath, 'remote', 'get-url', 'origin'], repoPath)
       return res.ok && isGithubRemoteUrl(res.stdout)
     },
-    ghAvailable: async () => {
-      const res = await run(['gh', '--version'])
+    publisherAvailable: async () => {
+      const res = await run(['gh', 'auth', 'status'])
       return res.ok
     },
   }

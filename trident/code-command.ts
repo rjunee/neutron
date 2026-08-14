@@ -142,7 +142,7 @@ export interface TridentCodeContext {
    * the production probe (GitHub origin + `gh` → `'pr'`, else `'local'`).
    * Tests inject a deterministic resolver.
    */
-  resolveMergeMode?: () => Promise<MergeMode>
+  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
   /**
    * Resolve whether this build is governed (Ralph one-task-per-context
    * loop). Defaults to `detectRalphMode` (see board-dispatch.ts) — a

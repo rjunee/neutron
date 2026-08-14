@@ -506,190 +506,6 @@ is_pr_mode() {
   [ "$MERGE_MODE" = 'pr' ]
 }
 
-# Can a `git push` to origin actually authenticate? Prints nothing; the STATUS is the
-# answer. See SO HOW DOES THE BUILD PUSH in the header for why this is asked at all.
-#
-# Three outcomes, and two of them are "yes, proceed":
-#
-#   0  a credential answered for the push remote's host          → proceed
-#   0  the remote does not use a credential helper (ssh, local)  → proceed, not our call
-#   1  the remote is http(s) and NOTHING answered                → the push will be
-#                                                                  anonymous
-#
-# `git credential fill` is the probe rather than a test for `GH_TOKEN` because it asks
-# THE SAME MACHINERY A REAL PUSH ASKS: whatever helpers are configured, in their
-# configured order, including ones this script has never heard of. A test for a specific
-# variable would answer a question about a mechanism instead of about the capability,
-# and would fail an install that authenticates some other way.
-#
-# `GIT_TERMINAL_PROMPT=0` so a box with no helper fails immediately instead of blocking
-# on a username prompt nobody is there to answer, and `bounded` on top of that because a
-# credential helper can reach the network (a keychain unlock, a token refresh) and this
-# runs before the build gets to spend anything.
-#
-# THE SECRET IS NEVER PRINTED, LOGGED OR STORED. The output goes to a file that is read
-# once with `grep -q` for the PRESENCE of a non-empty `password=` line and deleted in the
-# same breath; no branch here interpolates it, and the caller only ever sees the status.
-push_credential_ok() {
-  local url host proto out req rc
-  url="$(git remote get-url --push origin 2>/dev/null || true)"
-  # No push URL at all is not this function's failure to report — `has_origin` and the
-  # caller's `is_pr_mode` guard decide whether an origin was required.
-  [ -n "$url" ] || return 0
-  case "$url" in
-    https://*)
-      proto='https'
-      host="${url#https://}"
-      ;;
-    http://*)
-      proto='http'
-      host="${url#http://}"
-      ;;
-    # ssh://…, git@host:…, /a/local/path, file://… — a key or the filesystem
-    # authenticates these and no credential helper is ever consulted, so there is
-    # nothing here to measure and refusing them would break every install that pushes
-    # over ssh in order to protect the ones that push over https.
-    *) return 0 ;;
-  esac
-  # Strip any `user@` prefix and everything from the first `/` — what is left is the
-  # host (with its port, if any), which is the granularity git scopes a credential to.
-  host="${host#*@}"
-  host="${host%%/*}"
-  [ -n "$host" ] || return 0
-  out="${TMPDIR:-/tmp}/trident-codex-build-cred.$$"
-  req="${TMPDIR:-/tmp}/trident-codex-build-credreq.$$"
-  printf 'protocol=%s\nhost=%s\n\n' "$proto" "$host" > "$req"
-  # NOT `bounded`, and deliberately: that helper hard-codes `</dev/null` (a network tool
-  # that decides to prompt would otherwise wait on stdin forever), and `git credential
-  # fill` reads its REQUEST from stdin. Passing it /dev/null would ask about no host at
-  # all. Same alarm, same redirect-to-a-file discipline, different stdin — through a
-  # FILE rather than a pipe, for the reason `bounded`'s own comment gives: `$(…)` and a
-  # pipe both return when the fd closes, not when the process exits.
-  perl -e 'my $s = shift; alarm $s; exec @ARGV or exit 1' 10 \
-    env GIT_TERMINAL_PROMPT=0 git credential fill <"$req" >"$out" 2>/dev/null
-  # `password=` followed by at least one character. An empty `password=` line is a
-  # helper that answered without a secret, which authenticates nothing.
-  grep -q '^password=.' "$out" 2>/dev/null
-  rc=$?
-  rm -f "$out" "$req"
-  return "$rc"
-}
-
-# Can THIS PROCESS — the host side of the publish boundary — open a PR? Prints
-# nothing; the STATUS is the answer.
-#
-# `gh auth status` is the probe for exactly the reason `git credential fill` is the
-# probe for the push: it asks THE TOOL THAT WILL DO THE WORK whether it can, through
-# whatever mechanism it is configured with (a token in this environment, a hosts.yml, a
-# keychain), instead of testing for one variable and calling that a capability. On this
-# host it happens to resolve to `GH_TOKEN`, but nothing here depends on that.
-#
-# BOUNDED, AND ASKED UP TO THREE TIMES. `gh auth status` validates against the API, so
-# on a single attempt a network blip is indistinguishable from a missing credential —
-# and the answer here DEFERS a build, so a false negative costs the run a round. Same
-# retry shape as every other network probe in this script.
-#
-# NOTHING FROM ITS OUTPUT IS PRINTED OR KEPT: `gh auth status` names the credential's
-# source, and with `--show-token` (never passed here) prints the secret itself, so both
-# streams go to /dev/null and only the status is read.
-gh_auth_ok() {
-  local n
-  n=1
-  while [ "$n" -le 3 ]; do
-    bounded /dev/null 10 gh auth status && return 0
-    n=$((n + 1))
-  done
-  return 1
-}
-
-# The number of the OPEN PR for branch `$1`, or the empty string. Bounded like every
-# other network call here: `gh` talks to the API and to a credential helper, either of
-# which can block forever, and one of this function's two callers runs on the failure
-# path where a hang would eat the DEFERRED report the bridge is waiting for.
-#
-# ONE READER FOR TWO QUESTIONS, deliberately. `publish` asks it before `gh pr create`
-# ("is there already one, so this is a fix round and not a duplicate"), and
-# `emit_trailer` asks it AGAIN afterwards to measure what goes in the trailer. The
-# second call is not redundant with the first: it makes the reported number a fact read
-# back from GitHub rather than this script's memory of what it just did — the same rule
-# `REMOTE_HEAD` follows, for the same reason.
-open_pr_number() {
-  local out n
-  out="${TMPDIR:-/tmp}/trident-codex-build-pr.$$"
-  bounded "$out" 10 \
-    gh pr list --head "$1" --state open --json number --jq '.[0].number' || true
-  n="$(head -n 1 "$out" 2>/dev/null || true)"
-  rm -f "$out"
-  # `--jq` prints `null` when the list is empty, and a literal "null" reported as a PR
-  # number is worse than none at all.
-  case "$n" in
-    '' | *[!0-9]*) printf '' ;;
-    *) printf '%s' "$n" ;;
-  esac
-}
-
-# ── THE HOST PUBLISHES: push the branch, then open the PR ─────────────────────
-# Called with the sha THIS BUILD PRODUCED — `emit_trailer` has already blanked a head
-# that pre-existed or that was made on the wrong branch, so this can only ever publish
-# a commit the run is entitled to.
-#
-# NOTHING IT DOES IS REPORTED AS A FACT. The trailer's REMOTE_HEAD and PR are measured
-# afterwards by asking the remote and `gh`; a push that exits 0 is not evidence that
-# the commit is on the branch, and a `gh pr create` that exits 0 is not evidence that a
-# PR is open. This function only makes the facts possible.
-#
-# A FAILED PUBLISH DOES NOT FAIL THE SCRIPT. See the exit-code list in the header: the
-# fail-closed answer is an empty REMOTE_HEAD in a trailer that still carries the branch,
-# the local sha and the diff path, which is what an operator recovers the work from.
-#
-# THE TOOLS' OWN OUTPUT IS NEVER ECHOED. `git push` and `gh` both quote the remote URL
-# in their errors, and a URL can carry an embedded credential
-# (`https://x-access-token:<secret>@host/…`), so the failure is named and the text is
-# dropped. `emit_trailer`'s measurements are what diagnose it.
-publish() {
-  local head="$1" existing rc
-  # THE REFSPEC IS EXPLICIT and it is never forced. `git push origin <branch>` obeys
-  # `push.default` and the branch's upstream config, neither of which this script set;
-  # naming `refs/heads/X:refs/heads/X` pushes exactly the branch that was measured and
-  # nothing else. A non-fast-forward is a real refusal — the remote moved under us —
-  # and it must stay one: the witness probe below then reports an empty REMOTE_HEAD
-  # and the run stops, which is the correct end for a branch this build no longer
-  # understands.
-  #
-  # BOUNDED AT 300s rather than the 10s the read-only probes use: this one sends the
-  # whole branch, and a slow-but-working link must not be cut off into a false "the
-  # build produced nothing".
-  if ! bounded /dev/null 300 \
-    env GIT_TERMINAL_PROMPT=0 git push origin "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
-    echo "CODEX_BUILD_PUSH_FAILED: 'git push origin refs/heads/${BRANCH}' did not succeed, so ${head} exists only in this worktree. The trailer reports an empty REMOTE_HEAD and the run stops rather than review a commit no reviewer can fetch." >&2
-    return 1
-  fi
-  # REUSE, NEVER A DUPLICATE — the same rule the Forge contract states for the Claude
-  # builder. A fix round runs this function again on a branch that already has its PR,
-  # and `gh pr create` on that branch would either fail or open a second PR for the
-  # same work.
-  existing="$(open_pr_number "$BRANCH")"
-  if [ -n "$existing" ]; then
-    return 0
-  fi
-  # `--fill` takes the title and body from the commits, which is the only source here
-  # that is not a model asked to describe itself. `--base` only when the caller named
-  # one: an empty `$2` means "no base was passed", and inventing one would open the PR
-  # against a branch this run never heard of.
-  if [ -n "$BASE_BRANCH" ]; then
-    bounded /dev/null 60 gh pr create --head "$BRANCH" --base "$BASE_BRANCH" --fill
-    rc=$?
-  else
-    bounded /dev/null 60 gh pr create --head "$BRANCH" --fill
-    rc=$?
-  fi
-  if [ "$rc" -ne 0 ]; then
-    echo "CODEX_BUILD_PR_CREATE_FAILED: the branch was pushed but 'gh pr create --head ${BRANCH}' did not succeed. The trailer reports whatever 'gh pr list' can still see for the branch, which may be nothing." >&2
-    return 1
-  fi
-  return 0
-}
-
 # Was this sha already on the branch (or under HEAD) before codex ran?
 # Exact whole-line match against the captured set — a substring test would let an
 # abbreviation match a full sha.
@@ -731,49 +547,16 @@ emit_trailer() {
   if [ -n "$head" ] && [ -n "$BRANCH" ] && [ "$branch_name" != "$BRANCH" ]; then
     head=''
   fi
-  # ── THE PUBLISH, and it happens HERE for a reason ───────────────────────────
-  # Behind the same `$head` the two gates above just established. That is the whole
-  # safety argument for moving the push into this script: the only sha it can publish
-  # is one THIS RUN PRODUCED, on the branch this run was ASKED FOR. A publish placed
-  # before those gates — or keyed off "did the build commit something" — would push a
-  # re-entry's `git switch` onto the previous round's tip and open a PR for work this
-  # invocation did not do.
-  #
-  # `pr` mode with an origin only, and only when codex actually completed. The push
-  # credential and `gh auth` were both proved before launch, so reaching here without
-  # them means something changed mid-build; the failure is named on stderr and the
-  # measurements below tell the truth about what landed.
-  if [ "$outcome" = 'ok' ] && is_pr_mode && [ -n "$head" ] && [ -n "$BRANCH" ] && has_origin; then
-    publish "$head" || true
-  fi
+  # Publishing is deliberately absent from this process tree. In pr mode the durable
+  # outer loop receives `$head`, pushes it with its host-only credential, and measures
+  # `origin` before review resumes.
   remote_head=''
   # `pr` MODE ONLY, like the baseline and the PR probe. In local mode nothing is ever
   # pushed and the bridge reads HEAD rather than REMOTE_HEAD, so this probe can only
   # ever confirm "not pushed" about a commit that was never meant to be — at a cost of
   # up to 3×10s against a remote the run does not use, on the failure path included.
-  if is_pr_mode && [ -n "$head" ] && [ -n "$BRANCH" ] && has_origin; then
-    # THE REMOTE IS A WITNESS, NOT A SOURCE — this answers "was OUR sha pushed?", and
-    # any other answer is discarded (header: the `reviewedHead` rule).
-    #
-    # Bounded the same way every other network call here is: by this point the codex
-    # tokens are already spent, so a remote that hangs must cost the run a fact, not
-    # the build — and this function also runs on the FAILURE path, where a hang would
-    # eat the DEFERRED report the bridge is waiting for.
-    #
-    # RETRIED 3×, AND ONLY ON A FAILED PROBE. This is the single most consequential
-    # probe in the script: one that never answers empties REMOTE_HEAD, the bridge then
-    # reports no commitSha, and the workflow throws "produced no commitSha — nothing
-    # was built" about a build that committed, pushed and opened a PR. The claim is
-    # false and the entire build is discarded to make it, so one blip on a shared
-    # remote must not be the last word — the auth precheck above already retries three
-    # times for a far cheaper mistake. See `remote_tip` for why an ANSWER, even an
-    # unwelcome one, ends the loop.
-    #
-    # `remote_tip` prints the literal `unknown` when it never got an answer, which is
-    # not a sha and so can never equal `$head`: an unanswerable remote leaves
-    # REMOTE_HEAD empty, which is the fail-closed direction.
-    [ "$(remote_tip "$BRANCH" 3)" = "$head" ] && remote_head="$head"
-  fi
+  # `REMOTE_HEAD` is populated only by the outer publisher's independent
+  # `git ls-remote origin` witness; this inner trailer never claims it.
   pr_number=''
   # `pr` MODE ONLY. A local-mode run never opens a PR, and the workflow's own contract
   # says it reports null — but this probe used to run unconditionally, so a local build
@@ -785,9 +568,7 @@ emit_trailer() {
   # this script's claim about what it did; `gh pr list` is GitHub's answer about what
   # exists. On a fix round nothing was created at all and this is the only source there
   # has ever been.
-  if is_pr_mode && [ -n "$BRANCH" ] && command -v gh >/dev/null 2>&1; then
-    pr_number="$(open_pr_number "$BRANCH")"
-  fi
+  # Likewise, PR creation and measurement belong to the outer publisher.
   # THE DIFF OF LAST RESORT. The launch below DELETES this path so a stale diff from an
   # earlier round can never be reported as this one's (#545). That leaves a real gap on
   # a FIX round: the workflow captures the diff path ONCE and hands the same one to
@@ -969,38 +750,9 @@ if is_pr_mode && [ -n "$BRANCH" ] && has_origin; then
 "
 fi
 
-# ── DEFERRED: pr mode, and THIS PROCESS cannot publish what it is about to build ─
-# See THE PRECHECK NOW ASKS ABOUT THE HOST in the header. In `pr` mode the run is graded
-# on the PUSHED sha and on an open PR, and BOTH are this script's job now — so a host
-# that cannot do them has already failed the round, it just does not know it yet. Asking
-# here turns a full build that ends in "produced no commitSha — nothing was built" into a
-# free, named deferral one round earlier.
-#
-# Ordered AFTER the baseline probe and BEFORE the launch, with the rest of the pre-launch
-# refusals: everything above this line costs a round and no tokens, and this belongs on
-# that side of the line.
-#
-# THE PUSH HALF FIRST, because it is the local, instant one — `git credential fill`
-# consults configured helpers and returns, while `gh auth status` is a round trip to the
-# API. A host missing both should hear about the cheaper check.
-if is_pr_mode && has_origin && ! push_credential_ok; then
-  echo "CODEX_BUILD_NO_PUSH_CREDENTIAL: 'git credential fill' found no credential for the push remote's host, so the 'git push' THIS WRAPPER makes after the build would be anonymous and would fail. DEFERRED before any tokens were spent. Connect GitHub, configure a credential helper for the push host, or run this build in local merge-mode." >&2
-  exit 3
-fi
-# THE PR HALF, which is the one that was missing. A host with a working push and an
-# unauthenticated `gh` is exactly the run this split exists to fix: it built the whole
-# feature, committed, and then had nowhere to deliver it — and because the delivery step
-# is also the reporting step, the round looked identical to one that produced nothing.
-if is_pr_mode && has_origin; then
-  if ! command -v gh >/dev/null 2>&1; then
-    echo "CODEX_BUILD_NO_GH_CLI: 'gh' is not on PATH, and in pr mode THIS WRAPPER opens the PR after the build (the build itself is told not to, and holds no GitHub credential). DEFERRED before any tokens were spent — install the GitHub CLI, or run this build in local merge-mode." >&2
-    exit 3
-  fi
-  if ! gh_auth_ok; then
-    echo "CODEX_BUILD_NO_GH_CREDENTIAL: 'gh auth status' could not authenticate in 3 attempts, so the 'gh pr create' THIS WRAPPER makes after the build would fail and the build would have nowhere to be delivered. DEFERRED before any tokens were spent — authenticate gh (a GH_TOKEN in this process's environment, or 'gh auth login'), or run this build in local merge-mode." >&2
-    exit 3
-  fi
-fi
+# Publish capability is checked by the durable outer loop at run creation, before this
+# wrapper is launched and before any model tokens are spent. No GitHub authentication
+# probe belongs in the inner workflow's process tree.
 
 # CLEAR THE DIFF FILE BEFORE THE BUILD, never after. `emit_trailer` reports this path
 # when it is non-empty, and a path left over from an earlier round is non-empty with

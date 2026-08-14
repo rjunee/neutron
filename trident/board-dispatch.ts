@@ -97,7 +97,7 @@ export interface BoardBoundBuildDeps {
    */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
   /** Defaults to `detectMergeMode` over the production probe. Test seam. */
-  resolveMergeMode?: () => Promise<MergeMode>
+  resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
   /**
    * Resolve whether this build is governed (Ralph mode). Defaults to
    * `detectRalphMode` over the production probe — a `SPEC.md` at the git
@@ -173,7 +173,7 @@ export async function dispatchBoardBoundBuild(
       deps.repo_path,
       deps.project_slug,
     )
-    merge_mode = await (deps.resolveMergeMode ?? (() => detectMergeMode(repo_path, defaultGitModeProbe())))()
+    merge_mode = await (deps.resolveMergeMode ?? ((path) => detectMergeMode(path, defaultGitModeProbe())))(repo_path)
     // K10 restored the governed default (the refactor-window `resolveRalph =
     // false` override is gone): a root `SPEC.md` on the resolved workspace's
     // git root flips the build into Ralph mode via `detectRalphMode`. Neither

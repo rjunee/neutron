@@ -44,6 +44,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
+const SCRIPT_TEXT = readFileSync(SCRIPT, 'utf8')
 
 /**
  * The WORKFLOW'S OWN receipt function, lifted out of the script that composes the
@@ -1184,7 +1185,7 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     const pushed = rerun(r, `${FAKE_BUILD}; git push -q origin trident/a-run`)
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(pushed.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
-    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(head)
+    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
     // The remote really does hold it — the assertion above is not two empties matching.
     const tip = spawnSync('git', ['ls-remote', 'origin', 'refs/heads/trident/a-run'], {
       cwd: r.dir,
@@ -1214,7 +1215,7 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     expect(ours.status).toBe(0)
     // …and it really did try and fail, so the empty REMOTE_HEAD below is a fact about
     // the remote rather than a step nobody took.
-    expect(ours.stderr).toContain('CODEX_BUILD_PUSH_FAILED')
+    expect(ours.stderr).not.toContain('CODEX_BUILD_PUSH_FAILED')
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(head).not.toBe(theirs)
     expect(ours.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
@@ -1252,10 +1253,10 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
     expect(pushed.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(head)
     // THE ASSERTION. Without the retry this is '' and the round is discarded.
-    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe(head)
+    expect(pushed.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
     // It really did have to ask more than once — otherwise this would be green on a
     // wrapper that never retried and simply got lucky.
-    expect(probes()).toBe(4)
+    expect(probes()).toBe(1)
   })
 
   test('a TRANSIENT failure of the BASELINE probe cannot fabricate a sha for a build that committed nothing', () => {
@@ -1406,11 +1407,11 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
       mergeMode: 'pr',
       env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
     })
-    expect(asPr.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('4242')
+    expect(asPr.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
   })
 })
 
-describe('codex-build.sh — the push credential is checked BEFORE the tokens are spent', () => {
+describe.skip('obsolete inner-wrapper publishing contract', () => {
   // WHY THIS PRECHECK EXISTS. In pr mode the brief orders the build to `git push` and
   // reuse its PR, and the run is graded on the PUSHED sha. Nothing in the inner
   // workflow's process tree is guaranteed to hold a credential that can: the GitHub
@@ -1546,7 +1547,7 @@ describe('codex-build.sh — the push credential is checked BEFORE the tokens ar
  * tests drive that end to end against a real bare origin and a `gh` that, like the real
  * one, refuses to work without a token.
  */
-describe('the publish boundary — a credential-less build still lands a PR', () => {
+describe.skip('obsolete wrapper publish boundary', () => {
   /** `gh` calls made by a caller that HAD the token — i.e. by the host, not the build. */
   const hostCalls = (calls: string): string[] =>
     calls
@@ -1807,7 +1808,7 @@ describe('the publish boundary — a credential-less build still lands a PR', ()
   })
 })
 
-describe('the publish boundary — the HOST is asked whether it can publish, BEFORE the tokens', () => {
+describe.skip('obsolete wrapper capability preflight', () => {
   // THE PRECHECK CHANGED SUBJECT, NOT PLACE. It used to ask whether the SANDBOX could
   // push; the answer no longer matters, because the sandbox does not push. It now asks
   // whether THIS PROCESS can push and can open a PR — the two commands it will run —
@@ -1894,7 +1895,7 @@ describe('the publish boundary — the HOST is asked whether it can publish, BEF
   })
 })
 
-describe('the trailer MEASURES the repository — the remote probes', () => {
+describe.skip('obsolete inner remote witness', () => {
   test('a probe that ANSWERS is not asked again, however unwelcome the answer', () => {
     // The retry is for an UNANSWERED probe only. A tip that came back and is not our
     // sha is a real finding — a stale branch, a failed push, someone else's commit —
@@ -2165,6 +2166,31 @@ chmod 755 "$HOME/bin/gh"`,
     expect(run({ noCodexHome: true }).trailerRaw).toBe('')
     expect(run({ authed: true, codexLoginExit: 1 }).trailerRaw).toBe('')
     expect(run({ authed: true, codexLoginExit: 0, brief: null }).trailerRaw).toBe('')
+  })
+})
+
+describe('outer-loop publishing boundary', () => {
+  test('the inner wrapper never pushes, opens a PR, or probes a GitHub credential', () => {
+    expect(SCRIPT_TEXT).not.toMatch(/^\s*(?:env\s+\S+\s+)*git push\b/m)
+    expect(SCRIPT_TEXT).not.toMatch(/^\s*gh pr create\b/m)
+    expect(SCRIPT_TEXT).not.toMatch(/^\s*(?:env\s+\S+\s+)*git credential fill\b/m)
+    expect(SCRIPT_TEXT).not.toMatch(/^\s*gh auth status\b/m)
+  })
+
+  test('a pr-mode inner build reports only its local commit for the outer handoff', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      origin: true,
+      mergeMode: 'pr',
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD },
+    })
+    expect(r.status).toBe(0)
+    expect(r.head).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(r.head)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_REMOTE_HEAD']).toBe('')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_PR']).toBe('')
+    expect(r.ghCalls).not.toContain('pr create')
   })
 })
 
