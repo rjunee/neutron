@@ -57,6 +57,13 @@ describe('buildReplArgv', () => {
     expect(argv[argv.length - 1]).toBe('claude-opus-4-7')
   })
 
+  it('sets the REPL child autocompact budget to 300000 tokens', () => {
+    const argv = buildReplArgv({ ...base, resume: false })
+    const i = argv.indexOf('--autocompact')
+    expect(i).toBeGreaterThanOrEqual(0)
+    expect(argv[i + 1]).toBe('300000')
+  })
+
   it('appends --dangerously-skip-permissions only when requested', () => {
     expect(buildReplArgv({ ...base, resume: false })).not.toContain('--dangerously-skip-permissions')
     expect(buildReplArgv({ ...base, resume: false, skipPermissions: true })).toContain(

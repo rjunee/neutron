@@ -159,9 +159,12 @@ from durable state). The trigger is a per-session BASELINE DELTA (a `WeakMap` ke
 on the `ReplSession` object) so it fires only on growth since the last reset and can
 never re-fire-loop, regardless of whether CC keeps appending the same JSONL after
 `/clear` or rotates to a new file (a respawned session restarts at baseline 0). A
-per-scope 45-min cooldown gates re-resets. The `session-size-watchdog` (5 MB warn /
-10 MB critical) stays the wedge BACKSTOP; Layer B keeps the orchestrator in the good
-zone. The CLI persistent-REPL context-editing beta (`clear_tool_uses` tool-result
+per-scope 45-min cooldown gates re-resets. Every REPL child is spawned with
+`--autocompact 300000`, an upstream token budget that asks the CLI to compact well
+before its full context window. The `session-size-watchdog` (5 MB warn / 10 MB
+critical) remains the independent downstream byte backstop on the post-compact JSONL
+to keep `--resume` from wedging; the token budget does not replace it. Layer B keeps
+the orchestrator in the good zone. The CLI persistent-REPL context-editing beta (`clear_tool_uses` tool-result
 eviction) is NOT available for the interactive `claude` PTY REPL substrate — no CLI
 flag, no codebase primitive — so this composer-side periodic-reset-and-rehydrate is
 the path SPEC WAVE 3.5 anticipated as the fallback.

@@ -110,6 +110,9 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   if (input.addDir !== undefined) {
     argv.push('--add-dir', input.addDir)
   }
+  // Compact upstream at 300k tokens; the byte watchdog remains the downstream
+  // post-compact JSONL backstop for resume safety.
+  argv.push('--autocompact', '300000')
   // Model LAST so nothing shadows it (Nova invariant).
   argv.push('--model', input.model)
   return argv

@@ -41,3 +41,13 @@ interactive prompt blocks your turn forever and permanently wedges the session.
 When you need the user to choose between options, ask via the `reply()` tool
 with the choices written out as text (e.g. a numbered list) and let the user
 answer in their next message.
+
+## Long-running commands must emit progress
+
+**Never route a command started by a chat turn through a full-buffering consumer,**
+including an output-suffix filter, a sorter or counter that waits for EOF, or
+command substitution that captures the complete output. A full-buffering consumer
+withholds activity until the child exits, so the inactivity timeout can kill a
+healthy but apparently silent turn. Stream output directly or redirect it to a log
+and inspect bounded portions in separate commands after the producer exits; an
+early-exit prefix filter is safe because it does not wait for the full run.
