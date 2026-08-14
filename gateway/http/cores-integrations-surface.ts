@@ -113,6 +113,9 @@ export function createCoresIntegrationsSurface(
           tokens,
           secretsStore,
           project_slug,
+          // Threaded so the panel distinguishes "scoped to a previous owner
+          // handle" from "not connected" (card 2026-08-14).
+          ...(db !== undefined ? { db } : {}),
         })
         return jsonResponse(200, {
           ok: true,

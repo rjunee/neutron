@@ -23,6 +23,15 @@
  * registry. The set of integrations is DERIVED from the bundled Cores'
  * own manifest secret declarations — per-Core ownership stays intact.
  *
+ * A MISS IS DISTINGUISHABLE (card 2026-08-14). Credential rows carry the FROZEN
+ * owner handle, so rows written under a PREVIOUS handle (`dev` on a box that
+ * later boots as `juno`) are invisible to every read here. Presence-only status
+ * printed that as `connected: false` — the same sentence as "you never
+ * connected this", which is what turned a night of failed publishes into a
+ * hunt for a blinking token. When `db` is supplied this surface now also reports
+ * an `orphaned_credentials` summary and per-slot `orphaned: true`, naming the
+ * migrate action. Read-only: nothing here writes or decrypts a credential.
+ *
  * Cross-ref: gateway/http/cores-oauth-surface.ts (HTTP surface),
  * gateway/composition/wire-cores-surfaces.ts (tool registration),
  * gateway/cores/oauth-token-manager.ts, auth/secrets-store.ts.
@@ -31,6 +40,11 @@
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { asOwnerHandle, type ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApiKeyStore, ApiKeyStoreError, type ApiKeyProvider } from '@neutronai/auth/api-key-store.ts'
+import {
+  censusCredentialScope,
+  listOrphanedSecretSlots,
+  type CredentialScopeOrphanCount,
+} from '@neutronai/auth/credential-scope-reconcile.ts'
 import { metaLabel, parseGrantLabel, refreshLabel } from './oauth-token-manager.ts'
 import type {
   OAuthTokenManager,
@@ -61,6 +75,32 @@ export interface IntegrationsRegistryView {
   }>
 }
 
+/**
+ * The agent tool + HTTP action that moves credential rows scoped to a previous
+ * owner handle onto the boot handle. Named HERE (rather than in the tool module)
+ * so the status surface can point at it: a summary that says "orphaned" without
+ * naming the way out has fixed the cheap half of the card.
+ */
+export const MIGRATE_ORPHANED_ACTION = 'integrations_migrate_orphaned'
+
+/**
+ * Credential rows that exist but are scoped to a PREVIOUS owner handle — the
+ * difference between "not connected" and "connected, but this process cannot
+ * see it". Counts and handles only; never a secret value.
+ */
+export interface OrphanedCredentialsSummary {
+  /** Rows under a non-boot handle, summed across every swept credential table. */
+  total_rows: number
+  /** The distinct non-boot handles those rows sit under, sorted. */
+  stale_handles: string[]
+  /** Per-(table, handle) breakdown — `project_credentials` orphans show here too. */
+  tables: CredentialScopeOrphanCount[]
+  /** The action that repairs it (see {@link MIGRATE_ORPHANED_ACTION}). */
+  migrate_action: string
+  /** One human/agent-readable sentence, safe to print verbatim. */
+  message: string
+}
+
 /** A per-Core Google OAuth account slot + its live connection status. */
 export interface OAuthAccountIntegration extends OAuthTokenStatus {
   kind: 'oauth'
@@ -68,6 +108,13 @@ export interface OAuthAccountIntegration extends OAuthTokenStatus {
   scope: string
   /** Every bundled Core slug that declares this label. */
   core_slugs: string[]
+  /**
+   * `true` when this slot reads disconnected but a credential row for it exists
+   * under a previous owner handle — "scoped to a previous handle", not
+   * "not connected". A CONNECTED slot is never `orphaned` (a fresh boot-handle
+   * credential wins the slot; its stale twin is still counted in the summary).
+   */
+  orphaned: boolean
 }
 
 /** A standalone API-key slot + whether a key is currently stored. */
@@ -85,11 +132,19 @@ export interface ApiKeyIntegration {
   install_prompt: string
   /** `true` when a secret is currently stored for this label. */
   connected: boolean
+  /** See {@link OAuthAccountIntegration.orphaned}. */
+  orphaned: boolean
 }
 
 export interface IntegrationsStatus {
   oauth: OAuthAccountIntegration[]
   api_keys: ApiKeyIntegration[]
+  /**
+   * Non-null when credential rows are scoped to a previous owner handle. `null`
+   * means every credential row this instance can see is on the boot handle — so
+   * a `connected: false` slot really is "never connected".
+   */
+  orphaned_credentials: OrphanedCredentialsSummary | null
 }
 
 /** Stable error for known-label / value validation failures. */
@@ -252,18 +307,87 @@ export interface BuildIntegrationsStatusInput {
   tokens: OAuthTokenManager
   secretsStore: SecretsStore
   project_slug: string
+  /**
+   * Project DB — enables the `orphaned_credentials` summary + per-slot
+   * `orphaned` annotation (read-only census of the credential tables' scope
+   * columns). Optional so older callers keep compiling; both real call sites
+   * (the HTTP surface + the agent-native tools) supply it. Without it the
+   * status degrades to presence-only: `orphaned_credentials: null` and every
+   * slot `orphaned: false`.
+   */
+  db?: ProjectDb
+}
+
+/** The orphan census + the slot lookups derived from it, for one status build. */
+interface OrphanAnnotation {
+  summary: OrphanedCredentialsSummary | null
+  /** Services with an orphaned `oauth_token` grant row (meta/refresh rows excluded). */
+  services: Set<string>
+  /** Raw `byo_api_key` labels with an orphaned `secrets` row. */
+  apiKeyLabels: Set<string>
+}
+
+const NO_ORPHANS: OrphanAnnotation = {
+  summary: null,
+  services: new Set<string>(),
+  apiKeyLabels: new Set<string>(),
+}
+
+/**
+ * Census the credential tables against the boot handle and derive the per-slot
+ * lookups. Read-only: no writes, no decrypt, and the only `secrets` columns read
+ * are `kind`/`label` (slot identifiers this surface already renders).
+ */
+function buildOrphanAnnotation(db: ProjectDb, boot_handle: string): OrphanAnnotation {
+  const { stale_handles, orphan_counts } = censusCredentialScope(db, boot_handle)
+  if (stale_handles.length === 0) return NO_ORPHANS
+
+  const total_rows = orphan_counts.reduce((sum, c) => sum + c.rows, 0)
+  const summary: OrphanedCredentialsSummary = {
+    total_rows,
+    stale_handles,
+    tables: orphan_counts,
+    migrate_action: MIGRATE_ORPHANED_ACTION,
+    message:
+      `${total_rows} credential row(s) are scoped to a previous owner handle ` +
+      `(${stale_handles.join(', ')}), not missing — run the ${MIGRATE_ORPHANED_ACTION} ` +
+      `action to move them to '${boot_handle}'.`,
+  }
+
+  const services = new Set<string>()
+  const apiKeyLabels = new Set<string>()
+  for (const { kind, label } of listOrphanedSecretSlots(db, boot_handle)) {
+    if (kind === 'oauth_token') {
+      // The refresh/meta companions share the grant's label with a suffix; only
+      // the ACCESS row names the slot the panel renders.
+      if (label.endsWith(refreshLabel('')) || label.endsWith(metaLabel(''))) continue
+      services.add(parseGrantLabel(label).service)
+    } else if (kind === 'byo_api_key') {
+      apiKeyLabels.add(label)
+    }
+  }
+  return { summary, services, apiKeyLabels }
 }
 
 /**
  * Build the unified status. OAuth status comes from `OAuthTokenManager`
  * (live access/refresh/meta read); API-key `connected` is a presence check
  * against the `byo_api_key` rows — NO plaintext ever leaves this function.
+ *
+ * With `input.db` supplied, a slot that reads disconnected but has a credential
+ * row under a PREVIOUS owner handle is annotated `orphaned: true` and the status
+ * carries an `orphaned_credentials` summary naming the migrate action, so the
+ * surface never calls a wrong-scope miss "not connected" (acceptance (b)).
  */
 export async function buildIntegrationsStatus(
   input: BuildIntegrationsStatusInput,
 ): Promise<IntegrationsStatus> {
   const oauthSlots = collectOAuthSlots(input.registry)
   const apiKeySlots = collectAllApiKeySlots(input.registry)
+  const orphans =
+    input.db !== undefined
+      ? buildOrphanAnnotation(input.db, input.project_slug)
+      : NO_ORPHANS
 
   // One row per CONNECTED ACCOUNT. A service the owner has connected three
   // accounts to shows three rows, each independently disconnectable; a service
@@ -279,6 +403,9 @@ export async function buildIntegrationsStatus(
         ...status,
         scope: slot.scope,
         core_slugs: slot.core_slugs,
+        // A connected slot is never orphaned: a fresh boot-handle credential
+        // wins the slot, and the stale twin stays visible in the summary.
+        orphaned: !status.connected && orphans.services.has(status.service),
       })
     }
   }
@@ -292,6 +419,11 @@ export async function buildIntegrationsStatus(
 
   const api_keys: ApiKeyIntegration[] = []
   for (const [id, slot] of apiKeySlots) {
+    const storageLabel = slotSecretsLabel(id, slot)
+    // Presence is checked against the SECRETS label (which may differ from
+    // the public id for system slots), so an onboarding-set OpenAI key shows
+    // as connected here too.
+    const connected = present.has(storageLabel)
     api_keys.push({
       kind: 'api_key',
       label: id,
@@ -299,17 +431,15 @@ export async function buildIntegrationsStatus(
       core_slugs: slot.core_slugs,
       required: slot.required,
       install_prompt: slot.install_prompt,
-      // Presence is checked against the SECRETS label (which may differ from
-      // the public id for system slots), so an onboarding-set OpenAI key shows
-      // as connected here too.
-      connected: present.has(slotSecretsLabel(id, slot)),
+      connected,
+      orphaned: !connected && orphans.apiKeyLabels.has(storageLabel),
     })
   }
 
   // Deterministic ordering so UI + tests are stable.
   oauth.sort((a, b) => a.label.localeCompare(b.label))
   api_keys.sort((a, b) => a.label.localeCompare(b.label))
-  return { oauth, api_keys }
+  return { oauth, api_keys, orphaned_credentials: orphans.summary }
 }
 
 export interface SetApiKeyInput {
@@ -518,3 +648,6 @@ export async function disconnectOAuth(
 // Re-export the suffix helpers so callers constructing oauth row shapes
 // (tests, surfaces) don't have to import from oauth-token-manager too.
 export { metaLabel, refreshLabel }
+// Re-exported so consumers of `orphaned_credentials.tables` can type it without
+// reaching into the auth package.
+export type { CredentialScopeOrphanCount }

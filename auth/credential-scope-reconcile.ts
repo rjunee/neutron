@@ -184,24 +184,31 @@ interface HandleCountRow {
   n: number
 }
 
-/**
- * Reconcile the credential tables' scope columns with the handle this process
- * just booted as. See the module header for the policy; the short version:
- * unambiguous ⇒ migrate in one transaction, ambiguous ⇒ zero writes.
- *
- * Never decrypts anything and never returns secret material.
- */
-export async function reconcileCredentialScope(
-  db: ProjectDb,
-  boot_handle: string,
-): Promise<CredentialScopeReconcileResult> {
-  const swept = credentialScopeSweepColumns().filter(({ table }) => tableExists(db, table))
+/** Per-table `handle → row count` maps plus the derived handle partition. */
+interface CredentialScopeCensus {
+  /** One entry per SWEPT (existing) table, in `credentialScopeSweepColumns` order. */
+  tables: Array<{ table: string; column: string; counts: Map<string, number> }>
+  /** Distinct non-boot handles seen anywhere, sorted. */
+  stale_handles: string[]
+  /** Total rows already sitting under the boot handle, across every swept table. */
+  boot_handle_rows: number
+}
 
-  // Per-table handle → row-count census. One cheap GROUP BY per table; no
-  // ciphertext column is ever read.
-  const census: Array<{ table: string; column: string; counts: Map<string, number> }> = []
+/**
+ * The raw census: one cheap GROUP BY per existing swept table. No ciphertext
+ * column is ever read, nothing is decrypted, and nothing is written — this is
+ * the shared read-only core behind both {@link reconcileCredentialScope} (which
+ * needs the per-table counts to drive its move) and {@link censusCredentialScope}
+ * (which the LIVE integrations status surface calls on every read).
+ */
+function censusCredentialScopeTables(
+  db: Pick<ProjectDb, 'all' | 'get'>,
+  boot_handle: string,
+): CredentialScopeCensus {
+  const swept = credentialScopeSweepColumns().filter(({ table }) => tableExists(db, table))
+  const tables: CredentialScopeCensus['tables'] = []
   const staleHandles = new Set<string>()
-  let bootHandleRows = 0
+  let boot_handle_rows = 0
 
   for (const { table, column } of swept) {
     const t = assertIdent(table, 'table')
@@ -214,29 +221,102 @@ export async function reconcileCredentialScope(
     for (const row of rows) {
       if (row.handle === null) continue
       counts.set(row.handle, row.n)
-      if (row.handle === boot_handle) bootHandleRows += row.n
+      if (row.handle === boot_handle) boot_handle_rows += row.n
       else staleHandles.add(row.handle)
     }
-    census.push({ table, column, counts })
+    tables.push({ table, column, counts })
   }
 
-  if (staleHandles.size === 0) return { action: 'noop' }
+  return { tables, stale_handles: [...staleHandles].sort(), boot_handle_rows }
+}
 
-  const stale_handles = [...staleHandles].sort()
+/** Flatten a census into one `(table, stale handle, rows)` row per non-empty pair. */
+function orphanCountsOf(census: CredentialScopeCensus): CredentialScopeOrphanCount[] {
+  const orphan_counts: CredentialScopeOrphanCount[] = []
+  for (const { table, counts } of census.tables) {
+    for (const handle of census.stale_handles) {
+      const rows = counts.get(handle)
+      if (rows !== undefined && rows > 0) orphan_counts.push({ table, handle, rows })
+    }
+  }
+  return orphan_counts
+}
+
+/**
+ * READ-ONLY census of the credential tables' scope columns against the boot
+ * handle — the same sweep {@link reconcileCredentialScope} runs at boot, exposed
+ * for the LIVE status surface (`buildIntegrationsStatus`) so a wrong-scope miss
+ * can report "scoped to a previous handle" instead of "not connected"
+ * (acceptance (b), card 2026-08-14).
+ *
+ * Writes nothing, decrypts nothing, and returns only table names, handles and
+ * counts.
+ */
+export function censusCredentialScope(
+  db: ProjectDb,
+  boot_handle: string,
+): {
+  stale_handles: string[]
+  boot_handle_rows: number
+  orphan_counts: CredentialScopeOrphanCount[]
+} {
+  const census = censusCredentialScopeTables(db, boot_handle)
+  return {
+    stale_handles: census.stale_handles,
+    boot_handle_rows: census.boot_handle_rows,
+    orphan_counts: orphanCountsOf(census),
+  }
+}
+
+/**
+ * The `(kind, label)` of every `secrets` row scoped to a NON-boot handle.
+ *
+ * `kind`/`label` are SLOT IDENTIFIERS the integrations panel already renders
+ * (`google_calendar`, `tavily`) — never secret material; the `ciphertext` column
+ * is deliberately not in the SELECT. This exists for the LIVE status surface
+ * ONLY: it must never be journaled to system events, because the audit rows stay
+ * counts-and-handles-only per acceptance (d).
+ *
+ * Returns `[]` when the `secrets` table predates this DB's migration level.
+ */
+export function listOrphanedSecretSlots(
+  db: Pick<ProjectDb, 'all' | 'get'>,
+  boot_handle: string,
+): Array<{ kind: string; label: string }> {
+  if (!tableExists(db, 'secrets')) return []
+  return db.all<{ kind: string; label: string }, [string]>(
+    'SELECT kind, label FROM secrets WHERE project_slug IS NOT NULL AND project_slug <> ?',
+    [boot_handle],
+  )
+}
+
+/**
+ * Reconcile the credential tables' scope columns with the handle this process
+ * just booted as. See the module header for the policy; the short version:
+ * unambiguous ⇒ migrate in one transaction, ambiguous ⇒ zero writes.
+ *
+ * Never decrypts anything and never returns secret material.
+ */
+export async function reconcileCredentialScope(
+  db: ProjectDb,
+  boot_handle: string,
+): Promise<CredentialScopeReconcileResult> {
+  const census = censusCredentialScopeTables(db, boot_handle)
+  const { stale_handles } = census
+
+  if (stale_handles.length === 0) return { action: 'noop' }
 
   // THE UNAMBIGUOUS PRECONDITION — all three clauses, none optional (see the
   // rotation hazard in the module header): exactly one stale handle, it is not
   // the boot handle (guaranteed by construction of the set), and there are ZERO
   // rows under the boot handle in EVERY swept table.
-  if (stale_handles.length !== 1 || bootHandleRows > 0) {
-    const orphan_counts: CredentialScopeOrphanCount[] = []
-    for (const { table, counts } of census) {
-      for (const handle of stale_handles) {
-        const rows = counts.get(handle)
-        if (rows !== undefined && rows > 0) orphan_counts.push({ table, handle, rows })
-      }
+  if (stale_handles.length !== 1 || census.boot_handle_rows > 0) {
+    return {
+      action: 'orphaned',
+      boot_handle,
+      stale_handles,
+      orphan_counts: orphanCountsOf(census),
     }
-    return { action: 'orphaned', boot_handle, stale_handles, orphan_counts }
   }
 
   const stale = stale_handles[0]!
@@ -249,7 +329,7 @@ export async function reconcileCredentialScope(
   // to orphan reporting rather than to a half-moved credential set.
   const moved = await db.transaction(async (tx) => {
     const out: CredentialScopeMove[] = []
-    for (const { table, column, counts } of census) {
+    for (const { table, column, counts } of census.tables) {
       const rows = counts.get(stale)
       if (rows === undefined || rows === 0) continue
       const t = assertIdent(table, 'table')

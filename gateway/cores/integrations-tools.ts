@@ -79,7 +79,7 @@ export function buildIntegrationsTools(
   const listTool: ToolRegistration = {
     name: 'integrations_list',
     description:
-      'List every connected integration: per-Core Google OAuth accounts and standalone API-key slots, each with its connection status. Returns no secret values.',
+      'List every connected integration: per-Core Google OAuth accounts and standalone API-key slots, each with its connection status. Also reports credentials scoped to a previous owner handle as `orphaned` (needs migration) rather than disconnected. Returns no secret values.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
     output_schema: { type: 'object' },
     capability_required: 'read:project_data',
@@ -90,6 +90,7 @@ export function buildIntegrationsTools(
         tokens: deps.tokens,
         secretsStore: deps.secretsStore,
         project_slug: deps.project_slug,
+        db: deps.db,
       }),
   }
 
