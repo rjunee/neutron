@@ -173,6 +173,33 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // ENDED WITHOUT AN APPROVED REVIEW, CAUSE UNKNOWN — checked BEFORE the review branch
+  // below, which shares the "without argus approve" token and would otherwise swallow it.
+  //
+  // WHY THE ORDER MATTERS. The review summary below says the reviewer "had blocking
+  // findings". For a run that stopped at round 1 with no reviewer having run, that is FALSE
+  // — and confidently so: it sends the reader to look at review quality when the build never
+  // started. That happened three times on 2026-08-13 (an unresolved CODEX_HOME, a truncated
+  // build brief, an unauthenticated push).
+  //
+  // WHY THIS SUMMARY CLAIMS SO LITTLE. Codex review round 2 killed a stronger one. It read
+  // "the build stopped before the review could finish… a problem with the build pipeline",
+  // which is false for the below-ceiling exits that DID review: a round-2 lost fix has round
+  // 1's blocking findings behind it. This branch covers exits whose causes genuinely differ
+  // (early crash, lost fix, no-diff fix, infra-only synthesis stop) and the workflow emits no
+  // terminal cause to tell them apart, so the ONE thing true of all of them is all it says.
+  // `klass: 'unknown'` is the honest class — not a hedge, a measurement of what we know.
+  //
+  // THE TWO HALVES MUST MOVE TOGETHER — a reason that stops matching this string silently
+  // reverts the operator to the old, wrong story.
+  if (r.includes('inner workflow ended at round')) {
+    return {
+      klass: 'unknown',
+      summary: 'The build ended without an approved review, so I did not merge it.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
   // Argus still had blocking findings after the round budget — a review outcome.
   if (r.includes('without argus approve') || r.includes('request_changes') || r.includes('exhausted')) {
     return {
