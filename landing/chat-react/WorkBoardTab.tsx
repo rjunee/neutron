@@ -261,6 +261,22 @@ function formatCompletedShort(completed_at: string | null): string {
 }
 
 /**
+ * The `#NNN` PR tag, shared by the live meta line (`WorkBoardRow`) and the
+ * completed-history row (both need the identical clickable/plain-text shape).
+ * Clickable (opens GitHub in a new tab) when a URL resolved; plain text when
+ * the repo's web URL couldn't be resolved — never a dead or wrong link.
+ */
+function PrTag({ pr, prUrl }: { pr: number; prUrl: string | null }): React.JSX.Element {
+  return prUrl !== null ? (
+    <a className="cwb-pr" href={prUrl} target="_blank" rel="noopener noreferrer" title={`Open PR #${pr} on GitHub`}>
+      #{pr}
+    </a>
+  ) : (
+    <span className="cwb-pr">#{pr}</span>
+  )
+}
+
+/**
  * A live-activity roll-up of the board, consumed by the desktop slide-out pane
  * (PR-4) to drive its header count + auto-open/close:
  *   - `running` = items bound to a live (non-terminal) trident run.
@@ -855,10 +871,19 @@ export function WorkBoardTab({
                             </button>
                           )}
                         </div>
-                        {/* A completed row always carries its "Merged · <date>" on line 2. */}
+                        {/* A completed row always carries its "Merged · <date>" on line 2,
+                            with the durable #NNN (survives detach) ahead of it when known. */}
                         <div className="cwb-row-meta">
                           <span className="cwb-date">
-                            Merged · {formatCompletedShort(it.completed_at)}
+                            {it.pr !== null && it.pr !== undefined ? (
+                              <>
+                                {'Merged '}
+                                <PrTag pr={it.pr} prUrl={it.pr_url ?? null} />
+                                {` · ${formatCompletedShort(it.completed_at)}`}
+                              </>
+                            ) : (
+                              <>Merged · {formatCompletedShort(it.completed_at)}</>
+                            )}
                           </span>
                         </div>
                       </li>
@@ -939,11 +964,18 @@ function WorkBoardRow({
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
+  // Live source wins; the durable item columns cover the detached/terminal case
+  // (`run_progress` is gone once reconcile detaches a finished run). `?? null`
+  // normalizes `undefined` from the optional item fields.
+  const pr = item.run_progress?.pr ?? item.pr ?? null
+  const prUrl = item.run_progress?.pr_url ?? item.pr_url ?? null
 
   // Item 4 — the phase TAG (+ round) moves to a SECOND line, muted, but ONLY when
-  // the item has a run to report on. A bare queued/not-started card (no bound run
-  // → no tag) stays single-line: just the title. `hasStatus` gates the meta line.
-  const hasStatus = tag !== null
+  // the item has a run to report on OR a durable PR to show (a detached
+  // failed/done card with a durable PR must still get its meta line). A bare
+  // queued/not-started card (no bound run, no PR) stays single-line: just the
+  // title. `hasStatus` gates the meta line.
+  const hasStatus = tag !== null || pr !== null
 
   // Item 2 (a11y) — when the inline confirm closes via Cancel, return focus to the
   // ✕ that opened it (on Confirm the row unmounts, so this is a no-op there).
@@ -1074,6 +1106,7 @@ function WorkBoardRow({
       </div>
       {hasStatus ? (
         <div className="cwb-row-meta">
+          {pr !== null ? <PrTag pr={pr} prUrl={prUrl} /> : null}
           {tag !== null ? <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span> : null}
           {round !== null ? <span className="cwb-round">{round}</span> : null}
           {failReason !== null ? (
