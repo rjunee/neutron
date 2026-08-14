@@ -83,6 +83,21 @@ export type SystemEventName =
   // pre-repair snapshot lives. Emitted at most once per boot, and only when
   // something actually moved.
   | 'instance_scope_rekeyed'
+  // Credential-scope reconciler (`auth/credential-scope-reconcile.ts`). Same
+  // precedent as `instance_scope_rekeyed` above: REPAIR/VISIBILITY rows, not
+  // silent-degradation entries.
+  //   - `credential_scope_migrated` — credential rows frozen under a
+  //     pre-provisioning owner handle were unambiguously moved onto the boot
+  //     handle (a repair to the owner's database; the durable record of which
+  //     tables moved and how many rows).
+  //   - `credential_scope_orphaned` — the AMBIGUOUS case: rows under two
+  //     handles, or stale rows coexisting with boot-handle rows. NOTHING was
+  //     written; the row exists so a scope miss is distinguishable from "never
+  //     connected", which is the expensive half of the defect.
+  // Payload is COUNTS + HANDLES + TABLE NAMES only — never a secret kind/label,
+  // never ciphertext, never plaintext.
+  | 'credential_scope_migrated'
+  | 'credential_scope_orphaned'
 
 export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'gbrain_unavailable',
@@ -99,6 +114,8 @@ export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'session_size_alert',
   'rate_limit_banner',
   'instance_scope_rekeyed',
+  'credential_scope_migrated',
+  'credential_scope_orphaned',
 ]
 
 /** What a degrade site passes to {@link emitSystemEventSafe}. */

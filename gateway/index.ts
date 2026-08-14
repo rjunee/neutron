@@ -6,6 +6,7 @@ import {
   reconcileInstanceScopeOnProjectDb,
   type ScopeReconcileResult,
 } from '@neutronai/migrations/scope-rekey.ts'
+import { reconcileCredentialScope } from '@neutronai/auth/credential-scope-reconcile.ts'
 import { shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import {
   ProjectDb,
@@ -339,6 +340,70 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
         },
       }),
     )
+  }
+
+  // CREDENTIAL SCOPE RECONCILIATION (card 2026-08-14) — the OTHER half of the
+  // scope problem, and the reason it must run separately from #451 above.
+  // `secrets.project_slug` / `project_credentials.owner_slug` hold the FROZEN
+  // owner handle, so a credential written BEFORE provisioning froze a different
+  // handle (`dev` on a dogfood box) is unreachable once the unit boots as
+  // `juno` — and the #451 reconciler cannot see it, because the ledger AGREES
+  // with the boot slug and its every-boot path is a single SELECT. Unambiguous
+  // (one stale handle, zero rows under the boot handle) ⇒ migrate; ambiguous ⇒
+  // touch nothing and journal the orphan counts, so the integrations surface
+  // can say "scoped to a previous handle" instead of "not connected".
+  //
+  // DELIBERATE CONTRAST WITH #451 ABOVE: that one FAILS THE BOOT, because
+  // serving half a database is its defect. This one NEVER fails the boot. This
+  // box is headless — refusing to boot over unreachable credentials removes the
+  // only surface that could explain why, and the owner discovers it as
+  // "everything is dead". A throw here degrades to "credentials stay orphaned",
+  // which the surface reports; no cleanup cascade runs.
+  try {
+    const credentialScope = await reconcileCredentialScope(db, project_slug)
+    if (credentialScope.action === 'migrated') {
+      log.warn('credential_scope_migrated', {
+        to: credentialScope.boot_handle,
+        from: credentialScope.stale_handles.join(','),
+        tables: credentialScope.moved.map((m) => `${m.table}:${m.rows}`).join(' '),
+      })
+      fireAndForget(
+        'gateway.credential_scope_journal',
+        systemEventSink.record({
+          event: 'credential_scope_migrated',
+          module: 'gateway',
+          level: 'warn',
+          project_slug,
+          payload: {
+            from: credentialScope.stale_handles,
+            tables: credentialScope.moved,
+          },
+        }),
+      )
+    } else if (credentialScope.action === 'orphaned') {
+      log.warn('credential_scope_orphaned', {
+        boot_handle: credentialScope.boot_handle,
+        handles: credentialScope.stale_handles.join(','),
+        tables: credentialScope.orphan_counts
+          .map((o) => `${o.table}@${o.handle}:${o.rows}`)
+          .join(' '),
+      })
+      fireAndForget(
+        'gateway.credential_scope_journal',
+        systemEventSink.record({
+          event: 'credential_scope_orphaned',
+          module: 'gateway',
+          level: 'warn',
+          project_slug,
+          payload: {
+            from: credentialScope.stale_handles,
+            orphan_counts: credentialScope.orphan_counts,
+          },
+        }),
+      )
+    }
+  } catch (err) {
+    log.error('credential_scope_reconcile_failed', { error: errText(err) })
   }
 
   // Compose the module graph if the caller supplied a composer. We capture
