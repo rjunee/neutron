@@ -22,6 +22,11 @@
 #   pr <int>                 → pr=<int>                          (numeric)
 #   branch <str>             → branch='<str>'
 #   inner_checkpoint <str>   → inner_checkpoint='<str>'
+#   inner_checkpoint_head <str>
+#                            → inner_checkpoint_head='<str>'
+#   inner_findings_file <path>
+#                            → inner_checkpoint_findings=CAST(readfile('<path>')
+#                                                             AS TEXT)
 #   subagent_status <str>    → subagent_status='<str>'          (LIVENESS: frozen)
 #   inner_verdict <str>      → inner_verdict='<str>'
 #   inner_result_file <path> → inner_result=CAST(readfile('<path>') AS TEXT),
@@ -135,8 +140,22 @@ while [ "$#" -gt 0 ]; do
       # LIVENESS — frozen on a terminal row.
       sets+=("subagent_status=$(frozen subagent_status "'$(sql_quote "$value")'")")
       ;;
-    branch | inner_checkpoint | inner_verdict)
+    branch | inner_checkpoint | inner_verdict | inner_checkpoint_head)
+      # `inner_checkpoint_head` is the branch head OID the checkpoint APPLIES TO,
+      # and the workflow writes it in the SAME invocation as `inner_checkpoint`
+      # so the name and the commit can never drift apart. An EMPTY value is a
+      # legitimate write, not a no-op: it CLEARS a previous checkpoint's OID so a
+      # phase that could not report a sha never inherits the last one's.
       sets+=("$field='$(sql_quote "$value")'")
+      ;;
+    inner_findings_file)
+      # The synthesised findings the checkpoint was recorded with, loaded through
+      # the same readfile()-CAST-AS-TEXT indirection `inner_result_file` uses so
+      # the JSON's own quotes can never break the sqlite argument. A missing file
+      # makes readfile() yield NULL → no recorded findings → a resume re-reviews
+      # rather than fixing blind. NOT a liveness column: no freeze, and no
+      # `subagent_status` side effect (a mid-run checkpoint is not a result).
+      sets+=("inner_checkpoint_findings=CAST(readfile('$(sql_quote "$value")') AS TEXT)")
       ;;
     inner_result_file)
       f="$(sql_quote "$value")"

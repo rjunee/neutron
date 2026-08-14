@@ -69,6 +69,22 @@ export interface InnerLoopInput {
   max_rounds: number
   /** Last persisted `inner_checkpoint` (idempotent crash-resume), or null. */
   resume_checkpoint?: string | null
+  /**
+   * MID-LOOP RESUME — the persisted `inner_checkpoint_head`: the branch head OID
+   * the checkpoint above was RECORDED AGAINST. The workflow compares it with the
+   * live branch head and only skips forward when they are the SAME commit, so a
+   * verdict is never carried across a change in the thing it was a verdict about.
+   * Null (a checkpoint written before the OID was recorded) → the workflow rebuilds
+   * and re-reviews, exactly as it did before this existed.
+   */
+  resume_checkpoint_head?: string | null
+  /**
+   * MID-LOOP RESUME — the persisted `inner_checkpoint_findings` (raw JSON as
+   * stored). Decoded by `parseCheckpointFindings` before it reaches the workflow,
+   * where it seeds a resumed fix round. Null/unparseable → the workflow re-reviews
+   * instead of sending Forge in with nothing to fix.
+   */
+  resume_findings?: string | null
   /** Per-project Codex credential dir (CODEX_HOME) for the OPTIONAL cross-model
    *  review, or null when not configured. Threaded into the workflow args so the
    *  codex reviewer runs `trident/codex-review.sh` with this CODEX_HOME; null → the
@@ -280,6 +296,13 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // (#541).
     worktreeCleanupScript: WORKTREE_CLEANUP_SCRIPT_PATH,
     resumeCheckpoint: input.resume_checkpoint ?? null,
+    // MID-LOOP RESUME — the OID that checkpoint was recorded against, and the
+    // findings recorded with it. The workflow uses the OID to decide whether the
+    // prior phase's outcome is about the code now on the branch (skip forward) or
+    // about different code (re-review), and it is the ONLY value a resumed run may
+    // take a `reviewedHead` from (#545). Null/empty → the workflow rebuilds.
+    resumeCheckpointHead: input.resume_checkpoint_head ?? null,
+    resumeFindings: parseCheckpointFindings(input.resume_findings),
     // Per-project CODEX_HOME for the optional cross-model review; null → the
     // workflow treats codex as not-connected and reviews Claude-only.
     codexHome: input.codex_home ?? null,
@@ -446,6 +469,29 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
         ? Math.max(0, Math.trunc(p.remainingTasks))
         : null,
   }
+}
+
+/**
+ * Decode the findings a checkpoint was recorded with
+ * (`code_trident_runs.inner_checkpoint_findings`) for the resumed fix round.
+ *
+ * Returns `[]` for null/empty/unparseable/non-array content, and that empty array
+ * is load-bearing rather than merely tidy: the workflow treats "no recorded
+ * findings" as a reason to RE-REVIEW instead of skipping forward, so a column
+ * written by an older or garbled writer degrades into paying for the review again
+ * — never into a fix round with nothing to fix. Entries are passed through
+ * verbatim (the workflow embeds them in the fix prompt exactly as the synthesis
+ * produced them); this decoder's only job is to guarantee an array.
+ */
+export function parseCheckpointFindings(raw: string | null | undefined): unknown[] {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  return Array.isArray(parsed) ? parsed : []
 }
 
 function normalizeVerdict(v: unknown): 'APPROVE' | 'REQUEST_CHANGES' | null {

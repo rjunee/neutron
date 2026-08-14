@@ -123,7 +123,7 @@ export function deriveStepLabel(phase: TridentPhase, inner_checkpoint: string | 
   // #563 — the inner loop found the PR already MERGED and stopped there. The run is
   // finished in substance; the outer loop stamps `done` on its next tick.
   if (cp === 'pr-merged') return 'merging'
-  if (cp === 'argus-request-changes') return 'fixing' // changes asked → fix building
+  if (cp === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(cp)) return 'fixing'
   if (cp === 'forge-done') return 'reviewing' // build done → review running
   if (/^fix-round-\d+$/.test(cp)) return 'reviewing' // fix built → re-review running
   // `inner-error` / any unrecognised checkpoint → still building (about to fail).
@@ -173,9 +173,11 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
       // #563 — the PR is merged; the outer loop has yet to stamp `done`. Saying
       // 'reviewing' here would show a shipped change as still being read.
       phase_label = 'merged'
-    } else if (cp === 'argus-request-changes') {
-      // Review asked for changes → a fix round (round ≥ 2) is starting.
-      round = Math.max(round, 2)
+    } else if (cp === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(cp)) {
+      // Review asked for changes → the following fix round is starting. New
+      // checkpoints carry the spent review round; the legacy name floors at 2.
+      const reviewedRound = /^argus-request-changes-round-(\d+)$/.exec(cp)
+      round = Math.max(round, reviewedRound === null ? 2 : Number(reviewedRound[1]) + 1)
       phase_label = 'building'
     }
     // `inner-error` / any other checkpoint → keep the base label (about to fail).

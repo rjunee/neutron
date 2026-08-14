@@ -258,8 +258,8 @@ describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
 })
 
 describe('inner-workflow.mjs — idempotent crash-resume (C2)', () => {
-  test("resumeCheckpoint === 'argus-approved' skips build+review", () => {
-    expect(SRC).toContain("resumeCheckpoint === 'argus-approved'")
+  test("a classified approved resume skips build+review", () => {
+    expect(SRC).toContain("if (resumeMode === 'approved')")
     expect(SRC).toContain('skipping build+review')
   })
 
@@ -296,7 +296,7 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
   // check completely intact — the same trap `round-landed.test.ts` records having
   // been caught by twice already.
   test("round 1 pins to Forge's reported commit sha, fixed BEFORE the review that judges it", () => {
-    const decl = SRC.indexOf('let reviewedHead = branchHead')
+    const decl = SRC.indexOf('reviewedHead = branchHead')
     const firstReview = SRC.indexOf('runReviewRound(diffFile, round, pr)')
     expect(decl).toBeGreaterThan(-1)
     expect(firstReview).toBeGreaterThan(decl)
@@ -333,7 +333,7 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
     // round going through one function is what stops a fix round from silently
     // landing on a different builder than the one that opened the branch.
     expect(SRC).toContain('const fix = await forgeAgent(')
-    expect(SRC).toContain(': await forgeAgent(')
+    expect(SRC).toContain('const forge = await forgeAgent(')
   })
 
   test('the terminal result carries `reviewedHead` (the field merge.ts pins on)', () => {
@@ -343,7 +343,9 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
     expect(SRC.slice(start, end)).toContain('reviewedHead,')
   })
 
-  // THE CRASH-RESUME SHORTCUT RECORDS NO HEAD, ON PURPOSE.
+  // The matching-head resume path is covered behaviorally in
+  // inner-workflow-resume.test.ts. It must carry the RECORDED head, never the
+  // live probe, so the outer merge pins the commit that was actually reviewed.
   //
   // It runs only when the prior process reached 'argus-approved' and its terminal
   // result was never harvested — and the terminal result is the ONLY place a
@@ -352,13 +354,13 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
   // unreviewed commit: reviewers approve A, B is pushed into the crash window,
   // resume reads B, and the merge pins to B and SUCCEEDS. The pin then vouches for
   // a commit nobody read, which is worse than no pin at all.
-  describe('the crash-resume shortcut records NO reviewed head (fail-closed)', () => {
+  describe('the crash-resume shortcut carries only the recorded reviewed head', () => {
     // The resume block's CODE, sliced out so these assertions cannot be satisfied
     // by an unrelated part of the file. Comment lines are stripped: the docblock
     // there names `reviewedHead` to explain why it is deliberately absent, and a
     // naive check would fail on the documentation of the very fix it verifies.
     const resumeBlock = (): string => {
-      const at = SRC.indexOf("if (resumeCheckpoint === 'argus-approved') {")
+      const at = SRC.indexOf("if (resumeMode === 'approved') {")
       expect(at).toBeGreaterThan(-1)
       const end = SRC.indexOf('return resumeResult', at)
       expect(end).toBeGreaterThan(at)
@@ -368,10 +370,10 @@ describe('inner-workflow.mjs — #545: the reviewed head is the COMMIT THE DIFF 
         .join('\n')
     }
 
-    test('it does NOT probe the branch head and pass it off as reviewed', () => {
+    test('it pins from the recorded checkpoint rather than the live probe', () => {
       const block = resumeBlock()
-      expect(block).not.toContain('readBranchHead')
-      expect(block).not.toContain('reviewedHead')
+      expect(block).toContain('reviewedHead: recordedResumeHead')
+      expect(block).not.toContain('reviewedHead: currentHeadAtResume')
     })
 
     test('the resume result omits the field entirely, so `reviewedHeadOid` yields null', () => {

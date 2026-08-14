@@ -113,6 +113,7 @@ async function runWorkflow(script: Script): Promise<RunOut> {
     }
     // The branch moved iff a Forge round ran, so a fix round LANDS and the loop can
     // reach its second review (`roundLanded`).
+    if (label === 'head-probe-round-resume') return { head: '0123456789abcdef0123456789abcdef01234567' }
     if (label.startsWith('head-probe-round-')) return { head: `sha-${calls['forge'] ?? 0}` }
     return ''
   }

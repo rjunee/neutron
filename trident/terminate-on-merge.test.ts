@@ -253,7 +253,7 @@ describe('the loop terminates ON the merge, not on a later observation of it', (
   test('round 1 asks BEFORE the review panel is dispatched', () => {
     // The panel is the expensive half (five reviewers, one of them an 18-minute
     // subprocess). Asking after it has already bought most of what is being saved.
-    expect(at(R1_PROBE)).toBeLessThan(at('let synthesis = await runReviewRound('))
+    expect(at(R1_PROBE)).toBeLessThan(at('runReviewRound(diffFile, round, pr)'))
   })
 
   test('round 1 asks BEFORE the Ralph re-fire and BEFORE the empty-build throw', () => {
@@ -262,7 +262,7 @@ describe('the loop terminates ON the merge, not on a later observation of it', (
     // legitimately produces no diff — the throw would record that shipped work as a
     // failure, so the merge question must be settled first.
     expect(at(R1_PROBE)).toBeLessThan(at('if (ralph === true && ralphRemaining > 0)'))
-    expect(at(R1_PROBE)).toBeLessThan(at("if (forgeSha === '' || forgeDiff === '')"))
+    expect(at(R1_PROBE)).toBeLessThan(at("if (branchHead === '' || diffFile === '')"))
   })
 
   test('the fix loop asks BEFORE it re-reviews and BEFORE it blames the round', () => {
@@ -285,9 +285,7 @@ describe('the loop terminates ON the merge, not on a later observation of it', (
   test('a resume after a recorded merge does NOT rebuild', () => {
     // The prior process wrote `pr-merged` and may have died before the harvest. A
     // re-fire must not re-enter the build: the branch is gone and the change shipped.
-    expect(at("if (resumeCheckpoint === 'pr-merged')")).toBeLessThan(
-      at("if (resumeCheckpoint === 'argus-approved')"),
-    )
+    expect(at("if (resumeMode === 'merged')")).toBeLessThan(at("if (resumeMode === 'approved')"))
   })
 
   test('the probe is one deterministic command, and the model interprets nothing', () => {
