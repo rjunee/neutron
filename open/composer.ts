@@ -499,6 +499,10 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
+import {
+  withDerivedInlineActive,
+  type InlineEvidenceReader,
+} from '@neutronai/work-board/inline-activity.ts'
 import { buildNexusReaderSeam } from './wiring/nexus-reader-seam.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
@@ -2231,6 +2235,9 @@ export function buildOpenGraphComposer(
     const GENERAL_RAIL_KEY = '__general__'
     const railChatKey = (project_id?: string): string =>
       project_id !== undefined && project_id.length > 0 ? project_id : GENERAL_RAIL_KEY
+    // Same late-binding shape as buildClarifyPoster: these rail/WS closures are
+    // defined before ActivityInspector, but dereference the holder at fire time.
+    const inlineEvidenceReader: InlineEvidenceReader = {}
     // M1 UX REDESIGN — the rail-redesign per-project derived fields
     // (`activity` / `preview` / `preview_from` / `live_runs`). Pure derivation in
     // `open/project-rail.ts`; here we only COLLECT the signals from the project's
@@ -2252,7 +2259,12 @@ export function buildOpenGraphComposer(
       try {
         const scopeKey = workBoardScopeKey(project_slug, project_id)
         const nowMs = Date.now()
-        const items = workBoardStore.list(scopeKey)
+        const items = withDerivedInlineActive(
+          workBoardStore.list(scopeKey),
+          inlineEvidenceReader,
+          inspectorScopeKey(project_id),
+          nowMs,
+        )
         // Item-level signals (pure, unit-tested via scanItemsForRailSignals):
         // catches runless-but-failed items (cleared link / research/dispatch)
         // AND still-bound terminal-failed runs. See open/project-rail.ts.
@@ -3701,7 +3713,12 @@ export function buildOpenGraphComposer(
         const frame: AppWsOutboundWorkBoardChanged = {
           v: 1,
           type: 'work_board_changed',
-          items: workBoardStore.list(changedKey).map((it) => {
+          items: withDerivedInlineActive(
+            workBoardStore.list(changedKey),
+            inlineEvidenceReader,
+            inspectorScopeKey(framePid),
+            nowMs,
+          ).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
             const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
             return {
@@ -4025,6 +4042,8 @@ export function buildOpenGraphComposer(
         }
       },
     })
+    inlineEvidenceReader.lastRealActivityAt = (scope): number =>
+      activityInspector.lastRealActivityAt(scope)
     // The tool tap: `activity-tap.ts` (a Pre/PostToolUse hook running in the CC
     // subprocess) POSTs each tool start/finish to the substrate sink's `/activity`
     // route, which dispatches this closure. THIS is where the panel's real content

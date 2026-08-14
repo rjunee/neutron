@@ -51,3 +51,27 @@ export function deriveInlineActive(
   // R4 mutant: fresh evidence activates current inline work without requiring a flag write.
   return item.inline_active === true || item.status === 'in_progress'
 }
+
+/** Late-bound evidence seam. The composer defines this holder BEFORE the
+ *  ActivityInspector exists and binds `lastRealActivityAt` after construction;
+ *  an unset holder reads as evidence 0 => never active (fail-soft, and exactly
+ *  the correct post-restart semantics: a crashed session's stale flag heals). */
+export interface InlineEvidenceReader {
+  lastRealActivityAt?: (scope: string) => number
+}
+
+/** Map a board's items to carry the DERIVED `inline_active` on the wire.
+ *  Cost bound (acceptance e): ONE O(1) evidence read per board, zero per extra
+ *  row, no I/O — never call the reader inside the per-item loop. */
+export function withDerivedInlineActive<T extends InlineActivityScanItem>(
+  items: readonly T[],
+  reader: InlineEvidenceReader,
+  scope: string,
+  now: number,
+): T[] {
+  const last_real_activity_at = reader.lastRealActivityAt?.(scope) ?? 0
+  return items.map((it) => ({
+    ...it,
+    inline_active: deriveInlineActive(it, { last_real_activity_at, now }),
+  }))
+}
