@@ -57,6 +57,7 @@ import { modelTierRegistry } from './model-tiers.ts'
 import { parsePhaseModelConfig } from './phase-models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
+import { writeBriefParts, type BriefParts } from './brief-parts.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -197,6 +198,8 @@ export interface BuildWorkflowFirerOptions {
   /** How long the LAUNCHING turn may take to settle (fire + reply). Default 3 min
    *  — generous for a cold-spawn fire turn; NOT the build budget. */
   settle_timeout_ms?: number
+  /** Launcher-side by-path brief writer; injectable so failure fallback is testable. */
+  write_brief_parts?: typeof writeBriefParts
 }
 
 /** The default abs path of the sibling inner-workflow script. */
@@ -254,7 +257,10 @@ export const WORKFLOW_FIRE_TOOL_NAMES = [
  * `inner-workflow.mjs` `args` destructure exactly. `runId` correlates the
  * workflow's `inner_result`/`inner_checkpoint` writes back to THIS row.
  */
-export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown> {
+export function buildWorkflowArgs(
+  input: InnerLoopInput,
+  briefParts?: BriefParts | null,
+): Record<string, unknown> {
   const run = input.run
   return {
     repoPath: run.repo_path,
@@ -336,6 +342,9 @@ export function buildWorkflowArgs(input: InnerLoopInput): Record<string, unknown
     // behaviour, which is exactly the kind of noise that makes a payload hard to
     // trust when something does go wrong.
     ...phaseModelArgs(input.phase_models),
+    // Like phaseModels, omit an absent manifest entirely: legacy callers and
+    // existing workflow args remain byte-identical until the by-path path exists.
+    ...(briefParts ? { briefParts } : {}),
   }
 }
 
@@ -391,8 +400,12 @@ function phaseModelArgs(
  * for the workflow to finish. The workflow runs in the background and writes its
  * own typed result to the DB; this turn's only job is to FIRE it and settle.
  */
-export function buildFireWorkflowPrompt(scriptPath: string, input: InnerLoopInput): string {
-  const argsJson = JSON.stringify(buildWorkflowArgs(input))
+export function buildFireWorkflowPrompt(
+  scriptPath: string,
+  input: InnerLoopInput,
+  briefParts?: BriefParts | null,
+): string {
+  const argsJson = JSON.stringify(buildWorkflowArgs(input, briefParts))
   return `You are the trident-v2 inner-loop LAUNCHER. Your ENTIRE job is to FIRE one background Workflow and then immediately reply — you run UNATTENDED and must NEVER ask for input.
 
 Do EXACTLY this, nothing else:
@@ -463,10 +476,20 @@ function normalizeVerdict(v: unknown): 'APPROVE' | 'REQUEST_CHANGES' | null {
 export function buildWorkflowFirer(opts: BuildWorkflowFirerOptions): TridentWorkflowFirer {
   const scriptPath = opts.workflow_script_path ?? DEFAULT_INNER_WORKFLOW_PATH
   const settleTimeoutMs = opts.settle_timeout_ms ?? DEFAULT_SETTLE_TIMEOUT_MS
+  const writeParts = opts.write_brief_parts ?? writeBriefParts
 
   return async function fireWorkflow(input: InnerLoopInput): Promise<FireOutcome> {
     const cwd = input.run.worktree ?? input.run.repo_path
-    const prompt = buildFireWorkflowPrompt(scriptPath, input)
+    // CRITICAL: these must be exactly the strings buildWorkflowArgs carries. T3
+    // verifies args text against these receipts before substituting the files;
+    // derivation drift would make every codex build refuse. The guidance helper
+    // is pure and deterministic, so its two calls produce identical strings.
+    const briefParts = writeParts({
+      runId: input.run.id,
+      task: input.run.task,
+      reflectionGuidance: buildReflectionGuidance(input.reflection_context),
+    })
+    const prompt = buildFireWorkflowPrompt(scriptPath, input, briefParts)
     try {
       return await opts.fire({ prompt, cwd, settle_timeout_ms: settleTimeoutMs })
     } catch (e) {

@@ -19,6 +19,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   buildWorkflowFirer,
+  buildWorkflowArgs,
   buildSubstrateWorkflowFire,
   parseInnerResult,
   WORKFLOW_FIRE_TOOL_NAMES,
@@ -27,6 +28,8 @@ import {
   type FireOutcome,
   type InnerLoopInput,
 } from './inner-loop.ts'
+import { buildReflectionGuidance } from './reflection-guidance.ts'
+import type { BriefParts } from './brief-parts.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -166,6 +169,59 @@ describe('parseInnerResult — decode the typed terminal column', () => {
 })
 
 describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
+  test('workflow args omit absent brief parts and carry a supplied manifest verbatim', () => {
+    const without = buildWorkflowArgs(input())
+    expect('briefParts' in without).toBe(false)
+    const parts: BriefParts = {
+      taskFile: '/tmp/task.part',
+      taskIntegrity: '4:12345678',
+      reflectionFile: '/tmp/reflection.part',
+      reflectionIntegrity: '5:87654321',
+    }
+    expect(buildWorkflowArgs(input(), parts).briefParts).toBe(parts)
+  })
+
+  test('writes launcher-held strings and threads the returned manifest into the prompt', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const parts: BriefParts = {
+      taskFile: '/tmp/exact-task.part',
+      taskIntegrity: '8:12345678',
+      reflectionFile: '/tmp/exact-reflection.part',
+      reflectionIntegrity: '9:87654321',
+    }
+    const writes: Parameters<
+      NonNullable<Parameters<typeof buildWorkflowFirer>[0]['write_brief_parts']>
+    >[0][] = []
+    const write_brief_parts = (opts: (typeof writes)[number]) => {
+      writes.push(opts)
+      return parts
+    }
+    const reflection_context = '<learned_corrections>use TS</learned_corrections>'
+    const run = makeRun({ id: 'run-parts', task: 'exact task' })
+    const firer = buildWorkflowFirer({ fire, write_brief_parts })
+    expect(await firer(input({ run, reflection_context }))).toEqual({ status: 'fired', error: null })
+    expect(writes).toEqual([
+      {
+        runId: run.id,
+        task: run.task,
+        reflectionGuidance: buildReflectionGuidance(reflection_context),
+      },
+    ])
+    expect(calls[0]!.prompt).toContain(`"briefParts":${JSON.stringify(parts)}`)
+  })
+
+  test('a failed part write never prevents the fire and omits the manifest', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire, write_brief_parts: () => null })
+    expect(await firer(input())).toEqual({ status: 'fired', error: null })
+    expect(calls[0]!.prompt).not.toContain('"briefParts"')
+  })
+
+  test('the production brief-writer default still fires', async () => {
+    const { fire } = fakeFire(() => ({ status: 'fired', error: null }))
+    expect(await buildWorkflowFirer({ fire })(input())).toEqual({ status: 'fired', error: null })
+  })
+
   test('a fired outcome round-trips', async () => {
     const { fire } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })
