@@ -19,7 +19,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -43,8 +44,10 @@ import {
   type HostDeployDispatchResult,
   type HostDeployEmit,
   type HostDeployGit,
+  type HostDeployRequestResult,
   type HostDeployService,
 } from '../host-deploy.ts'
+import { createHostDeployGit } from '../host-deploy-runtime.ts'
 
 const OWNER = 'owner'
 const AGENT = 'agent-7'
@@ -106,13 +109,15 @@ interface GitState {
 }
 
 function fakeGit(state: GitState): HostDeployGit {
-  return {
-    revParse: async (ref) => {
+  const revParse = async (ref: string): Promise<string | null> => {
       if (state.gate != null) await state.gate
       if (state.throwOn === ref) throw new Error(`git blew up on ${ref}`)
       if (ref === 'HEAD') return state.head
       return state.refs[ref] ?? null
-    },
+  }
+  return {
+    revParse,
+    resolveTarget: revParse,
     commitsBetween: async (from, _to, limit) => {
       // Direction matters: `current..target` is what would LAND, `target..current`
       // is what a rollback would REMOVE. A stub that answered both the same way
@@ -200,6 +205,67 @@ function answer(h: Harness, user_text: string, user_id = OWNER) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe('a request without an approval deploys NOTHING', () => {
+  test('a remote ahead of the host pin is never reported as up to date', async () => {
+    const remote = join(tmp, 'remote.git')
+    const source = join(tmp, 'source')
+    const host = join(tmp, 'host')
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.test',
+      GIT_COMMITTER_NAME: 'fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.test',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+    }
+    const run = (cwd: string, ...args: string[]): string =>
+      execFileSync('git', args, { cwd, env, encoding: 'utf8' }).trim()
+
+    run(tmp, 'init', '--bare', '--initial-branch=main', remote)
+    run(tmp, 'clone', remote, source)
+    writeFileSync(join(source, 'release.txt'), 'pinned\n')
+    run(source, 'add', 'release.txt')
+    run(source, 'commit', '-m', 'base')
+    run(source, 'push', 'origin', 'main')
+    run(tmp, 'clone', remote, host)
+    const pinned = run(host, 'rev-parse', 'HEAD')
+    writeFileSync(join(source, 'release.txt'), 'remote ahead\n')
+    run(source, 'commit', '-am', 'fix: remote release')
+    run(source, 'push', 'origin', 'main')
+    const remoteHead = run(source, 'rev-parse', 'HEAD')
+
+    expect(() => run(host, 'cat-file', '-e', `${remoteHead}^{commit}`)).toThrow()
+    expect(run(host, 'cat-file', '-t', `${pinned}^{commit}`)).toBe('commit')
+    const h = harness({ git: createHostDeployGit({ repo_dir: host }) })
+    const result = await h.service.request({ ref: 'origin/main' })
+
+    expect(remoteHead).not.toBe(pinned)
+    expect(result.status).not.toBe('up_to_date')
+    expect(result).toMatchObject({ status: 'pending_approval', target_sha: remoteHead, current_sha: pinned })
+    expect(h.emits[0]!.body).toContain('fix: remote release')
+  })
+
+  test('the target consults its remote-aware resolver and the current pin does not', async () => {
+    const calls: string[] = []
+    const git = fakeGit({ head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS })
+    const h = harness({
+      git: {
+        resolveTarget: async (ref) => {
+          calls.push(`remote:${ref}`)
+          return git.resolveTarget(ref)
+        },
+        revParse: async (ref) => {
+          calls.push(`local:${ref}`)
+          return git.revParse(ref)
+        },
+        commitsBetween: git.commitsBetween,
+      },
+    })
+
+    expect((await h.service.request({ ref: 'origin/main' })).status).toBe('pending_approval')
+    expect(calls).toEqual(['remote:origin/main', 'local:HEAD'])
+  })
+
   test('request() raises an approval and dispatches nothing', async () => {
     const h = harness()
     const result = await h.service.request({ ref: 'origin/main' })
@@ -401,6 +467,7 @@ describe('the approval body carries the ACTUAL commit list', () => {
     const h = harness({
       git: {
         revParse: git.revParse,
+        resolveTarget: git.resolveTarget,
         commitsBetween: async () => {
           throw new Error('shallow clone')
         },
@@ -937,7 +1004,8 @@ describe('input + failure handling', () => {
     const seen: string[] = []
     const h = harness({
       git: {
-        revParse: async (ref) => {
+        revParse: async () => TARGET_SHA,
+        resolveTarget: async (ref) => {
           seen.push(ref)
           return TARGET_SHA
         },
@@ -957,7 +1025,8 @@ describe('input + failure handling', () => {
     const seen: string[] = []
     const h = harness({
       git: {
-        revParse: async (ref) => {
+        revParse: async () => TARGET_SHA,
+        resolveTarget: async (ref) => {
           seen.push(ref)
           return TARGET_SHA
         },
@@ -985,6 +1054,22 @@ describe('input + failure handling', () => {
     expect((result as { reason: string }).reason).toContain('does not know the ref')
     await settle()
     expect(approvals.listPending(PROJECT)).toEqual([])
+  })
+
+  test('a failing remote is refused in both assertions, never reported as up to date', async () => {
+    const results: HostDeployRequestResult[] = []
+    for (const staleLocalTarget of [HEAD_SHA, TARGET_SHA]) {
+      const git = fakeGit({ head: HEAD_SHA, refs: { 'origin/main': staleLocalTarget }, commits: [] })
+      git.resolveTarget = async () => {
+        throw new Error('remote unreachable before timeout')
+      }
+      results.push(await harness({ git }).service.request({ ref: 'origin/main' }))
+    }
+    expect(results.map((result) => result.status)).toEqual(['refused', 'refused'])
+    expect(results.every((result) => result.status !== 'up_to_date')).toBe(true)
+    for (const result of results) {
+      expect((result as { reason: string }).reason).toContain('remote unreachable before timeout')
+    }
   })
 
   test('a failed prompt emission cancels the grant so the owner can just ask again', async () => {

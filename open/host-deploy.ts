@@ -113,6 +113,9 @@ export const HOST_DEPLOY_TOKEN_SERVICE = 'host_deploy_token' as const
 /** Hard ceiling on the ONE authenticated control-plane call. */
 export const HOST_DEPLOY_CALL_TIMEOUT_MS = 30_000
 
+/** Hard ceiling on resolving a remote deploy target. */
+export const HOST_DEPLOY_REMOTE_TIMEOUT_MS = 30_000
+
 /** Longest slice of a control-plane response body echoed into chat. */
 export const HOST_DEPLOY_DETAIL_CAP = 400
 
@@ -181,13 +184,16 @@ export interface HostDeployCommitRange {
 }
 
 /**
- * The read-only git surface this module needs against the checkout the host
- * runs. READ-ONLY by construction: there is no fetch, no checkout and no write
- * here, because the instance does not deploy — it describes.
+ * The git surface this module needs against the checkout the host runs.
+ * READ-ONLY means it cannot mutate the working tree, HEAD, or deployed state.
+ * Resolving a remote-tracking ref may fetch remote objects and tracking metadata
+ * so the target and its approval commit list describe the remote truthfully.
  */
 export interface HostDeployGit {
   /** Full sha for `ref`, or null when this checkout does not know the ref. */
   revParse(ref: string): Promise<string | null>
+  /** Resolve a deploy target, consulting its remote only for a remote-tracking ref. */
+  resolveTarget(ref: string): Promise<string | null>
   /** Commits in `from..to`, newest first, rendered set capped at `limit`. */
   commitsBetween(from: string, to: string, limit: number): Promise<HostDeployCommitRange>
 }
@@ -530,11 +536,12 @@ export function createHostDeployService(
       }
     }
 
-    // ── (b) resolve what WOULD be deployed. Read-only; nothing is fetched.
+    // ── (b) resolve what WOULD be deployed. Remote-tracking targets are fetched
+    // without changing the working tree or HEAD; the current pin stays local.
     let target_sha: string | null
     let current_sha: string | null
     try {
-      target_sha = await git.revParse(ref)
+      target_sha = await git.resolveTarget(ref)
       current_sha = await git.revParse('HEAD')
     } catch (err) {
       return {
@@ -781,7 +788,7 @@ export function createHostDeployService(
     // whatever is newest" — a different and unbounded permission.
     let live_sha: string | null
     try {
-      live_sha = await git.revParse(ref)
+      live_sha = await git.resolveTarget(ref)
     } catch (err) {
       await cancel(id)
       return {
