@@ -64,6 +64,10 @@ describe('buildReplArgv', () => {
     expect(argv[i + 1]).toBe('300000')
   })
 
+  it('omits autocompact when the installed CLI does not support it', () => {
+    expect(buildReplArgv({ ...base, resume: false })).not.toContain('--autocompact')
+  })
+
   it('appends --dangerously-skip-permissions only when requested', () => {
     expect(buildReplArgv({ ...base, resume: false })).not.toContain('--dangerously-skip-permissions')
     expect(buildReplArgv({ ...base, resume: false, skipPermissions: true })).toContain(
